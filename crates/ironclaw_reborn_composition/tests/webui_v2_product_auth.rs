@@ -1900,3 +1900,152 @@ async fn product_auth_callback_malformed_flow_id_uses_sanitized_error() {
     assert!(!body.contains("malformed-flow-pkce"));
     assert!(dispatcher.events().is_empty());
 }
+
+// Caller-level coverage for the Slack personal OAuth serve wiring: the
+// handler-level tests in product_auth_serve construct ProductAuthRouteState
+// directly, which would stay green if webui_serve stopped carrying
+// WebuiServeConfig::with_slack_personal_oauth into webui_v2_app. These tests
+// drive the composed router so that composition seam cannot regress silently.
+#[cfg(feature = "slack-v2-host-beta")]
+mod slack_personal_oauth_serve {
+    use super::*;
+    use ironclaw_reborn_composition::{OAuthRedirectUri, SlackPersonalSetupServiceSlot};
+
+    const SLACK_PERSONAL_CALLBACK_PATH: &str =
+        "/api/reborn/product-auth/oauth/slack_personal/callback";
+    const SLACK_START_PATH: &str = "/api/webchat/v2/extensions/slack/setup/oauth/start";
+
+    async fn slack_personal_slot() -> SlackPersonalSetupServiceSlot {
+        SlackPersonalSetupServiceSlot::filled_with_in_memory_setup_for_tests(
+            OAuthRedirectUri::new(
+                "http://127.0.0.1:3000/api/reborn/product-auth/oauth/slack_personal/callback",
+            )
+            .expect("slack redirect uri"),
+            "slack-client-id",
+            "slack-client-secret",
+        )
+        .await
+    }
+
+    async fn build_app_with_slack_personal_oauth() -> axum::Router {
+        let dispatcher = Arc::new(RecordingAuthDispatcher::default());
+        let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+            Arc::new(InMemoryAuthProductServices::new()),
+            dispatcher,
+        ));
+        let bundle = RebornWebuiBundle {
+            api: Arc::new(UnusedServices),
+            product_auth: Some(product_auth),
+            readiness: RebornReadiness::disabled(),
+        };
+        let config = WebuiServeConfig::new(
+            TenantId::new(TENANT).expect("tenant"),
+            Arc::new(OnlyValidToken),
+            vec![HeaderValue::from_static("http://localhost:1234")],
+        )
+        .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+        .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
+        .with_slack_personal_oauth(slack_personal_slot().await);
+        webui_v2_app(bundle, config).expect("webui v2 app")
+    }
+
+    fn slack_oauth_start_body() -> serde_json::Value {
+        json!({
+            "provider": "slack_personal",
+            "account_label": "personal slack",
+            "scopes": ["search:read"],
+            "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
+            "invocation_id": InvocationId::new().to_string(),
+        })
+    }
+
+    #[tokio::test]
+    async fn slack_personal_oauth_start_requires_bearer_auth() {
+        let app = build_app_with_slack_personal_oauth().await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(SLACK_START_PATH)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(slack_oauth_start_body().to_string()))
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn slack_personal_oauth_start_serves_through_composed_router() {
+        let app = build_app_with_slack_personal_oauth().await;
+
+        let response = post_extension_oauth_start(&app, "slack", slack_oauth_start_body()).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_body_string(response).await;
+        let json: serde_json::Value = serde_json::from_str(&body).expect("start json");
+        let authorization_url = json["authorization_url"]
+            .as_str()
+            .expect("authorization url");
+        let parsed = url::Url::parse(authorization_url).expect("slack authorization url");
+        assert_eq!(parsed.host_str(), Some("slack.com"));
+        let user_scope = parsed
+            .query_pairs()
+            .find_map(|(name, value)| (name == "user_scope").then(|| value.into_owned()))
+            .expect("user_scope in slack authorize url");
+        assert!(
+            user_scope.contains("search:read"),
+            "server-side scope set must reach the authorize url: {user_scope}"
+        );
+    }
+
+    #[tokio::test]
+    async fn slack_personal_oauth_start_fails_closed_without_slot() {
+        // Product auth is mounted but the Slack slot was never carried into
+        // the serve config — the exact state a dropped webui_serve wiring
+        // block would produce.
+        let (app, _) = build_app_with_product_auth();
+
+        let response = post_extension_oauth_start(&app, "slack", slack_oauth_start_body()).await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = read_body_string(response).await;
+        assert!(body.contains("\"code\":\"backend_unavailable\""));
+    }
+
+    #[tokio::test]
+    async fn slack_personal_oauth_callback_is_mounted_and_fails_closed_sanitized() {
+        // The slot is wired but the binding config deliberately is not — the
+        // callback must be mounted (not 404) and fail closed with a sanitized
+        // error rather than proceeding without an identity binding path.
+        let app = build_app_with_slack_personal_oauth().await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!(
+                        "{SLACK_PERSONAL_CALLBACK_PATH}?state=malformed-state&code=denied"
+                    ))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_ne!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "the public slack_personal callback must be mounted by webui_v2_app"
+        );
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = read_body_string(response).await;
+        assert!(
+            !body.contains("malformed-state"),
+            "raw state must not be echoed: {body}"
+        );
+    }
+}

@@ -12,7 +12,8 @@ use ironclaw_auth::{
     ProviderScope, validate_provider_callback_request,
 };
 use ironclaw_capabilities::{
-    CapabilityObligationHandler, CapabilityObligationPhase, CapabilityObligationRequest,
+    CapabilityObligationAbortRequest, CapabilityObligationHandler, CapabilityObligationOutcome,
+    CapabilityObligationPhase, CapabilityObligationRequest,
 };
 use ironclaw_host_api::{
     CapabilityId, CapabilitySet, CorrelationId, ExtensionId, MountView, NetworkMethod,
@@ -257,11 +258,11 @@ impl HostOAuthProviderClient {
             );
             error
         })?;
-        let response = self
+        let exchange_result = self
             .egress
             .execute_credential_exchange(RuntimeHttpEgressRequest {
                 runtime: self.runtime,
-                scope,
+                scope: scope.clone(),
                 capability_id: self.capability_id.clone(),
                 method: NetworkMethod::Post,
                 url: token_endpoint.to_string(),
@@ -273,22 +274,31 @@ impl HostOAuthProviderClient {
                     ("accept".to_string(), "application/json".to_string()),
                 ],
                 body,
-                network_policy: policy,
+                network_policy: policy.clone(),
                 credential_injections: Vec::<RuntimeCredentialInjection>::new(),
                 response_body_limit: Some(self.response_body_limit),
                 save_body_to: None,
                 timeout_ms: Some(self.timeout_ms),
             })
-            .await
-            .map_err(|error| {
-                tracing::warn!(
-                    provider = self.spec.provider_id,
-                    token_host = %token_host,
-                    runtime_error = ?error,
-                    "oauth token request egress failed"
-                );
-                AuthProductError::BackendUnavailable
-            })?;
+            .await;
+        // Success or failure, the staged policy must not outlive the exchange
+        // (the pipeline's own discard only covers pre-transport failures).
+        discard_oauth_egress_policy(
+            Arc::clone(&self.obligation_handler),
+            &scope,
+            &self.capability_id,
+            &policy,
+        )
+        .await;
+        let response = exchange_result.map_err(|error| {
+            tracing::warn!(
+                provider = self.spec.provider_id,
+                token_host = %token_host,
+                runtime_error = ?error,
+                "oauth token request egress failed"
+            );
+            AuthProductError::BackendUnavailable
+        })?;
         if !(200..300).contains(&response.status) {
             if (500..600).contains(&response.status) {
                 return Err(AuthProductError::BackendUnavailable);
@@ -940,6 +950,47 @@ pub(crate) async fn authorize_oauth_egress(
         })
         .await
         .map_err(|_| AuthProductError::BackendUnavailable)
+}
+
+/// Consume the network policy staged by [`authorize_oauth_egress`] once the
+/// credential exchange has returned. The egress pipeline only discards staged
+/// policies on pre-transport failures, and the direct OAuth path never goes
+/// through the CapabilityHost prepare/complete lifecycle, so without this the
+/// unbounded policy store retains one entry per completed exchange for the
+/// life of the process. Best-effort: a discard failure is logged, never
+/// surfaced — the exchange outcome must not change because cleanup hiccuped.
+pub(crate) async fn discard_oauth_egress_policy(
+    handler: Arc<dyn CapabilityObligationHandler>,
+    scope: &ResourceScope,
+    capability_id: &CapabilityId,
+    policy: &NetworkPolicy,
+) {
+    let context = match oauth_execution_context(scope.clone()) {
+        Ok(context) => context,
+        Err(_) => return,
+    };
+    let estimate = ResourceEstimate {
+        network_egress_bytes: policy.max_egress_bytes,
+        ..ResourceEstimate::default()
+    };
+    if let Err(error) = handler
+        .abort(CapabilityObligationAbortRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id,
+            estimate: &estimate,
+            obligations: &[Obligation::ApplyNetworkPolicy {
+                policy: policy.clone(),
+            }],
+            outcome: &CapabilityObligationOutcome::default(),
+        })
+        .await
+    {
+        tracing::warn!(
+            obligation_error = ?error,
+            "failed to discard staged oauth egress policy after exchange"
+        );
+    }
 }
 
 fn oauth_execution_context(

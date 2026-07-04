@@ -39,9 +39,11 @@ function renderModal({
   setupReady = false,
   oauthMutationState = {},
   runEffects = false,
+  blockPopup = false,
 } = {}) {
   const calls = [];
   const invalidations = [];
+  const stateSets = [];
   const oauthCalls = [];
   const oauthSetupArgs = [];
   const openedPopups = [];
@@ -67,7 +69,9 @@ function renderModal({
     React: {
       useState: (initial) => [
         typeof initial === "function" ? initial() : initial,
-        () => {},
+        (next) => {
+          stateSets.push(next);
+        },
       ],
       useCallback: (fn) => fn,
       useEffect: (fn) => {
@@ -118,6 +122,10 @@ function renderModal({
     },
     window: {
       open: (url, target, features) => {
+        if (blockPopup) {
+          openedPopups.push({ url, target, features, popup: null });
+          return null;
+        }
         const popup = { closed: false, location: { href: url }, opener: "test-opener" };
         openedPopups.push({ url, target, features, popup });
         return popup;
@@ -149,7 +157,26 @@ function renderModal({
     oauthSetupArgs,
     openedPopups,
     rendered,
+    stateSets,
   };
+}
+
+// Walks the rendered html-template tree and returns the first captured
+// function value whose source contains the given marker (e.g. the
+// `() => handleOauth(secret)` click closure). Lets tests drive captured
+// handlers without a DOM.
+function findHandler(node, bodyMarker, seen = new Set()) {
+  if (typeof node === "function") {
+    return String(node).includes(bodyMarker) ? node : null;
+  }
+  if (!node || typeof node !== "object" || seen.has(node)) return null;
+  seen.add(node);
+  const children = Array.isArray(node) ? node : Object.values(node);
+  for (const child of children) {
+    const found = findHandler(child, bodyMarker, seen);
+    if (found) return found;
+  }
+  return null;
 }
 
 test("ConfigureModal renders the code-entry panel for a channel extension that uses manual setup", () => {
@@ -627,4 +654,97 @@ test("ConfigureModal treats post-redeem activation failure as best-effort", asyn
     ["redeem", "telegram", "A1B2C3"],
     ["activate", { id: "telegram" }],
   ]);
+});
+
+test("ConfigureModal surfaces a blocked popup and does not start the OAuth flow", () => {
+  const slackOauthSecret = {
+    name: "slack_personal_oauth",
+    provider: "slack_personal",
+    prompt: "Slack credential",
+    provided: false,
+    setup: {
+      kind: "oauth",
+      account_label: "slack slack_personal",
+      scopes: ["users:read"],
+      invocation_id: "invocation-alpha",
+    },
+  };
+  const { rendered, oauthCalls, openedPopups, stateSets } = renderModal({
+    kind: "channel",
+    packageRef: { kind: "extension", id: "slack" },
+    channel: "slack",
+    displayName: "Slack",
+    onboardingState: "pairing_required",
+    blockPopup: true,
+    setupResult: {
+      secrets: [slackOauthSecret],
+      fields: [],
+      onboarding: {
+        credential_instructions: "Authorize Slack in the browser.",
+        credential_next_step: "After authorization completes, DM the Slack bot.",
+      },
+      isLoading: false,
+      error: null,
+    },
+  });
+
+  const authorize = findHandler(rendered, "handleOauth");
+  assert.ok(authorize, "authorize click handler is rendered");
+  authorize();
+
+  assert.equal(openedPopups.length, 1, "the about:blank pre-open was attempted");
+  assert.equal(openedPopups[0].popup, null);
+  assert.equal(
+    oauthCalls.length,
+    0,
+    "a blocked popup must not burn the server-side OAuth flow start"
+  );
+  assert.ok(
+    stateSets.includes("Authorization popup was blocked."),
+    "the blocked-popup error is surfaced to the modal"
+  );
+});
+
+test("ConfigureModal starts the OAuth flow when the popup pre-open succeeds", () => {
+  const slackOauthSecret = {
+    name: "slack_personal_oauth",
+    provider: "slack_personal",
+    prompt: "Slack credential",
+    provided: false,
+    setup: {
+      kind: "oauth",
+      account_label: "slack slack_personal",
+      scopes: ["users:read"],
+      invocation_id: "invocation-alpha",
+    },
+  };
+  const { rendered, oauthCalls, openedPopups } = renderModal({
+    kind: "channel",
+    packageRef: { kind: "extension", id: "slack" },
+    channel: "slack",
+    displayName: "Slack",
+    onboardingState: "pairing_required",
+    setupResult: {
+      secrets: [slackOauthSecret],
+      fields: [],
+      onboarding: {
+        credential_instructions: "Authorize Slack in the browser.",
+        credential_next_step: "After authorization completes, DM the Slack bot.",
+      },
+      isLoading: false,
+      error: null,
+    },
+  });
+
+  const authorize = findHandler(rendered, "handleOauth");
+  assert.ok(authorize, "authorize click handler is rendered");
+  authorize();
+
+  assert.equal(oauthCalls.length, 1, "an unblocked pre-open starts the OAuth flow");
+  assert.equal(openedPopups.length, 1);
+  assert.equal(
+    oauthCalls[0].popup.opener,
+    null,
+    "the pre-opened popup is passed with its opener severed"
+  );
 });

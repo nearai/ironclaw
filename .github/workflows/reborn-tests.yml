@@ -651,7 +651,7 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Run Reborn settings JS tests
+      - name: Run Reborn webui JS tests
         run: |
           mapfile -t tests < <(
             find crates/ironclaw_webui_v2/static/js \
@@ -660,7 +660,7 @@ jobs:
               | sort
           )
           if [ "${#tests[@]}" -eq 0 ]; then
-            echo "No Reborn settings JS tests found"
+            echo "No Reborn webui JS tests found"
             exit 1
           fi
           node --test "${tests[@]}"

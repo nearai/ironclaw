@@ -219,11 +219,12 @@ async fn exchange_request_includes_client_secret_and_derived_network_policy_host
     let egress = Arc::new(RecordingEgress::ok(
             br#"{"access_token":"access-token","refresh_token":"refresh-token","scope":"gmail.readonly","expires_in":3600}"#.to_vec(),
         ));
+    let obligations = Arc::new(StagingObligationHandler::default());
     let client = HostOAuthProviderClient::new(
         google_spec(),
         egress.clone(),
         Arc::new(RecordingSecretStore::recording()),
-        Arc::new(NoopObligationHandler),
+        obligations.clone(),
         OAuthClientId::new("google-client").unwrap(),
         OAuthRedirectUri::new("https://app.example/callback").unwrap(),
     )
@@ -253,6 +254,11 @@ async fn exchange_request_includes_client_secret_and_derived_network_policy_host
         body.get("client_secret").map(String::as_str),
         Some("google-secret")
     );
+    // A successful exchange must consume the network policy it staged; the
+    // egress pipeline only discards staged policies on pre-transport errors,
+    // so leaving this to the pipeline would leak one store entry per flow.
+    assert_eq!(obligations.staged_policy_count(), 0);
+    assert_eq!(obligations.aborted_policy_count(), 1);
 }
 
 #[tokio::test]
@@ -739,6 +745,68 @@ impl CapabilityObligationHandler for NoopObligationHandler {
         &self,
         _request: CapabilityObligationRequest<'_>,
     ) -> Result<(), ironclaw_capabilities::CapabilityObligationError> {
+        Ok(())
+    }
+}
+
+/// Tracks staged-vs-discarded `ApplyNetworkPolicy` obligations so tests can
+/// assert the direct OAuth path consumes what it stages (mirrors the
+/// stage-on-satisfy / take-on-abort behavior of the production handler).
+#[derive(Debug, Default)]
+struct StagingObligationHandler {
+    staged_policies: std::sync::Mutex<usize>,
+    aborted_policies: std::sync::Mutex<usize>,
+}
+
+impl StagingObligationHandler {
+    fn staged_policy_count(&self) -> usize {
+        *self.staged_policies.lock().unwrap()
+    }
+
+    fn aborted_policy_count(&self) -> usize {
+        *self.aborted_policies.lock().unwrap()
+    }
+}
+
+#[async_trait]
+impl CapabilityObligationHandler for StagingObligationHandler {
+    async fn satisfy(
+        &self,
+        request: CapabilityObligationRequest<'_>,
+    ) -> Result<(), ironclaw_capabilities::CapabilityObligationError> {
+        let staged = request
+            .obligations
+            .iter()
+            .filter(|obligation| {
+                matches!(
+                    obligation,
+                    ironclaw_host_api::Obligation::ApplyNetworkPolicy { .. }
+                )
+            })
+            .count();
+        *self.staged_policies.lock().unwrap() += staged;
+        Ok(())
+    }
+
+    async fn abort(
+        &self,
+        request: ironclaw_capabilities::CapabilityObligationAbortRequest<'_>,
+    ) -> Result<(), ironclaw_capabilities::CapabilityObligationError> {
+        let discarded = request
+            .obligations
+            .iter()
+            .filter(|obligation| {
+                matches!(
+                    obligation,
+                    ironclaw_host_api::Obligation::ApplyNetworkPolicy { .. }
+                )
+            })
+            .count();
+        {
+            let mut staged = self.staged_policies.lock().unwrap();
+            *staged = staged.saturating_sub(discarded);
+        }
+        *self.aborted_policies.lock().unwrap() += discarded;
         Ok(())
     }
 }

@@ -226,6 +226,12 @@ impl SlackChannelSetupActivation for DynamicSlackChannelSetupActivation {
         if projection.phase == LifecyclePhase::Discovered {
             return Ok(());
         }
+        // Deliberately the plain (non-companion) activate: workspace setup
+        // save precedes any slack_personal OAuth account, and the slack_user
+        // companion cannot pass its credential gate until a caller-scoped
+        // account exists. Companion activation is owned by the post-OAuth
+        // activate path (WebUI activateExtension after the connect flow),
+        // which routes through activate_with_credential_gate.
         self.extension_management
             .activate(package_ref, ExtensionActivationMode::Static)
             .await
