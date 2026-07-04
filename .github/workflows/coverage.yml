@@ -133,6 +133,7 @@ jobs:
         run: cargo llvm-cov ${{ matrix.flags }} --workspace --lcov --output-path lcov.info
 
       - name: Upload to Codecov
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           files: lcov.info
@@ -223,6 +224,10 @@ jobs:
           mapfile -t reborn_e2e_tests < <(
             sed -e 's/#.*//' -e '/^[[:space:]]*$/d' tests/e2e/reborn_coverage_tests.txt
           )
+          if ((${#reborn_e2e_tests[@]} == 0)); then
+            echo "No Reborn coverage tests selected"
+            exit 1
+          fi
           printf 'Selected Reborn E2E coverage tests:\n'
           printf '  %s\n' "${reborn_e2e_tests[@]}"
           pytest "${reborn_e2e_tests[@]}" -v --timeout=120
@@ -247,7 +252,7 @@ jobs:
         run: cargo llvm-cov report --lcov --output-path e2e-coverage.info
 
       - name: Upload to Codecov
-        if: always()
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           files: e2e-coverage.info
