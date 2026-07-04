@@ -282,7 +282,7 @@ ironclaw_filesystem = { path = "crates/ironclaw_filesystem", version = "0.1.0" }
 ironclaw_mcp = { path = "crates/ironclaw_mcp", version = "0.1.0" }
 ironclaw_first_party_extensions = { path = "crates/ironclaw_first_party_extensions", version = "0.1.0" }
 # Recording hook doubles + `HookDispatcherBuilderFactory` builders for the
-# C-HOOKS / E-HOOK-INFRA int-tier coverage (tests/support/reborn/hooks.rs).
+# C-HOOKS / E-HOOK-INFRA int-tier coverage (tests/integration/support/hooks.rs).
 ironclaw_hooks = { path = "crates/ironclaw_hooks", version = "0.1.0" }
 ironclaw_host_runtime = { path = "crates/ironclaw_host_runtime", version = "0.1.0" }
 ironclaw_network = { path = "crates/ironclaw_network", version = "0.1.0" }

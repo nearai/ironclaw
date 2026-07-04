@@ -2,7 +2,7 @@
 //! / `write_only()`, sharing `file_tools_with_runtime_policy` as their
 //! internal tail. See `harness/options.rs` for the `ToolsProfile` pattern.
 
-use ironclaw_host_api::{CapabilityId, EffectKind, MountPermissions, UserId};
+use ironclaw_host_api::{CapabilityId, EffectKind, MountPermissions};
 use ironclaw_host_runtime::{READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID};
 
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
@@ -17,12 +17,11 @@ fn file_tools_with_runtime_policy(
             CapabilityId::new(READ_FILE_CAPABILITY_ID)?,
         ],
         effect_kinds: vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
-        user_id: UserId::new("reborn-e2e-builtin-user")?,
         options: HostRuntimeHarnessOptions::new(
             workspace_mounts(MountPermissions::read_write_list_delete())?,
             runtime_policy,
         ),
-        ..ToolsProfile::new("reborn-e2e-builtin-tools")?
+        ..ToolsProfile::new("reborn-e2e-builtin-tools", "reborn-e2e-builtin-user")?
     })
 }
 
@@ -51,12 +50,11 @@ pub(crate) fn write_only_profile() -> HarnessResult<ToolsProfile> {
     Ok(ToolsProfile {
         capability_ids: vec![CapabilityId::new(WRITE_FILE_CAPABILITY_ID)?],
         effect_kinds: vec![EffectKind::WriteFilesystem],
-        user_id: UserId::new("reborn-e2e-write-only-user")?,
         options: HostRuntimeHarnessOptions::new(
             workspace_mounts(MountPermissions::read_write_list_delete())?,
             None,
         ),
-        ..ToolsProfile::new("reborn-e2e-write-only")?
+        ..ToolsProfile::new("reborn-e2e-write-only", "reborn-e2e-write-only-user")?
     })
 }
 

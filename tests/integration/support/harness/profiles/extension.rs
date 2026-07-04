@@ -23,7 +23,6 @@ pub(crate) fn extension_lifecycle_tools_profile() -> HarnessResult<ToolsProfile>
     Ok(ToolsProfile {
         capability_ids,
         effect_kinds: local_dev_all_effects(),
-        user_id: UserId::new("reborn-e2e-extension-lifecycle-user")?,
         options: HostRuntimeHarnessOptions::new(
             MountView::default(),
             Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
@@ -34,7 +33,10 @@ pub(crate) fn extension_lifecycle_tools_profile() -> HarnessResult<ToolsProfile>
         network_policy_override: Some(wildcard_test_policy()),
         provider_trust_override: Some(bundled_extension_provider_trust()?),
         auto_approve_default: Some(true),
-        ..ToolsProfile::new("reborn-e2e-extension-lifecycle-tools")?
+        ..ToolsProfile::new(
+            "reborn-e2e-extension-lifecycle-tools",
+            "reborn-e2e-extension-lifecycle-user",
+        )?
     })
 }
 

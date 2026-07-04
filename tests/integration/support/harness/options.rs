@@ -169,19 +169,17 @@ impl ToolsProfile {
     /// "every caller agrees" exception to the empty/None/false default rule),
     /// default (empty) harness options, and no post-construct steps.
     ///
-    /// `user_id` is seeded from `service_label` as a placeholder ONLY — every
-    /// real profile overrides it (via struct-update syntax or `with_user_id`)
-    /// with its own domain-specific literal, mirroring the fixed per-constructor
-    /// user ids in the pre-migration catalog. No domain is expected to build
-    /// with this placeholder left in place.
-    pub(crate) fn new(service_label: &'static str) -> HarnessResult<Self> {
+    /// `user_id` is explicit (no placeholder default): every profile has a
+    /// fixed domain-specific user id, and a silently-valid fallback would let
+    /// a forgotten override build a harness under the wrong user.
+    pub(crate) fn new(service_label: &'static str, user_id: &str) -> HarnessResult<Self> {
         Ok(Self {
             service_label,
             capability_ids: Vec::new(),
             effect_kinds: Vec::new(),
             secrets: Vec::new(),
             provider_id: ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
-            user_id: UserId::new(service_label)?,
+            user_id: UserId::new(user_id)?,
             options: HostRuntimeHarnessOptions::default(),
             network_policy_override: None,
             provider_trust_override: None,

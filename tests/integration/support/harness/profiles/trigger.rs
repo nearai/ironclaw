@@ -1,6 +1,6 @@
 //! trigger domain capability profile.
 
-use ironclaw_host_api::{CapabilityId, EffectKind, MountView, UserId};
+use ironclaw_host_api::{CapabilityId, EffectKind, MountView};
 use ironclaw_host_runtime::{
     TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
     TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
@@ -19,7 +19,6 @@ pub(crate) fn trigger_management_tools_profile() -> HarnessResult<ToolsProfile> 
             CapabilityId::new(TRIGGER_REMOVE_CAPABILITY_ID)?,
         ],
         effect_kinds: vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
-        user_id: UserId::new("reborn-e2e-trigger-management-user")?,
         options: HostRuntimeHarnessOptions::new(
             MountView::default(),
             Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
@@ -27,7 +26,10 @@ pub(crate) fn trigger_management_tools_profile() -> HarnessResult<ToolsProfile> 
             )?),
         ),
         auto_approve_default: Some(true),
-        ..ToolsProfile::new("reborn-e2e-trigger-management-tools")?
+        ..ToolsProfile::new(
+            "reborn-e2e-trigger-management-tools",
+            "reborn-e2e-trigger-management-user",
+        )?
     })
 }
 

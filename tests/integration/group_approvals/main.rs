@@ -3,7 +3,7 @@
 //! One sequential `#[tokio::test]` drives eight scenarios over a shared
 //! [`RebornIntegrationGroup::live_approvals`] group (one approval-request store,
 //! one capability-lease store, one `(tenant, user)` auto-approve toggle, all
-//! shared across threads). See `tests/support/reborn/CLAUDE.md` §"Group tests".
+//! shared across threads). See `tests/integration/CLAUDE.md` §"Group tests".
 //!
 //! Every scenario drives the REAL gate path: scripted `builtin.write_file` call
 //! → real `TurnStatus::BlockedApproval` gate (auto-approve disabled for the

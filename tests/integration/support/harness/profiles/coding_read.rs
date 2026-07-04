@@ -1,7 +1,7 @@
 //! Coding-read domain tools profile (`coding_read_tools`) — reference example
 //! of the `ToolsProfile` pattern (see `harness/options.rs`).
 
-use ironclaw_host_api::{CapabilityId, EffectKind, MountPermissions, UserId};
+use ironclaw_host_api::{CapabilityId, EffectKind, MountPermissions};
 use ironclaw_host_runtime::{GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID};
 
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
@@ -18,13 +18,15 @@ pub(crate) fn coding_read_tools_profile() -> HarnessResult<ToolsProfile> {
             CapabilityId::new(GREP_CAPABILITY_ID)?,
         ],
         effect_kinds: vec![EffectKind::ReadFilesystem],
-        user_id: UserId::new("reborn-e2e-coding-read-user")?,
         options: HostRuntimeHarnessOptions::new(
             workspace_mounts(MountPermissions::read_write_list_delete())?,
             None,
         ),
         auto_approve_default: Some(true),
-        ..ToolsProfile::new("reborn-e2e-coding-read-tools")?
+        ..ToolsProfile::new(
+            "reborn-e2e-coding-read-tools",
+            "reborn-e2e-coding-read-user",
+        )?
     })
 }
 

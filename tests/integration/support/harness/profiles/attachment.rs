@@ -1,6 +1,6 @@
 //! Attachment domain tools profile (`attachment_tools`).
 
-use ironclaw_host_api::{EffectKind, MountView, UserId};
+use ironclaw_host_api::{EffectKind, MountView};
 
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
 use super::super::{HarnessResult, HostRuntimeCapabilityHarness};
@@ -17,14 +17,16 @@ use super::super::{HarnessResult, HostRuntimeCapabilityHarness};
 pub(crate) fn attachment_tools_profile() -> HarnessResult<ToolsProfile> {
     Ok(ToolsProfile {
         effect_kinds: vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
-        user_id: UserId::new("reborn-e2e-attachment-tools-user")?,
         options: HostRuntimeHarnessOptions::new(
             MountView::default(),
             Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
                 true,
             )?),
         ),
-        ..ToolsProfile::new("reborn-e2e-attachment-tools")?
+        ..ToolsProfile::new(
+            "reborn-e2e-attachment-tools",
+            "reborn-e2e-attachment-tools-user",
+        )?
     })
 }
 

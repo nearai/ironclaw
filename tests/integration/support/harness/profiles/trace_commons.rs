@@ -1,6 +1,6 @@
 //! trace_commons domain capability profile.
 
-use ironclaw_host_api::{CapabilityId, EffectKind, MountView, UserId};
+use ironclaw_host_api::{CapabilityId, EffectKind, MountView};
 use ironclaw_host_runtime::{
     TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
     TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
@@ -28,7 +28,6 @@ pub(crate) fn trace_commons_tools_profile() -> HarnessResult<ToolsProfile> {
             EffectKind::Network,
             EffectKind::ExternalWrite,
         ],
-        user_id: UserId::new("reborn-e2e-trace-commons-user")?,
         // onboard/profile_token/profile_set are PermissionMode::Ask; auto-approve is
         // enabled here so the scripted run isn't gated.
         options: HostRuntimeHarnessOptions::new(
@@ -41,7 +40,10 @@ pub(crate) fn trace_commons_tools_profile() -> HarnessResult<ToolsProfile> {
         // policy or the obligation check rejects dispatch before the consent gate runs.
         network_policy_override: Some(http_test_policy()),
         auto_approve_default: Some(true),
-        ..ToolsProfile::new("reborn-e2e-trace-commons-tools")?
+        ..ToolsProfile::new(
+            "reborn-e2e-trace-commons-tools",
+            "reborn-e2e-trace-commons-user",
+        )?
     })
 }
 

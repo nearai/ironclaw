@@ -24,8 +24,8 @@ use ironclaw_turns::{
 };
 use serde_json::json;
 
-const TEST_CAPABILITY_ID: &str = "test.echo";
-const TEST_CAPABILITY_SURFACE_VERSION: &str = "trace_replay_v1";
+pub(crate) const TEST_CAPABILITY_ID: &str = "test.echo";
+pub(crate) const TEST_CAPABILITY_SURFACE_VERSION: &str = "trace_replay_v1";
 const SUBAGENT_ALLOWED_TEST_TOOL_NAME: &str = "test_read_file";
 
 #[derive(Clone)]

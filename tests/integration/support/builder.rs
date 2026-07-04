@@ -147,7 +147,7 @@ impl RebornIntegrationHarnessBuilder {
     /// into the harness's underlying group. Rendered verbatim as a `system`-role
     /// prompt message ahead of any per-turn instructions; read back via
     /// `assert_system_prompt_contains`. Defaults to `None` (no banner, matching
-    /// today's behavior) — see `tests/support/reborn/group.rs`'s
+    /// today's behavior) — see `tests/integration/support/group.rs`'s
     /// `RebornIntegrationGroupBuilder::safety_context` for the underlying wiring.
     pub fn with_safety_context(mut self, ctx: InstructionSafetyContext) -> Self {
         self.safety_context = Some(ctx);

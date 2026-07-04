@@ -65,7 +65,6 @@ pub(crate) fn file_and_github_auth_tools_profile() -> HarnessResult<ToolsProfile
             CapabilityId::new("github.get_repo")?,
         ],
         effect_kinds: local_dev_all_effects(),
-        user_id: UserId::new("reborn-e2e-file-github-auth-user")?,
         options: HostRuntimeHarnessOptions::new(
             workspace_mounts(MountPermissions::read_write_list_delete())?,
             None,
@@ -79,7 +78,10 @@ pub(crate) fn file_and_github_auth_tools_profile() -> HarnessResult<ToolsProfile
             std::path::PathBuf::from("local-dev/system/extensions/github"),
         )),
         auto_approve_default: Some(false),
-        ..ToolsProfile::new("reborn-e2e-file-github-auth-tools")?
+        ..ToolsProfile::new(
+            "reborn-e2e-file-github-auth-tools",
+            "reborn-e2e-file-github-auth-user",
+        )?
     })
 }
 

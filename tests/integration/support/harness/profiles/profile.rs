@@ -1,6 +1,6 @@
 //! Profile domain tools profile (`profile_tools`).
 
-use ironclaw_host_api::{CapabilityId, EffectKind, MountPermissions, UserId};
+use ironclaw_host_api::{CapabilityId, EffectKind, MountPermissions};
 use ironclaw_host_runtime::PROFILE_SET_CAPABILITY_ID;
 
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
@@ -21,7 +21,6 @@ pub(crate) fn profile_tools_profile() -> HarnessResult<ToolsProfile> {
             EffectKind::ReadFilesystem,
             EffectKind::WriteFilesystem,
         ],
-        user_id: UserId::new("reborn-e2e-profile-tools-user")?,
         options: HostRuntimeHarnessOptions::new(
             memory_mounts(MountPermissions::read_write_list_delete())?,
             Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
@@ -29,7 +28,7 @@ pub(crate) fn profile_tools_profile() -> HarnessResult<ToolsProfile> {
             )?),
         ),
         auto_approve_default: Some(true),
-        ..ToolsProfile::new("reborn-e2e-profile-tools")?
+        ..ToolsProfile::new("reborn-e2e-profile-tools", "reborn-e2e-profile-tools-user")?
     })
 }
 

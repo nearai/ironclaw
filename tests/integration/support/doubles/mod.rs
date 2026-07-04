@@ -26,6 +26,11 @@ pub(crate) use recording_capability_result_writer::RecordingCapabilityResultWrit
 pub(crate) use recording_host_runtime::RecordingHostRuntime;
 pub(crate) use recording_network_http_egress::RecordingNetworkHttpEgress;
 pub(crate) use recording_runtime_http_egress::RecordingRuntimeHttpEgress;
-pub(crate) use recording_test_capability_port::RecordingTestCapabilityPort;
+// Consts consumed only by the binary-E2E harness in the parity/QA support tree
+// (unused in bins that don't mount it).
+#[allow(unused_imports)]
+pub(crate) use recording_test_capability_port::{
+    RecordingTestCapabilityPort, TEST_CAPABILITY_ID, TEST_CAPABILITY_SURFACE_VERSION,
+};
 pub(crate) use static_capability_surface_profile_resolver::StaticCapabilitySurfaceProfileResolver;
 pub(crate) use static_secret_store::StaticSecretStore;

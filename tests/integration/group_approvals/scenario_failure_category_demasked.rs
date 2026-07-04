@@ -1,7 +1,7 @@
 //! Scenario: a genuinely-FAILED group run reports its TRUE failure category,
 //! not the masking `driver_protocol_violation`.
 //!
-//! `RebornIntegrationGroupBuilder::into_group` (`tests/support/reborn/group.rs`
+//! `RebornIntegrationGroupBuilder::into_group` (`tests/integration/support/group.rs`
 //! ~line 472) wires `.with_checkpoint_state_store(..)` onto the group-level
 //! `ThreadCheckpointLoopExitEvidencePort` -- the de-mask fix. Without it,
 //! `verify_failure_evidence` (`crates/ironclaw_reborn/src/loop_exit_applier.rs`)

@@ -1,6 +1,6 @@
 //! Skill domain tools profiles.
 
-use ironclaw_host_api::{CapabilityId, EffectKind, TenantId, UserId};
+use ironclaw_host_api::{CapabilityId, EffectKind, TenantId};
 use ironclaw_host_runtime::{
     SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
 };
@@ -26,7 +26,6 @@ pub(crate) fn skill_management_tools_profile() -> HarnessResult<ToolsProfile> {
             EffectKind::DeleteFilesystem,
             EffectKind::Network,
         ],
-        user_id: UserId::new("reborn-e2e-skill-management-user")?,
         options: HostRuntimeHarnessOptions::new(
             skill_mounts()?,
             Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
@@ -35,7 +34,10 @@ pub(crate) fn skill_management_tools_profile() -> HarnessResult<ToolsProfile> {
         ),
         network_policy_override: Some(http_test_policy()),
         auto_approve_default: Some(true),
-        ..ToolsProfile::new("reborn-e2e-skill-management-tools")?
+        ..ToolsProfile::new(
+            "reborn-e2e-skill-management-tools",
+            "reborn-e2e-skill-management-user",
+        )?
     })
 }
 
@@ -64,7 +66,6 @@ pub(crate) fn skill_activation_tools_profile(tenant: &TenantId) -> HarnessResult
             EffectKind::WriteFilesystem,
             EffectKind::Network,
         ],
-        user_id: UserId::new("reborn-e2e-skill-activation-user")?,
         options: HostRuntimeHarnessOptions::new(
             skill_mounts()?,
             Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
@@ -74,7 +75,10 @@ pub(crate) fn skill_activation_tools_profile(tenant: &TenantId) -> HarnessResult
         .with_skill_activation_tenant(tenant.clone()),
         network_policy_override: Some(http_test_policy()),
         auto_approve_default: Some(true),
-        ..ToolsProfile::new("reborn-e2e-skill-activation-tools")?
+        ..ToolsProfile::new(
+            "reborn-e2e-skill-activation-tools",
+            "reborn-e2e-skill-activation-user",
+        )?
     })
 }
 

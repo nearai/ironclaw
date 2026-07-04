@@ -1,6 +1,6 @@
 //! Outbound domain tools profile (`outbound_target_tools`).
 
-use ironclaw_host_api::{CapabilityId, EffectKind, MountView, UserId};
+use ironclaw_host_api::{CapabilityId, EffectKind, MountView};
 
 use super::super::super::outbound_preferences::FakeOutboundPreferencesFacade;
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
@@ -35,7 +35,6 @@ pub(crate) fn outbound_target_tools_profile() -> HarnessResult<ToolsProfile> {
             EffectKind::ReadFilesystem,
             EffectKind::WriteFilesystem,
         ],
-        user_id: UserId::new("reborn-e2e-outbound-target-user")?,
         options: HostRuntimeHarnessOptions::new(
             MountView::default(),
             Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
@@ -43,7 +42,7 @@ pub(crate) fn outbound_target_tools_profile() -> HarnessResult<ToolsProfile> {
             )?),
         )
         .with_outbound_target_tools(facade, true),
-        ..ToolsProfile::new("reborn-e2e-outbound-target-tools")?
+        ..ToolsProfile::new("reborn-e2e-outbound-target-tools", "reborn-e2e-outbound-target-user")?
     })
 }
 

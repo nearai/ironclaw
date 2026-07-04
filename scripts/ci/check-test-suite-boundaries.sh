@@ -105,6 +105,21 @@ if [ -d tests/support/reborn ]; then
   fail "tests/support/reborn/ has reappeared; the parity/QA support tree now lives at tests/support/reborn_parity_qa/"
 fi
 
+# ---------------------------------------------------------------------------
+# 4. Stale-reference guard: no file under tests/ may cite the retired
+#    tests/support/reborn/ path (comments included -- stale pointers mislead
+#    readers and tools; the live homes are tests/integration/support/ and
+#    tests/support/reborn_parity_qa/).
+# ---------------------------------------------------------------------------
+
+mapfile -t stale_refs < <(
+  grep -rl 'tests/support/reborn/' tests/ 2>/dev/null | LC_ALL=C sort
+)
+if [ "${#stale_refs[@]}" -gt 0 ]; then
+  fail "stale 'tests/support/reborn/' references (retired path) found in:"
+  printf '  %s\n' "${stale_refs[@]}" >&2
+fi
+
 if [ "${violations}" -gt 0 ]; then
   printf '\n%s test-suite boundary violation(s) found\n' "${violations}" >&2
   exit 1

@@ -71,7 +71,10 @@ use serde_json::json;
 
 use super::model_replay::RebornTraceReplayModelGateway;
 use crate::reborn_support::config::WaitConfig;
-use crate::reborn_support::doubles::{EmptyIdentityContextSource, RecordingTestCapabilityPort};
+use crate::reborn_support::doubles::{
+    EmptyIdentityContextSource, RecordingTestCapabilityPort, TEST_CAPABILITY_ID,
+    TEST_CAPABILITY_SURFACE_VERSION,
+};
 use crate::reborn_support::filesystem::{BlockingTurnStatePutFilesystem, local_filesystem};
 use crate::reborn_support::harness::profiles::core_builtin::{self, CoreBuiltinOptions};
 use crate::reborn_support::harness::{
@@ -83,9 +86,6 @@ use crate::reborn_support::session_thread::RebornThreadHarness;
 use crate::reborn_support::test_adapter::{RebornTestIngress, RebornTestProductAdapter};
 
 pub type HarnessWaitConfig = WaitConfig;
-
-const TEST_CAPABILITY_ID: &str = "test.echo";
-const TEST_CAPABILITY_SURFACE_VERSION: &str = "trace_replay_v1";
 
 pub struct RebornBinaryE2EHarness {
     ingress: RebornTestIngress,

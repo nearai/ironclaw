@@ -1,7 +1,7 @@
 //! Process domain tools profile (`process_tools`) — see `harness/options.rs`
 //! for the `ToolsProfile` pattern.
 
-use ironclaw_host_api::{CapabilityId, EffectKind, MountView, UserId};
+use ironclaw_host_api::{CapabilityId, EffectKind, MountView};
 use ironclaw_host_runtime::{
     ECHO_CAPABILITY_ID, SHELL_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
 };
@@ -24,10 +24,9 @@ pub(crate) fn process_tools_profile() -> HarnessResult<ToolsProfile> {
             EffectKind::SpawnProcess,
             EffectKind::ExecuteCode,
         ],
-        user_id: UserId::new("reborn-e2e-process-user")?,
         options: HostRuntimeHarnessOptions::new(MountView::default(), None),
         auto_approve_default: Some(true),
-        ..ToolsProfile::new("reborn-e2e-process-tools")?
+        ..ToolsProfile::new("reborn-e2e-process-tools", "reborn-e2e-process-user")?
     })
 }
 

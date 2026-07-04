@@ -5,7 +5,7 @@
 //! inference iteration against a committed `insta` snapshot, plus the exact
 //! final reply — catching silent drift in prompt assembly, history
 //! accumulation, and tool-result feed-back that a substring check can't see.
-//! See `tests/support/reborn/golden.rs` for canonicalization rationale.
+//! See `tests/integration/support/golden.rs` for canonicalization rationale.
 //! Regenerate with `cargo insta review` (or `INSTA_UPDATE=always cargo test`).
 //!
 //! Deliberately small, curated scenario set (full payload matches are
