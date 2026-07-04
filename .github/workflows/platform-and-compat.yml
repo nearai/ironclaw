@@ -290,6 +290,9 @@ jobs:
         run: |
           timeout --signal=INT --kill-after=30s 20m \
             cargo test --all-features --test wit_compat -- --nocapture
+      - name: Show sccache stats
+        if: always()
+        run: command -v sccache >/dev/null 2>&1 && sccache --show-stats || true
 
   bench-compile:
     name: Benchmark Compilation
