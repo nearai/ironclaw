@@ -89,6 +89,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       packages: ${{ steps.packages.outputs.packages }}
+      buckets: ${{ steps.packages.outputs.buckets }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -160,15 +161,20 @@ jobs:
           fi
 
           echo "packages=${packages}" >> "$GITHUB_OUTPUT"
+          buckets="$(scripts/ci/reborn-crate-test-buckets.sh "${packages}")"
+          echo "buckets=${buckets}" >> "$GITHUB_OUTPUT"
+
           echo "Testing Reborn package crates:"
           printf '%s\n' "${packages}" | jq -r '.[] | "- " + .'
+          echo "Testing Reborn package buckets:"
+          printf '%s\n' "${buckets}" | jq -r '.[] | "- \(.name): \(.packages | join(", "))"'
 
   crate-tests:
-    name: Test ${{ matrix.package }}
+    name: Test Reborn crate bucket (${{ matrix.bucket.name }})
     needs: [changes, package-matrix]
     if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       ANTHROPIC_API_KEY: ""
       LLM_BACKEND: ""
@@ -178,7 +184,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: ${{ fromJSON(needs.package-matrix.outputs.packages) }}
+        bucket: ${{ fromJSON(needs.package-matrix.outputs.buckets) }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -196,21 +202,32 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      - name: Resolve crate feature flags
-        id: crate-feature-flags
+      - name: Resolve bucket settings
+        id: bucket-settings
         env:
-          PACKAGE: ${{ matrix.package }}
+          BUCKET_PACKAGES: ${{ toJSON(matrix.bucket.packages) }}
         run: |
-          feature_flags="$(scripts/ci/package-feature-flags.sh "$PACKAGE")"
-          echo "feature_flags=${feature_flags}" >> "$GITHUB_OUTPUT"
-          if [[ "${feature_flags}" == *"webui-v2-beta"* ]]; then
-            echo "needs_webui_node=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "needs_webui_node=false" >> "$GITHUB_OUTPUT"
-          fi
+          needs_webui_node=false
+          sccache_dist_enabled=true
+
+          while IFS= read -r package; do
+            feature_flags="$(scripts/ci/package-feature-flags.sh "$package")"
+            if [[ "${feature_flags}" == *"webui-v2-beta"* ]]; then
+              needs_webui_node=true
+            fi
+
+            case "${package}" in
+              ironclaw_first_party_extension_ports|ironclaw_host_runtime|ironclaw_loop_support|ironclaw_product_workflow|ironclaw_reborn|ironclaw_reborn_cli|ironclaw_reborn_composition|ironclaw_reborn_webui_ingress|ironclaw_wasm|ironclaw_wasm_product_adapters|ironclaw_wasm_sandbox_core)
+                sccache_dist_enabled=false
+                ;;
+            esac
+          done < <(printf '%s\n' "${BUCKET_PACKAGES}" | jq -r '.[]')
+
+          echo "needs_webui_node=${needs_webui_node}" >> "${GITHUB_OUTPUT}"
+          echo "sccache_dist_enabled=${sccache_dist_enabled}" >> "${GITHUB_OUTPUT}"
 
       - name: Install Node.js for WebUI bundle builds
-        if: ${{ steps.crate-feature-flags.outputs.needs_webui_node == 'true' }}
+        if: ${{ steps.bucket-settings.outputs.needs_webui_node == 'true' }}
         uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
         with:
           node-version: "22"
@@ -238,26 +255,11 @@ jobs:
           # repo cache LRU is seeded by shared states, not arbitrary PR branches.
           save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
 
-      - name: Resolve distributed sccache eligibility
-        id: sccache-dist-eligibility
-        env:
-          PACKAGE: ${{ matrix.package }}
-        run: |
-          case "${PACKAGE}" in
-            ironclaw_first_party_extension_ports|ironclaw_host_runtime|ironclaw_loop_support|ironclaw_product_workflow|ironclaw_reborn|ironclaw_reborn_cli|ironclaw_reborn_composition|ironclaw_reborn_webui_ingress|ironclaw_wasm|ironclaw_wasm_product_adapters|ironclaw_wasm_sandbox_core)
-              echo "enabled=false" >> "${GITHUB_OUTPUT}"
-              echo "::notice title=Distributed sccache skipped::${PACKAGE} compiles wasmtime-wasi proc macros that read registry source files unavailable on the remote builder."
-              ;;
-            *)
-              echo "enabled=true" >> "${GITHUB_OUTPUT}"
-              ;;
-          esac
-
       - name: Setup OVH sccache
         uses: ./.github/actions/setup-sccache-dist
         with:
-          scheduler-url: ${{ steps.sccache-dist-eligibility.outputs.enabled == 'true' && vars.SCCACHE_DIST_SCHEDULER_URL || '' }}
-          auth-token: ${{ steps.sccache-dist-eligibility.outputs.enabled == 'true' && secrets.SCCACHE_DIST_AUTH_TOKEN || '' }}
+          scheduler-url: ${{ steps.bucket-settings.outputs.sccache_dist_enabled == 'true' && vars.SCCACHE_DIST_SCHEDULER_URL || '' }}
+          auth-token: ${{ steps.bucket-settings.outputs.sccache_dist_enabled == 'true' && secrets.SCCACHE_DIST_AUTH_TOKEN || '' }}
           cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
           cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
           cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
@@ -267,18 +269,26 @@ jobs:
 
       - name: Run crate tests
         env:
-          PACKAGE: ${{ matrix.package }}
+          BUCKET_NAME: ${{ matrix.bucket.name }}
+          BUCKET_PACKAGES: ${{ toJSON(matrix.bucket.packages) }}
         run: |
-          feature_flags="${{ steps.crate-feature-flags.outputs.feature_flags }}"
+          echo "Running Reborn crate bucket: ${BUCKET_NAME}"
+          printf '%s\n' "${BUCKET_PACKAGES}" | jq -r '.[] | "- " + .'
 
-          if [ "$PACKAGE" = "ironclaw_reborn_composition" ]; then
-            echo "Disabling incremental compilation for ironclaw_reborn_composition to keep runner disk usage bounded."
-            export CARGO_INCREMENTAL=0
-          fi
+          while IFS= read -r package; do
+            feature_flags="$(scripts/ci/package-feature-flags.sh "$package")"
+            echo "::group::cargo test -p ${package} ${feature_flags}"
 
-          # shellcheck disable=SC2086 # feature_flags intentionally expands to zero or more Cargo args.
-          timeout --signal=INT --kill-after=30s 28m \
-            cargo test -p "$PACKAGE" ${feature_flags} --all-targets -- --nocapture
+            if [ "$package" = "ironclaw_reborn_composition" ]; then
+              echo "Disabling incremental compilation for ironclaw_reborn_composition to keep runner disk usage bounded."
+              export CARGO_INCREMENTAL=0
+            fi
+
+            # shellcheck disable=SC2086 # feature_flags intentionally expands to zero or more Cargo args.
+            timeout --signal=INT --kill-after=30s 28m \
+              cargo test -p "$package" ${feature_flags} --all-targets -- --nocapture
+            echo "::endgroup::"
+          done < <(printf '%s\n' "${BUCKET_PACKAGES}" | jq -r '.[]')
 
   root-reborn-parity-tests:
     name: Reborn root tests (${{ matrix.partition }})
