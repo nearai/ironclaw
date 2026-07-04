@@ -35,6 +35,8 @@ on:
 
 permissions:
   contents: read
+  issues: read
+  pull-requests: read
 
 concurrency:
   group: nightly-deep-ci-${{ github.ref }}
@@ -44,6 +46,10 @@ jobs:
   deterministic-deep-tests:
     name: Legacy Tests
     uses: ./.github/workflows/test.yml
+    secrets:
+      SCCACHE_CACHE_SSH_PRIVATE_KEY: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
+      SCCACHE_CACHE_SSH_KNOWN_HOSTS: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
+      SCCACHE_REDIS_PASSWORD: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
     with:
       ref: ${{ github.sha }}
       include_docker: false

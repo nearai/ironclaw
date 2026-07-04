@@ -11,6 +11,13 @@ on:
         required: false
         type: boolean
         default: true
+    secrets:
+      SCCACHE_CACHE_SSH_PRIVATE_KEY:
+        required: false
+      SCCACHE_CACHE_SSH_KNOWN_HOSTS:
+        required: false
+      SCCACHE_REDIS_PASSWORD:
+        required: false
 
 permissions:
   contents: read
@@ -25,6 +32,8 @@ env:
   # cfg!(test) covers unit tests; this covers integration/e2e that link the
   # non-cfg(test) library.
   IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
 
 jobs:
   changes:
@@ -165,12 +174,25 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: wasm32-wasip2
+      - name: Install mold and clang
+        run: |
+          scripts/ci/install-ci-apt-packages.sh clang mold
+          test -x /usr/bin/mold
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: ${{ matrix.name }}
           # Keep saves to protected-branch runs so the ~10 GB
           # repo cache LRU is seeded by shared states, not arbitrary branches.
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Setup OVH sccache cache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
+          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
+          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
+          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
+          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
+          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Install cargo-component
         uses: ./.github/actions/install-cargo-component
       - name: Build WASM artifacts for integration tests
@@ -178,6 +200,8 @@ jobs:
           ./scripts/build-wasm-extensions.sh --channels
           ./scripts/build-wasm-extensions.sh --first-party
       - name: Run Tests
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"
         run: |
           timeout --signal=INT --kill-after=30s 40m \
             cargo test ${{ matrix.flags }} -- --nocapture
@@ -187,14 +211,22 @@ jobs:
       # with `-p ironclaw_memory` (or `--workspace`) — otherwise the
       # Tier A guards for PR #3180 invariants compile but never run.
       - name: Run reborn composition substrate tests
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"
         run: |
           timeout --signal=INT --kill-after=30s 15m \
             cargo test -p ironclaw_reborn_composition --no-default-features --features libsql,postgres --tests -- --nocapture
 
       - name: Run ironclaw_memory tests
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"
         run: |
           timeout --signal=INT --kill-after=30s 15m \
             cargo test -p ironclaw_memory --tests -- --nocapture
+
+      - name: Show sccache stats
+        if: always()
+        run: command -v sccache >/dev/null 2>&1 && sccache --show-stats || true
 
   secret-store-contract-tests:
     name: Secret Store Contract Tests
@@ -213,16 +245,35 @@ jobs:
           persist-credentials: false
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Install mold and clang
+        run: |
+          scripts/ci/install-ci-apt-packages.sh clang mold
+          test -x /usr/bin/mold
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: secret-store-contract
           # Keep saves to protected-branch runs so the ~10 GB
           # repo cache LRU is seeded by shared states, not arbitrary branches.
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Setup OVH sccache cache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
+          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
+          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
+          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
+          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
+          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Run secret store contract
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"
         run: |
           timeout --signal=INT --kill-after=30s 10m \
             cargo test -p ironclaw_secrets --test secret_store_contract -- --nocapture
+
+      - name: Show sccache stats
+        if: always()
+        run: command -v sccache >/dev/null 2>&1 && sccache --show-stats || true
 
   heavy-integration-tests:
     name: Heavy Integration Tests
@@ -243,18 +294,37 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: wasm32-wasip2
+      - name: Install mold and clang
+        run: |
+          scripts/ci/install-ci-apt-packages.sh clang mold
+          test -x /usr/bin/mold
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: heavy-integration
           # Keep saves to protected-branch runs so the ~10 GB
           # repo cache LRU is seeded by shared states, not arbitrary branches.
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Setup OVH sccache cache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
+          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
+          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
+          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
+          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
+          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Build Telegram WASM channel
         run: cargo build --manifest-path channels-src/telegram/Cargo.toml --target wasm32-wasip2 --release
       - name: Run thread scheduling integration tests
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"
         run: |
           timeout --signal=INT --kill-after=30s 15m \
             cargo test --no-default-features --features libsql,integration --test e2e_thread_scheduling -- --nocapture
+
+      - name: Show sccache stats
+        if: always()
+        run: command -v sccache >/dev/null 2>&1 && sccache --show-stats || true
 
   telegram-integration-tests:
     name: Telegram Integration Tests (${{ matrix.partition }})
@@ -281,12 +351,25 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: wasm32-wasip2
+      - name: Install mold and clang
+        run: |
+          scripts/ci/install-ci-apt-packages.sh clang mold
+          test -x /usr/bin/mold
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: telegram-integration-${{ matrix.partition }}
           # Keep saves to protected-branch runs so the ~10 GB
           # repo cache LRU is seeded by shared states, not arbitrary branches.
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Setup OVH sccache cache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
+          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
+          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
+          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
+          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
+          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Build Telegram WASM channel
         run: cargo build --manifest-path channels-src/telegram/Cargo.toml --target wasm32-wasip2 --release
       - name: Install cargo-nextest
@@ -296,6 +379,7 @@ jobs:
       - name: Run Telegram integration tests
         env:
           NEXTEST_PROFILE: ci
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"
         run: |
           timeout --signal=INT --kill-after=30s 15m \
             cargo nextest run \
@@ -303,6 +387,10 @@ jobs:
               --features integration \
               --test telegram_auth_integration \
               --partition hash:${{ matrix.partition }}
+
+      - name: Show sccache stats
+        if: always()
+        run: command -v sccache >/dev/null 2>&1 && sccache --show-stats || true
 
   replay-required:
     name: Replay Required
@@ -347,16 +435,35 @@ jobs:
           persist-credentials: false
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Install mold and clang
+        run: |
+          scripts/ci/install-ci-apt-packages.sh clang mold
+          test -x /usr/bin/mold
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: telegram-tests
           # Keep saves to protected-branch runs so the ~10 GB
           # repo cache LRU is seeded by shared states, not arbitrary branches.
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Setup OVH sccache cache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
+          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
+          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
+          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
+          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
+          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Run Telegram Channel Tests
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"
         run: |
           timeout --signal=INT --kill-after=30s 10m \
             cargo test --manifest-path channels-src/telegram/Cargo.toml -- --nocapture
+
+      - name: Show sccache stats
+        if: always()
+        run: command -v sccache >/dev/null 2>&1 && sccache --show-stats || true
 
   slack-tests:
     name: Slack Channel Tests
@@ -377,18 +484,37 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: wasm32-wasip2
+      - name: Install mold and clang
+        run: |
+          scripts/ci/install-ci-apt-packages.sh clang mold
+          test -x /usr/bin/mold
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: slack-integration
           # Keep saves to protected-branch runs so the ~10 GB
           # repo cache LRU is seeded by shared states, not arbitrary branches.
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Setup OVH sccache cache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
+          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
+          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
+          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
+          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
+          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Build Slack WASM channel
         run: cargo build --manifest-path channels-src/slack/Cargo.toml --target wasm32-wasip2 --release
       - name: Run Slack integration tests
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"
         run: |
           timeout --signal=INT --kill-after=30s 15m \
             cargo test --features integration --test slack_auth_integration -- --nocapture
+
+      - name: Show sccache stats
+        if: always()
+        run: command -v sccache >/dev/null 2>&1 && sccache --show-stats || true
 
   run-tests:
     name: Tests (Legacy)
