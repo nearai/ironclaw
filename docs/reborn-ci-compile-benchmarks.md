@@ -19,6 +19,7 @@ Baseline run: [`28718496861`](https://github.com/nearai/ironclaw/actions/runs/28
 - Workflow: `Tests (Reborn)`
 - Status: success
 - Wall clock: `8m35s` (`2026-07-04T20:20:32Z` to `2026-07-04T20:29:07Z`)
+- Total Reborn jobs: `28`
 - Reborn crate bucket jobs: `12`
 
 Slowest crate buckets:
@@ -45,8 +46,9 @@ compile/link/setup time, with one notable runtime-heavy exception:
   integration binaries took `11-16s`, but compile/link/setup remained the
   dominant cost.
 
-The current branch has restored the workflow after each benchmark. The PR diff
-is report-only unless a new benchmark experiment is intentionally in flight.
+The current branch has restored the workflow after each rejected benchmark.
+H13 is the first retained benchmark because it reduces total Reborn jobs while
+improving measured wall clock.
 
 ## Hypotheses
 
@@ -64,7 +66,7 @@ is report-only unless a new benchmark experiment is intentionally in flight.
 | H10 | Remove the duplicate `libsql-restart-tests` feature from the broad `ironclaw_reborn` crate bucket. | Reduce `reborn-core` runtime while preserving the dedicated restart-test PR gate. | Reverted | Abandoned: package-node evidence showed no compile-graph shrink, and the active run still left the compile-heavy long poles as the blocker. |
 | H11 | Move libSQL-heavy coverage out of broad long-pole crate buckets into the existing Reborn group job. | Reduce compile graph size for `host-runtime` and `reborn-core` without dropping persistence coverage or adding a new job. | Tested | Rejected: wall clock regressed from `8m35s` to `9m50s`; `host-runtime`, `reborn-core`, and `composition-core` were all slower. |
 | H12 | Move `ironclaw_reborn_cli` from `reborn-core` to `webui-ingress`. | Keep job count flat while grouping the WebUI-shaped CLI build with the WebUI ingress bucket instead of the core Reborn bucket. | Tested | Rejected: `reborn-core` improved from `367s` to `238s`, but `webui-ingress` grew from `334s` to `377s`; wall clock stayed flat at `8m37s` with no job-count reduction. |
-| H13 | Remove the separate uninstrumented `reborn-group-tests` job and rely on the existing instrumented coverage `groups` lane for those same suites. | Reduce total Reborn jobs by one without dropping group-suite pass/fail coverage. | Running | Pending CI result. |
+| H13 | Remove the separate uninstrumented `reborn-group-tests` job and rely on the existing instrumented coverage `groups` lane for those same suites. | Reduce total Reborn jobs by one without dropping group-suite pass/fail coverage. | Retained | Accepted: total Reborn jobs dropped from `28` to `27`, and wall clock improved from `8m35s` to `8m21s`. |
 
 ## H1: Narrow Crate Bucket Targets
 
@@ -678,11 +680,37 @@ Why this is safe to test:
   instrumentation.
 - The workflow already treats `reborn-integration-coverage` as a real test gate
   for the flat `reborn_integration_*` suites.
-- The baseline `Reborn group tests` job took `324s`, while the existing
-  instrumented `groups` lane took `329s`, so keeping both jobs appears to
+- The baseline `Reborn group tests` job took `316s`, while the existing
+  instrumented `groups` lane took `325s`, so keeping both jobs appears to
   duplicate compile/test work without improving the critical path.
 
 Benchmark result:
 
 - Branch/PR: [`codex/ci-compile-benchmarks`, PR #5648](https://github.com/nearai/ironclaw/pull/5648)
-- Workflow run: pending.
+- Workflow run: [`28722534492`](https://github.com/nearai/ironclaw/actions/runs/28722534492)
+- Status: success.
+- Wall clock: `8m21s` (`2026-07-04T23:05:00Z` to `2026-07-04T23:13:21Z`).
+- Total Reborn jobs: `27`.
+- Reborn crate bucket jobs: `12` unchanged.
+
+| Metric | Baseline | H13 | Delta |
+| --- | ---: | ---: | ---: |
+| Reborn workflow wall clock | `8m35s` | `8m21s` | `-14s` |
+| Total Reborn jobs | `28` | `27` | `-1` |
+| Reborn crate bucket jobs | `12` | `12` | `0` |
+| `reborn-group-tests` job | `316s` | removed | `-1 job` |
+| `Reborn integration coverage (groups)` | `325s` | `391s` | `+66s` |
+| `host-runtime` | `473s` | `438s` | `-35s` |
+| `composition-core` | `419s` | `457s` | `+38s` |
+| `reborn-core` | `367s` | `462s` | `+95s` |
+| Slowest job | `host-runtime` `473s` | `reborn-core` `462s` | `-11s` |
+
+Decision:
+
+- Retain. This satisfies the job-count acceptance criterion: one fewer total
+  Reborn job with no wall-clock regression.
+- The result does not solve the core compile-time issue; it removes duplicated
+  group-suite execution while keeping group failures gated through the existing
+  instrumented coverage `groups` lane.
+- The remaining compile-time bottlenecks are still crate/root build graphs,
+  especially `reborn-core`, `composition-core`, and `host-runtime`.
