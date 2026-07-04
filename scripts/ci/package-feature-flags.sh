@@ -55,7 +55,7 @@ case "${package}" in
     printf '%s\n' "--features test-support,webui-v2-beta,slack-v2-host-beta,libsql"
     ;;
   ironclaw_reborn)
-    printf '%s\n' "--features root-llm-provider,libsql-secrets,libsql-restart-tests,webui-user-store"
+    printf '%s\n' "--features root-llm-provider"
     ;;
   ironclaw_reborn_event_store)
     printf '%s\n' "--features libsql"
@@ -75,9 +75,10 @@ case "${package}" in
   ironclaw_host_runtime)
     # Integration tests (tests/) link the lib as a normal dependency, so
     # cfg(test) is false there; the deterministic test-mode behavior they assert
-    # is gated behind `feature = "test-support"`. libsql exercises the embedded
-    # DB paths without a Postgres server (which the crate-tests job has none of).
-    printf '%s\n' "--features test-support,libsql"
+    # is gated behind `feature = "test-support"`. libSQL-specific persistence
+    # paths run in scripts/ci/run-reborn-group-tests.sh so the broad bucket does
+    # not pay the libSQL compile graph for every host-runtime test binary.
+    printf '%s\n' "--features test-support"
     ;;
   ironclaw_webui_v2)
     printf '%s\n' "--features webui-v2-beta"

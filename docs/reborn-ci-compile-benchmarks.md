@@ -62,7 +62,7 @@ is report-only unless a new benchmark experiment is intentionally in flight.
 | H8 | Merge only the two smallest Reborn crate buckets, `auth-security` and `memory-skills`. | Reduce crate bucket jobs by one while leaving all long-pole buckets unchanged. | Tested | Reverted by decision: total jobs dropped from `28` to `27`, but the compile-heavy long poles remained unchanged. |
 | H9 | Enable sccache distributed compilation for all Reborn crate buckets. | Reduce compile time for the existing long-pole buckets without changing coverage. | Tested | Rejected: wall clock regressed from `8m35s` to `9m11s`; long-pole buckets were slower. |
 | H10 | Remove the duplicate `libsql-restart-tests` feature from the broad `ironclaw_reborn` crate bucket. | Reduce `reborn-core` runtime while preserving the dedicated restart-test PR gate. | Reverted | Abandoned: package-node evidence showed no compile-graph shrink, and the active run still left the compile-heavy long poles as the blocker. |
-| H11 | Move libSQL-heavy coverage out of broad long-pole crate buckets into narrow dedicated libSQL jobs. | Reduce compile graph size for `host-runtime`, `composition-core`, and `reborn-core` without dropping persistence coverage. | Evidence review | Promising next benchmark: `libsql` adds `+85` to `+89` dependency-tree entries on the slowest buckets; naked removal is unsafe, but a replacement-coverage split is the best remaining compile-time lever. |
+| H11 | Move libSQL-heavy coverage out of broad long-pole crate buckets into the existing Reborn group job. | Reduce compile graph size for `host-runtime` and `reborn-core` without dropping persistence coverage or adding a new job. | Running | Benchmark branch now removes broad `libsql`/`libsql-secrets` feature flags and runs the exact skipped libSQL tests in `run-reborn-group-tests.sh`; CI result pending. |
 
 ## H1: Narrow Crate Bucket Targets
 
@@ -484,7 +484,7 @@ Benchmark result:
 
 ## H11: Move libSQL Coverage Out Of Broad Long-Pole Buckets
 
-Change under consideration:
+Change under test:
 
 - Remove the broad `libsql`-pulling feature sets from the slow crate buckets
   only after adding narrower replacement coverage for the libSQL-specific
@@ -492,13 +492,11 @@ Change under consideration:
 - Candidate crate-bucket feature reductions:
   - `ironclaw_host_runtime`: `--features test-support,libsql` ->
     `--features test-support`
-  - `ironclaw_reborn_composition`:
-    `--features test-support,webui-v2-beta,slack-v2-host-beta,libsql` ->
-    a split where the broad bucket avoids redundant libSQL work and a narrow
-    job runs the libSQL-required tests.
-  - `ironclaw_reborn`: keep the dedicated restart job for
-    `libsql-restart-tests`; evaluate whether `libsql-secrets` belongs in the
-    broad bucket or in a narrow secrets persistence job.
+  - `ironclaw_reborn`: `--features root-llm-provider,libsql-secrets,libsql-restart-tests,webui-user-store`
+    -> `--features root-llm-provider`
+  - `ironclaw_reborn_composition`: unchanged for this benchmark because
+    `webui-v2-beta` itself enables `libsql`; removing that surface safely needs
+    a larger coverage redesign.
 
 Evidence:
 
@@ -544,8 +542,27 @@ Decision:
 
 - Do not run or keep a naked "remove libSQL from the slow buckets" change; that
   would optimize compile time by weakening persistence coverage.
-- The next benchmarkable implementation should first identify the exact
-  libSQL-required tests in `host-runtime`, `composition-core`, and
-  `reborn-core`, then move only those tests into narrow dedicated libSQL jobs.
-  Success means the broad long-pole buckets get smaller while the added narrow
-  jobs do not become the new wall-clock critical path.
+- This benchmark keeps the Reborn job count flat by folding the exact
+  feature-gated libSQL tests into the existing Reborn group job instead of
+  adding a new matrix job.
+
+Focused replacement coverage now run by
+`scripts/ci/run-reborn-group-tests.sh`:
+
+- `ironclaw_host_runtime::first_party_builtin_tools::builtin_coding_blocks_sensitive_resolved_libsql_paths`
+- `ironclaw_host_runtime::host_runtime_services_contract` libSQL selection and
+  persistence guardrail tests:
+  - `production_root_filesystem_selection_accepts_libsql_root_filesystem`
+  - `production_turn_state_selection_accepts_filesystem_turn_state_store`
+  - `production_turn_coordinator_uses_configured_store_and_notifier`
+  - `production_turn_coordinator_requires_explicit_run_profile_resolver`
+  - `host_runtime_services_preserves_combined_store_after_root_filesystem_selection`
+- `ironclaw_host_runtime::reborn_durable_restart_integration::approval_resume_survives_durable_libsql_reopen_and_consumes_lease_once`
+- `ironclaw_reborn::secrets` with `--features libsql-secrets`
+- `ironclaw_reborn::loop_driver_host::turn_runner_worker_completes_after_libsql_turn_and_thread_services_reopen`
+  with `--features libsql-restart-tests`
+
+Benchmark result:
+
+- Branch/PR: [`codex/ci-compile-benchmarks`, PR #5648](https://github.com/nearai/ironclaw/pull/5648)
+- Workflow run: pending.
