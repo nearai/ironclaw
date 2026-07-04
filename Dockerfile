@@ -31,6 +31,7 @@ COPY build.rs build.rs
 COPY src/ src/
 COPY tests/ tests/
 COPY migrations/ migrations/
+COPY prompts/ prompts/
 COPY registry/ registry/
 COPY channels-src/ channels-src/
 COPY tools-src/ tools-src/
@@ -60,6 +61,7 @@ COPY build.rs build.rs
 COPY src/ src/
 COPY tests/ tests/
 COPY migrations/ migrations/
+COPY prompts/ prompts/
 COPY registry/ registry/
 COPY channels-src/ channels-src/
 COPY tools-src/ tools-src/

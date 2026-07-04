@@ -318,7 +318,12 @@ jobs:
     if: >
       needs.changes.outputs.docs_only != 'true' &&
       needs.changes.outputs.has_legacy_tests == 'true' &&
-      (github.event_name == 'push' || (github.event_name == 'workflow_call' && inputs.include_docker))
+      (
+        github.event_name == 'push' ||
+        github.event_name == 'pull_request' ||
+        github.event_name == 'merge_group' ||
+        (github.event_name == 'workflow_call' && inputs.include_docker)
+      )
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
