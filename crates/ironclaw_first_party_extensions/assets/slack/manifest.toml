@@ -35,3 +35,15 @@ handle = "slack_bot_token"
 [[product_adapter.inbound.egress]]
 host = "slack.com"
 credential_handle = "slack_bot_token"
+
+# Host-ingress routes projected by the serve layer (ironclaw_reborn_composition
+# ::slack_serve). The route path/method/policy live here as data — the axum
+# handler + HMAC verifier stay in Rust. Credential coherence: each route is
+# verified by `slack_bot_token`, which is declared in required_credentials above.
+[[product_adapter.inbound.host_ingress]]
+credential_handles = ["slack_bot_token"]
+descriptor = { route_id = "slack.events", method = "post", route_pattern = "/webhooks/slack/events", policy = { listener_class = "public_webhook", auth = { type = "required", schemes = ["webhook_signature"] }, scope_source = "host_resolved", body_limit = { type = "limited", max_bytes = 1048576 }, rate_limit = { type = "limited", scope = "global", max_requests = 12000, window_seconds = 60 }, cors = "not_applicable", websocket_origin = "not_applicable", streaming = "none", audit = "public_callback", effect_path = { type = "product_workflow" } } }
+
+[[product_adapter.inbound.host_ingress]]
+credential_handles = ["slack_bot_token"]
+descriptor = { route_id = "slack.commands", method = "post", route_pattern = "/webhooks/slack/commands", policy = { listener_class = "public_webhook", auth = { type = "required", schemes = ["webhook_signature"] }, scope_source = "host_resolved", body_limit = { type = "limited", max_bytes = 16384 }, rate_limit = { type = "limited", scope = "global", max_requests = 6000, window_seconds = 60 }, cors = "not_applicable", websocket_origin = "not_applicable", streaming = "none", audit = "public_callback", effect_path = { type = "product_workflow" } } }

@@ -103,6 +103,8 @@ mod trajectory_observer;
 pub use auth_prompt::{AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller};
 #[cfg(feature = "slack-v2-host-beta")]
 mod delivered_gate_routing;
+#[cfg(feature = "slack-v2-host-beta")]
+mod host_ingress;
 #[cfg(feature = "root-llm-provider")]
 mod provider_admin;
 #[cfg(feature = "root-llm-provider")]
