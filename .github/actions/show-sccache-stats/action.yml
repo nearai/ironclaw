@@ -1,0 +1,9 @@
+name: Show sccache stats
+description: Print sccache statistics when sccache is available.
+
+runs:
+  using: composite
+  steps:
+    - name: Show sccache stats
+      shell: bash
+      run: command -v sccache >/dev/null 2>&1 && sccache --show-stats || true

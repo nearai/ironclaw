@@ -1,0 +1,11 @@
+name: Setup mold and clang
+description: Install the Linux mold linker and clang compiler used by Rust CI jobs.
+
+runs:
+  using: composite
+  steps:
+    - name: Install mold and clang
+      shell: bash
+      run: |
+        scripts/ci/install-ci-apt-packages.sh clang mold
+        test -x /usr/bin/mold

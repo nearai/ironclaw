@@ -152,9 +152,6 @@ jobs:
     if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true' && needs.changes.outputs.has_core_code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    env:
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
     strategy:
       fail-fast: false
       matrix:
@@ -175,9 +172,7 @@ jobs:
         with:
           targets: wasm32-wasip2
       - name: Install mold and clang
-        run: |
-          scripts/ci/install-ci-apt-packages.sh clang mold
-          test -x /usr/bin/mold
+        uses: ./.github/actions/setup-mold-clang
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: ${{ matrix.name }}
@@ -226,7 +221,7 @@ jobs:
 
       - name: Show sccache stats
         if: always()
-        run: command -v sccache >/dev/null 2>&1 && sccache --show-stats || true
+        uses: ./.github/actions/show-sccache-stats
 
   secret-store-contract-tests:
     name: Secret Store Contract Tests
@@ -234,9 +229,6 @@ jobs:
     if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_legacy_tests == 'true' && needs.changes.outputs.has_core_code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -270,9 +262,7 @@ jobs:
         with:
           targets: wasm32-wasip2
       - name: Install mold and clang
-        run: |
-          scripts/ci/install-ci-apt-packages.sh clang mold
-          test -x /usr/bin/mold
+        uses: ./.github/actions/setup-mold-clang
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: heavy-integration
@@ -299,7 +289,7 @@ jobs:
 
       - name: Show sccache stats
         if: always()
-        run: command -v sccache >/dev/null 2>&1 && sccache --show-stats || true
+        uses: ./.github/actions/show-sccache-stats
 
   telegram-integration-tests:
     name: Telegram Integration Tests (${{ matrix.partition }})
@@ -327,9 +317,7 @@ jobs:
         with:
           targets: wasm32-wasip2
       - name: Install mold and clang
-        run: |
-          scripts/ci/install-ci-apt-packages.sh clang mold
-          test -x /usr/bin/mold
+        uses: ./.github/actions/setup-mold-clang
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: telegram-integration-${{ matrix.partition }}
@@ -365,7 +353,7 @@ jobs:
 
       - name: Show sccache stats
         if: always()
-        run: command -v sccache >/dev/null 2>&1 && sccache --show-stats || true
+        uses: ./.github/actions/show-sccache-stats
 
   replay-required:
     name: Replay Required
@@ -435,9 +423,7 @@ jobs:
         with:
           targets: wasm32-wasip2
       - name: Install mold and clang
-        run: |
-          scripts/ci/install-ci-apt-packages.sh clang mold
-          test -x /usr/bin/mold
+        uses: ./.github/actions/setup-mold-clang
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: slack-integration
@@ -464,7 +450,7 @@ jobs:
 
       - name: Show sccache stats
         if: always()
-        run: command -v sccache >/dev/null 2>&1 && sccache --show-stats || true
+        uses: ./.github/actions/show-sccache-stats
 
   run-tests:
     name: Tests (Legacy)
