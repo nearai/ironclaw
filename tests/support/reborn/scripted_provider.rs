@@ -1,7 +1,8 @@
 //! Scripted raw-provider seam for Reborn integration tests. Reuses `TraceLlm`'s
 //! replay engine (no new provider): builds an in-memory `LlmTrace` from the
-//! `RebornScriptedReply` façade and returns a `TraceLlm` to sit at the bottom of
-//! the real `ironclaw_llm` decorator chain (design §3.1/§3.3).
+//! `RebornScriptedReply` façade, canonicalizes harness-local tool-call ids per
+//! trace, and returns a `TraceLlm` to sit at the bottom of the real
+//! `ironclaw_llm` decorator chain (design §3.1/§3.3).
 
 // The parking provider (`ParkingModelGate`/`ParkingLlm`) is consumed only by the
 // `reborn_integration_cancel` test binary, so it reads as dead in the
@@ -9,6 +10,7 @@
 // matching the file-level allow every sibling support module already carries.
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -21,7 +23,7 @@ use rust_decimal::Decimal;
 use tokio::sync::oneshot;
 
 use super::reply::RebornScriptedReply;
-use crate::support::trace_llm::{LlmTrace, TraceLlm, TraceTurn};
+use crate::support::trace_llm::{LlmTrace, TraceLlm, TraceResponse, TraceStep, TraceTurn};
 
 /// Model name surfaced by the scripted provider. Non-empty and not "default" so
 /// the Reborn model gateway's model-override resolution accepts it.
@@ -29,9 +31,14 @@ pub const SCRIPTED_MODEL_NAME: &str = "scripted/integration-test";
 
 /// Build a `TraceLlm` that replays the given scripted replies in order.
 pub fn scripted_trace_llm(replies: impl IntoIterator<Item = RebornScriptedReply>) -> TraceLlm {
+    let mut tool_call_ids = ScriptedToolCallIds::default();
     let steps = replies
         .into_iter()
-        .map(RebornScriptedReply::into_step)
+        .map(|reply| {
+            let mut step = reply.into_step();
+            tool_call_ids.canonicalize_step(&mut step);
+            step
+        })
         .collect();
     let trace = LlmTrace::new(
         SCRIPTED_MODEL_NAME,
@@ -42,6 +49,36 @@ pub fn scripted_trace_llm(replies: impl IntoIterator<Item = RebornScriptedReply>
         }],
     );
     TraceLlm::from_trace(trace)
+}
+
+#[derive(Default)]
+struct ScriptedToolCallIds {
+    next: u32,
+    canonical_by_raw: HashMap<String, String>,
+}
+
+impl ScriptedToolCallIds {
+    fn canonicalize_step(&mut self, step: &mut TraceStep) {
+        if let TraceResponse::ToolCalls { tool_calls, .. } = &mut step.response {
+            for tool_call in tool_calls {
+                let canonical = self.next_id();
+                self.canonical_by_raw
+                    .insert(tool_call.id.clone(), canonical.clone());
+                tool_call.id = canonical;
+            }
+        }
+
+        for expected in &mut step.expected_tool_results {
+            if let Some(canonical) = self.canonical_by_raw.get(&expected.tool_call_id) {
+                expected.tool_call_id = canonical.clone();
+            }
+        }
+    }
+
+    fn next_id(&mut self) -> String {
+        self.next += 1;
+        format!("call-{}", self.next)
+    }
 }
 
 // ---------------------------------------------------------------------------

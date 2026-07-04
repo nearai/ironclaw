@@ -60,14 +60,11 @@
 //!     value depends on which sibling golden test's `tool_call`/`tool_calls`
 //!     happened to run concurrently first (`cargo test` runs a binary's tests
 //!     on a thread pool by default) — not reproducible across runs once more
-//!     than one golden scenario scripts a tool call.
-//!     `normalize_tool_call_ids` renumbers every `call-<N>` occurrence in ONE
-//!     rendered snapshot to a canonical `call-1`, `call-2`, … in order of
-//!     first appearance in that payload, consistently substituting the SAME
-//!     raw id everywhere it recurs (an assistant `tool_calls[].id` and every
-//!     later `tool` message's matching `tool_call_id`) — so the golden still
-//!     pins that those two always agree, without depending on the specific,
-//!     racy raw counter value.
+//!     than one golden scenario scripts a tool call. `scripted_trace_llm`
+//!     canonicalizes the scripted trace to stable per-trace `call-1`,
+//!     `call-2`, … ids before the model sees it, so the golden pins the actual
+//!     materialized ids without depending on the specific, racy raw counter
+//!     value.
 //!   - The `surface sha256:…` line is a content hash of the capability surface:
 //!     deterministic given the surface, and a surface change SHOULD ripple into
 //!     the golden (that is the point).
@@ -113,10 +110,9 @@ fn render_inference_payloads(
 /// <RFC3339-minute>Z`) and, for attachment-landing scenarios, today's real
 /// UTC date embedded in the landed project path (`.../attachments/<date>/...`)
 /// — with `<TIMESTAMP>`/`<DATE>` respectively. Each is anchored on an exact
-/// literal prefix so no other field is touched (tool-call ids and the
-/// `surface sha256:` hash are deterministic and stay exact — see module
-/// docs). Callers additionally run `normalize_tool_call_ids` (a separate,
-/// non-volatility canonicalization — see its doc) before snapshotting.
+/// literal prefix so no other field is touched; tool-call ids and the
+/// `surface sha256:` hash stay exact after scripted-provider materialization
+/// (see module docs).
 fn normalize_volatile(rendered: &str) -> String {
     let clock =
         regex::Regex::new(r"Current date/time at loop start: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z")
@@ -129,34 +125,6 @@ fn normalize_volatile(rendered: &str) -> String {
         .into_owned()
 }
 
-/// Renumber every `call-<N>` occurrence in ONE rendered payload to a
-/// canonical `call-1`, `call-2`, … in order of first appearance, with every
-/// recurrence of the SAME raw id (an assistant `tool_calls[].id` and the
-/// following `tool` message's `tool_call_id`) mapped to the SAME canonical
-/// number — see the module docs' "Tool-call ids" bullet for why this is
-/// needed (the underlying counter is racy across concurrently-running sibling
-/// tests in this binary, not a golden-worthy volatility). Distinct from
-/// `normalize_volatile`: this is not erasing nondeterminism the model itself
-/// produced, it is making a test-harness implementation detail (a shared
-/// counter) stop leaking into the pinned snapshot.
-fn normalize_tool_call_ids(rendered: &str) -> String {
-    let id_pattern = regex::Regex::new(r"call-\d+").expect("valid tool-call-id regex");
-    let mut canonical_by_raw: std::collections::HashMap<String, u32> =
-        std::collections::HashMap::new();
-    let mut next = 1u32;
-    id_pattern
-        .replace_all(rendered, |captures: &regex::Captures<'_>| {
-            let raw = captures[0].to_string();
-            let canonical = *canonical_by_raw.entry(raw).or_insert_with(|| {
-                let assigned = next;
-                next += 1;
-                assigned
-            });
-            format!("call-{canonical}")
-        })
-        .into_owned()
-}
-
 impl RebornIntegrationHarness {
     /// Assert the FULL model-visible inference payload for this thread (every
     /// captured inference call: system prompt + turns + tool messages + tool
@@ -165,14 +133,14 @@ impl RebornIntegrationHarness {
     /// Reads the retained scripted `TraceLlm`'s `captured_requests()` /
     /// `captured_tool_definitions()` (the same capture source
     /// `assert_system_prompt_contains` reads), renders them canonically, and
-    /// snapshots via `insta` with the single loop-start-clock filter applied.
+    /// snapshots via `insta` with loop-start-clock/date normalization applied.
     /// Panics (like the sibling `assert_replay_snapshot!`) on mismatch; run
     /// `cargo insta review` to inspect and accept drift.
     pub fn assert_golden_payload(&self, name: &str) {
-        let rendered = normalize_tool_call_ids(&normalize_volatile(&render_inference_payloads(
+        let rendered = normalize_volatile(&render_inference_payloads(
             &self.scripted_llm.captured_requests(),
             &self.scripted_llm.captured_tool_definitions(),
-        )));
+        ));
         let mut settings = insta::Settings::clone_current();
         settings.set_snapshot_path(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/snapshots"));
         settings.set_prepend_module_to_snapshot(false);

@@ -55,9 +55,10 @@ impl RebornScriptedReply {
     /// or long capability IDs must instead resolve the name against the advertised
     /// `ProviderToolName` from the tool list rather than applying this heuristic mapping.
     ///
-    /// The tool-call `id` is auto-filled from a process-scoped counter (`call-N`),
-    /// so it is unique within a run but not stable across parallel test processes.
-    /// No assertion depends on the id value.
+    /// The provisional tool-call `id` is auto-filled from a process-scoped
+    /// counter. `scripted_provider::scripted_trace_llm` canonicalizes those
+    /// ids per trace before the model sees them, so assertions can rely on the
+    /// materialized `call-1`, `call-2`, … order.
     pub fn tool_call(capability_id: &str, arguments: serde_json::Value) -> Self {
         let name = capability_id.replace('.', "__");
         let id = format!("call-{}", NEXT_TOOL_CALL_ID.fetch_add(1, Ordering::Relaxed));
@@ -82,9 +83,9 @@ impl RebornScriptedReply {
     /// assistant response (a "parallel" tool-calls turn — multiple
     /// `tool_calls[]` entries from ONE model call, as opposed to separate
     /// sequential turns). Each `(capability_id, arguments)` pair gets its own
-    /// `'.' → "__"` provider-seam encoding and its own sequentially-counted
-    /// `call-N` id (same counter `tool_call` uses, so ids stay unique across
-    /// both constructors within a run). Still counts as exactly ONE script
+    /// `'.' → "__"` provider-seam encoding and its own provisional id (same
+    /// counter `tool_call` uses, canonicalized per trace by
+    /// `scripted_trace_llm`). Still counts as exactly ONE script
     /// entry per the harness's "one entry per model call" discipline — the
     /// caller must follow it with exactly one more entry (the post-execution
     /// model call reacting to however many tool results come back).

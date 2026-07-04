@@ -5,6 +5,10 @@
 //! turn/outbound ports. They intentionally do not reuse the legacy Slack channel
 //! or legacy pairing store.
 
+// arch-exempt: large_file, triggered Slack gate-route e2e coverage stays with
+// the existing Slack harness; decomposition tracked in
+// docs/plans/2026-07-02-reborn-internal-module-refactor.md.
+
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -736,45 +740,23 @@ impl ConversationBindingService for NoopTriggeredBindingService {
 /// Poll-only [`TurnCoordinator`] for driving a [`TriggeredRunDeliveryDriver`].
 ///
 /// The triggered-delivery path only calls `get_run_state` (and, for the
-/// OAuth-not-DM backstop, `cancel_run`). This scripts the first poll as the
-/// configured `first_poll_status`/`first_poll_gate_ref` — `BlockedApproval` +
-/// `GATE` via [`Self::new`], or an arbitrary status (e.g. `BlockedAuth` +
-/// `AUTH_GATE`) via [`Self::new_with_first_poll`] — so the driver posts the
-/// corresponding gate prompt and records the delivered gate route, then
-/// `Completed` on every subsequent poll so the driver delivers the seeded final
-/// reply and records a terminal outcome. `prepare_turn`/`submit_turn`/
-/// `resume_turn` are never reached on this path.
+/// OAuth-not-DM backstop, `cancel_run`). The coordinator returns the provided
+/// template unchanged on the first poll so the driver posts the matching gate
+/// prompt and records the delivered gate route, then reports `Completed` on
+/// every subsequent poll so the driver delivers the seeded final reply and
+/// records a terminal outcome. `prepare_turn`/`submit_turn`/`resume_turn` are
+/// never reached on this path.
 struct ScriptedTriggerCoordinator {
     template: TurnRunState,
     polls: AtomicUsize,
-    first_poll_status: TurnStatus,
-    first_poll_gate_ref: Option<GateRef>,
     cancel_calls: Mutex<Vec<TurnRunId>>,
 }
 
 impl ScriptedTriggerCoordinator {
     fn new(template: TurnRunState) -> Self {
-        Self::new_with_first_poll(
-            template,
-            TurnStatus::BlockedApproval,
-            Some(GateRef::new(GATE).expect("gate ref")), // safety: static test gate ref is valid.
-        )
-    }
-
-    /// Like [`Self::new`] but scripts an arbitrary first-poll status/gate_ref
-    /// (e.g. `BlockedAuth` + `AUTH_GATE`) instead of the hardcoded
-    /// `BlockedApproval`/`GATE` pair `new` uses. Additive: `new`'s behavior (and
-    /// its existing callers) is unchanged.
-    fn new_with_first_poll(
-        template: TurnRunState,
-        first_poll_status: TurnStatus,
-        first_poll_gate_ref: Option<GateRef>,
-    ) -> Self {
         Self {
             template,
             polls: AtomicUsize::new(0),
-            first_poll_status,
-            first_poll_gate_ref,
             cancel_calls: Mutex::new(Vec::new()),
         }
     }
@@ -829,10 +811,7 @@ impl TurnCoordinator for ScriptedTriggerCoordinator {
     async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
         let poll = self.polls.fetch_add(1, Ordering::SeqCst);
         let mut state = self.template.clone();
-        if poll == 0 {
-            state.status = self.first_poll_status;
-            state.gate_ref = self.first_poll_gate_ref.clone();
-        } else {
+        if poll != 0 {
             state.status = TurnStatus::Completed;
             state.gate_ref = None;
         }
@@ -1314,12 +1293,7 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
         dm_target,
         AcceptedMessageRef::new("slack:triggered-auth").expect("accepted ref"), // safety: static test accepted ref is valid.
     );
-    let coordinator: Arc<dyn TurnCoordinator> =
-        Arc::new(ScriptedTriggerCoordinator::new_with_first_poll(
-            template,
-            TurnStatus::BlockedAuth,
-            Some(GateRef::new(AUTH_GATE).expect("auth gate ref")), // safety: static test gate ref is valid.
-        ));
+    let coordinator: Arc<dyn TurnCoordinator> = Arc::new(ScriptedTriggerCoordinator::new(template));
 
     let adapter: Arc<dyn ProductAdapter> = Arc::new(SlackV2Adapter::new(SlackV2AdapterConfig {
         adapter_id: ProductAdapterId::new(ADAPTER).expect("adapter id"), // safety: static test adapter id is valid.
@@ -1454,11 +1428,7 @@ async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_can
         dm_target,
         AcceptedMessageRef::new("slack:triggered-auth-not-dm").expect("accepted ref"), // safety: static test accepted ref is valid.
     );
-    let coordinator = Arc::new(ScriptedTriggerCoordinator::new_with_first_poll(
-        template,
-        TurnStatus::BlockedAuth,
-        Some(GateRef::new(AUTH_GATE).expect("auth gate ref")), // safety: static test gate ref is valid.
-    ));
+    let coordinator = Arc::new(ScriptedTriggerCoordinator::new(template));
 
     let adapter: Arc<dyn ProductAdapter> = Arc::new(SlackV2Adapter::new(SlackV2AdapterConfig {
         adapter_id: ProductAdapterId::new(ADAPTER).expect("adapter id"), // safety: static test adapter id is valid.

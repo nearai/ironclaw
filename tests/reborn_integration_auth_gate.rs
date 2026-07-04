@@ -252,10 +252,16 @@ async fn cancel_blocked_auth_gate_leaves_no_stale_replay() {
     // ref (not a bogus one -- this proves the run's terminal status is what
     // blocks the resume, not a gate-ref mismatch) must fail, not silently
     // re-dispatch the parked github capability.
-    let resume_result = harness.deny_auth_gate(run_id, &gate_ref).await;
+    let resume_err = harness
+        .deny_auth_gate(run_id, &gate_ref)
+        .await
+        .expect_err("resuming a cancelled run must fail, not silently replay");
+    let resume_err = resume_err.to_string();
     assert!(
-        resume_result.is_err(),
-        "resuming a cancelled run must fail, not silently replay"
+        resume_err.contains("invalid turn transition")
+            && resume_err.contains("Cancelled")
+            && resume_err.contains("Queued"),
+        "expected the cancelled/terminal run to be rejected, got: {resume_err}"
     );
     // No further egress escaped the failed resume attempt.
     harness
@@ -287,10 +293,15 @@ async fn deny_auth_gate_rejects_a_non_auth_gate_ref_prefix() {
         .expect("run blocks on an auth gate");
 
     let wrong_prefix_ref = GateRef::new("gate:approval-not-an-auth-gate").expect("valid gate ref");
-    let result = harness.deny_auth_gate(run_id, &wrong_prefix_ref).await;
+    let result = harness
+        .deny_auth_gate(run_id, &wrong_prefix_ref)
+        .await
+        .expect_err("a non-`gate:auth-` ref must be rejected client-side before it ever reaches the coordinator resume call");
+    let result = result.to_string();
     assert!(
-        result.is_err(),
-        "a non-`gate:auth-` ref must be rejected client-side before it ever \
-         reaches the coordinator resume call"
+        result.contains("auth gate ref")
+            || result.contains("gate:auth-")
+            || result.contains("invalid gate ref"),
+        "expected an invalid auth-gate prefix rejection, got: {result}"
     );
 }

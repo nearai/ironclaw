@@ -2225,11 +2225,10 @@ impl HostRuntimeCapabilityHarness {
     /// `FaultInjectingProjectService`
     /// (`with_project_service_fault_injection`) so a `create_project` call
     /// naming `FAULT_INJECT_DENIED_PROJECT_NAME` returns
-    /// `ProjectServiceError::Denied` — proving the real capability
-    /// dispatch's `project_service_outcome` `Unavailable` arm (a
-    /// model-visible, recoverable `Failed` tool error, not a terminal driver
-    /// crash) end-to-end, not just at the unit level. Any other
-    /// `create_project` name still reaches the real store.
+    /// `ProjectServiceError::Denied`/`PolicyDenied` and proves the real
+    /// capability dispatch's recoverable `Failed` behavior. This is *not*
+    /// the `project_service_outcome` `Unavailable` / internal-retry path.
+    /// Any other `create_project` name still reaches the real store.
     pub(crate) async fn project_tools_with_fault_injection() -> HarnessResult<Self> {
         let harness = Self::new_with_options(
             "reborn-e2e-project-tools-fault-injection",
