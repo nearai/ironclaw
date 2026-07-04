@@ -12,7 +12,7 @@
 //! outbound delivery is asserted through the recording delivery sink.
 
 #[allow(dead_code)]
-#[path = "support/reborn/mod.rs"]
+#[path = "integration/support/mod.rs"]
 mod reborn_support;
 mod support;
 

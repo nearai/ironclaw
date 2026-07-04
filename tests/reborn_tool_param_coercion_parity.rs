@@ -1,5 +1,5 @@
 #[allow(dead_code)]
-#[path = "support/reborn/mod.rs"]
+#[path = "integration/support/mod.rs"]
 mod reborn_support;
 // Required by reborn_support::model_replay through crate::support::trace_llm.
 mod support;

@@ -12,7 +12,7 @@
 //! real `builtin.http` capability against a live loopback server.
 
 #[allow(dead_code)]
-#[path = "support/reborn/mod.rs"]
+#[path = "integration/support/mod.rs"]
 mod reborn_support;
 mod support;
 

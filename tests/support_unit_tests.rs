@@ -4,7 +4,7 @@
 //! and run exactly once, rather than being duplicated across every `e2e_*.rs`
 //! test binary that declares `mod support;`.
 
-#[path = "support/reborn/mod.rs"]
+#[path = "integration/support/mod.rs"]
 mod reborn_support;
 mod support;
 
