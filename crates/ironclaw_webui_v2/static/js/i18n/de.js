@@ -915,11 +915,12 @@ registerPack("de", {
   "pairing.error": "Kopplung fehlgeschlagen.",
   "pairing.none": "Keine ausstehenden Pairing‑Anfragen.",
   "pairing.slackTitle": "Slack-Kontoverbindung",
-  "pairing.slackInstructions": "Nachricht an die Slack-App, dann geben Sie hier den Code ein.",
+  "pairing.slackInstructions": "Schreiben Sie der IronClaw Reborn-App in Slack, um einen Verbindungscode zu erhalten, und fügen Sie ihn hier ein. Codes laufen nach 10 Minuten ab. Wenn ein Code ungültig oder abgelaufen ist, führen Sie /pair in Slack aus, um einen neuen zu erhalten.",
   "pairing.slackPlaceholder": "Geben Sie den Slack-Kopplungscode ein…",
   "pairing.connect": "Verbinden",
+  "pairing.reconnectHint": "Verbunden — fügen Sie einen neuen Code ein, um neu zu koppeln.",
   "pairing.slackSuccess": "Slack-Konto verbunden.",
-  "pairing.slackError": "Ungültiger oder abgelaufener Slack-Kopplungscode.",
+  "pairing.slackError": "Ungültiger oder abgelaufener Slack-Kopplungscode. Führen Sie /pair in Slack aus, um einen neuen zu erhalten.",
 
   // Admin — tabs
   "admin.tab.dashboard": "Dashboard",
@@ -1067,6 +1068,7 @@ registerPack("de", {
   "job.followupPlaceholder": "Folgeaufforderung an den laufenden Job senden",
   "common.noChatsMatch": "Keine Chats stimmen mit „{query}“ überein",
   "extensions.configure": "Konfigurieren",
+  "extensions.connect": "Verbinden",
   "extensions.reconfigure": "Neu konfigurieren",
   "extensions.configureName": "{name} konfigurieren",
   "extensions.allInstalled": "Alle installierten Erweiterungen",

@@ -67,7 +67,7 @@ pub(crate) fn hosted_single_tenant_volume_build_input(
     {
         let _ = owner_id;
         let _ = root;
-        return Err(RebornLocalRuntimeProfileError::MissingLibsqlFeature);
+        Err(RebornLocalRuntimeProfileError::MissingLibsqlFeature)
     }
 
     #[cfg(feature = "libsql")]

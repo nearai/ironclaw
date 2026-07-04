@@ -149,6 +149,83 @@ fn rejects_auth_header_injection_shape() {
     ));
 }
 
+/// A valid public-webhook host-ingress route declaration in manifest wire form.
+/// `{cred}` lets a test swap the verifying credential handle; `{scheme}` lets a
+/// test swap the auth scheme to exercise host_api's fail-closed floor.
+fn host_ingress_fragment(cred: &str, scheme: &str) -> String {
+    format!(
+        r#"
+[[product_adapter.inbound.host_ingress]]
+credential_handles = ["{cred}"]
+descriptor = {{ route_id = "telegram.updates", method = "post", route_pattern = "/webhooks/telegram/updates", policy = {{ listener_class = "public_webhook", auth = {{ type = "required", schemes = ["{scheme}"] }}, scope_source = "host_resolved", body_limit = {{ type = "limited", max_bytes = 262144 }}, rate_limit = {{ type = "limited", scope = "global", max_requests = 600, window_seconds = 60 }}, cors = "not_applicable", websocket_origin = "not_applicable", streaming = "none", audit = "public_callback", effect_path = {{ type = "product_workflow" }} }} }}
+"#
+    )
+}
+
+#[test]
+fn parses_host_ingress_route_from_manifest() {
+    let record = parse(&manifest(&host_ingress_fragment(
+        "telegram_bot_token",
+        "webhook_signature",
+    )))
+    .unwrap();
+    let adapters = product_adapter_sections(&record).unwrap();
+    let routes = adapters[0].host_ingress();
+    assert_eq!(routes.len(), 1);
+    assert_eq!(
+        routes[0].descriptor().route_id().as_str(),
+        "telegram.updates"
+    );
+    assert_eq!(
+        routes[0].descriptor().route_pattern().as_str(),
+        "/webhooks/telegram/updates"
+    );
+    assert_eq!(
+        routes[0].credential_handles()[0].as_str(),
+        "telegram_bot_token"
+    );
+}
+
+#[test]
+fn rejects_host_ingress_public_webhook_without_webhook_signature() {
+    // host_api's own fail-closed floor: a `public_webhook` listener MUST
+    // require `webhook_signature`. Declaring `bearer_token` instead must be
+    // rejected while projecting the manifest — the manifest layer cannot
+    // weaken the descriptor's built-in verification requirement.
+    let raw = manifest(&host_ingress_fragment("telegram_bot_token", "bearer_token"));
+    let err = parse(&raw).unwrap_err();
+    // The invalid descriptor is rejected while deserializing the section, which
+    // may surface either as a stringified `Manifest` error (via the host-api
+    // contract validator) or as a typed `ManifestSectionParse` (via the final
+    // projection) depending on which projection runs first — accept both so the
+    // test pins the fail-closed behavior, not the error-routing path.
+    assert!(
+        matches!(
+            err,
+            RegistryError::Manifest(_) | RegistryError::ManifestSectionParse { .. }
+        ),
+        "expected the host_api listener/auth invariant to reject, got {err:?}"
+    );
+}
+
+#[test]
+fn rejects_host_ingress_credential_handle_not_declared_as_required() {
+    // Ingress credential coherence over the wire: a route may only be verified
+    // by a credential the section declares in `required_credentials`.
+    let raw = manifest(&host_ingress_fragment(
+        "undeclared_token",
+        "webhook_signature",
+    ));
+    let err = parse(&raw).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RegistryError::UndeclaredIngressCredentialHandle { .. } | RegistryError::Manifest(_)
+        ),
+        "got {err:?}"
+    );
+}
+
 #[test]
 fn rejects_real_derived_adapter_id_that_exceeds_limit() {
     let extension_id = "a".repeat(128);

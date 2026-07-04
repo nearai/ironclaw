@@ -4,8 +4,8 @@
 Focus is on `parse_summary_status` — the `summary.md` → exit-code
 fallback that classifies lane status when neither JUnit XML nor
 ``results.json`` is present (summary-only lanes like private-oauth,
-or any lane whose ``results.json`` got stripped by strict scrub before
-upload). This path is part of the status-classification surface, so
+or any lane whose detailed results are unavailable after artifact scrub).
+This path is part of the status-classification surface, so
 parser drift would silently mislabel lanes.
 
 Run with::

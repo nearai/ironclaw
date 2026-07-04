@@ -773,6 +773,11 @@ impl SlackInstallationSetupStore for MemorySetupStore {
         *self.setup.write().await = Some(setup.clone());
         Ok(())
     }
+
+    async fn delete_slack_installation_setup(&self) -> Result<(), SlackSetupError> {
+        *self.setup.write().await = None;
+        Ok(())
+    }
 }
 
 async fn save_single_channel_subject(

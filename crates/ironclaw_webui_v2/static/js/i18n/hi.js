@@ -915,11 +915,12 @@ registerPack("hi", {
   "pairing.error": "पेयरिंग विफल.",
   "pairing.none": "कोई लंबित युग्मन अनुरोध नहीं।",
   "pairing.slackTitle": "Slack खाता कनेक्शन",
-  "pairing.slackInstructions": "Slack ऐप को संदेश भेजें, फिर यहां कोड दर्ज करें।",
+  "pairing.slackInstructions": "पेयरिंग कोड पाने के लिए Slack में IronClaw Reborn ऐप को संदेश भेजें, फिर उसे यहां पेस्ट करें। कोड 10 मिनट में समाप्त हो जाते हैं। अगर कोड अमान्य या समाप्त हो गया है, तो नया कोड पाने के लिए Slack में /pair चलाएं।",
   "pairing.slackPlaceholder": "Slack पेयरिंग कोड दर्ज करें…",
   "pairing.connect": "कनेक्ट",
+  "pairing.reconnectHint": "कनेक्ट किया गया — फिर से पेयर करने के लिए एक नया कोड पेस्ट करें।",
   "pairing.slackSuccess": "Slack खाता कनेक्ट किया गया।",
-  "pairing.slackError": "अमान्य या समाप्त हो चुका Slack युग्मन कोड।",
+  "pairing.slackError": "अमान्य या समाप्त हो चुका Slack युग्मन कोड। नया कोड पाने के लिए Slack में /pair चलाएं।",
 
   // Admin — tabs
   "admin.tab.dashboard": "डैशबोर्ड",
@@ -1067,6 +1068,7 @@ registerPack("hi", {
   "job.followupPlaceholder": "चल रहे कार्य के लिए अनुवर्ती संकेत भेजें",
   "common.noChatsMatch": "कोई भी चैट \"{query}\" से मेल नहीं खाती",
   "extensions.configure": "कॉन्फ़िगर करें",
+  "extensions.connect": "कनेक्ट करें",
   "extensions.reconfigure": "पुन: कॉन्फ़िगर करें",
   "extensions.configureName": "{name} कॉन्फ़िगर करें",
   "extensions.allInstalled": "सभी स्थापित एक्सटेंशन",

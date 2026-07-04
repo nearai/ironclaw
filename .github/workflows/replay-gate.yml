@@ -63,12 +63,8 @@ jobs:
             --test-runner nextest \
             --no-default-features \
             --features "libsql,replay" \
-            --test e2e_engine_v2 \
             --test e2e_recorded_trace \
             --test e2e_live
-
-      - name: Report trace coverage
-        run: ./scripts/trace-coverage.sh
 
       - name: Reject committed .snap.new files
         run: |

@@ -9,10 +9,8 @@
 //! resolution, `CompletionRequest`/tool-definition assembly, and the
 //! retry/routing/circuit/cache decorators for real.
 //!
-//! Slice 1 scope: InMemory storage, single text reply, `build → submit_turn →
-//! assert_reply_contains`.
-//! Slice 3: `StorageMode { InMemory, LibSql }` — the builder defaults to
-//! `InMemory`; `.storage(StorageMode::LibSql)` selects a real SQLite file in a
+//! `StorageMode { InMemory, LibSql }` — the builder defaults to `InMemory`;
+//! `.storage(StorageMode::LibSql)` selects a real SQLite file in a
 //! per-`build()` `TempDir`. Both modes ride **one** `CompositeRootFilesystem`
 //! at `/tenants/...` so thread history and turn state share the same backend
 //! and the same production path layout.
@@ -34,7 +32,8 @@ use ironclaw_filesystem::{
     CompositeRootFilesystem, InMemoryBackend, LibSqlRootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
-    MountAlias, MountGrant, MountPermissions, MountView, RuntimeHttpEgressRequest, VirtualPath,
+    InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
+    RuntimeHttpEgressRequest, VirtualPath,
 };
 use ironclaw_llm::Role;
 use ironclaw_network::NetworkHttpRequest;
@@ -42,8 +41,9 @@ use ironclaw_product_adapters::{ProductInboundAck, ProductTriggerReason, Product
 use ironclaw_product_workflow::{
     DefaultProductWorkflow, ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
 };
+use ironclaw_reborn::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_threads::ThreadScope;
-use ironclaw_turns::run_profile::InstructionSafetyContext;
+use ironclaw_turns::run_profile::{CommunicationContextProvider, InstructionSafetyContext};
 use ironclaw_turns::{
     CancelRunRequest, CancelRunResponse, FilesystemTurnStateStore, GateRef, GateResumeDisposition,
     GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef, ResumeTurnPrecondition,
@@ -117,6 +117,17 @@ pub struct RebornIntegrationHarnessBuilder {
     fail_model: bool,
     /// C-TRACECAP seam: install an in-memory `TurnEventSink` when `true`.
     turn_event_sink: bool,
+    /// C-BUDGET: when `true`, wire the production budget accountant into the
+    /// degenerate one-thread group (see `RebornIntegrationGroupBuilder::budget_accounting`).
+    budget_accounting: bool,
+    /// C-COMMCTX: optional communication-context provider threaded into the
+    /// degenerate one-thread group (see
+    /// `RebornIntegrationGroupBuilder::communication_context_provider`).
+    communication_context_provider: Option<Arc<dyn CommunicationContextProvider>>,
+    /// C-HOOKS / E-HOOK-INFRA: optional per-run hook dispatcher builder factory
+    /// threaded into the degenerate one-thread group (see
+    /// `RebornIntegrationGroupBuilder::hook_dispatcher_builder_factory`).
+    hook_dispatcher_builder_factory: Option<HookDispatcherBuilderFactory>,
 }
 
 impl RebornIntegrationHarnessBuilder {
@@ -143,6 +154,38 @@ impl RebornIntegrationHarnessBuilder {
     /// `RebornIntegrationGroupBuilder::safety_context` for the underlying wiring.
     pub fn with_safety_context(mut self, ctx: InstructionSafetyContext) -> Self {
         self.safety_context = Some(ctx);
+        self
+    }
+
+    /// Wire the production budget accountant into this harness's underlying group
+    /// (C-BUDGET). On the turn's first model call the accountant seeds the run
+    /// owner's daily USD cap into an in-memory governor; read it back with
+    /// `assert_budget_user_cap_seeded`. Defaults off. See
+    /// `RebornIntegrationGroupBuilder::budget_accounting` for the wiring.
+    pub fn with_budget_accounting(mut self) -> Self {
+        self.budget_accounting = true;
+        self
+    }
+
+    /// Wire a `CommunicationContextProvider` into this harness's underlying group
+    /// (C-COMMCTX), so the delivery-preference / connected-channel slice it
+    /// resolves renders into the model request (assert via
+    /// `assert_model_request_contains`). Defaults `None`. See
+    /// `RebornIntegrationGroupBuilder::communication_context_provider`.
+    pub fn with_communication_context_provider(
+        mut self,
+        provider: Arc<dyn CommunicationContextProvider>,
+    ) -> Self {
+        self.communication_context_provider = Some(provider);
+        self
+    }
+
+    /// Wire a per-run `HookDispatcherBuilderFactory` into this harness's
+    /// underlying group (C-HOOKS / E-HOOK-INFRA), so hooks fire at their
+    /// lifecycle points on a coordinator-path turn. Defaults `None`. See
+    /// `RebornIntegrationGroupBuilder::hook_dispatcher_builder_factory`.
+    pub fn with_hook_factory(mut self, factory: HookDispatcherBuilderFactory) -> Self {
+        self.hook_dispatcher_builder_factory = Some(factory);
         self
     }
 
@@ -178,7 +221,7 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
-    /// Opt-in to real shell execution for this harness (slice 5). By default the
+    /// Opt-in to real shell execution for this harness. By default the
     /// `BuiltinHttpTools` backend injects an inert `RecordingProcessPort` so that
     /// `builtin.shell` turns record the command without spawning any OS process.
     ///
@@ -263,7 +306,7 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
-    /// Wire the real MCP runtime backed by a loopback mock MCP server (slice 6).
+    /// Wire the real MCP runtime backed by a loopback mock MCP server.
     ///
     /// `mcp_url` is the full mock endpoint URL (e.g. `server.mcp_url()`). The
     /// harness registers a single MCP capability `"<provider>.search"` (where
@@ -315,6 +358,15 @@ impl RebornIntegrationHarnessBuilder {
         }
         if self.turn_event_sink {
             group_builder = group_builder.with_turn_event_sink();
+        }
+        if self.budget_accounting {
+            group_builder = group_builder.budget_accounting();
+        }
+        if let Some(provider) = self.communication_context_provider {
+            group_builder = group_builder.communication_context_provider(provider);
+        }
+        if let Some(factory) = self.hook_dispatcher_builder_factory {
+            group_builder = group_builder.hook_dispatcher_builder_factory(factory);
         }
         let group: RebornIntegrationGroup = group_builder
             .build_with_capability(group_capability)
@@ -427,6 +479,9 @@ impl RebornIntegrationHarness {
             park_gate: None,
             fail_model: false,
             turn_event_sink: false,
+            budget_accounting: false,
+            communication_context_provider: None,
+            hook_dispatcher_builder_factory: None,
         }
     }
 
@@ -570,10 +625,6 @@ impl RebornIntegrationHarness {
     }
 
     /// Assert the finalized assistant reply in thread history contains `text`.
-    ///
-    /// (Co-located with the harness fields it reads. When the `assert_*` family
-    /// grows — `assert_capability_denied`/`assert_capability_order`, design §3.3 —
-    /// it can move to a dedicated `assertions.rs` with deliberate field accessors.)
     pub async fn assert_reply_contains(&self, text: &str) -> HarnessResult<()> {
         self.thread_harness
             .assert_final_reply(self.binding.thread_id.clone(), text)
@@ -794,7 +845,7 @@ impl RebornIntegrationHarness {
     /// Assert that a `builtin.shell` command was recorded by the inert process
     /// port and that the recorded command string contains `substr`. This proves
     /// the shell tool call was dispatched through the process port without
-    /// spawning a real OS process (slice 5 safety invariant).
+    /// spawning a real OS process (a safety invariant).
     ///
     /// Checks only the `[baseline_process_count..]` delta so a group thread
     /// never spuriously passes on a prior thread's entry (R2).
@@ -829,7 +880,7 @@ impl RebornIntegrationHarness {
     }
 
     /// Assert that the MCP tool named `tool_name` (the name on the mock server,
-    /// e.g. `"search"`) was invoked via the real MCP runtime (slice 6).
+    /// e.g. `"search"`) was invoked via the real MCP runtime.
     ///
     /// Internally maps `tool_name` → capability id `"mock-mcp.{tool_name}"` and
     /// delegates to `assert_tool_invoked`. The `"mock-mcp"` prefix matches the
@@ -958,18 +1009,61 @@ impl RebornIntegrationHarness {
         .await
     }
 
+    /// Test-support variant of [`approve_gate`](Self::approve_gate) for the
+    /// stale-gate-ref-resume regression guard (C-DENYEDGE row 7): resolves the
+    /// LOCAL-DEV approval using `real_gate_ref` (so the approval-store lookup
+    /// succeeds, unlike passing a bogus ref straight through `approve_gate`,
+    /// which fails earlier inside `approve_local_dev_gate`'s own request-id
+    /// lookup) but issues the COORDINATOR resume with a DIFFERENT
+    /// `stale_gate_ref`. This reaches `resume_turn_once`'s
+    /// `record.gate_ref.as_ref() != Some(&request.gate_resolution_ref)` check —
+    /// `TurnError::InvalidRequest { reason: "gate resolution reference mismatch" }` —
+    /// a path `approve_gate` itself can never reach because it always resolves
+    /// and resumes with the SAME gate_ref.
+    pub async fn approve_gate_with_stale_resume_ref(
+        &self,
+        run_id: TurnRunId,
+        real_gate_ref: &GateRef,
+        stale_gate_ref: &GateRef,
+    ) -> HarnessResult<()> {
+        self.capability_recorder
+            .approve_local_dev_gate(real_gate_ref)
+            .await?;
+        self.resume_run(
+            run_id,
+            stale_gate_ref.clone(),
+            None,
+            ResumeTurnPrecondition::BlockedApprovalGate,
+        )
+        .await
+    }
+
+    /// Resume-only companion to
+    /// [`approve_gate_with_stale_resume_ref`](Self::approve_gate_with_stale_resume_ref):
+    /// issues the coordinator resume for `gate_ref` WITHOUT re-running the
+    /// local-dev approval resolve step. Needed for a non-vacuity follow-up
+    /// after a failed stale-ref resume attempt — the approval record is
+    /// already `Approved` at that point (the resolve step succeeded before
+    /// the stale-ref resume failed), so calling `approve_gate` again would
+    /// hit the double-resolve `NotPending` error instead of completing the
+    /// still-blocked run.
+    pub async fn resume_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
+        self.resume_run(
+            run_id,
+            gate_ref.clone(),
+            None,
+            ResumeTurnPrecondition::BlockedApprovalGate,
+        )
+        .await
+    }
+
     /// Deny a blocked approval gate and resume the run (the user-declines path).
     /// Resolves the persisted request to `Denied` (no lease) and resumes with
     /// `GateResumeDisposition::Denied`, so the executor surfaces a non-retryable
     /// authorization failure to the model rather than re-dispatching the gate.
     ///
-    /// Resumes with `ResumeTurnPrecondition::BlockedApprovalGate` — the same
-    /// precondition `ApprovalInteractionService` uses for its production
-    /// approval-resume path. That precondition is enforced server-side
-    /// (`resume_turn_once` requires `record.status == BlockedApproval`), so a
-    /// stale or wrong (non-approval) gate ref fails the resume with
-    /// `TurnError::InvalidTransition` instead of silently resuming whatever
-    /// gate class happens to be blocked.
+    /// See [`approve_gate`](Self::approve_gate) for why this resumes with
+    /// `ResumeTurnPrecondition::BlockedApprovalGate`.
     pub async fn deny_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
         self.capability_recorder
             .deny_local_dev_gate(gate_ref)
@@ -1013,6 +1107,64 @@ impl RebornIntegrationHarness {
         .await
     }
 
+    /// Resolve a blocked AUTH gate the "user submitted credentials" way
+    /// (C-JOURNEY convergence seam): seed a real GitHub credential account
+    /// through product-auth (`HostRuntimeCapabilityHarness::seed_github_credential_account`)
+    /// so the parked capability's next `ProductAuthRuntimeCredentialResolver`
+    /// lookup resolves, then resume with `ResumeTurnPrecondition::BlockedAuthGate`
+    /// and NO deny disposition so the parked `github.*` capability re-dispatches
+    /// and the run completes.
+    ///
+    /// Only valid on a capability harness built via
+    /// `HostRuntimeCapabilityHarness::file_and_github_auth_tools` (reached
+    /// through `_shared.capability`) — the credential-seeding path needs the
+    /// `build_reborn_services` product-auth wiring that `deny_auth_gate`'s
+    /// sibling fixture (`RebornIntegrationGroup::live_auth_gate`, a lower-level
+    /// `HostRuntimeServices` build with a hardcoded credential resolver and no
+    /// run_state store) does not have.
+    pub async fn resolve_auth_gate(
+        &self,
+        run_id: TurnRunId,
+        gate_ref: &GateRef,
+    ) -> HarnessResult<()> {
+        if !gate_ref.as_str().starts_with("gate:auth-") {
+            return Err(format!("expected an auth gate ref, got {gate_ref:?}").into());
+        }
+        let harness = match &self._shared.capability {
+            GroupCapability::HostRuntime(arc) => arc,
+            GroupCapability::Recording => {
+                return Err(
+                    "no host-runtime capability backend to seed a github credential account".into(),
+                );
+            }
+        };
+        // Seed under THIS run's actual (tenant, user, agent, project) — the
+        // credential resolver's `account_visible_from_runtime_scope` check
+        // matches on all four, so a scope built from a differently-scoped
+        // group/harness (e.g. a fixed "*-e2e" literal) would silently seed an
+        // account the real dispatch-time lookup never finds, leaving the run
+        // stuck at `BlockedAuth` forever. `self.turn_scope` + `self.binding`
+        // are this harness's own resolved run scope (same fields
+        // `resume_run` uses for `TurnScope`/`TurnActor`).
+        let scope = ResourceScope {
+            tenant_id: self.turn_scope.tenant_id.clone(),
+            user_id: self.binding.actor_user_id.clone(),
+            agent_id: self.turn_scope.agent_id.clone(),
+            project_id: self.turn_scope.project_id.clone(),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        harness.seed_github_credential_account(&scope).await?;
+        self.resume_run(
+            run_id,
+            gate_ref.clone(),
+            None,
+            ResumeTurnPrecondition::BlockedAuthGate,
+        )
+        .await
+    }
+
     /// Flip the per-`(tenant, user)` auto-approve toggle back ON for the run's
     /// capability scope via the real CAS-persisted `AutoApproveSettingStore` (the
     /// no-gate / approve-always arm: with auto-approve on, the same capability
@@ -1032,6 +1184,21 @@ impl RebornIntegrationHarness {
             .await
     }
 
+    /// Flip the per-`(tenant, user)` auto-approve toggle OFF for the run's
+    /// capability scope (the gate arm: with auto-approve disabled, an
+    /// `Ask`-mode capability raises a real `BlockedApproval` gate instead of
+    /// dispatching). Inverse of [`enable_auto_approve`](Self::enable_auto_approve);
+    /// same `_shared.auto_approve_scope()` = `(run tenant, capability user)`.
+    pub async fn disable_auto_approve(&self) -> HarnessResult<()> {
+        let scope = self
+            ._shared
+            .auto_approve_scope()
+            .ok_or("group has no host-runtime capability backend for auto-approve")?;
+        self.capability_recorder
+            .disable_auto_approve_for(scope)
+            .await
+    }
+
     async fn resume_run(
         &self,
         run_id: TurnRunId,
@@ -1039,17 +1206,51 @@ impl RebornIntegrationHarness {
         resume_disposition: Option<GateResumeDisposition>,
         precondition: ResumeTurnPrecondition,
     ) -> HarnessResult<()> {
+        self.resume_run_in_scope_impl(
+            self.turn_scope.clone(),
+            run_id,
+            gate_ref,
+            resume_disposition,
+            precondition,
+        )
+        .await
+    }
+
+    /// Shared implementation behind both `resume_run` (resumes in
+    /// `self.turn_scope`) and `triggered_submit.rs`'s `resume_run_in_scope`
+    /// (resumes in an explicit, possibly different, `TurnScope` for
+    /// triggered/non-thread runs).
+    pub(crate) async fn resume_run_in_scope_impl(
+        &self,
+        scope: TurnScope,
+        run_id: TurnRunId,
+        gate_ref: GateRef,
+        resume_disposition: Option<GateResumeDisposition>,
+        precondition: ResumeTurnPrecondition,
+    ) -> HarnessResult<()> {
+        // Key on `(run_id, gate_ref)`, NOT `run_id` alone: a C-JOURNEY chained
+        // turn can resume the SAME run twice in a row (e.g. an approval gate
+        // resolved, immediately followed by the auth gate the re-dispatched
+        // capability then raises) — a `run_id`-only key collides with the
+        // FIRST resume's idempotency key, so the coordinator treats the
+        // second resume as a replay and returns the cached `Queued` response
+        // without actually re-queuing any work. The gate_ref changes per gate
+        // resolution (a fresh gate raised after a prior resume gets a new
+        // ref), so including it keeps each DISTINCT gate resolution unique
+        // while still deduping a genuine retry of the SAME resume call.
+        let idempotency_key =
+            IdempotencyKey::new(format!("resume-{run_id}-{}", gate_ref.as_str()))?;
         let response = self
             .coordinator
             .resume_turn(ResumeTurnRequest {
-                scope: self.turn_scope.clone(),
+                scope,
                 actor: TurnActor::new(self.binding.actor_user_id.clone()),
                 run_id,
                 gate_resolution_ref: gate_ref,
                 precondition,
                 source_binding_ref: SourceBindingRef::new("src:resume")?,
                 reply_target_binding_ref: ReplyTargetBindingRef::new("reply:resume")?,
-                idempotency_key: IdempotencyKey::new(format!("resume-{run_id}"))?,
+                idempotency_key,
                 resume_disposition,
             })
             .await?;
@@ -1183,8 +1384,8 @@ pub(crate) fn apply_hermetic_env() {
     });
 }
 
-/// Assemble a `ResolveBindingRequest` from a verified inbound envelope. Slice 1
-/// is DirectChat-only, so the route kind is `Direct`.
+/// Assemble a `ResolveBindingRequest` from a verified inbound envelope. This
+/// harness only submits DirectChat turns, so the route kind is `Direct`.
 pub(crate) fn binding_request(
     envelope: &ironclaw_product_adapters::ProductInboundEnvelope,
 ) -> ResolveBindingRequest {

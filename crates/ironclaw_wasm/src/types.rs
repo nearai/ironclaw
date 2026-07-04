@@ -1,6 +1,5 @@
 use ironclaw_host_api::ResourceUsage;
-
-use crate::WitToolLimits;
+use ironclaw_wasm_sandbox_core::SandboxLimits;
 
 /// Compiled WIT tool component plus metadata extracted from its WIT exports.
 pub struct PreparedWitTool {
@@ -8,7 +7,7 @@ pub struct PreparedWitTool {
     pub(crate) description: String,
     pub(crate) schema: serde_json::Value,
     pub(crate) component: wasmtime::component::Component,
-    pub(crate) limits: WitToolLimits,
+    pub(crate) limits: SandboxLimits,
 }
 
 impl PreparedWitTool {
@@ -24,7 +23,7 @@ impl PreparedWitTool {
         &self.schema
     }
 
-    pub fn limits(&self) -> &WitToolLimits {
+    pub fn limits(&self) -> &SandboxLimits {
         &self.limits
     }
 }

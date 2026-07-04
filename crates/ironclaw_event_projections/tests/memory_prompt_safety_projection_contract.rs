@@ -1,13 +1,13 @@
 use std::{fs, path::Path, sync::Arc};
 
 use ironclaw_event_projections::{
-    AuditProjectionRequest, AuditProjectionService, AuditProjectionStage, DurableMemoryAuditSink,
-    ProjectionScope, ReplayAuditProjectionService,
+    AuditProjectionRequest, AuditProjectionService, DurableMemoryAuditSink, ProjectionScope,
+    ReplayAuditProjectionService,
 };
 use ironclaw_events::{AuditSink, DurableAuditSink};
 use ironclaw_host_api::{
-    AgentId, CorrelationId, InvocationId, MissionId, ProjectId, ResourceScope, TenantId, ThreadId,
-    UserId,
+    AgentId, AuditStage, CorrelationId, InvocationId, MissionId, ProjectId, ResourceScope,
+    TenantId, ThreadId, UserId,
 };
 use ironclaw_memory_native::{
     InMemoryMemoryDocumentRepository, MemoryBackend, MemoryContext, MemoryDocumentPath,
@@ -75,7 +75,7 @@ async fn memory_prompt_safety_rejection_projects_metadata_only_from_durable_audi
 
     assert_eq!(snapshot.entries.len(), 1);
     let entry = &snapshot.entries[0];
-    assert_eq!(entry.stage, AuditProjectionStage::Denied);
+    assert_eq!(entry.stage, AuditStage::Denied);
     assert_eq!(
         entry.extension_id.as_ref().map(|id| id.as_str()),
         Some("memory.prompt_safety")
@@ -179,7 +179,7 @@ async fn prompt_rejection_projects_under_thread_scoped_audit_context() {
 
     assert_eq!(snapshot.entries.len(), 1);
     let entry = &snapshot.entries[0];
-    assert_eq!(entry.stage, AuditProjectionStage::Denied);
+    assert_eq!(entry.stage, AuditStage::Denied);
     assert_eq!(entry.correlation_id, correlation_id);
     assert_eq!(entry.invocation_id, resource_scope.invocation_id);
     assert_eq!(entry.thread_id, resource_scope.thread_id);

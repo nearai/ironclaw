@@ -50,18 +50,6 @@ impl PathPlacement {
     }
 }
 
-/// Trusted catalog over virtual filesystem mount placement.
-///
-/// The catalog explains where a [`VirtualPath`] is placed; it does not grant
-/// runtime access. Untrusted callers must still go through [`ScopedFilesystem`]
-/// and a scoped [`MountView`].
-#[async_trait]
-pub trait FilesystemCatalog: Send + Sync {
-    async fn describe_path(&self, path: &VirtualPath) -> Result<PathPlacement, FilesystemError>;
-
-    async fn mounts(&self) -> Result<Vec<MountDescriptor>, FilesystemError>;
-}
-
 /// Root filesystem that composes multiple backend roots behind one virtual namespace.
 pub struct CompositeRootFilesystem {
     mounts: Vec<CompositeMount>,
@@ -190,9 +178,16 @@ fn txn_capability_rank(value: crate::TxnCapability) -> u8 {
     }
 }
 
-#[async_trait]
-impl FilesystemCatalog for CompositeRootFilesystem {
-    async fn describe_path(&self, path: &VirtualPath) -> Result<PathPlacement, FilesystemError> {
+impl CompositeRootFilesystem {
+    /// Explains where a [`VirtualPath`] is placed.
+    ///
+    /// This describes mount placement; it does not grant runtime access.
+    /// Untrusted callers must still go through [`ScopedFilesystem`] and a
+    /// scoped [`MountView`].
+    pub async fn describe_path(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<PathPlacement, FilesystemError> {
         let mount = self.matching_mount(path)?;
         Ok(PathPlacement::from_descriptor(
             path.clone(),
@@ -200,7 +195,7 @@ impl FilesystemCatalog for CompositeRootFilesystem {
         ))
     }
 
-    async fn mounts(&self) -> Result<Vec<MountDescriptor>, FilesystemError> {
+    pub async fn mounts(&self) -> Result<Vec<MountDescriptor>, FilesystemError> {
         let mut mounts: Vec<_> = self
             .mounts
             .iter()
@@ -215,8 +210,8 @@ impl FilesystemCatalog for CompositeRootFilesystem {
 impl RootFilesystem for CompositeRootFilesystem {
     fn capabilities(&self) -> BackendCapabilities {
         // The composite is a router, not a backend in its own right. Callers
-        // wanting per-path capabilities should consult [`describe_path`]
-        // through the [`FilesystemCatalog`] impl.
+        // wanting per-path capabilities should consult
+        // [`describe_path`](CompositeRootFilesystem::describe_path).
         BackendCapabilities::default()
     }
 

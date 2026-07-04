@@ -3,6 +3,39 @@
 // `WebChatV2Event::AuthRequired { prompt: AuthPromptView }`. The
 // browser must hold `run_id` + `gate_ref` so a follow-up
 // `resolve_gate` call can fill them into the v2 path params.
+
+// Challenge kinds describe the interaction modality, not the provider:
+// `manual_token` covers a GitHub PAT / API key AND a channel pairing code
+// (paste a secret), while `oauth_url` is a browser OAuth relay. The pairing
+// card vs token card split for a `manual_token` gate is decided by the
+// presence of `connection`, below.
+
+// Optional `ChannelConnectionPromptContext` carried only on channel-pairing
+// gates (a `manual_token` gate whose paste is a pair code for a connectable
+// channel). Present on the live `auth_required` prompt as `prompt.connection`
+// and on the projection gate as `gate.auth_context.connection`. Normalized to
+// camelCase so the pairing card can render `{ channel, strategy, instructions,
+// inputPlaceholder, submitLabel, errorMessage }` straight off the gate.
+function connectionFromContext(connection) {
+  if (!connection || typeof connection !== "object") return null;
+  const channel = String(connection.channel || "").trim();
+  if (!channel) return null;
+  return {
+    channel,
+    strategy: typeof connection.strategy === "string" ? connection.strategy : null,
+    instructions:
+      typeof connection.instructions === "string" ? connection.instructions : null,
+    inputPlaceholder:
+      typeof connection.input_placeholder === "string"
+        ? connection.input_placeholder
+        : null,
+    submitLabel:
+      typeof connection.submit_label === "string" ? connection.submit_label : null,
+    errorMessage:
+      typeof connection.error_message === "string" ? connection.error_message : null,
+  };
+}
+
 export function gateFromEvent(eventType, prompt) {
   if (!prompt) return null;
 
@@ -24,9 +57,9 @@ export function gateFromEvent(eventType, prompt) {
     return {
       kind: "auth_required",
       gateKind: "auth",
-      // Legacy auth_required prompts predate challenge_kind and are manual
-      // token prompts. Explicit unknown/other challenge kinds still route to
-      // the neutral auth card in chat.js.
+      // Legacy auth_required prompts predate challenge_kind and are paste-a-secret
+      // prompts. Explicit unknown/other challenge kinds still route to the neutral
+      // auth card in chat.js.
       challengeKind:
         prompt.challenge_kind ||
         (prompt.provider ||
@@ -35,6 +68,9 @@ export function gateFromEvent(eventType, prompt) {
         prompt.expires_at
           ? "other"
           : "manual_token"),
+      // Channel-pairing gates ride the same `manual_token` rail but carry the
+      // connection requirement so the frontend renders the pairing card.
+      connection: connectionFromContext(prompt.connection),
       runId: prompt.turn_run_id,
       // AuthPromptView carries `auth_request_ref`, but v2's resolve
       // path is `/runs/{run_id}/gates/{gate_ref}/resolve` — auth
@@ -80,6 +116,8 @@ export function gateFromProjectionGate(gate) {
       accountLabel: authContext.account_label || "",
       authorizationUrl: authContext.authorization_url || null,
       expiresAt: authContext.expires_at || null,
+      // Present only for channel-pairing gates (see connectionFromContext).
+      connection: connectionFromContext(authContext.connection),
     };
   }
   return {

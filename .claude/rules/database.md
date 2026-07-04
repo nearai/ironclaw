@@ -46,7 +46,7 @@ See `src/db/CLAUDE.md` for full schema, dialect differences, and libSQL limitati
 5. Add migration if needed:
    - PostgreSQL: new `migrations/VN__description.sql`
    - libSQL: add entry to `INCREMENTAL_MIGRATIONS` in `libsql_migrations.rs`
-   - **Version numbering**: always number after the highest version on `staging`/`main` — those migrations may already be in production. Check with `git ls-tree origin/staging migrations/` and staging's `INCREMENTAL_MIGRATIONS`. Never reuse or insert before an existing version.
+   - **Version numbering**: always number after the highest version on `main` — those migrations may already be in production. Check with `git ls-tree origin/main migrations/` and main's `INCREMENTAL_MIGRATIONS`. Never reuse or insert before an existing version.
 6. Test feature isolation:
    ```bash
    cargo check                                          # postgres (default)

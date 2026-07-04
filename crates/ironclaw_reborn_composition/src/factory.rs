@@ -10,6 +10,7 @@ use std::{
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use crate::product_auth_durable::{FilesystemAuthProductServices, UnavailableAuthProviderClient};
+use crate::support::fs::RebornProjectService;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_approvals::{
     FilesystemAutoApproveSettingStore, FilesystemPersistentApprovalPolicyStore,
@@ -89,7 +90,8 @@ use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRu
 use ironclaw_outbound::{InMemoryDeliveredGateRouteStore, InMemoryTriggeredRunDeliveryStore};
 use ironclaw_processes::ProcessServices;
 use ironclaw_product_workflow::{
-    LifecycleProductSurfaceContext, ProductAuthTurnGateResumeDispatcher, ProjectService,
+    ChannelConnectionFacade, LifecycleProductSurfaceContext, ProductAuthTurnGateResumeDispatcher,
+    ProjectService,
 };
 use ironclaw_projects::ProjectRepository;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -626,17 +628,67 @@ impl RebornServices {
         let local_runtime = self.local_runtime.as_ref()?;
         let read_write_workspace_filesystem = self.read_write_workspace_filesystem()?;
         Some(AttachmentTestSupport {
-            read_port: Arc::new(
-                crate::attachment_landing::ProjectScopedAttachmentReader::new(Arc::clone(
-                    &local_runtime.workspace_filesystem,
-                )),
-            ),
-            lander: Arc::new(
-                crate::attachment_landing::ProjectScopedAttachmentLander::new(
-                    read_write_workspace_filesystem,
-                ),
-            ),
+            read_port: Arc::new(crate::support::fs::ProjectScopedAttachmentReader::new(
+                Arc::clone(&local_runtime.workspace_filesystem),
+            )),
+            lander: Arc::new(crate::support::fs::ProjectScopedAttachmentLander::new(
+                read_write_workspace_filesystem,
+            )),
         })
+    }
+
+    /// Test-support access to the local-dev per-tool permission override store
+    /// (C-SYNTH outbound seam). Backs `StoreApprovalSettingsProvider::tool_override`,
+    /// which the synthetic `outbound_delivery_target_set` capability consults for
+    /// its settings decision — a `Disabled` override drives the `policy_denied`
+    /// route. Mirrors `local_dev_auto_approve_settings_for_test`; `None` for
+    /// production-profile compositions without a local-dev runtime.
+    #[cfg(feature = "test-support")]
+    pub fn local_dev_tool_permission_overrides_for_test(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore>> {
+        let local_runtime = self.local_runtime.as_ref()?;
+        let overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
+            local_runtime.tool_permission_overrides.clone();
+        Some(overrides)
+    }
+
+    /// Test-support access to the local-dev persistent approval-policy store
+    /// (C-SYNTH outbound seam). Backs `StoreApprovalSettingsProvider::tool_always_allow`.
+    /// Mirrors `local_dev_auto_approve_settings_for_test`; `None` for
+    /// production-profile compositions without a local-dev runtime.
+    #[cfg(feature = "test-support")]
+    pub fn local_dev_persistent_approval_policies_for_test(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore>> {
+        let local_runtime = self.local_runtime.as_ref()?;
+        let policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore> =
+            local_runtime.persistent_approval_policies.clone();
+        Some(policies)
+    }
+
+    /// C-JOURNEY: publish a bundled first-party WASM extension package (e.g.
+    /// github) directly into the local-dev active-extension registry + trust
+    /// policy, bypassing the multi-turn `builtin.extension_install` →
+    /// `builtin.extension_activate` capability handshake. Reaches the SAME
+    /// `ActiveExtensionPublisher::publish` step `activate()` calls
+    /// (`extension_lifecycle.rs`) — the model-visible dispatchable surface —
+    /// so a harness that needs a bundled capability (like `github.*`)
+    /// reachable for dispatch without scripting install/activate turns can
+    /// seed it at construction time. Returns `None` for production-profile
+    /// compositions without a local-dev runtime (mirrors
+    /// `extension_installation_store_for_test`).
+    #[cfg(feature = "test-support")]
+    pub fn publish_bundled_extension_for_test(
+        &self,
+        package: &ironclaw_extensions::ExtensionPackage,
+    ) -> Option<Result<(), ironclaw_product_workflow::ProductWorkflowError>> {
+        let extension_management = self.local_runtime.as_ref()?.extension_management.as_ref()?;
+        Some(
+            extension_management
+                .active_extensions_for_test()
+                .publish(package),
+        )
     }
 }
 
@@ -751,6 +803,17 @@ pub(crate) struct RebornLocalRuntimeServices {
     // wiring need scoped storage/registry ownership before this is reused
     // outside local-dev composition. Tracked in #4091.
     pub(crate) extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
+    /// Late-binding slot for the per-caller channel-connection facade. Created
+    /// empty here and shared with the extension-lifecycle capability handler so
+    /// an inbound-channel activation can check whether the caller has already
+    /// connected the channel. Filled after runtime build by the Slack host-beta
+    /// composition (`build_webui_services_with_slack_host_beta_mounts` →
+    /// `RebornRuntime::set_channel_connection_facade`); stays empty in
+    /// deployments without a connectable channel, in which case the handler
+    /// fails closed (blocks) for any channel that declares a connection
+    /// requirement. Mirrors the `post_submit_hook_slot` deferred-wiring pattern.
+    pub(crate) channel_connection_facade_slot:
+        Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionFacade>>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub(crate) host_runtime_http_egress: Option<HostRuntimeHttpEgressPort>,
     pub(crate) skill_mounts: MountView,
@@ -1506,6 +1569,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         &mut first_party_registry,
         extension_management,
         product_auth.runtime_credential_account_selection_service(),
+        Arc::clone(&store_graph.local_runtime.channel_connection_facade_slot),
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("local-dev extension lifecycle handlers are invalid: {error}"),
@@ -2057,9 +2121,7 @@ async fn build_local_dev_store_graph(
         auto_approve_settings: Arc::clone(&auto_approve_settings),
         turn_state: Arc::clone(&turn_state),
         trigger_repository: Arc::clone(&trigger_repository),
-        project_service: Arc::new(crate::project_service::RebornProjectService::new(
-            Arc::clone(&project_repository),
-        )),
+        project_service: Arc::new(RebornProjectService::new(Arc::clone(&project_repository))),
         outbound_preferences: outbound_stores.outbound_preferences,
         skill_auto_activate_learned: Arc::new(AtomicBool::new(true)),
         #[cfg(feature = "slack-v2-host-beta")]
@@ -2083,6 +2145,7 @@ async fn build_local_dev_store_graph(
         budget_gate_store,
         skill_management,
         extension_management: None,
+        channel_connection_facade_slot: Arc::new(std::sync::OnceLock::new()),
         runtime_http_egress: None,
         host_runtime_http_egress: None,
         skill_mounts,
@@ -2207,9 +2270,7 @@ async fn build_local_dev_store_graph(
         auto_approve_settings: Arc::clone(&auto_approve_settings),
         turn_state: Arc::clone(&turn_state),
         trigger_repository: Arc::clone(&trigger_repository),
-        project_service: Arc::new(crate::project_service::RebornProjectService::new(
-            Arc::clone(&project_repository),
-        )),
+        project_service: Arc::new(RebornProjectService::new(Arc::clone(&project_repository))),
         outbound_preferences: outbound_stores.outbound_preferences,
         skill_auto_activate_learned: Arc::new(AtomicBool::new(true)),
         #[cfg(feature = "slack-v2-host-beta")]
@@ -2233,6 +2294,7 @@ async fn build_local_dev_store_graph(
         budget_gate_store,
         skill_management,
         extension_management: None,
+        channel_connection_facade_slot: Arc::new(std::sync::OnceLock::new()),
         runtime_http_egress: None,
         host_runtime_http_egress: None,
         skill_mounts,
@@ -2515,6 +2577,7 @@ async fn build_local_dev_root_filesystem(
 /// Filename of the local-dev libSQL database within the per-user root directory.
 /// One owner for the string — production factory, integration-test framework, and
 /// any on-disk path assertion all derive from this constant.
+#[cfg(any(feature = "libsql", feature = "test-support"))]
 pub(crate) const LOCAL_DEV_DB_FILENAME: &str = "reborn-local-dev.db";
 
 /// Open (or create) the local-dev libSQL database file at `root` — just the
@@ -4766,6 +4829,9 @@ mod tests {
             budget_gate_store: Arc::clone(&base_runtime.budget_gate_store),
             skill_management: Arc::clone(&base_runtime.skill_management),
             extension_management: base_runtime.extension_management.clone(),
+            channel_connection_facade_slot: Arc::clone(
+                &base_runtime.channel_connection_facade_slot,
+            ),
             runtime_http_egress: base_runtime.runtime_http_egress.clone(),
             host_runtime_http_egress: base_runtime.host_runtime_http_egress.clone(),
             skill_mounts: base_runtime.skill_mounts.clone(),

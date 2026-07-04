@@ -115,7 +115,6 @@ mod code_review_test {
 
     async fn build_harness(test_name: &str) -> LiveTestHarness {
         LiveTestHarnessBuilder::new(test_name)
-            .with_engine_v2(true)
             .with_auto_approve_tools(true)
             // Fetching the PR, parsing metadata, then fetching the diff
             // is at most a handful of tool calls, but the LLM may branch

@@ -2,8 +2,8 @@
 
 This is intentionally small. The Rust Reborn gate proves the host/runtime
 architecture. This Playwright/API smoke test proves the reborn-main branch still
-boots an isolated ENGINE_V2 gateway, serves the browser shell, persists a normal
-chat turn, and completes a simple tool-capable turn without duplicate terminal
+boots an isolated gateway, serves the browser shell, persists a normal chat
+turn, and completes a simple tool-capable turn without duplicate terminal
 assistant responses.
 """
 
@@ -90,7 +90,6 @@ async def reborn_gateway_server(ironclaw_binary, mock_llm_server, tmp_path_facto
             "IRONCLAW_BASE_DIR": str(base_dir),
             "RUST_LOG": "ironclaw=info",
             "RUST_BACKTRACE": "1",
-            "ENGINE_V2": "true",
             "AGENT_AUTO_APPROVE_TOOLS": "true",
             "GATEWAY_ENABLED": "true",
             "GATEWAY_HOST": "127.0.0.1",
@@ -214,15 +213,22 @@ async def _wait_for_terminal_turn(
     )
 
 
-async def test_reborn_gateway_loads_engine_v2_shell(reborn_gateway_page):
-    """The isolated Reborn smoke gateway should boot the ENGINE_V2 shell."""
+async def test_reborn_gateway_loads_shell(reborn_gateway_page):
+    """The isolated Reborn smoke gateway boots the browser shell.
+
+    With engine v2 removed the gateway always reports ``engine_v2_enabled:
+    false``, so the shell renders the legacy tab layout: chat, missions, and
+    routines stay visible while the v2-only projects tab is hidden.
+    """
     chat_tab = reborn_gateway_page.locator(SEL["tab_button"].format(tab="chat"))
     missions_tab = reborn_gateway_page.locator(SEL["tab_button"].format(tab="missions"))
     routines_tab = reborn_gateway_page.locator(SEL["tab_button"].format(tab="routines"))
+    projects_tab = reborn_gateway_page.locator(SEL["tab_button"].format(tab="projects"))
 
     await expect(chat_tab).to_be_visible()
     await expect(missions_tab).to_be_visible()
-    await expect(routines_tab).to_be_hidden()
+    await expect(routines_tab).to_be_visible()
+    await expect(projects_tab).to_be_hidden()
 
 
 async def test_reborn_gateway_persists_text_and_tool_turns_without_duplicate_response(

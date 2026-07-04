@@ -1,4 +1,5 @@
 use super::*;
+use crate::redaction::redact_postgres_url;
 
 #[test]
 fn redacts_postgres_uri_credentials_but_keeps_host() {

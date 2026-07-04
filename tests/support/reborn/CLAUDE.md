@@ -44,6 +44,22 @@ async fn replies_to_greeting() {
 `RebornScriptedReply::text(..)` — one line each. The harness is single-
 conversation; `submit_turn`/`assert_reply_contains` take just the text.
 
+### Script discipline — one script entry per model call
+
+The script is a FIFO of model calls, consumed across every turn on the harness.
+Count entries by model calls, not by "turns":
+
+- Plain reply turn = **1** entry (`text(..)`).
+- Ungated tool-call turn = **2** entries: `tool_call(..)` + the post-execution
+  model call (usually `text(..)`).
+- Gated tool-call turn (approval OR auth) = **exactly 2 entries**, whether the
+  gate is approved or denied: `tool_call(..)` + one post-resume model call
+  (reacting to the granted result or the authorization-failure tool error). A
+  third entry over-runs the FIFO and silently bleeds into the next turn.
+
+So a two-turn thread where both turns raise and resolve a gate needs 4 entries
+(`tool_call, text, tool_call, text`).
+
 ## Requirements & expectations (non-negotiable)
 
 1. **Test-first & consolidate.** Per root `CLAUDE.md` → Testing Discipline (and
@@ -160,11 +176,26 @@ Richer assertions in `assertions.rs` (all check the `[baseline..]` delta per thr
 - `assert_egress_body_contains(url_substr, body_substr)` — body of the (first) captured egress request whose URL contains the substring.
 - `assert_egress_body_contains_any(url_substr, body_substr)` — body of ANY (not just the first) captured egress request whose URL contains the substring; for a multi-request handshake where every leg shares one URL (e.g. web-access's Exa MCP `initialize`/`notifications/initialized`/`tools/call` sequence) and only one leg's body carries the substring under test. Prefer `assert_egress_body_contains` whenever `url_substr` matches exactly one request.
 - `assert_tool_result_contains(needle)` — a recorded capability result's output contains the text (proves the scripted body surfaced back to the model on the *Completed* path; reads the in-process recorder).
-- `assert_tool_error(class, reason)` — a persisted `ToolResultReference` envelope's parsed `safe_summary` field is of outcome `class` (`ToolErrorClass::{Failed, Denied}`) and carries `reason`. Distinct from `assert_tool_result_contains`: this reads the *Failed*/*Denied* capability-error path (persisted via `append_tool_result_reference`), not the in-process recorder, so it's the assertion for `egress_error`-scripted responses and other capability failures/denials. `class` is a typed arg (not a needle prefix) so it discriminates Failed-vs-Denied structurally — a `Failed{PolicyDenied}` and a `Denied{policy_denied}` render the same `reason` token but different classes. Parses the `safe_summary` field (not a raw-JSON substring). Scans full thread history (not baseline-sliced) — safe only for single-turn harnesses today; a multi-turn/group reuse must add baseline scoping first.
+- `assert_tool_error(class, reason)` — a persisted `ToolResultReference` envelope's parsed `safe_summary` field is of outcome `class` (`ToolErrorClass::{Failed, Denied}`) and carries `reason`. Distinct from `assert_tool_result_contains`: this reads the *Failed*/*Denied* capability-error path (persisted via `append_tool_result_reference`), not the in-process recorder, so it's the assertion for `egress_error`-scripted responses and other capability failures/denials. `class` is a typed arg (not a needle prefix) so it discriminates Failed-vs-Denied structurally — a `Failed{PolicyDenied}` and a `Denied{policy_denied}` render the same `reason` token but different classes. Parses the `safe_summary` field (not a raw-JSON substring). Scans full thread history (not baseline-sliced) — on multi-turn threads use the `*_since` variant with a `history_len()` baseline (see below).
 - `assert_no_tool_error(class, reason)` — the inverse of `assert_tool_error`: passes when NO persisted `ToolResultReference` summary matches `class`'s prefix and contains `reason`, and fails (listing what was found) when one is. Built on the same collector, so it shares the same full-thread-history caveat. Prefer this over pattern-matching `assert_tool_error`'s `Err` string when a test needs to prove absence — matching the negative directly avoids coupling the test to `assert_tool_error`'s diagnostic wording.
-- `assert_tool_error_summary_contains(text)` — raw `safe_summary` substring check on a persisted `ToolResultReference`, with NO class-prefix requirement. Use for `CapabilityErrorSummary`s the executor builds via `SanitizedStrategySummary::from_trusted_static` (`crates/ironclaw_agent_loop/src/executor/capabilities.rs`: filtered-surface denial, stale-surface retry, gate-declined short-circuit) — those are fixed host-authored literals with no host-returned text to prefix, so `assert_tool_error`'s `capability_{failed,denied}_summary` prefix match never succeeds for them. Scans full thread history (not baseline-sliced) — safe only for single-turn harnesses today; a multi-turn/group reuse must add baseline scoping first.
+- `assert_tool_error_summary_contains(text)` — raw `safe_summary` substring check on a persisted `ToolResultReference`, with NO class-prefix requirement. Use for `CapabilityErrorSummary`s the executor builds via `SanitizedStrategySummary::from_trusted_static` (`crates/ironclaw_agent_loop/src/executor/capabilities.rs`: filtered-surface denial, stale-surface retry, gate-declined short-circuit) — those are fixed host-authored literals with no host-returned text to prefix, so `assert_tool_error`'s `capability_{failed,denied}_summary` prefix match never succeeds for them. Scans full thread history (not baseline-sliced) — on multi-turn threads use the `*_since` variant with a `history_len()` baseline (see below).
 - `assert_network_egress_header_contains(url_substr, header_name, value_substr)` — reads the **network** egress lane (`captured_network_requests()`), not the runtime lane the four assertions above read. Needed for `.with_github_issue_tools()`: that harness's `try_with_host_http_egress` overwrites the runtime port with the host egress pipeline over the network recorder, so the runtime-lane `assert_egress_*` family is inert for it — assert here instead.
 - `tool_result_output(capability_id)` — the parsed JSON output of the most-recent recorded capability result for that id, for reading server-minted fields (e.g. `trigger_id`) a static script can't reference ahead of time.
+
+Multi-turn (baseline-sliced) variants: the `assert_tool_error*` and
+`assert_conversation_history_*` families scan the FULL thread history — safe
+only on a single-turn harness. On multi-turn threads, capture
+`history_len()` at the START of the turn under test and pass it as `baseline`
+to the `*_since` forms (`assert_tool_error_since`, `assert_no_tool_error_since`,
+`assert_tool_error_summary_contains_since`,
+`assert_conversation_history_contains_since`) so only that turn's appended
+messages are considered. `assert_conversation_history_contains(needle)` checks
+persisted-transcript containment across ANY role (the stored-history analogue
+of `assert_system_prompt_contains`, which reads only System-role model
+requests); `assert_conversation_history_role_contains(kind, needle)` restricts
+it to one `MessageKind`. Contracts (class discrimination, fail-loud decode)
+match the full-history siblings — see their doc-comments. Demo + regression:
+`tests/reborn_integration_http_matcher.rs::multi_turn_baseline_sliced_history_assertions`.
 
 ### Keyed HTTP responses
 
@@ -418,7 +449,30 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 | `RebornIntegrationGroup::triggers()` | trigger_create/list/pause/resume/remove | enabled |
 | `RebornIntegrationGroup::skill_management_tools()` | skill_list/skill_install/skill_remove | enabled |
 | `RebornIntegrationGroup::attachment_tools()` | attachment lander + read port (no tool dispatch) | n/a (no capability dispatch) |
+| `RebornIntegrationGroup::live_auth_and_approval()` | file tools @ Ask + unseeded `github.get_repo` (raises BlockedApproval AND BlockedAuth on one runtime; C-JOURNEY) | disabled |
 | `RebornIntegrationGroup::builder().storage(LibSql).live_approvals()` | same + LibSql storage | disabled |
+| `RebornIntegrationGroup::multiuser_memory_tools()` | core built-in (memory/http/shell/…) with per-actor run-owner-scoped capability dispatch (C-MULTIUSER) | enabled |
+| `RebornIntegrationGroup::multiuser_approvals()` | file tools (write_file/read_file @ Ask) with per-actor capability scoping (C-MULTIUSER) | enabled per owner (default; toggle per-owner in test) |
+| `RebornIntegrationGroup::outbound_target_tools()` | `outbound_delivery_targets_list`/`target_set` over an injected `FakeOutboundPreferencesFacade` (C-SYNTH) | enabled |
+
+### Auth-gate resolution (C-JOURNEY)
+
+On a `live_auth_and_approval()` group thread:
+
+- `resolve_auth_gate(run_id, &gate_ref)` — the "user submitted credentials"
+  happy arm: seeds a real GitHub credential account WITH secret material
+  through the production manual-token flow
+  (`request_manual_token_setup` -> `submit_manual_token`), then resumes with
+  `ResumeTurnPrecondition::BlockedAuthGate`; the parked `github.*` capability
+  re-dispatches and completes. Only valid on this group (needs the
+  `build_reborn_services` product-auth wiring; `live_auth_gate()`'s
+  lower-level fixture cannot complete an auth resume).
+- `deny_auth_gate(run_id, &gate_ref)` — works on both auth-gate groups.
+
+Multi-turn journey chaining (gate -> resolve -> next turn on ONE
+conversation) is pinned by `tests/reborn_group_journeys/`; per-turn resume
+idempotency keys are `(run_id, gate_ref)`-scoped so one run can resume
+through an approval gate and a subsequent auth gate without replay collision.
 
 ### Distinct actors per thread (E-MULTIUSER)
 

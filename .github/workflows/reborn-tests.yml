@@ -238,6 +238,33 @@ jobs:
           # repo cache LRU is seeded by shared states, not arbitrary PR branches.
           save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
 
+      - name: Resolve distributed sccache eligibility
+        id: sccache-dist-eligibility
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          case "${PACKAGE}" in
+            ironclaw_first_party_extension_ports|ironclaw_host_runtime|ironclaw_loop_support|ironclaw_product_workflow|ironclaw_reborn|ironclaw_reborn_cli|ironclaw_reborn_composition|ironclaw_reborn_webui_ingress|ironclaw_wasm|ironclaw_wasm_product_adapters|ironclaw_wasm_sandbox_core)
+              echo "enabled=false" >> "${GITHUB_OUTPUT}"
+              echo "::notice title=Distributed sccache skipped::${PACKAGE} compiles wasmtime-wasi proc macros that read registry source files unavailable on the remote builder."
+              ;;
+            *)
+              echo "enabled=true" >> "${GITHUB_OUTPUT}"
+              ;;
+          esac
+
+      - name: Setup OVH sccache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          scheduler-url: ${{ steps.sccache-dist-eligibility.outputs.enabled == 'true' && vars.SCCACHE_DIST_SCHEDULER_URL || '' }}
+          auth-token: ${{ steps.sccache-dist-eligibility.outputs.enabled == 'true' && secrets.SCCACHE_DIST_AUTH_TOKEN || '' }}
+          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
+          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
+          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
+          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
+          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
+          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
+
       - name: Run crate tests
         env:
           PACKAGE: ${{ matrix.package }}
@@ -324,6 +351,16 @@ jobs:
           # repo cache LRU is seeded by shared states, not arbitrary PR branches.
           save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
 
+      - name: Setup OVH sccache cache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
+          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
+          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
+          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
+          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
+          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
+
       - name: Run Reborn root tests
         run: scripts/ci/run-reborn-root-partition.sh
 
@@ -398,6 +435,16 @@ jobs:
           # repo cache LRU is seeded by shared states, not arbitrary PR branches.
           save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
 
+      - name: Setup OVH sccache cache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
+          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
+          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
+          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
+          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
+          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
+
       - name: Run Reborn group tests
         run: scripts/ci/run-reborn-group-tests.sh
 
@@ -464,6 +511,16 @@ jobs:
         with:
           key: reborn-qa-recorded-fixtures
           save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+
+      - name: Setup OVH sccache cache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
+          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
+          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
+          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
+          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
+          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
 
       - name: Scrub Reborn QA fixtures
         run: scripts/ci/check-reborn-qa-fixtures.sh
