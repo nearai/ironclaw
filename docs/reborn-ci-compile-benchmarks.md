@@ -58,7 +58,7 @@ is report-only unless a new benchmark experiment is intentionally in flight.
 | H4 | Reduce feature flags for slow crates where the coverage is duplicated elsewhere. | Less compile graph expansion in PR crate buckets. | Evidence review | Still the best compile-time lever, but no safe duplicate coverage was found for removing `webui-v2-beta` / `slack-v2-host-beta` from Reborn crate tests. |
 | H5 | Remove OVH sccache from Reborn crate buckets. | Verify whether remote cache overhead is hiding any local cache gain. | Tested | Rejected: wall clock regressed from `8m35s` to `9m45s`; job count unchanged. |
 | H6 | Disable incremental compilation across all Reborn crate buckets. | Avoid CI-only incremental bookkeeping and target-dir churn for one-shot builds. | Tested | Rejected: wall clock regressed from `8m35s` to `8m49s`; job count unchanged. |
-| H7 | Remove the duplicate instrumented `reborn_group_*` coverage lane from PR CI. | Reduce Reborn job count while keeping the uninstrumented group pass/fail gate. | Running | Pending CI result. |
+| H7 | Remove the duplicate instrumented `reborn_group_*` coverage lane from PR CI. | Reduce Reborn job count while keeping the uninstrumented group pass/fail gate. | Tested | Rejected: total jobs dropped from `28` to `27`, but wall clock regressed from `8m35s` to `9m39s`. |
 
 ## H1: Narrow Crate Bucket Targets
 
@@ -309,4 +309,35 @@ Why this is safe to test:
 Benchmark result:
 
 - Branch/PR: [`codex/ci-compile-benchmarks`, PR #5648](https://github.com/nearai/ironclaw/pull/5648)
-- Workflow run: pending.
+- Workflow run: [`28720349622`](https://github.com/nearai/ironclaw/actions/runs/28720349622)
+- Status: success
+- Wall clock: `9m39s` (`2026-07-04T21:34:23Z` to `2026-07-04T21:44:02Z`)
+- Total Reborn jobs: `27` versus baseline `28`
+- Reborn integration coverage jobs: `4` versus baseline `5`
+- Crate bucket job count: `12`
+- Slowest bucket: `host-runtime` at `519s`
+- Decision: reject. The job-count reduction worked, but it did not preserve the
+  current wall-clock baseline.
+
+Comparison against baseline:
+
+| Metric | Baseline | H7 | Delta |
+| --- | ---: | ---: | ---: |
+| Reborn workflow wall clock | `8m35s` | `9m39s` | `+64s` |
+| Total Reborn jobs | `28` | `27` | `-1` |
+| Reborn integration coverage jobs | `5` | `4` | `-1` |
+| Crate bucket job count | `12` | `12` | `0` |
+| `host-runtime` | `473s` | `519s` | `+46s` |
+| `composition-core` | `419s` | `418s` | `-1s` |
+| `reborn-core` | `367s` | `379s` | `+12s` |
+| `webui-ingress` | `334s` | `312s` | `-22s` |
+| `wasm-sandbox` | `307s` | `363s` | `+56s` |
+
+Interpretation:
+
+Removing the duplicate group coverage lane is the first experiment that reduced
+job count without reducing the normal group pass/fail test job. However, this
+run missed the acceptance criterion because `host-runtime` and `wasm-sandbox`
+regressed enough that total wall clock increased by `64s`. Keep this idea as a
+possible cleanup only if repeated runs show the wall-clock regression was
+variance; do not merge it from this benchmark alone.
