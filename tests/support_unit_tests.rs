@@ -413,14 +413,14 @@ mod reborn_support_tests {
     };
     use tokio::sync::Barrier;
 
+    use crate::parity_qa_support::delivery::RecordingOutboundDeliverySink;
     use crate::parity_qa_support::model_replay::{
         RebornModelReplayStep, RebornScriptedProviderToolCall, RebornTraceReplayError,
         RebornTraceReplayModelGateway, capability_call_from_trace_with_surface,
     };
-    use crate::reborn_support::delivery::RecordingOutboundDeliverySink;
+    use crate::parity_qa_support::network::RecordingNetworkHttpTransport;
     use crate::reborn_support::filesystem::local_filesystem;
     use crate::reborn_support::harness::RecordingTestCapabilityPort;
-    use crate::reborn_support::network::RecordingNetworkHttpTransport;
     use crate::reborn_support::product_workflow::{
         FilesystemIdempotencyLedger, RebornProductWorkflowHarness,
         RebornProductWorkflowHarnessError, resource_scope,

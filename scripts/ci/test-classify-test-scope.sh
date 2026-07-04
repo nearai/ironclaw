@@ -107,7 +107,7 @@ has_reborn_tests=true"
 assert_scope \
   "reborn root tests and support" \
   "tests/reborn_qa_smoke_scenarios_e2e.rs
-tests/support/reborn/harness.rs
+tests/integration/support/harness/mod.rs
 tests/e2e/scenarios/test_reborn_gateway_smoke.py" \
   "docs_only=false
 has_core_code=true

@@ -68,7 +68,7 @@ use chrono::Utc;
 use ironclaw_host_api::TenantId;
 use ironclaw_triggers::{TriggerRunStatus, TriggerState};
 use parity_qa_support::model_replay::RebornTraceReplayModelGateway;
-use reborn_support::qa_trace::{
+use parity_qa_support::qa_trace::{
     build_qa_trace_runtime_with_http_exchanges,
     build_qa_trace_runtime_with_http_exchanges_and_trigger_poller, load_qa_trace,
     qa_trace_tenant_id, record_qa_phrase, recorded_tool_calls, send_qa_phrase,

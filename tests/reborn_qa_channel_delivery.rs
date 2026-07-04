@@ -30,9 +30,9 @@ use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId, TurnStatus};
 use parity_qa_support::binary_e2e::{
     RebornBinaryE2EHarness, RebornHarnessSharedStorage, trace_tool_call_response,
 };
+use parity_qa_support::delivery::RecordingOutboundDeliverySink;
 use parity_qa_support::model_replay::RebornTraceReplayModelGateway;
 use reborn_support::{
-    delivery::RecordingOutboundDeliverySink,
     harness::{RecordingTestCapabilityPort, test_product_scope},
     test_adapter::RebornTestProductAdapter,
 };

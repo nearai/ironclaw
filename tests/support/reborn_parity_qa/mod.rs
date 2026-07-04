@@ -6,4 +6,9 @@
 //! parity and QA bins.
 
 pub mod binary_e2e;
+pub mod delivery;
 pub mod model_replay;
+pub mod network;
+#[allow(dead_code)]
+pub mod qa_scenarios;
+pub mod qa_trace;

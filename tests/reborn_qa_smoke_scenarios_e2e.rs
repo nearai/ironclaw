@@ -61,7 +61,7 @@ const COVERED_QA_SCENARIOS: &[&str] = &[
 
 #[test]
 fn every_pasted_qa_scenario_has_reborn_e2e_coverage() {
-    reborn_support::qa_scenarios::assert_all_covered(COVERED_QA_SCENARIOS);
+    parity_qa_support::qa_scenarios::assert_all_covered(COVERED_QA_SCENARIOS);
 }
 
 #[tokio::test]

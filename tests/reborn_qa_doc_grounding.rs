@@ -34,7 +34,7 @@ use parity_qa_support::binary_e2e::RebornBinaryE2EHarness;
 use parity_qa_support::model_replay::{
     RebornModelReplayStep, RebornScriptedProviderToolCall, RebornTraceReplayModelGateway,
 };
-use reborn_support::network::{
+use parity_qa_support::network::{
     LiveLoopbackHttpServer, LiveLoopbackHttpState, loopback_http_policy,
 };
 

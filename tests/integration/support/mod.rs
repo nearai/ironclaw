@@ -1,10 +1,8 @@
-pub mod approval;
 pub mod assertions;
 pub mod builder;
 pub mod capability_backend;
 pub mod comm_context;
 pub mod config;
-pub mod delivery;
 pub mod doubles;
 pub mod extension_surface;
 pub mod filesystem;
@@ -16,15 +14,11 @@ pub mod harness_mcp;
 pub mod harness_web_access;
 pub mod hooks;
 pub mod http_matcher;
-pub mod network;
 pub mod oauth_flow;
 pub mod outbound_preferences;
 pub mod process;
 pub mod product_workflow;
 pub mod project_service_fault;
-#[allow(dead_code)]
-pub mod qa_scenarios;
-pub mod qa_trace;
 pub mod reply;
 pub mod scope_gateway;
 pub mod scripted_provider;
