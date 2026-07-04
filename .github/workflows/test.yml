@@ -195,10 +195,10 @@ jobs:
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Install cargo-component
         uses: ./.github/actions/install-cargo-component
-      - name: Build WASM channel artifacts for integration tests
-        uses: ./.github/actions/cache-channel-wasm
-      - name: Build first-party WASM artifacts for integration tests
-        run: ./scripts/build-wasm-extensions.sh --first-party
+      - name: Build WASM artifacts for integration tests
+        run: |
+          ./scripts/build-wasm-extensions.sh --channels
+          ./scripts/build-wasm-extensions.sh --first-party
       - name: Run Tests
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"
@@ -289,9 +289,7 @@ jobs:
           cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Build Telegram WASM channel
-        uses: ./.github/actions/cache-channel-wasm
-        with:
-          channel: telegram
+        run: cargo build --manifest-path channels-src/telegram/Cargo.toml --target wasm32-wasip2 --release
       - name: Run thread scheduling integration tests
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"
@@ -348,9 +346,7 @@ jobs:
           cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Build Telegram WASM channel
-        uses: ./.github/actions/cache-channel-wasm
-        with:
-          channel: telegram
+        run: cargo build --manifest-path channels-src/telegram/Cargo.toml --target wasm32-wasip2 --release
       - name: Install cargo-nextest
         uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
         with:
@@ -458,9 +454,7 @@ jobs:
           cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Build Slack WASM channel
-        uses: ./.github/actions/cache-channel-wasm
-        with:
-          channel: slack
+        run: cargo build --manifest-path channels-src/slack/Cargo.toml --target wasm32-wasip2 --release
       - name: Run Slack integration tests
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"

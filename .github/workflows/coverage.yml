@@ -106,7 +106,7 @@ jobs:
         uses: ./.github/actions/install-cargo-component
 
       - name: Build WASM channels (for integration tests)
-        uses: ./.github/actions/cache-channel-wasm
+        run: ./scripts/build-wasm-extensions.sh --channels
 
       - name: Run database migrations
         if: matrix.has_postgres
@@ -174,7 +174,7 @@ jobs:
         uses: ./.github/actions/install-cargo-component
 
       - name: Build WASM channels
-        uses: ./.github/actions/cache-channel-wasm
+        run: ./scripts/build-wasm-extensions.sh --channels
 
       - name: Set up coverage instrumentation
         run: |
