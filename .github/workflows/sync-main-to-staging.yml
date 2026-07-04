@@ -1,0 +1,210 @@
+name: Sync main to staging
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17,47 * * * *"
+  workflow_run:
+    workflows:
+      - Code Coverage
+      - Code Style
+      - Docker Image
+      - Live Canary
+      - Platform & Compat
+      - Reborn Coverage
+      - Reborn E2E
+      - Release-plz
+      - Replay Snapshot Gate
+      - Tests (Reborn)
+    branches:
+      - main
+    types:
+      - completed
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-main-to-staging
+  cancel-in-progress: false
+
+jobs:
+  check-main:
+    name: Check latest main status
+    runs-on: ubuntu-latest
+    outputs:
+      green: ${{ steps.rollup.outputs.green }}
+      main_sha: ${{ steps.main.outputs.sha }}
+      short_sha: ${{ steps.main.outputs.short_sha }}
+    steps:
+      - name: Resolve latest main
+        id: main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${sha:0:12}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify latest main has green checks
+        id: rollup
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAIN_SHA: ${{ steps.main.outputs.sha }}
+        run: |
+          set -euo pipefail
+
+          query='
+            query($owner: String!, $repo: String!, $oid: GitObjectID!, $after: String) {
+              repository(owner: $owner, name: $repo) {
+                object(oid: $oid) {
+                  ... on Commit {
+                    statusCheckRollup {
+                      contexts(first: 100, after: $after) {
+                        pageInfo {
+                          hasNextPage
+                          endCursor
+                        }
+                        nodes {
+                          __typename
+                          ... on CheckRun {
+                            name
+                            status
+                            conclusion
+                          }
+                          ... on StatusContext {
+                            context
+                            state
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          '
+
+          owner="${GITHUB_REPOSITORY_OWNER}"
+          repo="${GITHUB_REPOSITORY#*/}"
+          after=""
+          bad=0
+          pending=0
+          total=0
+
+          while :; do
+            args=(
+              -f "query=${query}"
+              -f "owner=${owner}"
+              -f "repo=${repo}"
+              -f "oid=${MAIN_SHA}"
+            )
+            if [[ -n "${after}" ]]; then
+              args+=(-f "after=${after}")
+            fi
+
+            page="$(gh api graphql "${args[@]}")"
+            contexts="$(jq -c '.data.repository.object.statusCheckRollup.contexts.nodes[]?' <<<"${page}")"
+
+            while IFS= read -r context; do
+              [[ -n "${context}" ]] || continue
+              type="$(jq -r '.__typename' <<<"${context}")"
+              if [[ "${type}" == "CheckRun" ]]; then
+                name="$(jq -r '.name' <<<"${context}")"
+                status="$(jq -r '.status' <<<"${context}")"
+                conclusion="$(jq -r '.conclusion // ""' <<<"${context}")"
+
+                # Ignore this workflow's own jobs. They are attached to the
+                # same main commit while this guard is running, so including
+                # them would make the guard self-block forever.
+                case "${name}" in
+                  "Check latest main status"|"Fast-forward staging")
+                    continue
+                    ;;
+                esac
+
+                total=$((total + 1))
+                if [[ "${status}" != "COMPLETED" ]]; then
+                  echo "::notice::Pending check on main ${MAIN_SHA}: ${name} (${status})"
+                  pending=$((pending + 1))
+                  continue
+                fi
+                case "${conclusion}" in
+                  SUCCESS|SKIPPED|NEUTRAL)
+                    ;;
+                  *)
+                    echo "::notice::Non-green check on main ${MAIN_SHA}: ${name} (${conclusion})"
+                    bad=$((bad + 1))
+                    ;;
+                esac
+              elif [[ "${type}" == "StatusContext" ]]; then
+                name="$(jq -r '.context' <<<"${context}")"
+                state="$(jq -r '.state' <<<"${context}")"
+                total=$((total + 1))
+                if [[ "${state}" != "SUCCESS" ]]; then
+                  echo "::notice::Non-green status on main ${MAIN_SHA}: ${name} (${state})"
+                  bad=$((bad + 1))
+                fi
+              fi
+            done <<<"${contexts}"
+
+            has_next="$(jq -r '.data.repository.object.statusCheckRollup.contexts.pageInfo.hasNextPage // false' <<<"${page}")"
+            if [[ "${has_next}" != "true" ]]; then
+              break
+            fi
+            after="$(jq -r '.data.repository.object.statusCheckRollup.contexts.pageInfo.endCursor' <<<"${page}")"
+          done
+
+          if (( total == 0 )); then
+            echo "::notice::No status checks found for main ${MAIN_SHA}; not syncing staging."
+            echo "green=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if (( pending > 0 || bad > 0 )); then
+            echo "::notice::main ${MAIN_SHA} is not green: total=${total}, pending=${pending}, non_green=${bad}."
+            echo "green=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "::notice::main ${MAIN_SHA} is green across ${total} checks/statuses."
+          echo "green=true" >> "$GITHUB_OUTPUT"
+
+  sync-staging:
+    name: Fast-forward staging
+    needs: check-main
+    if: needs.check-main.outputs.green == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fast-forward staging to green main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAIN_SHA: ${{ needs.check-main.outputs.main_sha }}
+        run: |
+          set -euo pipefail
+
+          git fetch origin main staging
+
+          if git merge-base --is-ancestor "origin/main" "origin/staging"; then
+            echo "::notice::staging already contains main ${MAIN_SHA}; nothing to sync."
+            exit 0
+          fi
+
+          if ! git merge-base --is-ancestor "origin/staging" "origin/main"; then
+            echo "::error::staging has commits that are not in main; refusing to overwrite or merge automatically."
+            exit 1
+          fi
+
+          gh api \
+            -X PATCH \
+            "repos/${GITHUB_REPOSITORY}/git/refs/heads/staging" \
+            -f "sha=${MAIN_SHA}" \
+            -F "force=false" >/dev/null
+
+          echo "::notice::Fast-forwarded staging to green main ${MAIN_SHA}."
