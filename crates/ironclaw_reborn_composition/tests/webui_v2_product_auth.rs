@@ -147,6 +147,7 @@ impl AuthProviderClient for RecordingProviderClient {
             ),
             scopes: request.scopes,
             account_id: None,
+            provider_identity: None,
         })
     }
 

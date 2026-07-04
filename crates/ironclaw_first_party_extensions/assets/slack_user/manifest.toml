@@ -1,0 +1,80 @@
+schema_version = "reborn.extension_manifest.v2"
+id = "slack_user"
+name = "Slack (personal)"
+version = "0.1.0"
+description = "Act as you in Slack via a personal user token (xoxp-): search all your messages, list and read your DMs and group DMs, read channel history, and post as you. Distinct from the bot-token Slack channel; uses its own slack_user_token credential."
+trust = "first_party_requested"
+
+[runtime]
+kind = "wasm"
+module = "wasm/slack_user_tool.wasm"
+
+[[capabilities]]
+id = "slack_user.search_messages"
+description = "Search across all messages you can see (your DMs, group DMs, and channels you belong to). Requires the search:read user scope."
+effects = ["dispatch_capability", "network", "use_secret"]
+runtime_credentials = [
+  { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/slack_user/search_messages.input.v1.json"
+output_schema_ref = "schemas/slack_user/raw_output.v1.json"
+prompt_doc_ref = "prompts/slack_user/search_messages.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "slack_user.list_conversations"
+description = "List channels, private channels, DMs (im), and group DMs (mpim) you belong to. Use this to discover DM conversation IDs."
+effects = ["dispatch_capability", "network", "use_secret"]
+runtime_credentials = [
+  { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/slack_user/list_conversations.input.v1.json"
+output_schema_ref = "schemas/slack_user/raw_output.v1.json"
+prompt_doc_ref = "prompts/slack_user/list_conversations.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "slack_user.get_conversation_history"
+description = "Read message history from any channel or DM you can see, identified by its conversation ID."
+effects = ["dispatch_capability", "network", "use_secret"]
+runtime_credentials = [
+  { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/slack_user/get_conversation_history.input.v1.json"
+output_schema_ref = "schemas/slack_user/raw_output.v1.json"
+prompt_doc_ref = "prompts/slack_user/get_conversation_history.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "slack_user.get_user_info"
+description = "Get information about a Slack user (name, real name, email)."
+effects = ["dispatch_capability", "network", "use_secret"]
+runtime_credentials = [
+  { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/slack_user/get_user_info.input.v1.json"
+output_schema_ref = "schemas/slack_user/raw_output.v1.json"
+prompt_doc_ref = "prompts/slack_user/get_user_info.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "slack_user.send_message"
+description = "Send a message as you to a channel or DM. Requires the chat:write user scope; the message appears to come from your account."
+effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+runtime_credentials = [
+  { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/slack_user/send_message.input.v1.json"
+output_schema_ref = "schemas/slack_user/raw_output.v1.json"
+prompt_doc_ref = "prompts/slack_user/send_message.md"
+required_host_ports = ["host.runtime.http_egress"]

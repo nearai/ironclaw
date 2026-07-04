@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use ironclaw_host_api::ExtensionId;
 use serde::{Deserialize, Serialize};
 
-use crate::{AuthProductError, CredentialAccountId, scope::AuthProductScope};
+use crate::{AuthProductError, AuthProviderId, CredentialAccountId, scope::AuthProductScope};
 
 /// Lifecycle event that drives credential/session cleanup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -12,10 +12,24 @@ pub enum SecretCleanupAction {
     Uninstall,
 }
 
+/// Accounts are matched at credential-owner granularity (the scope's
+/// tenant/user/agent/project owner — see
+/// [`AuthProductScope::to_credential_owner`]), never by full scope equality:
+/// every lifecycle/disconnect caller re-derives its scope with a fresh
+/// `invocation_id`, so exact-scope matching could never find the account the
+/// OAuth flow stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecretCleanupRequest {
     pub scope: AuthProductScope,
     pub extension_id: ExtensionId,
+    /// Explicit opt-in that ALSO selects the owner's accounts issued by this
+    /// provider. OAuth-minted personal credentials are stored `UserReusable`
+    /// with no extension ownership or grants, so an extension-keyed cleanup
+    /// can never reach them; per the crate guardrail, reusable credentials are
+    /// untouched *by default* — this selector is the deliberate exception a
+    /// channel disconnect uses to revoke (not delete) the caller's own
+    /// personal token.
+    pub provider: Option<AuthProviderId>,
     pub action: SecretCleanupAction,
 }
 

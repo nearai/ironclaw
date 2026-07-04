@@ -199,7 +199,7 @@ pub struct NewAuthFlow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderCallbackOutcome {
     Authorized {
-        exchange: crate::OAuthProviderExchange,
+        exchange: Box<crate::OAuthProviderExchange>,
     },
     Denied,
 }

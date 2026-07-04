@@ -377,6 +377,8 @@ async fn seed_legacy_slack_setup(
                 .map(ToString::to_string),
             bot_token: Some(legacy_setup.bot_token),
             signing_secret: Some(legacy_setup.signing_secret),
+            oauth_client_id: None,
+            oauth_client_secret: None,
         })
         .await
         .map_err(|error| SlackHostBetaBuildError::InvalidConfig {
@@ -1538,6 +1540,8 @@ mod tests {
             shared_subject_user_id: None,
             bot_token_handle: SecretHandle::new(format!("bot_{revision}")).unwrap(),
             signing_secret_handle: SecretHandle::new(format!("signing_{revision}")).unwrap(),
+            oauth_client_id: None,
+            oauth_client_secret_handle: None,
             revision,
             updated_at: chrono::Utc::now(),
         }

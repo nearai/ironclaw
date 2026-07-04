@@ -238,6 +238,26 @@ impl SlackPersonalUserBindingService {
     }
 }
 
+#[async_trait::async_trait]
+pub(crate) trait SlackPersonalUserBinder: Send + Sync + std::fmt::Debug {
+    async fn bind_personal_user(
+        &self,
+        principal: SlackPersonalBindingPrincipal,
+        request: SlackPersonalUserBindingRequest,
+    ) -> Result<RebornUserIdentityBinding, SlackPersonalUserBindingError>;
+}
+
+#[async_trait::async_trait]
+impl SlackPersonalUserBinder for SlackPersonalUserBindingService {
+    async fn bind_personal_user(
+        &self,
+        principal: SlackPersonalBindingPrincipal,
+        request: SlackPersonalUserBindingRequest,
+    ) -> Result<RebornUserIdentityBinding, SlackPersonalUserBindingError> {
+        SlackPersonalUserBindingService::bind_personal_user(self, principal, request).await
+    }
+}
+
 impl std::fmt::Debug for SlackPersonalUserBindingService {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter

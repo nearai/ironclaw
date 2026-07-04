@@ -145,6 +145,8 @@ use ironclaw_turns::{InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore};
 use crate::RebornProductAuthServicePorts;
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::available_extensions::slack_manifest_digest;
+#[cfg(feature = "slack-v2-host-beta")]
+use crate::available_extensions::slack_user_manifest_digest;
 use crate::default_system_prompt::seed_default_system_prompt;
 use crate::input::{RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
@@ -1061,6 +1063,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_provider_configs,
+        #[cfg(feature = "slack-v2-host-beta")]
+        slack_personal_oauth_lazy_slot,
         nearai_mcp_bootstrap_config,
         owner_id,
         local_runtime_identity,
@@ -1373,6 +1377,10 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         oauth_dcr_provider_configs,
         Arc::clone(&secret_store),
         product_auth_runtime_ports.clone(),
+        #[cfg(feature = "slack-v2-host-beta")]
+        slack_personal_oauth_lazy_slot,
+        #[cfg(not(feature = "slack-v2-host-beta"))]
+        None,
     )?;
     let security_audit_sink = services.security_audit_sink();
     let nearai_mcp_host_managed_scope =
@@ -1452,6 +1460,11 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                 };
                 let services = match provider_composition.gate_registry.clone() {
                     Some(registry) => services.with_oauth_gate_registry(registry),
+                    None => services,
+                };
+                #[cfg(feature = "slack-v2-host-beta")]
+                let services = match provider_composition.slack_gate_registry.clone() {
+                    Some(registry) => services.with_slack_oauth_gate_registry(registry),
                     None => services,
                 };
                 Arc::new(services.with_host_managed_nearai_credential_scope(
@@ -3546,6 +3559,17 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
         Vec::new(),
         None,
     ));
+    #[cfg(feature = "slack-v2-host-beta")]
+    entries.push(AdminEntry::for_local_manifest(
+        PackageId::new("slack_user").map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("Slack personal first-party package id is invalid: {error}"),
+        })?,
+        "/system/extensions/slack_user/manifest.toml".to_string(),
+        Some(slack_user_manifest_digest()),
+        HostTrustAssignment::first_party(),
+        gsuite_allowed_effects(),
+        None,
+    ));
     HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries(entries))]).map_err(|error| {
         RebornBuildError::InvalidConfig {
             reason: format!("built-in first-party trust policy is invalid: {error}"),
@@ -3610,6 +3634,8 @@ async fn build_production_shaped(
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_provider_configs,
+        #[cfg(feature = "slack-v2-host-beta")]
+        slack_personal_oauth_lazy_slot,
         nearai_mcp_bootstrap_config: _,
         turn_state_store_limits,
     } = input;
@@ -3634,6 +3660,8 @@ async fn build_production_shaped(
         oauth_dcr_provider_configs,
         turn_state_store_limits,
     );
+    #[cfg(feature = "slack-v2-host-beta")]
+    let _ = slack_personal_oauth_lazy_slot;
 
     match storage {
         RebornStorageInput::Disabled | RebornStorageInput::LocalDev { .. } => {
@@ -3682,6 +3710,8 @@ async fn build_production_shaped(
                 product_auth_ports,
                 oauth_provider_configs,
                 oauth_dcr_provider_configs,
+                #[cfg(feature = "slack-v2-host-beta")]
+                slack_personal_oauth_lazy_slot,
                 owner_id,
                 local_runtime_identity,
                 turn_state_store_limits,
@@ -3718,6 +3748,8 @@ async fn build_production_shaped(
                 product_auth_ports,
                 oauth_provider_configs,
                 oauth_dcr_provider_configs,
+                #[cfg(feature = "slack-v2-host-beta")]
+                slack_personal_oauth_lazy_slot,
                 owner_id,
                 local_runtime_identity,
                 turn_state_store_limits,
@@ -3753,6 +3785,8 @@ struct RebornProductionBuildContext {
     product_auth_ports: Option<RebornProductAuthServicePorts>,
     oauth_provider_configs: Vec<crate::input::OAuthProviderBackendConfig>,
     oauth_dcr_provider_configs: Vec<crate::input::OAuthDcrProviderBackendConfig>,
+    #[cfg(feature = "slack-v2-host-beta")]
+    slack_personal_oauth_lazy_slot: Option<crate::slack_setup::SlackPersonalSetupServiceSlot>,
     owner_id: String,
     local_runtime_identity: Option<RebornLocalRuntimeIdentity>,
     turn_state_store_limits: ironclaw_turns::InMemoryTurnStateStoreLimits,
@@ -4135,6 +4169,8 @@ where
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_provider_configs,
+        #[cfg(feature = "slack-v2-host-beta")]
+        slack_personal_oauth_lazy_slot,
         owner_id,
         local_runtime_identity,
         turn_state_store_limits,
@@ -4252,6 +4288,10 @@ where
         oauth_dcr_provider_configs,
         Arc::clone(&secret_store),
         product_auth_runtime_ports.clone(),
+        #[cfg(feature = "slack-v2-host-beta")]
+        slack_personal_oauth_lazy_slot,
+        #[cfg(not(feature = "slack-v2-host-beta"))]
+        None,
     )?;
     let services = apply_production_runtime_process_binding(
         services,

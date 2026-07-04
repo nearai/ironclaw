@@ -63,7 +63,36 @@ const NEARAI_MCP_MANIFEST: &str =
 #[cfg(feature = "slack-v2-host-beta")]
 const SLACK_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/slack/manifest.toml");
+#[cfg(feature = "slack-v2-host-beta")]
+const SLACK_USER_MANIFEST: &str =
+    include_str!("../../ironclaw_first_party_extensions/assets/slack_user/manifest.toml");
 const NEARAI_EXTENSION_ID: &str = HostManagedCredentialExtension::NearAi.id();
+#[cfg(feature = "slack-v2-host-beta")]
+pub(crate) const SLACK_EXTENSION_ID: &str = "slack";
+#[cfg(feature = "slack-v2-host-beta")]
+const SLACK_PERSONAL_OAUTH_SETUP_SCOPES: &[&str] = &[
+    "search:read",
+    "channels:history",
+    "groups:history",
+    "im:history",
+    "mpim:history",
+    "channels:read",
+    "groups:read",
+    "im:read",
+    "mpim:read",
+    "users:read",
+    "chat:write",
+];
+
+#[cfg(feature = "slack-v2-host-beta")]
+pub(crate) fn slack_personal_oauth_setup_scopes() -> &'static [&'static str] {
+    SLACK_PERSONAL_OAUTH_SETUP_SCOPES
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+pub(crate) fn slack_user_manifest_digest() -> String {
+    sha256_digest_token(SLACK_USER_MANIFEST.as_bytes())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HostManagedCredentialExtension {

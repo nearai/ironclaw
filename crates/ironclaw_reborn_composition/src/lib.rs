@@ -90,6 +90,8 @@ mod production_runtime_policy;
 mod profile;
 mod profile_approval_authorization;
 mod projection;
+#[cfg(feature = "slack-v2-host-beta")]
+mod slack_personal_oauth;
 pub use auth_prompt::{AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller};
 #[cfg(feature = "slack-v2-host-beta")]
 mod delivered_gate_routing;
@@ -184,6 +186,16 @@ pub use gsuite::{bundled_gsuite_extension_packages, bundled_gsuite_first_party_h
 pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
 #[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_auth::GoogleOAuthRouteConfig;
+/// OAuth redirect-URI newtype re-exported so the `ironclaw_reborn_cli` binary
+/// can name it without a direct `ironclaw_auth` dependency. Its
+/// `runtime/mod.rs` parses `IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI`
+/// and the Google OAuth redirect URI from env into `OAuthRedirectUri` when
+/// building the runtime input / OAuth client config. The
+/// `reborn_cli_binary_crate_stays_separate_from_v1_root` boundary test (in
+/// `ironclaw_architecture`) pins the CLI's workspace dependencies to exactly
+/// the composition-facade set, so adding `ironclaw_auth` there would fail that
+/// test — the type must travel through this facade instead.
+pub use ironclaw_auth::OAuthRedirectUri;
 pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleSearchExtensionSummary,
@@ -232,6 +244,8 @@ pub use observability::operator_logs::{
 pub use observability::trajectory_observer::RebornTrajectoryObserver;
 #[cfg(feature = "openai-compat-beta")]
 pub use openai_compat_serve::build_openai_compat_route_mount;
+#[cfg(feature = "slack-v2-host-beta")]
+pub use product_auth_serve::SlackPersonalOAuthBindingConfig;
 pub use product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
     ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
@@ -342,6 +356,8 @@ pub use slack_serve::{
     SlackInstallationSelector, SlackTeamId, slack_events_route_descriptors,
     slack_events_route_mount,
 };
+#[cfg(feature = "slack-v2-host-beta")]
+pub use slack_setup::SlackPersonalSetupServiceSlot;
 pub use web_access::register_bundled_web_access_first_party_handlers;
 pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]

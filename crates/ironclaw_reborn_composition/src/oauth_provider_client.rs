@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
+#[cfg(feature = "slack-v2-host-beta")]
+use ironclaw_auth::OAuthProviderIdentity;
 use ironclaw_auth::{
     AuthFlowId, AuthProductError, AuthProviderClient, CredentialAccountId, OAuthClientId,
     OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderExchangeContext,
@@ -31,6 +33,18 @@ pub(crate) enum ExchangeScopePolicy {
     FallbackToRequested,
 }
 
+/// Shape of the provider's token-endpoint JSON response.
+///
+/// Most providers (Google, Notion, DCR) return the access token at the top
+/// level (`access_token`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum TokenResponseShape {
+    #[default]
+    Standard,
+    #[cfg(feature = "slack-v2-host-beta")]
+    SlackAuthedUser,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct HostOAuthProviderSpec {
     pub(crate) provider_id: &'static str,
@@ -39,6 +53,7 @@ pub(crate) struct HostOAuthProviderSpec {
     pub(crate) secret_handle_prefix: &'static str,
     pub(crate) resource: Option<&'static str>,
     pub(crate) exchange_scope_policy: ExchangeScopePolicy,
+    pub(crate) token_response_shape: TokenResponseShape,
 }
 
 #[derive(Clone, Debug)]
@@ -244,7 +259,7 @@ impl HostOAuthProviderClient {
         })?;
         let response = self
             .egress
-            .execute(RuntimeHttpEgressRequest {
+            .execute_credential_exchange(RuntimeHttpEgressRequest {
                 runtime: self.runtime,
                 scope,
                 capability_id: self.capability_id.clone(),
@@ -304,7 +319,7 @@ impl HostOAuthProviderClient {
             }
             return Err(AuthProductError::TokenExchangeFailed);
         }
-        parse_token_response(&response.body).map_err(|error| {
+        parse_token_response(&response.body, self.spec.token_response_shape).map_err(|error| {
             if refresh_request {
                 match error {
                     AuthProductError::BackendUnavailable => AuthProductError::BackendUnavailable,
@@ -376,10 +391,16 @@ impl HostOAuthProviderClient {
         // Clamp to i32::MAX seconds (~68 years) before converting, then use
         // checked_add_signed so a malformed/huge provider TTL yields None
         // instead of panicking on chrono/DateTime overflow.
-        let access_expires_at: Option<Timestamp> = tokens.expires_in_seconds.and_then(|secs| {
-            let signed_secs = secs.min(i32::MAX as u64) as i64;
-            Utc::now().checked_add_signed(chrono::Duration::seconds(signed_secs))
-        });
+        let access_expires_at: Option<Timestamp> = tokens
+            .expires_in_seconds
+            // Providers signal a non-expiring token as `expires_in: 0` (Slack
+            // does for apps without token rotation); treating it literally
+            // would mint an already-expired credential.
+            .filter(|secs| *secs > 0)
+            .and_then(|secs| {
+                let signed_secs = secs.min(i32::MAX as u64) as i64;
+                Utc::now().checked_add_signed(chrono::Duration::seconds(signed_secs))
+            });
 
         let refresh_token = tokens.refresh_token;
 
@@ -503,6 +524,7 @@ impl AuthProviderClient for HostOAuthProviderClient {
                 false,
             )
             .await?;
+        let provider_identity = token_response.provider_identity.clone();
         let scopes = scopes_for_exchange(&self.spec, &token_response, &request.scopes)?;
         let stored_tokens = self
             .store_tokens(callback_scope, context.flow_id, token_response)
@@ -522,6 +544,7 @@ impl AuthProviderClient for HostOAuthProviderClient {
             refresh_secret: stored_tokens.refresh_secret,
             scopes,
             account_id: None,
+            provider_identity,
         })
     }
 
@@ -610,7 +633,69 @@ struct TokenResponseBody {
     token_type: Option<String>,
 }
 
-fn parse_token_response(body: &[u8]) -> Result<OAuthTokenResponse, AuthProductError> {
+/// Slack `oauth.v2.access` response. Only the fields needed to extract the user
+/// token are modeled; the workspace bot token (top-level `access_token`) is
+/// intentionally ignored — this provider issues user-token credentials only.
+#[cfg(feature = "slack-v2-host-beta")]
+#[derive(Debug, Deserialize)]
+struct SlackTokenResponseBody {
+    #[serde(default)]
+    ok: bool,
+    /// Slack's stable error code on `ok: false` (HTTP is still 200). Logged
+    /// verbatim — it is a fixed enum-like code, never token material.
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    app_id: Option<String>,
+    #[serde(default)]
+    team: Option<SlackTokenResponseTeam>,
+    #[serde(default)]
+    enterprise: Option<SlackTokenResponseEnterprise>,
+    #[serde(default)]
+    authed_user: Option<SlackAuthedUser>,
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+#[derive(Debug, Deserialize)]
+struct SlackTokenResponseTeam {
+    #[serde(default)]
+    id: Option<String>,
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+#[derive(Debug, Deserialize)]
+struct SlackTokenResponseEnterprise {
+    #[serde(default)]
+    id: Option<String>,
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+#[derive(Debug, Deserialize)]
+struct SlackAuthedUser {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    access_token: Option<SecretString>,
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    refresh_token: Option<SecretString>,
+    #[serde(default)]
+    expires_in: Option<u64>,
+}
+
+fn parse_token_response(
+    body: &[u8],
+    shape: TokenResponseShape,
+) -> Result<OAuthTokenResponse, AuthProductError> {
+    match shape {
+        TokenResponseShape::Standard => parse_standard_token_response(body),
+        #[cfg(feature = "slack-v2-host-beta")]
+        TokenResponseShape::SlackAuthedUser => parse_slack_authed_user_token_response(body),
+    }
+}
+
+fn parse_standard_token_response(body: &[u8]) -> Result<OAuthTokenResponse, AuthProductError> {
     let parsed: TokenResponseBody =
         serde_json::from_slice(body).map_err(|_| AuthProductError::TokenExchangeFailed)?;
     let response_scope = parsed
@@ -627,6 +712,75 @@ fn parse_token_response(body: &[u8]) -> Result<OAuthTokenResponse, AuthProductEr
     .map_err(|_| AuthProductError::TokenExchangeFailed)
 }
 
+/// Parses Slack's `oauth.v2.access` response, extracting the **user** token from
+/// `authed_user`. Slack returns HTTP 200 with `ok: false` on failure, so the
+/// `ok` flag is checked before trusting the payload. Token rotation (when the
+/// app enables it) adds `authed_user.{refresh_token,expires_in}`; both are
+/// carried through when present.
+#[cfg(feature = "slack-v2-host-beta")]
+fn parse_slack_authed_user_token_response(
+    body: &[u8],
+) -> Result<OAuthTokenResponse, AuthProductError> {
+    let parsed: SlackTokenResponseBody = serde_json::from_slice(body).map_err(|error| {
+        // serde_json errors carry position/expectation only, never payload
+        // bytes — safe to log next to a token-bearing body.
+        tracing::warn!(parse_error = %error, "slack token exchange response did not parse");
+        AuthProductError::TokenExchangeFailed
+    })?;
+    if !parsed.ok {
+        // Slack signals failure as HTTP 200 + `ok: false`, so the non-2xx
+        // logging in the caller never sees this path.
+        tracing::warn!(
+            slack_error_code = parsed.error.as_deref().unwrap_or("<absent>"),
+            "slack token exchange returned ok:false"
+        );
+        return Err(AuthProductError::TokenExchangeFailed);
+    }
+    let missing = |field: &'static str| {
+        tracing::warn!(
+            field,
+            "slack token exchange response is missing a required field"
+        );
+        AuthProductError::TokenExchangeFailed
+    };
+    let authed_user = parsed.authed_user.ok_or_else(|| missing("authed_user"))?;
+    let access_token = authed_user
+        .access_token
+        .ok_or_else(|| missing("authed_user.access_token"))?;
+    let identity = OAuthProviderIdentity::new(
+        authed_user.id.ok_or_else(|| missing("authed_user.id"))?,
+        Some(
+            parsed
+                .team
+                .and_then(|team| team.id)
+                .ok_or_else(|| missing("team.id"))?,
+        ),
+        parsed.enterprise.and_then(|enterprise| enterprise.id),
+        Some(parsed.app_id.ok_or_else(|| missing("app_id"))?),
+    )
+    .map_err(|error| {
+        tracing::warn!(identity_error = %error, "slack token exchange identity was invalid");
+        AuthProductError::TokenExchangeFailed
+    })?;
+    // Slack returns granted user scopes as a COMMA-separated list, whereas
+    // OAuthTokenResponse::new splits on whitespace. Normalize commas to spaces
+    // so each scope is parsed individually (otherwise the whole list would be
+    // stored as one bogus scope and override the requested scopes).
+    let response_scope = authed_user
+        .scope
+        .as_deref()
+        .map(|scope| scope.replace(',', " "))
+        .filter(|scope| !scope.trim().is_empty());
+    OAuthTokenResponse::new(
+        access_token,
+        authed_user.refresh_token,
+        response_scope.as_deref(),
+        authed_user.expires_in,
+    )
+    .map(|response| response.with_provider_identity(identity))
+    .map_err(|_| AuthProductError::TokenExchangeFailed)
+}
+
 fn scopes_for_exchange(
     spec: &HostOAuthProviderSpec,
     token_response: &OAuthTokenResponse,
@@ -637,7 +791,21 @@ fn scopes_for_exchange(
     }
     match spec.exchange_scope_policy {
         ExchangeScopePolicy::RequireProviderScope => Err(AuthProductError::TokenExchangeFailed),
-        ExchangeScopePolicy::FallbackToRequested => Ok(requested_scopes.to_vec()),
+        ExchangeScopePolicy::FallbackToRequested => {
+            // The provider (e.g. Slack `oauth.v2.access`) returned a successful
+            // exchange but echoed no granted scopes, so the stored grant falls
+            // back to the requested (manifest) scope set. If the provider
+            // actually granted a NARROWER set, this widens the stored grant to
+            // the full requested set — surface it so a narrower-than-requested
+            // grant is never silently widened. Guard log only: the fallback
+            // value is unchanged, and the count (not the values) is logged.
+            tracing::warn!(
+                provider = spec.provider_id,
+                requested_scope_count = requested_scopes.len(),
+                "oauth exchange returned no granted scopes; falling back to requested scopes (stored grant may be wider than the provider actually granted)"
+            );
+            Ok(requested_scopes.to_vec())
+        }
     }
 }
 

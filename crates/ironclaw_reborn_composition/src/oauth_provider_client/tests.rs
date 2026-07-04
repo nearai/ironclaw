@@ -115,6 +115,44 @@ async fn google_exchange_fails_closed_when_response_omits_scope() {
 }
 
 #[tokio::test]
+async fn fallback_to_requested_stores_requested_scopes_when_provider_omits_scope() {
+    // Complements `google_exchange_fails_closed_when_response_omits_scope`
+    // (RequireProviderScope). Under `ExchangeScopePolicy::FallbackToRequested`
+    // (notion/Slack), a successful exchange whose body omits `scope` stores the
+    // REQUESTED (manifest) scope set — which can be wider than the provider
+    // actually granted, so `scopes_for_exchange` now emits a guard `warn!`.
+    // Behavior is preserved: the stored grant equals the requested set. Driven
+    // through `exchange_callback` (the caller), not the private helper.
+    let egress = Arc::new(RecordingEgress::ok(
+        br#"{"access_token":"access-token","expires_in":3600}"#.to_vec(),
+    ));
+    let client = HostOAuthProviderClient::new(
+        notion_spec(),
+        egress,
+        Arc::new(RecordingSecretStore::recording()),
+        Arc::new(NoopObligationHandler),
+        OAuthClientId::new("notion-client").unwrap(),
+        OAuthRedirectUri::new("https://app.example/callback").unwrap(),
+    )
+    .unwrap();
+
+    let exchange = client
+        .exchange_callback(
+            exchange_context(),
+            callback_request("notion", "notion", &["notion.read", "notion.insert"]),
+        )
+        .await
+        .expect("fallback-to-requested exchange succeeds");
+
+    let scopes: Vec<&str> = exchange.scopes.iter().map(|scope| scope.as_str()).collect();
+    assert_eq!(
+        scopes,
+        vec!["notion.read", "notion.insert"],
+        "empty provider scope must fall back to the exact requested scope set"
+    );
+}
+
+#[tokio::test]
 async fn exchange_maps_provider_5xx_to_retryable_backend_unavailable() {
     let egress = Arc::new(RecordingEgress::with_status(
         503,
@@ -362,6 +400,40 @@ fn fake_digest(value: &str) -> String {
     )
 }
 
+#[test]
+#[cfg(feature = "slack-v2-host-beta")]
+fn slack_authed_user_token_response_extracts_user_token_and_scopes() {
+    use secrecy::ExposeSecret;
+    let body = br#"{"ok":true,"access_token":"xoxb-bot-token","app_id":"A123","team":{"id":"T123"},"enterprise":{"id":"E123"},"authed_user":{"id":"U1","access_token":"xoxp-user-token","scope":"search:read,users:read","token_type":"user"}}"#;
+    let parsed = parse_token_response(body, TokenResponseShape::SlackAuthedUser)
+        .expect("slack user token parses");
+    assert_eq!(parsed.access_token.expose_secret(), "xoxp-user-token");
+    let scopes: Vec<&str> = parsed.scopes.iter().map(|scope| scope.as_str()).collect();
+    assert_eq!(scopes, vec!["search:read", "users:read"]);
+    assert!(parsed.refresh_token.is_none());
+    let identity = parsed
+        .provider_identity
+        .expect("slack response should carry non-secret identity fields");
+    assert_eq!(identity.subject.as_str(), "U1");
+    assert_eq!(identity.team_id.as_deref(), Some("T123"));
+    assert_eq!(identity.enterprise_id.as_deref(), Some("E123"));
+    assert_eq!(identity.app_id.as_deref(), Some("A123"));
+}
+
+#[test]
+#[cfg(feature = "slack-v2-host-beta")]
+fn slack_token_response_rejects_ok_false() {
+    let body = br#"{"ok":false,"error":"invalid_code"}"#;
+    assert!(parse_token_response(body, TokenResponseShape::SlackAuthedUser).is_err());
+}
+
+#[test]
+#[cfg(feature = "slack-v2-host-beta")]
+fn slack_token_response_rejects_missing_authed_user() {
+    let body = br#"{"ok":true,"access_token":"xoxb-bot-only"}"#;
+    assert!(parse_token_response(body, TokenResponseShape::SlackAuthedUser).is_err());
+}
+
 fn google_spec() -> HostOAuthProviderSpec {
     HostOAuthProviderSpec {
         provider_id: "google",
@@ -370,6 +442,7 @@ fn google_spec() -> HostOAuthProviderSpec {
         secret_handle_prefix: "google",
         resource: None,
         exchange_scope_policy: ExchangeScopePolicy::RequireProviderScope,
+        token_response_shape: TokenResponseShape::Standard,
     }
 }
 
@@ -381,6 +454,7 @@ fn notion_spec() -> HostOAuthProviderSpec {
         secret_handle_prefix: "notion",
         resource: Some("https://mcp.notion.com/mcp"),
         exchange_scope_policy: ExchangeScopePolicy::FallbackToRequested,
+        token_response_shape: TokenResponseShape::Standard,
     }
 }
 

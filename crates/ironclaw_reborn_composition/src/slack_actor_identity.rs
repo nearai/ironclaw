@@ -1,8 +1,7 @@
 //! Reborn-owned Slack actor identity resolution.
 //!
-//! This module intentionally lives in Reborn composition instead of the legacy
-//! `src/pairing` path. It adapts a host-owned integration-user identity lookup
-//! to the product workflow's actor-to-user resolver contract.
+//! This module adapts the Reborn-owned Slack OAuth identity lookup to the
+//! product workflow's actor-to-user resolver contract.
 
 use std::{
     collections::HashMap,
@@ -39,7 +38,7 @@ pub trait RebornUserIdentityLookup: Send + Sync {
 
     /// Whether the given IronClaw user has any binding for `provider` — the
     /// reverse of [`resolve_user_identity`]. Used to tell whether the calling
-    /// user has personally connected a channel (e.g. Slack personal pairing).
+    /// user has personally connected a channel (e.g. Slack personal OAuth).
     async fn user_has_provider_binding(
         &self,
         provider: &str,

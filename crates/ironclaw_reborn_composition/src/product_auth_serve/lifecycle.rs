@@ -13,6 +13,7 @@ pub(super) async fn lifecycle_cleanup_handler(
     let cleanup_request = SecretCleanupRequest {
         scope,
         extension_id,
+        provider: None,
         action: request.action,
     };
 

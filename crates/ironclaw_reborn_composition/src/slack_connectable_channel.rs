@@ -58,7 +58,11 @@ pub fn build_webui_services_with_slack_host_beta_mounts(
             reason: "outbound delivery target providers require local runtime services".to_string(),
         });
     }
-    let channel_connection = slack_mounts.map(slack_channel_connection_facade);
+    let personal_credential_cleanup = runtime.services().product_auth.clone().map(|services| {
+        services as Arc<dyn crate::slack_channel_connection::SlackPersonalCredentialCleanup>
+    });
+    let channel_connection = slack_mounts
+        .map(|mounts| slack_channel_connection_facade(mounts, personal_credential_cleanup));
     // Fill the extension-lifecycle handler's late-binding facade slot so an
     // inbound-channel activation can gate on the caller's channel connection.
     // Idempotent; shares the same facade the WebUI connectable-channel surface
