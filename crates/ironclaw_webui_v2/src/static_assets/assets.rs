@@ -348,7 +348,11 @@ mod tests {
         assert!(use_channel_onboarding.contains("submitOnboardingPairing"));
         assert!(use_channel_onboarding.contains("redeemPairingCode"));
         assert!(use_channel_onboarding.contains("connectionEventMatchesOnboarding"));
-        assert!(use_channel_onboarding.contains("resumeOnboardingAfterChannelConnected"));
+        // OAuth completion/failure matching goes through the shared flow-id
+        // matchers, not a hand-rolled comparison that could drift on the
+        // payload contract (type guard, snake_case flow_id fallback).
+        assert!(use_channel_onboarding.contains("completionMatchesFlow"));
+        assert!(use_channel_onboarding.contains("failureMatchesFlow"));
         assert!(use_channel_onboarding.contains("rememberChannelConnectionWaiter"));
         assert!(use_channel_onboarding.contains("forgetChannelConnectionWaiter"));
         assert!(use_channel_onboarding.contains("channelConnectionRequirementFromCard"));

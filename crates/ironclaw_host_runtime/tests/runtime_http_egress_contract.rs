@@ -4681,6 +4681,22 @@ impl RuntimeHttpEgress for RequestPolicyStagingEgress {
         );
         self.inner.execute(request).await
     }
+
+    // Forward the exchange entry point too: without this, an exchange routed
+    // through the staging helper would silently take the trait default (the
+    // SANITIZING path) and green-light against the wrong pipeline.
+    async fn execute_credential_exchange(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        stage_policy_sync(
+            &self.services,
+            &request.scope,
+            &request.capability_id,
+            request.network_policy.clone(),
+        );
+        self.inner.execute_credential_exchange(request).await
+    }
 }
 
 fn request_policy_staging_egress<N>(network: N) -> Arc<dyn RuntimeHttpEgress>

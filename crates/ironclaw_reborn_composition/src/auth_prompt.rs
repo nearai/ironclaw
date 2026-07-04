@@ -179,6 +179,9 @@ fn auth_prompt_from_credential_requirement(
         RuntimeCredentialAccountSetup::OAuth { .. } => {
             view.challenge_kind = Some(AuthPromptChallengeKind::OAuthUrl);
         }
+        // A retired setup kind (legacy persisted record) has no serviceable
+        // challenge; keep the generic requirement-derived prompt.
+        RuntimeCredentialAccountSetup::Retired => {}
     }
     view.provider = Some(provider);
     view

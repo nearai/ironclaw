@@ -48,9 +48,14 @@ function extensionListItemIsConfigured(extension) {
   if (extension.needs_setup === false && (extension.authenticated || extension.active)) {
     return true;
   }
+  // Same snake/camel fallback chain as `extensionLifecycleState`
+  // (lib/extension-actions.js) so a camelCase snapshot cannot read as
+  // "not configured" here while the rest of the page treats it as active.
   const state =
     extension.onboarding_state ||
+    extension.onboardingState ||
     extension.activation_status ||
+    extension.activationStatus ||
     (extension.active ? "active" : null);
   return (state === "active" || state === "ready") && extension.needs_setup !== true;
 }
@@ -470,6 +475,11 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
         const timedOut = Date.now() - startedAt > OAUTH_SETUP_TIMEOUT_MS;
         const popupClosedBeforeCallback = popup && popup.closed && !requireCallbackCompletion;
         if (popupClosedBeforeCallback || timedOut) {
+          if (timedOut) {
+            // An abandoned reconnect otherwise ends after 10 minutes with no
+            // signal at all — the button was disabled the whole time.
+            setAuthError("Authorization timed out. Try connecting again.");
+          }
           stopWatcher();
           refreshSetupState();
         }

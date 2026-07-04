@@ -67,12 +67,16 @@ pub(crate) struct OAuthGateProviderRegistry {
 
 impl OAuthGateProviderRegistry {
     pub(crate) fn new(drivers: Vec<Arc<OAuthGateFlowDriver>>) -> Self {
-        Self {
-            drivers: drivers
-                .into_iter()
-                .map(|driver| (driver.provider_id().to_string(), driver))
-                .collect(),
+        let mut map: BTreeMap<String, Arc<OAuthGateFlowDriver>> = BTreeMap::new();
+        for driver in drivers {
+            if let Some(previous) = map.insert(driver.provider_id().to_string(), driver) {
+                tracing::warn!(
+                    provider = previous.provider_id(),
+                    "duplicate OAuth gate provider registered; last registration wins"
+                );
+            }
         }
+        Self { drivers: map }
     }
 
     pub(crate) async fn challenge_for_blocked_gate(
@@ -83,10 +87,26 @@ impl OAuthGateProviderRegistry {
             let Some(driver) = self.drivers.get(requirement.provider.as_str()) else {
                 continue;
             };
-            return driver
+            match driver
                 .challenge_for_blocked_gate(request, requirement)
                 .await
-                .map(Some);
+            {
+                Ok(challenge) => return Ok(Some(challenge)),
+                // A registered-but-unconfigured provider (e.g. the Slack
+                // personal slot before the operator saves OAuth client
+                // credentials) must not swallow the whole gate: fall through to
+                // the next requirement / the generic requirement-derived
+                // prompt, matching the pre-registry behavior where an
+                // un-serviceable requirement was simply skipped.
+                Err(AuthProductError::BackendUnavailable) => {
+                    tracing::warn!(
+                        provider = requirement.provider.as_str(),
+                        "OAuth gate provider unavailable; falling through to next requirement"
+                    );
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
         }
         Ok(None)
     }
@@ -113,6 +133,7 @@ impl fmt::Debug for OAuthGateProviderRegistry {
     }
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct OAuthGateChallengeRequest<'a> {
     pub(crate) flow_manager: &'a Arc<dyn AuthFlowManager>,
     pub(crate) flow_source: &'a Arc<dyn AuthFlowRecordSource>,
@@ -603,6 +624,58 @@ mod tests {
 
         assert_eq!(challenge.kind, AuthPromptChallengeKind::OAuthUrl);
         assert_eq!(fixture.active_gate_flows().await.len(), 1);
+    }
+
+    /// A registered-but-unconfigured provider (Slack before the operator saves
+    /// OAuth client credentials) must not swallow the whole gate: pre-fix, a
+    /// requirements list with `slack_personal` first errored `challenge_for_gate`
+    /// entirely and the user got no auth prompt at all.
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[tokio::test]
+    async fn gate_registry_falls_through_unavailable_provider_to_next_requirement() {
+        use crate::slack_personal_oauth::SlackPersonalOAuthGateProvider;
+        use crate::slack_setup::SlackPersonalSetupServiceSlot;
+
+        let fixture = GateFixture::new(None);
+        let slack_driver = Arc::new(OAuthGateFlowDriver::new(
+            Arc::new(SlackPersonalOAuthGateProvider::new(
+                SlackPersonalSetupServiceSlot::new(
+                    ironclaw_auth::OAuthRedirectUri::new(
+                        "https://host.example/api/reborn/product-auth/oauth/slack_personal/callback",
+                    )
+                    .unwrap(),
+                ),
+            )),
+            Arc::new(InMemorySecretStore::new()),
+        ));
+        let registry =
+            OAuthGateProviderRegistry::new(vec![slack_driver, Arc::new(fixture.driver.clone())]);
+        let slack_requirement = RuntimeCredentialAuthRequirement {
+            provider: RuntimeCredentialAccountProviderId::new("slack_personal").unwrap(),
+            setup: Default::default(),
+            requester_extension: ExtensionId::new("slack").unwrap(),
+            provider_scopes: Vec::new(),
+        };
+        let requirements = vec![slack_requirement, fixture.requirement.clone()];
+
+        let challenge = registry
+            .challenge_for_blocked_gate(OAuthGateChallengeRequest {
+                flow_manager: &fixture.flow_manager,
+                flow_source: &fixture.flow_source,
+                requirements: &requirements,
+                scope: &fixture.scope,
+                owner_user_id: &fixture.owner_user_id,
+                run_id: fixture.run_id,
+                gate_ref: &fixture.gate_ref,
+            })
+            .await
+            .unwrap()
+            .expect("the google requirement must still produce a challenge");
+
+        assert_eq!(
+            challenge.provider.as_str(),
+            ironclaw_auth::GOOGLE_PROVIDER_ID
+        );
     }
 
     struct GateFixture {

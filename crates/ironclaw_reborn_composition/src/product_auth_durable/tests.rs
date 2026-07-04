@@ -1483,6 +1483,7 @@ async fn filesystem_cleanup_for_lifecycle_deactivates_owner_and_revokes_on_unins
         .cleanup_for_lifecycle(SecretCleanupRequest {
             scope: scope.clone(),
             extension_id: ext_id.clone(),
+            provider: None,
             action: SecretCleanupAction::Deactivate,
         })
         .await
@@ -1502,6 +1503,7 @@ async fn filesystem_cleanup_for_lifecycle_deactivates_owner_and_revokes_on_unins
         .cleanup_for_lifecycle(SecretCleanupRequest {
             scope: scope.clone(),
             extension_id: ext_id.clone(),
+            provider: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await
@@ -1522,6 +1524,93 @@ async fn filesystem_cleanup_for_lifecycle_deactivates_owner_and_revokes_on_unins
             .unwrap()
             .is_none(),
         "Uninstall must delete refresh secret from SecretStore"
+    );
+}
+
+// ─── fix: cleanup matches owner granularity + provider-selected OAuth accounts ─
+
+/// The production shape the Slack disconnect issues: the OAuth flow stored the
+/// account under its own scope (fresh per-flow `invocation_id`), as
+/// `UserReusable` with NO extension ownership/grants; the later disconnect
+/// mints another fresh invocation. Full-scope-equality matching (the old
+/// behavior) silently revoked nothing.
+#[tokio::test]
+async fn filesystem_cleanup_matches_owner_granularity_and_provider_selector() {
+    use ironclaw_auth::{SecretCleanupAction, SecretCleanupRequest, SecretCleanupService};
+    use ironclaw_host_api::ExtensionId;
+
+    let filesystem = test_filesystem();
+    let concrete_secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
+    let flow_scope = test_scope();
+    let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
+
+    let access = SecretHandle::new("slack-personal-access").unwrap();
+    use secrecy::SecretString;
+    concrete_secret_store
+        .put(
+            flow_scope.resource.clone(),
+            access.clone(),
+            SecretString::from("xoxp-material"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Exactly how the OAuth callback mints a personal credential (flows.rs).
+    let account = service
+        .create_account(ironclaw_auth::NewCredentialAccount {
+            scope: flow_scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: vec![],
+            access_secret: Some(access.clone()),
+            refresh_secret: None,
+            scopes: vec![],
+        })
+        .await
+        .unwrap();
+
+    // Same owner, FRESH invocation id — the disconnect/lifecycle caller shape.
+    let cleanup_scope = test_scope();
+    assert_ne!(
+        cleanup_scope.resource.invocation_id, flow_scope.resource.invocation_id,
+        "fixture must model the cross-invocation caller"
+    );
+
+    // Extension-keyed cleanup alone must NOT sweep the reusable account…
+    let report = service
+        .cleanup_for_lifecycle(SecretCleanupRequest {
+            scope: cleanup_scope.clone(),
+            extension_id: ExtensionId::new("slack").unwrap(),
+            provider: None,
+            action: SecretCleanupAction::Uninstall,
+        })
+        .await
+        .unwrap();
+    assert!(report.revoked_accounts.is_empty());
+
+    // …but the explicit provider selector revokes it and purges the secret.
+    let report = service
+        .cleanup_for_lifecycle(SecretCleanupRequest {
+            scope: cleanup_scope,
+            extension_id: ExtensionId::new("slack").unwrap(),
+            provider: Some(google_provider()),
+            action: SecretCleanupAction::Uninstall,
+        })
+        .await
+        .unwrap();
+    assert_eq!(report.revoked_accounts, vec![account.id]);
+    assert!(
+        concrete_secret_store
+            .metadata(&flow_scope.resource, &access)
+            .await
+            .unwrap()
+            .is_none(),
+        "provider-selected Uninstall must purge the token material"
     );
 }
 
@@ -2342,6 +2431,7 @@ async fn filesystem_cleanup_removes_grant_from_non_owner_account() {
         .cleanup_for_lifecycle(SecretCleanupRequest {
             scope: scope.clone(),
             extension_id: ext_id.clone(),
+            provider: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await

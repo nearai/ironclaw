@@ -42,21 +42,13 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
         console.error("Slack activation after OAuth failed.");
       }
     }
-    for (const queryKey of [
-      ["extensions"],
-      ["extension-registry"],
-      ["extension-setup", packageId],
-    ]) {
-      await queryClient.invalidateQueries({ queryKey });
-    }
-    await queryClient.refetchQueries?.({
-      queryKey: ["extensions"],
-      type: "active",
-    });
-    await queryClient.refetchQueries?.({
-      queryKey: ["extension-setup", packageId],
-      type: "active",
-    });
+    // invalidateQueries refetches active queries and resolves when they
+    // settle (TanStack v5), so no follow-up refetchQueries pass is needed.
+    await Promise.all(
+      [["extensions"], ["extension-registry"], ["extension-setup", packageId]].map(
+        (queryKey) => queryClient.invalidateQueries({ queryKey }),
+      ),
+    );
     // Broadcast channel-connected (same event pairing redemption sends) so an
     // open chat card for this channel clears and its parked request resumes —
     // connecting from the Extensions page must not strand the chat surface.

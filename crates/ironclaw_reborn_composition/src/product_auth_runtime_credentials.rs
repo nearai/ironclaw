@@ -626,7 +626,9 @@ fn account_has_provider_scopes(
 fn credential_setup_requires_stored_scopes(setup: &RuntimeCredentialAccountSetup) -> bool {
     match setup {
         RuntimeCredentialAccountSetup::OAuth { .. } => true,
-        RuntimeCredentialAccountSetup::ManualToken => false,
+        RuntimeCredentialAccountSetup::ManualToken | RuntimeCredentialAccountSetup::Retired => {
+            false
+        }
     }
 }
 

@@ -1,3 +1,6 @@
+// arch-exempt: large_file, PR #5604 adds the channel-connect requirement +
+// slack_user companion lifecycle here pending the composition decomposition
+// tracked for this crate, plan #5604
 use std::{collections::BTreeSet, sync::Arc};
 
 use ironclaw_extensions::{

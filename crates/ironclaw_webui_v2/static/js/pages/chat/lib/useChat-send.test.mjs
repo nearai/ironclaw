@@ -2774,9 +2774,16 @@ test("useChat: channel-connected event from extensions clears a mounted waiting 
     stateUpdates.some((update) => update.index === 5 && update.value === null),
     "waiting channel panel should clear before the continuation send",
   );
-  assert.deepEqual(
-    JSON.parse(storageValues.get(`ironclaw.chat.dismissedOnboarding.v1:${threadId}`)),
-    [sourceMessageId],
+  // The broadcast must NOT durably dismiss the card or forget the waiter: the
+  // continuation send happens best-effort in the NOTIFYING tab, and on its
+  // failure the re-persisted waiter is the only path left to resume the
+  // parked request. Re-derive suppression is owned by the per-user connection
+  // snapshot (connected) and the durable timeline continuation, not by a
+  // dismissal stamped on someone else's success signal.
+  assert.equal(
+    storageValues.get(`ironclaw.chat.dismissedOnboarding.v1:${threadId}`),
+    undefined,
+    "cross-tab connect must not persist a dismissal",
   );
 });
 
@@ -3617,7 +3624,11 @@ test("useChat: Slack OAuth completion consumes the in-chat connection card", asy
   await chat.startOnboardingOAuth();
   store.set(
     "ironclaw:product-auth:oauth-complete",
-    JSON.stringify({ flowId: "flow-slack-chat", status: "completed" }),
+    JSON.stringify({
+      type: "ironclaw:product-auth:oauth-complete",
+      flowId: "flow-slack-chat",
+      status: "completed",
+    }),
   );
   for (const callback of intervalCallbacks) callback();
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -3728,6 +3739,19 @@ test("useChat: a failed Slack OAuth signal surfaces a retryable error on the con
     "the card must stay mounted so the user can retry",
   );
   assert.equal(sendBodies.length, 0, "a failed flow must not send the continuation");
+
+  // Retry after the failure: a fresh start must clear the stale card error and
+  // track a new flow instead of leaving the dead one's message up.
+  await chat.startOnboardingOAuth();
+  assert.ok(
+    stateUpdates.some(
+      (update) =>
+        update.index === STATE_SLOT.pendingOnboarding &&
+        update.value &&
+        update.value.oauthError === null,
+    ),
+    "a retry must clear the stale card error",
+  );
 });
 
 test("useChat: an abandoned Slack OAuth flow times out instead of polling forever", async () => {

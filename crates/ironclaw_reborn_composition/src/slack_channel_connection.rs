@@ -9,7 +9,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use ironclaw_auth::{
-    AuthProductScope, AuthSurface, SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest,
+    AuthProductScope, AuthProviderId, AuthSurface, SLACK_PERSONAL_PROVIDER_ID, SecretCleanupAction,
+    SecretCleanupReport, SecretCleanupRequest,
 };
 use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope, TenantId};
 use ironclaw_product_workflow::{
@@ -125,19 +126,12 @@ impl ChannelConnectionFacade for SlackChannelConnectionFacade {
                 "Slack personal connection scope is unavailable; refusing unscoped disconnect",
             ));
         };
-        self.personal_dm_target_store
-            .delete_personal_dm_targets_for_user(
-                &self.tenant_id,
-                &caller.user_id,
-                &scope.installation_id,
-                &scope.team_id,
-            )
-            .await
-            .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
-        // Revoke the caller's `slack_personal` credential before deleting the
-        // identity binding: the binding is the "connected" signal, so a cleanup
-        // failure leaves the caller connected and the whole disconnect
-        // retryable (extension removal runs this before `ExtensionRemove`).
+        // Ordering: credential revoke → DM targets → identity binding. The
+        // binding is the "connected" signal and deletes last (commit point);
+        // the credential revokes first so a mid-sequence failure leaves the
+        // caller visibly connected with every step retryable — deleting DM
+        // targets before a failing revoke would silently break proactive DMs
+        // while the UI still shows connected.
         if let Some(cleanup) = &self.personal_credential_cleanup {
             cleanup
                 .cleanup_credentials_for_lifecycle(SecretCleanupRequest {
@@ -155,10 +149,27 @@ impl ChannelConnectionFacade for SlackChannelConnectionFacade {
                     ),
                     extension_id: ExtensionId::new(SLACK_EXTENSION_ID)
                         .map_err(|error| RebornServicesError::internal_from(error.to_string()))?,
+                    // OAuth-minted personal credentials carry no extension
+                    // ownership/grants, so the provider selector is what
+                    // actually reaches the caller's `slack_personal` account.
+                    provider: Some(
+                        AuthProviderId::new(SLACK_PERSONAL_PROVIDER_ID).map_err(|error| {
+                            RebornServicesError::internal_from(error.to_string())
+                        })?,
+                    ),
                     action: SecretCleanupAction::Uninstall,
                 })
                 .await?;
         }
+        self.personal_dm_target_store
+            .delete_personal_dm_targets_for_user(
+                &self.tenant_id,
+                &caller.user_id,
+                &scope.installation_id,
+                &scope.team_id,
+            )
+            .await
+            .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
         let provider_user_id_prefix = format!("{}:", scope.installation_id.as_str());
         self.user_identity_delete_store
             .delete_user_identity_bindings_for_user(
@@ -277,6 +288,11 @@ mod tests {
             "disconnect must issue exactly one credential cleanup"
         );
         assert_eq!(cleanup_requests[0].extension_id.as_str(), "slack");
+        assert_eq!(
+            cleanup_requests[0].provider.as_ref().map(|p| p.as_str()),
+            Some(SLACK_PERSONAL_PROVIDER_ID),
+            "the provider selector is what reaches the grant-less OAuth account"
+        );
         assert_eq!(cleanup_requests[0].action, SecretCleanupAction::Uninstall);
         assert_eq!(
             cleanup_requests[0].scope.resource.tenant_id,

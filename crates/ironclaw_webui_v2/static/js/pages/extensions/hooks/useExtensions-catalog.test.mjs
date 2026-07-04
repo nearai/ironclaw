@@ -137,9 +137,10 @@ test("useExtensions merges registry and installed entries with installed first",
   );
 });
 
-test("install/activate report a blocked auth popup as blocked, not as an HTTPS error", () => {
+test("install/activate auth popups: noopener null is not an error; insecure URLs are", () => {
   const stateUpdates = [];
   const mutationConfigs = [];
+  const openCalls = [];
   const context = {
     Date,
     Error,
@@ -174,9 +175,16 @@ test("install/activate report a blocked auth popup as blocked, not as an HTTPS e
     useQuery: () => ({ data: {}, isLoading: false }),
     useQueryClient: () => ({ invalidateQueries: () => {} }),
     useT: () => (key) => key,
-    // A valid HTTPS auth URL whose popup the browser refuses to open:
-    // window.open returns null, which openAuthPopup reports as popup_blocked.
-    window: { clearInterval: () => {}, setInterval: () => 1, open: () => null },
+    // Spec-compliant browser: window.open with "noopener" returns null EVEN
+    // when the popup opens, so null on this branch must not surface an error.
+    window: {
+      clearInterval: () => {},
+      setInterval: () => 1,
+      open: (url, target, features) => {
+        openCalls.push({ url, target, features });
+        return null;
+      },
+    },
   };
   vm.runInNewContext(useExtensionsSourceForTest(), context);
   context.globalThis.__testExports.useExtensions();
@@ -191,19 +199,21 @@ test("install/activate report a blocked auth popup as blocked, not as an HTTPS e
     { success: true, auth_url: "https://slack.com/oauth/v2/authorize" },
     { displayName: "Slack", kind: "extension" },
   );
-  assert.match(lastError().message, /popup was blocked/i);
-
-  activateConfig.onSuccess(
-    { success: true, auth_url: "https://slack.com/oauth/v2/authorize" },
-    { displayName: "Slack" },
-  );
-  assert.match(lastError().message, /popup was blocked/i);
+  assert.equal(lastError(), undefined, "noopener null must not read as a blocked popup");
+  // The fresh open must pass the full hardened argument set (see
+  // .claude/rules/testing.md mock-hygiene: assert EVERY argument the
+  // production call passes — dropping "noopener" would be a security bug).
+  assert.deepEqual(openCalls.at(-1), {
+    url: "https://slack.com/oauth/v2/authorize",
+    target: "_blank",
+    features: "noopener,noreferrer",
+  });
 
   activateConfig.onSuccess(
     { success: false, auth_url: "https://slack.com/oauth/v2/authorize" },
     { displayName: "Slack" },
   );
-  assert.match(lastError().message, /popup was blocked/i);
+  assert.equal(lastError(), undefined);
 
   // A genuinely non-HTTPS URL still reports the HTTPS problem.
   activateConfig.onSuccess(

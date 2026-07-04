@@ -1007,8 +1007,12 @@ impl SecretCleanupService for InMemoryAuthProductServices {
         let mut state = self.lock_state();
         let quarantines = state.quarantines.clone();
         let mut report = SecretCleanupReport::default();
+        // Credential-owner granularity, not full scope equality: cleanup
+        // callers mint a fresh invocation (and often a different thread), so
+        // exact matching could never find the account the flow stored.
+        let owner = CredentialAccountOwnerScope::from_scope(&request.scope.to_credential_owner());
         for account in state.accounts.values_mut() {
-            if !scope_matches(&request.scope, &account.scope) {
+            if !owner.matches(account) {
                 continue;
             }
             let owns_extension_account = account.owner_extension.as_ref()
@@ -1018,7 +1022,8 @@ impl SecretCleanupService for InMemoryAuthProductServices {
                 .granted_extensions
                 .iter()
                 .any(|extension| extension == &request.extension_id);
-            if !(owns_extension_account || had_grant) {
+            let provider_selected = request.provider.as_ref() == Some(&account.provider);
+            if !(owns_extension_account || had_grant || provider_selected) {
                 continue;
             }
             if let Some(reason) = quarantines.get(&account.id).copied() {
@@ -1035,7 +1040,7 @@ impl SecretCleanupService for InMemoryAuthProductServices {
                 report.removed_grants.push(account.id);
             }
 
-            if owns_extension_account {
+            if owns_extension_account || provider_selected {
                 match request.action {
                     Deactivate => {
                         account.status = CredentialAccountStatus::Inactive;
@@ -1045,6 +1050,8 @@ impl SecretCleanupService for InMemoryAuthProductServices {
                     SecretCleanupAction::Uninstall => {
                         if account.status != CredentialAccountStatus::Revoked {
                             account.status = CredentialAccountStatus::Revoked;
+                            account.access_secret = None;
+                            account.refresh_secret = None;
                             account.updated_at = Utc::now();
                             report.revoked_accounts.push(account.id);
                         }

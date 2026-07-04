@@ -391,10 +391,16 @@ impl HostOAuthProviderClient {
         // Clamp to i32::MAX seconds (~68 years) before converting, then use
         // checked_add_signed so a malformed/huge provider TTL yields None
         // instead of panicking on chrono/DateTime overflow.
-        let access_expires_at: Option<Timestamp> = tokens.expires_in_seconds.and_then(|secs| {
-            let signed_secs = secs.min(i32::MAX as u64) as i64;
-            Utc::now().checked_add_signed(chrono::Duration::seconds(signed_secs))
-        });
+        let access_expires_at: Option<Timestamp> = tokens
+            .expires_in_seconds
+            // Providers signal a non-expiring token as `expires_in: 0` (Slack
+            // does for apps without token rotation); treating it literally
+            // would mint an already-expired credential.
+            .filter(|secs| *secs > 0)
+            .and_then(|secs| {
+                let signed_secs = secs.min(i32::MAX as u64) as i64;
+                Utc::now().checked_add_signed(chrono::Duration::seconds(signed_secs))
+            });
 
         let refresh_token = tokens.refresh_token;
 
@@ -635,6 +641,10 @@ struct TokenResponseBody {
 struct SlackTokenResponseBody {
     #[serde(default)]
     ok: bool,
+    /// Slack's stable error code on `ok: false` (HTTP is still 200). Logged
+    /// verbatim — it is a fixed enum-like code, never token material.
+    #[serde(default)]
+    error: Option<String>,
     #[serde(default)]
     app_id: Option<String>,
     #[serde(default)]
@@ -711,31 +721,47 @@ fn parse_standard_token_response(body: &[u8]) -> Result<OAuthTokenResponse, Auth
 fn parse_slack_authed_user_token_response(
     body: &[u8],
 ) -> Result<OAuthTokenResponse, AuthProductError> {
-    let parsed: SlackTokenResponseBody =
-        serde_json::from_slice(body).map_err(|_| AuthProductError::TokenExchangeFailed)?;
+    let parsed: SlackTokenResponseBody = serde_json::from_slice(body).map_err(|error| {
+        // serde_json errors carry position/expectation only, never payload
+        // bytes — safe to log next to a token-bearing body.
+        tracing::warn!(parse_error = %error, "slack token exchange response did not parse");
+        AuthProductError::TokenExchangeFailed
+    })?;
     if !parsed.ok {
+        // Slack signals failure as HTTP 200 + `ok: false`, so the non-2xx
+        // logging in the caller never sees this path.
+        tracing::warn!(
+            slack_error_code = parsed.error.as_deref().unwrap_or("<absent>"),
+            "slack token exchange returned ok:false"
+        );
         return Err(AuthProductError::TokenExchangeFailed);
     }
-    let authed_user = parsed
-        .authed_user
-        .ok_or(AuthProductError::TokenExchangeFailed)?;
+    let missing = |field: &'static str| {
+        tracing::warn!(
+            field,
+            "slack token exchange response is missing a required field"
+        );
+        AuthProductError::TokenExchangeFailed
+    };
+    let authed_user = parsed.authed_user.ok_or_else(|| missing("authed_user"))?;
     let access_token = authed_user
         .access_token
-        .ok_or(AuthProductError::TokenExchangeFailed)?;
+        .ok_or_else(|| missing("authed_user.access_token"))?;
     let identity = OAuthProviderIdentity::new(
-        authed_user
-            .id
-            .ok_or(AuthProductError::TokenExchangeFailed)?,
+        authed_user.id.ok_or_else(|| missing("authed_user.id"))?,
         Some(
             parsed
                 .team
                 .and_then(|team| team.id)
-                .ok_or(AuthProductError::TokenExchangeFailed)?,
+                .ok_or_else(|| missing("team.id"))?,
         ),
         parsed.enterprise.and_then(|enterprise| enterprise.id),
-        Some(parsed.app_id.ok_or(AuthProductError::TokenExchangeFailed)?),
+        Some(parsed.app_id.ok_or_else(|| missing("app_id"))?),
     )
-    .map_err(|_| AuthProductError::TokenExchangeFailed)?;
+    .map_err(|error| {
+        tracing::warn!(identity_error = %error, "slack token exchange identity was invalid");
+        AuthProductError::TokenExchangeFailed
+    })?;
     // Slack returns granted user scopes as a COMMA-separated list, whereas
     // OAuthTokenResponse::new splits on whitespace. Normalize commas to spaces
     // so each scope is parsed individually (otherwise the whole list would be

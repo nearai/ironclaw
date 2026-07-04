@@ -28,17 +28,17 @@ export function isHttpsAuthUrl(url) {
 // is supplied and still open; otherwise opens a fresh `noopener` window. Refuses
 // non-HTTPS urls. Returns `{ ok, popup, reason? }`.
 export function openAuthPopup(url, popup = null) {
-  if (!isHttpsAuthUrl(url)) return { ok: false, popup: null };
+  if (!isHttpsAuthUrl(url)) return { ok: false, popup: null, reason: "insecure_url" };
   if (popup && !popup.closed) {
     popup.location.href = url;
     return { ok: true, popup };
   }
   const opened = window.open(url, "_blank", "noopener,noreferrer");
-  return {
-    ok: Boolean(opened),
-    popup: opened || null,
-    reason: opened ? null : "popup_blocked",
-  };
+  // Per spec, `window.open` with "noopener" returns null even when the popup
+  // opens, so null here is NOT evidence of a blocked popup (the v1 gateway
+  // handles this the same way). Real blocked-popup detection happens at the
+  // `about:blank` pre-open sites, whose feature list carries no "noopener".
+  return { ok: true, popup: opened || null, reason: null };
 }
 
 export function parseProductAuthOAuthCompletion(value) {
@@ -116,9 +116,16 @@ export function failureMatchesFlow(payload, flowId) {
 export function completionMatchesGate(payload, gate, listeningSince) {
   if (!isProductAuthOAuthCompletion(payload)) return false;
   const continuation = payload?.continuation;
-  if (!continuation || continuation.type !== "turn_gate_resume") {
+  // The timestamp fallback exists for legacy payloads that carry no
+  // continuation at all. A payload with a NON-gate continuation (e.g.
+  // `setup_only` from an extension-setup flow completing in another tab) is
+  // known to belong to a different flow shape and must never satisfy a gate —
+  // treating it as a wildcard cleared pending chat gates whenever any other
+  // extension finished OAuth.
+  if (!continuation) {
     return Number(payload?.completedAt || 0) >= listeningSince;
   }
+  if (continuation.type !== "turn_gate_resume") return false;
   if (continuation.turn_run_ref && continuation.turn_run_ref !== gate?.runId) return false;
   if (continuation.gate_ref && continuation.gate_ref !== gate?.gateRef) return false;
   return true;

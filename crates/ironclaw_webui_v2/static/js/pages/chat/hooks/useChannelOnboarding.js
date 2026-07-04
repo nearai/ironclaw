@@ -9,6 +9,8 @@ import {
   subscribeChannelConnected,
 } from "../../../lib/channel-connection-events.js";
 import {
+  completionMatchesFlow,
+  failureMatchesFlow,
   openAuthPopup,
   readLatestProductAuthOAuthCompletion,
   subscribeProductAuthOAuthCompletion,
@@ -334,7 +336,12 @@ export function useChannelOnboarding(
       typeof window !== "undefined" ? window : globalThis?.window || null;
     if (!browserWindow) return;
     let serverCheckInFlight = false;
-    const finishCompletion = async (pending) => {
+    // Reads the pending flow from the REF (not a caller-captured copy) so a
+    // completion arriving via the broadcast subscription and one arriving via
+    // the interval poll cannot both pass the `completing` guard with stale
+    // objects and double-send the continuation.
+    const finishCompletion = async () => {
+      const pending = pendingOnboardingOauthFlowRef.current;
       if (!pending || pending.completing) return;
       pendingOnboardingOauthFlowRef.current = { ...pending, completing: true };
       const onboarding = pendingOnboardingRef.current;
@@ -386,13 +393,12 @@ export function useChannelOnboarding(
     const handleCompletion = (payload) => {
       const pending = pendingOnboardingOauthFlowRef.current;
       if (!pending) return;
-      if (!payload || payload.flowId !== pending.flowId) return;
-      if (payload.status === "failed") {
+      if (failureMatchesFlow(payload, pending.flowId)) {
         failOauthFlow(pending, CHAT_OAUTH_FAILED_MESSAGE);
         return;
       }
-      if (payload.status !== "completed") return;
-      Promise.resolve(finishCompletion(pending)).catch(() => {
+      if (!completionMatchesFlow(payload, pending.flowId)) return;
+      Promise.resolve(finishCompletion()).catch(() => {
         pendingOnboardingOauthFlowRef.current = pending;
       });
     };
@@ -406,7 +412,7 @@ export function useChannelOnboarding(
             ? snapshot
             : snapshot?.extensions || [];
           if (channelConnectionIsSatisfied(extensions, pending.channel)) {
-            return finishCompletion(pending);
+            return finishCompletion();
           }
           return null;
         })
@@ -419,8 +425,10 @@ export function useChannelOnboarding(
     const unsubscribe = subscribeProductAuthOAuthCompletion(browserWindow, handleCompletion);
     const timer = browserWindow.setInterval(() => {
       const pending = pendingOnboardingOauthFlowRef.current;
+      // No in-flight OAuth flow: skip the storage read + server poll entirely
+      // (the interval runs for the lifetime of every chat view).
+      if (!pending) return;
       if (
-        pending &&
         !pending.completing &&
         pending.startedAt &&
         Date.now() - pending.startedAt > CHAT_OAUTH_TIMEOUT_MS
@@ -437,13 +445,6 @@ export function useChannelOnboarding(
     };
   }, [clearOnboardingAfterChannelConnected, setPendingOnboarding, threadId]);
 
-  const resumeOnboardingAfterChannelConnected = React.useCallback(
-    async (onboarding, event = {}) => {
-      clearOnboardingAfterChannelConnected(onboarding);
-    },
-    [clearOnboardingAfterChannelConnected],
-  );
-
   React.useEffect(() => {
     return subscribeChannelConnected((event) => {
       // A channel connected — here, in another tab, or on the extensions page.
@@ -455,11 +456,15 @@ export function useChannelOnboarding(
       queryClient.invalidateQueries?.({ queryKey: ["connectable-channels"] });
       const onboarding = pendingOnboardingRef.current;
       if (!connectionEventMatchesOnboarding(event, onboarding)) return;
-      resumeOnboardingAfterChannelConnected(onboarding, event).catch((error) => {
-        console.error("channel connection resume failed:", error);
-      });
+      // Hide the mounted panel (the account IS connected now), but do NOT
+      // persist a dismissal or forget the waiter: the continuation send for
+      // this thread happens best-effort in the NOTIFYING tab
+      // (resumeWaitingChannelConnections). If that send fails, the waiter it
+      // re-persists is the only remaining path to resume the parked request —
+      // durably dismissing here would strand it with no UI affordance left.
+      setPendingOnboarding(null);
     });
-  }, [resumeOnboardingAfterChannelConnected]);
+  }, [setPendingOnboarding]);
 
   const submitOnboardingPairing = React.useCallback(
     async (code) => {
@@ -587,6 +592,12 @@ export function useChannelOnboarding(
     // blocked. Any failure below closes it again.
     const popup = window.open("about:blank", "_blank", "width=600,height=600");
     if (popup) popup.opener = null;
+    // Unlike the noopener fresh-open in `openAuthPopup` (which returns null
+    // even on success per spec), a null here reliably means the browser
+    // blocked the popup — surface it before burning the flow start.
+    if (!popup) {
+      throw new Error("Authorization popup was blocked.");
+    }
     try {
       const setup =
         typeof queryClient.fetchQuery === "function"

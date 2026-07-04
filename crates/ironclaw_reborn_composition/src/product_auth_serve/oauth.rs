@@ -208,8 +208,21 @@ async fn start_slack_personal_oauth_flow(
     if requester_extension.as_str() != SLACK_EXTENSION_ID {
         return Err(ProductAuthRouteFailure::invalid_request());
     }
+    // The provider id and scope list are compile-time constants: a failure
+    // here is an internal invariant bug, not a malformed client request — do
+    // not blame the caller with a 400.
+    let internal_invariant = |field: &'static str| {
+        tracing::error!(
+            field,
+            "slack personal OAuth start hit an invalid built-in constant"
+        );
+        ProductAuthRouteFailure::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            AuthErrorCode::BackendUnavailable,
+        )
+    };
     let provider = AuthProviderId::new(SLACK_PERSONAL_PROVIDER_ID)
-        .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
+        .map_err(|_| internal_invariant("provider_id"))?;
     let account_label = CredentialAccountLabel::new(request.account_label)
         .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
     let requested_scopes = slack_personal_oauth_setup_scopes()
@@ -217,7 +230,7 @@ async fn start_slack_personal_oauth_flow(
         .copied()
         .map(ProviderScope::new)
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
+        .map_err(|_| internal_invariant("provider_scopes"))?;
     let fields = ScopeFields {
         session_id: None,
         thread_id: None,
@@ -805,8 +818,16 @@ async fn bind_slack_personal_oauth_identity_for_callback(
     callback_scope: &AuthProductScope,
     provider_identity: Option<&OAuthProviderIdentity>,
 ) -> Result<(), AuthProductError> {
+    // Fail closed: the Slack callback descriptor is only mounted when Slack
+    // personal OAuth is wired, so a missing binding config here is a
+    // composition bug. Silently skipping would store a live xoxp token with no
+    // identity binding — the UI would show "not connected" forever while the
+    // credential exists and is selectable.
     let Some(config) = state.slack_personal_oauth_binding_config() else {
-        return Ok(());
+        tracing::warn!(
+            "Slack personal OAuth callback reached without a binding config; failing closed"
+        );
+        return Err(AuthProductError::BackendUnavailable);
     };
     let identity = provider_identity.ok_or(AuthProductError::MalformedCallback)?;
     let connection_scope = config
@@ -930,6 +951,11 @@ const OAUTH_CALLBACK_SIGNAL_MESSAGE_TYPE: &str = "ironclaw:product-auth:oauth-co
 /// the popup. Shared by the success and failure callback pages so the two
 /// cannot drift on the signal contract the WebUI listens for.
 fn oauth_callback_signal_script(payload: &serde_json::Value) -> String {
+    // serde_json escapes quotes/control chars but not `<`: a value containing
+    // `</script>` would otherwise terminate the element mid-string (HTML
+    // parsing ignores JS string context). All payload values are server-minted
+    // today; this keeps that assumption non-load-bearing.
+    let payload = payload.to_string().replace('<', "\\u003c");
     format!(
         r#"  <script>
     (() => {{
