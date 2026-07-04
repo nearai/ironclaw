@@ -2302,7 +2302,13 @@ impl From<DispatchFailureKind> for RuntimeFailureKind {
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UnsupportedRunner) => {
                 RuntimeFailureKind::Backend
             }
-            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Unknown) => Self::Unknown,
+            // The fail-safe "uncategorized" redaction bucket collapses to a
+            // concrete internal failure rather than propagating a dedicated
+            // `Unknown` category downstream. `Internal` is retryable and
+            // surfaces to the model/user, so an unclassified dispatch error is
+            // no longer an opaque run-ending dead-end. See
+            // `docs/plans/2026-06-28-reborn-error-recoverability-audit.md`.
+            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Unknown) => Self::Internal,
         }
     }
 }
@@ -2528,9 +2534,12 @@ output_schema_ref = "schemas/test.output.json"
                 RuntimeDispatchErrorKind::UnsupportedRunner,
                 RuntimeFailureKind::Backend,
             ),
+            // The fail-safe "uncategorized" redaction bucket collapses to a
+            // concrete, surfacing `Internal` rather than a dedicated `Unknown`
+            // category (which no longer exists on `RuntimeFailureKind`).
             (
                 RuntimeDispatchErrorKind::Unknown,
-                RuntimeFailureKind::Unknown,
+                RuntimeFailureKind::Internal,
             ),
         ];
         for (variant, expected) in cases {
@@ -2708,7 +2717,6 @@ output_schema_ref = "schemas/test.output.json"
         assert_eq!(RuntimeFailureKind::Resource.as_str(), "resource");
         assert_eq!(RuntimeFailureKind::Transient.as_str(), "transient");
         assert_eq!(RuntimeFailureKind::Unavailable.as_str(), "unavailable");
-        assert_eq!(RuntimeFailureKind::Unknown.as_str(), "unknown");
     }
 
     #[test]
@@ -2732,7 +2740,6 @@ output_schema_ref = "schemas/test.output.json"
             (RuntimeFailureKind::Resource, ModelVisibleToolError),
             (RuntimeFailureKind::Transient, RetrySameCall),
             (RuntimeFailureKind::Unavailable, RetrySameCall),
-            (RuntimeFailureKind::Unknown, ModelVisibleToolError),
         ];
 
         for (kind, expected) in cases {

@@ -430,7 +430,6 @@ fn generic_failure_recovery(error_kind: &CapabilityFailureKind) -> ToolRecoveryO
         | CapabilityFailureKind::Resource
         | CapabilityFailureKind::Internal
         | CapabilityFailureKind::Unknown(_) => SameCallRetryConstraint::Allowed,
-        _ => SameCallRetryConstraint::Allowed,
     };
     ToolRecoveryObservation {
         same_call_retry,
