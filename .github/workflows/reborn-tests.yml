@@ -468,8 +468,9 @@ jobs:
       - name: Run Reborn settings JS tests
         run: |
           mapfile -t tests < <(
-            find crates/ironclaw_webui_v2/static/js/pages/settings \
+            find crates/ironclaw_webui_v2/static/js \
               -type f \( -name '*.test.mjs' -o -name '*.test.js' \) \
+              -not -path '*/node_modules/*' -not -path '*/dist/*' \
               | sort
           )
           if [ "${#tests[@]}" -eq 0 ]; then
