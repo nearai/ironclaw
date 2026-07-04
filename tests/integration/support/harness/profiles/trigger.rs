@@ -1,4 +1,4 @@
-//! trigger domain tools profiles (populated by the profile migration).
+//! trigger domain capability profile.
 
 use ironclaw_host_api::{CapabilityId, EffectKind, MountView, UserId};
 use ironclaw_host_runtime::{

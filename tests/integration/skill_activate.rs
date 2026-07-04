@@ -3,26 +3,18 @@
 //!
 //! A `greet` system skill is seeded by `skill_activation_tools()`. The model
 //! explicitly activates it through the REAL local-dev synthetic capability
-//! (`builtin.skill_activate`, dispatched via
-//! `wrap_skill_activation_capability_for_test`), and the test then proves BOTH
-//! halves of the seam:
+//! (`builtin.skill_activate`), and the test proves BOTH halves of the seam:
+//! the capability dispatched and reported the skill activated (`count: 1`),
+//! and its instructions reached a subsequent model request through the wired
+//! `skill_context_source` (`assert_model_request_contains`).
 //!
-//! - the capability dispatched and reported the skill activated (`count: 1`),
-//!   and
-//! - the activated skill's instructions reached a subsequent model request
-//!   through the runtime's wired `skill_context_source`
-//!   (`assert_model_request_contains`).
-//!
-//! The user message deliberately omits the skill's `greet` activation keyword,
-//! so the injected `GREET_SKILL_PROMPT_SENTINEL` can only originate from the
-//! explicit `skill_activate` call — not from keyword auto-activation. If either
-//! the capability wrap or the `into_group` `skill_context_source` wiring
-//! regresses, the sentinel never reaches a captured request and the assert fails.
+//! The user message omits the skill's `greet` keyword, so the injected
+//! `GREET_SKILL_PROMPT_SENTINEL` can only originate from the explicit
+//! `skill_activate` call, not keyword auto-activation.
 //!
 //! The second test below pins the OTHER half of E-SKILL: criteria-based
 //! (keyword) auto-activation stays OFF on the coordinator path (product
-//! decision, closed issue #5530) — see the mechanism note on that test for
-//! why.
+//! decision, closed issue #5530).
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
@@ -76,14 +68,12 @@ async fn skill_activate_dispatches_and_injects_skill_context() {
 }
 
 // INTENTIONAL: `SkillActivationMode::ActivationCriteria` (keyword/regex
-// auto-activation) does not fire on the modern `TurnCoordinator`/agent-loop
-// path — disabled on purpose (product decision, closed issue #5530). The
-// explicit `builtin.skill_activate` capability path (proven above) is the
-// supported mechanism. Mechanically: criteria selection only runs when
-// `take_message_for_run` returns `Some`, populated by `record_user_message`,
-// whose sole production caller is the legacy `RebornRuntime::submit_user_turn`
-// — the coordinator stack never records the message, so criteria selection
-// stays inert here by design.
+// auto-activation) does not fire on the `TurnCoordinator`/agent-loop path —
+// disabled on purpose (product decision, closed issue #5530). It only runs
+// when `record_user_message` populates `take_message_for_run`, whose sole
+// caller is the legacy `RebornRuntime::submit_user_turn`; the coordinator
+// stack never records the message, so criteria selection stays inert here.
+// The explicit `builtin.skill_activate` path (proven above) is supported.
 #[tokio::test]
 async fn skill_criteria_auto_activation_stays_off_on_coordinator_path() {
     let group = RebornIntegrationGroup::skill_activation_tools()
@@ -134,13 +124,9 @@ async fn skill_criteria_auto_activation_stays_off_on_coordinator_path() {
 
 /// C-SYNTH failure route — `skill_activate` `ContextBudgetExceeded` is a
 /// MODEL-VISIBLE `Failed` tool error (recoverable), not a terminal driver
-/// error.
-///
-/// An oversized system skill (prompt ≈ 10k tokens at the ~4-bytes-per-token
-/// estimate, over `DEFAULT_MAX_SKILL_CONTEXT_TOKENS = 4000`) is seeded via
-/// `seed_system_skill_for_test`. Activating it drives the real selection path
-/// (`reserve_skill_budget` → `SkillActivationSelectionError::ContextBudgetExceeded`
-/// → `CapabilityOutcome::Failed`, skill_activation.rs `selection_outcome`).
+/// error. An oversized system skill (~10k tokens, over
+/// `DEFAULT_MAX_SKILL_CONTEXT_TOKENS = 4000`) drives the real selection path
+/// (`reserve_skill_budget` → `ContextBudgetExceeded` → `Failed`).
 #[tokio::test]
 async fn skill_activate_over_budget_surfaces_recoverable_failed() {
     let group = RebornIntegrationGroup::skill_activation_tools()
@@ -193,17 +179,12 @@ async fn skill_activate_over_budget_surfaces_recoverable_failed() {
     );
 }
 
-/// C-SYNTH `AmbiguousSkill` seeding arm — a skill name that resolves to TWO
-/// Trusted candidates under different `SkillSourceKind`s (a system-scoped
-/// skill AND a user-scoped skill sharing the same name) drives the real
-/// `validate_explicit_mentions_are_unambiguous` reject path
-/// (`SkillActivationSelectionError::AmbiguousSkill` ->
-/// `skill_activation_selection_outcome`'s `AmbiguousSkill` arm), NOT the
-/// `ContextBudgetExceeded` arm the sibling test above already covers. Both
-/// arms map to a model-visible, recoverable `Failed(InvalidInput)` — this
-/// test proves the OTHER arm reaches that same outcome through the real
-/// capability dispatch, and that neither candidate's instructions leak into a
-/// later model request despite the name matching both.
+/// C-SYNTH `AmbiguousSkill` seeding arm — a skill name resolving to TWO
+/// Trusted candidates (system-scoped + user-scoped, same name) drives the
+/// real `validate_explicit_mentions_are_unambiguous` reject path
+/// (`AmbiguousSkill` → `Failed(InvalidInput)`), distinct from the
+/// `ContextBudgetExceeded` arm above. Proves neither candidate's instructions
+/// leak into a later model request despite the name matching both.
 #[tokio::test]
 async fn skill_activate_ambiguous_name_surfaces_recoverable_failed() {
     let group = RebornIntegrationGroup::skill_activation_tools()

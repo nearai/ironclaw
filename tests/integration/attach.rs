@@ -1,21 +1,17 @@
-//! C-ATTACH: `attachment_read_port` int-tier coverage (rev-3 Tier-2, A1 audit).
+//! C-ATTACH: `attachment_read_port` int-tier coverage.
 //!
 //! Production wires `attachment_read_port` from the local-dev workspace
-//! filesystem (`ProjectScopedAttachmentReader` over `local_runtime.workspace_filesystem`,
+//! filesystem (`ProjectScopedAttachmentReader`,
 //! `crates/ironclaw_reborn_composition/src/runtime.rs:3328-3334`) so the loop
-//! model port can read landed attachment bytes back and the gateway
-//! (`crates/ironclaw_reborn/src/model_gateway.rs::convert_messages`) builds a
-//! `ContentPart::ImageUrl` multimodal part for a vision-capable model. That seam
-//! was never exercised by any Reborn test: `DefaultPlannedRuntimeParts.attachment_read_port`
-//! was `None` everywhere, so every image attachment silently degraded to the
-//! textual `<attachments>` pointer regardless of the model's vision capability.
+//! model port reads landed attachment bytes back for the gateway
+//! (`convert_messages`) to build a `ContentPart::ImageUrl` for vision-capable
+//! models. Regression: this port was `None` everywhere pre-fix, so images
+//! silently degraded to the textual `<attachments>` pointer.
 //!
-//! This test wires the read port + the real `InboundAttachmentLander` (same
-//! production `ProjectScopedAttachmentLander`) via `RebornIntegrationGroup::attachment_tools()`,
-//! lands an image through the real `submit_inbound_with_attachments` production
-//! entry point, routes the thread through a vision-pattern model id
-//! (`.with_model_override`), and asserts the model-visible request actually
-//! carried the image as a `data:` URL content part.
+//! Wires the read port + real `InboundAttachmentLander` via
+//! `RebornIntegrationGroup::attachment_tools()`, lands an image, routes
+//! through a vision-pattern model id, and asserts the model request carried
+//! the image as a `data:` URL.
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
@@ -62,12 +58,9 @@ async fn landed_image_attachment_reaches_the_model_as_a_multimodal_part() {
         .expect("landed image bytes reached the model intact as a multimodal content part");
 }
 
-/// Negative control: without `.with_model_override(<vision id>)` the thread
-/// keeps the harness's default scripted model id, which is not a vision-pattern
-/// match. `convert_messages` then drops the image part (text-only fallback), so
-/// no multimodal content part should reach the model even though the
-/// attachment landed and the read port is wired. Proves the model-override knob
-/// (not just the read port) is load-bearing for this assertion.
+/// Negative control: without a vision-model override, `convert_messages`
+/// drops the image part (text-only fallback) — proves the override knob, not
+/// just the read port, is load-bearing.
 #[tokio::test]
 async fn non_vision_model_does_not_receive_a_multimodal_image_part() {
     let group = RebornIntegrationGroup::attachment_tools()
@@ -101,13 +94,9 @@ async fn non_vision_model_does_not_receive_a_multimodal_image_part() {
     );
 }
 
-/// Negative control: a plain harness (not built via
-/// `RebornIntegrationGroup::attachment_tools()`) has no `InboundAttachmentLander`
-/// wired, so `submit_turn_with_image_attachment`'s explicit no-lander guard must
-/// fire before any turn is submitted. Proves that fail-fast path stays load-bearing
-/// — without this, a regression that removed or weakened the guard would not be
-/// caught, since every other test in this file only exercises harnesses with a
-/// lander wired.
+/// Negative control: a plain harness with no `InboundAttachmentLander` wired
+/// must fail fast via the no-lander guard before any turn is submitted —
+/// every other test in this file wires a lander.
 #[tokio::test]
 async fn submit_with_image_attachment_fails_fast_without_a_lander() {
     let harness = RebornIntegrationHarness::test_default()
@@ -131,15 +120,11 @@ async fn submit_with_image_attachment_fails_fast_without_a_lander() {
     );
 }
 
-/// W4-ATTACH-VARIANTS: a `text/plain` attachment (`AttachmentKind::Document`,
-/// per `ironclaw_common::AttachmentKind::from_mime_type`) is landed through the
-/// real `InboundAttachmentLander`, its text extracted by
-/// `land_inbound_attachments` -> `extract_document_text`, and rendered into the
-/// `<attachments>` block `ironclaw_threads::attachment_context::augment_model_content`
-/// appends to the user message — the textual (non-multimodal) attachment path
-/// no `RebornIntegrationHarness` test exercised before this file only covered
-/// images. Reads the captured model request (not just tool output), proving
-/// the extracted text reached the model.
+/// W4-ATTACH-VARIANTS: a `text/plain` attachment (`AttachmentKind::Document`)
+/// is landed and text-extracted via `land_inbound_attachments`, and its
+/// content is verified in the captured model request (not just tool output)
+/// — the textual (non-multimodal) attachment path, uncovered by the
+/// image-only tests above.
 #[tokio::test]
 async fn doc_attachment_reaches_the_model_with_extracted_text() {
     const MARKER: &str = "ZAFFRE-DOCUMENT-MARKER-771";
@@ -169,19 +154,15 @@ async fn doc_attachment_reaches_the_model_with_extracted_text() {
         .assert_model_request_contains(MARKER)
         .await
         .expect("extracted document text reached the model");
-    // `assert_model_request_contains` matches against the JSON-serialized
-    // captured request, so a literal `"` inside the rendered `<attachments>`
-    // XML is escaped to `\"` in that serialization — the needle must match the
+    // Serialized capture escapes `"` to `\"`; the needle must match the
     // escaped form.
     harness
         .assert_model_request_contains("type=\\\"document\\\"")
         .await
         .expect("the attachment block tags the attachment as a document, not an image");
 
-    // Non-vacuity guard: a marker that was never written must be ABSENT, so
-    // `assert_model_request_contains` is proven to discriminate rather than
-    // pass unconditionally (e.g. on a captured-request stringification bug
-    // that always matches).
+    // Non-vacuity guard: an unwritten marker must be ABSENT, proving the
+    // assertion discriminates rather than passing unconditionally.
     if harness
         .assert_model_request_contains("UNWRITTEN-MARKER-999")
         .await
@@ -191,13 +172,10 @@ async fn doc_attachment_reaches_the_model_with_extracted_text() {
     }
 }
 
-/// W4-ATTACH-VARIANTS: two attachments landed on a SINGLE turn both reach the
-/// model in one captured request — proves `submit_turn_with_attachments`
-/// carries N attachments through the real
-/// `DefaultProductWorkflow::submit_inbound_with_attachments` entry point (every
-/// prior attachment test in this file submitted exactly one), and that
-/// `land_inbound_attachments`/`augment_model_content` render every landed
-/// attachment into the `<attachments>` block, not just the first.
+/// W4-ATTACH-VARIANTS: two attachments landed in one turn both reach the
+/// model in one captured request — proves N-attachment support through
+/// `submit_inbound_with_attachments`, not just the single-attachment path
+/// exercised above.
 #[tokio::test]
 async fn multiple_attachments_in_one_turn_all_reach_the_model() {
     const MARKER_ONE: &str = "TOPAZ-MARKER-ALPHA";
@@ -239,11 +217,8 @@ async fn multiple_attachments_in_one_turn_all_reach_the_model() {
         .assert_model_request_contains(MARKER_TWO)
         .await
         .expect("second attachment's extracted text reached the model");
-    // Both attachments are indexed distinctly in the rendered block, so both
-    // ordinal markers must be present — proves two DISTINCT attachment blocks
-    // were rendered, not one attachment whose body happens to contain both
-    // marker strings. (See the escaping note above: needles match the
-    // JSON-serialized, quote-escaped form.)
+    // Both ordinal markers prove two DISTINCT attachment blocks were
+    // rendered, not one block whose body contains both strings.
     harness
         .assert_model_request_contains("index=\\\"1\\\"")
         .await

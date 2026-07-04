@@ -1,7 +1,5 @@
-//! Template domain migration for the `ToolsProfile` infrastructure (see
-//! `harness/options.rs`). `coding_read_tools()` previously lived as a
-//! hand-built `Self { .. }` constructor in `harness/mod.rs`; this module is
-//! the pattern later domain migrations follow.
+//! Coding-read domain tools profile (`coding_read_tools`) — reference example
+//! of the `ToolsProfile` pattern (see `harness/options.rs`).
 
 use ironclaw_host_api::{CapabilityId, EffectKind, MountPermissions, UserId};
 use ironclaw_host_runtime::{GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID};
@@ -30,9 +28,7 @@ pub(crate) fn coding_read_tools_profile() -> HarnessResult<ToolsProfile> {
     })
 }
 
-/// Read-only coding tools (`list_dir`/`glob`/`grep`). Auto-approve is enabled
-/// for the product and harness users so the model-visible surface dispatches
-/// without a gate.
+/// See [`coding_read_tools_profile`].
 pub(crate) async fn coding_read_tools() -> HarnessResult<HostRuntimeCapabilityHarness> {
     coding_read_tools_profile()?.build().await
 }

@@ -1,6 +1,5 @@
-//! `process` domain migration for the `ToolsProfile` infrastructure (see
-//! `harness/options.rs`). `process_tools()` previously lived as a hand-built
-//! `Self::new_with_options(..)` constructor in `harness/mod.rs`.
+//! Process domain tools profile (`process_tools`) — see `harness/options.rs`
+//! for the `ToolsProfile` pattern.
 
 use ironclaw_host_api::{CapabilityId, EffectKind, MountView, UserId};
 use ironclaw_host_runtime::{

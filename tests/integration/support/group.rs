@@ -6,11 +6,9 @@
 //! a per-thread workflow (binding + inbound service + scripted-gateway
 //! registration) over that one shared runtime. Within one group, state written
 //! by thread A is visible to thread B — the key e2e persistence contract.
-//!
-//! Separate groups are separate test binaries and run in parallel, fully
-//! isolated. A single-shot [`RebornIntegrationHarness::test_default()`] is a
-//! degenerate one-thread group (its own storage, baseline = 0), so all
-//! existing tests are byte-identical after this refactor.
+//! Separate groups are separate test binaries, fully isolated. A single-shot
+//! [`RebornIntegrationHarness::test_default()`] is a degenerate one-thread
+//! group (its own storage, baseline = 0).
 //!
 //! ## Group test binary layout
 //!
@@ -21,42 +19,22 @@
 //!     scenario_approve_always_persists.rs
 //! ```
 //!
-//! ### Why one sequential `#[tokio::test]`, not N separate `#[test]` fns
-//!
-//! Cargo does not guarantee order or share an instance between multiple
-//! `#[test]` fns in one binary, and `serial_test` + global statics are
-//! fragile.  One orchestrating fn is the only design that gives deterministic
-//! ordering over a shared group instance without fragile machinery.
-//!
-//! ### Scenario shape
-//!
-//! ```rust,no_run
-//! // scenario_approve_always_persists.rs
-//! use crate::reborn_support::group::HarnessResult;
-//! pub async fn run(g: &super::reborn_support::group::RebornIntegrationGroup)
-//!     -> HarnessResult<()>
-//! {
-//!     // ... build thread, submit turn, assert ...
-//!     Ok(())
-//! }
-//! ```
-//!
-//! Use `?` for *dependent* scenarios (failure stops the driver) and
+//! One sequential `#[tokio::test]` drives all scenarios (Cargo doesn't
+//! guarantee order or share state across `#[test]` fns in one binary). Use `?`
+//! for *dependent* scenarios (failure stops the driver) and
 //! `report.record(name, scenario::run(&g).await)` for *independent* ones
 //! (failure recorded, others continue).
 //!
-//! ### Subdir module paths
+//! ### Subdir module paths (required)
 //!
 //! Each group `main.rs` MUST declare BOTH `#[path]` overrides, each with
-//! `#[allow(dead_code)]`:
+//! `#[allow(dead_code)]` — bare `mod support;` resolves relative to the
+//! group's own subdir and fails to compile:
 //!
 //! ```rust,no_run
 //! #[allow(dead_code)] #[path = "../support/reborn/mod.rs"] mod reborn_support;
 //! #[allow(dead_code)] #[path = "../support/mod.rs"] mod support;
 //! ```
-//!
-//! Bare `mod support;` resolves to `tests/reborn_group_*/support.rs` (which
-//! does not exist) and fails to compile.
 //!
 //! ### Two composites — use the right one
 //!
@@ -214,33 +192,23 @@ pub(crate) struct GroupSharedStorage {
     /// only see that thread's own deltas (R2).
     pub(crate) capability_recorder: HarnessCapabilityRecorder,
     /// The exact `HostUserProfileSource` wired into the group's ONE planned
-    /// runtime (E-PROFILE seam; built once in `into_group` from
-    /// `capability_recorder.profile_filesystem()`). Kept so a profile-round-trip
-    /// test can call `resolve_user_profile` on the SAME instance the running
-    /// loop reads from, rather than re-deriving an equivalent one — a mutation
-    /// that breaks the `into_group` wiring (not just `build_user_profile_source_for_test`
-    /// itself) is caught.
+    /// runtime (E-PROFILE seam). Kept so a profile-round-trip test reads from
+    /// the SAME instance the running loop uses, not a re-derived equivalent —
+    /// catches wiring mutations, not just the builder itself.
     pub(crate) user_profile_source: Arc<dyn HostUserProfileSource>,
-    /// In-memory turn-lifecycle event sink wired into the group's ONE planned
-    /// runtime when `.with_turn_event_sink()` opted in (C-TRACECAP seam).
-    /// `None` for every group that did not opt in (`turn_event_sink` stays
-    /// `None` in `DefaultPlannedRuntimeParts`, matching prior behavior).
-    /// Kept as the concrete `InMemoryTurnEventSink` (not `Arc<dyn TurnEventSink>`)
-    /// so a test can read `.events()` back directly.
+    /// In-memory turn-lifecycle event sink wired in when `.with_turn_event_sink()`
+    /// opted in (C-TRACECAP seam); `None` otherwise. Concrete type (not `Arc<dyn
+    /// TurnEventSink>`) so a test can read `.events()` back directly.
     pub(crate) turn_event_sink: Option<Arc<InMemoryTurnEventSink>>,
-    /// C-BUDGET: the in-memory `ResourceGovernor` wired behind the group's
-    /// `model_budget_accountant` (via the production `build_default_budget_accountant`
-    /// helper). Retained so a test can read back the account the accountant seeds
-    /// on the first model call of a turn — the liveness proof that the accountant
-    /// is wired through `DefaultPlannedRuntimeParts` and fires on the coordinator
-    /// path. `None` unless the group/harness was built with budget accounting
-    /// wired (`budget_accounting()` / `with_budget_accounting()`).
+    /// C-BUDGET: the in-memory `ResourceGovernor` behind the group's
+    /// `model_budget_accountant`. Retained so a test can read back the account
+    /// the accountant seeds on a turn's first model call — proof the
+    /// accountant is wired and fires. `None` unless budget accounting is wired.
     pub(crate) budget_governor: Option<Arc<InMemoryResourceGovernor>>,
-    /// C-BUDGET: the `(tenant, run-owner-user)` account the group's turns reserve
-    /// against — computed once from the canonical binding so a budget test reads
-    /// the SAME account the loop's accountant seeds (keyed on the run actor, i.e.
-    /// the binding subject user, per `GovernorBackedAccountant::resource_scope`).
-    /// `None` unless budget accounting is wired.
+    /// C-BUDGET: the `(tenant, run-owner-user)` account the group's turns
+    /// reserve against — computed once from the canonical binding so a test
+    /// reads the SAME account the loop's accountant seeds. `None` unless
+    /// budget accounting is wired.
     pub(crate) budget_account: Option<ResourceAccount>,
 }
 
@@ -334,16 +302,12 @@ impl GroupCapability {
 /// [`triggers`](Self::triggers), or via
 /// [`builder`](Self::builder) for custom storage mode.
 ///
-/// The per-capability preset constructors themselves (`live_approvals`,
-/// `builtin_tools`, `extension_lifecycle`, `live_auth_gate`,
-/// `project_lifecycle`, `profile_tools`, `triggers`, `skill_activation_tools`,
-/// `skill_management_tools`, `attachment_tools`, and their `RebornIntegrationGroupBuilder`
-/// counterparts) live in the child `group_constructors` module (file:
-/// `group_constructors.rs`, kept private to `group` — see the `mod
-/// group_constructors` declaration below) — a thin catalog of "which
-/// capability" selections layered over the one-shared-runtime assembly
-/// mechanics (`build_base`/`into_group`) this file owns. Mirrors the
-/// `harness_mcp.rs` split.
+/// The per-capability preset constructors (`live_approvals`, `builtin_tools`,
+/// `extension_lifecycle`, etc., and their `RebornIntegrationGroupBuilder`
+/// counterparts) live in the private child module `group_constructors` — a
+/// thin catalog of "which capability" selections layered over the
+/// one-shared-runtime assembly mechanics (`build_base`/`into_group`) this
+/// file owns.
 pub struct RebornIntegrationGroup {
     pub(crate) shared: Arc<GroupSharedStorage>,
 }
@@ -475,17 +439,11 @@ pub(crate) struct GroupBaseData {
     turn_root: Arc<tempfile::TempDir>,
     /// A throwaway probe binding resolved once at group construction, used
     /// ONLY to derive the group-level shared turn store path and the
-    /// group-level `ThreadScope` for the single `ThreadCheckpointLoopExitEvidencePort`.
-    /// Every thread in a group shares `(tenant, agent, project)` — only
-    /// `thread_id` varies per conversation, and `ThreadScope` (unlike
-    /// `TurnScope`) has no `thread_id` field — so this canonical binding is a
-    /// valid stand-in for the whole group (see `ensure_thread_scope_matches_turn_scope`,
-    /// which checks only tenant/agent/project, never thread_id).
-    ///
-    /// `group_constructors.rs`'s `live_approvals`/`skill_activation_tools`
-    /// read the resolved tenant/subject user off this field directly (see
-    /// field docs above); reachable at module-private visibility since that
-    /// file is a child module of `group`.
+    /// group-level `ThreadScope`. Every thread in a group shares `(tenant,
+    /// agent, project)` — only `thread_id` varies, and `ThreadScope` has no
+    /// `thread_id` field — so this binding is a valid stand-in for the whole
+    /// group. `group_constructors.rs` reads tenant/subject user off this
+    /// field directly (module-private; it's a child module of `group`).
     canonical_binding: ResolvedBinding,
 }
 
@@ -712,19 +670,12 @@ impl RebornIntegrationGroupBuilder {
                 ..DefaultPlannedRuntimeConfig::default()
             },
             model_route_resolver: None,
-            // E-GATEWAY: the parking scripted gateway (`park_model`) plus
-            // `cancel_run` are the covered seam. This optional `cancellation_factory`
-            // is intentionally left `None`: it does NOT gate whether a run reaches
+            // E-GATEWAY: left `None` — it does not gate whether a run reaches
             // `Cancelled`. `RebornLoopDriverHostFactory` always builds its own
-            // default `TurnStateRunCancellationFactory` internally
-            // (`ironclaw_reborn::loop_driver_host`), whose cancel poll loop
-            // (`DEFAULT_CANCEL_POLL_INTERVAL`, 25ms) observes the durable
-            // `CancelRequested` and drives the parked run to `Cancelled` on resume —
-            // which is what `reborn_integration_cancel` asserts (verified 12/12).
-            // Supplying a factory here would only add the coordinator's
-            // `CompositeTurnRunWakeNotifier` fan-out for product-live retained-run-handle
-            // observation (`ironclaw_reborn::runtime` `wake_notifier`), a path this
-            // test does not exercise — so wiring one would be dead, untested code.
+            // default `TurnStateRunCancellationFactory`, whose cancel poll loop
+            // drives a parked run to `Cancelled` on resume regardless (verified
+            // by `reborn_integration_cancel`). Supplying one here would only add
+            // the product-live wake-notifier fan-out, unexercised by this test.
             cancellation_factory: None,
             // E-SKILL: wire the local-dev skill context source so an activated
             // skill's instructions inject into the model request. `Some` only for
@@ -734,16 +685,11 @@ impl RebornIntegrationGroupBuilder {
             skill_context_source: capability_recorder.skill_context_source(),
             input_queue: None,
             identity_context_source: Arc::new(EmptyIdentityContextSource),
-            // E-PROFILE: in HostRuntime mode, back the profile source with the
-            // local-dev memory filesystem so `profile_set` writes can be read back;
-            // non-HostRuntime backends (and HostRuntime harnesses without a profile
-            // filesystem) fall back to `EmptyUserProfileSource`. `resolve_user_profile`
-            // returns `None` when no `context/profile.json` exists, so existing
-            // HostRuntime group tests are behavior-identical. Built once here (not
-            // per-thread) because the group's ONE planned runtime is assembled once.
-            // Kept in a local (rather than built inline) so the SAME `Arc` can
-            // also be stashed on `GroupSharedStorage` for a profile-round-trip
-            // test to read from directly (see `user_profile_source` field docs).
+            // E-PROFILE: HostRuntime mode backs this with the local-dev memory
+            // filesystem so `profile_set` writes read back; other backends fall
+            // back to `EmptyUserProfileSource`. Built as a local (not inline) so
+            // the SAME `Arc` is also stashed on `GroupSharedStorage` for a
+            // profile-round-trip test to read directly.
             user_profile_source: Arc::clone(&user_profile_source),
             model_policy_guard: None,
             // C-BUDGET: production `build_default_budget_accountant` (Some only
@@ -865,18 +811,10 @@ impl<'g> RebornThreadBuilder<'g> {
     }
 
     /// Resolve this thread's binding under a DISTINCT actor instead of the
-    /// group's default `HARNESS_ACTOR_ID` (E-MULTIUSER seam). The resulting
-    /// binding's `subject_user_id`/`actor_user_id` differ from every other
-    /// thread's, so the run's `TurnActor` and per-turn owner-scope resolution
-    /// (`ThreadScopeResolver::resolve_for_turn`, the same mechanism production
-    /// uses for multi-user WebChat) isolate this thread's reads/writes under
-    /// their own subtree. The owner axis of that subtree is the resolved
-    /// canonical `UserId` (`binding.subject_user_id` / `ThreadScope.owner_user_id`)
-    /// — NOT the external `actor_id` string passed here — the binding probe
-    /// maps this `actor_id` to that canonical user id once at build time, and
-    /// every subsequent op resolves its mount from the binding, not the raw
-    /// string. Unset (the default) keeps the existing `HARNESS_ACTOR_ID`
-    /// behavior byte-identical.
+    /// group's default `HARNESS_ACTOR_ID` (E-MULTIUSER seam), so per-turn
+    /// owner-scope resolution isolates this thread's reads/writes under their
+    /// own subtree (keyed on the resolved canonical `UserId`, not the raw
+    /// `actor_id` string). Unset keeps the default `HARNESS_ACTOR_ID` behavior.
     pub fn with_actor_id(mut self, actor_id: impl Into<String>) -> Self {
         self.actor_id = Some(actor_id.into());
         self
@@ -955,21 +893,14 @@ impl<'g> RebornThreadBuilder<'g> {
 
         // --- per-thread scripted gateway, registered before any submit ---------
         // Session path is per-conversation so group threads do not clobber each
-        // other's LLM session cache under the same `turn_root`.
-        // Retain the concrete `TraceLlm` before the `dyn LlmProvider` upcast so
-        // tests can inspect the model-visible requests via `captured_requests()`:
-        // the system prompt (`assert_system_prompt_contains`, T0-SYSPROMPT) and
-        // host-injected context such as activated-skill instructions
-        // (`assert_model_request_contains`, E-SKILL half B).
+        // other's LLM session cache under the same `turn_root`. Retain the
+        // concrete `TraceLlm` before the `dyn LlmProvider` upcast so tests can
+        // inspect captured requests via `captured_requests()`.
         //
-        // E-GATEWAY: when a park gate is set, swap the scripted provider for a
-        // parking one at the SAME vendor-SDK seam (the decorator chain still runs
-        // on top). Parking mode is only a wrapper around the same scripted
-        // provider, so the `TraceLlm` is built unconditionally first and the
-        // parking wrapper holds/clones that same `Arc` — the trace is retained
-        // either way, so tests can inspect captured requests
-        // (`assert_system_prompt_contains`, `assert_model_request_contains`)
-        // regardless of whether this thread is parked.
+        // E-GATEWAY: the `TraceLlm` is built unconditionally first; a park gate
+        // wraps it in a parking provider at the SAME vendor-SDK seam (decorator
+        // chain still runs on top), so captured requests stay inspectable either
+        // way.
         let scripted_llm: Arc<TraceLlm> = Arc::new(scripted_trace_llm(self.replies));
         // C-ERRORS: `Failing` swaps in `ErrLlm` at the same vendor-SDK seam;
         // `Parked` swaps in the parking wrapper. `ThreadModelMode` makes the
@@ -1042,16 +973,9 @@ impl<'g> RebornThreadBuilder<'g> {
         let workflow = DefaultProductWorkflow::new(inbound, ledger, binding_service);
 
         // Register the gateway only now that every fallible (`?`) step above has
-        // succeeded — `register` is infallible and interior-mutable, so deferring
-        // it here costs nothing, but registering any earlier risks leaving the
-        // scope registered for a harness that never finished building: a later
-        // `?` bailing out of `build()` would leave `turn_scope` registered, and
-        // retrying the same conversation would then hit the duplicate-
-        // registration panic. The loop-driver host only resolves
-        // `resolve_for_scope` at host construction (off the model hot path), and
-        // that happens strictly after this fn returns, so registering
-        // immediately before the harness is constructed still satisfies
-        // "registered before any submit for this scope".
+        // succeeded — registering earlier risks leaving the scope registered
+        // for a harness that never finished building (a later `?` bailing out
+        // would make a retry hit the duplicate-registration panic).
         shared
             .scope_gateway
             .register(turn_scope.clone(), thread_gateway);

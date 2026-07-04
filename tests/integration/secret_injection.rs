@@ -1,19 +1,14 @@
 //! Reborn integration-test tier — T0-SECRET-INJECT.
 //!
 //! Proves credential/secret injection reaches the wire: a scripted `github.*`
-//! tool call executes the real first-party GitHub WASM capability behind a
+//! call executes the real first-party GitHub WASM capability behind a
 //! `GithubHarnessAuthorizer` that attaches an `InjectCredentialAccountOnce`
 //! obligation. The host egress pipeline resolves the synthetic access token
-//! (`ghp_fake_fixture_token`, from the harness `StaticSecretStore`) and injects
-//! it as `Authorization: Bearer <token>` onto the outbound request before the
-//! recording network egress captures it. The assertion reads that captured
-//! request and confirms the injected credential is present on the header.
-//!
-//! Note on the egress lane: this harness's runtime egress recorder
-//! (`runtime_http_requests()`) is inert — `try_with_host_http_egress` overwrites
-//! the runtime port with the host pipeline over the recording *network* egress —
-//! so injection is observable on the network lane. See
-//! `assert_network_egress_header_contains` for the full mechanism.
+//! (from the harness `StaticSecretStore`) and injects it as `Authorization:
+//! Bearer <token>` onto the outbound request before the recording *network*
+//! egress captures it (the runtime egress lane is inert here —
+//! `try_with_host_http_egress` overwrites it — see
+//! `assert_network_egress_header_contains`).
 //!
 //! Security: the token is a synthetic test fixture, never a real credential.
 

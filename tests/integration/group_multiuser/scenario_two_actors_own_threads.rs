@@ -58,13 +58,11 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     Ok(())
 }
 
-/// One direction of the owner-isolation negative guard (prove genuine owner
-/// separation, not just "didn't crash" — the banana-99 pattern):
-/// `reader`'s own thread must not surface `other`'s reply, and `other`'s
-/// thread must not be readable through `reader`'s owner scope at all — each
-/// owner's records live under a separate `/tenants/<tenant>/users/<user>/threads`
-/// subtree. One helper
-/// called once per direction, so the symmetric check cannot silently de-sync.
+/// One direction of the owner-isolation negative guard: `reader`'s thread must
+/// not surface `other`'s reply, and `other`'s thread must not be readable
+/// through `reader`'s owner scope at all (each owner's records live under a
+/// separate `/tenants/<tenant>/users/<user>/threads` subtree). Called once per
+/// direction so the symmetric check can't silently de-sync.
 async fn assert_cannot_read_other_actor(
     reader: &RebornIntegrationHarness,
     reader_name: &str,

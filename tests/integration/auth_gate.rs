@@ -1,44 +1,23 @@
-//! E-AUTHGATE seam test: a capability whose credential account resolves to
-//! `AuthRequired` raises a real `TurnStatus::BlockedAuth` gate, and denying
-//! that gate resumes the run to completion without re-dispatching the parked
-//! capability (no loop, no silent re-execution).
+//! E-AUTHGATE: a capability whose credential account resolves `AuthRequired`
+//! raises a real `TurnStatus::BlockedAuth` gate; denying it resumes to
+//! completion without re-dispatching the parked capability.
 //!
-//! Drives the production auth path end-to-end: scripted `github.*` tool call →
-//! real credential-account injection (`FixedRuntimeCredentialAccountResolver`
-//! returns `AuthRequired`) → `CapabilityObligationError::AuthRequired` → the
-//! agent loop blocks the run at `BlockedAuth` with a `gate:auth-` ref → deny +
-//! resume → the executor's deny short-circuit
-//! (`crates/ironclaw_agent_loop/src/executor/capabilities.rs`, the
-//! `state.pending_auth_resume` disposition check right after the
-//! `visible_calls.is_empty()` guard) surfaces a model-visible gate-declined
-//! failure for the parked capability instead of re-dispatching it → the run
-//! completes. Nothing is faked except the model at the vendor-SDK seam.
+//! Path: scripted `github.*` call -> `FixedRuntimeCredentialAccountResolver`
+//! returns `AuthRequired` -> `BlockedAuth` (`gate:auth-` ref) -> deny+resume ->
+//! the deny short-circuit in `executor/capabilities.rs`
+//! (`state.pending_auth_resume` check) surfaces gate-declined instead of
+//! re-dispatching. Only the model is faked.
 //!
-//! DEFERRED here, COVERED elsewhere: the happy "submit credentials → resume
-//! completes" arm. The `live_auth_gate` fixture wires a FIXED `AuthRequired`
-//! credential-account resolver with no toggle to flip it to resolved mid-test
-//! (and no `run_state` store, so the capability host's auth-resume path cannot
-//! complete on this fixture at all). That arm is now covered by
-//! `tests/reborn_group_journeys/` (C-JOURNEY) on the
-//! `RebornIntegrationGroup::live_auth_and_approval()` group, whose auth gate
-//! resolves through the REAL `ProductAuthRuntimeCredentialResolver` +
-//! production manual-token flow — no settable-resolver fake needed.
+//! DEFERRED here, COVERED by `tests/reborn_group_journeys/` (C-JOURNEY) via
+//! `RebornIntegrationGroup::live_auth_and_approval()`: the "submit credentials
+//! -> resume completes" arm, since this fixture's resolver is fixed
+//! `AuthRequired` with no `run_state` store to complete a real resume.
 //!
-//! `assert_tool_error` IS used below, despite the general guidance to prefer
-//! `wait_for_status(Completed)` as the sole discriminator (as in
-//! `tests/reborn_group_approvals/scenario_gate_then_deny.rs`): mutation-testing
-//! this specific short-circuit (deleting the disposition check) showed that
-//! `wait_for_status(Completed)` alone does NOT fail. This harness's mock
-//! capability host has no support for a genuine auth-resume completion (see
-//! the DEFERRED note above), so a neutralized short-circuit still reaches
-//! `Completed` — just via a *different*, harness-specific path: the
-//! re-dispatched call comes back `Failed(Backend, "... resume requires
-//! run_state")` instead of being denied, and that Failed observation is ALSO
-//! surfaced to the model as a non-blocking failure, which also finalizes to
-//! `Completed`. `wait_for_status(Completed)` cannot tell these apart; the
-//! persisted tool-error class/reason can, because a real re-dispatch is the
-//! only way a `Failed{Backend}` result is ever recorded for this capability in
-//! this test.
+//! `assert_tool_error` (not just `wait_for_status(Completed)`) is required:
+//! mutation-testing the deny short-circuit proved `Completed` alone doesn't
+//! discriminate — a bypassed short-circuit still re-dispatches, fails
+//! `Backend`, and that failure ALSO finalizes `Completed`. Only the persisted
+//! tool-error class/reason distinguishes them.
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
@@ -78,30 +57,23 @@ async fn github_auth_gate_denied_resume_completes_without_loop() {
         .await
         .expect("run blocks on an auth gate");
     // `submit_turn_until_auth_blocked` already validates the `gate:auth-`
-    // prefix and returns `Err` otherwise, so the `.expect` above is the real
-    // failure point — no redundant assert needed here.
+    // prefix; the `.expect` above is the real failure point.
 
     harness
         .deny_auth_gate(run_id, &gate_ref)
         .await
         .expect("deny + resume auth gate");
 
-    // The scripted final reply text is intentionally NOT asserted: `TraceLlm`
-    // emits scripted replies by call order regardless of what the model
-    // actually observed, so asserting its text would not distinguish a correct
-    // deny-and-continue from a regression that loops or fails differently
-    // (same reasoning as
-    // tests/reborn_group_approvals/scenario_gate_then_deny.rs). Do not call
-    // `assert_reply_contains` here.
+    // Final reply text intentionally NOT asserted: `TraceLlm` emits scripted
+    // replies by call order regardless of model behavior, so it wouldn't
+    // discriminate a correct deny from a looping regression.
     harness
         .wait_for_status(run_id, TurnStatus::Completed)
         .await
         .expect("denied auth resume completes without re-blocking / looping");
 
-    // The discriminating proof: no `Failed{Backend}` tool-error was persisted
-    // for this capability. Mutation-verified — see the module doc above — a
-    // `Failed{Backend, "resume requires run_state"}` result only exists when
-    // the deny short-circuit was bypassed and re-dispatched.
+    // Mutation-verified: a `Failed{Backend}` result only exists if the deny
+    // short-circuit was bypassed and re-dispatched (see module doc).
     harness
         .assert_no_tool_error(ToolErrorClass::Failed, "backend")
         .await
@@ -110,12 +82,9 @@ async fn github_auth_gate_denied_resume_completes_without_loop() {
              re-dispatch)",
         );
 
-    // Positive proof of the CORRECT outcome: `short_circuit_denied_resume`
-    // (capabilities.rs ~1149) persists its raw planner summary via
-    // `SanitizedStrategySummary::from_trusted_static("auth gate denied by
-    // user")`, deliberately bypassing the "capability denied with " prefix
-    // (no host-returned text to prefix for a gate denial) — so
-    // `assert_tool_error(Denied, ..)` cannot express this; use the raw-summary
+    // `short_circuit_denied_resume` (capabilities.rs ~1149) persists a raw
+    // planner summary bypassing the "capability denied with " prefix, so
+    // `assert_tool_error(Denied, ..)` can't express this; use the raw-summary
     // assertion instead.
     harness
         .assert_tool_error_summary_contains("auth gate denied by user")
@@ -123,27 +92,21 @@ async fn github_auth_gate_denied_resume_completes_without_loop() {
         .expect("the deny short-circuit's planner summary was persisted");
 }
 
-/// W4-AUTHGATE-WIRE (flagship): a GitHub capability whose credential account
-/// resolves OK (`.with_github_issue_tools()` — unlike the sibling test above,
-/// whose `live_auth_gate` fixture is wired via `github_issue_tools_auth_required`'s
-/// credential-*missing* resolver) but whose injected token draws a runtime
-/// `401` from the (scripted) GitHub API must raise `TurnStatus::BlockedAuth`
-/// with `credential_requirements` POPULATED (provider=github, ManualToken
-/// setup) — the #5174/#5180 bug class: an empty `credential_requirements` left
-/// `AuthPromptView.provider` null, so the WebUI's manual-token card threw
-/// client-side and silently dropped the submit ("Could not save the token", no
-/// network request ever sent).
+/// W4-AUTHGATE-WIRE (flagship): a GitHub capability with a valid credential
+/// account but a runtime `401` from the GitHub API must raise
+/// `TurnStatus::BlockedAuth` with `credential_requirements` POPULATED
+/// (provider=github, ManualToken) — the #5174/#5180 bug class: an empty
+/// `credential_requirements` left `AuthPromptView.provider` null, silently
+/// dropping the WebUI manual-token submit ("Could not save the token").
 ///
-/// This runs the FULL scripted-gateway integration harness (`submit_turn` ->
-/// product workflow -> turn coordinator -> agent loop -> capability host -> the
-/// real GitHub WASM module), a tier below neither of the two existing pins for
-/// this fix covers: `ironclaw_capabilities/tests/capability_host_auth_required_enrichment_contract.rs`
-/// drives `CapabilityHost::invoke_json` directly (no turn/loop), and
-/// `ironclaw_host_runtime/tests/github_wasm_runtime_contract.rs`
-/// (`host_runtime_services_maps_google_drive_wasm_401_to_auth_required`) drives
-/// `HostRuntimeServices::invoke_capability` directly (no coordinator/loop, and a
-/// different first-party extension). Neither exercises the real submit-turn ->
-/// `BlockedAuth` wire the WebUI actually depends on.
+/// Runs the full scripted-gateway harness (submit_turn -> workflow ->
+/// coordinator -> agent loop -> capability host -> real GitHub WASM module) —
+/// a tier neither existing pin covers:
+/// `capability_host_auth_required_enrichment_contract.rs` drives
+/// `CapabilityHost::invoke_json` directly (no turn/loop);
+/// `github_wasm_runtime_contract.rs` drives `HostRuntimeServices::invoke_capability`
+/// directly (no coordinator/loop). Neither exercises the real submit-turn ->
+/// `BlockedAuth` wire the WebUI depends on.
 #[tokio::test]
 async fn runtime_401_after_injection_populates_provider_credential_requirement() {
     let harness = RebornIntegrationHarness::test_default()
@@ -164,10 +127,8 @@ async fn runtime_401_after_injection_populates_provider_credential_requirement()
         .await
         .expect("run blocks on an auth gate");
 
-    // `submit_turn_until_auth_blocked` only returns the gate ref; re-fetch the
-    // full state (already at `BlockedAuth`, so this returns immediately) to
-    // read `credential_requirements` — the exact field the #5180 fix enriches
-    // from the capability's declared `InjectCredentialAccountOnce` obligation.
+    // Re-fetch full state to read `credential_requirements` -- the field the
+    // #5180 fix enriches from the InjectCredentialAccountOnce obligation.
     let state = harness
         .wait_for_status(run_id, TurnStatus::BlockedAuth)
         .await
@@ -205,13 +166,10 @@ async fn runtime_401_after_injection_populates_provider_credential_requirement()
         .expect("denied auth resume completes");
 }
 
-/// W4-AUTHGATE-WIRE: cancelling a run parked at `BlockedAuth` must land
-/// directly on `TurnStatus::Cancelled` (unlike a mid-model park -- see
-/// `reborn_integration_cancel.rs` -- a blocked-gate run has no active worker to
-/// cooperate with cancellation, so `request_cancel_once` transitions it
-/// straight through) and must leave no stale replay: once cancelled, the SAME
-/// real gate ref can no longer resume the run (closes the #5067/#4957 class of
-/// auth gates staying "live"/resumable after the user has moved on).
+/// W4-AUTHGATE-WIRE: cancelling a run parked at `BlockedAuth` lands directly
+/// on `Cancelled` (no active worker to cooperate with, unlike a mid-model
+/// park) and leaves no stale replay -- the SAME gate ref can't resume after
+/// cancel (closes the #5067/#4957 "gate stays live" class).
 #[tokio::test]
 async fn cancel_blocked_auth_gate_leaves_no_stale_replay() {
     let harness = RebornIntegrationHarness::test_default()
@@ -249,10 +207,8 @@ async fn cancel_blocked_auth_gate_leaves_no_stale_replay() {
         .await
         .expect("run stays Cancelled");
 
-    // Stale-replay guard: resuming the now-terminal run with the SAME real gate
-    // ref (not a bogus one -- this proves the run's terminal status is what
-    // blocks the resume, not a gate-ref mismatch) must fail, not silently
-    // re-dispatch the parked github capability.
+    // Stale-replay guard: the SAME gate ref (not bogus) must be rejected by
+    // the run's terminal status, not a gate-ref mismatch.
     let resume_err = harness
         .deny_auth_gate(run_id, &gate_ref)
         .await
@@ -271,11 +227,9 @@ async fn cancel_blocked_auth_gate_leaves_no_stale_replay() {
         .expect("cancel + failed resume must not trigger a second github dispatch");
 }
 
-/// Regression guard for the flip side of the stale-replay test above: an
-/// invalid/unknown `GateRef` string against a still-open (non-terminal) run
-/// must also fail cleanly rather than resuming under a synthesized ref.
-/// Cheap, discriminating companion assertion -- not a full scenario -- so it
-/// stays inline here instead of a third full harness build.
+/// Regression guard, flip side of the stale-replay test above: an
+/// invalid/unknown `GateRef` against a still-open run must also fail cleanly,
+/// not resume under a synthesized ref.
 #[tokio::test]
 async fn deny_auth_gate_rejects_a_non_auth_gate_ref_prefix() {
     let harness = RebornIntegrationHarness::test_default()

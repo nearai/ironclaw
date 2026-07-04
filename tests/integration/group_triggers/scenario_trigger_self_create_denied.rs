@@ -1,69 +1,33 @@
-//! C-DENYEDGE (row 4): a scheduled-trigger fire must not be able to create
-//! (or remove/pause/resume) triggers of its own — the int-tier twin of the
+//! C-DENYEDGE (row 4): a scheduled-trigger fire must not be able to create (or
+//! remove/pause/resume) triggers of its own — int-tier twin of the
 //! `ironclaw_reborn::runtime` unit coverage for issue #5505
 //! (`SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS`, PR #5515).
 //!
-//! Drives a REAL triggered-origin run (`submit_triggered_turn_scripted`,
-//! `TurnOriginKind::ScheduledTrigger`) that scripts a `builtin.trigger_create`
-//! call. The trusted-trigger submit path (`ironclaw_conversations::inbound`)
-//! sets `requested_run_profile: RunProfileId::scheduled_trigger()` on the
-//! `SubmitTurnRequest`, so the run resolves under the dedicated
-//! `scheduled_trigger` run profile
-//! (`crate::planned_driver_factory::scheduled_trigger_planned_profile_definition`),
-//! whose `capability_surface_profile_id` is
-//! `SCHEDULED_TRIGGER_CAPABILITY_SURFACE_PROFILE_ID`. The host's
-//! `PerSurfaceCapabilityDenyDecorator` — wired unconditionally in
-//! `ironclaw_reborn::runtime::build_default_planned_runtime`, keyed on that
-//! profile id, resolving to a `CapabilitySurfaceDenyFilter` — strips
-//! `builtin.trigger_create` (and remove/pause/resume; `trigger_list` stays
-//! visible) from the fire's model-visible capability surface.
+//! Drives a triggered-origin run (`submit_triggered_turn_scripted`) that scripts
+//! `builtin.trigger_create`. The host's `PerSurfaceCapabilityDenyDecorator`,
+//! keyed on the `scheduled_trigger` run profile's capability-surface id, strips
+//! trigger_create/remove/pause/resume from the model-visible surface
+//! (`trigger_list` stays visible).
 //!
-//! ## Where the denial actually happens (traced, not assumed)
+//! Traced, not assumed: denial happens at the model-gateway seam
+//! (`ironclaw_reborn::model_gateway`'s `validate_provider_tool_call`, via
+//! `CapabilitySurfaceDenyFilter`), BEFORE a `CapabilityCallCandidate` is ever
+//! constructed — so `CapabilityStage` never runs and nothing is appended via
+//! `append_tool_result_reference` (confirmed empirically: persisted history is
+//! exactly `[User, Assistant]`, no `ToolResultReference`). The executor
+//! transparently re-issues the model call rather than gating or failing.
 //!
-//! A model tool call targeting a denied capability is rejected earlier than
-//! `CapabilityStage`'s per-call `denied_calls` bucket
-//! (`crates/ironclaw_agent_loop/src/executor/capabilities.rs`, the
-//! `"capability is not visible in the filtered surface"` literal — that arm
-//! is for a capability that WAS registered as a `CapabilityCallCandidate`
-//! but fell outside the surface between advertisement and dispatch, e.g. a
-//! stale-surface race). For a capability denied from the start (ours),
-//! `ironclaw_reborn::model_gateway`'s response classification calls
-//! `capabilities.validate_provider_tool_call(provider_call)` on every raw
-//! provider tool call BEFORE registering it
-//! (`crates/ironclaw_reborn/src/model_gateway.rs` ~line 1226); the deny
-//! filter's `CapabilitySurfaceDenyFilter::validate_provider_tool_call`
-//! (`crates/ironclaw_loop_support/src/capability_surface_filter.rs`) returns
-//! `AgentLoopHostErrorKind::InvalidInvocation` with the fixed message
-//! `"provider tool call targets a disabled capability"`, and
-//! `map_provider_tool_output_error` maps that to
-//! `HostManagedModelError::safe(HostManagedModelErrorKind::InvalidOutput, ..)`.
-//! The whole model response is rejected at the GATEWAY seam — no
-//! `CapabilityCallCandidate` is ever constructed, so `CapabilityStage` never
-//! runs for this call, and nothing is appended via
-//! `append_capability_result_ref`/`append_tool_result_reference` (confirmed
-//! empirically: the triggered thread's persisted history is exactly
-//! `[User, Assistant]` — no `ToolResultReference` message at all). The
-//! executor transparently re-issues the model call (consuming the second
-//! scripted `text(..)` reply) rather than gating or failing the run.
+//! Because nothing is persisted for this seam, `assert_tool_error`/
+//! `assert_tool_error_summary_contains` (which read persisted envelopes) can't
+//! observe it. This scenario instead asserts the security property directly:
+//! (1) `builtin.trigger_create` was never dispatched, (2) the run completes
+//! cleanly, (3) no trigger with the attempted name exists afterward (verified
+//! via a real, non-triggered `builtin.trigger_list` call).
 //!
-//! Because nothing is persisted to thread history or the in-process capability
-//! recorder for this seam, `assert_tool_error`/`assert_tool_error_summary_contains`
-//! (which both read persisted `ToolResultReference` envelopes) cannot observe
-//! it — there is no host-authored summary string to pin here, unlike the
-//! gate-declined/filtered-surface-race families those assertions were built
-//! for. This scenario instead asserts the actual security property directly:
-//! (1) `builtin.trigger_create` was never dispatched (`assert_tool_invoked`
-//! returns `Err`), (2) the run completes cleanly (no hang, no terminal
-//! failure), and (3) no trigger with the attempted name exists in the shared
-//! repository afterward, verified by dispatching a real (non-triggered)
-//! `builtin.trigger_list` call, whose surface is unaffected by the
-//! scheduled-trigger deny map.
-//!
-//! Distinct from `scenario_verbs_lifecycle`'s `trigger_create` coverage in
-//! this same binary: that scenario submits through the plain (non-triggered)
-//! `submit_turn` wire, which resolves the default/interactive run profile —
-//! the trigger-mutator surface is fully visible there, so it never exercises
-//! this deny map at all.
+//! Distinct from `scenario_verbs_lifecycle`'s `trigger_create` coverage: that
+//! submits through the plain `submit_turn` wire (interactive run profile),
+//! where the trigger-mutator surface is fully visible and never exercises
+//! this deny map.
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
@@ -104,11 +68,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     )
     .await?;
 
-    // The capability must never have reached dispatch at all — a
-    // discriminating negative check against the real in-process invocation
-    // recorder (not a bare `.is_err()` on something unrelated: this reads
-    // the SAME recorder `assert_tool_invoked` uses for the positive case
-    // in `scenario_verbs_lifecycle`).
+    // The capability must never have reached dispatch — reads the SAME
+    // invocation recorder `assert_tool_invoked` uses for the positive case in
+    // `scenario_verbs_lifecycle`, not a bare `.is_err()` on something unrelated.
     if h.assert_tool_invoked("builtin.trigger_create")
         .await
         .is_ok()
@@ -120,12 +82,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         );
     }
 
-    // Strongest proof of the security property: no trigger with the
-    // attempted name actually exists in the shared repository. Verified
-    // through a genuine INTERACTIVE (non-triggered) `trigger_list` call on a
-    // fresh thread in the SAME group — `trigger_list` is read-only and stays
-    // visible on every profile, so this reads the real, current repository
-    // state rather than anything scoped to the denied run.
+    // Strongest proof: no trigger with the attempted name exists, verified via
+    // a genuine INTERACTIVE `trigger_list` call (read-only, visible on every
+    // profile) rather than anything scoped to the denied run.
     let verifier = g
         .thread("conv-trigger-self-create-denied-verify")
         .script([

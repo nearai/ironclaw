@@ -1,4 +1,4 @@
-//! extension domain tools profiles (populated by the profile migration).
+//! Extension domain tools profiles.
 
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,

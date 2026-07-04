@@ -2,13 +2,11 @@
 //!
 //! Store-level durability proof: writes a secret to a `FilesystemSecretStore`
 //! backed by a libSQL composite, then reopens a genuinely fresh store over the
-//! same on-disk database file and reads the secret back. Proves real on-disk
-//! secret durability without exercising the turn/model layer.
+//! same on-disk database file and reads the secret back — real on-disk
+//! durability, without the turn/model layer.
 //!
-//! Gated on the `libsql` feature because the test directly instantiates
-//! `LibSqlRootFilesystem`, a type that compiles only under
-//! `feature = "libsql"`.  Running without the feature produces 0 tests
-//! (compile-safe); running with `--features libsql` produces 2 tests.
+//! Gated on `feature = "libsql"` (directly instantiates `LibSqlRootFilesystem`,
+//! which only compiles under that feature); 0 tests without it, 2 with it.
 
 #![cfg(feature = "libsql")]
 
@@ -74,12 +72,8 @@ async fn secret_persists_across_libsql_reopen() {
     drop(composite);
 
     // --- Reopen: fresh libsql database, fresh composite, fresh store ---
-    //
-    // Mirrors the `assert_reply_persists_after_reopen` pattern in
-    // `tests/support/reborn/builder.rs`: `libsql::Builder::new_local` opens
-    // the existing file, `run_migrations` is idempotent (schema already
-    // exists), and the SAME `root` path yields the SAME cached master-key
-    // file so decryption succeeds on the fresh store.
+    // Mirrors `assert_reply_persists_after_reopen` (builder.rs): same `root`
+    // path yields the same cached master-key file, so decryption succeeds.
     let db_path = dir.path().join(LOCAL_DEV_DB_FILENAME);
     let db = Arc::new(
         libsql::Builder::new_local(&db_path)
@@ -157,22 +151,15 @@ async fn secret_read_back_fails_for_unknown_handle() {
 }
 
 /// Prove secrets don't leak across tenants: leasing a secret under a scope
-/// that differs ONLY in `tenant_id` (same host user, agent, and project)
-/// must fail, and must fail with the same discriminating error as the
-/// unknown-handle case above — `FilesystemSecretStore::read_secret`
-/// (`crates/ironclaw_secrets/src/filesystem_store.rs`) enforces this via
-/// `same_scope_owner`, which compares `tenant_id`/`user_id`/`agent_id`/
-/// `project_id` on the stored secret against the caller's scope and treats
-/// any mismatch as "not found" — the same code path a genuinely unknown
-/// handle hits, not a distinct "forbidden" branch. That is still a real,
-/// discriminating assertion: it proves the tenant mismatch is what's
-/// gating the read (not some unrelated store failure), and the
-/// non-vacuity check below proves the store isn't just broadly broken.
+/// that differs ONLY in `tenant_id` must fail with the same
+/// `UnknownSecret` error as the unknown-handle case — `same_scope_owner`
+/// (`FilesystemSecretStore::read_secret`) treats any scope-field mismatch as
+/// "not found" rather than a distinct "forbidden" branch. The non-vacuity
+/// check below proves the store isn't just broadly broken.
 ///
-/// (A same-tenant-different-user cross-read is a distinct mechanic — same
-/// `same_scope_owner` comparison, different axis — and is intentionally
-/// left for a separate test; this one isolates the tenant dimension only,
-/// per the C-DENYEDGE row-2 scope.)
+/// (Same-tenant-different-user cross-read is a distinct axis of the same
+/// `same_scope_owner` comparison, left for a separate test — C-DENYEDGE row 2
+/// isolates tenant only.)
 #[tokio::test]
 async fn secret_read_back_fails_for_wrong_tenant_scope() {
     let dir = tempfile::tempdir().expect("temp dir");

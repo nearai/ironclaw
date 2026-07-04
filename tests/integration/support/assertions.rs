@@ -1,21 +1,15 @@
 //! Egress + tool-result + model-prompt assertions for [`RebornIntegrationHarness`].
 //!
-//! These read the captured Tier-2 `RuntimeHttpEgressRequest`s and recorded
-//! capability results through the `pub(super)` accessors on the harness
-//! (`captured_egress_requests` / `captured_capability_results`) rather than
-//! re-reaching internals.
+//! Read the captured Tier-2 `RuntimeHttpEgressRequest`s and recorded
+//! capability results through the harness's `pub(super)` accessors rather than
+//! reaching internals directly.
 //!
-//! The egress-assertion group (`assert_egress_count` / `assert_egress_url_order`
-//! / `assert_egress_method_order` / `assert_egress_body_contains`) all assert
-//! over the SAME captured `RecordingRuntimeHttpEgress` request log — there is
-//! one runtime-lane egress-assertion API, not a parallel one. The one
-//! exception is `assert_network_egress_header_contains`, which reads the
-//! recording *network* egress lane — required for the T0-SECRET-INJECT
-//! credential-injection proof, whose harness routes through the host egress
-//! pipeline over the network recorder (see that method's docs for why).
-//! `assert_system_prompt_contains` reads a different capture source — the
-//! scripted `TraceLlm`'s captured requests, via the harness's
-//! `captured_system_prompts` accessor.
+//! The egress-assertion group (`assert_egress_count`/`assert_egress_url_order`/
+//! `assert_egress_method_order`/`assert_egress_body_contains`) all read the SAME
+//! `RecordingRuntimeHttpEgress` log — one runtime-lane API, not a parallel one.
+//! `assert_network_egress_header_contains` is the exception: it reads the
+//! *network* egress lane (required for T0-SECRET-INJECT). `assert_system_prompt_contains`
+//! reads yet another source — the scripted `TraceLlm`'s captured requests.
 
 // Shared integration-test support: not every binary that mounts the
 // `reborn_support` tree consumes this module (e.g. `support_unit_tests.rs`), so
@@ -161,13 +155,11 @@ impl RebornIntegrationHarness {
     /// Assert that ANY captured egress request whose URL contains `url_substr`
     /// carried a body containing `body_substr` — checks every matching request,
     /// not just the first. Needed for a multi-request handshake where every leg
-    /// shares the same URL (e.g. web-access's Exa MCP `initialize` /
-    /// `notifications/initialized` / `tools/call` sequence, C-WEBACCESS) and
-    /// only one leg's body carries the substring under test. Prefer
-    /// [`assert_egress_body_contains`] when `url_substr` is expected to match
-    /// exactly one request — its first-match semantics catch a false pass that
-    /// this looser check would miss if a later, unrelated same-URL request also
-    /// happened to satisfy `body_substr`.
+    /// shares the same URL (e.g. web-access's Exa MCP handshake, C-WEBACCESS)
+    /// and only one leg's body carries the substring. Prefer
+    /// [`assert_egress_body_contains`] when `url_substr` matches exactly one
+    /// request — its first-match semantics catch a false pass this looser
+    /// check would miss.
     pub async fn assert_egress_body_contains_any(
         &self,
         url_substr: &str,
@@ -246,16 +238,13 @@ impl RebornIntegrationHarness {
         .into())
     }
 
-    /// Assert that some SINGLE model request this thread sent to the scripted
-    /// provider contains EVERY needle in `needles` (all in one request, not
-    /// spread across several). This is the multi-turn "sees prior context"
-    /// proof: pass a needle unique to an earlier turn plus one unique to the
-    /// current turn — only the current turn's request carries BOTH, because the
-    /// earlier turn's own request predates the later text. Scanning with the
-    /// single-needle [`assert_model_request_contains`] cannot express this (each
-    /// needle would trivially match its own originating request), so a genuine
-    /// context-carryover regression (the loop rebuilding the request without
-    /// prior history) would slip through it but not through this.
+    /// Assert some SINGLE model request contains EVERY needle in `needles`
+    /// (all in one request, not spread across several) — the multi-turn "sees
+    /// prior context" proof: an earlier-turn needle plus a current-turn needle
+    /// only co-occur if history carried over. The single-needle
+    /// [`assert_model_request_contains`] can't express this (each needle
+    /// trivially matches its own originating request), so it would miss a
+    /// context-carryover regression this catches.
     pub async fn assert_model_request_contains_all(&self, needles: &[&str]) -> HarnessResult<()> {
         let requests = self.scripted_llm.captured_requests();
         for messages in &requests {
@@ -273,15 +262,12 @@ impl RebornIntegrationHarness {
     }
 
     /// Collects the persisted `safe_summary` field of every `ToolResultReference`
-    /// message on this thread's FULL history (not baseline-sliced — same caveat
-    /// as `assert_tool_error`/`assert_tool_error_summary_contains`: safe only for
-    /// single-turn harnesses today). Shared collector for [`assert_tool_error`],
-    /// [`assert_no_tool_error`], and [`assert_tool_error_summary_contains`].
-    ///
-    /// A `ToolResultReference` message with `content: None`, or with `content`
-    /// that fails to decode as a `ToolResultReferenceEnvelope`, is an `Err` —
-    /// never silently skipped. Both would otherwise vanish from `summaries`
-    /// and degrade into a misleading "not found; saw [...]" for the caller.
+    /// message on this thread's FULL history (not baseline-sliced — safe only
+    /// for single-turn harnesses today). Shared collector for
+    /// [`assert_tool_error`], [`assert_no_tool_error`], and
+    /// [`assert_tool_error_summary_contains`]. Fail loud (never silently skip):
+    /// missing or undecodable `content` is an `Err`, not an omission that would
+    /// degrade into a misleading "not found" for the caller.
     async fn persisted_tool_error_summaries(&self) -> HarnessResult<Vec<String>> {
         let history = self
             .thread_harness
@@ -367,35 +353,23 @@ impl RebornIntegrationHarness {
     }
 
     /// Assert a model-visible tool error of `class` carrying `reason` was
-    /// persisted for this thread. Unlike [`assert_tool_result_contains`] (which
-    /// reads the in-process recorder, populated only on the *Completed* write
-    /// path), a `Failed`/`Denied` capability outcome is persisted through a
-    /// different pipeline — `append_capability_result_ref` →
-    /// `append_tool_result_reference` — as a `MessageKind::ToolResultReference`
-    /// message whose `content` is the JSON-serialized `ToolResultReferenceEnvelope`.
-    /// Reaching this state at all (rather than a terminal `driver_unavailable`)
-    /// also proves the failure was a recoverable, model-visible tool error.
+    /// persisted for this thread. Unlike [`assert_tool_result_contains`]
+    /// (in-process recorder, *Completed* path only), a `Failed`/`Denied`
+    /// outcome persists as a `MessageKind::ToolResultReference` message —
+    /// reaching this state at all proves it was recoverable, not a terminal
+    /// `driver_unavailable`.
     ///
-    /// This parses the envelope and checks its **`safe_summary` field** — NOT a
-    /// raw-JSON substring — so `reason` cannot match incidentally inside
-    /// `model_observation`/`result_ref`, and JSON escaping can't skew the match.
-    /// The summary reads `"capability <failed|denied> with <token>: …"`; the
-    /// assertion requires the summary to start with [`class`](ToolErrorClass)'s
-    /// prefix AND contain `reason`. `class` therefore discriminates
-    /// Failed-vs-Denied structurally: a regression that flips one into the other
-    /// fails even when both classes render the same `reason` token (e.g.
-    /// `policy_denied`).
+    /// Parses the envelope's **`safe_summary` field** (not a raw-JSON
+    /// substring, so `reason` can't match incidentally elsewhere) and requires
+    /// it to start with [`class`](ToolErrorClass)'s prefix AND contain
+    /// `reason` — `class` discriminates Failed-vs-Denied structurally even
+    /// when both render the same `reason` token (e.g. `policy_denied`).
     ///
-    /// **Scans the full thread history, not baseline-sliced** (unlike the
-    /// sibling `assert_egress_*`/`assert_tool_result_contains`, which slice
-    /// `[baseline..]` off the shared in-process recorder). Every current caller
-    /// is a single-turn, single-tool-call harness, so there is at most one
-    /// `ToolResultReference` message and no earlier-thread bleed-through is
-    /// reachable. A future multi-turn or group-thread reuse of this assertion
-    /// MUST add baseline scoping first (thread a `baseline_history_len` through
-    /// harness construction, mirroring `baseline_egress_count` etc.) — do not
-    /// assume this helper is safe to reuse as-is once a thread has more than one
-    /// turn.
+    /// **Scans the full thread history, not baseline-sliced.** Safe today
+    /// because every caller is single-turn/single-tool-call; a future
+    /// multi-turn or group-thread reuse MUST add baseline scoping first
+    /// (mirroring `baseline_egress_count`) before assuming this is reusable
+    /// as-is.
     pub async fn assert_tool_error(
         &self,
         class: ToolErrorClass,
@@ -443,14 +417,11 @@ impl RebornIntegrationHarness {
 
     /// Assert some persisted `ToolResultReference`'s raw `safe_summary` text
     /// contains `text` — NO class-prefix requirement. Complements
-    /// [`assert_tool_error`] for `CapabilityErrorSummary`s the executor builds
-    /// via `SanitizedStrategySummary::from_trusted_static` in
-    /// `crates/ironclaw_agent_loop/src/executor/capabilities.rs` (filtered-surface
-    /// denial, stale-surface retry, auth/approval gate-declined short-circuit) —
-    /// those are fixed host-authored literals with no host-returned text to
-    /// prefix, so `assert_tool_error`'s `capability_{failed,denied}_summary`
-    /// prefix match can never succeed for them. Use only for known
-    /// executor-synthesized literals.
+    /// [`assert_tool_error`] for executor-synthesized `CapabilityErrorSummary`s
+    /// (filtered-surface denial, stale-surface retry, gate-declined
+    /// short-circuit — `executor/capabilities.rs`) that are fixed host-authored
+    /// literals with no host-returned text, so `assert_tool_error`'s prefix
+    /// match can never succeed for them.
     pub async fn assert_tool_error_summary_contains(&self, text: &str) -> HarnessResult<()> {
         let summaries = self.persisted_tool_error_summaries().await?;
         if summaries.iter().any(|summary| summary.contains(text)) {
@@ -464,24 +435,16 @@ impl RebornIntegrationHarness {
 
     /// Assert that any captured **network** egress request whose URL
     /// contains `url_substr` carried a header named `header_name`
-    /// (case-insensitive) whose value contains `value_substr`. This is the
-    /// credential-injection-on-the-wire proof for T0-SECRET-INJECT: a
-    /// host-injected `Authorization: Bearer <token>` lands on the outbound
-    /// request only after the egress pipeline's `apply_credential_injections`
-    /// step, which the recording network egress captures.
+    /// (case-insensitive) whose value contains `value_substr` — the
+    /// credential-injection-on-the-wire proof for T0-SECRET-INJECT.
     ///
-    /// **Why the network lane, not the runtime lane:** the GitHub WASM harness
-    /// (`with_github_issue_tools`) wires its recording `RuntimeHttpEgress` and
-    /// then calls `try_with_host_http_egress`, which overwrites the runtime port
-    /// with the host egress pipeline over the recording *network* egress. So the
-    /// injected request flows through the network recorder, and the runtime-lane
-    /// `assert_egress_*` family (which reads `runtime_http_requests()`) is inert
-    /// for this wiring. Assert here instead.
+    /// **Why the network lane, not the runtime lane:** `with_github_issue_tools`'s
+    /// `try_with_host_http_egress` overwrites the runtime port with the host
+    /// egress pipeline over the recording *network* egress, so the runtime-lane
+    /// `assert_egress_*` family is inert for this wiring — assert here instead.
     ///
-    /// Checks only the `[baseline_network_count..]` delta so a group thread never
-    /// spuriously matches a prior thread's request (R2), mirroring the runtime-lane
-    /// `assert_egress_*` family's baseline discipline even though no group
-    /// constructor wires `GithubIssueTools` today.
+    /// Checks only `[baseline_network_count..]` so a group thread never
+    /// spuriously matches a prior thread's request (R2).
     pub async fn assert_network_egress_header_contains(
         &self,
         url_substr: &str,
@@ -528,18 +491,13 @@ impl RebornIntegrationHarness {
 
     /// C-BUDGET liveness assertion: the group's wired `model_budget_accountant`
     /// seeded the run owner's daily USD cap on the turn's first model call.
+    /// Reads the in-memory `ResourceGovernor` behind `build_default_budget_accountant`
+    /// (wired via `with_budget_accounting()`); asserting the cap equals the
+    /// compiled default (`$5.00`) proves it came from `BudgetDefaults` through
+    /// the real coordinator → loop → model-port path, not an incidental path.
     ///
-    /// Reads the in-memory `ResourceGovernor` retained behind the production
-    /// `build_default_budget_accountant` accountant (wired via
-    /// `with_budget_accounting()` / `budget_accounting()`). Before any turn the
-    /// run-owner account does not exist; after a completed turn the accountant's
-    /// `pre_model_call` has fired through the real coordinator → loop → model-port
-    /// path and its compiled-default seeding policy has installed the daily cap.
-    /// Asserting the cap equals the compiled default (`$5.00`) proves the value
-    /// came from the production helper's `BudgetDefaults`, not an incidental path.
-    ///
-    /// This is wiring-liveness only — budget SEMANTICS (thresholds, gates,
-    /// `BudgetEvent` cascade) are covered at crate tier (`budget_e2e.rs`).
+    /// Wiring-liveness only — budget SEMANTICS are covered at crate tier
+    /// (`budget_e2e.rs`).
     pub async fn assert_budget_user_cap_seeded(&self) -> HarnessResult<()> {
         let governor = self._shared.budget_governor.as_ref().ok_or(
             "harness was not built with budget accounting wired (call with_budget_accounting)",

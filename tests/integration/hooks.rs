@@ -4,38 +4,28 @@
 //!
 //! # BLOCKED by a production bug (both scenarios are `#[ignore]`d RED regressions)
 //!
-//! Wiring ANY hook dispatcher into a full coordinator-path turn (via the same
-//! `build_default_planned_runtime` → `RebornLoopDriverHostFactory::with_hook_dispatcher_builder_factory`
-//! path production uses when the hooks flag is enabled) fails EVERY turn with
-//! `driver_unavailable`. Root cause, confirmed via trace capture:
+//! Wiring ANY hook dispatcher into a full coordinator-path turn fails EVERY
+//! turn with `driver_unavailable`:
+//! `HostUnavailableWithDiagnostics { stage: Checkpoint, kind: Unavailable,
+//! safe_summary: "stage_checkpoint_payload not implemented" }`.
 //!
-//! ```text
-//! HostUnavailableWithDiagnostics { stage: Checkpoint, kind: Unavailable,
-//!     safe_summary: "stage_checkpoint_payload not implemented" }
-//! ```
+//! Root cause: `ironclaw_hooks::middleware::checkpoint_port::
+//! HookedLoopCheckpointPort` overrides only `LoopCheckpointPort::checkpoint`;
+//! it does NOT forward `stage_checkpoint_payload`/`load_checkpoint_payload` to
+//! its inner port, so those fall through to the trait's fail-closed defaults.
+//! A planned run stages a checkpoint payload before the first model call, so
+//! with a hook dispatcher active the turn dies there before any hook fires.
+//! Hooks are off by default in production, so this latent bug has never been
+//! exercised — this is the first full-turn-with-hooks path.
 //!
-//! `ironclaw_hooks::middleware::checkpoint_port::HookedLoopCheckpointPort`
-//! (crates/ironclaw_hooks/src/middleware/checkpoint_port.rs) overrides ONLY
-//! `LoopCheckpointPort::checkpoint`; it does NOT forward `stage_checkpoint_payload`
-//! (nor `load_checkpoint_payload`) to its inner port, so those fall through to the
-//! trait's fail-closed defaults (`ironclaw_turns::run_profile::host::LoopCheckpointPort`,
-//! host.rs:2214/2227 — "…not implemented"). A planned run stages a checkpoint
-//! payload on `checkpoint_before_model` (before the first model call), so with a
-//! hook dispatcher active the turn dies at that checkpoint before any hook
-//! meaningfully fires. Hooks are off by default in production
-//! (`HOOKS_ENABLED_ENV`), so this latent wrapper bug has never been exercised —
-//! this is the first full-turn-with-hooks path (all existing hook tests drive
-//! mock ports via `host.invoke_capability`, never a coordinator submit).
+//! TODO(reborn-hooks-checkpoint-forward): forward both methods through
+//! `HookedLoopCheckpointPort` to `self.inner` (mirroring `checkpoint()`), then
+//! remove the `#[ignore]`s below. Cross-crate fix in `ironclaw_hooks`, out of
+//! scope for this tests-only lane.
 //!
-//! TODO(reborn-hooks-checkpoint-forward): forward `stage_checkpoint_payload` +
-//! `load_checkpoint_payload` through `HookedLoopCheckpointPort` to `self.inner`
-//! (mirroring `checkpoint()`), then remove the `#[ignore]`s below. Fix is a
-//! cross-crate change in `ironclaw_hooks`, out of scope for this tests-only lane.
-//!
-//! The E-HOOK-INFRA enabler (recording hook doubles + `HookDispatcherBuilderFactory`
-//! builders in `tests/support/reborn/hooks.rs`, the `hook_dispatcher_builder_factory`
-//! group-builder seam, and the `with_hook_factory` harness seam) DOES land and is
-//! correct — these scenarios go green the moment the wrapper bug is fixed.
+//! The E-HOOK-INFRA enabler (recording hook doubles, the
+//! `hook_dispatcher_builder_factory` group-builder seam, `with_hook_factory`)
+//! DOES land and is correct — these scenarios go green once the wrapper bug is fixed.
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
@@ -83,12 +73,9 @@ async fn hooks_fire_at_lifecycle_points_on_coordinator_turn() {
     h.assert_tool_invoked("builtin.http")
         .await
         .expect("http tool ran through the real capability path");
-    // Both lifecycle points fired, in the expected order: the AfterModel
-    // observer dispatches once per `finalize_assistant_message` call (see
-    // `HookedLoopTranscriptPort::finalize_assistant_message`), and the script
-    // has two assistant turns (the tool-call reply, then the final text
-    // reply) with the BeforeCapability gate hook firing between them, right
-    // before the dispatched `builtin.http` capability.
+    // Both lifecycle points fired in order: AfterModel dispatches once per
+    // `finalize_assistant_message` call, and the script's two assistant turns
+    // sandwich the BeforeCapability gate hook right before dispatch.
     assert_eq!(
         log.fires(),
         vec![

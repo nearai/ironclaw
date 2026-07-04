@@ -1,18 +1,9 @@
 //! Per-capability preset constructors for [`RebornIntegrationGroup`] /
-//! [`RebornIntegrationGroupBuilder`].
-//!
-//! `group.rs` owns the one-shared-runtime assembly mechanics
-//! (`RebornIntegrationGroupBuilder::build_base` / `into_group`); this file is
-//! a private child module of `group` (declared `#[path = "group_constructors.rs"]
-//! mod group_constructors;` in `group.rs`, NOT `pub mod` from `mod.rs`) that
-//! catalogs "which capability" selections layered on top of that mechanics —
-//! one method per `HostRuntimeCapabilityHarness` preset. Keeping it a child
-//! module (rather than a top-level sibling) lets it reach `build_base`/
-//! `into_group`/`GroupBaseData` at plain module-private visibility instead of
-//! widening them to `pub(crate)` for the whole test-support crate. Split out
-//! (design precedent: `harness_mcp.rs`) once `group.rs` crossed the 1000-line
-//! ceiling with PR-E2's E-SKILL/E-DURABLE/E-GATEWAY additions; new capability
-//! presets belong HERE, not back in `group.rs`.
+//! [`RebornIntegrationGroupBuilder`] — one method per `HostRuntimeCapabilityHarness`
+//! preset. Private child module of `group.rs` (owns the shared assembly
+//! mechanics: `build_base`/`into_group`), so it reaches those + `GroupBaseData`
+//! at module-private visibility instead of widening them to `pub(crate)` for
+//! the whole test-support crate. New capability presets belong HERE.
 
 // Shared by all group test binaries; symbols read as dead when a binary does
 // not exercise every preset (mirrors the same attribute on `group.rs`/`builder.rs`).
@@ -55,18 +46,14 @@ impl RebornIntegrationGroup {
         Self::builder().live_auth_gate().await
     }
 
-    /// C-JOURNEY convergence seam: group surfacing BOTH an unseeded GitHub
-    /// capability (raises `TurnStatus::BlockedAuth`, resolvable with
-    /// `resolve_auth_gate`/`deny_auth_gate`) AND real file-tool approval
-    /// stores (`write_file`/`read_file` at `PermissionMode::Ask`, raises
-    /// `TurnStatus::BlockedApproval`, resolvable with `approve_gate`/`deny_gate`)
-    /// on the SAME `build_reborn_services` runtime — unlike `live_auth_gate`
-    /// (a separate, lower-level `HostRuntimeServices` build with a hardcoded
-    /// credential resolver and no run_state store), this group's auth gate
-    /// resolves through the REAL `ProductAuthRuntimeCredentialResolver`, so
-    /// `resolve_auth_gate`'s happy-path resume actually completes. Auto-approve
-    /// is disabled for the group scope at construction so gated file-tool calls
-    /// raise real `BlockedApproval` gates.
+    /// C-JOURNEY: surfaces BOTH an unseeded GitHub capability (`BlockedAuth`,
+    /// resolve via `resolve_auth_gate`/`deny_auth_gate`) AND real file-tool
+    /// approvals (`BlockedApproval`, via `approve_gate`/`deny_gate`) on ONE
+    /// `build_reborn_services` runtime. Unlike `live_auth_gate` (a hardcoded
+    /// credential resolver, no run_state store), the auth gate here resolves
+    /// through the REAL `ProductAuthRuntimeCredentialResolver`, so
+    /// `resolve_auth_gate` actually completes. Auto-approve disabled at
+    /// construction.
     pub async fn live_auth_and_approval() -> HarnessResult<Self> {
         Self::builder().live_auth_and_approval().await
     }
@@ -190,28 +177,19 @@ impl RebornIntegrationGroupBuilder {
     /// Build a live-approvals group. See [`RebornIntegrationGroup::live_approvals`].
     pub async fn live_approvals(self) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
-        // Execute first-party tools under the run's CANONICAL binding subject
-        // user (the hashed `UserId` the actor `host-user` resolves to), not the
-        // constructor's fixed test user, so capability dispatch, approval
-        // persistence, auto-approve keying, and gate-evidence lookup all share the
-        // run's `(tenant, user)` — matching production. Reuse the SAME canonical
-        // binding `build_base` already resolved for the shared turn-store /
-        // evidence scope, so the approval user and the turn-store scope are
-        // derived from one probe and cannot drift. `build_group_capability_with_base`
-        // is the shared "build then align user" core (`harness/options.rs`).
+        // Align capability execution to the run's CANONICAL binding subject user
+        // (not the constructor's fixed test user) so dispatch, approval, auto-
+        // approve keying, and gate-evidence lookup share one `(tenant, user)` —
+        // matching production. `build_group_capability_with_base` is the shared
+        // "build then align user" core (`harness/options.rs`).
         let host_runtime =
             super::super::harness::profiles::file::file_tools_requiring_approval_profile()?
                 .build_group_capability_with_base(&base)
                 .await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         let group = self.into_group(base, capability).await?;
-        // Disable auto-approve once at build time so every thread in this group
-        // faces real approval gates. The dispatch-time check is keyed on the
-        // capability harness's executor user (NOT the binding owner), so target
-        // `auto_approve_scope()` — `(run tenant, capability user)`.
-        // `live_approvals` always constructs `GroupCapability::HostRuntime`, so
-        // both `auto_approve_scope()` and `capability_harness()` are guaranteed
-        // `Some` — use `expect` rather than a redundant `if let`.
+        // Disable auto-approve once so every thread faces real approval gates;
+        // always `HostRuntime` here, so `Some` is guaranteed.
         let scope = group
             .shared
             .auto_approve_scope()
@@ -304,15 +282,10 @@ impl RebornIntegrationGroupBuilder {
     /// Build a profile-tools group. See [`RebornIntegrationGroup::profile_tools`].
     pub async fn profile_tools(self) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
-        // Execute `builtin.profile_set` under the run's canonical binding
-        // subject user, mirroring `live_approvals`'s alignment above (via
-        // the shared `build_group_capability_with_base` core,
-        // `harness/options.rs`). Without this, a second thread's loop
-        // resolves the profile under the canonical subject user while the
-        // write dispatched under the fixed constructor user, so the
-        // read-back never sees it. Also why this cannot go through
-        // `build_with_capability`: the capability depends on `base`, so
-        // `base` must be resolved first.
+        // Align `builtin.profile_set`'s executor to the canonical subject user
+        // (mirrors `live_approvals`) — otherwise a write and its read-back
+        // resolve under different users. Needs `base` first, so can't go
+        // through `build_with_capability`.
         let host_runtime = super::super::harness::profiles::profile::profile_tools_profile()?
             .build_group_capability_with_base(&base)
             .await?;
@@ -353,12 +326,10 @@ impl RebornIntegrationGroupBuilder {
         self.into_group(base, capability).await
     }
 
-    /// Build a per-actor-scoped memory group.
-    /// See [`RebornIntegrationGroup::multiuser_memory_tools`]. Same capability
+    /// Per-actor-scoped memory group. See
+    /// [`RebornIntegrationGroup::multiuser_memory_tools`]. Same capability
     /// surface as [`builtin_tools`] but with per-actor capability dispatch, so
-    /// each actor's memory lands under its own owner subtree. Self-contained
-    /// (no shared helper) so it relocates trivially if the group constructors
-    /// are later split out.
+    /// each actor's memory lands under its own owner subtree.
     pub async fn multiuser_memory_tools(self) -> HarnessResult<RebornIntegrationGroup> {
         let host_runtime =
             super::super::harness::profiles::core_builtin::core_builtin_tools_default()
@@ -368,17 +339,14 @@ impl RebornIntegrationGroupBuilder {
         self.build_with_capability(capability).await
     }
 
-    /// Build a per-actor-scoped file-approval group.
-    /// See [`RebornIntegrationGroup::multiuser_approvals`]. Real approval stores
-    /// (write_file/read_file @ `Ask`) plus per-actor capability dispatch. Auto-
-    /// approve defaults ON per owner (`AUTO_APPROVE_DEFAULT_ENABLED = true`), so
-    /// a scenario that needs an owner to GATE sets that owner OFF explicitly via
-    /// `disable_auto_approve_for_owner` (and grants another owner via
-    /// `enable_auto_approve_for_owner`) — the per-user setting is what the test
-    /// asserts isolates. Because the seam makes the dispatch user equal the turn
-    /// owner, a raised approval request persists under — and its gate-evidence
-    /// lookup resolves through — the SAME owner, so the gate is verified (not
-    /// masked to `Failed`). Self-contained for trivial relocation.
+    /// Per-actor-scoped file-approval group. See
+    /// [`RebornIntegrationGroup::multiuser_approvals`]. Real approval stores
+    /// (write_file/read_file @ `Ask`) plus per-actor capability dispatch;
+    /// auto-approve defaults ON per owner, so a test that needs an owner to
+    /// GATE sets that owner OFF via `disable_auto_approve_for_owner` — the
+    /// per-user setting is what isolation asserts. Dispatch user == turn owner,
+    /// so the raised approval's gate-evidence lookup resolves under that same
+    /// owner (verified, not masked to `Failed`).
     pub async fn multiuser_approvals(self) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
         let host_runtime = super::super::harness::profiles::file::file_tools_requiring_approval()
@@ -388,16 +356,12 @@ impl RebornIntegrationGroupBuilder {
         self.into_group(base, capability).await
     }
 
-    /// Build an outbound-target-tools group. See
-    /// [`RebornIntegrationGroup::outbound_target_tools`]. Mirrors `live_approvals`
-    /// / `profile_tools`: the synthetic `outbound_delivery_*` capabilities run
-    /// under the run's CANONICAL binding subject user (via `with_user_id`), so
-    /// the dispatch-time settings/auto-approve scope
-    /// (`_shared.auto_approve_scope()` = `(tenant, capability user)`) aligns with
-    /// the run's effective dispatch user — the approval-gate arm's
-    /// `disable_auto_approve` and the deny arm's `disable_outbound_target_set_tool`
-    /// both target that exact `(tenant, user)`. Auto-approve is left at its
-    /// default-ON state (no disable here); the gate arm disables it per-test.
+    /// Outbound-target-tools group. See
+    /// [`RebornIntegrationGroup::outbound_target_tools`]. Mirrors
+    /// `live_approvals`/`profile_tools`: the synthetic `outbound_delivery_*`
+    /// capabilities run under the run's canonical binding subject user, so the
+    /// dispatch-time auto-approve scope aligns with tests' per-test disables.
+    /// Auto-approve stays default-ON here; the gate arm disables it per-test.
     pub async fn outbound_target_tools(self) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
         // `build_group_capability_with_base` is the shared "build then align

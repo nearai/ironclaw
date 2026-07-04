@@ -118,34 +118,23 @@ pub async fn run_deny(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     Ok(())
 }
 
-/// C-DENYEDGE (row 1): a resume request carrying the RIGHT `run_id` but a
-/// MUTATED `TurnScope` (different tenant) must be rejected, not silently
-/// resolved against the wrong tenant's run.
+/// C-DENYEDGE (row 1): a resume for the RIGHT `run_id` but a MUTATED
+/// `TurnScope` (different tenant) must be rejected, not silently resolved
+/// against the wrong tenant's run.
 ///
-/// Drives a triggered fire to a real `BlockedApproval` gate exactly like
-/// [`run_approve`], then attempts to resume the SAME `run_id` under a
-/// scope with a different `tenant_id`. `InMemoryTurnStateStore::resume_turn_once`
-/// (`crates/ironclaw_turns/src/memory/mod.rs`) looks the run up by `run_id`
-/// alone, then checks `record.scope != request.scope` BEFORE consulting the
-/// gate/precondition/actor at all — so a mis-scoped resume against an
-/// otherwise-valid pending gate deterministically hits
-/// `TurnError::ScopeNotFound` (`#[error("turn run not found")]`), and the
-/// taken-out record is unconditionally reinserted afterward regardless of
-/// outcome, so the run's `BlockedApproval` state is untouched by the
-/// rejected attempt.
+/// Drives a triggered fire to a real `BlockedApproval` gate like
+/// [`run_approve`], then resumes the SAME `run_id` under a mismatched tenant
+/// scope. `InMemoryTurnStateStore::resume_turn_once` checks `record.scope !=
+/// request.scope` BEFORE consulting gate/precondition/actor, so this
+/// deterministically hits `TurnError::ScopeNotFound` and reinserts the
+/// taken-out record unconditionally — the gate's `BlockedApproval` state is
+/// untouched by the rejected attempt.
 ///
-/// This drives `resume_run_in_scope` (the resume-only tail
-/// `approve_gate_in_scope`/`deny_gate_in_scope` share) rather than those two
-/// helpers themselves: both first resolve the approval request in the
-/// (scope-independent) local-dev approval store via
-/// `capability_recorder.approve_local_dev_gate`/`deny_local_dev_gate`, which
-/// is keyed on `gate_ref` alone and would irreversibly flip the approval
-/// record to `Approved`/`Denied` even though the resume itself is rejected —
-/// corrupting the approval-store state this scenario's non-vacuity check
-/// depends on being still-`Pending`. The resume-only call isolates the
-/// assertion to exactly the mechanism under test (the `TurnScope` equality
-/// check inside `resume_turn_once`) and leaves the gate genuinely live for
-/// the real resume that follows.
+/// Drives `resume_run_in_scope` directly (not `approve_gate_in_scope`/
+/// `deny_gate_in_scope`): those first flip the approval record to
+/// Approved/Denied in the scope-independent local-dev store even when the
+/// resume itself is rejected, which would corrupt the still-`Pending` state
+/// this scenario's non-vacuity check depends on.
 pub async fn run_wrong_scope_resume_rejected(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let h = g.thread("conv-triggered-gate-wrong-scope").build().await?;
 

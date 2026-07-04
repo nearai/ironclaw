@@ -22,21 +22,12 @@ pub enum RebornThreadHarnessError {
     MissingFinalReply(String),
 }
 
-/// Thin harness over a `FilesystemSessionThreadService<F>` for asserting thread
-/// history in integration and binary-tier tests.
+/// Thin harness over `FilesystemSessionThreadService<F>` for asserting thread history.
 ///
-/// The type parameter `F` defaults to `InMemoryBackend` so that all existing
-/// callers that write `RebornThreadHarness` (no type parameter) continue to
-/// compile as `RebornThreadHarness<InMemoryBackend>` without modification.
-/// `InMemoryBackend` (not `LocalFilesystem`) is the default because it is
-/// CAS-capable and models the production database-backed filesystem that these
-/// stores are mounted on in real deployments; `LocalFilesystem` is a byte-only
-/// backend that production never uses for record-shaped CAS stores (see
-/// e3e155803).
-///
-/// The integration tier uses `RebornThreadHarness<CompositeRootFilesystem>` via
-/// `filesystem_shared_composite`, mounting the thread service directly on the
-/// per-`build()` production-path composite (threads at `/tenants/{t}/users/{u}/threads`).
+/// Defaults to `InMemoryBackend` (CAS-capable, models the production DB-backed filesystem)
+/// rather than the byte-only `LocalFilesystem` (see e3e155803). The integration tier uses
+/// `RebornThreadHarness<CompositeRootFilesystem>` via `filesystem_shared_composite`, mounted
+/// on the per-`build()` production-path composite.
 pub struct RebornThreadHarness<F = InMemoryBackend>
 where
     F: RootFilesystem,
@@ -44,19 +35,14 @@ where
     pub scope: ThreadScope,
     pub service: Arc<FilesystemSessionThreadService<F>>,
     backend: Arc<F>,
-    /// Backing `TempDir` to keep alive for tiers whose backend persists to
-    /// disk (e.g. the `CompositeRootFilesystem` integration tier). `None` for
-    /// in-memory tiers, which have nothing to keep alive.
+    /// Backing `TempDir` for disk-persisting tiers (e.g. `CompositeRootFilesystem`);
+    /// `None` for in-memory tiers.
     root: Option<Arc<tempfile::TempDir>>,
-    /// Path prefix inserted before `/tenants/...` when constructing the thread
-    /// scoped filesystem. The default `InMemoryBackend` tier uses `"/engine"`
-    /// (preserving the historical `/engine/tenants/...` layout); the
-    /// integration-tier `CompositeRootFilesystem` harness uses `""` so threads
-    /// land at `/tenants/...` inside the production composite.
+    /// Path prefix before `/tenants/...`. Default `InMemoryBackend` tier uses `"/engine"`;
+    /// integration-tier `CompositeRootFilesystem` uses `""` (production composite layout).
     root_prefix: String,
 }
 
-/// Shared methods: work for any `F: RootFilesystem`.
 impl<F: RootFilesystem> RebornThreadHarness<F> {
     pub fn reopened(&self) -> Result<Self, RebornThreadHarnessError> {
         let scoped = scoped_threads_fs_at(&self.root_prefix, Arc::clone(&self.backend))?;
@@ -120,8 +106,7 @@ impl<F: RootFilesystem> RebornThreadHarness<F> {
     }
 }
 
-/// `InMemoryBackend`-specific constructors (default tier); see the type doc
-/// above for why this is the default.
+/// `InMemoryBackend`-specific constructors (default tier).
 impl RebornThreadHarness<InMemoryBackend> {
     pub fn filesystem_temp(scope: ThreadScope) -> Result<Self, RebornThreadHarnessError> {
         let backend = Arc::new(InMemoryBackend::new());
@@ -146,15 +131,10 @@ impl RebornThreadHarness<InMemoryBackend> {
 
 /// `CompositeRootFilesystem`-specific constructor (integration tier).
 impl RebornThreadHarness<CompositeRootFilesystem> {
-    /// Create a harness backed by a shared production-path composite.
-    ///
-    /// Threads land at `/tenants/{tenant}/users/{user}/threads` inside the
-    /// composite (no `/engine` prefix), so they are visible through the
-    /// `/tenants` mount that `mount_local_dev_database_roots` installs.
-    /// `root` keeps the composite's `TempDir` alive; the same `Arc` is also
-    /// held by `GroupSharedStorage::turn_root` so on-disk libsql data persists
-    /// across calls to `reopened()`, which rebuilds the scoped service from
-    /// the same composite backend.
+    /// Harness backed by a shared production-path composite; threads land at
+    /// `/tenants/{tenant}/users/{user}/threads` (visible via `mount_local_dev_database_roots`).
+    /// `root` (also held by `GroupSharedStorage::turn_root`) keeps the `TempDir` alive so
+    /// on-disk libsql data persists across `reopened()` calls.
     pub fn filesystem_shared_composite(
         scope: ThreadScope,
         backend: Arc<CompositeRootFilesystem>,
@@ -174,23 +154,13 @@ impl RebornThreadHarness<CompositeRootFilesystem> {
 
 /// Build the scoped thread filesystem.
 ///
-/// The `/threads` mount is resolved **per filesystem operation** from that
-/// operation's own `ResourceScope` (production's `invocation_mount_view`
-/// shape: `ScopedFilesystem::new` + resolver) — NOT fixed once at
-/// construction. `FilesystemSessionThreadService` derives each op's
-/// `ResourceScope` from the request's `ThreadScope` (owner included, via
-/// `ThreadScope::to_resource_scope`), so ONE service instance serves every
-/// owner's `/tenants/{t}/users/{owner}/threads` subtree. This is what lets a
-/// group's ONE shared runtime resolve a second actor's thread (issue #5479):
-/// the runtime's per-turn owner rewrite
-/// (`ThreadScopeResolver::resolve_for_turn`) now lands on the right physical
-/// root instead of a mount pinned to the group's canonical actor. For any
-/// single owner the resolved path is byte-identical to the previous fixed
-/// view, so single-actor tests are unaffected.
+/// The `/threads` mount resolves **per filesystem operation** from that op's `ResourceScope`
+/// (via `ThreadScope::to_resource_scope`), not fixed at construction — so one service instance
+/// serves every owner's subtree, letting a group's shared runtime resolve a second actor's
+/// thread (issue #5479). Single-owner tests are unaffected (path is byte-identical).
 ///
-/// `root_prefix` is prepended before `/tenants/...`:
-/// - Default `InMemoryBackend` tier: `"/engine"` → `/engine/tenants/{t}/users/{u}/threads`
-/// - Integration tier: `""` → `/tenants/{t}/users/{u}/threads`
+/// `root_prefix` precedes `/tenants/...`: `"/engine"` for the default `InMemoryBackend` tier,
+/// `""` for the integration tier.
 fn scoped_threads_fs_at<F>(
     root_prefix: &str,
     backend: Arc<F>,
@@ -206,15 +176,11 @@ where
 
 /// The single `/threads` mount grant for one operation's `ResourceScope`.
 ///
-/// System-scoped operations (e.g. `find_idempotency_record`, which routes
-/// through `ResourceScope::system()`) and owner-less thread scopes carry the
-/// `SYSTEM_RESERVED_ID` sentinel — control bytes, not path-safe — in the
-/// tenant and/or user segment. Map it to the harness's historical `_system`
-/// segment: this mirrors production's `resource_scope_path_segment`
-/// (`invocation_mount_view`, ironclaw_reborn_composition) only in SHAPE
-/// (sentinel-in, path-safe-segment-out) — production's actual segment value
-/// is `__system__`, not `_system`. Deliberately NOT switched to match, to
-/// avoid rewriting every existing harness fixture path; see `path_segment`.
+/// System-scoped ops carry the `SYSTEM_RESERVED_ID` sentinel (control bytes, not path-safe)
+/// in the tenant/user segment; mapped to the harness's `_system` segment — matching
+/// production's `resource_scope_path_segment` only in SHAPE, not value (prod uses
+/// `__system__`). Deliberately not switched, to avoid rewriting every existing fixture
+/// path; see `path_segment`.
 pub(crate) fn threads_mount_view(
     root_prefix: &str,
     scope: &ironclaw_host_api::ResourceScope,
@@ -229,10 +195,9 @@ pub(crate) fn threads_mount_view(
     )])
 }
 
-/// Path-safe segment for one scope axis: the `SYSTEM_RESERVED_ID` sentinel
-/// becomes the harness's historical `_system` segment (NOT production's
-/// `__system__` value — see `threads_mount_view`); everything else is used
-/// verbatim, matching production's `resource_scope_path_segment` shape.
+/// Path-safe segment for one scope axis: `SYSTEM_RESERVED_ID` becomes `_system` (not
+/// production's `__system__` — see `threads_mount_view`); everything else passes through
+/// verbatim.
 pub(crate) fn path_segment(value: &str) -> &str {
     if value == ironclaw_host_api::SYSTEM_RESERVED_ID {
         "_system"

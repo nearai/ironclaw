@@ -1,28 +1,16 @@
 //! C-SYNTH outbound seam: the `outbound_target_tools` group surfaces the two
-//! local-dev synthetic `outbound_delivery_*` capabilities, and scripted tool
-//! calls dispatch through the REAL production synthetic-capability wrap
-//! (`wrap_local_dev_synthetic_capabilities` + `outbound_delivery_capabilities`)
-//! over an injected `FakeOutboundPreferencesFacade` at the production-wired
-//! facade trait seam.
+//! local-dev synthetic `outbound_delivery_*` capabilities, dispatched through
+//! the REAL production synthetic-capability wrap over an injected
+//! `FakeOutboundPreferencesFacade` at the production-wired facade trait seam.
 //!
-//! Covers the reachable model-visible (kind-A) routes for these capabilities:
-//! - `targets_list` happy path (its only reachable route — every facade error is
-//!   kind-B `driver_unavailable`, so only the happy path is pinned).
-//! - `target_set` happy path (settings decision `Allow` via default-ON
-//!   auto-approve → facade succeeds).
-//! - `target_set` settings-`Deny` → `Failed{policy_denied}` (a `Disabled` tool
-//!   override, `OutboundDeliveryTargetSetHandler`'s
-//!   `OutboundDeliveryApprovalSettingsDecision::Deny` → `PolicyDenied` arm in
-//!   `runtime/local_dev/outbound_delivery.rs`).
-//! - `target_set` facade `NotFound` → `Failed{invalid_input}` (unknown target,
-//!   `OutboundDeliveryTargetSetHandler`'s `NotFound` →
-//!   `CapabilityFailureKind::InvalidInput` arm in the same file).
-//! - `target_set` approval gate: `Ask` (auto-approve disabled) → real
-//!   `BlockedApproval` gate → approve → resume applies the preference; deny →
-//!   resume leaves the preference unchanged.
+//! Covers the reachable model-visible routes: `targets_list` happy path (its
+//! only reachable route — every facade error is `driver_unavailable`);
+//! `target_set` happy path; settings-`Deny` → `Failed{policy_denied}`; facade
+//! `NotFound` → `Failed{invalid_input}`; approval gate `Ask` → approve applies
+//! the preference / deny leaves it unchanged.
 //!
-//! Read-back through the SAME facade double (`recorded_set_target_ids`) proves a
-//! `Completed`/applied outcome actually reached the facade seam — a no-op set
+//! Read-back through the SAME facade double (`recorded_set_target_ids`) proves
+//! a `Completed`/applied outcome actually reached the facade seam — a no-op set
 //! that still fabricated a success payload would leave it empty.
 
 #[allow(dead_code)]
@@ -338,19 +326,12 @@ async fn target_set_approval_gate_deny_leaves_preference_unchanged() {
         .await
         .expect("run resumes to Completed after denial");
 
-    // A bare `Completed` status also matches a silent no-op/vanish bug (the
-    // resumed capability call could simply disappear rather than surface a
-    // model-visible denial). Pin the persisted gate-declined failure summary:
-    // `short_circuit_denied_resume` (capabilities.rs) surfaces this scenario as
-    // `CapabilityOutcome::Failed(GateDeclined)` with a fixed host-authored
-    // planner summary — `SanitizedStrategySummary::from_trusted_static(
-    // "approval gate denied by user")` — NOT the `capability_denied_summary`/
-    // `capability_failed_summary` prefix wrapper (those apply only when a
-    // capability itself returns Denied/Failed, not this executor-level
-    // gate-declined short-circuit). `assert_tool_error_summary_contains` reads
-    // that raw safe_summary without the class-prefix requirement, mirroring
-    // the analogous auth-gate-deny assertion in
-    // `reborn_integration_auth_gate.rs`.
+    // A bare `Completed` also matches a silent no-op/vanish bug. Pin the
+    // gate-declined failure summary directly: `short_circuit_denied_resume`
+    // surfaces this as a fixed host-authored planner summary, NOT the
+    // `capability_denied_summary`/`capability_failed_summary` prefix wrapper
+    // (those apply only when a capability itself returns Denied/Failed).
+    // Mirrors the analogous assertion in `reborn_integration_auth_gate.rs`.
     harness
         .assert_tool_error_summary_contains("approval gate denied by user")
         .await

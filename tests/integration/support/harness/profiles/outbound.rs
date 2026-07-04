@@ -47,18 +47,7 @@ pub(crate) fn outbound_target_tools_profile() -> HarnessResult<ToolsProfile> {
     })
 }
 
-/// C-SYNTH outbound: harness surfacing the two local-dev synthetic
-/// `outbound_delivery_*` capabilities over an injected
-/// [`FakeOutboundPreferencesFacade`] double.
-/// `create_capability_port` injects them via
-/// `apply_synthetic_capability_wrappers` because
-/// `outbound_target_tools` is `Some`. `target_set` runs with
-/// `requires_approval = true`, so its settings decision is exercised for
-/// real: global auto-approve (default ON) → `Allow`; a `Disabled` tool
-/// override (`disable_outbound_target_set_tool`) → `Deny`; auto-approve
-/// disabled → `Ask` (approval gate). The RETURNED harness leaves global
-/// auto-approve at its default-ON state so the happy/`NotFound` arms
-/// dispatch through `Allow`; the gate arm disables it per-test.
+/// See [`outbound_target_tools_profile`].
 pub(crate) async fn outbound_target_tools() -> HarnessResult<HostRuntimeCapabilityHarness> {
     outbound_target_tools_profile()?.build().await
 }

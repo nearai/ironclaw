@@ -1,10 +1,8 @@
-//! Inert recording process port for the integration-test harness (slice 5).
-//!
-//! `RecordingProcessPort` implements `RuntimeProcessPort` but never spawns a
-//! real OS process. Every `run_command` call records the command string and
-//! returns a benign success response (exit 0, empty stdout/stderr). The
-//! recorder is the default for the `BuiltinHttpTools` capability backend so
-//! that `builtin.shell` test turns are safe to run without any system setup.
+//! Inert recording process port for the integration-test harness.
+//! `RecordingProcessPort` implements `RuntimeProcessPort` without spawning a
+//! real OS process: every `run_command` call is recorded and returns a benign
+//! success (exit 0, empty output) by default — the default port for
+//! `BuiltinHttpTools` so `builtin.shell` test turns are safe without system setup.
 
 // Not every test binary that mounts this support tree exercises the recording
 // process port — mirrors the `#![allow(dead_code)]` used in sibling modules.
@@ -18,10 +16,9 @@ use ironclaw_host_runtime::{
     CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, RuntimeProcessPort,
 };
 
-/// A scripted `run_command` result for the recording process port. Sticky:
-/// once set, EVERY `run_command` call returns it (after recording the command),
-/// so a retryable failure surfaces consistently across the loop's retry budget
-/// instead of being consumed once from a FIFO queue.
+/// Sticky scripted `run_command` result: once set, EVERY subsequent call
+/// returns it (after recording the command) — a retryable failure surfaces
+/// consistently across the loop's retry budget, not just once from a FIFO queue.
 #[derive(Debug, Clone)]
 pub enum ScriptedProcessResult {
     /// Return a benign success with this exit code (non-zero drives the tool's
@@ -33,12 +30,8 @@ pub enum ScriptedProcessResult {
     Timeout,
 }
 
-/// Inert process port: records every `CommandExecutionRequest` and, by default,
-/// returns a benign success (`exit_code = 0`, empty stdout/stderr) without
-/// spawning any OS process. A scripted result (via [`set_scripted`]) overrides
-/// the default for every subsequent call.
-///
-/// [`set_scripted`]: RecordingProcessPort::set_scripted
+/// Records every `CommandExecutionRequest`; returns a benign success by default
+/// (no OS process spawned). [`set_scripted`](Self::set_scripted) overrides it.
 #[derive(Debug, Clone, Default)]
 pub struct RecordingProcessPort {
     commands: Arc<Mutex<Vec<String>>>,

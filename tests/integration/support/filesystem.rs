@@ -12,17 +12,10 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::{HostPath, VirtualPath};
 
-/// Build the turn-state scope path for `binding`, with `root_prefix`
-/// prepended before `/tenants/...`.
-///
-/// The 4-arm match selects a path that isolates turn state by the combination
-/// of tenant, optional agent, optional project, and owner user:
-/// - Binary-E2E tier: `root_prefix = "/engine"` → `/engine/tenants/{t}/.../{u}/turns`
-/// - Integration tier: `root_prefix = ""` → `/tenants/{t}/.../{u}/turns`
-///
-/// Extracted here so `scoped_turns_fs` (harness.rs) and `scoped_turns_fs_composite`
-/// (builder.rs) share one source of turn-path truth; adding a new dimension
-/// (e.g. `mission_id`) only requires updating this function.
+/// Turn-state scope path for `binding` (isolated by tenant/agent/project/
+/// owner user), with `root_prefix` prepended before `/tenants/...`. Shared by
+/// `scoped_turns_fs` (harness.rs) and `scoped_turns_fs_composite` (builder.rs)
+/// so both tiers derive turn paths from one source of truth.
 pub fn turns_scope_path(root_prefix: &str, binding: &ResolvedBinding) -> String {
     let owner_user_id = binding
         .subject_user_id

@@ -1,22 +1,8 @@
 //! E-HOOK-INFRA: recording hook doubles + per-run `HookDispatcherBuilderFactory`
-//! builders, so C-HOOKS can observe hook dispatch on a coordinator-path turn.
-//!
-//! Wired into a harness/group via `with_hook_factory` /
-//! `RebornIntegrationGroupBuilder::hook_dispatcher_builder_factory`. The factory
-//! mints a fresh [`HookDispatcherBuilder`] per host build (per-run isolation),
-//! installing recording hooks that write every fire into a shared
-//! [`RecordingHookLog`]. A test reads that log back after the turn to prove the
-//! wired factory actually fires hooks at the expected lifecycle points.
-//!
-//! These are hand-built first-party hooks (like `ironclaw_reborn`'s
-//! `first_party_only_hook_factory` host-plumbing double), NOT composition
-//! activation coverage: the production `build_hook_dispatcher_builder_factory`
-//! ships an EMPTY first-party catalog, and its activation/projection path is
-//! covered at crate tier in `ironclaw_reborn_composition::hooks::tests`. The
-//! int-tier gap this fills is the end-to-end turn wire — that a wired
-//! `hook_dispatcher_builder_factory` dispatches hooks through the real
-//! coordinator → loop → host path — without re-authoring that crate-tier
-//! activation coverage.
+//! builders so C-HOOKS can observe hook dispatch on a coordinator-path turn.
+//! Hand-built test hooks, not composition activation coverage — that's covered
+//! at crate tier in `ironclaw_reborn_composition::hooks::tests`; this fills the
+//! end-to-end coordinator → loop → host turn-wire gap only.
 
 // Shared integration-test support: not every binary that mounts the
 // `reborn_support` tree consumes this module, so its symbols read as dead there
@@ -36,18 +22,15 @@ use ironclaw_hooks::sink::{
 };
 use ironclaw_reborn::loop_driver_host::{HookDispatcherBuilderFactory, RebornLoopDriverHostError};
 
-/// Canonical identity paths for the TEST-ONLY recording hooks. Kept distinct so
-/// both a `BeforeCapability` gate hook and an `AfterModel` observer can coexist
-/// in one dispatcher.
+/// Distinct identity paths so a `BeforeCapability` hook and an `AfterModel`
+/// observer can coexist in one dispatcher.
 const RECORDING_OBSERVER_PATH: &str = "tests::reborn::hooks::RecordingObserverHook";
 const RECORDING_BEFORE_CAPABILITY_PATH: &str =
     "tests::reborn::hooks::RecordingBeforeCapabilityHook";
-/// The `&'static` reason a `DenyBeforeCapabilityHook` mints (gate-sink reasons
-/// must be `&'static str`, so no `format!`-built string can leak through).
+/// Gate-sink reasons must be `&'static str`, so this can't be a `format!`-built string.
 pub const HOOK_TEST_DENY_REASON: &str = "hook_test_deny";
 
-/// Shared, cloneable log of hook fires. Each installed hook double clones this
-/// handle and appends an entry on every fire; a test reads the entries back.
+/// Shared log of hook fires; each installed hook double appends on fire, a test reads it back.
 #[derive(Clone, Default)]
 pub struct RecordingHookLog {
     fires: Arc<Mutex<Vec<String>>>,
@@ -79,8 +62,7 @@ impl RecordingHookLog {
     }
 }
 
-/// A recording `AfterModel` observer. Observers cannot affect outcomes; this one
-/// records the observed kind so a test can prove the observer fired.
+/// Records the observed kind so a test can prove the observer fired (observers cannot affect outcomes).
 struct RecordingObserverHook {
     log: RecordingHookLog,
 }
@@ -92,9 +74,7 @@ impl ObserverHook for RecordingObserverHook {
     }
 }
 
-/// A recording `BeforeCapability` gate hook that records the capability name and
-/// then `pass()`es (no opinion) — it observes the point without altering the
-/// composed decision, so the capability still runs.
+/// Records the capability name then `pass()`es (no opinion) — observes without altering the decision.
 struct RecordingBeforeCapabilityHook {
     log: RecordingHookLog,
 }
@@ -108,9 +88,8 @@ impl PrivilegedBeforeCapabilityHook for RecordingBeforeCapabilityHook {
     }
 }
 
-/// A `BeforeCapability` gate hook that DENIES `deny_target` (records the fire,
-/// then `deny()`s) and `pass()`es every other capability. Drives the C-HOOKS
-/// error path: a hook deny must block the capability without wedging the run.
+/// DENIES `deny_target`, `pass()`es everything else. Drives the C-HOOKS error
+/// path: a hook deny must block the capability without wedging the run.
 struct DenyBeforeCapabilityHook {
     log: RecordingHookLog,
     deny_target: String,
@@ -135,11 +114,9 @@ fn hook_install_err(context: &str, error: impl std::fmt::Display) -> RebornLoopD
     }
 }
 
-/// A `HookDispatcherBuilderFactory` that installs a recording `AfterModel`
-/// observer plus a recording (passing) `BeforeCapability` gate hook, both
-/// writing to `log`. The observer fires on every model call; the gate hook fires
-/// before every capability invocation — so a turn that invokes a capability
-/// records BOTH points. Mints a fresh dispatcher per call (per-run isolation).
+/// Installs a recording `AfterModel` observer + passing `BeforeCapability` hook,
+/// both writing to `log`; a turn invoking a capability records both points.
+/// Mints a fresh dispatcher per call (per-run isolation).
 pub fn recording_hook_factory(log: RecordingHookLog) -> HookDispatcherBuilderFactory {
     Arc::new(move || {
         let log = log.clone();
@@ -163,9 +140,8 @@ pub fn recording_hook_factory(log: RecordingHookLog) -> HookDispatcherBuilderFac
     })
 }
 
-/// A `HookDispatcherBuilderFactory` that installs a recording `AfterModel`
-/// observer plus a `BeforeCapability` gate hook that DENIES `deny_target`. Used
-/// to prove a hook deny blocks the capability without wedging the run.
+/// Installs a recording `AfterModel` observer + a `BeforeCapability` hook that
+/// DENIES `deny_target`; proves a hook deny blocks the capability without wedging the run.
 pub fn denying_hook_factory(
     log: RecordingHookLog,
     deny_target: impl Into<String>,

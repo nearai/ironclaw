@@ -1,19 +1,16 @@
 //! `RebornIntegrationHarness` — the integration test tier that runs the full
 //! internal Reborn stack and intercepts the model at the vendor-SDK seam.
 //!
-//! Unlike `RebornBinaryE2EHarness` (which swaps the whole `HostManagedModelGateway`
-//! with `RebornTraceReplayModelGateway`), this tier wires the REAL
-//! `LlmProviderModelGateway` over the REAL `ironclaw_llm` decorator chain
-//! (`apply_decorator_chain`, hermetic passthrough) and only scripts the raw
-//! provider underneath via `TraceLlm`. A turn therefore exercises model-profile
-//! resolution, `CompletionRequest`/tool-definition assembly, and the
-//! retry/routing/circuit/cache decorators for real.
+//! Unlike `RebornBinaryE2EHarness` (swaps the whole `HostManagedModelGateway`),
+//! this tier wires the REAL `LlmProviderModelGateway` over the REAL
+//! `ironclaw_llm` decorator chain and only scripts the raw provider underneath
+//! via `TraceLlm` — a turn exercises model-profile resolution, request/tool-def
+//! assembly, and the retry/routing/circuit/cache decorators for real.
 //!
-//! `StorageMode { InMemory, LibSql }` — the builder defaults to `InMemory`;
+//! `StorageMode { InMemory, LibSql }` — defaults to `InMemory`;
 //! `.storage(StorageMode::LibSql)` selects a real SQLite file in a
-//! per-`build()` `TempDir`. Both modes ride **one** `CompositeRootFilesystem`
-//! at `/tenants/...` so thread history and turn state share the same backend
-//! and the same production path layout.
+//! per-`build()` `TempDir`. Both ride **one** `CompositeRootFilesystem` at
+//! `/tenants/...` so thread history and turn state share the same backend.
 
 // Shared integration-test support: not every binary that mounts the
 // `reborn_support` tree consumes this module — `support_unit_tests.rs` mounts
@@ -71,17 +68,14 @@ pub(crate) const HARNESS_ACTOR_ID: &str = "host-user";
 pub(crate) const INTERACTIVE_MODEL_PROFILE: &str = "interactive_model";
 
 /// Selects the durable storage backend mounted into the integration harness's
-/// `CompositeRootFilesystem` (design spec §3.2, §3.8).
+/// `CompositeRootFilesystem`. Both modes ride **one** composite at the
+/// production path layout `/tenants/<tenant>/users/<user>/...` — the only
+/// difference is which `RootFilesystem` is mounted under `/tenants`,
+/// `/memory`, and `/events`.
 ///
-/// Both modes ride **one** composite at the production path layout
-/// `/tenants/<tenant>/users/<user>/...` — the only difference is which
-/// `RootFilesystem` is mounted under `/tenants`, `/memory`, and `/events`.
-///
-/// `InMemory` is the default: it's fast, needs no filesystem, and covers
-/// all assertion cases that don't require on-disk durability.
-/// `LibSql` creates a real SQLite file in a per-`build()` `TempDir`, runs
-/// the full libSQL migration suite, and lets `assert_reply_persists_after_reopen`
-/// verify that data survived serialization to disk (design §3.8 guardrail).
+/// `InMemory` (default): fast, no filesystem, covers all cases that don't
+/// need on-disk durability. `LibSql`: real SQLite in a per-`build()`
+/// `TempDir`, full migrations, enables `assert_reply_persists_after_reopen`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StorageMode {
     /// In-memory backend: fast, no filesystem I/O, default.
@@ -292,16 +286,13 @@ impl RebornIntegrationHarnessBuilder {
     }
 
     /// W4-AUTHGATE-WIRE: script the GitHub WASM capability's real HTTP call to
-    /// come back with `status` instead of the default `200` fixture (FIFO,
-    /// one call consumed per queued status). Unlike `with_keyed_http_responses`
-    /// (the runtime-egress lane), the `GithubIssueTools` backend's real call
-    /// flows through the **network** egress lane — see
-    /// `reborn_integration_secret_injection.rs`'s module doc
-    /// (`try_with_host_http_egress` overwrites the runtime port with the host
-    /// pipeline over the recording network egress) — so a runtime-401 (the
-    /// credential-injected-but-401 auth-gate path, distinct from
-    /// `github_issue_tools_auth_required`'s credential-*missing* path) must be
-    /// scripted here instead. Implies [`with_github_issue_tools`](Self::with_github_issue_tools).
+    /// come back with `status` instead of the default `200` (FIFO, one call
+    /// consumed per queued status). The `GithubIssueTools` backend's real call
+    /// flows through the **network** egress lane, not the runtime-egress lane
+    /// `with_keyed_http_responses` scripts (`try_with_host_http_egress`
+    /// overwrites the runtime port), so a runtime-401 (credential-injected-but-401,
+    /// distinct from `github_issue_tools_auth_required`'s credential-missing
+    /// path) must be scripted here. Implies [`with_github_issue_tools`](Self::with_github_issue_tools).
     pub fn with_github_network_status(mut self, status: u16) -> Self {
         self.capability = RebornCapabilityBackend::GithubIssueTools;
         self.github_network_statuses.push(status);
@@ -347,11 +338,8 @@ impl RebornIntegrationHarnessBuilder {
     /// the scripted provider, and start the planned runtime.
     ///
     /// Routes through an internal, degenerate one-thread `RebornIntegrationGroup`
-    /// (matching this builder's capability/storage/shell_mode/keyed_http_responses
-    /// selections) so there is exactly ONE assembly path for both groups and
-    /// single-shot harnesses (design §3: no de-facto fork). Behavior is
-    /// byte-identical to the old inline build — existing tests are unaffected
-    /// (R1/R5).
+    /// so there is exactly ONE assembly path for both groups and single-shot
+    /// harnesses — no de-facto fork.
     pub async fn build(self) -> HarnessResult<RebornIntegrationHarness> {
         apply_hermetic_env();
 
@@ -410,24 +398,16 @@ pub struct RebornIntegrationHarness {
     pub(crate) conversation_id: String,
     /// External (raw, pre-resolution) actor id every submit for this thread is
     /// made under. Defaults to `HARNESS_ACTOR_ID`; a group thread built with
-    /// `with_actor_id` (the E-MULTIUSER seam) carries its distinct actor here
-    /// so submit-time envelopes resolve the SAME binding (and owner scope) as
-    /// the build-time probe.
+    /// `with_actor_id` (E-MULTIUSER seam) carries its distinct actor here so
+    /// submit-time envelopes resolve the SAME binding as the build-time probe.
     ///
-    /// NOT redundant with `binding.actor_user_id`: the binding's field is a
-    /// one-way SHA-256-derived opaque `UserId` (`user_id_for_binding` /
-    /// `scoped_id`, product_workflow.rs), while `verified_text_envelope_with_trigger`
-    /// (called by both the build-time probe and every submit) needs the raw,
-    /// pre-hash external actor-id string to compute the SAME `binding_path`
-    /// hash the probe persisted under. Substituting `binding.actor_user_id`
-    /// here would make submit resolve a *different*, unrelated binding (new
-    /// `actor_user_id`/`subject_user_id`, same `thread_id` since that hash is
-    /// actor-independent) instead of reusing this harness's own — silently
-    /// breaking every `submit_turn`/`submit_turn_async` call, not just the
-    /// multi-actor scenario. `binding.actor_user_id` IS the right source of
-    /// truth for `resume_run`'s `TurnActor` (an already-resolved identity, no
-    /// envelope round-trip involved) — that is a materially different use
-    /// case from this field's.
+    /// NOT redundant with `binding.actor_user_id` (a one-way hashed opaque
+    /// `UserId`): `verified_text_envelope_with_trigger` needs the raw,
+    /// pre-hash string to compute the SAME `binding_path` hash the probe
+    /// persisted under — substituting the hashed field here would silently
+    /// resolve a different binding on every submit. `binding.actor_user_id`
+    /// remains the right source for `resume_run`'s `TurnActor` (no envelope
+    /// round-trip there).
     pub(crate) actor_id: String,
     pub(crate) binding: ResolvedBinding,
     pub(crate) turn_scope: TurnScope,
@@ -440,15 +420,11 @@ pub struct RebornIntegrationHarness {
     pub(crate) event_seq: AtomicU64,
     pub(crate) capability_recorder: HarnessCapabilityRecorder,
     /// The concrete scripted `TraceLlm` retained before it was upcast to
-    /// `dyn LlmProvider` in the per-thread gateway build. Its
-    /// `captured_requests()` lets assertions inspect the exact model-visible
-    /// requests: the system prompt (safety banners, profile lines —
-    /// `captured_system_prompts()`/`assert_system_prompt_contains`) and any
-    /// host-injected context such as activated-skill instructions
-    /// (`assert_model_request_contains`, E-SKILL half B). Retained even when
-    /// the thread parks the model (`park_model`, E-GATEWAY): parking mode is
-    /// only a wrapper (`ParkingLlm`) around this SAME `TraceLlm`, so captured
-    /// requests are still inspectable for a parked thread.
+    /// `dyn LlmProvider`. Its `captured_requests()` lets assertions inspect the
+    /// exact model-visible requests (system prompt, host-injected context —
+    /// `assert_system_prompt_contains`/`assert_model_request_contains`).
+    /// Retained even when parked (`park_model`, E-GATEWAY): `ParkingLlm` only
+    /// wraps this SAME `TraceLlm`.
     pub(crate) scripted_llm: Arc<TraceLlm>,
     /// Shared storage bundle keeping the composite, TempDir, product harness, and
     /// capability alive for this harness's lifetime. For a single-shot harness the
@@ -470,13 +446,10 @@ pub struct RebornIntegrationHarness {
     pub(crate) baseline_network_count: usize,
     /// Turn-lifecycle-event count on the group-shared `InMemoryTurnEventSink` at
     /// harness construction, if `.with_turn_event_sink()` opted in. The sink has
-    /// no per-thread channel — every thread in a group publishes to the same
-    /// `Arc<InMemoryTurnEventSink>` — so without this baseline a group thread's
-    /// `assert_turn_event_recorded` could pass on an EARLIER thread's event
-    /// (e.g. a prior thread's `Completed`) even if this thread's own turn never
-    /// published anything, silently defeating the assertion. `recorded_turn_events`
-    /// slices `[baseline_turn_event_count..]` the same way the other
-    /// `baseline_*_count` fields scope their recorders to this thread only (R2).
+    /// no per-thread channel, so without this baseline a group thread's
+    /// `assert_turn_event_recorded` could pass on an earlier thread's event.
+    /// `recorded_turn_events` slices `[baseline_turn_event_count..]` like the
+    /// other `baseline_*_count` fields (R2).
     pub(crate) baseline_turn_event_count: usize,
 }
 
@@ -561,13 +534,10 @@ impl RebornIntegrationHarness {
     /// Submit a user turn carrying N inline attachments of any mime type, and
     /// wait for it to complete (W4-ATTACH-VARIANTS). Generalizes
     /// `submit_turn_with_image_attachment` to multiple attachments and
-    /// non-image kinds (e.g. `text/plain`, which `AttachmentKind::from_mime_type`
-    /// classifies as `Document` — its bytes are extracted to text by
-    /// `land_inbound_attachments` and rendered into the `<attachments>` block
-    /// `augment_model_content` appends to the message, rather than read back as
-    /// a multimodal part). Same production entry point
-    /// (`DefaultProductWorkflow::submit_inbound_with_attachments`) and lander
-    /// requirement as `submit_turn_with_image_attachment`.
+    /// non-image kinds (e.g. `text/plain`, classified `Document` — extracted
+    /// to text and rendered into the `<attachments>` block rather than read
+    /// back as a multimodal part). Same entry point and lander requirement as
+    /// `submit_turn_with_image_attachment`.
     pub async fn submit_turn_with_attachments(
         &self,
         text: &str,
@@ -701,16 +671,10 @@ impl RebornIntegrationHarness {
     /// service (design §3.8 durability guardrail).
     ///
     /// For `StorageMode::LibSql`: opens a **genuinely fresh** `libsql::Database`
-    /// connection to the on-disk `.db` file — the live `CompositeRootFilesystem`
-    /// Arc is deliberately NOT reused. Only data that was actually serialized and
-    /// committed to disk is visible through the new handle, so this assertion
-    /// proves real on-disk durability, not an in-process cache.
-    ///
-    /// For `StorageMode::InMemory`: re-instantiates the
-    /// `FilesystemSessionThreadService` over the same in-process handle (no disk
-    /// involved). This asserts service re-instantiation but cannot prove durability
-    /// — there is nothing on disk to read back. Use `StorageMode::LibSql` for the
-    /// durability guarantee.
+    /// connection to the on-disk file (the live composite `Arc` is deliberately
+    /// NOT reused), so this proves real on-disk durability. For `InMemory`:
+    /// re-instantiates the service over the same in-process handle — asserts
+    /// re-instantiation only, not durability (nothing on disk to read back).
     pub async fn assert_reply_persists_after_reopen(&self, text: &str) -> HarnessResult<()> {
         if let Some(db_path) = &self._shared.libsql_db_path {
             // Open a fresh libsql connection — independent of the live composite.
@@ -1081,14 +1045,9 @@ impl RebornIntegrationHarness {
     /// Test-support variant of [`approve_gate`](Self::approve_gate) for the
     /// stale-gate-ref-resume regression guard (C-DENYEDGE row 7): resolves the
     /// LOCAL-DEV approval using `real_gate_ref` (so the approval-store lookup
-    /// succeeds, unlike passing a bogus ref straight through `approve_gate`,
-    /// which fails earlier inside `approve_local_dev_gate`'s own request-id
-    /// lookup) but issues the COORDINATOR resume with a DIFFERENT
-    /// `stale_gate_ref`. This reaches `resume_turn_once`'s
-    /// `record.gate_ref.as_ref() != Some(&request.gate_resolution_ref)` check —
-    /// `TurnError::InvalidRequest { reason: "gate resolution reference mismatch" }` —
-    /// a path `approve_gate` itself can never reach because it always resolves
-    /// and resumes with the SAME gate_ref.
+    /// succeeds) but issues the COORDINATOR resume with a DIFFERENT
+    /// `stale_gate_ref`, reaching `resume_turn_once`'s gate-ref-mismatch check
+    /// (`InvalidRequest`) — a path `approve_gate` itself can never reach.
     pub async fn approve_gate_with_stale_resume_ref(
         &self,
         run_id: TurnRunId,
@@ -1109,13 +1068,11 @@ impl RebornIntegrationHarness {
 
     /// Resume-only companion to
     /// [`approve_gate_with_stale_resume_ref`](Self::approve_gate_with_stale_resume_ref):
-    /// issues the coordinator resume for `gate_ref` WITHOUT re-running the
-    /// local-dev approval resolve step. Needed for a non-vacuity follow-up
-    /// after a failed stale-ref resume attempt — the approval record is
-    /// already `Approved` at that point (the resolve step succeeded before
-    /// the stale-ref resume failed), so calling `approve_gate` again would
-    /// hit the double-resolve `NotPending` error instead of completing the
-    /// still-blocked run.
+    /// issues the coordinator resume WITHOUT re-running the local-dev approval
+    /// resolve step. Needed for a non-vacuity follow-up after a failed
+    /// stale-ref resume: the record is already `Approved`, so re-calling
+    /// `approve_gate` would hit a double-resolve `NotPending` error instead of
+    /// completing the still-blocked run.
     pub async fn resume_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
         self.resume_run(
             run_id,
@@ -1147,22 +1104,16 @@ impl RebornIntegrationHarness {
     }
 
     /// Deny a blocked AUTH gate and resume the run (user-declines path). Unlike
-    /// [`deny_gate`](Self::deny_gate) (approval gates, which resolve a persisted request in the
-    /// local-dev approval store), auth gates have no such store entry — there is nothing to
-    /// resolve — so this resumes directly with `GateResumeDisposition::Denied`. The executor's
-    /// `short_circuit_denied_resume` then surfaces a model-visible gate-declined failure for the
-    /// parked capability instead of re-dispatching it (which would re-block on the still-missing
-    /// credential → infinite loop).
+    /// [`deny_gate`](Self::deny_gate) (approval gates resolve a persisted
+    /// request), auth gates have no such store entry, so this resumes directly
+    /// with `GateResumeDisposition::Denied` — `short_circuit_denied_resume`
+    /// then surfaces a model-visible gate-declined failure instead of
+    /// re-dispatching (which would re-block on the missing credential forever).
     ///
-    /// Like `deny_gate` (which resumes with its own gate-class-specific
-    /// `ResumeTurnPrecondition::BlockedApprovalGate`), this resumes with a
-    /// gate-class-specific precondition — `ResumeTurnPrecondition::BlockedAuthGate` — the same
-    /// precondition `AuthInteractionService` uses for its production auth-resume path. That precondition is
-    /// enforced server-side (`resume_turn_once` requires `record.status == BlockedAuth`), so a
-    /// stale or wrong (non-auth) gate ref fails the resume with `TurnError::InvalidTransition`
-    /// instead of silently resuming whatever gate class happens to be blocked. A client-side
-    /// `gate:auth-` prefix check (mirroring `submit_turn_until_auth_blocked`) adds cheap
-    /// defense-in-depth on top of that server-side check.
+    /// Resumes with the gate-class-specific `ResumeTurnPrecondition::BlockedAuthGate`
+    /// (server-enforced: `resume_turn_once` requires `status == BlockedAuth`),
+    /// same shape as `deny_gate`'s `BlockedApprovalGate`. A client-side
+    /// `gate:auth-` prefix check adds cheap defense-in-depth on top.
     pub async fn deny_auth_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
         if !gate_ref.as_str().starts_with("gate:auth-") {
             return Err(format!("expected an auth gate ref, got {gate_ref:?}").into());
@@ -1178,19 +1129,16 @@ impl RebornIntegrationHarness {
 
     /// Resolve a blocked AUTH gate the "user submitted credentials" way
     /// (C-JOURNEY convergence seam): seed a real GitHub credential account
-    /// through product-auth (`HostRuntimeCapabilityHarness::seed_github_credential_account`)
-    /// so the parked capability's next `ProductAuthRuntimeCredentialResolver`
-    /// lookup resolves, then resume with `ResumeTurnPrecondition::BlockedAuthGate`
-    /// and NO deny disposition so the parked `github.*` capability re-dispatches
-    /// and the run completes.
+    /// (`seed_github_credential_account`) so the parked capability's next
+    /// credential-resolver lookup resolves, then resume with NO deny
+    /// disposition so the parked `github.*` capability re-dispatches and the
+    /// run completes.
     ///
-    /// Only valid on a capability harness built via
-    /// `HostRuntimeCapabilityHarness::file_and_github_auth_tools` (reached
-    /// through `_shared.capability`) — the credential-seeding path needs the
-    /// `build_reborn_services` product-auth wiring that `deny_auth_gate`'s
-    /// sibling fixture (`RebornIntegrationGroup::live_auth_gate`, a lower-level
-    /// `HostRuntimeServices` build with a hardcoded credential resolver and no
-    /// run_state store) does not have.
+    /// Only valid on a harness built via
+    /// `HostRuntimeCapabilityHarness::file_and_github_auth_tools` — the
+    /// credential-seeding path needs `build_reborn_services` product-auth
+    /// wiring that `deny_auth_gate`'s sibling fixture (`live_auth_gate`, a
+    /// lower-level build with a hardcoded resolver) does not have.
     pub async fn resolve_auth_gate(
         &self,
         run_id: TurnRunId,
@@ -1208,13 +1156,9 @@ impl RebornIntegrationHarness {
             }
         };
         // Seed under THIS run's actual (tenant, user, agent, project) — the
-        // credential resolver's `account_visible_from_runtime_scope` check
-        // matches on all four, so a scope built from a differently-scoped
-        // group/harness (e.g. a fixed "*-e2e" literal) would silently seed an
-        // account the real dispatch-time lookup never finds, leaving the run
-        // stuck at `BlockedAuth` forever. `self.turn_scope` + `self.binding`
-        // are this harness's own resolved run scope (same fields
-        // `resume_run` uses for `TurnScope`/`TurnActor`).
+        // resolver's `account_visible_from_runtime_scope` check matches all
+        // four, so a differently-scoped seed would leave the run stuck at
+        // `BlockedAuth` forever.
         let scope = ResourceScope {
             tenant_id: self.turn_scope.tenant_id.clone(),
             user_id: self.binding.actor_user_id.clone(),
@@ -1357,15 +1301,12 @@ impl RebornIntegrationHarness {
 // ---------------------------------------------------------------------------
 
 /// Build the one `CompositeRootFilesystem` for a harness, selecting the durable
-/// backend by `mode`. The `dir` argument is used only for `LibSql` (the SQLite
-/// file is created there by the production `build_default_local_dev_database_roots`
-/// sequence); `InMemory` ignores it.
+/// backend by `mode`. `dir` is used only for `LibSql` (the SQLite file is
+/// created there); `InMemory` ignores it.
 ///
-/// Returns the composite alongside the path to the on-disk SQLite file for
-/// `LibSql` (`None` for `InMemory`). The path is stored on
-/// `RebornIntegrationHarness` so `assert_reply_persists_after_reopen` can open
-/// a genuinely fresh database connection — independent of the live
-/// `CompositeRootFilesystem` Arc — and confirm real on-disk durability.
+/// Returns the composite alongside the on-disk SQLite path for `LibSql`
+/// (`None` for `InMemory`) — stored on the harness so
+/// `assert_reply_persists_after_reopen` can open a genuinely fresh connection.
 pub(crate) async fn build_storage_composite(
     mode: StorageMode,
     dir: &Path,

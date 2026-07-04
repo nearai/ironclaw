@@ -72,15 +72,11 @@ impl HostRuntime for RecordingHostRuntime {
     }
 
     /// C-JOURNEY: forward auth-resume to the real runtime. `auth_resume_capability`
-    /// is a DEFAULTED trait method whose default fails loudly ("capability
-    /// auth-resume is unsupported by this host runtime", `ironclaw_host_runtime`
-    /// lib.rs) precisely so wrappers that forget to forward it fail visibly —
-    /// which is exactly what happened here: this wrapper predates any test
-    /// exercising a happy-path auth resume, so the missing forward was latent
-    /// until the first auth→resolve→re-dispatch journey drove it. Mirrors
-    /// `invoke_capability`'s ApprovalRequired scope recording because
-    /// `auth_resume_json` can itself raise an approval gate (the NoPriorLease
-    /// path re-runs authorization).
+    /// is a DEFAULTED trait method whose default fails loudly, so a wrapper
+    /// that forgets to forward it fails visibly — this wrapper's missing
+    /// forward was latent until the first auth→resolve→re-dispatch journey
+    /// drove it. Mirrors `invoke_capability`'s ApprovalRequired scope
+    /// recording because `auth_resume_json` can itself raise an approval gate.
     async fn auth_resume_capability(
         &self,
         request: ironclaw_host_runtime::RuntimeCapabilityAuthResumeRequest,

@@ -3,37 +3,23 @@
 //!
 //! `web-access.search` / `web-access.get_content` are `RuntimeKind::FirstParty`
 //! capabilities, not MCP-extension capabilities — this module does NOT reuse
-//! `harness_mcp.rs`'s `McpRuntime` scaffolding. The real dispatch logic is
-//! `ironclaw_first_party_extensions::web_access::WebAccessExecutor::dispatch`,
-//! which itself speaks MCP JSON-RPC by hand over three sequential
-//! `RuntimeHttpEgress` calls (`initialize` → `notifications/initialized` →
-//! `tools/call`) to the Exa MCP endpoint. This harness wires the real
-//! production handler registration,
-//! `ironclaw_reborn_composition::register_bundled_web_access_first_party_handlers`
-//! (`crates/ironclaw_reborn_composition/src/web_access.rs`), instead of
-//! duplicating the `FirstPartyCapabilityHandler` dispatch/error-mapping glue
-//! here. Only the
-//! manifest/schema loading below and the trust/network policy further down
-//! remain harness-local — those are test-support concerns (reading assets
-//! off disk, scoping a test-only trust policy), not business logic that
-//! production owns.
+//! `harness_mcp.rs`'s `McpRuntime` scaffolding. The real dispatch logic
+//! (`WebAccessExecutor::dispatch`, three sequential `RuntimeHttpEgress` calls
+//! to the Exa MCP endpoint) lives in production; this harness wires the real
+//! production handler registration
+//! (`register_bundled_web_access_first_party_handlers`) instead of
+//! duplicating the dispatch/error-mapping glue. Only manifest/schema loading
+//! and the trust/network policy below are harness-local test-support concerns.
 //!
 //! `web_access_extension_package()` mirrors `github.rs`'s
-//! `extension_registry()` pattern exactly: it reads the REAL production
-//! `crates/ironclaw_first_party_extensions/assets/web-access/manifest.toml`
-//! off disk via `ExtensionManifest::parse_with_host_api_contracts` and builds
-//! the package via `ExtensionPackage::from_manifest`, instead of hand-
-//! authoring a synthetic manifest/schema. That construction is pure in-memory
-//! — the capability schema `$ref`s are resolved later, at capability-surface-
-//! descriptor build time, against the real schema files on disk mounted at
-//! `/system/extensions/web-access` by `LocalDevRootMounts::web_access_assets()`
-//! (`harness.rs::local_dev_root_filesystem`).
+//! `extension_registry()`: reads the REAL production manifest off disk via
+//! `ExtensionManifest::parse_with_host_api_contracts` rather than hand-
+//! authoring a synthetic one. Schema `$ref`s resolve later against the real
+//! schema files mounted at `/system/extensions/web-access`.
 //!
-//! web-access declares zero `runtime_credentials` and never sets
-//! `credential_injections`, so no credential-injecting authorizer is needed —
-//! `HostRuntimeCapabilityHarness::web_access_tools` (in `harness.rs`) wires the
-//! plain default `GrantAuthorizer`, the same authorizer `core_builtin_tools()`
-//! uses for `builtin.http` (also a `Network`-effect capability).
+//! web-access declares zero `runtime_credentials`, so no credential-injecting
+//! authorizer is needed — `web_access_tools` wires the plain default
+//! `GrantAuthorizer`, same as `core_builtin_tools()` for `builtin.http`.
 
 #![allow(dead_code)] // Test-only scaffolding; not every consumer exercises every helper.
 
@@ -97,13 +83,9 @@ fn repo_root() -> &'static Path {
 }
 
 /// Trust policy admitting the test-only `web-access` provider as first-party,
-/// kept aligned with the shape of `first_party_trust_policy()`/
-/// `github_first_party_trust_policy()` in `harness.rs` — a harness-local
-/// `AdminConfig` construction with a `web-access`-specific effect list, not a
-/// call into either function (the manifest, by contrast, is asset-backed —
-/// see `web_access_extension_package()` above). The manifest path must match
-/// the `PackageSource::LocalManifest` key the host runtime derives from
-/// `web_access_extension_package()`'s root.
+/// kept aligned with `first_party_trust_policy()`/`github_first_party_trust_policy()`
+/// in `harness.rs`. The manifest path must match the `PackageSource::LocalManifest`
+/// key the host runtime derives from `web_access_extension_package()`'s root.
 pub(super) fn web_access_first_party_trust_policy() -> HarnessResult<HostTrustPolicy> {
     Ok(HostTrustPolicy::new(vec![Box::new(
         AdminConfig::with_entries(vec![AdminEntry::for_local_manifest(

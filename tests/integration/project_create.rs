@@ -1,18 +1,15 @@
 //! E-PROJ seam smoke test: the `project_lifecycle` group surfaces the local-dev
-//! synthetic `project_create` capability, and a scripted `builtin.project_create`
-//! tool call dispatches through the REAL production synthetic-capability wrap
+//! synthetic `project_create` capability; a scripted `builtin.project_create`
+//! call dispatches through the REAL synthetic-capability wrap
 //! (`wrap_local_dev_synthetic_capabilities` + `project_create_capability`) and
 //! persists a project via the real `ProjectService`.
 //!
-//! The result-contains assertion proves dispatch + a recorded output payload,
-//! but not actual persistence: a regression that made `create_project` a
-//! silent no-op while still fabricating a `{project_id, name}` success payload
-//! would pass it. The read-back below closes that gap by re-querying the REAL
-//! `ProjectService` (through `RebornIntegrationGroup::capability_harness` ->
-//! `project_service_for_test`, the SAME instance
-//! `apply_synthetic_capability_wrappers` dispatched the write through) and
-//! asserting the created project is actually present — mirrors the E-PROFILE
-//! `reborn_integration_profile` write -> read-back pattern.
+//! A result-contains assertion alone would pass a silent-no-op regression that
+//! still fabricates a success payload, so the read-back below re-queries the
+//! SAME `ProjectService` instance the write dispatched through
+//! (`capability_harness` -> `project_service_for_test`) and asserts the
+//! project is actually present — mirrors the E-PROFILE write -> read-back
+//! pattern.
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
@@ -63,13 +60,9 @@ async fn project_create_capability_dispatches_and_persists_project() {
 
     // Persistence read-back (E-PROJ): re-fetch through the SAME `ProjectService`
     // instance the capability wrote through, scoped to the same `(tenant, user)`
-    // `project_create_capability::effective_user_id` derived the caller from.
-    // `effective_user_id` prefers the run scope's explicit thread owner, then
-    // the run actor, and only falls back to the capability harness's fixed
-    // constructor user when neither is set — this thread's binding has neither
-    // an explicit owner nor an override (`project_tools()` never calls
-    // `with_user_id`), so the actual dispatch caller is the thread's binding
-    // actor, not `capability_harness.user_id()`.
+    // `project_create_capability::effective_user_id` derived the caller from —
+    // here, the thread's binding actor (`project_tools()` never calls
+    // `with_user_id`, so it's not `capability_harness.user_id()`).
     let capability_harness = group
         .capability_harness()
         .expect("project_lifecycle always uses HostRuntime");
@@ -93,16 +86,12 @@ async fn project_create_capability_dispatches_and_persists_project() {
     );
 }
 
-/// An oversized `name` (201 ASCII bytes, over `MAX_PROJECT_NAME_BYTES=200`)
-/// passes `parse_project_create_input`'s non-empty check but fails
-/// `ProjectRecord::validate()` inside the real `ProjectService`, which returns
-/// `ProjectServiceError::InvalidInput`. `project_service_outcome` maps that to
-/// `CapabilityOutcome::Failed(CapabilityFailureKind::InvalidInput)`, persisted
-/// as a `ToolResultReference` with `safe_summary` `"capability failed with
-/// invalid_input: ..."` — a recoverable, model-visible tool error, not a
-/// terminal `driver_unavailable` crash. Distinct from the happy-path test
-/// above: this proves the reject path routes through the same
-/// Completed-turn/Failed-outcome plumbing instead of aborting the run.
+/// An oversized `name` (201 bytes, over `MAX_PROJECT_NAME_BYTES=200`) passes
+/// input parsing but fails `ProjectRecord::validate()` inside the real
+/// `ProjectService`; `project_service_outcome` maps the resulting
+/// `InvalidInput` error to a recoverable, model-visible `Failed` tool error —
+/// proving the reject path routes through Completed-turn/Failed-outcome
+/// plumbing rather than aborting the run.
 #[tokio::test]
 async fn project_create_invalid_input_routes_to_recoverable_tool_error() {
     let group = RebornIntegrationGroup::project_lifecycle()
@@ -137,35 +126,20 @@ async fn project_create_invalid_input_routes_to_recoverable_tool_error() {
         .expect("oversized name surfaces as a Failed(InvalidInput) capability outcome");
 }
 
-/// C-SYNTH fault-injection arm — `project_create` against a
-/// `ProjectService::Denied` failure. Distinct from the two tests above: those
-/// exercise the real `ProjectService` end-to-end (happy path) or a real,
-/// model-controlled input-validation reject (`ProjectServiceError::InvalidInput`,
-/// a caller mistake the real store itself detects). This test drives a
-/// genuine host-side reject the real local-dev store cannot be coerced into
-/// on demand — `create_project` calling through a `FaultInjectingProjectService`
-/// decorator wrapping the real service (`project_lifecycle_fault_injected()`),
-/// which forces `ProjectServiceError::Denied` only for the sentinel
-/// `FAULT_INJECT_DENIED_PROJECT_NAME` and delegates every other call
-/// (including a same-turn happy-path create) to the real store.
-/// `project_service_outcome`'s `Denied` arm maps this to a model-visible,
-/// recoverable `Failed(PolicyDenied)` tool error — NOT the terminal
-/// `Internal` arm, which would instead kill the whole run — proving the
-/// distinction end-to-end through the real capability dispatch rather than
-/// only at `project_create.rs`'s unit-test level.
+/// C-SYNTH fault-injection arm — `project_create` against a genuine host-side
+/// `ProjectService::Denied` reject the real local-dev store can't be coerced
+/// into on demand: `create_project` calls through a
+/// `FaultInjectingProjectService` decorator (`project_lifecycle_fault_injected()`)
+/// that forces `Denied` only for `FAULT_INJECT_DENIED_PROJECT_NAME` and
+/// delegates everything else to the real store. `project_service_outcome`'s
+/// `Denied` arm maps this to a recoverable `Failed(PolicyDenied)` tool error on
+/// the FIRST attempt — not the terminal `Internal` arm.
 ///
-/// Deliberately NOT `ProjectServiceError::Unavailable`/`Internal`: both route
-/// through `DefaultRecoveryStrategy`'s capability-retry branch, whose retry
-/// re-dispatch hits an independently confirmed production bug for
-/// provider-tool-call-originated invocations under local-dev composition
-/// (`LocalDevCapabilityIo::resolve_capability_input` rejects the reused
-/// `input_ref` on the retry attempt with `InvalidInvocation`/"capability
-/// input ref was not staged for this loop run", collapsing the documented
-/// "retry twice, then a model-visible `Failed`" contract into an immediate
-/// terminal `driver_unavailable`) — see issue #5608. `Denied`
-/// surfaces to the model on the FIRST attempt
-/// (`capability_error_is_model_visible_tool_failure`), so it exercises a
-/// genuine `project_service_outcome` arm without tripping that unrelated bug.
+/// Deliberately NOT `Unavailable`/`Internal`: both route through the
+/// capability-retry branch, whose retry re-dispatch hits an unrelated,
+/// independently confirmed bug for provider-tool-call-originated invocations
+/// under local-dev composition (issue #5608) that collapses the "retry twice,
+/// then Failed" contract into an immediate `driver_unavailable`.
 #[tokio::test]
 async fn project_create_denied_fault_routes_to_recoverable_tool_error() {
     let group = RebornIntegrationGroup::project_lifecycle_fault_injected()

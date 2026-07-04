@@ -1,15 +1,9 @@
-//! Reborn integration-test harness — mock-MCP scaffolding.
-//!
-//! Extracted from `harness.rs` to keep that file focused: this module owns the
-//! loopback mock-MCP wiring — the real `McpRuntime` built over a loopback HTTP
-//! egress, the test-only `RuntimeHttpEgress` that talks to the in-process
-//! `MockMcpServer`, the mock extension package/registry, and the MCP trust +
-//! network policies.
-//!
-//! The single entry point used by the harness is
-//! `HostRuntimeCapabilityHarness::mock_mcp_tools` (in `harness.rs`), which calls
-//! the `pub(super)` factories here. Everything in this module is test-only and
-//! never ships.
+//! Reborn integration-test harness — mock-MCP scaffolding: the real `McpRuntime`
+//! built over a loopback HTTP egress, the test-only `RuntimeHttpEgress` that
+//! talks to the in-process `MockMcpServer`, the mock extension package/registry,
+//! and the MCP trust + network policies. Single entry point:
+//! `HostRuntimeCapabilityHarness::mock_mcp_tools` (`harness.rs`), which calls
+//! the `pub(super)` factories here. Test-only; never ships.
 
 #![allow(dead_code)] // Shared by staged Reborn binary-E2E validation ports.
 
@@ -249,12 +243,9 @@ pub(super) struct LoopbackMcpRuntimeHttpEgress {
 
 impl LoopbackMcpRuntimeHttpEgress {
     fn new(mcp_url: &str) -> HarnessResult<Self> {
-        // Hermetic hardening: refuse any host other than 127.0.0.1 so a typo in
-        // the mock URL cannot silently turn this test egress into real external
-        // network I/O. Narrowed to 127.0.0.1 only (not ::1 / localhost) so the
-        // guard matches `mcp_loopback_network_policy()`, which also only permits
-        // 127.0.0.1; a caller using "localhost" would otherwise pass this guard
-        // then fail network authorization — a latent trap.
+        // Refuse any host other than 127.0.0.1 (not ::1/localhost) so a typo
+        // can't turn this into real network I/O, and so it matches
+        // `mcp_loopback_network_policy()` (which only permits 127.0.0.1).
         let parsed = url::Url::parse(mcp_url)
             .map_err(|e| format!("invalid mock MCP URL {mcp_url:?}: {e}"))?;
         let scheme = parsed.scheme();

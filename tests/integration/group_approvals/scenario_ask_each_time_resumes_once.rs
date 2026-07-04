@@ -3,20 +3,15 @@
 //! `BlockedApproval` gate, and approving it resumes the run to `Completed` in
 //! ONE round trip -- it must NOT re-gate the just-approved resume.
 //!
-//! Pre-#5306, `require_approval_for_profile_policy` checked the explicit
-//! `ask_each_time` override (and the "hard floor" force-approval class)
-//! BEFORE consulting the matching one-shot approval lease a resume carries.
-//! So a resumed dispatch for an `AskEachTime`-overridden capability hit the
-//! `ask_each_time` branch first and gated AGAIN, ignoring the lease that was
-//! just issued for exactly this invocation -- the run could never reach
-//! `Completed` (an unresumable BlockedApproval loop). The fix reordered the
-//! one-shot-lease check to run FIRST.
+//! Regression: pre-#5306, `require_approval_for_profile_policy` checked the
+//! `ask_each_time` override BEFORE consulting the resume's one-shot approval
+//! lease, so a resumed dispatch re-hit the `ask_each_time` branch and gated
+//! AGAIN -- an unresumable `BlockedApproval` loop. Fixed by checking the
+//! lease first.
 //!
-//! `live_approvals()`'s plain `write_file`/`read_file` @ `PermissionMode::Ask`
-//! gate (exercised by `scenario_gate_then_approve.rs`) does NOT reach the
-//! `ask_each_time` branch at all (no override is installed there), so it
-//! cannot exercise this ordering bug -- this scenario installs the override
-//! explicitly via `set_ask_each_time_override_for_test` before submitting.
+//! `live_approvals()`'s plain Ask-mode gate (`scenario_gate_then_approve.rs`)
+//! never reaches the `ask_each_time` branch, so this scenario installs the
+//! override explicitly via `set_ask_each_time_override_for_test`.
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
@@ -37,9 +32,8 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .build()
         .await?;
 
-    // Install the explicit AskEachTime override for this run's real dispatch
-    // (tenant, user) -- the same scope key `require_approval_for_profile_policy`
-    // reads `tool_override` under.
+    // Install the explicit AskEachTime override under the same (tenant, user)
+    // scope key `require_approval_for_profile_policy` reads `tool_override` under.
     g.capability_harness()
         .ok_or("live_approvals always uses HostRuntime")?
         .set_ask_each_time_override_for_test(
@@ -55,11 +49,8 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .submit_turn_until_blocked("write the ask-each-time file")
         .await?;
 
-    // Approve through the real resolver + resume. This is the discriminating
-    // assertion: pre-#5306, the resumed dispatch re-hits the `ask_each_time`
-    // branch and re-blocks (the run never reaches `Completed`, so
-    // `wait_for_status(Completed)` times out against the still-`BlockedApproval`
-    // status instead of returning `Ok`).
+    // Discriminating assertion: pre-#5306 the resumed dispatch re-blocks, so
+    // `wait_for_status(Completed)` times out instead of returning `Ok`.
     h.approve_gate(run_id, &gate_ref).await?;
     h.wait_for_status(run_id, TurnStatus::Completed).await?;
 
@@ -68,11 +59,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     h.assert_workspace_file_contains("ask-each-time.txt", "ask each time payload")
         .await?;
 
-    // "Resumes exactly once" companion proof: the SAME gate_ref is already
-    // resolved (Approved) from the single resume above, so a second approve
-    // on it must fail NotPending, not succeed against a fresh re-raised gate
-    // (which would indicate a second, distinct BlockedApproval was silently
-    // created and resolved somewhere in between).
+    // "Resumes exactly once" companion proof: re-approving the same
+    // already-resolved gate_ref must fail NotPending, not succeed against a
+    // silently re-raised gate.
     let err =
         h.approve_gate(run_id, &gate_ref).await.err().ok_or(
             "expected err: re-approving the already-resolved ask-each-time gate must fail",

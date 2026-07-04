@@ -11,14 +11,12 @@ use ironclaw_host_api::{ApprovalRequestId, ResourceScope};
 
 /// Records `(ApprovalRequestId, ResourceScope)` on `save_pending`, then delegates
 /// every method to the inner store. Synthetic local-dev capabilities (e.g.
-/// `outbound_delivery_target_set`) persist their approval requests directly to
-/// the approval store rather than through the host runtime, so
-/// [`RecordingHostRuntime`] (which only observes host-runtime-level gates) never
-/// captures their scope. Wrapping the store the synthetic capability writes
-/// through restores the same `pending_approval_scopes` bookkeeping the
-/// `approve_local_dev_gate` / `deny_local_dev_gate` lookups depend on. Delegation
-/// is total, so the inner store the evidence/approve/deny paths read stays the
-/// single source of truth.
+/// `outbound_delivery_target_set`) persist approval requests directly to the
+/// store rather than through the host runtime, so [`RecordingHostRuntime`]
+/// never captures their scope — wrapping the store they write through
+/// restores the `pending_approval_scopes` bookkeeping `approve_local_dev_gate`
+/// / `deny_local_dev_gate` depend on. Delegation is total, so the inner store
+/// stays the single source of truth.
 pub(crate) struct RecordingApprovalRequestStore {
     pub(crate) inner: Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
     pub(crate) pending_approval_scopes: Arc<Mutex<HashMap<ApprovalRequestId, ResourceScope>>>,

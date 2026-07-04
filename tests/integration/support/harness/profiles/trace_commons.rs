@@ -1,4 +1,4 @@
-//! trace_commons domain tools profiles (populated by the profile migration).
+//! trace_commons domain capability profile.
 
 use ironclaw_host_api::{CapabilityId, EffectKind, MountView, UserId};
 use ironclaw_host_runtime::{
@@ -22,28 +22,23 @@ pub(crate) fn trace_commons_tools_profile() -> HarnessResult<ToolsProfile> {
         effect_kinds: vec![
             EffectKind::DispatchCapability,
             EffectKind::ReadFilesystem,
-            // onboard persists device-key material (Ed25519 keypair +
-            // policy.json) and profile_token writes profile_token.jwt, so
-            // the harness allow-set must grant WriteFilesystem or those
-            // capabilities are filtered out of the model-visible surface.
+            // onboard/profile_token write device-key material and profile_token.jwt to disk;
+            // WriteFilesystem must stay in the allow-set or these capabilities get filtered out.
             EffectKind::WriteFilesystem,
             EffectKind::Network,
             EffectKind::ExternalWrite,
         ],
         user_id: UserId::new("reborn-e2e-trace-commons-user")?,
-        // The Trace Commons write/network capabilities are
-        // PermissionMode::Ask (onboard, profile_token, profile_set) — like
-        // the skill/trigger harnesses, the scripted run enables global
-        // auto-approve so it is not gated.
+        // onboard/profile_token/profile_set are PermissionMode::Ask; auto-approve is
+        // enabled here so the scripted run isn't gated.
         options: HostRuntimeHarnessOptions::new(
             MountView::default(),
             Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
                 true,
             )?),
         ),
-        // onboard declares EffectKind::Network, so the lease must carry a
-        // non-empty network policy or the obligation check rejects dispatch
-        // before the consent gate runs.
+        // onboard declares EffectKind::Network, so the lease needs a non-empty network
+        // policy or the obligation check rejects dispatch before the consent gate runs.
         network_policy_override: Some(http_test_policy()),
         auto_approve_default: Some(true),
         ..ToolsProfile::new("reborn-e2e-trace-commons-tools")?

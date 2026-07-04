@@ -37,21 +37,13 @@ fn test_scope() -> AuthProductScope {
 /// idle threshold) triggers a token-refresh HTTP call for the idle account AND
 /// commits the rotated credential to the durable store.
 ///
-/// The egress count alone only proves the refresh HTTP call *fired*; it would
-/// still pass if the refresh made the call but silently dropped the account
-/// write.  To close that gap we also re-read the account through the durable
-/// `CredentialAccountService` and assert the persisted access-token handle was
-/// rewritten to the refresh-path handle.  On a successful refresh,
-/// `ProviderBackedCredentialAccountService::refresh_account` persists
-/// `HostOAuthProviderClient::store_refreshed_tokens`'s output via
-/// `create_or_update_account`; that handle (`…-oauth-refresh-access-<account_id>`)
-/// is produced *only* by the refresh write-back path and differs from the
-/// connect-exchange handle (`…-oauth-access-<flow_id>-<invocation_id>`).  A
-/// dropped account write would leave the original connect handle in place, so
-/// the handle assertions fail in that case.  Because `store_refreshed_tokens`
-/// returns the handle only after `put`-ing the new token material, the rotated
-/// handle on the account also transitively proves the refreshed material was
-/// persisted to the secret store.
+/// Egress count alone only proves the HTTP call *fired*; it would still pass
+/// if the write was silently dropped. To close that gap, re-read the account
+/// and assert the persisted access-token handle was rewritten to the
+/// refresh-path handle (`…-oauth-refresh-access-<account_id>`, produced only
+/// by `store_refreshed_tokens`'s write-back) rather than the original
+/// connect-exchange handle — which also transitively proves the refreshed
+/// material was persisted to the secret store.
 #[tokio::test]
 async fn credential_refresh_sweep_refreshes_idle_google_account() {
     let bundle = build_google_oauth_product_auth_for_test();

@@ -23,25 +23,16 @@ use serde_json::json;
 const ONCE_AT: &str = "2999-01-01T00:00:00";
 const TRIGGER_NAME: &str = "t0-triggers-once";
 
-// TODO(T0-TRIGGERS, no enabler needed): distinct verb branches this same group
-// can grow in a follow-up without any harness seam — add as new `scenario_*`
-// files, not by bloating this happy-path lifecycle:
-//   - cron-schedule create (`{kind:"cron", expression, timezone}`) → list renders
-//     `is_recurring`/next_run_at; contrast with the Once path here.
-//   - `trigger_list` `limit`/`run_limit` params (bounded output).
-//   - deny/error branches through the capability path (model-recoverable, NOT
-//     terminal per `.claude/rules/agent-loop-capabilities.md`): remove/pause a
-//     non-existent `trigger_id` → `{"removed":false}` / `{"updated":false}`;
-//     malformed `trigger_id` → surfaced input error the model can retry.
+// TODO(T0-TRIGGERS, no enabler needed): follow-ups this group can grow as new
+// `scenario_*` files (not by bloating this happy-path lifecycle): cron-schedule
+// create/list contrast, `trigger_list` limit params, deny/error branches
+// (remove/pause a non-existent id, malformed id).
 //
-// Two gotchas for follow-up scenarios in THIS group binary:
-//   - `tool_result_output(cap)` returns the MOST RECENT result for `cap` in the
-//     thread's slice. If a scenario dispatches the same verb twice in one thread,
-//     read the intermediate result before the second call — `.rev()` will
-//     otherwise silently return the later one.
-//   - the group's trigger repository is shared across scenarios with NO cleanup
-//     between them; keep list assertions id-scoped (`.any(|t| t["trigger_id"]…)`)
-//     and never assert an exact `triggers.len()`, which would flake on leftovers.
+// Gotchas for follow-ups in THIS binary: `tool_result_output(cap)` returns the
+// MOST RECENT result for `cap` in the thread's slice — read intermediate
+// results before a second call to the same verb. The trigger repository has NO
+// cleanup between scenarios — keep list assertions id-scoped, never assert
+// exact `triggers.len()`.
 pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // ── Thread A: create a one-shot Once trigger, then list it ───────────────
     let creator = g

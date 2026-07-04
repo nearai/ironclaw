@@ -1,21 +1,10 @@
-//! C-TRACECAP: `turn_event_sink` int-tier coverage (rev-3 Tier-2, A1 audit).
+//! C-TRACECAP: `turn_event_sink` int-tier coverage.
 //!
-//! Production wires a best-effort turn-lifecycle sink via
-//! `lifecycle_bus.subscribe_best_effort(sink)` in
-//! `build_default_planned_runtime_inner` (`crates/ironclaw_reborn/src/runtime.rs:613-619`),
-//! fed in real deployments by `CompositeTurnEventSink` over
-//! `[TraceCaptureTurnEventSink, ..]` (`crates/ironclaw_reborn_composition/src/runtime.rs:3229-3290`)
-//! — the entry point to the 0%-covered `ironclaw_reborn_traces` crate. That
-//! seam was never exercised by any Reborn test: `DefaultPlannedRuntimeParts.turn_event_sink`
-//! was `None` in every harness/group construction.
-//!
-//! This test wires `ironclaw_turns::InMemoryTurnEventSink` — a real, already-shipped
-//! production `TurnEventSink` impl with zero callers anywhere in the codebase
-//! today — into the harness's planned runtime via `.with_turn_event_sink()`, and
-//! proves `subscribe_best_effort` actually publishes to it for a real completed
-//! turn. Distinct from T0-SYSPROMPT's `TraceLlm` captured model requests (a
-//! different seam: what the model saw, not what the turn coordinator published)
-//! and from `reborn_recorded_trace_parity.rs` (recorded-response replay).
+//! Wires `ironclaw_turns::InMemoryTurnEventSink` into the harness's planned
+//! runtime via `.with_turn_event_sink()`, proving production's
+//! `lifecycle_bus.subscribe_best_effort` seam actually publishes turn-lifecycle
+//! events. Distinct from T0-SYSPROMPT (captured model requests) and
+//! `reborn_recorded_trace_parity.rs` (recorded-response replay).
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
@@ -49,10 +38,8 @@ async fn turn_event_sink_receives_completed_event_for_a_finished_turn() {
         .expect("turn-lifecycle sink recorded the Completed event for the finished turn");
 }
 
-/// Negative control: a harness that never calls `.with_turn_event_sink()` has no
-/// sink installed, so `DefaultPlannedRuntimeParts.turn_event_sink` stays `None`
-/// (matching every pre-existing reborn test) and no events are recorded. Proves
-/// the assertion is discriminating on real wiring, not a tautology.
+/// Negative control: without `.with_turn_event_sink()`, no sink is installed and
+/// no events are recorded — proves the assertion discriminates on real wiring.
 #[tokio::test]
 async fn no_events_recorded_without_opting_in() {
     let harness = RebornIntegrationHarness::test_default()
@@ -76,13 +63,9 @@ async fn no_events_recorded_without_opting_in() {
     );
 }
 
-/// Regression: the sink is shared across every thread in a `.with_turn_event_sink()`
-/// group (it has no per-thread channel), so `assert_turn_event_recorded` must slice
-/// `[baseline_turn_event_count..]` to see only THIS thread's events. Drives a first
-/// thread to Completed, then builds a second thread AFTER that (so its baseline
-/// already includes the first thread's event) and never submits a turn on it. If
-/// the baseline slice were missing, the second thread's assertion would incorrectly
-/// pass on the first thread's Completed event.
+/// Regression: the sink is shared across every thread in a group, so
+/// `assert_turn_event_recorded` must slice `[baseline_turn_event_count..]` —
+/// a second thread built after the first's Completed event must not see it.
 #[tokio::test]
 async fn group_thread_does_not_see_a_sibling_threads_turn_event() {
     let group = RebornIntegrationGroup::builder()
@@ -106,7 +89,7 @@ async fn group_thread_does_not_see_a_sibling_threads_turn_event() {
         .await
         .expect("first thread recorded its own Completed event");
 
-    // Built after `first` completed, so the shared sink already holds `first`'s
+    // Built after `first` completed, so the shared sink already holds its
     // Completed event ahead of this thread's baseline.
     let second = group
         .thread("conv-tracecap-second")

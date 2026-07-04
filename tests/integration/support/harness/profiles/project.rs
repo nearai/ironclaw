@@ -32,11 +32,7 @@ pub(crate) fn project_tools_profile() -> HarnessResult<ToolsProfile> {
     })
 }
 
-/// E-PROJ: harness surfacing the local-dev synthetic `project_create`
-/// capability. `create_capability_port` injects the synthetic capability via
-/// `apply_synthetic_capability_wrappers` because `PROJECT_CREATE_CAPABILITY_ID`
-/// is in the allowlist. Auto-approve is enabled so the capability dispatches
-/// without a gate.
+/// See [`project_tools_profile`].
 pub(crate) async fn project_tools() -> HarnessResult<HostRuntimeCapabilityHarness> {
     project_tools_profile()?.build().await
 }
@@ -73,15 +69,7 @@ pub(crate) fn project_tools_with_fault_injection_profile() -> HarnessResult<Tool
     })
 }
 
-/// C-SYNTH `project_create` fault-injection arm: same surface as
-/// `project_tools()`, but the real `Arc<dyn ProjectService>` is wrapped in
-/// `FaultInjectingProjectService`
-/// (`with_project_service_fault_injection`) so a `create_project` call
-/// naming `FAULT_INJECT_DENIED_PROJECT_NAME` returns
-/// `ProjectServiceError::Denied`/`PolicyDenied` and proves the real
-/// capability dispatch's recoverable `Failed` behavior. This is *not*
-/// the `project_service_outcome` `Unavailable` / internal-retry path.
-/// Any other `create_project` name still reaches the real store.
+/// See [`project_tools_with_fault_injection_profile`].
 pub(crate) async fn project_tools_with_fault_injection()
 -> HarnessResult<HostRuntimeCapabilityHarness> {
     project_tools_with_fault_injection_profile()?.build().await

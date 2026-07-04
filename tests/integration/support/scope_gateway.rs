@@ -1,21 +1,9 @@
-//! Scope-routing gateway for Reborn group integration tests.
-//!
-//! `ScopeRegistryGateway` multiplexes model calls to per-thread scripted
-//! gateways by `TurnScope`. The loop-driver host calls
-//! `resolve_for_scope(&scope)` at host-construction time (not on the model
-//! hot path) and wraps the returned gateway in
-//! `ThreadResolvingLoopModelGateway`. The registry's own `stream_model` is
-//! therefore **never called** when routing succeeds; it exists only to satisfy
-//! the trait contract and fails **loudly** so a routing miss (unregistered
-//! scope) surfaces as `ConfigurationError` rather than masking as the original
-//! flake.
-//!
-//! ## Invariant
-//! This dispatcher sits at the `HostManagedModelGateway` seam but routes to
-//! REAL `LlmProviderModelGateway` instances over the `ironclaw_llm` decorator
-//! chain. The single-fake-at-the-vendor-SDK-seam invariant (CLAUDE.md §5–8,
-//! §28) is preserved: the only fake is the `TraceLlm` at the bottom of each
-//! registered gateway's chain, not this dispatcher.
+//! Scope-routing gateway for Reborn group integration tests: routes model calls to
+//! per-thread scripted gateways by `TurnScope` via `resolve_for_scope`, called at
+//! host-construction time (off the model hot path). Its own `stream_model` is
+//! unreachable on success — fails loudly with `ConfigurationError` on an unregistered
+//! scope, preserving the single-fake-at-vendor-SDK-seam invariant (CLAUDE.md §5-8, §28):
+//! the only fake is the `TraceLlm` at the bottom of each registered gateway's chain.
 
 // Shared by all group test binaries; symbols read as dead when a binary
 // does not exercise every variant.
@@ -33,34 +21,22 @@ use ironclaw_turns::TurnScope;
 
 /// Scope-keyed gateway registry for Reborn group integration tests.
 ///
-/// Call [`register`](Self::register) (with `&self`) before submitting any
-/// turns; the loop-driver calls
-/// [`resolve_for_scope`][HostManagedModelGateway::resolve_for_scope] at
-/// host-construction time to obtain the per-thread scripted gateway.
-///
-/// The registry's own `stream_model` is a deliberate sentinel: it always
-/// returns [`HostManagedModelErrorKind::ConfigurationError`] so a routing
-/// miss fails legibly and cannot be confused with `TraceLlm` deque exhaustion
-/// (which surfaces as `Unavailable`) or `driver_protocol_violation`.
+/// `stream_model` is a sentinel: always returns `ConfigurationError` on a routing miss so
+/// it can't be confused with `TraceLlm` exhaustion (`Unavailable`) or `driver_protocol_violation`.
 #[derive(Default)]
 pub struct ScopeRegistryGateway {
     map: Mutex<HashMap<TurnScope, Arc<dyn HostManagedModelGateway>>>,
 }
 
 impl ScopeRegistryGateway {
-    /// Construct an empty registry.
     pub fn new() -> Self {
         Self {
             map: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Register `gateway` for `scope`.
-    ///
-    /// Interior-mutable (`&self`) so callers can hold an
-    /// `Arc<ScopeRegistryGateway>` and register threads one-by-one before any
-    /// turn is submitted. This is called from `.thread(conv).script().build()`
-    /// before any turn reaches the scheduler.
+    /// Register `gateway` for `scope`. `&self` (not `&mut self`) so callers holding an
+    /// `Arc<ScopeRegistryGateway>` can register threads one-by-one before any turn is submitted.
     pub fn register(&self, scope: TurnScope, gateway: Arc<dyn HostManagedModelGateway>) {
         let replaced = self
             .map
@@ -76,14 +52,9 @@ impl ScopeRegistryGateway {
 
 #[async_trait]
 impl HostManagedModelGateway for ScopeRegistryGateway {
-    /// Sentinel — never reached when routing succeeds.
-    ///
-    /// The loop-driver host resolves the per-scope gateway via
-    /// [`resolve_for_scope`](Self::resolve_for_scope) and calls `stream_model`
-    /// on **that** gateway. If execution reaches here it means a scope was not
-    /// registered — failing with `ConfigurationError` makes the miss impossible
-    /// to confuse with model exhaustion (`Unavailable`) or
-    /// `driver_protocol_violation`.
+    /// Sentinel — never reached when routing succeeds; execution here means a scope was not
+    /// registered. Fails with `ConfigurationError`, distinct from `Unavailable` (model
+    /// exhaustion) or `driver_protocol_violation`.
     async fn stream_model(
         &self,
         request: HostManagedModelRequest,
@@ -101,12 +72,9 @@ impl HostManagedModelGateway for ScopeRegistryGateway {
         ))
     }
 
-    /// Return the gateway registered for `scope`, or `None` if no match.
-    ///
-    /// The loop-driver host calls this at host-construction time (off the
-    /// model hot path). `None` → the host falls back to `Arc::clone(self)`,
-    /// causing the next `stream_model` call to emit the sentinel error above,
-    /// making the routing miss immediately visible.
+    /// Returns the gateway registered for `scope`, or `None`. Called at host-construction
+    /// time (off the model hot path); `None` makes the host fall back to `Arc::clone(self)`,
+    /// so the next `stream_model` call emits the sentinel error above.
     fn resolve_for_scope(&self, scope: &TurnScope) -> Option<Arc<dyn HostManagedModelGateway>> {
         self.map
             .lock()
@@ -120,9 +88,7 @@ impl HostManagedModelGateway for ScopeRegistryGateway {
 mod tests {
     use super::*;
 
-    /// Trivial gateway stub: another `ScopeRegistryGateway` satisfies the trait
-    /// bound and lets us check `Arc::ptr_eq` identity without touching any model
-    /// logic.
+    /// Stub gateway (reuses `ScopeRegistryGateway`) for `Arc::ptr_eq` identity checks.
     fn stub_gateway() -> Arc<dyn HostManagedModelGateway> {
         Arc::new(ScopeRegistryGateway::new())
     }
@@ -136,10 +102,8 @@ mod tests {
         )
     }
 
-    /// Mutation guard (a): if `resolve_for_scope` is changed to always return
-    /// `None`, this test goes RED on the `is_some()` assertion.
-    /// Mutation guard (b): if it returns the wrong entry or ignores scope,
-    /// `two_scopes_route_to_distinct_gateways` goes RED on `ptr_eq`.
+    /// Mutation guards: always-None `resolve_for_scope` fails `is_some()` here; wrong-entry
+    /// resolution fails `ptr_eq` in `two_scopes_route_to_distinct_gateways`.
     #[test]
     fn registered_scope_returns_some() {
         let registry = ScopeRegistryGateway::new();
@@ -169,9 +133,8 @@ mod tests {
         assert!(resolved.is_none(), "unregistered scope must return None");
     }
 
-    /// Fail-loud guard: re-registering the same `TurnScope` must panic rather
-    /// than silently re-pointing the first registration's callers at the
-    /// second gateway (the bug this assert prevents — see module docs).
+    /// Fail-loud guard: re-registering a scope must panic, not silently repoint the first
+    /// registration's callers at the second gateway.
     #[test]
     #[should_panic(expected = "duplicate scope registration")]
     fn duplicate_register_for_same_scope_panics() {
@@ -184,10 +147,8 @@ mod tests {
         registry.register(scope, gw_second);
     }
 
-    /// Construct a minimal `HostManagedModelRequest` for exercising the
-    /// `stream_model` sentinel directly; field contents beyond `run_id`/
-    /// `turn_id` are irrelevant since the sentinel never inspects them for
-    /// anything but the error message.
+    /// Minimal request for exercising the `stream_model` sentinel; only `run_id`/`turn_id`
+    /// matter (the sentinel only echoes them into the error message).
     fn make_request() -> HostManagedModelRequest {
         HostManagedModelRequest {
             model_profile_id: ironclaw_turns::run_profile::ModelProfileId::new("interactive_model")
@@ -200,13 +161,8 @@ mod tests {
         }
     }
 
-    /// De-mask guard: a routing miss (no scope registered) must fail as the
-    /// distinct `ConfigurationError` sentinel, not silently resemble model
-    /// exhaustion (`Unavailable`) or `driver_protocol_violation`. If this
-    /// sentinel regresses to a different kind or loses its diagnostic text,
-    /// a real routing miss in a group scenario would become ambiguous with
-    /// those other failure categories — exactly the masking this gateway
-    /// exists to prevent (see module docs).
+    /// De-mask guard: a routing miss must fail as the distinct `ConfigurationError` sentinel,
+    /// not resemble model exhaustion (`Unavailable`) or `driver_protocol_violation`.
     #[tokio::test]
     async fn stream_model_sentinel_reports_configuration_error_on_routing_miss() {
         let registry = ScopeRegistryGateway::new();

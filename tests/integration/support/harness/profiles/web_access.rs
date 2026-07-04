@@ -1,4 +1,4 @@
-//! web_access domain tools profiles (populated by the profile migration).
+//! web_access domain capability profile.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -16,21 +16,11 @@ use super::super::{
     host_runtime_storage_roots, workspace_mounts,
 };
 
-/// C-WEBACCESS: wires the real first-party `web-access.search` /
-/// `web-access.get_content` capabilities via the production
-/// `register_bundled_web_access_first_party_handlers` registration
-/// (`harness_web_access.rs`), which dispatches through the same
-/// `WebAccessExecutor` production composition uses. Unlike
-/// `github_issue_tools`, no credential-injecting authorizer is needed —
-/// web-access declares zero `runtime_credentials` — so this wires the
-/// plain default `GrantAuthorizer`.
+/// C-WEBACCESS: wires the real first-party web-access capabilities through production's
+/// `WebAccessExecutor`; no credential-injecting authorizer needed (declares zero `runtime_credentials`).
 ///
-/// The three-leg Exa MCP handshake (`initialize` → `notifications/initialized`
-/// → `tools/call`) all target the same URL, so script it via
-/// `RecordingRuntimeHttpEgress::push_response_body` (FIFO), not the keyed
-/// matcher — see [`install_web_access_responses`](Self::install_web_access_responses),
-/// called from `RebornIntegrationHarnessBuilder::build` before the harness
-/// is returned.
+/// Exa MCP's three-leg handshake shares one URL, so responses are scripted via
+/// `RecordingRuntimeHttpEgress::push_response_body` (FIFO), not the keyed matcher.
 pub(crate) async fn web_access_tools() -> HarnessResult<HostRuntimeCapabilityHarness> {
     let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
     let http_egress = Arc::new(RecordingRuntimeHttpEgress::with_body(

@@ -1,18 +1,15 @@
 //! Reborn integration test — mid-turn cancellation + related failure paths
 //! (E-GATEWAY seam, C-ERRORS).
 //!
-//! Proves the cancel path end-to-end at the int tier: the model call parks at
-//! the vendor-SDK seam, the test cancels the in-flight run, releases the park,
-//! and the run reaches `TurnStatus::Cancelled` (not `Completed`). Exercises the
-//! parking provider (`park_model`) and `cancel_run`. Cancellation is observed
-//! by the loop-driver host's own default `TurnStateRunCancellationFactory`
-//! (`group.rs` leaves the optional `cancellation_factory` as `None`), not a
+//! Proves the cancel path end-to-end: the model call parks at the vendor-SDK
+//! seam, the test cancels the in-flight run, releases the park, and the run
+//! reaches `TurnStatus::Cancelled` (not `Completed`). Cancellation is observed
+//! by the loop-driver host's default `TurnStateRunCancellationFactory`, not a
 //! wired coordinator fan-out.
 //!
-//! The tests below extend the same seam with C-ERRORS coverage: a
-//! leaked-permit regression guard on the cancel path (precedent: PR #5206's
-//! RAII `ReservationGuard` bugs), thread-busy rejection, and a non-retryable
-//! provider-`Err` reaching a categorized `TurnStatus::Failed`.
+//! Also covers C-ERRORS: a leaked-permit regression guard (precedent: PR
+//! #5206's RAII `ReservationGuard` bugs), thread-busy rejection, and a
+//! non-retryable provider-`Err` reaching a categorized `TurnStatus::Failed`.
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
@@ -59,12 +56,10 @@ async fn cancels_a_parked_mid_turn_run() {
         .expect("parked run reaches Cancelled after cancel");
 }
 
-/// Regression guard: cancelling a parked run must release whatever
-/// per-actor/tenant admission slot or run-concurrency permit it held. If
-/// cancellation leaked one (precedent: PR #5206's leaked WASM
-/// permit/reservation bugs), a second turn on the SAME thread right after
-/// would either hang past `wait_for_status`'s internal deadline or come back
-/// `RejectedBusy` instead of completing.
+/// Regression guard: cancelling a parked run must release its per-actor/
+/// tenant admission permit. If leaked (precedent: PR #5206's WASM
+/// permit/reservation bugs), a second turn on the SAME thread would hang or
+/// come back `RejectedBusy` instead of completing.
 #[tokio::test]
 async fn cancelled_run_does_not_block_a_second_turn_on_the_same_thread() {
     let gate = ParkingModelGate::new();
@@ -92,9 +87,9 @@ async fn cancelled_run_does_not_block_a_second_turn_on_the_same_thread() {
         .await
         .expect("parked run reaches Cancelled after cancel");
 
-    // The gate's channels are already consumed after the first park+release
-    // cycle, so this second call passes through the same `ParkingLlm` instantly
-    // (see `ParkingModelGate`'s "second call does not block" guarantee).
+    // The gate's channels are already consumed, so this second call passes
+    // through the same `ParkingLlm` instantly (`ParkingModelGate`'s "second
+    // call does not block" guarantee).
     harness
         .submit_turn("do another thing")
         .await
@@ -105,11 +100,9 @@ async fn cancelled_run_does_not_block_a_second_turn_on_the_same_thread() {
         .expect("second turn's reply persisted");
 }
 
-/// A second submit on a thread whose first run is still active (parked, not
-/// yet cancelled) must be rejected — `InboundTurnOutcome::RejectedBusy`
-/// (`ironclaw_product_workflow::inbound_turn`) — not silently queued or
-/// accepted. Releases the park afterward so the first run still completes and
-/// the harness doesn't leak a parked task past the test.
+/// A second submit on a thread whose first run is still active (parked) must
+/// be rejected — `InboundTurnOutcome::RejectedBusy` — not silently queued or
+/// accepted. Releases the park afterward so no parked task leaks past the test.
 #[tokio::test]
 async fn busy_reject_when_thread_already_has_an_active_run() {
     let gate = ParkingModelGate::new();
@@ -144,11 +137,10 @@ async fn busy_reject_when_thread_already_has_an_active_run() {
         .expect("first turn still completes after the rejected second submit");
 }
 
-/// A raw provider `Err` that the real `ironclaw_llm` decorator chain classifies
-/// as non-retryable (`LlmError::ContextLengthExceeded`, excluded from
-/// `ironclaw_llm::retry::is_retryable`) must reach the model a `TurnStatus::Failed`
-/// run categorized `"model_error"` (`LoopFailureKind::ModelError`), not silently
-/// retry forever or surface as a different failure category.
+/// A raw provider `Err` classified non-retryable by `ironclaw_llm`
+/// (`LlmError::ContextLengthExceeded`, excluded from `is_retryable`) must
+/// reach `TurnStatus::Failed` categorized `"model_error"`, not retry forever
+/// or surface as a different category.
 #[tokio::test]
 async fn mid_turn_provider_error_reaches_failed_with_model_error_category() {
     let harness = RebornIntegrationHarness::test_default()
@@ -177,29 +169,21 @@ async fn mid_turn_provider_error_reaches_failed_with_model_error_category() {
 }
 
 /// Regression guard, `Failed`-path sibling of
-/// `cancelled_run_does_not_block_a_second_turn_on_the_same_thread`: whatever
-/// per-thread busy/admission lock a run holds must be released when the run
-/// reaches `TurnStatus::Failed`, not just `Cancelled`. If that release leaked
-/// (same "wedge class" as PR #5206's leaked WASM permit/reservation bugs), a
-/// second submit on the SAME thread right after would come back
-/// `RejectedBusy` instead of being admitted.
+/// `cancelled_run_does_not_block_a_second_turn_on_the_same_thread`: the
+/// per-thread busy/admission lock must release on `TurnStatus::Failed`, not
+/// just `Cancelled` (same "wedge class" as PR #5206's leaked WASM
+/// permit/reservation bugs) — a leak would make a second submit on the SAME
+/// thread come back `RejectedBusy`.
 ///
-/// This cannot mirror the cancel-path test's shape exactly (second turn
-/// reaching `Completed`): `fail_model()` swaps in `ErrLlm` — see
-/// `tests/support/reborn/scripted_provider.rs` — as this thread's ENTIRE raw
-/// model provider, unconditionally, for every future call (no per-call
-/// counting; `ErrLlm::complete`/`complete_with_tools` always return
-/// `LlmError::ContextLengthExceeded`). There is also no builder seam to swap
-/// in a fresh, successful script for a second turn on the same thread: a
-/// second `RebornIntegrationGroup::thread(...)` build for the same
-/// `conversation_id` would resolve the same `TurnScope` and panic on
-/// `ScopeRegistryGateway::register`'s duplicate-registration guard (see
-/// `tests/support/reborn/scope_gateway.rs::duplicate_register_for_same_scope_panics`).
-/// So the second turn here also fails (same `"model_error"` category) — the
-/// regression signal is that it is *admitted* (`Accepted`, not `RejectedBusy`)
-/// and reaches its own terminal status promptly rather than hanging or being
-/// silently dropped, proving the lock was genuinely released and not just
-/// accepted-then-stuck.
+/// The second turn also fails (same `"model_error"` category), not
+/// completes: `fail_model()` swaps in `ErrLlm` as the thread's entire raw
+/// model provider permanently (no per-call counting), and there is no
+/// builder seam to swap in a fresh script for a second turn on the same
+/// thread (a second `group.thread(...)` for the same `conversation_id` would
+/// panic on `ScopeRegistryGateway::register`'s duplicate-registration guard).
+/// The regression signal is that it is *admitted* (`Accepted`, not
+/// `RejectedBusy`) and reaches its own terminal status promptly, proving the
+/// lock was genuinely released.
 #[tokio::test]
 async fn failed_run_does_not_block_a_second_turn_on_the_same_thread() {
     let harness = RebornIntegrationHarness::test_default()

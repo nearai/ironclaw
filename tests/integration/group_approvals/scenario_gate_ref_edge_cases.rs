@@ -57,10 +57,8 @@ pub async fn stale_gate_ref_resume(g: &RebornIntegrationGroup) -> HarnessResult<
         );
     }
 
-    // Non-vacuity follow-up: the run is STILL blocked (the failed stale-ref
-    // resume never reached the point of clearing the gate) — resuming with
-    // the REAL gate ref (resume-only; the approval was already resolved
-    // above) completes the run normally.
+    // Non-vacuity: the run is STILL blocked (stale-ref resume never cleared
+    // the gate); resuming with the REAL gate ref completes it normally.
     h.resume_gate(run_id, &gate_ref).await?;
     h.wait_for_status(run_id, TurnStatus::Completed).await?;
     h.assert_workspace_file_contains("stale_ref.txt", "stale ref write")
@@ -78,12 +76,9 @@ pub async fn missing_gate_bare_resolve(g: &RebornIntegrationGroup) -> HarnessRes
     // No tool call, so no gate is ever raised on this thread.
     let run_id = h.submit_turn("just say hello, no tools").await?;
 
-    // Syntactically well-formed (`"gate:approval-<uuid>"` shape, matching what
-    // `approval_request_id_from_gate_ref` parses) but NEVER-ISSUED gate ref —
-    // no capability call on this thread ever recorded this request id in the
-    // harness's `pending_approval_scopes` bookkeeping. `approve_gate`'s
-    // local-dev resolve step fails on this lookup before `resume_run` is ever
-    // reached, so the (already-`Completed`) `run_id` is never touched.
+    // Syntactically well-formed but NEVER-ISSUED gate ref: no capability call
+    // on this thread recorded this request id, so `approve_gate`'s local-dev
+    // resolve fails on the lookup before `resume_run` is ever reached.
     let bogus_gate_ref = GateRef::new("gate:approval-11111111-1111-1111-1111-111111111111")
         .expect("valid bounded gate ref string");
 

@@ -1,21 +1,13 @@
-//! Canonical multi-turn JOURNEY over ONE conversation/harness — the deterministic
-//! twin of the live approval-gate canary flow. Chains, on a single thread:
-//!
-//!   turn 1: gated `write_file` → `BlockedApproval` → APPROVE → resumes, the
-//!           write re-dispatches and persists → `Completed`;
-//!   turn 2: gated `write_file` → `BlockedApproval` → DENY → resumes, the model
-//!           sees a non-retryable authorization failure, side effect suppressed
-//!           → `Completed`;
-//!   turn 3: a plain follow-up user message → the model's request carries the
-//!           PRIOR turns' history → replies → `Completed`.
+//! Canonical multi-turn JOURNEY over ONE conversation/harness: chains, on a
+//! single thread, turn 1 (gated `write_file` → APPROVE → persists), turn 2
+//! (gated `write_file` → DENY → suppressed, non-retryable auth failure), turn 3
+//! (plain follow-up carrying prior turns' history).
 //!
 //! Journey value (not re-tested here) = the CHAINING across turns on one
-//! conversation: gate-resolve → next turn → gate-resolve → follow-up, all over
-//! the group's ONE shared coordinator/turn-store with the SAME binding. The
-//! single-gate mechanics (approve/deny/resume correctness) are already pinned by
-//! `reborn_group_approvals`; this asserts they COMPOSE across a live session and
-//! that per-turn state does not bleed (turn 2's deny does not un-persist turn 1's
-//! approved write; turn 3 still sees both).
+//! conversation over the group's ONE shared coordinator/turn-store. Single-gate
+//! mechanics (approve/deny/resume) are already pinned by `reborn_group_approvals`;
+//! this asserts they COMPOSE across a live session with no per-turn state bleed
+//! (turn 2's deny doesn't un-persist turn 1's write; turn 3 still sees both).
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
@@ -75,10 +67,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         return Err("turn 3 reused a prior run id — turns did not chain".into());
     }
     h.assert_reply_contains("JOURNEY_FINAL_REPLY").await?;
-    // The model request for turn 3 carries the earlier turns' history: ONE
-    // captured request contains BOTH turn 1's and turn 3's user text. Only turn
-    // 3's request can (turn 1's request predates turn 3), so this is a real
-    // context-carryover proof, not a tautology.
+    // Turn 3's request must carry BOTH turn 1's and turn 3's text — real
+    // context-carryover, not a tautology (only turn 3's request can, since
+    // turn 1 predates it).
     h.assert_model_request_contains_all(&["JOURNEY_TURN1", "JOURNEY_TURN3"])
         .await?;
     Ok(())

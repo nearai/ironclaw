@@ -1,13 +1,7 @@
-//! Shared Google OAuth connect-flow helper for Reborn integration tests.
-//!
-//! Provides [`connect_google_account`], the standard OAuth connect flow that
-//! drives `create_flow` → `handle_oauth_callback` → `get_account` to produce
-//! a connected `CredentialAccount`.  Factored out because multiple test files
-//! exercise paths that require a pre-connected Google credential account.
-//!
-//! The function and its dependencies are gated on
-//! `any(feature = "libsql", feature = "postgres")` to match the gate on
-//! `OAuthProductAuthTestBundle` in `ironclaw_reborn_composition::test_support`.
+//! Shared Google OAuth connect-flow helper for Reborn integration tests:
+//! [`connect_google_account`] drives `create_flow` → `handle_oauth_callback` →
+//! `get_account` to produce a connected `CredentialAccount`. Gated on
+//! `any(feature = "libsql", feature = "postgres")` to match `OAuthProductAuthTestBundle`.
 
 // Shared support module: not every test binary that mounts the `reborn_support`
 // tree calls into this helper (e.g. `support_unit_tests` exercises none of it),
@@ -38,13 +32,8 @@ fn hex64(fill: u8) -> String {
     format!("{fill:02x}").repeat(32)
 }
 
-/// Run the standard Google OAuth connect flow on `bundle` and return the
-/// persisted `CredentialAccount`.
-///
-/// Drives `create_flow` → `handle_oauth_callback` → `get_account` using
-/// `fill` as a seed byte to generate deterministic hex hashes for the OAuth
-/// state, PKCE verifier, and authorization code.  Call with distinct `fill`
-/// values when multiple accounts are needed in the same test.
+/// Runs the connect flow on `bundle`, returning the persisted `CredentialAccount`.
+/// `fill` seeds deterministic hex hashes; use distinct values for multiple accounts in one test.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub async fn connect_google_account(
     bundle: &OAuthProductAuthTestBundle,

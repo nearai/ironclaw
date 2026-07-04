@@ -42,9 +42,8 @@ impl HarnessCapabilityRecorder {
         }
     }
 
-    /// E-PROFILE: the local-dev memory filesystem backing the user-profile
-    /// source for this backend, if any. `None` for the Echo backend and for
-    /// HostRuntime harnesses without a profile filesystem.
+    /// E-PROFILE: local-dev memory filesystem backing the user-profile source, if any.
+    /// `None` for the Echo backend and HostRuntime harnesses without a profile filesystem.
     pub(crate) fn profile_filesystem(&self) -> Option<Arc<dyn RootFilesystem>> {
         match self {
             Self::Recording(_) => None,
@@ -52,9 +51,8 @@ impl HarnessCapabilityRecorder {
         }
     }
 
-    /// E-SKILL: the `HostSkillContextSource` to wire as the runtime's
-    /// `skill_context_source` for this backend, if any. `None` for the Echo
-    /// backend and for HostRuntime harnesses without skill activation.
+    /// E-SKILL: the `HostSkillContextSource` to wire as the runtime's `skill_context_source`, if any.
+    /// `None` for the Echo backend and HostRuntime harnesses without skill activation.
     pub(crate) fn skill_context_source(
         &self,
     ) -> Option<Arc<dyn ironclaw_loop_support::HostSkillContextSource>> {
@@ -64,9 +62,8 @@ impl HarnessCapabilityRecorder {
         }
     }
 
-    /// C-ATTACH: the attachment read port + inbound lander for this backend, if
-    /// any. `None` for the Echo backend and for HostRuntime harnesses without a
-    /// local-dev workspace filesystem.
+    /// C-ATTACH: the attachment read port + inbound lander, if any. `None` for the
+    /// Echo backend and HostRuntime harnesses without a local-dev workspace filesystem.
     pub(crate) fn attachment_test_support(
         &self,
     ) -> Option<ironclaw_reborn_composition::AttachmentTestSupport> {

@@ -51,9 +51,8 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     lister.assert_tool_result_contains("atlas/").await?;
     lister.assert_tool_result_contains("runbook.md").await?;
 
-    // Committed negative guard (non-vacuity): a directory that was never created
-    // must be ABSENT, so the positive assertions discriminate rather than pass
-    // unconditionally.
+    // Non-vacuity: an uncreated directory must be ABSENT, so the positive
+    // assertions discriminate rather than pass unconditionally.
     if lister.assert_tool_result_contains("phantom/").await.is_ok() {
         return Err("negative guard failed: tree must not contain an uncreated directory".into());
     }

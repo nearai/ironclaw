@@ -2,13 +2,11 @@
 //! pipeline — the delivery-preference / connected-channel slice it resolves
 //! renders into the model request on a real coordinator-path turn.
 //!
-//! Distinct from the outbound delivery **sink** (E-OUTBOUND, a sibling lane):
-//! this covers prompt **context** (delivery preferences/targets), not a delivery
-//! recorder. The production `RuntimeCommunicationContextProvider`'s
-//! facade→context mapping is densely unit-tested at crate tier
-//! (`ironclaw_reborn_composition::communication_context`); this binary covers
-//! only the int-tier wiring gap — that the `communication_context_provider`
-//! field threads through the coordinator path into the model request.
+//! Distinct from the outbound delivery sink (E-OUTBOUND): this covers prompt
+//! context, not a delivery recorder. The facade→context mapping itself is
+//! unit-tested at crate tier (`ironclaw_reborn_composition::communication_context`);
+//! this binary covers only that the field threads through the coordinator path
+//! into the model request.
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
@@ -58,19 +56,15 @@ async fn no_communication_section_without_provider() {
         .expect("harness builds");
     h.submit_turn("hello").await.expect("turn completes");
 
-    // Baseline: a model request WAS captured at all (the turn actually
-    // reached the scripted provider), so the negative assertion below is
-    // proving absence of the communication section, not a vacuous pass
-    // against zero captured requests.
+    // Baseline: a request WAS captured, so the negative assertion below
+    // proves absence of the section, not a vacuous pass on zero requests.
     h.assert_model_request_contains("hello")
         .await
         .expect("the turn's own text must reach the captured model request");
 
-    // Specific error check (not generic `is_err()`): pin that the failure is
-    // the "not found" path over exactly the one captured request, so an
-    // infra-level failure (e.g. JSON serialization) can't masquerade as proof
-    // the communication section was absent, and a regression that silently
-    // captures zero requests can't slip through either.
+    // Specific error check (not `is_err()`): pins the failure to the
+    // "not found" path over the one captured request, ruling out an infra
+    // failure or a zero-capture regression masquerading as proof of absence.
     let err = h
         .assert_model_request_contains("Outbound delivery target:")
         .await

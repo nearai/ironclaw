@@ -45,10 +45,8 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let capability_harness = g
         .capability_harness()
         .ok_or("triggers group always uses HostRuntime")?;
-    // Same run-scope tenant every group's `build_base` resolves (the fixed
-    // itest scope) — read off the group's own product-workflow scope rather
-    // than a separately hardcoded literal, so this can never drift from the
-    // tenant `trigger_create` actually stored under.
+    // Read off the group's own scope rather than a hardcoded literal, so this
+    // can never drift from the tenant `trigger_create` actually stored under.
     let tenant_id = g.shared.product_harness.scope.tenant_id.clone();
 
     // Reopen a FRESH, independent repository at the same on-disk root — not the

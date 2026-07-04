@@ -1,8 +1,6 @@
-//! `file` domain migration for the `ToolsProfile` infrastructure (see
-//! `harness/options.rs`). `file_tools()` / `file_tools_requiring_approval()` /
-//! `write_only()` previously lived as hand-built `Self::new(..)` constructors
-//! in `harness/mod.rs`; `file_tools_with_runtime_policy` was their shared
-//! internal tail.
+//! File domain tools profiles: `file_tools()` / `file_tools_requiring_approval()`
+//! / `write_only()`, sharing `file_tools_with_runtime_policy` as their
+//! internal tail. See `harness/options.rs` for the `ToolsProfile` pattern.
 
 use ironclaw_host_api::{CapabilityId, EffectKind, MountPermissions, UserId};
 use ironclaw_host_runtime::{READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID};

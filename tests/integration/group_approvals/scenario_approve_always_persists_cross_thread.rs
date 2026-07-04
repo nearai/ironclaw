@@ -2,18 +2,15 @@
 //! DIFFERENT thread of the same group.
 //!
 //! Thread A flips the per-`(tenant, user)` auto-approve toggle ON via the real
-//! CAS-persisted `AutoApproveSettingStore` (shared across the group). Thread B —
-//! a distinct conversation/thread — then runs the SAME gated capability and
-//! completes WITHOUT blocking, because it reads thread A's persisted setting.
-//! This is the exact user requirement: set approve-always once, and subsequent
-//! threads invoking the same tool are not prompted.
+//! CAS-persisted `AutoApproveSettingStore`. Thread B, a distinct
+//! conversation/thread, then runs the SAME gated capability and completes
+//! WITHOUT blocking because it reads thread A's persisted setting.
 //!
-//! Non-vacuity: the sibling `gate_then_approve`/`gate_then_deny` scenarios run
-//! FIRST (auto-approve still OFF) and prove the gate genuinely fires — so thread
-//! B's no-gate completion here is the setting flip, not a vacuous pass. The
-//! `submit_turn` call waits for `Completed`; if the setting had NOT crossed the
-//! thread boundary, the write would block and `submit_turn` would time out and
-//! error.
+//! Non-vacuity: sibling `gate_then_approve`/`gate_then_deny` run FIRST
+//! (auto-approve still OFF) and prove the gate genuinely fires, so thread B's
+//! no-gate completion here is the setting flip, not a vacuous pass — if the
+//! setting had not crossed the thread boundary, `submit_turn` would time out
+//! waiting for `Completed` instead of returning.
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;

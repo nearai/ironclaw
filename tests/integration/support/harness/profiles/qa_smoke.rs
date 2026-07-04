@@ -1,8 +1,7 @@
-//! `qa_smoke` domain migration. `qa_smoke_tools()` previously lived as a
-//! hand-built `Self { .. }` constructor in `harness/mod.rs` — it builds the
-//! host runtime directly (rather than through `new_with_options`) so it can
-//! wire a scripted `RecordingRuntimeHttpEgress` body at construction time, so
-//! it stays a bespoke full constructor rather than a `ToolsProfile`.
+//! `qa_smoke` domain tools profile. `qa_smoke_tools()` builds the host
+//! runtime directly (rather than through `new_with_options`) so it can wire a
+//! scripted `RecordingRuntimeHttpEgress` body at construction time — a bespoke
+//! full constructor rather than a `ToolsProfile`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

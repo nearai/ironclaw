@@ -1,14 +1,9 @@
-//! Reborn integration-test framework — slice 3: storage-backend matrix.
+//! Reborn integration-test framework — storage-backend matrix.
 //!
-//! Two things this tier did not cover before:
-//!   1. **Backend parity** — one golden scenario through BOTH
-//!      `StorageMode::InMemory` and `StorageMode::LibSql` (real SQLite on a
-//!      tmp `.db`, real SQL + migrations + CAS), asserting an identical
-//!      outcome. The canonical `rstest` matrix exemplar for this tier.
-//!   2. **Persistence correctness (LibSql-only)** — a write-then-read-back
-//!      test that reopens the SQLite file through a *fresh* database handle and
-//!      asserts the assistant reply survived to disk, proving real
-//!      serialization + durability (design §3.8 guardrail).
+//! Covers: backend parity (one golden scenario through `StorageMode::InMemory`
+//! and `StorageMode::LibSql`, asserting an identical outcome — the canonical
+//! `rstest` matrix exemplar for this tier) and LibSql persistence correctness
+//! (write-then-reopen through a fresh database handle, design §3.8 guardrail).
 //!
 //! Runs under default features, no services, no keys, no Docker, no
 //! `integration` feature — libSQL is an embedded SQLite file in a `TempDir`
@@ -49,11 +44,9 @@ async fn backend_parity_replies_to_greeting(#[case] storage: StorageMode) {
         .expect("reply finalized in thread history");
 }
 
-/// Persistence correctness, LibSql-only (design §3.8): the reply must survive
-/// to the SQLite file and read back through a *fresh* database handle — real
-/// serialization + durability, not an in-process cache. InMemory cannot make
-/// this assertion (nothing reaches disk), so this test legitimately requires
-/// `StorageMode::LibSql`.
+/// Persistence correctness (design §3.8): the reply must survive to the
+/// SQLite file and read back through a fresh database handle, not an
+/// in-process cache. InMemory cannot make this assertion (nothing reaches disk).
 #[tokio::test]
 async fn libsql_persists_reply_across_reopen() {
     let harness = RebornIntegrationHarness::test_default()
@@ -73,10 +66,8 @@ async fn libsql_persists_reply_across_reopen() {
 }
 
 /// Guard: `assert_reply_persists_after_reopen` must return `Err` when the
-/// expected text is absent — proving the LibSql reopen read-back assertion is
-/// not vacuously green (it really inspects the reopened on-disk history, and a
-/// wrong expectation fails). Mirrors the negative-guard tests the other slices
-/// carry (e.g. `assertions_fail_when_tool_did_not_run`).
+/// expected text is absent, proving the reopen assertion isn't vacuously
+/// green — it inspects real on-disk history.
 #[tokio::test]
 async fn persistence_assertion_fails_on_mismatch_after_reopen() {
     let harness = RebornIntegrationHarness::test_default()

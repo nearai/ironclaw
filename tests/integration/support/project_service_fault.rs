@@ -1,42 +1,13 @@
 //! In-process `ProjectService` fault-injecting decorator for the C-SYNTH
-//! `project_create` seam.
+//! `project_create` seam: wraps the real inner `ProjectService`; a sentinel
+//! `create_project` name triggers a scripted fault, any other call passes
+//! straight through.
 //!
-//! Substitutes ONLY at the production-wired `Arc<dyn ProjectService>` seam the
-//! `builtin.project_create` synthetic capability consumes
-//! (`wrap_project_create_capability_for_test` ->
-//! `ProjectCreateHandler::project_service`, see
-//! `crates/ironclaw_reborn_composition/src/runtime/local_dev/project_create.rs`).
-//! Delegates every call to a REAL inner `ProjectService` (the same
-//! `local_dev_project_service_for_test()` instance every other project-tools
-//! harness uses) except `create_project`, where a caller-chosen sentinel name
-//! triggers a scripted `ProjectServiceError` instead of reaching the real
-//! store — the same "double at the trait seam production already uses"
-//! pattern as `FakeOutboundPreferencesFacade` (`outbound_preferences.rs`) and
-//! `ScriptedHttpResponse::egress_error`. Any other name passes straight
-//! through to the real service, so the same double can drive both a
-//! fault-injection arm and an ordinary happy-path project_create in the same
-//! group.
-//!
-//! Deliberately forces `ProjectServiceError::Denied` (`PolicyDenied`), NOT
-//! `Unavailable`/`Internal`: those two `CapabilityFailureKind`s route through
-//! `DefaultRecoveryStrategy`'s capability-retry branch
-//! (`crates/ironclaw_agent_loop/src/strategies/recovery.rs`), which
-//! re-dispatches via `capability_invocation_from_candidate` reusing the
-//! ORIGINAL `input_ref`. For a provider-tool-call-originated invocation under
-//! local-dev composition, that retry hits a real, independently confirmed
-//! production bug — `LocalDevCapabilityIo::resolve_capability_input`
-//! (`crates/ironclaw_reborn_composition/src/runtime/local_dev.rs`) rejects the
-//! SAME `input_ref` on the retry with `InvalidInvocation`/"capability input
-//! ref was not staged for this loop run" (the first attempt's input resolves
-//! through a different, staging-bypassing path — see
-//! `LocalDevCapabilityIo`'s own doc comment), collapsing the documented
-//! "retry twice, then a model-visible `Failed`" contract into an immediate
-//! terminal `driver_unavailable`. See issue #5608 for the full
-//! repro. `Denied` avoids that retry path entirely
-//! (`capability_error_is_model_visible_tool_failure` surfaces `PolicyDenied`
-//! straight to the model on the FIRST attempt), so this double still proves a
-//! genuine, distinct `project_service_outcome` arm end-to-end without
-//! tripping the unrelated retry bug.
+//! Deliberately forces `ProjectServiceError::Denied`, not
+//! `Unavailable`/`Internal`: those retry via `DefaultRecoveryStrategy` and hit
+//! a real `LocalDevCapabilityIo` input-ref restaging bug (issue #5608),
+//! collapsing the retry contract into an immediate `driver_unavailable`.
+//! `Denied` surfaces to the model on the first attempt, avoiding the bug.
 
 #![allow(dead_code)]
 
@@ -51,16 +22,12 @@ use ironclaw_product_workflow::{
     RebornRemoveMemberRequest, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
 };
 
-/// Sentinel `create_project` name that triggers the injected fault instead of
-/// reaching the real project store. Kept distinct from ordinary test project
-/// names (`"My Project"` etc.) so the same double never accidentally
-/// intercepts an unrelated happy-path create.
+/// Sentinel `create_project` name that triggers the injected fault; distinct
+/// from ordinary test project names so it never intercepts a real create.
 pub(crate) const FAULT_INJECT_DENIED_PROJECT_NAME: &str = "FAULT_INJECT_DENIED_PROJECT";
 
-/// Decorator around a real `Arc<dyn ProjectService>` that forces
-/// `ProjectServiceError::Denied` on a `create_project` call naming the
-/// sentinel, and delegates everything else (including non-sentinel
-/// `create_project` calls) to the wrapped real service.
+/// Decorator around a real `Arc<dyn ProjectService>`: forces `Denied` on the
+/// sentinel `create_project` name, delegates everything else to the inner service.
 pub(crate) struct FaultInjectingProjectService {
     inner: Arc<dyn ProjectService>,
 }

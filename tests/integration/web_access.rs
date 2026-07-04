@@ -1,15 +1,9 @@
-//! Reborn integration-test framework — first-party `web-access.*` coverage
-//! (C-WEBACCESS).
-//!
-//! `web-access.search` / `web-access.get_content` are `RuntimeKind::FirstParty`
-//! capabilities dispatched through the real `WebAccessExecutor`, which speaks
-//! MCP JSON-RPC by hand over three sequential `RuntimeHttpEgress` calls
-//! (`initialize` → `notifications/initialized` → `tools/call`) to the Exa MCP
-//! endpoint. `.with_web_access_tools([..])` wires the real executor behind a
-//! thin test adapter and scripts the three-leg handshake onto the recording
-//! egress's FIFO queue at build time (all three legs share one URL, so the
-//! keyed HTTP matcher can't tell them apart). Same single LLM seam as every
-//! other Reborn integration test; no real network, services, keys, or Docker.
+//! C-WEBACCESS: first-party `web-access.*` capabilities dispatched through the
+//! real `WebAccessExecutor`, which speaks MCP JSON-RPC over three sequential
+//! `RuntimeHttpEgress` calls (initialize → notifications/initialized →
+//! tools/call) to the Exa MCP endpoint. `.with_web_access_tools([..])` scripts
+//! the three-leg handshake onto the recording egress's FIFO queue (all three
+//! legs share one URL, so the keyed HTTP matcher can't tell them apart).
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
@@ -27,12 +21,10 @@ const MCP_INIT_BODY: &[u8] =
     br#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}"#;
 const MCP_NOTIF_BODY: &[u8] = br#"{"accepted":true}"#;
 
-/// SSE-framed `initialize` result body with a leading keepalive `ping` event
-/// (`event: ping\ndata:\n`) before the real `message` event. Streamable-HTTP
-/// MCP servers may legally answer any leg this way because `web_access` sends
-/// `Accept: application/json, text/event-stream` on every request. Hand-authored
-/// (no live-captured MCP bodies exist under `tests/fixtures/`); the shape mirrors
-/// the production unit fixture in `web_access.rs::extracts_text_from_sse_mcp_response`.
+/// SSE-framed `initialize` result with a leading keepalive `ping` event before
+/// the real `message` event — legal because `web_access` sends `Accept:
+/// application/json, text/event-stream`. Mirrors the unit fixture in
+/// `web_access.rs::extracts_text_from_sse_mcp_response`.
 const MCP_INIT_BODY_SSE: &[u8] = b"event: ping\ndata:\n\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{}}}\n\n";
 
 /// SSE-framed `tools/call` result wrapping the same `{"result":{"content":..}}`
@@ -49,12 +41,8 @@ fn mcp_tool_call_result_body_sse(content_text: &str) -> Vec<u8> {
     format!("event: message\ndata: {json}\n\n").into_bytes()
 }
 
-/// Builds the `tools/call` JSON-RPC result body the scripted Exa MCP
-/// handshake's third leg returns:
-/// `{"result":{"content":[{"type":"text","text":"<content_text>"}]}}`. Both
-/// `web-access.search` and `web-access.get_content` MCP responses share this
-/// shape — only the text content differs — so every test scripts its third
-/// leg with `mcp_tool_call_result_body(..)` instead of hand-writing the JSON.
+/// Builds the `tools/call` JSON-RPC result body shared by `web-access.search`
+/// and `web-access.get_content` responses (only the text content differs).
 fn mcp_tool_call_result_body(content_text: &str) -> Vec<u8> {
     json!({
         "result": {
@@ -176,15 +164,10 @@ async fn get_content_dispatches_through_scripted_exa_mcp() {
         .expect("scripted MCP fetch result surfaced back to the model");
 }
 
-/// Format-matrix regression (C-WIREFMT) through the REAL Reborn handler: the
-/// Exa MCP server answers `initialize` with SSE framing. `web-access.search`
-/// must still round-trip end-to-end (model -> capability -> `WebAccessExecutor`
-/// -> egress) and surface the result. Before the sibling-parity fix in
-/// `is_valid_mcp_initialize_response`, the JSON-only init parser rejected the
-/// SSE body and the handshake aborted before `tools/call`, so the search result
-/// never reached the model. This is the int-tier twin of the crate-tier
-/// `search_accepts_sse_framed_initialize_response`, exercising the full dispatch
-/// pipeline rather than the executor in isolation.
+/// Format-matrix regression (C-WIREFMT): the Exa MCP server answers
+/// `initialize` with SSE framing; `web-access.search` must still round-trip
+/// end-to-end. Int-tier twin of the crate-tier
+/// `search_accepts_sse_framed_initialize_response`.
 #[tokio::test]
 async fn web_search_over_sse_framed_initialize_dispatches_through_exa_mcp() {
     let harness = RebornIntegrationHarness::test_default()
@@ -228,11 +211,9 @@ async fn web_search_over_sse_framed_initialize_dispatches_through_exa_mcp() {
         .expect("SSE-framed initialize accepted so the handshake reached tools/call");
 }
 
-/// Sibling parity (C-WIREFMT): BOTH body-parsing legs — `initialize`
-/// (`is_valid_mcp_initialize_response`) and `tools/call` (`extract_mcp_text`) —
-/// are SSE-framed on the same handshake, proving each leg inherits the other's
-/// framing matrix rather than only the leg its author happened to test. Uses the
-/// richest framing (multi-event with a keepalive `ping` prelude) for both legs.
+/// Sibling parity (C-WIREFMT): both body-parsing legs (`initialize` and
+/// `tools/call`) are SSE-framed on the same handshake, proving each leg
+/// inherits the other's framing matrix rather than only the tested one.
 #[tokio::test]
 async fn web_access_handshake_over_sse_framed_both_legs() {
     let harness = RebornIntegrationHarness::test_default()
@@ -317,10 +298,9 @@ async fn assert_egress_body_contains_any_fails_when_substring_absent() {
     );
 }
 
-/// Guards `assert_egress_body_contains_any` against its OTHER error branch —
-/// when no captured egress request's URL matches `url_substr` at all (as
-/// opposed to matching the URL but missing the body substring, covered by
-/// `assert_egress_body_contains_any_fails_when_substring_absent` above).
+/// Guards the OTHER error branch of `assert_egress_body_contains_any`: no
+/// captured request's URL matches `url_substr` at all (vs. matching the URL
+/// but missing the body substring, covered by the sibling test above).
 #[tokio::test]
 async fn assert_egress_body_contains_any_fails_when_url_absent() {
     let harness = RebornIntegrationHarness::test_default()
@@ -355,10 +335,8 @@ async fn assert_egress_body_contains_any_fails_when_url_absent() {
             "assert_egress_body_contains_any must fail when no captured egress request's URL \
              matches url_substr at all",
         );
-    // Pins the specific "no matching URL" branch (not just any `Err`) — the
-    // sibling substring-absent branch below it in the same function returns a
-    // differently worded `Err`, so this message check is what actually
-    // distinguishes the two failure paths.
+    // Pins the specific "no matching URL" branch, not just any `Err` — the
+    // sibling substring-absent branch returns a differently worded message.
     assert!(
         err.to_string()
             .contains("no captured egress request matching url"),
@@ -366,17 +344,9 @@ async fn assert_egress_body_contains_any_fails_when_url_absent() {
     );
 }
 
-/// Error path — `web-access.get_content` requests a URL the scripted Exa MCP
-/// response reports as failed to fetch. `WebAccessExecutor::fetch_content`
-/// treats an `"Error fetching <requested url>"` line in the MCP tool-call
-/// text as a hard failure (`parse_fetch_results` -> `operation_error()` ->
-/// `RuntimeDispatchErrorKind::OperationFailed`), proving the production
-/// `register_bundled_web_access_first_party_handlers` error-mapping path
-/// surfaces a real `WebAccessDispatchError` as a model-visible `Failed`
-/// tool error — the run
-/// is expected to reach `Completed` rather than a terminal `driver_unavailable`
-/// (implied here by the presence of a final reply) — rather than a dropped
-/// `Err` or a mis-mapped error class.
+/// Error path: a scripted Exa fetch-error response surfaces as a model-visible
+/// `Failed`/`operation_failed` tool error, and the run still reaches
+/// `Completed` with a final reply rather than terminal `driver_unavailable`.
 #[tokio::test]
 async fn get_content_fetch_error_surfaces_recoverable_failed() {
     let harness = RebornIntegrationHarness::test_default()

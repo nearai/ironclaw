@@ -1,20 +1,15 @@
-//! E-PROFILE seam smoke test: `profile_tools()` builds a `RebornIntegrationGroup`
-//! whose ONE planned runtime is wired with a real `HostUserProfileSource`
-//! (`build_user_profile_source_for_test`, backed by the local-dev memory
-//! filesystem `builtin.profile_set` writes through) instead of the default
-//! `EmptyUserProfileSource`.
+//! E-PROFILE seam smoke test: `profile_tools()` wires ONE planned runtime with
+//! a real `HostUserProfileSource` (backed by the local-dev memory filesystem
+//! `builtin.profile_set` writes through) instead of `EmptyUserProfileSource`.
 //!
-//! A scripted `builtin.profile_set` tool call dispatches through the REAL
-//! production capability (`crates/ironclaw_host_runtime/src/first_party_tools/profile_set.rs`),
-//! and the test then reads the profile back through the SAME
-//! `Arc<dyn HostUserProfileSource>` instance the group's planned runtime is
-//! built with (`RebornIntegrationGroup::user_profile_source_for_test`) — not a
-//! re-derived equivalent — so a regression in the `into_group` wiring itself
-//! (not just `build_user_profile_source_for_test`) fails this test.
+//! A scripted `builtin.profile_set` call dispatches through the real
+//! production capability; the test reads back through the SAME
+//! `Arc<dyn HostUserProfileSource>` instance the group's runtime uses
+//! (`user_profile_source_for_test`), so a regression in `into_group` wiring
+//! itself — not just `build_user_profile_source_for_test` — fails this test.
 //!
-//! Mutation-catching: if the profile source ignores its filesystem input (or
-//! always returns `EmptyUserProfileSource`/`None`), `resolve_user_profile`
-//! returns `None` here and the `expect` below fails.
+//! Mutation-catching: an ignored filesystem input or an always-`None` source
+//! makes `resolve_user_profile` return `None`, failing the `expect` below.
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
@@ -31,13 +26,10 @@ use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
 
 /// Build the `LoopRunContext` `resolve_user_profile` reads from, scoped to the
-/// same `(tenant, user)` the `profile_set` write dispatched under: the
-/// thread's binding tenant and the capability harness's dispatch user, which
-/// `RebornIntegrationGroup::profile_tools()` aligns to the run's
-/// canonical binding subject user via `with_user_id` (mirroring
-/// `live_approvals`) — see `HostRuntimeCapabilityHarness::with_user_id` doc
-/// comment — dispatch's `ResourceScope` is keyed on the harness user, not the
-/// binding owner, unless overridden.
+/// same `(tenant, user)` the `profile_set` write dispatched under — the
+/// capability harness's dispatch user, which `profile_tools()` aligns to the
+/// binding subject user via `with_user_id` (mirroring `live_approvals`; see
+/// `HostRuntimeCapabilityHarness::with_user_id`).
 async fn read_back_run_context(tenant_id: &str, user_id: &str) -> LoopRunContext {
     let resolved_run_profile = InMemoryRunProfileResolver::default()
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
@@ -86,10 +78,8 @@ async fn profile_set_write_is_readable_through_the_wired_profile_source() {
         .await
         .expect("profile_set dispatched through the real capability");
 
-    // Read back through the SAME `HostUserProfileSource` the group's planned
-    // runtime was built with (E-PROFILE seam), keyed by the dispatch tenant
-    // and the capability harness's dispatch user (see `read_back_run_context`
-    // above for how that user is derived).
+    // Read back through the SAME HostUserProfileSource (E-PROFILE seam), keyed
+    // by the dispatch tenant/user (see `read_back_run_context` above).
     let dispatch_user = group
         .capability_harness()
         .expect("profile_tools always uses HostRuntime")
@@ -120,10 +110,8 @@ async fn profile_set_write_is_readable_through_the_wired_profile_source() {
         "location must survive the round trip"
     );
 
-    // The profile is resolved once per loop spawn (before turn 1's profile_set write), so a
-    // SECOND loop is needed to observe it in the model-visible prompt. A second thread in the
-    // same group shares the profile source under the SAME aligned (tenant, user) as turn 1, so
-    // its fresh loop renders the newly written profile into the runtime-context system message.
+    // Profile resolves once per loop spawn, before turn 1's write — a second
+    // thread's fresh loop is needed to observe it in the model-visible prompt.
     let prompt_thread = group
         .thread("conv-profile-prompt")
         .script([RebornScriptedReply::text("ok")])

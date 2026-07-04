@@ -1,18 +1,12 @@
 //! C-JOURNEY (triggered-origin): a triggered fire whose run raises a real
-//! `BlockedApproval` gate, gets resolved, and then CHAINS into a SECOND
-//! `BlockedApproval` gate in the SAME run (the post-resume model call issues
-//! another gated tool call instead of finalizing) — pinning that
-//! `TurnOriginKind::ScheduledTrigger` origin survives BOTH resume hops, not
-//! just the first.
+//! `BlockedApproval` gate, gets resolved, then CHAINS into a SECOND
+//! `BlockedApproval` gate in the SAME run — pins that `TurnOriginKind::
+//! ScheduledTrigger` survives BOTH resume hops, not just the first.
 //!
-//! Distinct from `scenario_triggered_gate::run_approve`: that scenario is
-//! ONE gate (tool_call, text) — a single resume hop. This scenario scripts
-//! THREE model calls (tool_call, tool_call, text) so the run parks TWICE,
-//! and reads `state.product_context.origin` at both parked states AND at
-//! final `Completed`, closing the gap that a regression which only
-//! preserved origin across the FIRST resume (e.g. a resume path that
-//! rebuilds `product_context` from a fresh, non-trigger-aware default on the
-//! second hop) would otherwise slip through undetected.
+//! Distinct from `scenario_triggered_gate::run_approve` (ONE gate, single
+//! resume hop): this scripts THREE model calls so the run parks TWICE, and
+//! reads `state.product_context.origin` at both parks AND at final
+//! `Completed` — closing the gap where origin regresses only on the second hop.
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
@@ -117,13 +111,10 @@ pub async fn run_chained_approve(g: &RebornIntegrationGroup) -> HarnessResult<()
     Ok(())
 }
 
-/// Read the run state fresh at the coordinator boundary (not the state handed
-/// in from an earlier `wait_for_status_in_scope`/`approve_gate_in_scope`
-/// call) and assert its `product_context.origin` is
-/// `TurnOriginKind::ScheduledTrigger`. Re-reading independently at each of
-/// the three checkpoints (not just trusting the ONE `TriggeredSubmission` for
-/// the whole scenario) is what actually proves origin persists ACROSS both
-/// resume hops, rather than merely being set once at submit time.
+/// Read the run state fresh at each checkpoint (not the state handed in from
+/// an earlier call, and not just the ONE `TriggeredSubmission`) and assert
+/// `product_context.origin` is `ScheduledTrigger` — proves origin persists
+/// ACROSS both resume hops, not merely set once at submit time.
 fn assert_scheduled_trigger_origin(
     state: &ironclaw_turns::TurnRunState,
     checkpoint: &str,

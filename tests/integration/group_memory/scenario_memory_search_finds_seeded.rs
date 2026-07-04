@@ -35,9 +35,8 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     writer.assert_tool_invoked("builtin.memory_write").await?;
 
     // ── Thread B: searcher (DIFFERENT conversation, SAME shared store) ──────
-    // A natural-language query whose terms overlap the seeded sentence. The
-    // matched chunk's `content` snippet surfaces the marker token, proving the
-    // search actually located the seeded document rather than returning empty.
+    // Query overlaps the seeded sentence; the matched chunk's snippet must
+    // surface the marker token, proving search located the doc (not empty).
     let searcher = g
         .thread("conv-memory-searcher")
         .script([
@@ -60,10 +59,8 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .assert_tool_result_contains("osprey-meridian-7")
         .await?;
 
-    // Committed negative guard (non-vacuity): a marker that was never written
-    // must be ABSENT from the search result, so `assert_tool_result_contains`
-    // is proven to discriminate rather than pass unconditionally (e.g. if the
-    // search silently returned every document or an empty-but-stringified set).
+    // Non-vacuity: an unwritten marker must be ABSENT, so the assertion above
+    // is proven to discriminate rather than pass unconditionally.
     if searcher
         .assert_tool_result_contains("tungsten-mirage-88")
         .await

@@ -235,22 +235,15 @@ async fn mcp_server_5xx_surfaces_recoverable_failed() {
         .expect("run recovered and finalized (not terminal driver_unavailable)");
 }
 
-/// Error path — MCP `tools/call` returns a valid, successful JSON-RPC response
-/// whose parsed `result` payload exceeds the host's MCP output-size limit
-/// (`McpRuntimeConfig::default().max_output_bytes` = 1 MiB, wired by
-/// `build_loopback_mcp_runtime` in `tests/support/reborn/harness_mcp.rs`). The
-/// client surfaces this as `Failed{OutputTooLarge}` (recoverable, model-visible
-/// — `reason` token `"output_too_large"`), and the run completes. Distinct wire
-/// path from both cases above: this trips neither the HTTP status gate nor the
-/// JSON-RPC error-field guard — the HTTP call and JSON-RPC parse both succeed —
-/// it trips the POST-parse `output_bytes > max_output_bytes` check in
-/// `McpRuntime::execute_extension_json` (`crates/ironclaw_mcp/src/lib.rs`),
-/// which is a wholly different mechanism from an HTTP-egress
-/// `response_body_limit` rejection: `LoopbackMcpRuntimeHttpEgress` (this
-/// harness's test-only egress) never enforces `response_body_limit` against the
-/// real bytes it reads back, so only this post-parse size check is reachable at
-/// this test tier — a genuinely oversized HTTP response body would just be read
-/// in full and only then rejected once parsed.
+/// Error path — a valid, successful JSON-RPC response whose parsed `result`
+/// exceeds the host's MCP output-size limit (`McpRuntimeConfig::default()
+/// .max_output_bytes` = 1 MiB). Surfaces as `Failed{OutputTooLarge}`
+/// (recoverable, model-visible), run completes. Distinct wire path from both
+/// cases above: HTTP and JSON-RPC parse both succeed; this trips the
+/// POST-parse `output_bytes > max_output_bytes` check in `McpRuntime::
+/// execute_extension_json` — `LoopbackMcpRuntimeHttpEgress` never enforces
+/// `response_body_limit` against real bytes, so this is the only size check
+/// reachable at this test tier.
 #[tokio::test]
 async fn mcp_tool_call_output_too_large_surfaces_failed() {
     // `content` serializes (inside the mock server's `{"content":[{"type":
@@ -288,9 +281,7 @@ async fn mcp_tool_call_output_too_large_surfaces_failed() {
 }
 
 // MCP "auth mismatch" (HTTP 401/403) is deliberately NOT covered here: unlike
-// the two cases above, a 401/403 maps to `McpClientError::AuthRequired` — an
-// auth *gate* (park-and-resume), not a model-visible `Failed`/`Denied` tool
-// error. Exercising a credentialed-backend 401 through to a raised auth gate
-// requires a capability-backend credential stub that this tier does not yet
-// have; it is the same "live-401 re-auth arm" already deferred in
-// `reborn_integration_auth_failure.rs`. Track with that follow-up.
+// the cases above, a 401/403 maps to `McpClientError::AuthRequired` — an auth
+// *gate*, not a model-visible tool error — and requires a capability-backend
+// credential stub this tier lacks. Same deferred "live-401 re-auth arm" as
+// `reborn_integration_auth_failure.rs`.

@@ -48,8 +48,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // asserting on the marker proves thread B reads thread A's write.
     reader.assert_tool_result_contains("plum-42").await?;
 
-    // Committed negative guard (non-vacuity): a marker that was never written
-    // must be ABSENT from the same read result, so `assert_tool_result_contains`
+    // Non-vacuity: an unwritten marker must be ABSENT, so the assertion above
     // is proven to discriminate rather than pass unconditionally.
     if reader
         .assert_tool_result_contains("banana-99")

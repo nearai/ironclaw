@@ -1,16 +1,12 @@
 //! C-DURABLE: a pending approval request survives an independent reopen of
 //! the approval-request store at the SAME on-disk local-dev `storage_root` —
-//! proving capability-produced approval state persists to disk, not just to
-//! in-memory state. Parallels `assert_reply_persists_after_reopen` (thread
-//! history) and `reborn_integration_durable.rs` (extension installs) for the
-//! approval-request store.
+//! proving approval state persists to disk, not just in memory. Parallels
+//! `assert_reply_persists_after_reopen` (thread history) and
+//! `reborn_integration_durable.rs` (extension installs).
 //!
-//! Raises a real `BlockedApproval` gate (auto-approve is disabled for the
-//! group), reopens a FRESH `ApprovalRequestStore` at the capability harness's
-//! `storage_root_for_test()`, and asserts the `Pending` record is there —
-//! independent of the live `Arc` the running group holds. Then resolves the
-//! gate through the normal path so the scenario leaves no run permanently
-//! blocked.
+//! Raises a real `BlockedApproval` gate, reopens a FRESH `ApprovalRequestStore`
+//! at the same root, and asserts the `Pending` record is there independent of
+//! the live `Arc` the running group holds, then resolves the gate normally.
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
@@ -39,8 +35,8 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .ok_or("live_approvals always uses HostRuntime")?;
     let (request_id, scope) = capability_harness.approval_request_scope_for_test(&gate_ref)?;
 
-    // Reopen a FRESH, independent store at the same on-disk root — not the live
-    // `Arc` the running group holds — and confirm the pending request is there.
+    // Reopen a FRESH store at the same on-disk root, independent of the live
+    // `Arc`, and confirm the pending request is there.
     let reopened =
         ironclaw_reborn_composition::test_support::open_local_dev_approval_request_store_for_test(
             &capability_harness.storage_root_for_test(),

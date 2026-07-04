@@ -1,34 +1,19 @@
 //! Reborn integration-test framework — auth/credential-failure coverage.
 //!
-//! Two arms:
+//! (a) `revoked_account_reads_back_revoked` — pure-store `update_status(..,
+//! Revoked)` durable read-back; no refresh sweep involved.
+//! (b) `invalid_grant_sweep_marks_account_revoked` — a scripted
+//! `invalid_grant` 400 during a credential-refresh sweep (`sweep_once` ->
+//! `refresh_account` -> `refresh_token` -> scripted egress) marks the account
+//! `Revoked`.
+//! (negative guard) `normal_sweep_does_not_mark_account_revoked` — same sweep
+//! with a `200` egress leaves the account `Configured`, proving (b)'s
+//! `Revoked` comes from `invalid_grant`, not the sweep itself.
 //!
-//! **(a) `revoked_account_reads_back_revoked`** — pure-store: create a
-//! `Configured` credential account via the standard OAuth connect flow, call
-//! `CredentialAccountService::update_status(.., Revoked)`, and assert the
-//! durable read-back carries `Revoked`.  This arm exercises the status-mutation
-//! path without touching the refresh sweep.
+//! DEFERRED: live-401 reactive re-auth arm — needs a credentialed capability
+//! backend test double, not yet available.
 //!
-//! **(b) `invalid_grant_sweep_marks_account_revoked`** — end-to-end refresh
-//! failure: an idle Google OAuth account receives a scripted `invalid_grant`
-//! 400 response from the token endpoint during a credential-refresh sweep, and
-//! the durable record is subsequently `Revoked`.  The sweep path is
-//! `sweep_once` → `ProviderBackedCredentialAccountService::refresh_account` →
-//! `HostOAuthProviderClient::refresh_token` → scripted HTTP egress.
-//!
-//! **(negative guard) `normal_sweep_does_not_mark_account_revoked`** — the
-//! same sweep flow with a normal `200` egress must leave the account status as
-//! `Configured`, proving that `Revoked` in arm (b) is caused by the
-//! `invalid_grant` error, not by the sweep machinery itself.
-//!
-//! **Deferred — live-401 re-auth arm**: reactive re-auth after a credentialed
-//! capability backend returns HTTP 401 requires a credentialed capability
-//! backend stub and is out of scope here.  Track as a follow-up once a
-//! `CapabilityBackend` test double is available.
-//!
-//! All three test functions are gated on
-//! `any(feature = "libsql", feature = "postgres")` (the same gate as the
-//! `credential_refresh_worker` that powers arm b) so the file compiles and
-//! produces zero tests when neither database feature is active.
+//! All three tests gated on `any(feature = "libsql", feature = "postgres")`.
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
@@ -64,13 +49,8 @@ fn test_scope() -> AuthProductScope {
 
 // ─── arm a: pure-store revoke ─────────────────────────────────────────────────
 
-/// Create a `Configured` credential account, mark it `Revoked` via
-/// `update_status`, and verify the durable read-back carries `Revoked`.
-///
-/// `Revoked` is a terminal status: no further OAuth flow is expected.
-/// The assertion on the read-back proves the status change committed to the
-/// durable `FilesystemAuthProductServices<InMemoryBackend>` store and was not
-/// merely returned in-memory by `update_status`.
+/// `Revoked` is terminal; the read-back proves the status committed to the
+/// durable store, not just `update_status`'s in-memory return value.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 #[tokio::test]
 async fn revoked_account_reads_back_revoked() {
@@ -97,8 +77,7 @@ async fn revoked_account_reads_back_revoked() {
         "update_status return value must carry Revoked"
     );
 
-    // Durable read-back proves the mutation committed to the store, not
-    // merely returned from update_status in-memory.
+    // Durable read-back, not just update_status's in-memory return.
     let read_back = bundle
         .services
         .credential_account_service()
@@ -119,30 +98,20 @@ async fn revoked_account_reads_back_revoked() {
 
 // ─── arm b: invalid_grant sweep marks account Revoked ─────────────────────────
 //
-// Proves the end-to-end path:
-//   sweep_once → select_idle_candidates → RebornProductAuthServices::refresh_credential_account
-//     → ProviderBackedCredentialAccountService::refresh_account
-//     → HostOAuthProviderClient::refresh_token (HTTP egress: 400 invalid_grant)
-//     → AuthProductError::InvalidGrant
-//     → report_terminal_refresh_status(.., Revoked)
+// Path: sweep_once -> refresh_credential_account -> refresh_account ->
+// refresh_token (HTTP egress: 400 invalid_grant) -> InvalidGrant ->
+// report_terminal_refresh_status(.., Revoked).
 //
-// The egress mock uses the `push_response` mechanism: the bundle's default
-// egress returns 200 (so the initial token exchange succeeds and stores a real
-// refresh-secret handle), then a 400 `invalid_grant` response is queued for
-// the sweep's refresh call.
+// Egress: default 200 (initial exchange), then a queued 400 invalid_grant for
+// the sweep's refresh call (`push_response`).
 
-/// An idle Google OAuth account that receives `{"error":"invalid_grant"}` from
-/// the token endpoint during a credential-refresh sweep is persistently marked
-/// `Revoked` by `refresh_account`.
+/// An idle Google OAuth account receiving `invalid_grant` from the token
+/// endpoint during a credential-refresh sweep is persistently marked
+/// `Revoked`.
 ///
-/// Egress call count asserts:
-///   1 = initial token exchange (connect flow, 200)
-///   2 = sweep refresh attempt (queued 400 invalid_grant)
-///
-/// The account write-back is verified through the durable
-/// `CredentialAccountService::get_account` path (not just the refresh report
-/// return value), guarding against the "HTTP fired but account write dropped"
-/// failure mode.
+/// Egress count: 1 = initial exchange (200), 2 = sweep refresh (400
+/// invalid_grant). Verified via durable `get_account` read-back, guarding
+/// against "HTTP fired but account write dropped".
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 #[tokio::test]
 async fn invalid_grant_sweep_marks_account_revoked() {
@@ -153,9 +122,8 @@ async fn invalid_grant_sweep_marks_account_revoked() {
     let account = connect_google_account(&bundle, &scope, 0x22).await;
     let account_id = account.id;
 
-    // The sweep makes exactly one refresh call per candidate, so a single
-    // queued invalid_grant response is enough; the constructor-default 200
-    // body stays in place for any calls after that.
+    // Sweep makes exactly one refresh call per candidate; the default 200
+    // body covers any calls after this queued invalid_grant response.
     bundle.egress.push_response(
         400,
         serde_json::json!({"error": "invalid_grant"})
@@ -206,10 +174,8 @@ async fn invalid_grant_sweep_marks_account_revoked() {
 // ─── negative guard ────────────────────────────────────────────────────────────
 
 /// A credential-refresh sweep with a normal `200` egress MUST NOT mark the
-/// account `Revoked`.
-///
-/// After a successful sweep the account is `Configured` (tokens rotated) and
-/// the egress call count is 2 (initial exchange + refresh).
+/// account `Revoked`; it stays `Configured` (tokens rotated), egress count 2
+/// (initial exchange + refresh).
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 #[tokio::test]
 async fn normal_sweep_does_not_mark_account_revoked() {
@@ -261,15 +227,10 @@ async fn normal_sweep_does_not_mark_account_revoked() {
 
 // ─── FIFO + default-fallback unit test ───────────────────────────────────────
 
-/// [`ScriptedOAuthTokenEgress`] queued responses are consumed in FIFO order;
-/// once the queue is exhausted, subsequent calls fall back to the constructor
-/// default.
-///
-/// This test drives [`RuntimeHttpEgress::execute`] directly — no OAuth flow,
-/// no real network — to verify the FIFO queue + default-fallback path and
-/// the [`captured_count`] accessor in isolation, exercising the
-/// `push_response` / `with_error_response` pairing described in the
-/// `ScriptedOAuthTokenEgress` documentation.
+/// [`ScriptedOAuthTokenEgress`] queued responses are consumed FIFO; once
+/// exhausted, calls fall back to the constructor default. Drives
+/// [`RuntimeHttpEgress::execute`] directly (no OAuth flow, no real network) to
+/// verify the FIFO + fallback path and [`captured_count`] in isolation.
 #[tokio::test]
 async fn scripted_oauth_token_egress_consumes_queued_responses_fifo_then_default() {
     use ironclaw_host_api::{
@@ -285,9 +246,8 @@ async fn scripted_oauth_token_egress_consumes_queued_responses_fifo_then_default
     egress.push_response(200, body_a.clone());
     egress.push_response(500, body_b.clone());
 
-    // `ScriptedOAuthTokenEgress::execute` only reads `request.body.len()` and
-    // records the full request; the other fields are unused by the scripted
-    // impl, so this dummy request leaves them empty/default.
+    // Only `request.body.len()` is read by the scripted impl; other fields
+    // are left empty/default.
     let dummy_request = || RuntimeHttpEgressRequest {
         runtime: RuntimeKind::Wasm,
         scope: ResourceScope::local_default(

@@ -1,22 +1,15 @@
 //! Reborn integration — golden inference-payload coverage.
 //!
 //! Exact-matches the FULL model-visible inference payload (system prompt +
-//! conversation turns + tool-call/tool-result messages + ordered tool surface)
-//! per inference iteration against a committed `insta` snapshot, plus the exact
-//! final user-visible reply. Where `assert_system_prompt_contains` proves a
-//! substring reached the model, this pins end-to-end prompt construction byte
-//! for byte — catching silent drift in prompt assembly, history accumulation,
-//! and tool-result feed-back. See `tests/support/reborn/golden.rs` for the
-//! canonicalization + single-filter normalization rationale. Regenerate drift
-//! with `cargo insta review` (or `INSTA_UPDATE=always cargo test`).
+//! turns + tool-call/tool-result messages + ordered tool surface) per
+//! inference iteration against a committed `insta` snapshot, plus the exact
+//! final reply — catching silent drift in prompt assembly, history
+//! accumulation, and tool-result feed-back that a substring check can't see.
+//! See `tests/support/reborn/golden.rs` for canonicalization rationale.
+//! Regenerate with `cargo insta review` (or `INSTA_UPDATE=always cargo test`).
 //!
-//! This is the dedicated suite for watching prompt-construction drift: base
-//! system-prompt assembly, context/capability surfacing (communication
-//! context, capability surface), message appending across turns, and (once
-//! reachable — see the "(e) Compaction" blocker note below) compaction — on a
-//! deliberately small, curated set of scenarios (full payload matches are
-//! expensive to review and maintain; substring checks elsewhere cover
-//! everything else). Add a new scenario here only when an existing one can't
+//! Deliberately small, curated scenario set (full payload matches are
+//! expensive to review); add a scenario only when an existing one can't
 //! absorb it — see root `CLAUDE.md` Testing Discipline.
 
 #[allow(dead_code)]
@@ -57,10 +50,9 @@ async fn golden_single_turn_greeting() {
         .expect("final reply matches exactly");
 }
 
-/// (b) Tool-call turn: BOTH inference iterations exact-matched — the initial
-/// call and the post-tool-result call. Pins tool-result feed-back construction
-/// (the assistant `tool_calls[].id` and the following `tool` message's
-/// `tool_call_id` must match).
+/// (b) Tool-call turn: both inference iterations exact-matched (initial call
+/// + post-tool-result call), pinning that `tool_calls[].id` matches the
+/// following `tool` message's `tool_call_id`.
 #[tokio::test]
 async fn golden_tool_call_feedback() {
     let h = RebornIntegrationHarness::test_default()
@@ -113,12 +105,10 @@ async fn golden_multi_turn_history() {
         .expect("final reply matches exactly");
 }
 
-/// (d) Context surfacing: a wired `CommunicationContextProvider` PLUS the real
+/// (d) Context surfacing: a wired `CommunicationContextProvider` plus the real
 /// builtin capability surface, on one plain-text turn. Pins byte-for-byte how
-/// the communication/context section and the capability surface render into
-/// the system prompt alongside each other (a single-value substring check,
-/// e.g. `assert_model_request_contains`, cannot see whether the two sections
-/// interleave, reorder, or duplicate content).
+/// the two sections render together in the system prompt — ordering/duplication
+/// a substring check like `assert_model_request_contains` cannot see.
 #[tokio::test]
 async fn golden_context_surfacing() {
     let provider = RecordingCommunicationContextProvider::with_target_and_channel(
@@ -142,14 +132,10 @@ async fn golden_context_surfacing() {
         .expect("final reply matches exactly");
 }
 
-/// (f) Parallel tool_calls: ONE assistant response carrying TWO `tool_calls[]`
-/// entries (`RebornScriptedReply::tool_calls`), both exact-matched — the
-/// initial multi-call request and the post-both-results call. Distinct from
-/// (b) `golden_tool_call_feedback`: that pins a SINGLE tool_call's id/result
-/// feedback; this pins that MULTIPLE tool_calls in one assistant message each
-/// get a distinct id and each following `tool` role message's `tool_call_id`
-/// lines up with the right one, in order — a shape (b) cannot exercise with
-/// only one call.
+/// (f) Parallel tool_calls: one assistant response carrying TWO `tool_calls[]`
+/// entries, both exact-matched. Distinct from (b): pins that multiple
+/// tool_calls in one message each get a distinct id, and each following `tool`
+/// message's `tool_call_id` lines up with the right one, in order.
 #[tokio::test]
 async fn golden_parallel_tool_calls() {
     let h = RebornIntegrationHarness::test_default()
@@ -174,14 +160,11 @@ async fn golden_parallel_tool_calls() {
 }
 
 /// (g) Image/user-parts: an inline image attachment landed through the real
-/// `submit_inbound_with_attachments` entry point (`RebornIntegrationGroup::attachment_tools()`)
-/// and routed through a vision-pattern model id. Pins byte-for-byte how the
-/// user turn's multimodal content parts (`ContentPart::ImageUrl` `data:` URL
-/// alongside the text part) render into the request — a shape none of the
-/// plain-text scenarios above can exercise. Complements
-/// `tests/reborn_integration_attach.rs`'s substring assertion
-/// (`assert_model_saw_image_attachment`) with the full-payload byte-for-byte
-/// pin, catching drift in part ORDERING/shape a substring check cannot see.
+/// `submit_inbound_with_attachments` entry point, routed through a
+/// vision-pattern model id. Pins byte-for-byte how `ContentPart::ImageUrl`
+/// renders alongside the text part — complements
+/// `tests/reborn_integration_attach.rs`'s substring check by catching drift in
+/// part ordering/shape a substring check can't see.
 #[tokio::test]
 async fn golden_image_attachment_turn() {
     let group = RebornIntegrationGroup::attachment_tools()
@@ -208,15 +191,10 @@ async fn golden_image_attachment_turn() {
         .expect("final reply matches exactly");
 }
 
-/// (h) Gated turn (approve arm): a real `BlockedApproval` gate
-/// (`RebornIntegrationGroup::live_approvals()`) raised by a scripted
-/// `builtin.write_file` call, approved, and resumed. Snapshots BOTH captured
-/// inference calls around the gate in one golden — the pre-gate tool_call
-/// request AND the post-resume request that reacts to the granted write's
-/// result — pinning that a gate resume does not silently drop, duplicate, or
-/// reorder the accumulated turn history the way a mid-run resume easily
-/// could. Distinct from (b): that tool call dispatches immediately
-/// (auto-approved, `test_default()`'s Echo backend has no gate); this one
+/// (h) Gated turn (approve arm): a real `BlockedApproval` gate raised by a
+/// scripted `builtin.write_file` call, approved, and resumed. Snapshots both
+/// captured inference calls around the gate, pinning that a resume doesn't
+/// silently drop, duplicate, or reorder history. Distinct from (b): this one
 /// actually parks on `TurnStatus::BlockedApproval` between the two calls.
 #[tokio::test]
 async fn golden_gated_turn_approve() {
@@ -251,39 +229,14 @@ async fn golden_gated_turn_approve() {
         .expect("final reply matches exactly");
 }
 
-// (e) Compaction: NOT implemented — blocked. Investigated the byte-cap-overflow
-// force-compaction path (`ByteCapStrategy` / `PostCapabilityStage`,
-// crates/ironclaw_agent_loop/src/executor/post_capability.rs:73-91) end-to-end
-// through this harness with a scripted `builtin.http` result exceeding the
-// 32,000-byte cap (crates/ironclaw_agent_loop/src/strategies/compaction.rs:190-213,
-// `ByteCapStrategy::with_defaults`). Confirmed via instrumented local runs (not
-// committed) that `pending_capability_bytes` correctly accumulates past the cap
-// and `state.compaction_state.force_compact_on_next_iteration` /
-// `skip_model_this_iteration` DO get set, and that `PromptStage`
-// (crates/ironclaw_agent_loop/src/executor/prompt.rs:219-241) correctly detects
-// the flag on the very next iteration and enters `PromptCompactionStep`.
-//
-// The wall: `PromptCompactionStep::run` decides via
-// `self.ctx.planner.compaction().should_compact(..)`
-// (crates/ironclaw_agent_loop/src/executor/prompt.rs:442-446), and the Reborn
-// `DefaultPlanner` wires that seam to `ActiveTaskPreservingCompactionStrategy`,
-// not the bare `DefaultCompactionStrategy`
-// (crates/ironclaw_agent_loop/src/default_planner.rs:339).
+// (e) Compaction: NOT implemented — blocked. The byte-cap-overflow force-
+// compaction path (`ByteCapStrategy` / `PostCapabilityStage`) sets
+// `state.compaction_state.force_compact_on_next_iteration`, but Reborn's
+// `DefaultPlanner` wires `PromptCompactionStep` to
 // `ActiveTaskPreservingCompactionStrategy::should_compact`
-// (crates/ironclaw_agent_loop/src/strategies/active_task_compaction.rs:41-61)
-// never reads `state.compaction_state.force_compact_on_next_iteration` at all —
-// it always falls through to `active_task_preserving_user_boundary`, which
-// requires a genuine accumulated tail of at least `preserve_tail_tokens`
-// (8,000 tokens, `DefaultCompactionStrategy::DEFAULT_PRESERVE_TAIL_TOKENS`) of
-// real message content plus `minimum_tail_messages`/`minimum_compacted_messages`
-// (3 each) before it will trigger at all. The byte-cap-overflow force path
-// (`CompactionInitiator::CapabilityResultOverflow`) is consequently a dead
-// letter under the strategy Reborn's `default_planner.rs` actually installs —
-// it sets state flags this strategy's `should_compact` never consults.
-//
-// Exercising compaction here would need either a production fix (out of scope
-// per this suite's test-only mandate) or inflating the scripted transcript to a
-// genuine ~8,000+ token natural tail, which no longer tests the reported
-// byte-cap mechanism, would make the golden snapshot unreviewable, and is
-// fragile against token-estimation drift. Reporting the blocker instead of
-// faking the scenario.
+// (crates/ironclaw_agent_loop/src/strategies/active_task_compaction.rs:41-61),
+// which never reads that flag — it only compacts on a genuine ~8,000+ token
+// accumulated tail. The force path is a dead letter under Reborn's installed
+// strategy; exercising it here needs a production fix (out of scope) or a
+// fragile multi-thousand-token scripted transcript that breaks golden-snapshot
+// reviewability.

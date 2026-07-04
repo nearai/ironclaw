@@ -121,20 +121,15 @@ impl HostRuntimeHarnessOptions {
 
 /// Typed capture of a `HostRuntimeCapabilityHarness::new_with_options(..)` call
 /// shape plus the post-construct steps a domain constructor applies to the
-/// built harness. This is the shared infrastructure the per-domain
-/// `harness/profiles/<domain>.rs` migrations build on: a domain module
-/// constructs one `ToolsProfile` (mirroring today's positional constructor
-/// call) and calls `.build()` in place of the old inline `Self::new_with_options(..)`
-/// + ad-hoc post-construct mutation.
+/// built harness. Each `harness/profiles/<domain>.rs` module constructs one
+/// `ToolsProfile` and calls `.build()` instead of an inline
+/// `new_with_options(..)` + ad-hoc post-construct mutation.
 ///
-/// Field-by-field, this mirrors `new_with_options`'s parameter list
-/// (`service_label` .. `options`) plus four ADDITIONAL fields that capture
-/// exactly the post-construct steps observed across the existing constructor
-/// catalog in `harness/mod.rs` (`network_policy_override`,
+/// Mirrors `new_with_options`'s parameter list plus four ADDITIONAL fields
+/// capturing post-construct steps (`network_policy_override`,
 /// `provider_trust_override`, `post_construct_asset_copy`,
 /// `auto_approve_default`) — see `build()`'s doc comment for the fixed
-/// application order, which matches every existing multi-step constructor
-/// (`extension_lifecycle_tools`, `file_and_github_auth_tools`).
+/// application order.
 pub(crate) struct ToolsProfile {
     pub(crate) service_label: &'static str,
     pub(crate) capability_ids: Vec<CapabilityId>,
@@ -308,13 +303,11 @@ impl ToolsProfile {
     /// `profile_tools`, `outbound_target_tools` — verified against
     /// `group_constructors.rs`).
     ///
-    /// This is the COMMON core of those four; it does NOT cover the other two
-    /// "thick pairs" (`skill_activation_tools`, whose alignment is a
-    /// constructor-time tenant parameter plus a post-build skill seed, and
-    /// `multiuser_approvals`, whose alignment is
-    /// `.with_run_owner_scoped_capability_dispatch()` rather than a fixed
-    /// `user_id` override) — those remain call-site-specific and are left for
-    /// the group-constructor migration wave to wire directly.
+    /// This is the COMMON core of those four; it does NOT cover
+    /// `skill_activation_tools` (alignment is a constructor-time tenant param
+    /// plus a post-build skill seed) or `multiuser_approvals` (alignment is
+    /// `.with_run_owner_scoped_capability_dispatch()`, not a fixed `user_id`
+    /// override) — those remain call-site-specific.
     pub(crate) async fn build_group_capability_with_base(
         self,
         base: &GroupBaseData,

@@ -169,9 +169,9 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     pub(crate) results: Arc<Mutex<Vec<RecordedCapabilityResult>>>,
     http_egress: Option<Arc<RecordingRuntimeHttpEgress>>,
     network_egress: Option<Arc<RecordingNetworkHttpEgress>>,
-    /// Inert recording process port (slice 5). `Some` when the harness injected
-    /// a `RecordingProcessPort`; `None` when the live `LocalHostProcessPort` was
-    /// used (`.with_live_shell()` path) or the harness predates slice 5.
+    /// Inert recording process port. `Some` when the harness injected a
+    /// `RecordingProcessPort`; `None` when the live `LocalHostProcessPort` was
+    /// used (`.with_live_shell()` path).
     process_port: Option<Arc<super::process::RecordingProcessPort>>,
     /// Raw local-dev memory filesystem backing the user-profile source
     /// (E-PROFILE seam). `Some` only for `new_with_options`-built harnesses (which
@@ -239,32 +239,20 @@ pub(crate) struct HostRuntimeCapabilityHarness {
 impl HostRuntimeCapabilityHarness {
     /// C-JOURNEY: seed a real GitHub credential account — WITH real secret
     /// material — through the PRODUCTION manual-token flow
-    /// (`request_manual_token_setup` → `submit_manual_token`, the same
-    /// two-step path the real "user pastes a token in the UI" flow drives), so
-    /// a parked `github.*` auth gate's `ProductAuthRuntimeCredentialResolver`
-    /// lookup resolves on re-dispatch AND the re-dispatched WASM capability's
-    /// credential obligation can actually stage the token. A bare
-    /// `credential_account_service().create_account(..)` carrying a dangling
-    /// `SecretHandle` is NOT enough: it clears the auth gate, but the
-    /// re-dispatched execution then fails at `stage_credential_material`
-    /// (no material behind the handle) and the run still completes with a
-    /// model-visible failure — caught by `assert_tool_result_contains`.
+    /// (`request_manual_token_setup` → `submit_manual_token`), so a parked
+    /// `github.*` auth gate resolves on re-dispatch AND the WASM capability's
+    /// credential obligation can actually stage the token (a bare
+    /// `create_account(..)` with a dangling handle clears the gate but then
+    /// fails at `stage_credential_material`).
     ///
     /// `scope` MUST be the run's actual dispatch-time `(tenant, user, agent,
-    /// project)` — `ProductAuthRuntimeCredentialResolver::resolve_access_secret`'s
-    /// `account_visible_from_runtime_scope` check matches on all four, so a
-    /// mismatched scope (e.g. a fixed literal that doesn't match the calling
-    /// group/harness's real run scope) silently seeds an account the
-    /// dispatch-time lookup never finds, leaving the run stuck at
-    /// `BlockedAuth`. Callers build this from their own resolved run scope
-    /// (see `RebornIntegrationHarness::resolve_auth_gate`, which uses
-    /// `self.turn_scope` + `self.binding.actor_user_id` — the SAME fields
-    /// `resume_run` uses).
+    /// project)` — a mismatch silently seeds an account the dispatch-time
+    /// lookup never finds, leaving the run stuck at `BlockedAuth` (see
+    /// `RebornIntegrationHarness::resolve_auth_gate` for how callers derive it).
     ///
     /// Continuation is `AuthContinuationRef::SetupOnly`: the harness's
-    /// `resolve_auth_gate` performs the run resume itself (mirroring the
-    /// approval-gate helpers), so the flow must not ALSO dispatch a
-    /// `TurnGateResume` continuation.
+    /// `resolve_auth_gate` performs the run resume itself, so this must not
+    /// ALSO dispatch a `TurnGateResume` continuation.
     pub(crate) async fn seed_github_credential_account(
         &self,
         scope: &ResourceScope,
@@ -614,9 +602,9 @@ impl HostRuntimeCapabilityHarness {
         Ok(())
     }
 
-    /// Snapshot of every command string recorded by the inert process port
-    /// (slice 5). Empty when the harness uses the live `LocalHostProcessPort`
-    /// (`.with_live_shell()` path) or predates slice 5.
+    /// Snapshot of every command string recorded by the inert process port.
+    /// Empty when the harness uses the live `LocalHostProcessPort`
+    /// (`.with_live_shell()` path).
     pub(crate) fn process_commands(&self) -> Vec<String> {
         self.process_port
             .as_ref()
@@ -847,16 +835,10 @@ impl HostRuntimeCapabilityHarness {
 
     /// W4-ASK-EACH-ONCE: install a `ToolPermissionOverride::AskEachTime`
     /// override for `capability_id` under `(tenant_id, user_id)` via the real
-    /// local-dev per-tool permission override store -- generalizes
-    /// `disable_outbound_target_set_tool`'s shape (same scope-key
-    /// convention: `agent_id`/`project_id` unset, matching how
-    /// `StoreApprovalSettingsProvider::tool_override` looks the override up)
-    /// to any host-runtime-backed harness/group, not just
-    /// `outbound_target_tools()`. Drives the SAME
-    /// `require_approval_for_profile_policy` `tool_override` consultation
-    /// the #5306 fix reordered relative to the one-shot approval-lease check.
-    /// Errors if this harness wired no local-dev tool-permission-override
-    /// store (i.e. not built via `new_with_options`).
+    /// local-dev per-tool permission override store — generalizes
+    /// `disable_outbound_target_set_tool`'s shape to any host-runtime-backed
+    /// harness/group. Errors if this harness wired no such store (i.e. not
+    /// built via `new_with_options`).
     pub(crate) async fn set_ask_each_time_override_for_test(
         &self,
         capability_id: &CapabilityId,
@@ -964,20 +946,13 @@ impl HostRuntimeCapabilityHarness {
 
     /// C-SYNTH `skill_activate` `AmbiguousSkill` seeding arm: seed a
     /// USER-scoped skill (writes
-    /// `<storage_root>/tenants/<tenant>/users/<user>/skills/<name>/SKILL.md`,
-    /// mirroring the runtime.rs composition-test layout) so a name shared with
-    /// a system-scoped skill (`seed_system_skill_for_test`) resolves to TWO
-    /// Trusted candidates under different `SkillSourceKind`s — `System` root
-    /// and `User` root both default to `SkillTrust::Trusted`
-    /// (`FilesystemSkillBundleRoot::system`/`user`,
-    /// `crates/ironclaw_loop_support/src/filesystem_skill_bundle_source.rs`),
-    /// so `select_named_skill_activations`'s `active_candidates` filter
-    /// (`trust == Trusted`) admits both, and
-    /// `validate_explicit_mentions_are_unambiguous` then rejects the shared
-    /// name as `SkillActivationSelectionError::AmbiguousSkill`. `tenant`/`user`
-    /// must be the SAME `(tenant, actor_user_id)` the driving thread's run
-    /// resolves under (`harness.binding`), or the user root never matches the
-    /// run's own scoped `/skills` mount. Tests only.
+    /// `<storage_root>/tenants/<tenant>/users/<user>/skills/<name>/SKILL.md`)
+    /// so a name shared with a system-scoped skill
+    /// (`seed_system_skill_for_test`) resolves to TWO Trusted candidates
+    /// (`System` and `User` roots both default `Trusted`), triggering
+    /// `SkillActivationSelectionError::AmbiguousSkill`. `tenant`/`user` must
+    /// match the driving thread's run scope (`harness.binding`), or the user
+    /// root never matches the run's own `/skills` mount. Tests only.
     pub(crate) fn seed_user_skill_for_test(
         &self,
         tenant: &TenantId,
@@ -1113,17 +1088,13 @@ impl HostRuntimeCapabilityHarness {
         Ok(port)
     }
 
-    /// Override the user this capability harness executes first-party tools under.
-    /// The dispatch ResourceScope, approval-request persistence, auto-approve
-    /// keying, and the approval-gate-evidence lookup are ALL keyed on this user
-    /// (`HostRuntimeHarnessCapabilityPortFactory` builds the authority from
-    /// `self.user_id`). The integration harness sets it to the run's binding owner
-    /// so capability dispatch and the turn run under the SAME `(tenant, user)` —
-    /// matching production (where the run owner *is* the capability user) instead
-    /// of the constructor's fixed test user. Without this, a `BlockedApproval`
-    /// run's request persists under the capability user but the gate-evidence
-    /// lookup uses the turn owner, so the gate is never verified and the run goes
-    /// terminal `Failed`.
+    /// Override the user this capability harness executes first-party tools
+    /// under. Dispatch scope, approval persistence, auto-approve keying, and
+    /// gate-evidence lookup are ALL keyed on this user. The integration harness
+    /// sets it to the run's binding owner so dispatch and the turn share one
+    /// `(tenant, user)`, matching production — without this, a
+    /// `BlockedApproval` gate's evidence lookup uses the turn owner while the
+    /// request persists under the capability user, and the run never verifies.
     pub(crate) fn with_user_id(mut self, user_id: UserId) -> Self {
         self.user_id = user_id;
         self

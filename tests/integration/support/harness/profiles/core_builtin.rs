@@ -29,20 +29,13 @@ use super::super::{
     local_dev_host_runtime_with_live_http_egress, memory_mounts, workspace_mounts,
 };
 
-/// Axes threaded through the pre-collapse `core_builtin_tools*` constructor
-/// chain (today: `core_builtin_tools`, `core_builtin_tools_with_network_policy`,
-/// `core_builtin_tools_with_live_shell`,
-/// `core_builtin_tools_with_network_policy_and_process_port`,
-/// `core_builtin_tools_with_live_http_egress`). `Default` matches today's
-/// zero-arg `core_builtin_tools()`.
+/// Configuration axes for [`core_builtin_tools`]. `Default` matches the
+/// zero-arg `core_builtin_tools(CoreBuiltinOptions::default())` call.
 pub(crate) struct CoreBuiltinOptions {
     /// Network policy the built harness dispatches capabilities under.
-    /// Defaults to `http_test_policy()`, mirroring `core_builtin_tools()`;
-    /// override via `.with_network_policy(..)`, mirroring
-    /// `core_builtin_tools_with_network_policy(..)` /
-    /// `core_builtin_tools_with_live_http_egress(..)`.
+    /// Defaults to `http_test_policy()`; override via `.with_network_policy(..)`.
     pub(crate) network_policy: NetworkPolicy,
-    /// Slice 5: `true` (default) injects the inert `RecordingProcessPort` so
+    /// `true` (default) injects the inert `RecordingProcessPort` so
     /// `builtin.shell` invocations in tests never spawn a real OS process.
     /// `.with_live_shell()` sets this `false`, which skips injection and lets
     /// `HostRuntimeServices` default to the real `LocalHostProcessPort`. Only
@@ -52,9 +45,7 @@ pub(crate) struct CoreBuiltinOptions {
     /// `true` selects `local_dev_host_runtime_with_live_http_egress` (a real
     /// HTTP egress; no recording `RuntimeHttpEgress`/process port captured on
     /// the harness) instead of the default recording-egress runtime
-    /// construction (`local_dev_host_runtime_with_http_egress`). Was
-    /// `core_builtin_tools_with_live_http_egress()`. Set via
-    /// `.with_live_http_egress()`.
+    /// construction. Set via `.with_live_http_egress()`.
     pub(crate) live_http_egress: bool,
 }
 
@@ -74,15 +65,13 @@ impl CoreBuiltinOptions {
         self
     }
 
-    /// Was `core_builtin_tools_with_live_shell()`: opts out of the recording
-    /// process port so the real `LocalHostProcessPort` executes shell
-    /// commands on the host.
+    /// Opts out of the recording process port so the real `LocalHostProcessPort`
+    /// executes shell commands on the host.
     pub(crate) fn with_live_shell(mut self) -> Self {
         self.recording_process = false;
         self
     }
 
-    /// Was `core_builtin_tools_with_live_http_egress(network_policy)`.
     pub(crate) fn with_live_http_egress(mut self) -> Self {
         self.live_http_egress = true;
         self
@@ -90,9 +79,7 @@ impl CoreBuiltinOptions {
 }
 
 /// Core built-in tools (`time`/`json`/`http`/`memory_*`/`profile_set`/
-/// `read_file`/`apply_patch`/`shell`). See [`CoreBuiltinOptions`] for the axes
-/// this collapses; `core_builtin_tools(CoreBuiltinOptions::default())` is
-/// byte-identical to the pre-collapse zero-arg `core_builtin_tools()`.
+/// `read_file`/`apply_patch`/`shell`). See [`CoreBuiltinOptions`] for the axes.
 pub(crate) async fn core_builtin_tools(
     options: CoreBuiltinOptions,
 ) -> HarnessResult<HostRuntimeCapabilityHarness> {
@@ -116,7 +103,7 @@ pub(crate) async fn core_builtin_tools(
         let runtime_http_egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
             br#"{"accepted":true}"#.to_vec(),
         ));
-        // Slice 5: inject the inert recording port by default so `builtin.shell`
+        // Inject the inert recording port by default so `builtin.shell`
         // invocations in tests never spawn a real OS process. `.with_live_shell()`
         // sets `recording_process = false`, which skips injection and lets
         // `HostRuntimeServices` default to the real `LocalHostProcessPort`.
@@ -148,8 +135,8 @@ pub(crate) async fn core_builtin_tools(
     }
 }
 
-/// Zero-arg convenience matching the pre-collapse `core_builtin_tools()`
-/// default; most callers want this and never touch `CoreBuiltinOptions`.
+/// Zero-arg convenience; most callers want this and never touch
+/// `CoreBuiltinOptions`.
 pub(crate) async fn core_builtin_tools_default() -> HarnessResult<HostRuntimeCapabilityHarness> {
     core_builtin_tools(CoreBuiltinOptions::default()).await
 }
@@ -199,8 +186,8 @@ fn core_builtin_tools_from_runtime(
             CapabilityId::new(PROFILE_SET_CAPABILITY_ID)?,
             CapabilityId::new(READ_FILE_CAPABILITY_ID)?,
             CapabilityId::new(APPLY_PATCH_CAPABILITY_ID)?,
-            // slice 5: `builtin.shell` on the surface so scripted shell calls
-            // route through the process port (recording by default, live via
+            // `builtin.shell` on the surface so scripted shell calls route
+            // through the process port (recording by default, live via
             // `.with_live_shell()`).
             CapabilityId::new(SHELL_CAPABILITY_ID)?,
         ],
@@ -211,9 +198,9 @@ fn core_builtin_tools_from_runtime(
             EffectKind::WriteFilesystem,
             EffectKind::Network,
             EffectKind::SpawnProcess,
-            // slice 5: `builtin.shell` declares ExecuteCode; the grant's
-            // allowed_effects must include it or the authorizer denies the
-            // capability before it reaches the process port.
+            // `builtin.shell` declares ExecuteCode; the grant's allowed_effects
+            // must include it or the authorizer denies the capability before
+            // it reaches the process port.
             EffectKind::ExecuteCode,
         ],
         network_policy,

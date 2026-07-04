@@ -1,4 +1,4 @@
-//! mock_mcp domain tools profiles (populated by the profile migration).
+//! Mock-MCP domain tools profiles.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -18,7 +18,7 @@ use super::super::{
     host_runtime_storage_roots, workspace_mounts,
 };
 
-/// Slice 6: wire a single MCP capability backed by the loopback mock server.
+/// Wire a single MCP capability backed by the loopback mock server.
 ///
 /// `mcp_url`  — the mock server's MCP endpoint (e.g. `"http://127.0.0.1:PORT/mcp"`).
 /// `provider_id`   — extension id used in the registry (e.g. `"mock-mcp"`).

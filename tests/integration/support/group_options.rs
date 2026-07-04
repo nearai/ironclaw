@@ -1,18 +1,10 @@
-//! Runtime-wiring setters for [`RebornIntegrationGroupBuilder`].
-//!
-//! `group.rs` owns the builder's struct definition and the shared
-//! assembly mechanics (`build_base`/`into_group`); this file is a private
-//! child module of `group` (declared `#[path = "group_options.rs"] mod
-//! group_options;` in `group.rs`, NOT `pub mod` from `mod.rs`, same
-//! precedent as `group_constructors.rs`) that catalogs the builder's
-//! optional-runtime-wiring setters — `storage`, `safety_context`,
-//! `with_turn_event_sink`, `budget_accounting`,
+//! Runtime-wiring setters for [`RebornIntegrationGroupBuilder`] — `storage`,
+//! `safety_context`, `with_turn_event_sink`, `budget_accounting`,
 //! `communication_context_provider`, `hook_dispatcher_builder_factory`.
-//! Keeping it a child module (rather than a top-level sibling) lets it
-//! reach `RebornIntegrationGroupBuilder`'s private fields at plain
-//! module-private visibility instead of widening them to `pub(crate)` for
-//! the whole test-support crate. New builder setters belong HERE, not back
-//! in `group.rs`.
+//! Private child module of `group.rs` (owns the struct + `build_base`/
+//! `into_group`), so it reaches the builder's private fields at module-
+//! private visibility instead of widening them to `pub(crate)`. New builder
+//! setters belong HERE.
 
 // Shared by all group test binaries; symbols read as dead when a binary does
 // not exercise every setter (mirrors the same attribute on `group.rs`/
@@ -48,30 +40,23 @@ impl RebornIntegrationGroupBuilder {
         self
     }
 
-    /// Install an in-memory `TurnEventSink` (`ironclaw_turns::InMemoryTurnEventSink`,
-    /// a real, already-shipped production type with zero callers today — this is the
-    /// seam production wires via `subscribe_best_effort` in `build_default_planned_runtime_inner`,
-    /// `crates/ironclaw_reborn/src/runtime.rs:613-619`) into the group's ONE planned
-    /// runtime (C-TRACECAP). Read the recorded events back with
-    /// [`RebornIntegrationHarness::recorded_turn_events`] — the ONLY read path;
-    /// it slices `[baseline_turn_event_count..]` so a group thread never sees a
-    /// sibling thread's events. Deliberately no raw group-level sink accessor:
-    /// one would bypass that slicing and reintroduce cross-thread bleed.
+    /// Install an in-memory `InMemoryTurnEventSink` into the group's ONE
+    /// planned runtime via production's `subscribe_best_effort` seam
+    /// (C-TRACECAP). Read back via
+    /// [`RebornIntegrationHarness::recorded_turn_events`] — the ONLY read
+    /// path; it slices `[baseline_turn_event_count..]` so threads don't see
+    /// siblings' events. No raw sink accessor, deliberately.
     pub fn with_turn_event_sink(mut self) -> Self {
         self.turn_event_sink = Some(Arc::new(InMemoryTurnEventSink::default()));
         self
     }
 
-    /// Wire the production `build_default_budget_accountant` (over in-memory
-    /// governor, gate store, zero-cost table, and compiled-default seeding) into
-    /// the group's ONE shared planned runtime (`DefaultPlannedRuntimeParts::model_budget_accountant`),
-    /// and retain the governor for read-back. This is the C-BUDGET liveness seam:
-    /// on the first model call of any turn the accountant seeds the run owner's
-    /// daily USD cap into the governor, which
-    /// `RebornIntegrationHarness::assert_budget_user_cap_seeded` reads back.
-    /// Budget SEMANTICS (thresholds, gates, `BudgetEvent` cascade) are covered at
-    /// crate tier (`budget_e2e.rs`); this only proves the harness bypass path
-    /// (`build_default_planned_runtime`) wires the accountant live. Defaults off.
+    /// Wire the production `build_default_budget_accountant` into the group's
+    /// ONE planned runtime and retain the governor for read-back (C-BUDGET
+    /// liveness seam: the accountant seeds the run owner's daily cap on the
+    /// first model call; read back via `assert_budget_user_cap_seeded`).
+    /// Budget semantics are covered at crate tier (`budget_e2e.rs`); this only
+    /// proves the harness wires the accountant live. Defaults off.
     pub fn budget_accounting(mut self) -> Self {
         self.budget = true;
         self

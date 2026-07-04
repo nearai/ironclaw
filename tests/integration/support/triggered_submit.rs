@@ -1,28 +1,13 @@
-//! E-TRIGGERED-SUBMIT enabler seam: submit a turn through the REAL
-//! `TrustedTriggerFireSubmitter` so it carries a genuine
-//! `TurnOriginKind::ScheduledTrigger` origin, end to end.
+//! E-TRIGGERED-SUBMIT seam: submits turns through the REAL
+//! `trusted_trigger_fire_submitter` (not a fake) over the harness's shared
+//! `coordinator`, so runs carry a genuine `TurnOriginKind::ScheduledTrigger`
+//! origin and land in the same turn store/scheduler as any other turn.
 //!
-//! [`RebornIntegrationHarness::submit_triggered_turn`] builds a synthetic
-//! `TriggerFire` + `TriggerMaterializedPrompt::for_fire` (test ctor) and hands
-//! them to the production `trusted_trigger_fire_submitter` — it does NOT fake
-//! or re-implement origin tagging itself. That submitter runs over a fresh,
-//! per-call `InMemoryConversationServices` dedicated to the trigger path (the
-//! same conversation-services type production's own local-dev build wires for
-//! this exact purpose), while the harness's REAL shared `coordinator` is
-//! passed through unchanged, so the submitted run lands in the same turn
-//! store/scheduler as every other harness turn.
-//!
-//! Two variants:
-//! - [`RebornIntegrationHarness::submit_triggered_turn`] — submit only; the
-//!   run then fails benignly on the scope-miss sentinel (asserts submit-time
-//!   state, e.g. the persisted origin).
-//! - [`RebornIntegrationHarness::submit_triggered_turn_scripted`] — materializes
-//!   through the REAL production trusted-trigger pipeline
-//!   (`ironclaw_reborn_composition::test_support::materialize_trigger_prompt_for_test`:
-//!   authorize, validate, resolve binding, thread-recorded prompt, real
-//!   content ref) and registers a scripted gateway for the fire's exact
-//!   scope, so the triggered run can be driven to completion or through
-//!   mid-fire gates (scope-aware `wait`/`approve`/`deny` helpers below).
+//! Two variants: [`RebornIntegrationHarness::submit_triggered_turn`]
+//! (submit-only; asserts submit-time state) and
+//! [`RebornIntegrationHarness::submit_triggered_turn_scripted`] (full
+//! production materialization + scripted gateway, drivable to completion or
+//! a mid-fire gate).
 
 // Shared integration-test support: not every binary that mounts the
 // `reborn_support` tree consumes this module — its symbols read as dead there
@@ -59,13 +44,11 @@ use super::reply::RebornScriptedReply;
 use super::scripted_provider::{SCRIPTED_MODEL_NAME, scripted_trace_llm};
 use crate::support::trace_llm::TraceLlm;
 
-// `builder.rs`'s `HarnessResult` is module-private; every sibling file that
-// needs the alias (`assertions.rs`, `harness.rs`, `harness_mcp.rs`) declares
-// its own identical copy rather than reaching across the module boundary.
+// `builder.rs`'s `HarnessResult` is module-private, so each sibling file
+// declares its own identical copy rather than reaching across the boundary.
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-/// Far-future, deterministic fire slot — no wall-clock flake, matches the
-/// style already used in `tests/reborn_group_triggers/scenario_verbs_lifecycle.rs`.
+/// Far-future, deterministic fire slot — avoids wall-clock flake.
 fn triggered_fire_slot() -> chrono::DateTime<chrono::Utc> {
     Utc.with_ymd_and_hms(2999, 1, 1, 0, 0, 0).unwrap()
 }
@@ -73,17 +56,15 @@ fn triggered_fire_slot() -> chrono::DateTime<chrono::Utc> {
 /// Result of a successful `submit_triggered_turn` call.
 pub(crate) struct TriggeredSubmission {
     pub(crate) run_id: TurnRunId,
-    /// The trigger's OWN resolved scope, as returned by the real submitter.
-    /// The trusted-submit contract forbids re-deriving binding keys from a
-    /// `TriggerFire` (see `ironclaw_triggers::trusted_submit` docs), so callers
-    /// must read this back rather than reconstruct it.
+    /// The trigger's OWN resolved scope. The trusted-submit contract forbids
+    /// re-deriving binding keys from a `TriggerFire`, so callers must read
+    /// this back rather than reconstruct it.
     pub(crate) turn_scope: TurnScope,
 }
 
 impl RebornIntegrationHarness {
-    /// Synthetic `TriggerFire` for this harness's binding — the shared fire
-    /// construction both triggered-submit seams hand to the production
-    /// submitter.
+    /// Synthetic `TriggerFire` shared by both triggered-submit seams, handed
+    /// to the production submitter.
     fn triggered_fire(&self, prompt: &str, fire_slot: chrono::DateTime<Utc>) -> TriggerFire {
         TriggerFire {
             identity: TriggerFireIdentity::new(
@@ -98,15 +79,11 @@ impl RebornIntegrationHarness {
         }
     }
 
-    /// Fresh `InMemoryConversationServices` for the trigger path with the
-    /// trigger's canonical external actor pre-paired — mirrors
-    /// `TriggerTrustedInboundBinding::for_fire`'s own derivation exactly and
-    /// mirrors production's pre-seed requirement (`resolve_actor` hard-fails
-    /// `BindingRequired` without it, on both trusted and untrusted resolve
-    /// paths). Uses `try_pair_external_actor` (not the infallible
-    /// `pair_external_actor` wrapper) so a pairing failure surfaces here, at
-    /// the seam boundary, instead of resurfacing later as an indirect
-    /// binding-resolution error.
+    /// Fresh `InMemoryConversationServices` with the trigger's actor
+    /// pre-paired (mirrors `TriggerTrustedInboundBinding::for_fire`;
+    /// production's `resolve_actor` hard-fails `BindingRequired` without it).
+    /// Uses `try_pair_external_actor` so a pairing failure surfaces here, not
+    /// as an indirect binding-resolution error downstream.
     async fn trigger_conversations_with_paired_actor(
         &self,
     ) -> HarnessResult<InMemoryConversationServices> {
@@ -126,18 +103,12 @@ impl RebornIntegrationHarness {
         Ok(conversations)
     }
 
-    /// Submit a turn through the REAL `TrustedTriggerFireSubmitter` so it carries
-    /// a genuine `TurnOriginKind::ScheduledTrigger` origin, end to end (E-TRIGGERED-SUBMIT).
-    /// See the module docs for how the fire/prompt/conversation-services are built.
-    ///
-    /// The submitted run then executes autonomously on the background scheduler; no
-    /// scripted model gateway is registered for the trigger's own resolved scope, so it
-    /// fails benignly on a scope-miss (`ScopeRegistryGateway`'s `ConfigurationError`
-    /// sentinel). `product_context` (carrying the origin) is persisted synchronously at
-    /// submit time, before that later failure — this seam and its driving test assert
-    /// only on that submit-time state, not on anything after. Driving a triggered run
-    /// to model completion, or asserting behavior across that later failure, is
-    /// C-TRIGGERED-DELIVERY, not this seam.
+    /// Submits through the REAL `TrustedTriggerFireSubmitter` for a genuine
+    /// `TurnOriginKind::ScheduledTrigger` origin (E-TRIGGERED-SUBMIT). No
+    /// scripted gateway is registered, so the run fails benignly on
+    /// scope-miss after submit-time state (e.g. persisted origin) is
+    /// recorded — this seam asserts only that state; driving to model
+    /// completion is C-TRIGGERED-DELIVERY.
     pub(crate) async fn submit_triggered_turn(
         &self,
         prompt: &str,
@@ -169,35 +140,21 @@ impl RebornIntegrationHarness {
         }
     }
 
-    /// [`submit_triggered_turn`](Self::submit_triggered_turn), with the
-    /// triggered run's model calls scripted and the trigger prompt recorded
-    /// into the harness's REAL thread service — so the run can be driven past
-    /// submission (to completion, or to a mid-fire gate) instead of failing
-    /// benignly on the scope-miss sentinel.
+    /// [`submit_triggered_turn`](Self::submit_triggered_turn) with model
+    /// calls scripted and the prompt recorded into the harness's REAL thread
+    /// service, so the run can be driven to completion or a mid-fire gate
+    /// instead of failing on scope-miss.
     ///
-    /// Materializes through the REAL production trusted-trigger pipeline via
-    /// `ironclaw_reborn_composition::test_support::materialize_trigger_prompt_for_test`
-    /// (authorize, validate, resolve-or-create binding, record the prompt as
-    /// a real inbound thread message, build the real `thread-message:<id>`
-    /// content ref, AND return the resolved `TurnScope`) rather than
-    /// hand-mirroring `trigger_resolve_request` + `record_trigger_prompt` +
-    /// the content-ref shape field-by-field — flagged as a drift trap on PR
-    /// #5584 (trusted-trigger materialization is an ownership boundary,
-    /// `AGENTS.md:61`) and extracted as the agreed fast-follow. This
-    /// mirrors the production trigger poller's OWN materializer
-    /// (`ConversationContentRefMaterializer::materialize_prompt`) exactly,
-    /// since it now calls the SAME code, not a copy of it — which the plain
-    /// `submit_triggered_turn`'s `TriggerMaterializedPrompt::for_fire`
-    /// shortcut still skips.
+    /// Materializes via `materialize_trigger_prompt_for_test`, which calls
+    /// the SAME production code as the trigger poller's own materializer —
+    /// trusted-trigger materialization is an ownership boundary (see
+    /// `AGENTS.md`), so this must not hand-mirror it field-by-field.
     ///
-    /// After materialization: register the scripted gateway for the EXACT
-    /// resolved scope on the group's `ScopeRegistryGateway` (the same
-    /// real-chain construction thread gateways use: `scripted_trace_llm` →
+    /// After materialization, registers the scripted gateway for the exact
+    /// resolved scope (real-chain construction: `scripted_trace_llm` →
     /// `provider_chain_over` → `LlmProviderModelGateway`, preserving the
-    /// one-fake-at-the-vendor-SDK-seam invariant), then submit through the
-    /// production submitter over the SAME conversation services — its own
-    /// resolve reuses the just-created binding, so the run executes under the
-    /// pre-registered scope with no race.
+    /// one-fake-at-the-vendor-SDK-seam invariant) before submitting, so the
+    /// run executes under the pre-registered scope with no race.
     pub(crate) async fn submit_triggered_turn_scripted(
         &self,
         prompt: &str,
@@ -283,11 +240,9 @@ impl RebornIntegrationHarness {
         }
     }
 
-    /// `wait_for_status` for a run living in a scope OTHER than this harness
-    /// thread's own (`builder.rs::wait_for_status` polls `self.turn_scope`) —
-    /// today only triggered runs, whose scope is minted at submit time and
-    /// returned on [`TriggeredSubmission`]. Same poll loop, deadline, and
-    /// fail-fast-on-wrong-terminal semantics.
+    /// Scope-parameterized twin of `builder.rs::wait_for_status` (which polls
+    /// `self.turn_scope`), for runs in another scope (e.g. triggered runs).
+    /// Same poll loop, deadline, and fail-fast-on-wrong-terminal semantics.
     pub(crate) async fn wait_for_status_in_scope(
         &self,
         scope: &TurnScope,
@@ -324,10 +279,9 @@ impl RebornIntegrationHarness {
         }
     }
 
-    /// `approve_gate` for a run in a non-thread scope (triggered runs). Same
-    /// two steps as `builder.rs::approve_gate` — resolve the persisted approval
-    /// request to an issued lease, then resume with the production
-    /// `BlockedApprovalGate` precondition — but resuming in the given scope.
+    /// `builder.rs::approve_gate` for a non-thread scope (triggered runs):
+    /// resolve the persisted approval to an issued lease, then resume with
+    /// `BlockedApprovalGate` precondition in the given scope.
     pub(crate) async fn approve_gate_in_scope(
         &self,
         scope: &TurnScope,
@@ -347,10 +301,10 @@ impl RebornIntegrationHarness {
         .await
     }
 
-    /// `deny_gate` for a run in a non-thread scope (triggered runs). Mirrors
-    /// `builder.rs::deny_gate`: resolve the persisted request to `Denied`, then
-    /// resume with `GateResumeDisposition::Denied` so the executor surfaces a
-    /// non-retryable authorization failure to the model.
+    /// `builder.rs::deny_gate` for a non-thread scope (triggered runs):
+    /// resolve the persisted request to `Denied`, then resume with
+    /// `GateResumeDisposition::Denied` so the executor surfaces a
+    /// non-retryable authorization failure.
     pub(crate) async fn deny_gate_in_scope(
         &self,
         scope: &TurnScope,
@@ -370,17 +324,13 @@ impl RebornIntegrationHarness {
         .await
     }
 
-    /// Scope-parameterised twin of `builder.rs::resume_run` (which resumes in
-    /// `self.turn_scope`). The actor stays the harness actor: a trigger fire's
-    /// creator IS `binding.actor_user_id` (`submit_triggered_turn` builds the
-    /// fire from it), so the approving user and the trigger creator coincide,
-    /// as in production's approval-resolution path.
+    /// Scope-parameterized twin of `builder.rs::resume_run` (resumes in
+    /// `self.turn_scope`). The approving actor is the harness actor, matching
+    /// the trigger creator (`binding.actor_user_id`), as in production.
     ///
-    /// `pub(crate)` (not just a private tail of `approve_gate_in_scope`/
-    /// `deny_gate_in_scope`) so deny-edge scenarios can drive a resume with a
-    /// deliberately WRONG scope without rebuilding the `ResumeTurnRequest` by
-    /// hand — a coordinator-level rejection (`TurnError`) propagates out
-    /// unchanged for the caller to pin.
+    /// `pub(crate)` so deny-edge scenarios can drive a resume with a
+    /// deliberately WRONG scope without hand-rebuilding `ResumeTurnRequest` —
+    /// a coordinator-level rejection propagates out for the caller to pin.
     pub(crate) async fn resume_run_in_scope(
         &self,
         scope: &TurnScope,

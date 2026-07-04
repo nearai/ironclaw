@@ -33,21 +33,14 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // Approve through the real resolver + resume; the gated capability re-runs.
     h.approve_gate(run_id, &gate_ref).await?;
     h.wait_for_status(run_id, TurnStatus::Completed).await?;
-    // The approved write actually re-ran AND PERSISTED: the real file on disk
-    // holds the written content. This proves approve→resume re-dispatched the
-    // gated capability and the write took effect — not merely that the scripted
-    // reply was emitted (`builtin.write_file`'s result does not echo content).
+    // The approved write actually re-ran AND PERSISTED to disk -- not merely
+    // that the scripted reply was emitted.
     h.assert_workspace_file_contains("approved.txt", "approved write")
         .await?;
 
-    // Double-resolve regression guard (C-DENYEDGE row 6): approving the SAME
-    // already-`Completed` gate a second time must fail loudly, not silently
-    // no-op or hang. The approval record is already `Approved` from the first
-    // `approve_gate` call above, so this second call's `approve_local_dev_gate`
-    // hits `ApprovalResolver::approve_capability_action`'s
-    // `record.status != Pending` check and returns
-    // `ApprovalResolutionError::NotPending { status: Approved }` before the
-    // resume/coordinator layer is even reached.
+    // Double-resolve regression guard (C-DENYEDGE row 6): re-approving the
+    // already-`Approved` gate must fail loudly (`NotPending`), not silently
+    // no-op or hang.
     let err = h
         .approve_gate(run_id, &gate_ref)
         .await

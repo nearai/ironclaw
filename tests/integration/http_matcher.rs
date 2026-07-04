@@ -219,11 +219,9 @@ async fn http_oversize_response_surfaces_recoverable_failed() {
         .expect("run recovered and finalized (not terminal driver_unavailable)");
 }
 
-/// Guards `assert_tool_error` against a vacuous pass, mirroring the sibling
-/// negative guards (`shell_assertions_fail_when_no_shell_call_ran`,
-/// `assert_mcp_tool_called_fails_when_no_mcp_call_ran`). Three ways it must
-/// return `Err`: (a) a completed turn that persisted NO tool-error reference at
-/// all, (b) a real `Denied` turn probed with the wrong reason, and (c) that same
+/// Guards `assert_tool_error` against a vacuous pass. Three ways it must
+/// return `Err`: (a) a completed turn with NO persisted tool-error reference,
+/// (b) a real `Denied` turn probed with the wrong reason, (c) that same
 /// `Denied` turn probed with the WRONG CLASS but the right reason token —
 /// proving the class discriminates structurally, not just the reason.
 #[tokio::test]
@@ -407,9 +405,8 @@ async fn multi_turn_baseline_sliced_history_assertions() {
             .is_err(),
         "containment assert must reject text absent from the whole transcript"
     );
-    // Fail-check: an out-of-range baseline (stale/foreign-thread value) is a
-    // loud error, not an empty slice — otherwise `assert_no_tool_error_since`
-    // would pass vacuously on a caller bug.
+    // Fail-check: an out-of-range baseline must be a loud error, not an empty
+    // slice — otherwise `assert_no_tool_error_since` passes vacuously.
     let past_end = h.history_len().await.expect("history len readable") + 1;
     assert!(
         h.assert_no_tool_error_since(past_end, ToolErrorClass::Denied, "policy_denied")

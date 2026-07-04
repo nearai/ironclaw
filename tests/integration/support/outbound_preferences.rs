@@ -1,17 +1,9 @@
-//! In-process `OutboundPreferencesProductFacade` double for the C-SYNTH outbound
-//! seam.
-//!
-//! Substitutes ONLY at the production-wired facade trait seam the two synthetic
-//! `outbound_delivery_*` capabilities consume (see
-//! `ironclaw_reborn_composition::runtime::local_dev::outbound_delivery`). Holds a
-//! fixed in-memory target inventory; `set_outbound_preferences` succeeds when the
-//! requested target is in the inventory and returns `NotFound` otherwise — so the
-//! same double drives BOTH the happy-path (`set` a known target) and the
-//! `invalid_input`/`NotFound` reject route (`set` an unknown target) without a
-//! per-test facade config.
-//!
-//! Distinct from `delivery::RecordingOutboundDeliverySink` (the final-reply
-//! delivery sink); this is the delivery-*preference* facade.
+//! In-process `OutboundPreferencesProductFacade` double for the C-SYNTH seam
+//! (`ironclaw_reborn_composition::runtime::local_dev::outbound_delivery`). Fixed
+//! in-memory inventory: succeeds for a known target, `NotFound` otherwise — one
+//! double drives both the happy path and the reject route without per-test
+//! config. Distinct from `delivery::RecordingOutboundDeliverySink` (the
+//! final-reply delivery sink; this is the delivery-*preference* facade).
 
 #![allow(dead_code)]
 
@@ -27,22 +19,18 @@ use ironclaw_product_workflow::{
     RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, WebUiAuthenticatedCaller,
 };
 
-/// `set_calls` + `last_accepted` bundled behind ONE mutex (not two) so a
-/// concurrent reader can never observe a `set` that recorded its call id but
-/// not yet its accepted summary, or vice versa.
+/// Bundled behind ONE mutex (not two) so a reader never observes `set_calls`
+/// and `last_accepted` out of sync.
 #[derive(Default)]
 struct FakeOutboundState {
     set_calls: Vec<RebornOutboundDeliveryTargetId>,
     last_accepted: Option<RebornOutboundDeliveryTargetSummary>,
 }
 
-/// A fixed in-memory `OutboundPreferencesProductFacade` double.
-///
-/// Stateful: `set_outbound_preferences` accepting a known target updates
-/// `last_accepted`, and `get_outbound_preferences` reads it back — so a test
-/// can prove a `set` actually persisted (not just that the setter's own
-/// response echoed the request) by reading it back through a *different*
-/// facade method.
+/// Fixed in-memory `OutboundPreferencesProductFacade` double. Stateful:
+/// `set_outbound_preferences` updates `last_accepted`, and
+/// `get_outbound_preferences` reads it back — proves a `set` persisted via a
+/// different facade method, not just an echo.
 pub(crate) struct FakeOutboundPreferencesFacade {
     targets: Vec<RebornOutboundDeliveryTargetOption>,
     state: Mutex<FakeOutboundState>,
@@ -61,9 +49,8 @@ impl FakeOutboundPreferencesFacade {
         })
     }
 
-    /// The target ids passed to `set_outbound_preferences`, in call order —
-    /// read-back that a `Completed` outcome actually reached the facade seam (a
-    /// no-op set that still fabricated a success payload would leave this empty).
+    /// Target ids passed to `set_outbound_preferences`, in call order — proves a
+    /// `Completed` outcome reached the facade (a no-op set would leave this empty).
     pub(crate) fn recorded_set_target_ids(&self) -> Vec<String> {
         self.state
             .lock()
@@ -161,10 +148,8 @@ fn target_option(target_id: &str, display_name: &str) -> RebornOutboundDeliveryT
     }
 }
 
-/// The `NotFound` the production handler maps to
-/// `CapabilityOutcome::Failed(InvalidInput)` ("outbound delivery target is not
-/// available") — see `OutboundDeliveryTargetSetHandler`'s `NotFound` →
-/// `CapabilityFailureKind::InvalidInput` arm in
+/// The `NotFound` the production handler maps to `Failed(InvalidInput)` — see
+/// `OutboundDeliveryTargetSetHandler`'s `NotFound` arm in
 /// `runtime/local_dev/outbound_delivery.rs`.
 fn target_not_found() -> RebornServicesError {
     RebornServicesError {

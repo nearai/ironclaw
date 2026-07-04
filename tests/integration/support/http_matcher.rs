@@ -1,25 +1,11 @@
-//! `ScriptedHttpResponse` — the URL/method/capability-keyed scripting layer over
-//! `RecordingRuntimeHttpEgress` (design §3.6 "P1 ergonomics", §3.7 Tier-2).
+//! `ScriptedHttpResponse` — the canonical URL/method/capability-keyed scripting
+//! layer over `RecordingRuntimeHttpEgress`, letting a multi-step tool-HTTP flow
+//! script a different body per request. First-match-wins scripted list, falling
+//! back to the FIFO queue then the default body. A match can also script a
+//! non-2xx status (`.with_status`, still Completed) or a runtime egress error
+//! (`egress_error`, mapping to Failed/Denied — see [`ScriptedHttpOutcome`]).
 //!
-//! Slice 2 shipped the recording egress with a single FIFO body queue. A
-//! multi-step tool-HTTP flow (two `builtin.http` calls to different URLs in one
-//! turn) needs a DIFFERENT scripted body per request. This module is the
-//! canonical keyed-matcher API: a test scripts a list of
-//! [`ScriptedHttpResponse`]s; on each `RuntimeHttpEgress::execute` the recording
-//! egress returns the body of the FIRST scripted response whose key matches the
-//! request, falling back to the FIFO queue, then the default body.
-//!
-//! A matched response is not always a `200` body: `.with_status(u16)` scripts a
-//! non-2xx status (still a successful egress call — `builtin.http` surfaces it
-//! as a Completed tool result carrying that status), and
-//! `ScriptedHttpResponse::egress_error(url, RuntimeHttpEgressError)` scripts a
-//! runtime egress failure (`Err` from `execute`, mapping to a
-//! `Failed`/`Denied` capability outcome). See [`ScriptedHttpOutcome`].
-//!
-//! Concrete by design (spec §3.7): the `Recording*` structs are deliberately not
-//! a premature generic `Recording<P>` — this is written in the extractable
-//! scripted-responses + captured-calls shape so a future rule-of-three lift is
-//! mechanical, but no generic is introduced ahead of need.
+//! `Recording*` structs are deliberately concrete, not generic, ahead of need.
 
 // Shared integration-test support: not every binary that mounts the
 // `reborn_support` tree consumes this module, so its symbols read as dead there
@@ -28,13 +14,10 @@
 
 use ironclaw_host_api::{RuntimeHttpEgressError, RuntimeHttpEgressRequest};
 
-/// What a matched [`ScriptedHttpResponse`] yields at the runtime HTTP egress
-/// boundary: either a successful response (status + body) or a scripted egress
-/// error. The error arm lets tests exercise the runtime error paths
-/// (`policy_denied`, `response_body_limit_exceeded`, …) that the real
-/// `HostHttpEgressService` produces but the recording egress otherwise cannot —
-/// the egress *is* the vendor/network seam this tier fakes, so scripting an
-/// error here is the same seam as scripting a body.
+/// What a matched [`ScriptedHttpResponse`] yields: a successful response
+/// (status + body), or a scripted egress error letting tests exercise runtime
+/// error paths (`policy_denied`, `response_body_limit_exceeded`) that the real
+/// `HostHttpEgressService` produces — the egress is the seam this tier fakes.
 #[derive(Debug, Clone)]
 pub enum ScriptedHttpOutcome {
     /// A successful egress response with the given HTTP status and body.
@@ -43,10 +26,9 @@ pub enum ScriptedHttpOutcome {
     Error(RuntimeHttpEgressError),
 }
 
-/// One scripted HTTP response keyed by request attributes. Matching is
-/// first-match-wins in scripted order. A response with only a URL substring
-/// matches any method/capability hitting that URL; adding [`with_method`] or
-/// [`with_capability`] narrows the key.
+/// One scripted HTTP response keyed by request attributes; first-match-wins in
+/// scripted order. URL-substring-only matches any method/capability; narrow
+/// with [`with_method`]/[`with_capability`].
 ///
 /// [`with_method`]: ScriptedHttpResponse::with_method
 /// [`with_capability`]: ScriptedHttpResponse::with_capability
@@ -65,12 +47,8 @@ pub struct ScriptedHttpResponse {
 
 impl ScriptedHttpResponse {
     /// Script a `200` response with `body` for any request whose URL contains
-    /// `url_substr`. Use [`with_status`] to script a non-2xx status (which the
-    /// `builtin.http` tool surfaces as a *successful* tool result carrying the
-    /// status), or [`egress_error`] for a runtime egress error.
-    ///
-    /// [`with_status`]: ScriptedHttpResponse::with_status
-    /// [`egress_error`]: ScriptedHttpResponse::egress_error
+    /// `url_substr`. Use [`with_status`](Self::with_status) for a non-2xx status
+    /// or [`egress_error`](Self::egress_error) for a runtime egress error.
     pub fn for_url(url_substr: impl Into<String>, body: impl Into<Vec<u8>>) -> Self {
         Self {
             url_contains: url_substr.into(),
@@ -83,10 +61,9 @@ impl ScriptedHttpResponse {
         }
     }
 
-    /// Script a runtime egress error for any request whose URL contains
-    /// `url_substr`. The `execute` boundary returns `Err(error)`, driving the
-    /// `builtin.http` tool's error mapping (e.g. `policy_denied` → `Denied`,
-    /// `response_body_limit_exceeded` → `Failed{OutputTooLarge}`).
+    /// Script a runtime egress error (`Err(error)` from `execute`) for requests
+    /// whose URL contains `url_substr` — drives `builtin.http`'s error mapping
+    /// (e.g. `policy_denied` → `Denied`, `response_body_limit_exceeded` → `Failed{OutputTooLarge}`).
     pub fn egress_error(url_substr: impl Into<String>, error: RuntimeHttpEgressError) -> Self {
         Self {
             url_contains: url_substr.into(),
@@ -96,11 +73,8 @@ impl ScriptedHttpResponse {
         }
     }
 
-    /// Script a network-layer egress failure (`RuntimeHttpEgressError::Network`)
-    /// with the given `reason` — e.g. `"policy_denied"`, which the tool's error
-    /// mapping surfaces as a `Denied` capability outcome. Thin named wrapper over
-    /// [`egress_error`](Self::egress_error) so test bodies select the scenario by
-    /// name instead of hand-building the nested error struct.
+    /// `RuntimeHttpEgressError::Network` with `reason` (e.g. `"policy_denied"` →
+    /// `Denied`). Named wrapper over [`egress_error`](Self::egress_error).
     pub fn network_error(url_substr: impl Into<String>, reason: impl Into<String>) -> Self {
         Self::egress_error(
             url_substr,
@@ -112,11 +86,9 @@ impl ScriptedHttpResponse {
         )
     }
 
-    /// Script a response-layer egress failure (`RuntimeHttpEgressError::Response`)
-    /// with the given `reason` — e.g. `RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED`,
-    /// which the tool's error mapping surfaces as `Failed{OutputTooLarge}`. Thin
-    /// named wrapper over [`egress_error`](Self::egress_error) so test bodies
-    /// select the scenario by name instead of hand-building the nested error struct.
+    /// `RuntimeHttpEgressError::Response` with `reason` (e.g.
+    /// `RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED` → `Failed{OutputTooLarge}`).
+    /// Named wrapper over [`egress_error`](Self::egress_error).
     pub fn response_error(url_substr: impl Into<String>, reason: impl Into<String>) -> Self {
         Self::egress_error(
             url_substr,
@@ -129,10 +101,8 @@ impl ScriptedHttpResponse {
     }
 
     /// Override the HTTP status of a body response (default `200`). Panics on
-    /// an [`egress_error`](ScriptedHttpResponse::egress_error) response — the
-    /// two are mutually exclusive scripted outcomes, and silently no-op'ing
-    /// would leave the test exercising the egress-error path instead of the
-    /// status the author intended.
+    /// an [`egress_error`](ScriptedHttpResponse::egress_error) response — mutually
+    /// exclusive outcomes; silently no-op'ing would exercise the wrong path.
     pub fn with_status(mut self, status: u16) -> Self {
         match &mut self.outcome {
             ScriptedHttpOutcome::Body { status: s, .. } => *s = status,

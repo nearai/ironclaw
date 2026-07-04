@@ -1,24 +1,19 @@
-//! C-MULTIUSER scenario: per-actor AUTO-APPROVE (always-allow) isolation.
-//!
-//! Covers both the "approval-settings non-leak" and "auto-approve non-leak"
-//! requirements — they are the SAME mechanic: the always-allow toggle is keyed
-//! on the run owner's `(tenant, user)` scope (`AutoApproveSettingKey`, keyed on
-//! `{tenant_id, user_id}`), read at capability dispatch. A grant made for actor
-//! A's owner must NOT let actor B's identical, otherwise-gated call through.
+//! C-MULTIUSER scenario: per-actor AUTO-APPROVE (always-allow) isolation. The
+//! always-allow toggle is keyed on the run owner's `(tenant, user)` scope
+//! (`AutoApproveSettingKey`), read at capability dispatch — a grant made for
+//! actor A's owner must NOT let actor B's identical, otherwise-gated call
+//! through. Covers both "approval-settings non-leak" and "auto-approve
+//! non-leak", which are the SAME mechanic.
 //!
 //! Actor A grants always-allow for its own owner, then A's gated `write_file`
-//! completes with NO approval gate. Actor B — a DISTINCT actor over the group's
-//! ONE shared auto-approve store — issues the IDENTICAL `write_file` call and
-//! still raises a real `BlockedApproval` gate, because A's grant is scoped to
-//! A's owner alone.
+//! completes with NO gate. Actor B — a DISTINCT actor over the SAME shared
+//! auto-approve store — issues the IDENTICAL call and still raises a real
+//! `BlockedApproval` gate, because A's grant is scoped to A's owner alone.
 //!
 //! Seam: `RebornIntegrationGroup::multiuser_approvals` builds the file-approval
-//! backend with `with_run_owner_scoped_capability_dispatch`, so each actor's
-//! dispatch (and thus the auto-approve lookup, the persisted approval request,
-//! and the gate-evidence lookup) is keyed on that actor's OWN owner — matching
-//! production, where the run owner IS the capability user. Without per-actor
-//! scoping, all actors collapse onto one fixed capability user and this
-//! isolation is unobservable.
+//! backend with `with_run_owner_scoped_capability_dispatch`, keying dispatch
+//! (auto-approve lookup, approval request, gate evidence) on each actor's OWN
+//! owner — matching production, where the run owner IS the capability user.
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
@@ -43,11 +38,8 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .subject_user_id
         .clone()
         .ok_or("actor A binding missing subject user id")?;
-    // Prove the grant is load-bearing, not just present: `AUTO_APPROVE_DEFAULT_ENABLED`
-    // is `true`, so a genuinely no-op `enable_auto_approve_for_owner` would still let
-    // A's write through by default and mask a broken grant. Force A OFF first so "A
-    // completes without a gate" is only reachable if the enable call below genuinely
-    // flips A's owner scope back ON.
+    // Force A OFF first: `AUTO_APPROVE_DEFAULT_ENABLED` is `true`, so a no-op
+    // `enable_auto_approve_for_owner` could otherwise mask a broken grant.
     g.disable_auto_approve_for_owner(&a_owner)
         .await
         .map_err(|e| format!("[A pre-disable] {e}"))?;
@@ -86,9 +78,8 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     if a.binding.subject_user_id == b.binding.subject_user_id {
         return Err("with_actor_id seam no-op: both actors resolved the same owner".into());
     }
-    // Give B its OWN explicit always-allow=OFF (auto-approve defaults ON per
-    // `AUTO_APPROVE_DEFAULT_ENABLED`), so B is a genuine gating actor. The
-    // isolation claim is then unambiguous: A's ON and B's OFF coexist per user.
+    // Give B its OWN explicit always-allow=OFF so B is a genuine gating actor;
+    // A's ON and B's OFF then coexist unambiguously per owner.
     let b_owner = b
         .binding
         .subject_user_id

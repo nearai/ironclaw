@@ -27,18 +27,14 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 
     let (run_id, gate_ref) = h.submit_turn_until_blocked("write the denied file").await?;
 
-    // Deny + resume. Real guard (non-vacuous): the deny→resume pipeline drives the
-    // run to terminal `Completed` (the model sees a non-retryable authorization
-    // failure and finalizes a reply) — it would hang/Fail if deny or resume were
-    // broken. (The scripted final reply text is NOT asserted: the scripted model
-    // emits it unconditionally, so it would not discriminate.)
+    // Non-vacuous: the deny→resume pipeline must drive the run to terminal
+    // `Completed`, not hang/Fail. (Scripted final reply text is not asserted
+    // -- the model emits it unconditionally, so it wouldn't discriminate.)
     h.deny_gate(run_id, &gate_ref).await?;
     h.wait_for_status(run_id, TurnStatus::Completed).await?;
 
-    // The denied write must NOT have executed: unlike the approve path, the gated
-    // capability is never re-dispatched, so the target file is never created. We
-    // assert the real persisted state — the file is absent on disk — which proves
-    // deny blocked the side effect, not merely that the run terminated.
+    // The denied write must NOT have executed: the gated capability is never
+    // re-dispatched, so the file is absent on disk.
     h.assert_workspace_file_absent("denied.txt").await?;
     Ok(())
 }

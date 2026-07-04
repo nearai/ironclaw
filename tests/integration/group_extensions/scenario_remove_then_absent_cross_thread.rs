@@ -1,23 +1,13 @@
 //! Scenario 2 (HEADLINE): install then remove an extension in thread A; thread B
 //! (a DIFFERENT conversation) does NOT see it as installed over the shared store.
 //!
-//! Uses "notion" (NOT "github") so this scenario is self-contained: Scenario 1
-//! installs "github" into the same shared store and never removes it, so a fresh
-//! install→remove cycle here must use a different bundled extension to observe a
-//! real install result rather than an already-installed no-op.
+//! Uses "notion" (not "github", which Scenario 1 installs into this same store
+//! and never removes) so the install→remove cycle is self-contained.
 //!
-//! Thread A-install calls `builtin.extension_install` for "notion". Thread
-//! A-remove (a distinct conversation) calls `builtin.extension_remove` for the
-//! same package (arg shape `{"extension_id": "<id>"}`, identical to install/
-//! activate; success output carries `"removed":true` — both confirmed from
-//! `extension_lifecycle_capabilities.rs`'s unit tests). Thread B calls
-//! `builtin.extension_search` for "notion" and asserts the result does NOT
-//! carry `installation_phase: "installed"` — the field is entirely absent for
-//! extensions that are not installed (confirmed from the same unit tests),
-//! and reappears/disappears as the lifecycle state changes. Because all three
-//! conversations use different conversation IDs but the same
-//! `Arc<HostRuntimeCapabilityHarness>`, this proves cross-thread extension
-//! removal persistence: a remove in thread A is durably visible to thread B.
+//! `installation_phase` is entirely absent from `extension_search` for a
+//! not-installed extension (confirmed in `extension_lifecycle_capabilities.rs`'s
+//! unit tests). Three threads, different conversation IDs, same
+//! `Arc<HostRuntimeCapabilityHarness>`, prove cross-thread removal persistence.
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
@@ -25,11 +15,6 @@ use serde_json::json;
 
 pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // ── Phase 1: install "notion" ────────────────────────────────────────────
-    // Install a fresh extension so there is something to remove. "notion" is
-    // chosen because Scenario 1 installs "github" into this same shared store
-    // and never removes it; re-installing an already-installed extension would
-    // be a no-op and produce no `"installed":true` result. "notion" is untouched
-    // by Scenario 1, so this is a genuine fresh install.
     let installer = g
         .thread("ext-remove-phase-install")
         .script([
@@ -45,15 +30,11 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     installer
         .assert_tool_invoked("builtin.extension_install")
         .await?;
-    // Confirm the install succeeded: output carries `"installed":true`.
     installer
         .assert_tool_result_contains("\"installed\":true")
         .await?;
 
     // ── Phase 2: remove "notion" (DIFFERENT conversation, SAME shared store) ─
-    // A distinct conversation_id → distinct binding/thread scope, but the
-    // same `HostRuntimeCapabilityHarness`, so the remover can see and delete
-    // the installation that Phase 1 just wrote.
     let remover = g
         .thread("ext-remove-phase-remove")
         .script([
@@ -69,15 +50,11 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     remover
         .assert_tool_invoked("builtin.extension_remove")
         .await?;
-    // Confirm the real remove succeeded: capability output carries `"removed":true`.
     remover
         .assert_tool_result_contains("\"removed\":true")
         .await?;
 
     // ── Phase 3: cross-thread search — "notion" must NOT be installed ───────
-    // A DIFFERENT conversation_id produces a distinct binding and thread scope
-    // but Arc-clones the same `HostRuntimeCapabilityHarness`, so the viewer
-    // reads from the exact same extension-install store the remover just wrote to.
     let viewer = g
         .thread("ext-remove-phase-viewer")
         .script([
@@ -91,9 +68,8 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .assert_tool_invoked("builtin.extension_search")
         .await?;
 
-    // Absence assertion: after removal `installation_phase` reverts to absent.
-    // `assert_tool_result_contains` returns `Ok` when the needle IS present and
-    // `Err` when it is absent — invert to assert absence.
+    // `assert_tool_result_contains` returns `Ok` when present, `Err` when
+    // absent — invert to assert absence.
     if viewer
         .assert_tool_result_contains(r#""installation_phase":"installed""#)
         .await
@@ -106,11 +82,8 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         );
     }
 
-    // Non-vacuity guard: "notion" must still appear in the catalog search result
-    // (as an available-but-not-installed bundled extension), proving the search
-    // actually ran and returned catalog entries. The absence of
-    // `installation_phase` is therefore meaningful — not a symptom of an empty
-    // or errored result.
+    // Non-vacuity guard: catalog entry must still appear, so the absence
+    // assertion above isn't vacuously true on an empty/errored result.
     if viewer
         .assert_tool_result_contains("\"notion\"")
         .await

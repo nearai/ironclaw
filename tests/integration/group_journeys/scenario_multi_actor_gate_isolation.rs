@@ -2,16 +2,12 @@
 //! actor B (via `with_actor_id`), each hitting its OWN approval gate over the
 //! group's ONE shared coordinator. Pins that gate resolution + resume state stay
 //! bound to the RAISING actor's turn: approving A's gate does NOT resolve B's,
-//! and B's turn does not inherit A's approval — B still blocks on its own gate
-//! and must be resolved independently under B's actor.
+//! and B still blocks on its own gate, resolved independently under B's actor.
 //!
-//! Runs on `RebornIntegrationGroup::multiuser_approvals()`, whose per-actor
-//! capability dispatch (the C-MULTIUSER `scope_capability_by_run_owner`
-//! harness seam) scopes each actor's gated write to ITS OWN run owner, so
-//! actor B's dispatch no longer dies with `driver_protocol_violation` under
-//! actor A's user. Production already isolates capability dispatch by run
-//! owner correctly; this seam makes that isolation observable at the harness
-//! level.
+//! Runs on `RebornIntegrationGroup::multiuser_approvals()` (C-MULTIUSER
+//! `scope_capability_by_run_owner` harness seam), which scopes each actor's
+//! gated write to ITS OWN run owner so actor B's dispatch doesn't die with
+//! `driver_protocol_violation` under actor A's user.
 //!
 //! Complementary to (not a duplicate of): `reborn_group_approvals`'s
 //! `concurrent_dual_gate_resume` (SAME actor, two threads parked simultaneously)
@@ -100,10 +96,8 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     a.assert_workspace_file_contains("journey-actor-a.txt", "ACTOR_PAYLOAD")
         .await?;
 
-    // Actor B: its turn MUST still block on ITS OWN gate. If A's approval had
-    // leaked to B (a resolution-scope bug), B's write would auto-complete and
-    // `submit_turn_until_blocked` would fail fast on a terminal `Completed`
-    // instead of returning a gate ref — this is the load-bearing isolation pin.
+    // Load-bearing isolation pin: if A's approval leaked to B, B's write would
+    // auto-complete and this call would fail fast on `Completed` instead of a gate ref.
     let (run_b, gate_b) = b
         .submit_turn_until_blocked("ACTOR_B write the file")
         .await
@@ -125,12 +119,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 
     // Owner isolation: neither actor's owner scope may read the other's thread
     // history (each owner's records live under a separate
-    // `/tenants/<tenant>/users/<user>/threads` subtree).
-    //
-    // Positive control FIRST: each actor must still be able to read its OWN
-    // thread's history under its OWN scope, so the negative checks below
-    // aren't vacuously true because `history()` never resolves anything on
-    // this harness.
+    // `/tenants/<tenant>/users/<user>/threads` subtree). Positive control
+    // FIRST: each actor must read its OWN history, so the negative checks
+    // below aren't vacuously true.
     let a_own_history = a
         .thread_harness
         .history(a.binding.thread_id.clone())
@@ -168,12 +159,10 @@ async fn assert_history_isolated(
              {reader_name}'s owner scope"
         )
         .into()),
-        // Pin the SPECIFIC failure reason (cross-owner lookup resolves to
-        // `SessionThreadError::UnknownThread` — scope-relative path
-        // resolution, not a separate ACL check) rather than accepting any
-        // `Err(_)` — an unrelated failure (e.g. a driver/backend error)
-        // would otherwise vacuously satisfy a bare `.is_ok()` check without
-        // proving isolation.
+        // Pin the SPECIFIC failure (cross-owner lookup -> UnknownThread via
+        // scope-relative path resolution, not a separate ACL check) rather
+        // than accepting any `Err(_)`, which an unrelated backend error
+        // could satisfy without proving isolation.
         Err(RebornThreadHarnessError::Thread(SessionThreadError::UnknownThread { .. })) => Ok(()),
         Err(other_err) => Err(format!(
             "isolation check for actor {other_name} under actor {reader_name}'s scope failed \

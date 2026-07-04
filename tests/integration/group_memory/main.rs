@@ -4,13 +4,10 @@
 //! (one filesystem, one memory backend). State written by thread A is visible
 //! to thread B because both share the same underlying store — the whole point.
 //!
-//! ## Why one sequential `#[tokio::test]`
-//!
-//! Each scenario's writer must complete before its reader/searcher/lister runs;
-//! a shared group instance cannot be split across Cargo test cases without
-//! fragile global state. One orchestrating function gives deterministic ordering
-//! for free. Each scenario seeds its own data, so they are independent and the
-//! ordering between scenarios does not matter.
+//! One sequential `#[tokio::test]`: a shared group instance can't split across
+//! Cargo test cases without fragile global state, and each scenario's
+//! writer must complete before its reader/searcher/lister runs. Scenarios seed
+//! their own data, so ordering between them doesn't matter.
 
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]

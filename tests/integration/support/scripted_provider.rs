@@ -1,8 +1,7 @@
-//! Scripted raw-provider seam for Reborn integration tests. Reuses `TraceLlm`'s
-//! replay engine (no new provider): builds an in-memory `LlmTrace` from the
-//! `RebornScriptedReply` façade, canonicalizes harness-local tool-call ids per
-//! trace, and returns a `TraceLlm` to sit at the bottom of the real
-//! `ironclaw_llm` decorator chain (design §3.1/§3.3).
+//! Scripted raw-provider seam for Reborn integration tests. Reuses `TraceLlm`'s replay
+//! engine: builds an in-memory `LlmTrace` from `RebornScriptedReply`, canonicalizes
+//! tool-call ids, and sits at the bottom of the real `ironclaw_llm` decorator chain
+//! (design §3.1/§3.3).
 
 // The parking provider (`ParkingModelGate`/`ParkingLlm`) is consumed only by the
 // `reborn_integration_cancel` test binary, so it reads as dead in the
@@ -85,23 +84,9 @@ impl ScriptedToolCallIds {
 // Parking model provider (E-GATEWAY seam) — mid-turn cancel coverage.
 // ---------------------------------------------------------------------------
 
-/// Synchronization handle for a [`ParkingLlm`]: the test waits until the model
-/// call parks, then releases it. Cloneable (shares one [`ParkingState`] over an
-/// `Arc`), so the test keeps a handle while a clone lives inside the provider.
-///
-/// Uses `oneshot` channels rather than `Notify` so signalling is lost-wakeup
-/// free: `oneshot::Sender::send` stores the value regardless of whether the
-/// receiver is already awaiting, so `release()` may run before or after the
-/// provider reaches its `await` without racing. The first model call parks; a
-/// second call (if any) delegates immediately.
-///
-/// The `take()`-based single-shot design is deliberate and idempotent: a second
-/// `park()` (e.g. from a retry/failover hop in the real `ironclaw_llm` decorator
-/// chain this provider sits under) finds its channel already consumed and
-/// returns immediately rather than blocking. A plain `Notify` pair would
-/// *deadlock* that second `park()` — `Notify` stores only one permit, so once
-/// the single `release` permit is consumed there is nothing left to wake a
-/// second waiter.
+/// Synchronization handle for a [`ParkingLlm`]: the test waits until the model call parks,
+/// then releases it. Uses `oneshot` (not `Notify`) so release-before-park and a second
+/// `park()` call are both lost-wakeup-free — `Notify`'s single permit would deadlock the latter.
 #[derive(Clone)]
 pub struct ParkingModelGate(Arc<ParkingState>);
 
@@ -134,8 +119,7 @@ impl ParkingModelGate {
         }
     }
 
-    /// Release the parked model call so it delegates to the inner trace and the
-    /// turn proceeds.
+    /// Release the parked model call so it delegates to the inner trace.
     pub fn release(&self) {
         if let Some(tx) = lock(&self.0.release_tx).take() {
             let _ = tx.send(());
@@ -165,21 +149,16 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// A raw `LlmProvider` that parks the first model call until the test releases
-/// it, then delegates to the inner scripted [`TraceLlm`]. Sits at the same
-/// vendor-SDK seam `scripted_trace_llm` fills, preserving the tier's
-/// single-fake invariant (the real `ironclaw_llm` decorator chain still runs
-/// on top).
+/// A raw `LlmProvider` that parks the first model call until the test releases it, then
+/// delegates to the inner scripted `TraceLlm`. Same vendor-SDK seam as `scripted_trace_llm`,
+/// preserving the single-fake invariant.
 pub struct ParkingLlm {
     inner: Arc<TraceLlm>,
     gate: ParkingModelGate,
 }
 
-/// Build a parking provider wrapping the already-built `inner` trace, released
-/// via `gate`. Takes an `Arc<TraceLlm>` (rather than building its own from raw
-/// replies) so the caller retains the SAME trace handle the parked provider
-/// replays through — parking mode is only a wrapper around the same scripted
-/// provider, not a separate trace.
+/// Wraps `inner` (an `Arc<TraceLlm>`, not fresh-built) so the caller retains the same
+/// trace handle the parked provider replays through.
 pub fn parking_trace_llm(gate: ParkingModelGate, inner: Arc<TraceLlm>) -> ParkingLlm {
     ParkingLlm { inner, gate }
 }
@@ -213,16 +192,10 @@ impl LlmProvider for ParkingLlm {
 // category coverage (C-ERRORS).
 // ---------------------------------------------------------------------------
 
-/// A raw `LlmProvider` that always fails with a fixed, NON-retryable
-/// `LlmError::ContextLengthExceeded`. Deliberately NOT the `LlmError::RequestFailed`
-/// a naturally-exhausted `TraceLlm` returns (see `next_step` above) — `RequestFailed`
-/// IS retryable (`ironclaw_llm::retry::is_retryable`), so scripting it would drive
-/// several seconds of real exponential backoff (1s/2s/4s) before the run finally
-/// failed. `ContextLengthExceeded` is excluded from `is_retryable`, so the run
-/// fails on the first model call — fast and deterministic. Sits at the same
-/// vendor-SDK seam `scripted_trace_llm`/`ParkingLlm` fill; the real `ironclaw_llm`
-/// decorator chain still runs on top, so this proves the chain's non-retryable-error
-/// mapping through to a terminal `TurnStatus::Failed`, not just the seam itself.
+/// A raw `LlmProvider` that always fails with non-retryable `LlmError::ContextLengthExceeded`
+/// — deliberately not `RequestFailed` (retryable, would add several seconds of real backoff).
+/// Same vendor-SDK seam as `scripted_trace_llm`/`ParkingLlm`; proves the real decorator
+/// chain's non-retryable-error mapping through to `TurnStatus::Failed`.
 pub struct ErrLlm;
 
 #[async_trait]
@@ -253,30 +226,14 @@ mod tests {
 
     use super::*;
 
-    /// Enforces both concurrency guarantees documented on `ParkingModelGate`
-    /// (module docs above) that the committed `reborn_integration_cancel`
-    /// integration test does not exercise directly, since it always calls
-    /// `release()` *after* the provider has already parked.
-    ///
-    /// Guarantee 1 — release-before-await ordering: `release()` sends on a
-    /// `oneshot::Sender` and `oneshot::Sender::send` buffers the value
-    /// regardless of whether a receiver is already awaiting, so calling
-    /// `release()` before `park()` has ever run must not be a lost wakeup —
-    /// the eventual `park()` call must still resolve promptly rather than
-    /// hanging forever waiting on `release_rx`.
-    ///
-    /// Guarantee 2 — second call does not block: `parked_tx`/`release_tx` are
-    /// `Mutex<Option<..>>` `take()`-based single-shot channels, so once the
-    /// first `park()` call has consumed them, a second `park()` call (e.g.
-    /// simulating a retry/failover hop in the real decorator chain) must
-    /// return immediately instead of blocking on an already-consumed
-    /// channel.
+    /// Covers two `ParkingModelGate` guarantees the committed cancel test doesn't exercise
+    /// (it always releases after parking): (1) release-before-park is not a lost wakeup;
+    /// (2) a second `park()` call after the channels are consumed returns immediately.
     #[tokio::test]
     async fn parking_llm_release_before_await_and_second_call_do_not_block() {
         let gate = ParkingModelGate::new();
 
-        // Guarantee 1: release fires before any `park()` call exists to
-        // receive it.
+        // Guarantee 1: release fires before park() exists to receive it.
         gate.release();
         tokio::time::timeout(Duration::from_secs(5), gate.park())
             .await
@@ -285,9 +242,7 @@ mod tests {
                  (oneshot send is lost-wakeup free)",
             );
 
-        // Guarantee 2: a second park() call, after the first full
-        // park+release cycle already consumed both channels, must not
-        // block.
+        // Guarantee 2: second park() call, after both channels are consumed.
         tokio::time::timeout(Duration::from_secs(5), gate.park())
             .await
             .expect("second park() call must return immediately, not block");

@@ -1,20 +1,15 @@
 //! C-COMMCTX: a recording [`CommunicationContextProvider`] test double.
 //!
-//! Wired into a harness/group via `with_communication_context_provider` /
-//! `RebornIntegrationGroupBuilder::communication_context_provider`, this double
-//! returns a fixed delivery-preference / connected-channel slice so a test can
-//! prove the wired `communication_context_provider` reaches the turn pipeline —
-//! the slice renders into the model request (assert via
+//! Wired via `with_communication_context_provider`, this double returns a
+//! fixed delivery-preference/connected-channel slice so a test can prove it
+//! reaches the turn pipeline and renders into the model request (assert via
 //! `assert_model_request_contains`).
 //!
-//! This is DISTINCT from the outbound delivery **sink** (E-OUTBOUND, a sibling
-//! lane): this is prompt **context** (delivery preferences/targets), not a
-//! delivery recorder. The production `RuntimeCommunicationContextProvider`'s
-//! facade→context mapping is already densely unit-tested in
-//! `crates/ironclaw_reborn_composition/src/communication_context.rs`; this double
-//! deliberately covers only the int-tier gap — that the `communication_context_provider`
-//! field wires through the coordinator path into the model request — without
-//! re-authoring that crate-tier mapping coverage.
+//! DISTINCT from the outbound delivery **sink** (E-OUTBOUND): this is prompt
+//! **context**, not a delivery recorder. The production facade→context
+//! mapping is already unit-tested in
+//! `crates/ironclaw_reborn_composition/src/communication_context.rs`; this
+//! double covers only the int-tier wiring gap.
 
 // Shared integration-test support: not every binary that mounts the
 // `reborn_support` tree consumes this module, so its symbols read as dead there
