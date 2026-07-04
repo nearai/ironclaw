@@ -5,6 +5,7 @@ agents:
     display_name: ironloop/general-reviewer
     instructions: .ironloop/agents/general-reviewer/AGENTS.md
     aliases: ["general"]
+    actions: ["review"]
     auto_on_open: false
 
   - id: small-fix-implementer
@@ -12,3 +13,15 @@ agents:
     display_name: ironloop/small-fix-implementer
     instructions: .ironloop/agents/small-fix-implementer/AGENTS.md
     aliases: ["small-fix"]
+    actions: ["implement"]
+
+  - id: small-fix-resolver
+    role: developer
+    display_name: ironloop/small-fix-resolver
+    instructions: .ironloop/agents/small-fix-resolver/AGENTS.md
+    aliases: ["resolver"]
+    actions: ["resolve"]
+    auto_resolve:
+      enabled: true
+      quiet_period_seconds: 300
+      max_attempts_per_head: 2
