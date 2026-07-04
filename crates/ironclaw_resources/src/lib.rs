@@ -406,7 +406,7 @@ impl std::fmt::Display for ResourceAccount {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceLimits {
-    #[serde(with = "decimal_string_or_legacy_number::option")]
+    #[serde(default, with = "decimal_string_or_legacy_number::option")]
     pub max_usd: Option<Decimal>,
     pub max_input_tokens: Option<u64>,
     pub max_output_tokens: Option<u64>,
@@ -2748,6 +2748,23 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(limits.max_usd, Some(Decimal::from(1000)));
+
+        let limits_without_usd = serde_json::from_value::<ResourceLimits>(serde_json::json!({
+            "max_input_tokens": null,
+            "max_output_tokens": null,
+            "max_wall_clock_ms": null,
+            "max_output_bytes": null,
+            "max_network_egress_bytes": null,
+            "max_process_count": null,
+            "max_concurrency_slots": null,
+            "period": { "kind": "rolling24h" },
+            "thresholds": {
+                "warn_at": 1.0,
+                "pause_at": 1.0
+            }
+        }))
+        .unwrap();
+        assert_eq!(limits_without_usd.max_usd, None);
     }
 
     #[test]
