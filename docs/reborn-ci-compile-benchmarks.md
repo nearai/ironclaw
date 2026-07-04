@@ -59,7 +59,7 @@ is report-only unless a new benchmark experiment is intentionally in flight.
 | H5 | Remove OVH sccache from Reborn crate buckets. | Verify whether remote cache overhead is hiding any local cache gain. | Tested | Rejected: wall clock regressed from `8m35s` to `9m45s`; job count unchanged. |
 | H6 | Disable incremental compilation across all Reborn crate buckets. | Avoid CI-only incremental bookkeeping and target-dir churn for one-shot builds. | Tested | Rejected: wall clock regressed from `8m35s` to `8m49s`; job count unchanged. |
 | H7 | Remove the duplicate instrumented `reborn_group_*` coverage lane from PR CI. | Reduce Reborn job count while keeping the uninstrumented group pass/fail gate. | Tested | Rejected: total jobs dropped from `28` to `27`, but wall clock regressed from `8m35s` to `9m39s`. |
-| H8 | Merge only the two smallest Reborn crate buckets, `auth-security` and `memory-skills`. | Reduce crate bucket jobs by one while leaving all long-pole buckets unchanged. | Running | Pending CI result. |
+| H8 | Merge only the two smallest Reborn crate buckets, `auth-security` and `memory-skills`. | Reduce crate bucket jobs by one while leaving all long-pole buckets unchanged. | Tested | Reverted by decision: total jobs dropped from `28` to `27`, but the compile-heavy long poles remained unchanged. |
 
 ## H1: Narrow Crate Bucket Targets
 
@@ -364,4 +364,34 @@ Why this is safe to test:
 Benchmark result:
 
 - Branch/PR: [`codex/ci-compile-benchmarks`, PR #5648](https://github.com/nearai/ironclaw/pull/5648)
-- Workflow run: pending.
+- Workflow run: [`28720713733`](https://github.com/nearai/ironclaw/actions/runs/28720713733)
+- Status: success
+- Wall clock: `8m04s` (`2026-07-04T21:49:32Z` to `2026-07-04T21:57:36Z`)
+- Total Reborn jobs: `27` versus baseline `28`
+- Crate bucket job count: `11` versus baseline `12`
+- Slowest bucket: `host-runtime` at `443s`
+- Decision: revert. This did meet the original job-count criterion on this
+  manual run, but it does not address the compile-time bottleneck. The same
+  single-crate compile-heavy buckets still decide the workflow critical path.
+
+Comparison against baseline:
+
+| Metric | Baseline | H8 | Delta |
+| --- | ---: | ---: | ---: |
+| Reborn workflow wall clock | `8m35s` | `8m04s` | `-31s` |
+| Total Reborn jobs | `28` | `27` | `-1` |
+| Crate bucket job count | `12` | `11` | `-1` |
+| `host-runtime` | `473s` | `443s` | `-30s` |
+| `composition-core` | `419s` | `397s` | `-22s` |
+| `reborn-core` | `367s` | `375s` | `+8s` |
+| `webui-ingress` | `334s` | `302s` | `-32s` |
+| `wasm-sandbox` | `307s` | `283s` | `-24s` |
+
+Interpretation:
+
+Merging two small buckets is a reasonable queue-pressure cleanup, but it is not
+a compile-time optimization. The result still spends the critical path in
+`host-runtime`, `composition-core`, and `reborn-core`, all of which are driven
+by compiling large dependency graphs. Per the updated direction, this benchmark
+branch restored the original buckets and should focus next on reducing the
+compile graph or avoiding repeated compiles for those long poles.
