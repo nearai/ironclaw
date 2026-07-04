@@ -35,16 +35,19 @@ use ironclaw_auth::{
     CredentialAccountLabel, CredentialAccountListPage, CredentialAccountListRequest,
     CredentialAccountProjection, CredentialAccountSelectionRequest, CredentialAccountStatus,
     CredentialAccountUpdateBinding, CredentialRecoveryProjection, CredentialRecoveryRequest,
-    CredentialRefreshReport, CredentialRefreshRequest, GOOGLE_PROVIDER_ID,
-    GoogleOAuthCallbackState, GoogleOAuthRouteConfig, OAuthAuthorizationCode,
-    OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OpaqueStateHash, PkceVerifierHash,
-    PkceVerifierSecret, ProviderScope, SLACK_PERSONAL_PROVIDER_ID, SecretCleanupAction,
-    SecretCleanupReport, SecretCleanupRequest, Timestamp, TurnRunRef, binding_scope_owns_account,
+    CredentialRefreshReport, CredentialRefreshRequest, GOOGLE_PROVIDER_ID, GoogleOAuthRouteConfig,
+    OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthCallbackState, OAuthCallbackStateKind,
+    OAuthProviderCallbackRequest, OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret,
+    ProviderScope, SLACK_PERSONAL_PROVIDER_ID, SecretCleanupAction, SecretCleanupReport,
+    SecretCleanupRequest, Timestamp, TurnRunRef, binding_scope_owns_account,
     build_google_authorization_url, parse_google_callback_scopes, parse_google_requested_scopes,
     pkce_s256_challenge,
 };
 #[cfg(feature = "slack-v2-host-beta")]
-use ironclaw_auth::{SlackPersonalOAuthCallbackState, build_slack_personal_authorization_url};
+use ironclaw_auth::{
+    OAuthAuthorizationEndpoint, OAuthAuthorizeUrlRequest, OAuthScopeParam,
+    SLACK_PERSONAL_AUTHORIZATION_ENDPOINT, build_authorization_url_with_scope_param,
+};
 use ironclaw_host_api::NetworkMethod;
 use ironclaw_host_api::ingress::{
     AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,

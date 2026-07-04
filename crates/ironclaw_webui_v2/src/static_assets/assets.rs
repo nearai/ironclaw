@@ -329,21 +329,28 @@ mod tests {
         assert!(gates.contains("oauth_url"));
         assert!(gates.contains("connectionFromContext"));
 
-        // useChat keeps the channel-connected subscription, submits pairing by
-        // redeeming through the generic pairing API (submitOnboardingPairing ->
-        // redeemPairingCode) so the backend resumes the parked turn, and retains
-        // the waiter/onboarding-resume wiring that resumes a chat blocked on a
-        // channel connected in another tab.
+        // The channel-connection/onboarding state machine — the channel-connected
+        // subscription, pairing redemption through the generic pairing API
+        // (submitOnboardingPairing -> redeemPairingCode) that resumes the parked
+        // turn, and the waiter/onboarding-resume wiring that resumes a chat
+        // blocked on a channel connected in another tab — moved out of useChat
+        // into the dedicated useChannelOnboarding hook (PR #5604 mn10). useChat
+        // still wires that hook in and re-exposes its handles, so the wiring is
+        // verified here and the state machine itself in its new home below.
         let use_chat = asset_text("js/pages/chat/hooks/useChat.js");
-        assert!(use_chat.contains("subscribeChannelConnected"));
+        assert!(use_chat.contains("useChannelOnboarding(threadId, {"));
         assert!(use_chat.contains("submitOnboardingPairing"));
-        assert!(use_chat.contains("redeemPairingCode"));
-        assert!(use_chat.contains("connectionEventMatchesOnboarding"));
-        assert!(use_chat.contains("resumeOnboardingAfterChannelConnected"));
-        assert!(use_chat.contains("rememberChannelConnectionWaiter"));
-        assert!(use_chat.contains("forgetChannelConnectionWaiter"));
-        assert!(use_chat.contains("channelConnectionRequirementFromCard"));
-        assert!(use_chat.contains("pendingOnboarding"));
+
+        let use_channel_onboarding = asset_text("js/pages/chat/hooks/useChannelOnboarding.js");
+        assert!(use_channel_onboarding.contains("subscribeChannelConnected"));
+        assert!(use_channel_onboarding.contains("submitOnboardingPairing"));
+        assert!(use_channel_onboarding.contains("redeemPairingCode"));
+        assert!(use_channel_onboarding.contains("connectionEventMatchesOnboarding"));
+        assert!(use_channel_onboarding.contains("resumeOnboardingAfterChannelConnected"));
+        assert!(use_channel_onboarding.contains("rememberChannelConnectionWaiter"));
+        assert!(use_channel_onboarding.contains("forgetChannelConnectionWaiter"));
+        assert!(use_channel_onboarding.contains("channelConnectionRequirementFromCard"));
+        assert!(use_channel_onboarding.contains("pendingOnboarding"));
 
         let generic_pairing = asset_text("js/pages/extensions/lib/pairing-api.js");
         assert!(generic_pairing.contains("notifyChannelConnected"));

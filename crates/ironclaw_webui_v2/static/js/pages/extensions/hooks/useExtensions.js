@@ -2,6 +2,13 @@ import { React } from "../../../lib/html.js";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { gatewayStatus } from "../../../lib/api.js";
 import { listConnectableChannels } from "../../../lib/channel-connect.js";
+import {
+  completionMatchesFlow,
+  isHttpsAuthUrl,
+  openAuthPopup,
+  readLatestProductAuthOAuthCompletion,
+  subscribeProductAuthOAuthCompletion,
+} from "../../../lib/product-auth-oauth-events.js";
 import { useT } from "../../../lib/i18n.js";
 import { isChannelExtensionKind } from "../lib/extensions-schema.js";
 import {
@@ -19,57 +26,11 @@ import {
 
 const OAUTH_SETUP_REFRESH_MS = 2000;
 const OAUTH_SETUP_TIMEOUT_MS = 10 * 60 * 1000;
-const OAUTH_CALLBACK_CHANNEL = "ironclaw-product-auth";
-const OAUTH_CALLBACK_STORAGE_KEY = "ironclaw:product-auth:oauth-complete";
-const OAUTH_CALLBACK_MESSAGE_TYPE = "ironclaw:product-auth:oauth-complete";
 
-function isHttpsAuthUrl(url) {
-  try {
-    return new URL(url).protocol === "https:";
-  } catch (_) {
-    return false;
-  }
-}
-
-function openAuthUrl(url, popup = null) {
-  if (!isHttpsAuthUrl(url)) return { ok: false, popup: null };
-  if (popup && !popup.closed) {
-    popup.location.href = url;
-    return { ok: true, popup };
-  }
-  const opened = window.open(url, "_blank", "noopener,noreferrer");
-  return {
-    ok: Boolean(opened),
-    popup: opened || null,
-    reason: opened ? null : "popup_blocked",
-  };
-}
-
-function parseOAuthCallbackStoragePayload(value) {
-  if (!value) return null;
-  try {
-    return JSON.parse(value);
-  } catch {
-    return null;
-  }
-}
-
-function isOAuthCallbackCompletion(payload) {
-  return payload?.type === OAUTH_CALLBACK_MESSAGE_TYPE && payload?.status === "completed";
-}
-
-function oauthCompletionMatchesFlow(payload, flowId) {
-  if (!isOAuthCallbackCompletion(payload)) return false;
-  // Require a matching flow id. A completion carrying no flow id — or one from a
-  // DIFFERENT extension's flow in another tab — must NOT satisfy this modal;
-  // treating a missing flow id as a match let a stale cross-tab callback
-  // prematurely activate/close the modal. When the OAuth response carried no
-  // flow id, this callback fast-path stays disabled and the polling path
-  // (`setupIsConfigured`) is the sole completion signal. Mirrors the stricter
-  // in-chat gate in useChat.js, which also keys on the flow id.
-  if (!flowId) return false;
-  return payload.flowId === flowId || payload.flow_id === flowId;
-}
+// OAuth callback constants, HTTPS-auth-URL/popup helpers, and completion
+// parsing/matching are the shared product-auth OAuth event contract — see
+// `lib/product-auth-oauth-events.js`. This hook keeps only its setup-watcher
+// state machine below.
 
 function oauthResponseFlowId(response) {
   return response?.flow_id || response?.flowId || null;
@@ -160,7 +121,7 @@ export function useExtensions() {
           type: "success",
           message,
         });
-        if (res.auth_url && !openAuthUrl(res.auth_url).ok) {
+        if (res.auth_url && !openAuthPopup(res.auth_url).ok) {
           setActionResult({
             type: "error",
             message: "Authentication URL must use HTTPS.",
@@ -208,14 +169,14 @@ export function useExtensions() {
               name: displayName || t("extensions.defaultName"),
             }),
         });
-        if (res.auth_url && !openAuthUrl(res.auth_url).ok) {
+        if (res.auth_url && !openAuthPopup(res.auth_url).ok) {
           setActionResult({
             type: "error",
             message: "Authentication URL must use HTTPS.",
           });
         }
       } else if (res.auth_url) {
-        if (openAuthUrl(res.auth_url).ok) {
+        if (openAuthPopup(res.auth_url).ok) {
           setActionResult({ type: "info", message: t("extensions.openingAuth") });
         } else {
           setActionResult({
@@ -421,15 +382,14 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
       setIsAuthorizing(true);
       const startedAt = Date.now();
       let stopped = false;
-      let channel = null;
       let timer = null;
+      let unsubscribe = () => {};
 
       function cleanup() {
         if (stopped) return;
         stopped = true;
         if (timer) browserWindow.clearInterval(timer);
-        if (channel) channel.close();
-        browserWindow.removeEventListener?.("storage", onStorage);
+        unsubscribe();
         setIsAuthorizing(false);
       }
 
@@ -449,31 +409,16 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
       }
 
       function handleCompletion(payload) {
-        if (!oauthCompletionMatchesFlow(payload, flowId)) return false;
+        if (!completionMatchesFlow(payload, flowId)) return false;
         complete();
         return true;
       }
 
-      function onStorage(event) {
-        if (event.key !== OAUTH_CALLBACK_STORAGE_KEY) return;
-        handleCompletion(parseOAuthCallbackStoragePayload(event.newValue));
-      }
-
-      if (typeof browserWindow.BroadcastChannel === "function") {
-        channel = new browserWindow.BroadcastChannel(OAUTH_CALLBACK_CHANNEL);
-        channel.onmessage = (event) => handleCompletion(event.data);
-      }
-      browserWindow.addEventListener?.("storage", onStorage);
+      unsubscribe = subscribeProductAuthOAuthCompletion(browserWindow, handleCompletion);
 
       timer = browserWindow.setInterval(() => {
         refreshSetupState();
-        if (
-          handleCompletion(
-            parseOAuthCallbackStoragePayload(
-              browserWindow.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY),
-            ),
-          )
-        ) {
+        if (handleCompletion(readLatestProductAuthOAuthCompletion(browserWindow))) {
           return;
         }
         const configured = setupIsConfigured({
@@ -491,11 +436,7 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
         }
       }, OAUTH_SETUP_REFRESH_MS);
       watcherRef.current = cleanup;
-      handleCompletion(
-        parseOAuthCallbackStoragePayload(
-          browserWindow.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY),
-        ),
-      );
+      handleCompletion(readLatestProductAuthOAuthCompletion(browserWindow));
     },
     [clearWatcher, onConfigured, refreshSetupState, setupIsConfigured]
   );
@@ -516,7 +457,7 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
     onSuccess: ({ res, popup }, variables) => {
       let authPopup = popup;
       if (res.authorization_url) {
-        const opened = openAuthUrl(res.authorization_url, popup);
+        const opened = openAuthPopup(res.authorization_url, popup);
         authPopup = opened.popup;
         if (!opened.ok) {
           throw new Error(

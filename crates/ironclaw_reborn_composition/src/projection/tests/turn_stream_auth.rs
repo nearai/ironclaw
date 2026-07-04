@@ -323,7 +323,9 @@ async fn webui_event_stream_surfaces_auth_challenge_lookup_failure() {
 async fn webui_event_stream_creates_google_oauth_prompt_for_runtime_credential_gate() {
     use crate::OAuthClientConfig;
     use crate::auth::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
-    use crate::oauth_gate::{GoogleOAuthGateProvider, GoogleOAuthGateProviderRegistry};
+    use crate::oauth_gate::{
+        GoogleOAuthGateProvider, OAuthGateFlowDriver, OAuthGateProviderRegistry,
+    };
     use async_trait::async_trait;
     use ironclaw_auth::{AuthContinuationEvent, InMemoryAuthProductServices};
     use ironclaw_secrets::InMemorySecretStore;
@@ -363,21 +365,21 @@ async fn webui_event_stream_creates_google_oauth_prompt_for_runtime_credential_g
     }];
 
     let shared = Arc::new(InMemoryAuthProductServices::new());
-    let google_gate = Arc::new(GoogleOAuthGateProvider::new(
-        OAuthClientConfig::new(
-            "google-client.apps.googleusercontent.com",
-            "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
-            None,
-        )
-        .unwrap(),
+    let google_gate = Arc::new(OAuthGateFlowDriver::new(
+        Arc::new(GoogleOAuthGateProvider::new(
+            OAuthClientConfig::new(
+                "google-client.apps.googleusercontent.com",
+                "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
+                None,
+            )
+            .unwrap(),
+        )),
         Arc::new(InMemorySecretStore::new()),
     ));
     let product_auth = Arc::new(
         RebornProductAuthServices::from_shared(shared.clone(), Arc::new(NoopDispatcher))
             .with_flow_record_source(shared)
-            .with_oauth_gate_registry(Arc::new(GoogleOAuthGateProviderRegistry::new(vec![
-                google_gate,
-            ]))),
+            .with_oauth_gate_registry(Arc::new(OAuthGateProviderRegistry::new(vec![google_gate]))),
     );
 
     let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());

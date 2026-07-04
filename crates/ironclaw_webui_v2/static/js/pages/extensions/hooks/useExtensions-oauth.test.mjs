@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
+import { productAuthOAuthEventsSource } from "../../../lib/product-auth-oauth-events.vm-inline.mjs";
 
 function useExtensionsOauthSourceForTest() {
   const source = readFileSync(new URL("./useExtensions.js", import.meta.url), "utf8");
@@ -18,7 +19,7 @@ function useExtensionsOauthSourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { useOauthSetup };`;
+  return `${productAuthOAuthEventsSource()}\n${lines.join("\n")}\nglobalThis.__testExports = { useOauthSetup };`;
 }
 
 test("useOauthSetup exposes the popup-watcher phase as authorizing", () => {

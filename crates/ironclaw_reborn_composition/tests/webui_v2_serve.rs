@@ -2218,7 +2218,16 @@ async fn static_chat_oauth_card_exposes_https_only_authorization_link() {
 #[tokio::test]
 async fn static_chat_hook_listens_for_oauth_callback_completion() {
     let (app, _) = build_app();
-    let response = app
+
+    // The chat hook's OAuth-gate callback listener stayed in useChat.js, but the
+    // cross-tab transport it depends on — the BroadcastChannel consumer, the
+    // localStorage `storage`-event fallback, the localStorage poll read, and the
+    // completion-signal constant — was extracted into the shared
+    // lib/product-auth-oauth-events.js module (PR #5604 Dup-4, shared with
+    // useExtensions). Assert both halves so neither the listener nor the
+    // transport it wires to regresses.
+    let use_chat_response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method(Method::GET)
@@ -2228,34 +2237,68 @@ async fn static_chat_hook_listens_for_oauth_callback_completion() {
         )
         .await
         .expect("oneshot");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = read_body_string(response).await;
+    assert_eq!(use_chat_response.status(), StatusCode::OK);
+    let use_chat = read_body_string(use_chat_response).await;
 
+    let oauth_events_response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/js/lib/product-auth-oauth-events.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(oauth_events_response.status(), StatusCode::OK);
+    let oauth_events = read_body_string(oauth_events_response).await;
+
+    // useChat.js arms the listener only while an OAuth gate is pending,
+    // subscribes to the shared completion contract, polls the latest persisted
+    // completion, matches it to the visible gate, and clears ONLY a pending
+    // OAuth auth gate.
     assert!(
-        body.contains("ironclaw:product-auth:oauth-complete"),
-        "chat hook must listen for the OAuth callback completion signal"
+        use_chat.contains("if (!isPendingOAuthGate(pendingGate)) return;"),
+        "chat hook must arm the OAuth callback listener only while an OAuth gate is pending"
     );
     assert!(
-        body.contains("new browserWindow.BroadcastChannel(OAUTH_CALLBACK_CHANNEL)"),
-        "chat hook must consume same-origin OAuth callback broadcasts"
+        use_chat.contains("subscribeProductAuthOAuthCompletion(browserWindow, handleCompletion)"),
+        "chat hook must subscribe to the shared OAuth callback completion transport"
     );
     assert!(
-        body.contains("browserWindow.addEventListener?.(\"storage\", onStorage)"),
-        "chat hook must keep a localStorage fallback for browsers without BroadcastChannel"
+        use_chat.contains("readLatestProductAuthOAuthCompletion(browserWindow)"),
+        "chat hook must poll the latest persisted OAuth callback completion in case the callback write happened before the listener observed it"
     );
     assert!(
-        body.contains("browserWindow.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY)"),
-        "chat hook must poll localStorage in case the callback write happened before the storage event listener observed it"
-    );
-    assert!(
-        body.contains("oauthCompletionMatchesGate(payload, pendingGate, listeningSince)"),
+        use_chat.contains("completionMatchesGate(payload, pendingGate, listeningSince)"),
         "chat hook must match callback completion to the visible OAuth gate when continuation metadata is present"
     );
     assert!(
-        body.contains(
+        use_chat.contains(
             "setPendingGate((current) => (isPendingOAuthGate(current) ? null : current))"
         ),
         "OAuth callback completion must clear only a pending OAuth auth gate"
+    );
+
+    // product-auth-oauth-events.js owns the cross-tab transport the listener
+    // consumes: the completion signal, the same-origin BroadcastChannel, and the
+    // localStorage storage-event + poll fallback for browsers without
+    // BroadcastChannel.
+    assert!(
+        oauth_events.contains("ironclaw:product-auth:oauth-complete"),
+        "shared OAuth events module must define the callback completion signal"
+    );
+    assert!(
+        oauth_events.contains("new browserWindow.BroadcastChannel(OAUTH_CALLBACK_CHANNEL)"),
+        "shared OAuth events module must consume same-origin OAuth callback broadcasts"
+    );
+    assert!(
+        oauth_events.contains("browserWindow.addEventListener?.(\"storage\", onStorage)"),
+        "shared OAuth events module must keep a localStorage fallback for browsers without BroadcastChannel"
+    );
+    assert!(
+        oauth_events.contains("browserWindow?.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY)"),
+        "shared OAuth events module must read the persisted OAuth callback completion from localStorage"
     );
 }
 

@@ -18,13 +18,10 @@ use ironclaw_secrets::SecretStore;
 use crate::RebornBuildError;
 use crate::input::{OAuthDcrProviderBackendConfig, OAuthProviderBackendConfig};
 use crate::oauth_dcr::{OAuthDcrProvider, OAuthDcrProviderRegistry};
-use crate::oauth_gate::{GoogleOAuthGateProvider, GoogleOAuthGateProviderRegistry};
+use crate::oauth_gate::{GoogleOAuthGateProvider, OAuthGateFlowDriver, OAuthGateProviderRegistry};
 use crate::oauth_provider_client::HostOAuthProviderClient;
 #[cfg(feature = "slack-v2-host-beta")]
-use crate::slack_personal_oauth::{
-    SlackPersonalOAuthGateProvider, SlackPersonalOAuthGateProviderRegistry,
-    slack_personal_provider_spec,
-};
+use crate::slack_personal_oauth::{SlackPersonalOAuthGateProvider, slack_personal_provider_spec};
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::slack_setup::SlackPersonalSetupServiceSlot;
 
@@ -32,9 +29,8 @@ use crate::slack_setup::SlackPersonalSetupServiceSlot;
 pub(crate) struct OAuthProviderComposition {
     pub(crate) client: Option<Arc<dyn AuthProviderClient>>,
     pub(crate) dcr_registry: Option<Arc<OAuthDcrProviderRegistry>>,
-    pub(crate) gate_registry: Option<Arc<GoogleOAuthGateProviderRegistry>>,
-    #[cfg(feature = "slack-v2-host-beta")]
-    pub(crate) slack_gate_registry: Option<Arc<SlackPersonalOAuthGateProviderRegistry>>,
+    /// One generic gate registry over every provider (Google + Slack personal).
+    pub(crate) gate_registry: Option<Arc<OAuthGateProviderRegistry>>,
 }
 
 pub(crate) fn compose_provider_client(
@@ -67,14 +63,12 @@ fn compose_provider_client_with_runtime(
     >,
 ) -> Result<OAuthProviderComposition, RebornBuildError> {
     let mut clients = Vec::new();
-    let mut gate_providers = Vec::new();
-    #[cfg(feature = "slack-v2-host-beta")]
-    let mut slack_gate_providers = Vec::new();
+    let mut gate_drivers = Vec::new();
     for config in configs {
         let provider_id = config.spec.provider_id;
         if provider_id == GOOGLE_PROVIDER_ID {
-            gate_providers.push(Arc::new(GoogleOAuthGateProvider::new(
-                config.client.clone(),
+            gate_drivers.push(Arc::new(OAuthGateFlowDriver::new(
+                Arc::new(GoogleOAuthGateProvider::new(config.client.clone())),
                 Arc::clone(&secret_store),
             )));
         }
@@ -98,8 +92,8 @@ fn compose_provider_client_with_runtime(
     }
     #[cfg(feature = "slack-v2-host-beta")]
     if let Some(slot) = slack_personal_oauth_slot {
-        slack_gate_providers.push(Arc::new(SlackPersonalOAuthGateProvider::new(
-            slot.clone(),
+        gate_drivers.push(Arc::new(OAuthGateFlowDriver::new(
+            Arc::new(SlackPersonalOAuthGateProvider::new(slot.clone())),
             Arc::clone(&secret_store),
         )));
         clients.push((
@@ -148,25 +142,17 @@ fn compose_provider_client_with_runtime(
         provider_count = clients.len(),
         providers = ?clients.iter().map(|(provider, _)| *provider).collect::<Vec<_>>(),
         dcr_provider_count = dcr_providers.len(),
-        google_gate_provider_count = gate_providers.len(),
+        gate_provider_count = gate_drivers.len(),
         "product-auth OAuth provider clients composed"
     );
     let dcr_registry =
         (!dcr_providers.is_empty()).then(|| Arc::new(OAuthDcrProviderRegistry::new(dcr_providers)));
-    let gate_registry = (!gate_providers.is_empty())
-        .then(|| Arc::new(GoogleOAuthGateProviderRegistry::new(gate_providers)));
-    #[cfg(feature = "slack-v2-host-beta")]
-    let slack_gate_registry = (!slack_gate_providers.is_empty()).then(|| {
-        Arc::new(SlackPersonalOAuthGateProviderRegistry::new(
-            slack_gate_providers,
-        ))
-    });
+    let gate_registry =
+        (!gate_drivers.is_empty()).then(|| Arc::new(OAuthGateProviderRegistry::new(gate_drivers)));
     Ok(OAuthProviderComposition {
         client: compose_provider_clients(clients),
         dcr_registry,
         gate_registry,
-        #[cfg(feature = "slack-v2-host-beta")]
-        slack_gate_registry,
     })
 }
 

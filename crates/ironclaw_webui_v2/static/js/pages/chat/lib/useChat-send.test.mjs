@@ -24,6 +24,8 @@ import {
   rememberChannelConnectionWaiter,
   subscribeChannelConnected,
 } from "../../../lib/channel-connection-events.js";
+import { productAuthOAuthEventsSource } from "../../../lib/product-auth-oauth-events.vm-inline.mjs";
+import { moduleSourceForVm } from "../../../lib/vm-inline-source.mjs";
 
 const STATE_SLOT = Object.freeze({
   cooldownUntil: 0,
@@ -58,7 +60,16 @@ function useChatSourceForTest() {
     }
     lines.push(line.replace("export function useChat", "function useChat"));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { useChat };`;
+  // Inline the shared OAuth-events source and the extracted `useChannelOnboarding`
+  // hook so their window-dependent primitives (e.g. openAuthPopup) compile inside
+  // the vm and resolve the per-test `window`, and so `useChat` drives the real
+  // onboarding state machine (not a stub) through the caller. The onboarding
+  // source is inlined after OAuth-events (which it imports from) and before the
+  // hook body that calls it.
+  const channelOnboardingSource = moduleSourceForVm(
+    new URL("../hooks/useChannelOnboarding.js", import.meta.url),
+  );
+  return `${productAuthOAuthEventsSource()}\n${channelOnboardingSource}\n${lines.join("\n")}\nglobalThis.__testExports = { useChat };`;
 }
 
 function runUseChatSource(context) {

@@ -2,6 +2,9 @@
 // arch-exempt: large_file, product-auth OAuth start/callback serve surface; Slack-OAuth audit MJ4 will unify Slack personal-OAuth start here and shrink this file, plan #5604
 
 use super::*;
+use crate::auth::OAuthProviderIdentityCheck;
+#[cfg(feature = "slack-v2-host-beta")]
+use crate::auth::OAuthProviderIdentityCheckFuture;
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::available_extensions::{SLACK_EXTENSION_ID, slack_personal_oauth_setup_scopes};
 use crate::oauth_dcr::DcrOAuthCallbackState;
@@ -229,7 +232,8 @@ async fn start_slack_personal_oauth_flow(
         Some(&requester_extension),
     )
     .await?;
-    let opaque_state = SlackPersonalOAuthCallbackState::new(
+    let opaque_state = OAuthCallbackState::new(
+        OAuthCallbackStateKind::SLACK_PERSONAL,
         flow_id,
         scope.clone(),
         account_label,
@@ -244,12 +248,20 @@ async fn start_slack_personal_oauth_flow(
     let pkce_secret = PkceVerifierSecret::new(pkce_verifier_secret.clone())
         .map_err(ProductAuthRouteFailure::from)?;
     let pkce_challenge = pkce_s256_challenge(&pkce_secret);
-    let authorization_url = build_slack_personal_authorization_url(
-        client_id.as_str(),
-        redirect_uri.as_str(),
-        opaque_state.as_str(),
-        &pkce_challenge,
-        &requested_scopes,
+    let authorization_endpoint =
+        OAuthAuthorizationEndpoint::new(SLACK_PERSONAL_AUTHORIZATION_ENDPOINT)
+            .map_err(ProductAuthRouteFailure::from)?;
+    let authorization_url = build_authorization_url_with_scope_param(
+        OAuthAuthorizeUrlRequest {
+            authorization_endpoint: &authorization_endpoint,
+            client_id: &client_id,
+            redirect_uri: &redirect_uri,
+            state: &opaque_state,
+            code_challenge: &pkce_challenge,
+            scopes: &requested_scopes,
+            extra_params: &[],
+        },
+        OAuthScopeParam::UserScope,
     )
     .map_err(ProductAuthRouteFailure::from)?;
 
@@ -318,7 +330,8 @@ async fn start_google_oauth_flow(
         requester_extension.as_ref(),
     )
     .await?;
-    let opaque_state = GoogleOAuthCallbackState::new(
+    let opaque_state = OAuthCallbackState::new(
+        OAuthCallbackStateKind::GOOGLE,
         flow_id,
         scope.clone(),
         account_label,
@@ -449,150 +462,109 @@ pub(super) async fn oauth_callback_handler(
     Ok(oauth_callback_response(&headers, response))
 }
 
+/// How a provider's granted scopes are resolved at the callback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CallbackScopeResolution {
+    /// Validate that the provider-echoed `scope` query includes every requested
+    /// scope, then submit the requested scopes (Google).
+    ValidateEchoedIncludesRequested,
+    /// The provider does not echo granted scopes on the redirect; submit the
+    /// requested scopes from the encoded state directly (Slack personal — the
+    /// granted scopes arrive later in the token response under `authed_user`).
+    RequestedOnly,
+}
+
+/// Provider-specific parameters that drive the single [`oauth_provider_callback_handler`].
+///
+/// Google and Slack become two descriptor values instead of two near-identical
+/// hand-written callback handlers.
+struct OAuthCallbackDescriptor {
+    /// Wire prefix + scope policy used to decode the callback `state`.
+    state_kind: OAuthCallbackStateKind,
+    /// Reborn provider id submitted with the token exchange.
+    provider_id: &'static str,
+    /// How granted scopes are resolved at the callback.
+    scope_resolution: CallbackScopeResolution,
+    /// Optional post-exchange provider-identity check (Slack binds the
+    /// `authed_user` identity; Google has none). Built after the callback scope
+    /// is decoded so it can capture the scope.
+    identity_hook:
+        fn(&ProductAuthRouteState, &AuthProductScope) -> Option<OAuthProviderIdentityCheck>,
+}
+
+/// No post-exchange identity check (Google).
+fn no_identity_hook(
+    _state: &ProductAuthRouteState,
+    _callback_scope: &AuthProductScope,
+) -> Option<OAuthProviderIdentityCheck> {
+    None
+}
+
+static GOOGLE_CALLBACK_DESCRIPTOR: OAuthCallbackDescriptor = OAuthCallbackDescriptor {
+    state_kind: OAuthCallbackStateKind::GOOGLE,
+    provider_id: GOOGLE_PROVIDER_ID,
+    scope_resolution: CallbackScopeResolution::ValidateEchoedIncludesRequested,
+    identity_hook: no_identity_hook,
+};
+
+#[cfg(feature = "slack-v2-host-beta")]
+static SLACK_PERSONAL_CALLBACK_DESCRIPTOR: OAuthCallbackDescriptor = OAuthCallbackDescriptor {
+    state_kind: OAuthCallbackStateKind::SLACK_PERSONAL,
+    provider_id: SLACK_PERSONAL_PROVIDER_ID,
+    scope_resolution: CallbackScopeResolution::RequestedOnly,
+    identity_hook: slack_personal_identity_hook,
+};
+
+enum CallbackScopeOutcome {
+    Scopes(Vec<ProviderScope>),
+    ProviderDenied,
+}
+
+fn resolve_callback_scopes(
+    resolution: CallbackScopeResolution,
+    requested_scopes: &[ProviderScope],
+    query_scopes: Option<&str>,
+) -> Result<CallbackScopeOutcome, ProductAuthRouteFailure> {
+    match resolution {
+        CallbackScopeResolution::RequestedOnly => {
+            Ok(CallbackScopeOutcome::Scopes(requested_scopes.to_vec()))
+        }
+        CallbackScopeResolution::ValidateEchoedIncludesRequested => {
+            match parse_google_callback_scopes(query_scopes) {
+                Ok(Some(callback_scopes)) => {
+                    if validate_google_callback_includes_requested_scopes(
+                        &callback_scopes,
+                        requested_scopes,
+                    )
+                    .is_err()
+                    {
+                        Ok(CallbackScopeOutcome::ProviderDenied)
+                    } else {
+                        Ok(CallbackScopeOutcome::Scopes(requested_scopes.to_vec()))
+                    }
+                }
+                Ok(None) => Ok(CallbackScopeOutcome::Scopes(requested_scopes.to_vec())),
+                Err(error) => Err(ProductAuthRouteFailure::from(error)),
+            }
+        }
+    }
+}
+
+/// Google product-auth OAuth callback. Thin wrapper over the shared
+/// [`oauth_provider_callback_handler`] with the Google descriptor.
 pub(super) async fn google_oauth_callback_handler(
     State(state): State<ProductAuthRouteState>,
     RawQuery(raw_query): RawQuery,
     uri: Uri,
     headers: HeaderMap,
 ) -> Result<Response, ProductAuthRouteFailure> {
-    validate_callback_raw_query(raw_query.as_deref())?;
-    let query = axum::extract::Query::<GoogleOAuthCallbackQuery>::try_from_uri(&uri)
-        .map_err(|_| ProductAuthRouteFailure::malformed_callback())?
-        .0;
-    validate_google_callback_query_fields(&query)?;
-    let state_value = query
-        .state
-        .as_ref()
-        .ok_or_else(ProductAuthRouteFailure::malformed_callback)?;
-    let state_hash = opaque_state_hash(state_value.as_str())?;
-    let callback_state = GoogleOAuthCallbackState::decode(state_value.as_str())
-        .map_err(ProductAuthRouteFailure::from)?;
-    let flow_id = callback_state.flow_id();
-    let callback_scope = callback_state.scope();
-
-    if query
-        .error
-        .as_deref()
-        .is_some_and(|value| !value.is_empty())
-    {
-        let response = run_with_backend_timeout(state.product_auth.handle_oauth_callback(
-            RebornOAuthCallbackRequest {
-                scope: callback_scope.clone(),
-                flow_id,
-                opaque_state_hash: state_hash.clone(),
-                outcome: RebornOAuthCallbackOutcome::ProviderDenied,
-            },
-        ))
-        .await;
-        state.remove_pkce_verifier(flow_id);
-        return oauth_callback_route_result_response(&headers, response);
-    }
-
-    let provider = match run_with_backend_timeout(
-        state
-            .product_auth
-            .ensure_oauth_callback_flow_known(callback_scope, flow_id),
-    )
-    .await
-    {
-        Ok(provider) => provider,
-        Err(error) => {
-            state.remove_pkce_verifier(flow_id);
-            return Err(error);
-        }
-    };
-    let Some(code) = query.code.as_ref() else {
-        state.remove_pkce_verifier(flow_id);
-        return Err(ProductAuthRouteFailure::malformed_callback());
-    };
-    let pkce_verifier =
-        match pkce_verifier_for_known_callback_flow(&state, callback_scope, &provider, flow_id)
-            .await
-        {
-            Ok(pkce_verifier) => pkce_verifier,
-            Err(error) => {
-                state.remove_pkce_verifier(flow_id);
-                return Err(error);
-            }
-        };
-    let requested_scopes = callback_state.requested_scopes();
-    let callback_scopes = match parse_google_callback_scopes(query.scopes.as_deref()) {
-        Ok(Some(callback_scopes)) => {
-            if validate_google_callback_includes_requested_scopes(
-                &callback_scopes,
-                requested_scopes,
-            )
-            .is_err()
-            {
-                state.remove_pkce_verifier(flow_id);
-                let response = run_with_backend_timeout(state.product_auth.handle_oauth_callback(
-                    RebornOAuthCallbackRequest {
-                        scope: callback_scope.clone(),
-                        flow_id,
-                        opaque_state_hash: state_hash.clone(),
-                        outcome: RebornOAuthCallbackOutcome::ProviderDenied,
-                    },
-                ))
-                .await;
-                return oauth_callback_route_result_response(&headers, response);
-            }
-            requested_scopes.to_vec()
-        }
-        Ok(None) => requested_scopes.to_vec(),
-        Err(error) => {
-            state.remove_pkce_verifier(flow_id);
-            return Err(ProductAuthRouteFailure::from(error));
-        }
-    };
-    let authorization_code_hash = authorization_code_hash(code.expose_secret())?;
-    let pkce_verifier_hash = pkce_verifier_hash(pkce_verifier.expose_secret())?;
-
-    let response = match run_with_backend_timeout(
-        state
-            .product_auth
-            .handle_oauth_callback(RebornOAuthCallbackRequest {
-                scope: callback_scope.clone(),
-                flow_id,
-                opaque_state_hash: state_hash.clone(),
-                outcome: RebornOAuthCallbackOutcome::Authorized {
-                    provider_request: OAuthProviderCallbackRequest {
-                        provider: AuthProviderId::new(GOOGLE_PROVIDER_ID)
-                            .map_err(|_| ProductAuthRouteFailure::malformed_callback())?,
-                        account_label: callback_state.account_label().clone(),
-                        authorization_code: OAuthAuthorizationCode::new(code.clone_secret())
-                            .map_err(ProductAuthRouteFailure::from)?,
-                        authorization_code_hash,
-                        pkce_verifier: PkceVerifierSecret::new(pkce_verifier)
-                            .map_err(ProductAuthRouteFailure::from)?,
-                        pkce_verifier_hash,
-                        scopes: callback_scopes,
-                    },
-                },
-            }),
-    )
-    .await
-    {
-        Ok(response) => {
-            state.remove_pkce_verifier(flow_id);
-            response
-        }
-        Err(error) => {
-            if should_forget_pkce_verifier(error.body.code) {
-                state.remove_pkce_verifier(flow_id);
-            }
-            return Err(error);
-        }
-    };
-
-    Ok(oauth_callback_response(&headers, response))
+    oauth_provider_callback_handler(state, &GOOGLE_CALLBACK_DESCRIPTOR, raw_query, uri, headers)
+        .await
 }
 
-/// Slack personal (user-token) OAuth callback. Mirrors
-/// [`google_oauth_callback_handler`] but decodes a
-/// [`SlackPersonalOAuthCallbackState`] and skips Google-specific scope
-/// validation: Slack does not echo granted scopes on the redirect (they are in
-/// the token response under `authed_user.scope`), so the requested scopes from
-/// the encoded state are used directly.
+/// Slack personal (user-token) OAuth callback. Thin wrapper over the shared
+/// [`oauth_provider_callback_handler`] with the Slack descriptor, which adds the
+/// `authed_user`-identity binding hook.
 #[cfg(feature = "slack-v2-host-beta")]
 pub(super) async fn slack_personal_oauth_callback_handler(
     State(state): State<ProductAuthRouteState>,
@@ -600,6 +572,34 @@ pub(super) async fn slack_personal_oauth_callback_handler(
     uri: Uri,
     headers: HeaderMap,
 ) -> Result<Response, ProductAuthRouteFailure> {
+    oauth_provider_callback_handler(
+        state,
+        &SLACK_PERSONAL_CALLBACK_DESCRIPTOR,
+        raw_query,
+        uri,
+        headers,
+    )
+    .await
+}
+
+/// One OAuth callback handler for every static-callback-URL provider (Google,
+/// Slack personal). The provider differences — state decode prefix/policy,
+/// provider id, scope resolution, and post-exchange identity binding — are
+/// carried by `descriptor`.
+///
+/// Safety-preserving invariants (identical for both providers): the raw `state`
+/// is hashed once and claimed through `AuthFlowManager` (CSRF/state-hash +
+/// single-use/replay), the PKCE verifier is resolved from the process-local
+/// cache then the durable gate store, provider tokens are exchanged only after
+/// the flow is claimed, and the callback tenant must match the route tenant
+/// before any exchange.
+async fn oauth_provider_callback_handler(
+    state: ProductAuthRouteState,
+    descriptor: &OAuthCallbackDescriptor,
+    raw_query: Option<String>,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Result<Response, ProductAuthRouteFailure> {
     validate_callback_raw_query(raw_query.as_deref())?;
     let query = axum::extract::Query::<GoogleOAuthCallbackQuery>::try_from_uri(&uri)
         .map_err(|_| ProductAuthRouteFailure::malformed_callback())?
@@ -610,10 +610,13 @@ pub(super) async fn slack_personal_oauth_callback_handler(
         .as_ref()
         .ok_or_else(ProductAuthRouteFailure::malformed_callback)?;
     let state_hash = opaque_state_hash(state_value.as_str())?;
-    let callback_state = SlackPersonalOAuthCallbackState::decode(state_value.as_str())
+    let callback_state = OAuthCallbackState::decode(descriptor.state_kind, state_value.as_str())
         .map_err(ProductAuthRouteFailure::from)?;
     let flow_id = callback_state.flow_id();
     let callback_scope = callback_state.scope();
+    // Reject a callback state minted for another tenant before any provider
+    // exchange. Applied to BOTH providers: unification strengthens Google, which
+    // previously lacked this check (Slack already had it).
     if callback_scope.resource.tenant_id != state.tenant_id {
         return Err(ProductAuthRouteFailure::new(
             StatusCode::FORBIDDEN,
@@ -666,7 +669,30 @@ pub(super) async fn slack_personal_oauth_callback_handler(
                 return Err(error);
             }
         };
-    let callback_scopes = callback_state.requested_scopes().to_vec();
+    let callback_scopes = match resolve_callback_scopes(
+        descriptor.scope_resolution,
+        callback_state.requested_scopes(),
+        query.scopes.as_deref(),
+    ) {
+        Ok(CallbackScopeOutcome::Scopes(scopes)) => scopes,
+        Ok(CallbackScopeOutcome::ProviderDenied) => {
+            state.remove_pkce_verifier(flow_id);
+            let response = run_with_backend_timeout(state.product_auth.handle_oauth_callback(
+                RebornOAuthCallbackRequest {
+                    scope: callback_scope.clone(),
+                    flow_id,
+                    opaque_state_hash: state_hash.clone(),
+                    outcome: RebornOAuthCallbackOutcome::ProviderDenied,
+                },
+            ))
+            .await;
+            return oauth_callback_route_result_response(&headers, response);
+        }
+        Err(error) => {
+            state.remove_pkce_verifier(flow_id);
+            return Err(error);
+        }
+    };
     let authorization_code_hash = authorization_code_hash(code.expose_secret())?;
     let pkce_verifier_hash = pkce_verifier_hash(pkce_verifier.expose_secret())?;
 
@@ -676,7 +702,7 @@ pub(super) async fn slack_personal_oauth_callback_handler(
         opaque_state_hash: state_hash.clone(),
         outcome: RebornOAuthCallbackOutcome::Authorized {
             provider_request: OAuthProviderCallbackRequest {
-                provider: AuthProviderId::new(SLACK_PERSONAL_PROVIDER_ID)
+                provider: AuthProviderId::new(descriptor.provider_id)
                     .map_err(|_| ProductAuthRouteFailure::malformed_callback())?,
                 account_label: callback_state.account_label().clone(),
                 authorization_code: OAuthAuthorizationCode::new(code.clone_secret())
@@ -689,31 +715,17 @@ pub(super) async fn slack_personal_oauth_callback_handler(
             },
         },
     };
-    #[cfg(feature = "slack-v2-host-beta")]
-    let callback_future = {
-        let state_for_binding = state.clone();
-        let scope_for_binding = callback_scope.clone();
+    let identity_check = (descriptor.identity_hook)(&state, callback_scope);
+    let response = match run_with_backend_timeout(
         state
             .product_auth
-            .handle_oauth_callback_with_provider_identity_check(
+            .handle_oauth_callback_with_optional_provider_identity_check(
                 callback_request,
-                move |provider_identity| {
-                    let state_for_binding = state_for_binding.clone();
-                    let scope_for_binding = scope_for_binding.clone();
-                    async move {
-                        bind_slack_personal_oauth_identity_for_callback(
-                            &state_for_binding,
-                            &scope_for_binding,
-                            provider_identity.as_ref(),
-                        )
-                        .await
-                    }
-                },
-            )
-    };
-    #[cfg(not(feature = "slack-v2-host-beta"))]
-    let callback_future = state.product_auth.handle_oauth_callback(callback_request);
-    let response = match run_with_backend_timeout(callback_future).await {
+                identity_check,
+            ),
+    )
+    .await
+    {
         Ok(response) => {
             state.remove_pkce_verifier(flow_id);
             response
@@ -727,6 +739,30 @@ pub(super) async fn slack_personal_oauth_callback_handler(
     };
 
     Ok(oauth_callback_response(&headers, response))
+}
+
+/// Slack post-exchange identity hook: binds the exchanged `authed_user` identity
+/// to the authenticated Reborn user. Captures a clone of the route state and the
+/// decoded callback scope.
+#[cfg(feature = "slack-v2-host-beta")]
+fn slack_personal_identity_hook(
+    state: &ProductAuthRouteState,
+    callback_scope: &AuthProductScope,
+) -> Option<OAuthProviderIdentityCheck> {
+    let state = state.clone();
+    let callback_scope = callback_scope.clone();
+    Some(Box::new(
+        move |provider_identity: Option<OAuthProviderIdentity>| {
+            Box::pin(async move {
+                bind_slack_personal_oauth_identity_for_callback(
+                    &state,
+                    &callback_scope,
+                    provider_identity.as_ref(),
+                )
+                .await
+            }) as OAuthProviderIdentityCheckFuture
+        },
+    ))
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
@@ -1084,7 +1120,9 @@ mod tests {
     use crate::AuthChallengeProvider;
     use crate::RebornAuthContinuationDispatcher;
     use crate::input::OAuthClientConfig;
-    use crate::oauth_gate::{GoogleOAuthGateProvider, GoogleOAuthGateProviderRegistry};
+    use crate::oauth_gate::{
+        GoogleOAuthGateProvider, OAuthGateFlowDriver, OAuthGateProviderRegistry,
+    };
     use async_trait::async_trait;
     use axum::body::to_bytes;
     use ironclaw_auth::{
@@ -1189,19 +1227,21 @@ mod tests {
         let secret_store = Arc::new(InMemorySecretStore::new());
         let secret_store_for_provider: Arc<dyn SecretStore> = secret_store.clone();
         let dispatcher = Arc::new(RecordingDispatcher::default());
-        let google_gate = Arc::new(GoogleOAuthGateProvider::new(
-            OAuthClientConfig::new(
-                "google-client.apps.googleusercontent.com",
-                "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
-                None,
-            )
-            .expect("google oauth client"),
+        let google_gate = Arc::new(OAuthGateFlowDriver::new(
+            Arc::new(GoogleOAuthGateProvider::new(
+                OAuthClientConfig::new(
+                    "google-client.apps.googleusercontent.com",
+                    "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
+                    None,
+                )
+                .expect("google oauth client"),
+            )),
             secret_store_for_provider,
         ));
         let product_auth = Arc::new(
             RebornProductAuthServices::from_shared(shared.clone(), dispatcher.clone())
                 .with_flow_record_source(shared)
-                .with_oauth_gate_registry(Arc::new(GoogleOAuthGateProviderRegistry::new(vec![
+                .with_oauth_gate_registry(Arc::new(OAuthGateProviderRegistry::new(vec![
                     google_gate,
                 ]))),
         );
@@ -1278,19 +1318,21 @@ mod tests {
         let secret_store = Arc::new(InMemorySecretStore::new());
         let secret_store_for_provider: Arc<dyn SecretStore> = secret_store.clone();
         let dispatcher = Arc::new(RecordingDispatcher::default());
-        let google_gate = Arc::new(GoogleOAuthGateProvider::new(
-            OAuthClientConfig::new(
-                "google-client.apps.googleusercontent.com",
-                "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
-                None,
-            )
-            .expect("google oauth client"),
+        let google_gate = Arc::new(OAuthGateFlowDriver::new(
+            Arc::new(GoogleOAuthGateProvider::new(
+                OAuthClientConfig::new(
+                    "google-client.apps.googleusercontent.com",
+                    "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
+                    None,
+                )
+                .expect("google oauth client"),
+            )),
             secret_store_for_provider,
         ));
         let product_auth = Arc::new(
             RebornProductAuthServices::from_shared(shared.clone(), dispatcher)
                 .with_flow_record_source(shared)
-                .with_oauth_gate_registry(Arc::new(GoogleOAuthGateProviderRegistry::new(vec![
+                .with_oauth_gate_registry(Arc::new(OAuthGateProviderRegistry::new(vec![
                     google_gate,
                 ]))),
         );

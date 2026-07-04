@@ -1,41 +1,29 @@
 //! Slack personal (user-token) OAuth: provider spec + blocked-gate provider.
 //!
-//! Approach (B) duplicate: this mirrors the Google product-auth OAuth gate in
-//! [`crate::oauth_gate`] but builds a Slack authorization URL (`user_scope`) and
-//! encodes a [`SlackPersonalOAuthCallbackState`]. The provider-agnostic helpers
-//! (`auth_scope_for_blocked_turn`, `turn_gate_query`, `challenge_view_from_flow`,
-//! `provider_scopes`, `OAuthGateChallengeRequest`) are shared from
-//! `crate::oauth_gate`; only the flow preparation and PKCE handle differ. The
-//! Google path is left functionally unchanged.
+//! This is one of the two production [`OAuthGateProvider`] implementors. The
+//! shared challenge/turn-gate-reuse/PKCE-store/cleanup/expiry logic lives in
+//! [`crate::oauth_gate::OAuthGateFlowDriver`]; only the flow preparation differs
+//! from Google — Slack resolves client credentials from its setup slot at
+//! request time and emits `user_scope=` (its `scope=` is reserved for bot
+//! tokens) via the generic authorization-URL builder.
 
 use std::fmt;
-use std::sync::Arc;
 
-use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_auth::{
-    AuthChallenge, AuthContinuationRef, AuthFlowId, AuthFlowKind, AuthFlowManager, AuthFlowRecord,
-    AuthFlowRecordSource, AuthProductError, AuthProductScope, AuthProviderId,
-    CredentialAccountLabel, NewAuthFlow, PkceVerifierSecret, ProviderScope,
-    SLACK_PERSONAL_PROVIDER_ID, SlackPersonalOAuthCallbackState, TurnGateAuthFlowQuery, TurnRunRef,
-    build_slack_personal_authorization_url, opaque_state_hash, pkce_s256_challenge,
+    AuthFlowId, AuthProductError, AuthProductScope, CredentialAccountLabel,
+    OAuthAuthorizationEndpoint, OAuthAuthorizeUrlRequest, OAuthCallbackState,
+    OAuthCallbackStateKind, OAuthScopeParam, PkceVerifierSecret, ProviderScope,
+    SLACK_PERSONAL_AUTHORIZATION_ENDPOINT, SLACK_PERSONAL_PROVIDER_ID,
+    build_authorization_url_with_scope_param, opaque_state_hash, pkce_s256_challenge,
     pkce_verifier_hash,
 };
-use ironclaw_host_api::{ResourceScope, SecretHandle};
-use ironclaw_secrets::{SecretMaterial, SecretStore};
 use secrecy::SecretString;
-use tokio::sync::Mutex as AsyncMutex;
 
-use crate::AuthChallengeView;
-use crate::oauth_gate::{
-    OAuthGateChallengeRequest, auth_scope_for_blocked_turn, challenge_view_from_flow,
-    provider_scopes, turn_gate_query,
-};
+use crate::oauth_gate::{OAuthGateProvider, PreparedOAuthGateFlow};
 use crate::oauth_provider_client::{
     ExchangeScopePolicy, HostOAuthProviderSpec, TokenResponseShape,
 };
 use crate::slack_setup::SlackPersonalSetupServiceSlot;
-
-const GATE_FLOW_TTL_SECONDS: i64 = 600;
 
 /// Host OAuth provider spec for the Slack personal (user-token) provider.
 ///
@@ -54,167 +42,29 @@ pub(crate) fn slack_personal_provider_spec() -> HostOAuthProviderSpec {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct SlackPersonalOAuthGateProviderRegistry {
-    providers: std::collections::BTreeMap<String, Arc<SlackPersonalOAuthGateProvider>>,
-}
-
-impl SlackPersonalOAuthGateProviderRegistry {
-    pub(crate) fn new(providers: Vec<Arc<SlackPersonalOAuthGateProvider>>) -> Self {
-        Self {
-            providers: providers
-                .into_iter()
-                .map(|provider| (provider.provider_id().to_string(), provider))
-                .collect(),
-        }
-    }
-
-    pub(crate) async fn challenge_for_blocked_gate(
-        &self,
-        request: OAuthGateChallengeRequest<'_>,
-    ) -> Result<Option<AuthChallengeView>, AuthProductError> {
-        for requirement in request.requirements {
-            let Some(provider) = self.providers.get(requirement.provider.as_str()) else {
-                continue;
-            };
-            return provider
-                .challenge_for_blocked_gate(request, requirement)
-                .await
-                .map(Some);
-        }
-        Ok(None)
-    }
-
-    pub(crate) async fn pkce_verifier_for_flow(
-        &self,
-        scope: &AuthProductScope,
-        provider: &AuthProviderId,
-        flow_id: AuthFlowId,
-    ) -> Result<Option<SecretString>, AuthProductError> {
-        let Some(provider) = self.providers.get(provider.as_str()) else {
-            return Ok(None);
-        };
-        provider.pkce_verifier_for_flow(scope, flow_id).await
-    }
-}
-
-impl fmt::Debug for SlackPersonalOAuthGateProviderRegistry {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("SlackPersonalOAuthGateProviderRegistry")
-            .field("providers", &self.providers.keys().collect::<Vec<_>>())
-            .finish()
-    }
-}
-
+/// Slack personal (user-token) blocked-turn OAuth gate provider.
+///
+/// Holds the Slack setup slot; the shared [`crate::oauth_gate::OAuthGateFlowDriver`]
+/// owns everything else.
 #[derive(Clone)]
 pub(crate) struct SlackPersonalOAuthGateProvider {
     slot: SlackPersonalSetupServiceSlot,
-    secret_store: Arc<dyn SecretStore>,
-    setup_lock: Arc<AsyncMutex<()>>,
 }
 
 impl SlackPersonalOAuthGateProvider {
-    pub(crate) fn new(
-        slot: SlackPersonalSetupServiceSlot,
-        secret_store: Arc<dyn SecretStore>,
-    ) -> Self {
-        Self {
-            slot,
-            secret_store,
-            setup_lock: Arc::new(AsyncMutex::new(())),
-        }
+    pub(crate) fn new(slot: SlackPersonalSetupServiceSlot) -> Self {
+        Self { slot }
     }
+}
 
+#[async_trait::async_trait]
+impl OAuthGateProvider for SlackPersonalOAuthGateProvider {
     fn provider_id(&self) -> &'static str {
         SLACK_PERSONAL_PROVIDER_ID
     }
 
-    async fn challenge_for_blocked_gate(
-        &self,
-        request: OAuthGateChallengeRequest<'_>,
-        requirement: &ironclaw_host_api::RuntimeCredentialAuthRequirement,
-    ) -> Result<AuthChallengeView, AuthProductError> {
-        let auth_scope = auth_scope_for_blocked_turn(request.scope, request.owner_user_id);
-        let turn_run_ref = TurnRunRef::new(request.run_id.to_string())?;
-        let query = turn_gate_query(&auth_scope, request.scope, &turn_run_ref, request.gate_ref);
-
-        let _setup_guard = self.setup_lock.lock().await;
-        if let Some(existing) = self
-            .reusable_flow_for_query(request.flow_manager, request.flow_source, query.clone())
-            .await?
-        {
-            return challenge_view_from_flow(&existing);
-        }
-
-        let flow_id = AuthFlowId::new();
-        let scopes = provider_scopes(&requirement.provider_scopes)?;
-        let prepared = self.prepare_flow(&auth_scope, flow_id, scopes).await?;
-        let expires_at = Utc::now() + ChronoDuration::seconds(GATE_FLOW_TTL_SECONDS);
-        self.store_pkce_verifier(
-            &auth_scope.resource,
-            flow_id,
-            prepared.pkce_verifier.clone(),
-        )
-        .await?;
-        let flow = match request
-            .flow_manager
-            .create_flow(NewAuthFlow {
-                id: Some(flow_id),
-                scope: auth_scope.clone(),
-                kind: AuthFlowKind::IntegrationCredential,
-                provider: AuthProviderId::new(self.provider_id())?,
-                challenge: AuthChallenge::OAuthUrl {
-                    authorization_url: prepared.authorization_url,
-                    expires_at,
-                },
-                continuation: AuthContinuationRef::TurnGateResume {
-                    turn_run_ref,
-                    gate_ref: request.gate_ref.clone(),
-                },
-                update_binding: None,
-                opaque_state_hash: Some(prepared.opaque_state_hash),
-                pkce_verifier_hash: Some(prepared.pkce_verifier_hash),
-                expires_at,
-            })
-            .await
-        {
-            Ok(flow) => flow,
-            Err(AuthProductError::BackendConflict) => {
-                self.cleanup_pkce_verifier(&auth_scope.resource, flow_id)
-                    .await;
-                self.reusable_flow_for_query(request.flow_manager, request.flow_source, query)
-                    .await?
-                    .ok_or(AuthProductError::BackendConflict)?
-            }
-            Err(error) => {
-                self.cleanup_pkce_verifier(&auth_scope.resource, flow_id)
-                    .await;
-                return Err(error);
-            }
-        };
-
-        challenge_view_from_flow(&flow)
-    }
-
-    async fn reusable_flow_for_query(
-        &self,
-        flow_manager: &Arc<dyn AuthFlowManager>,
-        flow_source: &Arc<dyn AuthFlowRecordSource>,
-        query: TurnGateAuthFlowQuery,
-    ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
-        let Some(existing) = flow_source.flow_for_turn_gate(query).await? else {
-            return Ok(None);
-        };
-        if existing.expires_at > Utc::now() {
-            return Ok(Some(existing));
-        }
-        self.cleanup_pkce_verifier(&existing.scope.resource, existing.id)
-            .await;
-        flow_manager
-            .cancel_flow(&existing.scope, existing.id)
-            .await
-            .map(|_| None)
+    fn pkce_secret_handle_label(&self) -> &'static str {
+        "slack-personal-oauth-gate-flow-pkce"
     }
 
     async fn prepare_flow(
@@ -222,7 +72,7 @@ impl SlackPersonalOAuthGateProvider {
         scope: &AuthProductScope,
         flow_id: AuthFlowId,
         scopes: Vec<ProviderScope>,
-    ) -> Result<PreparedSlackOAuthGateFlow, AuthProductError> {
+    ) -> Result<PreparedOAuthGateFlow, AuthProductError> {
         let service = self
             .slot
             .get()
@@ -232,7 +82,8 @@ impl SlackPersonalOAuthGateProvider {
             AuthProductError::BackendUnavailable
         })?;
         let account_label = CredentialAccountLabel::new("slack_personal")?;
-        let state = SlackPersonalOAuthCallbackState::new(
+        let state = OAuthCallbackState::new(
+            OAuthCallbackStateKind::SLACK_PERSONAL,
             flow_id,
             scope.clone(),
             account_label,
@@ -244,87 +95,26 @@ impl SlackPersonalOAuthGateProvider {
         let pkce_secret = PkceVerifierSecret::new(pkce_verifier.clone())?;
         let pkce_verifier_hash = pkce_verifier_hash(&pkce_secret)?;
         let pkce_challenge = pkce_s256_challenge(&pkce_secret);
-        let authorization_url = build_slack_personal_authorization_url(
-            client_id.as_str(),
-            self.slot.redirect_uri().as_str(),
-            state.as_str(),
-            &pkce_challenge,
-            &scopes,
+        let authorization_endpoint =
+            OAuthAuthorizationEndpoint::new(SLACK_PERSONAL_AUTHORIZATION_ENDPOINT)?;
+        let authorization_url = build_authorization_url_with_scope_param(
+            OAuthAuthorizeUrlRequest {
+                authorization_endpoint: &authorization_endpoint,
+                client_id: &client_id,
+                redirect_uri: self.slot.redirect_uri(),
+                state: &state,
+                code_challenge: &pkce_challenge,
+                scopes: &scopes,
+                extra_params: &[],
+            },
+            OAuthScopeParam::UserScope,
         )?;
-        Ok(PreparedSlackOAuthGateFlow {
+        Ok(PreparedOAuthGateFlow {
             authorization_url,
             opaque_state_hash,
             pkce_verifier_hash,
             pkce_verifier,
         })
-    }
-
-    async fn store_pkce_verifier(
-        &self,
-        scope: &ResourceScope,
-        flow_id: AuthFlowId,
-        material: SecretMaterial,
-    ) -> Result<(), AuthProductError> {
-        self.secret_store
-            .put(scope.clone(), pkce_secret_handle(flow_id)?, material, None)
-            .await
-            .map(|_| ())
-            .map_err(|e| {
-                tracing::warn!(
-                    provider = self.provider_id(),
-                    flow_id = %flow_id,
-                    error = %e,
-                    "failed to store Slack OAuth PKCE verifier"
-                );
-                AuthProductError::BackendUnavailable
-            })
-    }
-
-    async fn cleanup_pkce_verifier(&self, scope: &ResourceScope, flow_id: AuthFlowId) {
-        let Ok(handle) = pkce_secret_handle(flow_id) else {
-            return;
-        };
-        if self.secret_store.delete(scope, &handle).await.is_err() {
-            tracing::warn!(
-                provider = self.provider_id(),
-                flow_id = %flow_id,
-                "failed to clean up Slack OAuth gate PKCE verifier after flow creation failure"
-            );
-        }
-    }
-
-    async fn pkce_verifier_for_flow(
-        &self,
-        scope: &AuthProductScope,
-        flow_id: AuthFlowId,
-    ) -> Result<Option<SecretString>, AuthProductError> {
-        let handle = pkce_secret_handle(flow_id)?;
-        let lease = match self.secret_store.lease_once(&scope.resource, &handle).await {
-            Ok(lease) => lease,
-            Err(error) if error.is_unknown_secret() => return Ok(None),
-            Err(e) => {
-                tracing::warn!(
-                    provider = self.provider_id(),
-                    flow_id = %flow_id,
-                    error = %e,
-                    "failed to lease Slack OAuth PKCE verifier"
-                );
-                return Err(AuthProductError::BackendUnavailable);
-            }
-        };
-        self.secret_store
-            .consume(&scope.resource, lease.id)
-            .await
-            .map(Some)
-            .map_err(|e| {
-                tracing::warn!(
-                    provider = self.provider_id(),
-                    flow_id = %flow_id,
-                    error = %e,
-                    "failed to consume Slack OAuth PKCE verifier"
-                );
-                AuthProductError::BackendUnavailable
-            })
     }
 }
 
@@ -335,19 +125,4 @@ impl fmt::Debug for SlackPersonalOAuthGateProvider {
             .field("slot", &self.slot)
             .finish()
     }
-}
-
-#[derive(Debug)]
-struct PreparedSlackOAuthGateFlow {
-    authorization_url: ironclaw_auth::OAuthAuthorizationUrl,
-    opaque_state_hash: ironclaw_auth::OpaqueStateHash,
-    pkce_verifier_hash: ironclaw_auth::PkceVerifierHash,
-    pkce_verifier: SecretString,
-}
-
-fn pkce_secret_handle(flow_id: AuthFlowId) -> Result<SecretHandle, AuthProductError> {
-    SecretHandle::new(format!("slack-personal-oauth-gate-flow-pkce-{flow_id}")).map_err(|e| {
-        tracing::warn!(flow_id = %flow_id, error = %e, "failed to build Slack OAuth PKCE secret handle");
-        AuthProductError::BackendUnavailable
-    })
 }
