@@ -76,6 +76,11 @@ pub enum BudgetGateStatus {
     },
 }
 
+/// Wire decoder for the externally persisted budget-gate status shape.
+///
+/// Keep this in lockstep with [`BudgetGateStatus`] variants: each terminal
+/// state has required fields, and variants must reject fields owned by other
+/// states so durable snapshots cannot silently drift across releases.
 impl<'de> Deserialize<'de> for BudgetGateStatus {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -422,6 +427,66 @@ mod tests {
                 && thresholds.warn_at == 1.0
                 && thresholds.pause_at == 1.0
         ));
+    }
+
+    #[test]
+    fn status_decode_rejects_invalid_field_combinations() {
+        let valid_limit = serde_json::json!({
+            "max_usd": "1000.00",
+            "max_input_tokens": null,
+            "max_output_tokens": null,
+            "max_wall_clock_ms": null,
+            "max_output_bytes": null,
+            "max_network_egress_bytes": null,
+            "max_process_count": null,
+            "max_concurrency_slots": null,
+            "period": { "kind": "rolling24h" },
+            "thresholds": {
+                "warn_at": 1.0,
+                "pause_at": 1.0
+            }
+        });
+        let cases = [
+            (
+                "pending status with terminal fields",
+                serde_json::json!({
+                    "kind": "pending",
+                    "by": "alice"
+                }),
+            ),
+            (
+                "approved status missing required actor",
+                serde_json::json!({
+                    "kind": "approved",
+                    "increased_limit": valid_limit.clone(),
+                    "at": "2026-07-03T14:18:49.505189Z"
+                }),
+            ),
+            (
+                "cancelled status with increased limit",
+                serde_json::json!({
+                    "kind": "cancelled",
+                    "increased_limit": valid_limit.clone(),
+                    "by": "alice",
+                    "at": "2026-07-03T14:18:49.505189Z"
+                }),
+            ),
+            (
+                "expired status with approval fields",
+                serde_json::json!({
+                    "kind": "expired",
+                    "by": "alice",
+                    "at": "2026-07-03T14:18:49.505189Z"
+                }),
+            ),
+        ];
+
+        for (label, raw) in cases {
+            assert!(
+                serde_json::from_value::<BudgetGateStatus>(raw).is_err(),
+                "{label} must be rejected"
+            );
+        }
     }
 
     #[test]
