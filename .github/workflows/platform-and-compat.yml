@@ -260,7 +260,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
-          targets: wasm32-wasip2
+          targets: wasm32-wasip1,wasm32-wasip2
       - name: Install Node.js for WebUI bundle builds
         uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
         with:
@@ -276,7 +276,25 @@ jobs:
       - name: Install cargo-component
         uses: ./.github/actions/install-cargo-component
       - name: Build all WASM extensions against current WIT
-        run: ./scripts/build-wasm-extensions.sh
+        env:
+          CARGO_BUILD_JOBS: "1"
+        run: |
+          set -euo pipefail
+
+          ./scripts/build-wasm-extensions.sh --tools &
+          tools_pid="$!"
+          ./scripts/build-wasm-extensions.sh --first-party &
+          first_party_pid="$!"
+          ./scripts/build-wasm-extensions.sh --channels &
+          channels_pid="$!"
+
+          status=0
+          for pid in "$tools_pid" "$first_party_pid" "$channels_pid"; do
+            if ! wait "$pid"; then
+              status=1
+            fi
+          done
+          exit "$status"
       - name: Instantiation test (host linker compatibility)
         run: |
           timeout --signal=INT --kill-after=30s 20m \
