@@ -32,6 +32,12 @@ on:
   schedule:
     - cron: "0 4 * * *" # Daily deterministic deep CI at 04:00 UTC
   workflow_dispatch:
+    inputs:
+      optimization_benchmark:
+        description: Run optional OVH persistent-builder benchmark jobs
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -73,6 +79,129 @@ jobs:
     uses: ./.github/workflows/reborn-e2e.yml
     with:
       ref: ${{ github.sha }}
+
+  ovh-reborn-root-archive-benchmark:
+    name: OVH Reborn root archive benchmark
+    if: github.event_name == 'workflow_dispatch' && inputs.optimization_benchmark
+    runs-on: [self-hosted, Linux, X64, ovh, trusted-pr]
+    timeout-minutes: 30
+    env:
+      ANTHROPIC_API_KEY: ""
+      LLM_BACKEND: ""
+      LLM_USE_CODEX_AUTH: "false"
+      OLLAMA_BASE_URL: ""
+      OPENAI_API_KEY: ""
+      CARGO_INCREMENTAL: "0"
+      CARGO_TARGET_DIR: /home/ubuntu/ironclaw-ci-target/reborn-root
+      RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"
+    steps:
+      - name: Add Rust to PATH
+        run: echo "/home/ubuntu/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Verify toolchain
+        run: |
+          rustc --version
+          cargo --version
+          clang --version | head -n 1
+          mold --version
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
+        with:
+          tool: cargo-nextest
+
+      - name: Archive Reborn root tests
+        run: |
+          mapfile -t test_names < <(
+            {
+              find tests -maxdepth 1 -type f -name 'reborn_*.rs' -print
+              if [ -f tests/support_unit_tests.rs ]; then
+                printf '%s\n' tests/support_unit_tests.rs
+              fi
+            } \
+              | sed -E 's#^tests/##; s#\.rs$##' \
+              | LC_ALL=C sort
+          )
+
+          if [ "${#test_names[@]}" -eq 0 ]; then
+            echo "No Reborn root tests discovered" >&2
+            exit 1
+          fi
+
+          test_args=()
+          for test_name in "${test_names[@]}"; do
+            test_args+=(--test "${test_name}")
+          done
+
+          mkdir -p "$RUNNER_TEMP/nextest"
+          cargo nextest archive \
+            --profile ci \
+            --archive-file "$RUNNER_TEMP/nextest/reborn-root.tar.zst" \
+            "${test_args[@]}"
+          ls -lh "$RUNNER_TEMP/nextest/reborn-root.tar.zst"
+
+      - name: Upload Reborn root archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ovh-reborn-root-nextest-archive
+          path: ${{ runner.temp }}/nextest/reborn-root.tar.zst
+          if-no-files-found: error
+          retention-days: 1
+
+  ovh-reborn-root-shards-benchmark:
+    name: OVH Reborn root archive shard (${{ matrix.partition }})
+    needs: ovh-reborn-root-archive-benchmark
+    if: github.event_name == 'workflow_dispatch' && inputs.optimization_benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ANTHROPIC_API_KEY: ""
+      LLM_BACKEND: ""
+      LLM_USE_CODEX_AUTH: "false"
+      OLLAMA_BASE_URL: ""
+      OPENAI_API_KEY: ""
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [0, 1, 2, 3]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
+        with:
+          tool: cargo-nextest
+
+      - name: Download Reborn root archive
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ovh-reborn-root-nextest-archive
+          path: target/nextest
+
+      - name: Run Reborn root archive shard
+        env:
+          PARTITION_INDEX: ${{ matrix.partition }}
+          PARTITION_COUNT: 4
+        run: |
+          partition_ordinal=$((PARTITION_INDEX + 1))
+          cargo nextest run \
+            --archive-file target/nextest/reborn-root.tar.zst \
+            --workspace-remap "$GITHUB_WORKSPACE" \
+            --profile ci \
+            --partition "slice:${partition_ordinal}/${PARTITION_COUNT}"
 
   nightly-alert:
     name: Nightly Deep CI Alert
