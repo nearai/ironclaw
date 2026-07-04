@@ -32,8 +32,8 @@
 //! group's own subdir and fails to compile:
 //!
 //! ```rust,no_run
-//! #[allow(dead_code)] #[path = "../support/reborn/mod.rs"] mod reborn_support;
-//! #[allow(dead_code)] #[path = "../support/mod.rs"] mod support;
+//! #[allow(dead_code)] #[path = "../support/mod.rs"] mod reborn_support;
+//! #[allow(dead_code)] #[path = "../../support/mod.rs"] mod support;
 //! ```
 //!
 //! ### Two composites — use the right one
@@ -422,17 +422,15 @@ impl RebornIntegrationGroup {
 /// Option<PathBuf>, Arc<TempDir>)` so each constructor can name fields rather than
 /// position-destructure a tuple.
 ///
-/// `pub(crate)` (not module-private): `group_constructors.rs` reaches this at
+/// Plain module-private visibility: `group_constructors.rs` reaches this at
 /// plain module-private visibility as a descendant of `group` (see the `mod
 /// group_constructors` declaration above), so the fields stay private and the
-/// per-capability preset constructors there still take/return this type as the
-/// opaque handoff between `build_base` and `into_group`, reading only
-/// `canonical_binding` directly. The struct name and `canonical_subject_user`
-/// are bumped to `pub(crate)` ONLY so `harness/options.rs`'s
-/// `ToolsProfile::build_group_capability_with_base` — a sibling of `group`,
-/// not a descendant — can name the type and call the one accessor it needs;
-/// `build_base`/`into_group` themselves stay module-private.
-pub(crate) struct GroupBaseData {
+/// per-capability preset constructors there — including their own
+/// `build_group_capability_with_base` helper, which calls
+/// `canonical_subject_user()` — take/return this type as the opaque handoff
+/// between `build_base` and `into_group`; `build_base`/`into_group` themselves
+/// stay module-private too.
+struct GroupBaseData {
     product_harness: RebornProductWorkflowHarness,
     composite: Arc<CompositeRootFilesystem>,
     libsql_db_path: Option<PathBuf>,
@@ -454,7 +452,7 @@ impl GroupBaseData {
     /// dispatch shares the run's `(tenant, user)` with the turn-store /
     /// evidence scope resolved from the SAME `canonical_binding` (see the
     /// `canonical_binding` field docs above).
-    pub(crate) fn canonical_subject_user(&self) -> HarnessResult<UserId> {
+    fn canonical_subject_user(&self) -> HarnessResult<UserId> {
         Ok(self
             .canonical_binding
             .subject_user_id

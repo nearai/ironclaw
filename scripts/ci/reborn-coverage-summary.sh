@@ -54,7 +54,7 @@ import tomllib
 
 mode, lcov_path, exemptions_path = sys.argv[1], sys.argv[2], sys.argv[3]
 
-crate_re = re.compile(r"/crates/(ironclaw_[A-Za-z0-9_]+)/")
+crate_re = re.compile(r"(?:^|/)crates/(ironclaw_[A-Za-z0-9_]+)/")
 
 
 def round2(value: float) -> str:
@@ -84,6 +84,9 @@ for entry in exemptions:
         sys.exit(1)
     if not entry.get("issue"):
         print(f"exemption for '{module}' is missing 'issue'", file=sys.stderr)
+        sys.exit(1)
+    if not module.startswith("crates/"):
+        print(f"exemption module path '{module}' must be repo-relative and start with 'crates/'", file=sys.stderr)
         sys.exit(1)
     exempt_modules.add(module)
 

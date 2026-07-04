@@ -325,6 +325,21 @@ capture "${summary_sh}" "${fixtures_dir}/a6_boundary.lcov" "${fixtures_dir}/a8_m
 assert_exit_code "A8: malformed exemption (no issue) exits non-zero" 1 "${CAP_RC}"
 assert_contains "A8: malformed exemption reports the missing issue" "${CAP_ERR}" "missing 'issue'"
 
+# A9: a non-repo-relative exemption module path (missing the "crates/" prefix)
+# would otherwise match every same-named file across all crates via the
+# endswith("/" + m) check in the summary's own accounting — reject it at
+# parse time instead of silently over-exempting.
+cat > "${fixtures_dir}/a9_bare_module_exemptions.toml" <<'TOML'
+[[exemption]]
+module = "a.rs"
+reason = "bare filename, not repo-relative"
+issue = "https://github.com/nearai/ironclaw/issues/1"
+TOML
+capture "${summary_sh}" "${fixtures_dir}/a6_boundary.lcov" "${fixtures_dir}/a9_bare_module_exemptions.toml"
+assert_exit_code "A9: non-crates/-prefixed exemption module exits non-zero" 1 "${CAP_RC}"
+assert_contains "A9: non-crates/-prefixed exemption module reports the validation error" "${CAP_ERR}" \
+  "must be repo-relative and start with 'crates/'"
+
 # ---------------------------------------------------------------------------
 # B. reborn-coverage-summary.sh --zero-crates
 # ---------------------------------------------------------------------------

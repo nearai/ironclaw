@@ -3,7 +3,7 @@
 Support tree for the **parity and QA suites** (`tests/reborn_*_parity.rs`,
 `tests/reborn_qa_*.rs`, `tests/reborn_*_e2e.rs`). These suites are current and
 maintained, but they are **not coverage-bearing** — the coverage program runs
-exclusively over `tests/integration/` (see `tests/integration/support/CLAUDE.md`).
+exclusively over `tests/integration/` (see `tests/integration/CLAUDE.md`).
 
 ## Tier
 

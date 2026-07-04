@@ -7,6 +7,7 @@
 #[allow(dead_code)]
 #[path = "support/reborn_parity_qa/mod.rs"]
 mod parity_qa_support;
+#[allow(dead_code)]
 #[path = "integration/support/mod.rs"]
 mod reborn_support;
 mod support;

@@ -110,8 +110,72 @@ async fn shell_timeout_surfaces_recoverable_failed() {
         .expect("run recovered and finalized (not terminal driver_unavailable)");
 }
 
-// `.with_live_shell()` test omitted: a live `echo` is hermetic but offers no
-// assertion the recording-port test above doesn't already cover — the scripted
-// model reply is fixed regardless of actual shell output, so there is nothing
-// to assert on the real execution result beyond "the tool was invoked", which
-// the recording test already proves end-to-end through the real dispatch path.
+/// Live-shell path (`.with_live_shell()`) — proves `builtin.shell` dispatches
+/// through the real `LocalHostProcessPort`, not the inert `RecordingProcessPort`
+/// the other tests in this file cover. Asserts both directions: (a) the real
+/// command's echoed output is visible in the model-facing tool result — only
+/// possible if an actual OS process ran — and (b) `assert_shell_ran_through_inert_port`
+/// (which passes only when the inert port recorded a command) reports `Err`,
+/// proving the recording port's command buffer stayed empty. Guards against a
+/// regression that routes live-shell requests back through
+/// `core_builtin_tools_default()` (the inert path) while every other test in
+/// this file — which never exercises `.with_live_shell()` — would stay green.
+///
+/// Runs on a larger-stack thread (mirrors
+/// `tests/reborn_qa_smoke_scenarios_e2e.rs::run_async_test_with_stack`): the
+/// real `LocalHostProcessPort` subprocess path (spawn + piped-stream capture)
+/// adds enough async-state-machine depth on top of the full
+/// `product_workflow → composition → webui_v2 → runtime` chain to overflow
+/// the default `#[tokio::test]` thread stack in a debug build.
+#[test]
+fn live_shell_uses_local_process_port() {
+    run_with_larger_stack(async {
+        let h = RebornIntegrationHarness::test_default()
+            .with_live_shell()
+            .script([
+                RebornScriptedReply::tool_call(
+                    "builtin.shell",
+                    json!({"command": "echo live-shell-probe"}),
+                ),
+                RebornScriptedReply::text("done"),
+            ])
+            .build()
+            .await
+            .expect("harness builds");
+        h.submit_turn("run shell").await.expect("turn completes");
+        h.assert_tool_result_contains("live-shell-probe")
+            .await
+            .expect("real process output surfaced in the model-visible tool result");
+        assert!(
+            h.assert_shell_ran_through_inert_port().await.is_err(),
+            "live shell must not route through the inert RecordingProcessPort"
+        );
+        h.assert_reply_contains("done")
+            .await
+            .expect("final reply finalized");
+    });
+}
+
+/// Spawns `test` on a dedicated 16MB-stack thread with a current-thread tokio
+/// runtime. See the doc comment on `live_shell_uses_local_process_port` for
+/// why this one test needs it (matches the existing fix in
+/// `tests/reborn_qa_smoke_scenarios_e2e.rs::run_async_test_with_stack`).
+fn run_with_larger_stack<F>(test: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name("live_shell_uses_local_process_port".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio test runtime")
+                .block_on(test);
+        })
+        .expect("spawn stack-sized test thread");
+    if let Err(panic) = handle.join() {
+        std::panic::resume_unwind(panic);
+    }
+}

@@ -1,6 +1,6 @@
-/// Test double substituting the production `NetworkHttpEgress` impl
-/// (`PolicyNetworkHttpEgress` over `ReqwestNetworkTransport`,
-/// `crates/ironclaw_network/src/egress.rs`).
+/// Test double substituting the production `NetworkHttpEgress` impl:
+/// `PolicyNetworkHttpEgress` (`crates/ironclaw_network/src/egress.rs`) over
+/// `ReqwestNetworkTransport` (`crates/ironclaw_network/src/transport.rs`).
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},

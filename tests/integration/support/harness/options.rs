@@ -8,7 +8,6 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::BUILTIN_FIRST_PARTY_PROVIDER;
 use ironclaw_network::NetworkHttpEgress;
 
-use super::super::group::GroupBaseData;
 use super::{HarnessResult, HostRuntimeCapabilityHarness};
 
 #[derive(Default)]
@@ -292,26 +291,5 @@ impl ToolsProfile {
             None => {}
         }
         Ok(harness)
-    }
-
-    /// Shared "align user to the group's canonical binding subject, then
-    /// build" step for the `group_constructors.rs` presets whose capability
-    /// executes under the group's resolved binding user rather than the
-    /// constructor's fixed test user (`live_approvals`, `live_auth_and_approval`,
-    /// `profile_tools`, `outbound_target_tools` — verified against
-    /// `group_constructors.rs`).
-    ///
-    /// This is the COMMON core of those four; it does NOT cover
-    /// `skill_activation_tools` (alignment is a constructor-time tenant param
-    /// plus a post-build skill seed) or `multiuser_approvals` (alignment is
-    /// `.with_run_owner_scoped_capability_dispatch()`, not a fixed `user_id`
-    /// override) — those remain call-site-specific.
-    pub(crate) async fn build_group_capability_with_base(
-        self,
-        base: &GroupBaseData,
-    ) -> HarnessResult<HostRuntimeCapabilityHarness> {
-        let subject_user = base.canonical_subject_user()?;
-        let harness = self.build().await?;
-        Ok(harness.with_user_id(subject_user))
     }
 }

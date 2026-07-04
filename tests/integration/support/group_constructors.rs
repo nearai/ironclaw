@@ -11,9 +11,30 @@
 
 use std::sync::Arc;
 
+use super::super::harness::HostRuntimeCapabilityHarness;
+use super::super::harness::options::ToolsProfile;
 use super::{
-    GroupCapability, HarnessResult, RebornIntegrationGroup, RebornIntegrationGroupBuilder,
+    GroupBaseData, GroupCapability, HarnessResult, RebornIntegrationGroup,
+    RebornIntegrationGroupBuilder,
 };
+
+/// Shared "align user to the group's canonical binding subject, then build"
+/// step for the preset constructors below whose capability executes under
+/// the group's resolved binding user rather than a fixed constructor test
+/// user (`live_approvals`, `live_auth_and_approval`, `profile_tools`,
+/// `outbound_target_tools`). Does NOT cover `skill_activation_tools`
+/// (alignment is a constructor-time tenant param plus a post-build skill
+/// seed) or `multiuser_approvals` (alignment is
+/// `.with_run_owner_scoped_capability_dispatch()`, not a fixed `user_id`
+/// override) — those remain call-site-specific.
+async fn build_group_capability_with_base(
+    profile: ToolsProfile,
+    base: &GroupBaseData,
+) -> HarnessResult<HostRuntimeCapabilityHarness> {
+    let subject_user = base.canonical_subject_user()?;
+    let harness = profile.build().await?;
+    Ok(harness.with_user_id(subject_user))
+}
 
 impl RebornIntegrationGroup {
     /// Group with real file-tool approval stores (write_file/read_file at
@@ -180,12 +201,13 @@ impl RebornIntegrationGroupBuilder {
         // Align capability execution to the run's CANONICAL binding subject user
         // (not the constructor's fixed test user) so dispatch, approval, auto-
         // approve keying, and gate-evidence lookup share one `(tenant, user)` —
-        // matching production. `build_group_capability_with_base` is the shared
-        // "build then align user" core (`harness/options.rs`).
-        let host_runtime =
-            super::super::harness::profiles::file::file_tools_requiring_approval_profile()?
-                .build_group_capability_with_base(&base)
-                .await?;
+        // matching production. `build_group_capability_with_base` (above) is the
+        // shared "build then align user" core.
+        let host_runtime = build_group_capability_with_base(
+            super::super::harness::profiles::file::file_tools_requiring_approval_profile()?,
+            &base,
+        )
+        .await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         let group = self.into_group(base, capability).await?;
         // Disable auto-approve once so every thread faces real approval gates;
@@ -239,12 +261,13 @@ impl RebornIntegrationGroupBuilder {
     /// constructor's fixed test user.
     pub async fn live_auth_and_approval(self) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
-        // `build_group_capability_with_base` is the shared "build then align
-        // user" core (`harness/options.rs`) — see `live_approvals` above.
-        let host_runtime =
-            super::super::harness::profiles::github::file_and_github_auth_tools_profile()?
-                .build_group_capability_with_base(&base)
-                .await?;
+        // `build_group_capability_with_base` (above) is the shared "build then
+        // align user" core — see `live_approvals` above.
+        let host_runtime = build_group_capability_with_base(
+            super::super::harness::profiles::github::file_and_github_auth_tools_profile()?,
+            &base,
+        )
+        .await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         let group = self.into_group(base, capability).await?;
         // `file_and_github_auth_tools` already disabled auto-approve under its
@@ -286,9 +309,11 @@ impl RebornIntegrationGroupBuilder {
         // (mirrors `live_approvals`) — otherwise a write and its read-back
         // resolve under different users. Needs `base` first, so can't go
         // through `build_with_capability`.
-        let host_runtime = super::super::harness::profiles::profile::profile_tools_profile()?
-            .build_group_capability_with_base(&base)
-            .await?;
+        let host_runtime = build_group_capability_with_base(
+            super::super::harness::profiles::profile::profile_tools_profile()?,
+            &base,
+        )
+        .await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.into_group(base, capability).await
     }
@@ -364,12 +389,13 @@ impl RebornIntegrationGroupBuilder {
     /// Auto-approve stays default-ON here; the gate arm disables it per-test.
     pub async fn outbound_target_tools(self) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
-        // `build_group_capability_with_base` is the shared "build then align
-        // user" core (`harness/options.rs`) — see `live_approvals` above.
-        let host_runtime =
-            super::super::harness::profiles::outbound::outbound_target_tools_profile()?
-                .build_group_capability_with_base(&base)
-                .await?;
+        // `build_group_capability_with_base` (above) is the shared "build then
+        // align user" core — see `live_approvals` above.
+        let host_runtime = build_group_capability_with_base(
+            super::super::harness::profiles::outbound::outbound_target_tools_profile()?,
+            &base,
+        )
+        .await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.into_group(base, capability).await
     }

@@ -249,3 +249,51 @@ assert_scope_no_trailing_newline \
 has_core_code=true
 has_legacy_tests=false
 has_reborn_tests=true"
+
+assert_scope \
+  "reborn coverage lane-run script" \
+  "scripts/ci/reborn-coverage-lane-run.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "reborn coverage merge-lcov script" \
+  "scripts/ci/reborn-coverage-merge-lcov.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "reborn coverage summary script" \
+  "scripts/ci/reborn-coverage-summary.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "reborn coverage regression suite" \
+  "scripts/ci/test-reborn-coverage.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "test suite boundaries checker script" \
+  "scripts/ci/check-test-suite-boundaries.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "test-classify-test-scope script is itself reborn-scoped" \
+  "scripts/ci/test-classify-test-scope.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=true
+has_reborn_tests=true"

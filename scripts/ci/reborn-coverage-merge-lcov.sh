@@ -55,7 +55,7 @@ files: dict[str, dict[int, int]] = {}
 # a superset of the historical Reborn-family-only allowlist (the int-tier
 # suites now exercise the whole workspace closure, not just the Reborn crate
 # families).
-crate_re = re.compile(r"/crates/(ironclaw_[A-Za-z0-9_]+)/")
+crate_re = re.compile(r"(?:^|/)crates/(ironclaw_[A-Za-z0-9_]+)/")
 
 for input_path in input_paths:
     current_file = None

@@ -23,6 +23,7 @@ pub(crate) use harness_capability_port_factory::HarnessCapabilityPortFactory;
 pub(crate) use host_runtime_harness_capability_port_factory::HostRuntimeHarnessCapabilityPortFactory;
 pub(crate) use recording_approval_request_store::RecordingApprovalRequestStore;
 pub(crate) use recording_capability_result_writer::RecordingCapabilityResultWriter;
+pub(crate) use recording_delegating_capability_port::RecordingDelegatingCapabilityPort;
 pub(crate) use recording_host_runtime::RecordingHostRuntime;
 pub(crate) use recording_network_http_egress::RecordingNetworkHttpEgress;
 pub(crate) use recording_runtime_http_egress::RecordingRuntimeHttpEgress;

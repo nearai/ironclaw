@@ -1,22 +1,11 @@
-//! Reborn binary-E2E harness.
-//!
-//! This harness drives the product caller path used by the #3702 validation
-//! ports:
-//!
-//! inbound bytes -> ProductAdapter -> DefaultProductWorkflow ->
-//! DefaultInboundTurnService -> DefaultTurnCoordinator -> TurnRunScheduler ->
-//! Reborn planned agent loop -> model/capability/transcript evidence.
-//!
-//! Documented test-support substitutions:
-//! - the model gateway is scripted trace replay;
-//! - the capability port is a local recording echo/approval port;
-//! - external internet, delivery, and OAuth are not exercised by this harness.
+//! `HostRuntimeCapabilityHarness` — the integration-tier harness that
+//! assembles real host-runtime capability wiring (a genuine `HostRuntime`,
+//! real mounts, real capability dispatch) over recorded test doubles
+//! substituted at the port boundaries (HTTP/network egress, process,
+//! approval). See `tests/integration/CLAUDE.md` for the `harness/` file
+//! split and the single-fake-at-the-vendor-SDK-seam contract it implements.
 
 #![allow(dead_code)] // Shared by staged Reborn binary-E2E validation ports.
-
-// arch-exempt: large_file, Reborn binary-E2E + host-runtime capability harness; the
-// mock-MCP scaffolding has been split into `harness_mcp.rs`, further focused splits
-// (auth, hooks) are tracked in `tests/integration/CLAUDE.md`.
 
 pub(crate) mod assembly;
 pub(crate) mod options;
@@ -40,36 +29,38 @@ use ironclaw_filesystem::{
     RootFilesystem, ScopedFilesystem, StorageClass,
 };
 use ironclaw_host_api::{
-    Action, AgentId, ApprovalRequestId, CapabilityId, EffectKind, ExtensionId, GrantConstraints,
-    InvocationId, MountAlias, MountGrant, MountPermissions, MountView, NetworkPolicy, Principal,
-    ProjectId, ResourceScope, RuntimeHttpEgressRequest, RuntimeKind, SecretHandle, TenantId,
-    UserId, VirtualPath,
+    Action, AgentId, ApprovalRequestId, CapabilityGrant, CapabilityGrantId, CapabilityId,
+    CapabilitySet, EffectKind, ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant,
+    MountPermissions, MountView, NetworkPolicy, Principal, ProjectId, ResourceScope,
+    RuntimeHttpEgressRequest, RuntimeKind, SecretHandle, TenantId, TrustClass, UserId, VirtualPath,
 };
-use ironclaw_host_runtime::HostRuntime;
+use ironclaw_host_runtime::{CapabilitySurfacePolicy, HostRuntime, SurfaceKind};
 use ironclaw_loop_support::{
-    CapabilityAllowSet, CapabilitySurfaceProfileResolver, LoopCapabilityPortFactory,
-    LoopCapabilityResultWriter,
+    CapabilityAllowSet, CapabilitySurfaceProfileResolver, HostRuntimeLoopCapabilityPortFactory,
+    LoopCapabilityPortFactory, LoopCapabilityResultWriter,
 };
 use ironclaw_network::NetworkHttpRequest;
 use ironclaw_product_workflow::{ProjectService, ResolvedBinding};
 use ironclaw_reborn_composition::test_support::SkillActivationTestSource;
 use ironclaw_reborn_composition::{
-    ProductLiveCapabilityIo, RebornBuildInput, RebornLocalDevApprovalTestParts,
-    RebornProductAuthServices, build_reborn_services,
+    ProductLiveCapabilityIo, ProductLiveVisibleCapabilityRequestConfig, RebornBuildInput,
+    RebornLocalDevApprovalTestParts, RebornProductAuthServices, build_reborn_services,
+    visible_capability_request_for_run,
 };
+use ironclaw_trust::EffectiveTrustClass;
 use ironclaw_turns::{
     GateRef,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInvocation, LoopCapabilityPort,
-        LoopRunContext,
+        LoopHostMilestoneSink, LoopRunContext,
     },
 };
 
 pub(crate) use super::doubles::{
     EmptyIdentityContextSource, HarnessCapabilityPortFactory,
     HostRuntimeHarnessCapabilityPortFactory, RecordingApprovalRequestStore,
-    RecordingCapabilityResultWriter, RecordingHostRuntime, RecordingNetworkHttpEgress,
-    RecordingRuntimeHttpEgress, RecordingTestCapabilityPort,
+    RecordingCapabilityResultWriter, RecordingDelegatingCapabilityPort, RecordingHostRuntime,
+    RecordingNetworkHttpEgress, RecordingRuntimeHttpEgress, RecordingTestCapabilityPort,
     StaticCapabilitySurfaceProfileResolver,
 };
 pub(crate) use assembly::{
@@ -148,25 +139,25 @@ struct OutboundTargetToolsParts {
 }
 
 pub(crate) struct HostRuntimeCapabilityHarness {
-    pub(crate) runtime: Arc<dyn HostRuntime>,
+    runtime: Arc<dyn HostRuntime>,
     approval_parts: Option<RebornLocalDevApprovalTestParts>,
     auto_approve_settings: Option<Arc<dyn ironclaw_approvals::AutoApproveSettingStore>>,
     pending_approval_scopes: Arc<Mutex<HashMap<ApprovalRequestId, ResourceScope>>>,
-    pub(crate) io: Arc<ProductLiveCapabilityIo>,
+    io: Arc<ProductLiveCapabilityIo>,
     root: Arc<tempfile::TempDir>,
     workspace_root: PathBuf,
-    pub(crate) mounts: MountView,
-    pub(crate) capability_mount_overrides: Vec<(CapabilityId, MountView)>,
-    pub(crate) capability_ids: Vec<CapabilityId>,
-    pub(crate) runtime_kind: RuntimeKind,
-    pub(crate) effect_kinds: Vec<EffectKind>,
-    pub(crate) network_policy: NetworkPolicy,
-    pub(crate) secrets: Vec<SecretHandle>,
-    pub(crate) provider_id: ExtensionId,
-    pub(crate) additional_provider_trust: Vec<(ExtensionId, Vec<EffectKind>)>,
+    mounts: MountView,
+    capability_mount_overrides: Vec<(CapabilityId, MountView)>,
+    capability_ids: Vec<CapabilityId>,
+    runtime_kind: RuntimeKind,
+    effect_kinds: Vec<EffectKind>,
+    network_policy: NetworkPolicy,
+    secrets: Vec<SecretHandle>,
+    provider_id: ExtensionId,
+    additional_provider_trust: Vec<(ExtensionId, Vec<EffectKind>)>,
     user_id: UserId,
-    pub(crate) invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
-    pub(crate) results: Arc<Mutex<Vec<RecordedCapabilityResult>>>,
+    invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
+    results: Arc<Mutex<Vec<RecordedCapabilityResult>>>,
     http_egress: Option<Arc<RecordingRuntimeHttpEgress>>,
     network_egress: Option<Arc<RecordingNetworkHttpEgress>>,
     /// Inert recording process port. `Some` when the harness injected a
@@ -996,7 +987,7 @@ impl HostRuntimeCapabilityHarness {
     /// outbound), each layered independently when this harness holds the backing
     /// handle, so other local-dev groups are unaffected. See
     /// `LocalDevCapabilityPortFactory::build_inner()` for the full production set.
-    pub(crate) fn apply_synthetic_capability_wrappers(
+    fn apply_synthetic_capability_wrappers(
         &self,
         port: Arc<dyn LoopCapabilityPort>,
         run_context: &LoopRunContext,
@@ -1088,6 +1079,89 @@ impl HostRuntimeCapabilityHarness {
         Ok(port)
     }
 
+    /// Assembles the recording `LoopCapabilityPort` for one run: builds the
+    /// authority/grant/visible-capability-request chain over this harness's
+    /// fields, wraps it in the real `HostRuntimeLoopCapabilityPortFactory`,
+    /// layers the synthetic capability wrappers, and wraps the result in the
+    /// invocation-recording port. Owned here (rather than in the
+    /// `HostRuntimeHarnessCapabilityPortFactory` test double) because the
+    /// assembly reads this harness's fields directly — see
+    /// `tests/integration/support/doubles/host_runtime_harness_capability_port_factory.rs`
+    /// for the thin `LoopCapabilityPortFactory` delegating wrapper that calls
+    /// this method.
+    pub(crate) async fn create_recording_capability_port(
+        &self,
+        run_context: &LoopRunContext,
+        milestone_sink: &Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
+    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        // C-MULTIUSER: resolve the execution user per run (owner/actor) when the
+        // harness opts in, else the fixed harness user. Both the authority scope
+        // and the grant grantee MUST use the SAME user so the lease is
+        // self-consistent (grantee == execution user) — matching production.
+        let dispatch_user = self.dispatch_user_for_run(run_context);
+        let mut authority = ProductLiveVisibleCapabilityRequestConfig::new(
+            dispatch_user.clone(),
+            self.runtime_kind,
+            TrustClass::FirstParty,
+            SurfaceKind::new("agent_loop").map_err(host_runtime_harness_error)?,
+            CapabilitySurfacePolicy::allow_all(),
+        )
+        .with_mounts(self.mounts.clone())
+        .with_grants(capability_grants(
+            Principal::User(dispatch_user.clone()),
+            &self.capability_ids,
+            self.effect_kinds.clone(),
+            self.mounts.clone(),
+            &self.capability_mount_overrides,
+            self.network_policy.clone(),
+            self.secrets.clone(),
+        ))
+        .with_provider_trust_for_effects(
+            self.provider_id.clone(),
+            EffectiveTrustClass::user_trusted(),
+            self.effect_kinds.clone(),
+        );
+        for (provider, effects) in &self.additional_provider_trust {
+            authority = authority.with_provider_trust_for_effects(
+                provider.clone(),
+                EffectiveTrustClass::user_trusted(),
+                effects.clone(),
+            );
+        }
+        let execution_mounts = self.mounts.clone();
+        let visible_request = visible_capability_request_for_run(run_context, authority)
+            .map_err(host_runtime_harness_error)?;
+        let milestone_sink: Arc<dyn LoopHostMilestoneSink> = milestone_sink.clone();
+        let result_writer = Arc::new(RecordingCapabilityResultWriter {
+            inner: self.io.clone(),
+            results: Arc::clone(&self.results),
+        });
+        let mut factory = HostRuntimeLoopCapabilityPortFactory::new(
+            Arc::clone(&self.runtime),
+            visible_request,
+            self.io.clone(),
+            result_writer.clone(),
+            milestone_sink,
+        )
+        .with_execution_mounts(execution_mounts);
+        for (capability_id, mounts) in &self.capability_mount_overrides {
+            factory =
+                factory.with_capability_execution_mount(capability_id.clone(), mounts.clone());
+        }
+        let port = factory.for_run_context(run_context.clone());
+        // E-PROJ: see `apply_synthetic_capability_wrappers`'s doc comment.
+        let port = self.apply_synthetic_capability_wrappers(
+            port,
+            run_context,
+            self.io.clone(),
+            result_writer,
+        )?;
+        Ok(Arc::new(RecordingDelegatingCapabilityPort {
+            inner: port,
+            invocations: Arc::clone(&self.invocations),
+        }))
+    }
+
     /// Override the user this capability harness executes first-party tools
     /// under. Dispatch scope, approval persistence, auto-approve keying, and
     /// gate-evidence lookup are ALL keyed on this user. The integration harness
@@ -1118,7 +1192,7 @@ impl HostRuntimeCapabilityHarness {
     /// prefer the run scope's explicit owner, then the run actor, then fall back
     /// to the fixed harness `user_id`. Without the flag, always the fixed
     /// `user_id` (legacy behavior — every existing test unaffected).
-    pub(crate) fn dispatch_user_for_run(&self, run_context: &LoopRunContext) -> UserId {
+    fn dispatch_user_for_run(&self, run_context: &LoopRunContext) -> UserId {
         if self.scope_capability_by_run_owner {
             run_context
                 .scope
@@ -1151,6 +1225,48 @@ impl HostRuntimeCapabilityHarness {
             },
         }
     }
+}
+
+fn capability_grants(
+    grantee: Principal,
+    capabilities: &[CapabilityId],
+    allowed_effects: Vec<EffectKind>,
+    mounts: MountView,
+    mount_overrides: &[(CapabilityId, MountView)],
+    network: NetworkPolicy,
+    secrets: Vec<SecretHandle>,
+) -> CapabilitySet {
+    CapabilitySet {
+        grants: capabilities
+            .iter()
+            .map(|capability| {
+                let mounts = mount_overrides
+                    .iter()
+                    .find(|(override_capability, _mounts)| override_capability == capability)
+                    .map(|(_capability, mounts)| mounts.clone())
+                    .unwrap_or_else(|| mounts.clone());
+                CapabilityGrant {
+                    id: CapabilityGrantId::new(),
+                    capability: capability.clone(),
+                    grantee: grantee.clone(),
+                    issued_by: Principal::HostRuntime,
+                    constraints: GrantConstraints {
+                        allowed_effects: allowed_effects.clone(),
+                        mounts,
+                        network: network.clone(),
+                        secrets: secrets.clone(),
+                        resource_ceiling: None,
+                        expires_at: None,
+                        max_invocations: None,
+                    },
+                }
+            })
+            .collect(),
+    }
+}
+
+fn host_runtime_harness_error(error: impl std::fmt::Display) -> AgentLoopHostError {
+    AgentLoopHostError::new(AgentLoopHostErrorKind::InvalidInvocation, error.to_string())
 }
 
 fn approval_request_id_from_gate_ref(gate_ref: &GateRef) -> HarnessResult<ApprovalRequestId> {

@@ -4,7 +4,7 @@ mod parity_qa_support;
 #[allow(dead_code)]
 #[path = "integration/support/mod.rs"]
 mod reborn_support;
-// Required by reborn_support::model_replay through crate::support::trace_llm.
+// Required by parity_qa_support::model_replay through crate::support::trace_llm.
 mod support;
 
 use ironclaw_host_api::{
