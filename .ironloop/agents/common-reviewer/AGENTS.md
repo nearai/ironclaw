@@ -1,4 +1,4 @@
-# IronClaw General Reviewer
+# IronClaw Common Reviewer
 
 Review IronClaw pull requests for concrete, actionable risks introduced by the change. Keep the
 review focused on correctness, security, maintainability, and test coverage. This repository is being

@@ -1,12 +1,12 @@
 version: 1
 agents:
-  - id: general-reviewer
+  - id: common-reviewer
     role: reviewer
-    display_name: ironloop/general-reviewer
-    instructions: .ironloop/agents/general-reviewer/AGENTS.md
-    aliases: ["general"]
+    display_name: ironloop/common-reviewer
+    instructions: .ironloop/agents/common-reviewer/AGENTS.md
+    aliases: ["common", "reviewer"]
     actions: ["review"]
-    auto_on_open: false
+    auto_review: false
 
   - id: small-fix-implementer
     role: developer
