@@ -275,12 +275,8 @@ jobs:
           save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
       - name: Install cargo-component
         uses: ./.github/actions/install-cargo-component
-      - name: Build WASM tools against current WIT
-        run: ./scripts/build-wasm-extensions.sh --tools
-      - name: Build first-party WASM extensions against current WIT
-        run: ./scripts/build-wasm-extensions.sh --first-party
-      - name: Build channel WASM extensions against current WIT
-        uses: ./.github/actions/cache-channel-wasm
+      - name: Build all WASM extensions against current WIT
+        run: ./scripts/build-wasm-extensions.sh
       - name: Instantiation test (host linker compatibility)
         run: |
           timeout --signal=INT --kill-after=30s 20m \

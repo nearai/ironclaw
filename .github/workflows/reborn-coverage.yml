@@ -88,6 +88,11 @@ jobs:
           # (invisible to other PRs) that evicts the useful seed.
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
+      - name: Install mold and clang
+        run: |
+          scripts/ci/install-ci-apt-packages.sh clang mold
+          test -x /usr/bin/mold
+
       - name: Setup OVH sccache
         uses: ./.github/actions/setup-sccache-dist
         with:
@@ -104,6 +109,8 @@ jobs:
         uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # cargo-llvm-cov
 
       - name: Generate Reborn integration-tier coverage
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"
         run: |
           set -euo pipefail
           # Process substitution hides the discovery script's exit code, so
