@@ -60,7 +60,7 @@ is report-only unless a new benchmark experiment is intentionally in flight.
 | H6 | Disable incremental compilation across all Reborn crate buckets. | Avoid CI-only incremental bookkeeping and target-dir churn for one-shot builds. | Tested | Rejected: wall clock regressed from `8m35s` to `8m49s`; job count unchanged. |
 | H7 | Remove the duplicate instrumented `reborn_group_*` coverage lane from PR CI. | Reduce Reborn job count while keeping the uninstrumented group pass/fail gate. | Tested | Rejected: total jobs dropped from `28` to `27`, but wall clock regressed from `8m35s` to `9m39s`. |
 | H8 | Merge only the two smallest Reborn crate buckets, `auth-security` and `memory-skills`. | Reduce crate bucket jobs by one while leaving all long-pole buckets unchanged. | Tested | Reverted by decision: total jobs dropped from `28` to `27`, but the compile-heavy long poles remained unchanged. |
-| H9 | Enable sccache distributed compilation for all Reborn crate buckets. | Reduce compile time for the existing long-pole buckets without changing coverage. | Running | Pending CI result. |
+| H9 | Enable sccache distributed compilation for all Reborn crate buckets. | Reduce compile time for the existing long-pole buckets without changing coverage. | Tested | Rejected: wall clock regressed from `8m35s` to `9m11s`; long-pole buckets were slower. |
 
 ## H1: Narrow Crate Bucket Targets
 
@@ -420,4 +420,32 @@ Why this is safe to test:
 Benchmark result:
 
 - Branch/PR: [`codex/ci-compile-benchmarks`, PR #5648](https://github.com/nearai/ironclaw/pull/5648)
-- Workflow run: pending.
+- Workflow run: [`28721039930`](https://github.com/nearai/ironclaw/actions/runs/28721039930)
+- Status: success
+- Wall clock: `9m11s` (`2026-07-04T22:02:40Z` to `2026-07-04T22:11:51Z`)
+- Total Reborn jobs: `28`
+- Crate bucket job count: `12`
+- Slowest bucket: `host-runtime` at `512s`
+- Decision: reject. Enabling distributed compilation for the buckets that were
+  intentionally cache-only made the critical path slower.
+
+Comparison against baseline:
+
+| Metric | Baseline | H9 | Delta |
+| --- | ---: | ---: | ---: |
+| Reborn workflow wall clock | `8m35s` | `9m11s` | `+36s` |
+| Total Reborn jobs | `28` | `28` | `0` |
+| Crate bucket job count | `12` | `12` | `0` |
+| `host-runtime` | `473s` | `512s` | `+39s` |
+| `composition-core` | `419s` | `436s` | `+17s` |
+| `reborn-core` | `367s` | `378s` | `+11s` |
+| `webui-ingress` | `334s` | `298s` | `-36s` |
+| `wasm-sandbox` | `307s` | `253s` | `-54s` |
+
+Interpretation:
+
+The distributed scheduler helped some non-critical buckets, but it regressed
+all three long-pole buckets that determine wall clock. The existing opt-out
+list is justified by this benchmark; the remaining compile-time work needs to
+reduce the dependency/feature graph or avoid repeated compiles, not simply send
+the same graph through sccache-dist.
