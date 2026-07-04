@@ -63,7 +63,7 @@ is report-only unless a new benchmark experiment is intentionally in flight.
 | H9 | Enable sccache distributed compilation for all Reborn crate buckets. | Reduce compile time for the existing long-pole buckets without changing coverage. | Tested | Rejected: wall clock regressed from `8m35s` to `9m11s`; long-pole buckets were slower. |
 | H10 | Remove the duplicate `libsql-restart-tests` feature from the broad `ironclaw_reborn` crate bucket. | Reduce `reborn-core` runtime while preserving the dedicated restart-test PR gate. | Reverted | Abandoned: package-node evidence showed no compile-graph shrink, and the active run still left the compile-heavy long poles as the blocker. |
 | H11 | Move libSQL-heavy coverage out of broad long-pole crate buckets into the existing Reborn group job. | Reduce compile graph size for `host-runtime` and `reborn-core` without dropping persistence coverage or adding a new job. | Tested | Rejected: wall clock regressed from `8m35s` to `9m50s`; `host-runtime`, `reborn-core`, and `composition-core` were all slower. |
-| H12 | Move `ironclaw_reborn_cli` from `reborn-core` to `webui-ingress`. | Keep job count flat while grouping the WebUI-shaped CLI build with the WebUI ingress bucket instead of the core Reborn bucket. | Running | Pending CI result. |
+| H12 | Move `ironclaw_reborn_cli` from `reborn-core` to `webui-ingress`. | Keep job count flat while grouping the WebUI-shaped CLI build with the WebUI ingress bucket instead of the core Reborn bucket. | Tested | Rejected: `reborn-core` improved from `367s` to `238s`, but `webui-ingress` grew from `334s` to `377s`; wall clock stayed flat at `8m37s` with no job-count reduction. |
 
 ## H1: Narrow Crate Bucket Targets
 
@@ -633,4 +633,29 @@ ironclaw_webui_v2 --features webui-v2-beta
 Benchmark result:
 
 - Branch/PR: [`codex/ci-compile-benchmarks`, PR #5648](https://github.com/nearai/ironclaw/pull/5648)
-- Workflow run: pending.
+- Workflow run: [`28722205751`](https://github.com/nearai/ironclaw/actions/runs/28722205751)
+- Status: success.
+- Wall clock: `8m37s` (`2026-07-04T22:50:54Z` to `2026-07-04T22:59:31Z`).
+- Total Reborn jobs: `28` unchanged.
+- Reborn crate bucket jobs: `12` unchanged.
+
+| Metric | Baseline | H12 | Delta |
+| --- | ---: | ---: | ---: |
+| Reborn workflow wall clock | `8m35s` | `8m37s` | `+2s` |
+| Total Reborn jobs | `28` | `28` | `0` |
+| Reborn crate bucket jobs | `12` | `12` | `0` |
+| `reborn-core` | `367s` | `238s` | `-129s` |
+| `webui-ingress` | `334s` | `377s` | `+43s` |
+| `composition-core` | `419s` | `445s` | `+26s` |
+| `host-runtime` | `473s` | `480s` | `+7s` |
+| `wasm-sandbox` | `307s` | `296s` | `-11s` |
+| Reborn group tests | `324s` | `406s` | `+82s` |
+
+Decision:
+
+- Reject and revert. The change validated that `ironclaw_reborn_cli` is a large
+  part of the `reborn-core` bucket, but moving it only shifts compile cost into
+  `webui-ingress`.
+- The workflow still has the same job count and the same compile-bound long
+  poles: `host-runtime`, `composition-core`, `webui-ingress`, root tests, and
+  group tests.
