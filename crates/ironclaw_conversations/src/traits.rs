@@ -50,9 +50,6 @@ pub trait ConversationBindingService: Send + Sync {
     ) -> Result<ReplyTargetBinding, InboundTurnError>;
 }
 
-pub trait ConversationBindingServiceExt: ConversationBindingService {}
-impl<T> ConversationBindingServiceExt for T where T: ConversationBindingService {}
-
 #[async_trait]
 pub trait ConversationActorPairingService: Send + Sync {
     /// Pair an adapter-scoped external actor with a canonical Reborn user.

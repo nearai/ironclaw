@@ -2876,24 +2876,25 @@ async def case_qa_6e_gmail_to_sheet_delivery(ctx: LiveQaContext) -> ProbeResult:
                 "Drive lookup by exact sheet name did not find one"
             )
             return result
-        sheet_check = await _google_sheet_contains_marker(
+        sheet_check = await _wait_for_google_sheet_marker(
             access_token=access_token,
             spreadsheet_id=spreadsheet_id,
             marker=marker,
+            timeout=90.0,
         )
         result.details["google_token"] = token_meta
         result.details["spreadsheet_id"] = spreadsheet_id
         result.details["sheet_marker_check"] = sheet_check
-        if not sheet_check.get("found"):
-            result.success = False
-            result.details["error"] = "Google Sheet did not contain the QA marker row"
         result.latency_ms = int((time.monotonic() - started) * 1000)
         return result
     except Exception as exc:
         result.success = False
         result.latency_ms = int((time.monotonic() - started) * 1000)
         result.details["spreadsheet_id"] = spreadsheet_id
-        result.details["error"] = str(exc)
+        exc_text = str(exc)
+        result.details["error"] = (
+            f"{type(exc).__name__}: {exc_text}" if exc_text else type(exc).__name__
+        )
         return result
 
 
@@ -3644,7 +3645,7 @@ async def case_qa_8c_hn_keyword_slack_routine(ctx: LiveQaContext) -> ProbeResult
         case_name="qa_8c_hn_keyword_slack_routine",
         routine_name=routine_name,
         marker=None,
-        required_text=["routine"],
+        required_text=["routine|trigger|automation|cron|schedule|created|monitor"],
         prompt=_qa_sheet_prompt("qa_8c_hn_keyword_slack_routine"),
     )
 

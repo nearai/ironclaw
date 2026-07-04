@@ -32,13 +32,15 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(feature = "postgres")]
+use crate::redaction::redact_postgres_url;
 use crate::{
     capture::CapturedRun,
     child_io::{join_child_stderr_reader, spawn_child_stderr_reader},
     db_probe::DbProbeSummary,
     process_metrics::{ProcessMetrics, ProcessMetricsSampler},
     progress::{ProgressCounters, spawn_progress_reporter, stop_progress_reporter},
-    redaction::{redact_libsql_path, redact_postgres_url},
+    redaction::redact_libsql_path,
     summary::{
         FailureCause, FailureCauseSummary, LatencySummary, latency_summary,
         summarize_failure_causes, summarize_user_turn_operation_attribution,

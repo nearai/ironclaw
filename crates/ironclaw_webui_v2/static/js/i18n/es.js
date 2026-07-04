@@ -915,11 +915,12 @@ registerPack("es", {
   "pairing.error": "El emparejamiento falló.",
   "pairing.none": "No hay solicitudes de emparejamiento pendientes.",
   "pairing.slackTitle": "Conexión de cuenta Slack",
-  "pairing.slackInstructions": "Envíe un mensaje a la aplicación Slack, luego ingrese el código aquí.",
+  "pairing.slackInstructions": "Envía un mensaje a la app IronClaw Reborn en Slack para obtener un código de vinculación y pégalo aquí. Los códigos caducan en 10 minutos. Si un código no es válido o caducó, ejecuta /pair en Slack para obtener uno nuevo.",
   "pairing.slackPlaceholder": "Ingrese el código de emparejamiento Slack…",
   "pairing.connect": "Conectar",
+  "pairing.reconnectHint": "Conectado — pega un nuevo código para volver a vincular.",
   "pairing.slackSuccess": "Cuenta Slack conectada.",
-  "pairing.slackError": "Código de emparejamiento Slack no válido o caducado.",
+  "pairing.slackError": "Código de emparejamiento Slack no válido o caducado. Ejecute /pair en Slack para obtener uno nuevo.",
 
   // Admin — tabs
   "admin.tab.dashboard": "Panel de control",
@@ -1068,6 +1069,7 @@ registerPack("es", {
   "job.followupPlaceholder": "Enviar un mensaje de seguimiento al trabajo en ejecución",
   "common.noChatsMatch": "Ningún chat coincide con \"{query}\"",
   "extensions.configure": "Configurar",
+  "extensions.connect": "Conectar",
   "extensions.reconfigure": "Reconfigurar",
   "extensions.configureName": "Configurar {name}",
   "extensions.allInstalled": "Todas las extensiones instaladas",

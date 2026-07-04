@@ -915,11 +915,12 @@ registerPack("ja", {
   "pairing.error": "ペアリングに失敗しました。",
   "pairing.none": "保留中のペアリング要求はありません。",
   "pairing.slackTitle": "Slack アカウント接続",
-  "pairing.slackInstructions": "Slack アプリにメッセージを送り、ここにコードを入力します。",
+  "pairing.slackInstructions": "Slack で IronClaw Reborn アプリにメッセージを送り、ペアリングコードを取得してここに貼り付けます。コードは 10 分で期限切れになります。コードが無効または期限切れの場合は、Slack で /pair を実行して新しいコードを取得してください。",
   "pairing.slackPlaceholder": "Slack ペアリング コードを入力してください…",
   "pairing.connect": "接続",
+  "pairing.reconnectHint": "接続済み — 再ペアリングするには新しいコードを貼り付けてください。",
   "pairing.slackSuccess": "Slack アカウントが接続されました。",
-  "pairing.slackError": "Slack ペアリング コードが無効または期限切れです。",
+  "pairing.slackError": "Slack ペアリング コードが無効または期限切れです。Slack で /pair を実行して新しいコードを取得してください。",
 
   // Admin — tabs
   "admin.tab.dashboard": "ダッシュボード",
@@ -1067,6 +1068,7 @@ registerPack("ja", {
   "job.followupPlaceholder": "実行中のジョブにフォローアップ プロンプトを送信します",
   "common.noChatsMatch": "いいえチャットは「{query}」と一致します",
   "extensions.configure": "設定",
+  "extensions.connect": "接続",
   "extensions.reconfigure": "再設定",
   "extensions.configureName": "{name} を設定します",
   "extensions.allInstalled": "インストール済み",

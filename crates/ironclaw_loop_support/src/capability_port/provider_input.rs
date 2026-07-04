@@ -1,6 +1,6 @@
+use ironclaw_host_api::DispatchInputIssueCode;
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityInputIssue,
-    CapabilityInputIssueCode,
 };
 
 pub(super) const MAX_PROVIDER_NORMALIZATION_DEPTH: usize = 32;
@@ -184,13 +184,13 @@ fn validation_error_input_issues(
         "additionalProperties" => return unexpected_field_issues(arguments, schema, error),
         "type" => (
             safe_schema_path_summary(error.instance_path().as_str()),
-            CapabilityInputIssueCode::TypeMismatch,
+            DispatchInputIssueCode::TypeMismatch,
             expected_type_at_schema_path(schema, error.schema_path().as_str()),
             Some(json_value_kind(error.instance()).to_string()),
         ),
         _ => (
             safe_schema_path_summary(error.instance_path().as_str()),
-            CapabilityInputIssueCode::InvalidValue,
+            DispatchInputIssueCode::InvalidValue,
             None,
             None,
         ),
@@ -226,7 +226,7 @@ fn missing_required_issues(
 fn missing_required_issue(path: String) -> CapabilityInputIssue {
     CapabilityInputIssue {
         path,
-        code: CapabilityInputIssueCode::MissingRequired,
+        code: DispatchInputIssueCode::MissingRequired,
         expected: Some("required field".to_string()),
         received: None,
         schema_path: Some("required".to_string()),
@@ -273,7 +273,7 @@ fn unexpected_field_issues(
 fn unexpected_field_issue(path: String, schema_path: String) -> CapabilityInputIssue {
     CapabilityInputIssue {
         path,
-        code: CapabilityInputIssueCode::UnexpectedField,
+        code: DispatchInputIssueCode::UnexpectedField,
         expected: Some("declared field".to_string()),
         received: Some("unexpected field".to_string()),
         schema_path: Some(schema_path),
@@ -283,7 +283,7 @@ fn unexpected_field_issue(path: String, schema_path: String) -> CapabilityInputI
 fn invalid_value_issue(path: String, schema_path: String) -> CapabilityInputIssue {
     CapabilityInputIssue {
         path,
-        code: CapabilityInputIssueCode::InvalidValue,
+        code: DispatchInputIssueCode::InvalidValue,
         expected: None,
         received: None,
         schema_path: Some(schema_path),

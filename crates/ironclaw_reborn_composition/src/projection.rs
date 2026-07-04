@@ -75,7 +75,7 @@ const WEBUI_PROJECTION_INSTALLATION_ID: &str = "webui_v2.local";
 pub(crate) struct RebornProjectionServices {
     event_stream_manager: Arc<EventStreamManager>,
     live_updates: Arc<InMemoryProjectionUpdateSource>,
-    live_update_sequence: Arc<AtomicU64>,
+    live_sequence: Arc<AtomicU64>,
     turn_events: TurnEventBridge,
     approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
     display_previews: Arc<dyn CapabilityDisplayPreviewSource>,
@@ -169,7 +169,7 @@ impl RebornProjectionServices {
         Arc::new(LiveProjectionPublisher::new(
             Arc::clone(&self.live_updates),
             actor_user_id,
-            Arc::clone(&self.live_update_sequence),
+            Arc::clone(&self.live_sequence),
         ))
     }
 
@@ -191,7 +191,7 @@ pub(crate) fn build_reborn_projection_services(
     // One counter per projection-services bundle keeps all live publishers in
     // the same SSE cursor space; per-publisher counters can collide after a
     // durable cursor has advanced.
-    let live_update_sequence = Arc::new(AtomicU64::new(0));
+    let live_sequence = Arc::new(AtomicU64::new(0));
     let event_stream_manager = Arc::new(EventStreamManager::from_services(
         projection,
         Arc::new(AllowAllProjectionAccessPolicy),
@@ -203,7 +203,7 @@ pub(crate) fn build_reborn_projection_services(
     RebornProjectionServices {
         event_stream_manager,
         live_updates,
-        live_update_sequence,
+        live_sequence,
         turn_events: TurnEventBridge::default(),
         approval_requests: None,
         display_previews: Arc::new(NoopCapabilityDisplayPreviewSource),

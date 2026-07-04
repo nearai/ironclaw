@@ -1,15 +1,15 @@
 use std::collections::{HashMap, HashSet};
 
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::{CapabilityId, DispatchInputIssueCode};
 use ironclaw_turns::{
     LoopResultRef,
     run_profile::{
         AgentLoopDriverHost, AppendCapabilityResultRef, CapabilityApprovalResume,
         CapabilityAuthResume, CapabilityCallCandidate, CapabilityDescriptorView, CapabilityFailure,
         CapabilityFailureDetail, CapabilityFailureKind, CapabilityInputIssue,
-        CapabilityInputIssueCode, CapabilityInputRepair, CapabilityInvocation,
-        CapabilityRecoveryHint, CapabilityResultMessage, CapabilitySurfaceVersion,
-        ModelVisibleToolObservation, ObservationTrust, ProviderToolCall, ProviderToolCallReference,
+        CapabilityInputRepair, CapabilityInvocation, CapabilityRecoveryHint,
+        CapabilityResultMessage, CapabilitySurfaceVersion, ModelVisibleToolObservation,
+        ObservationTrust, ProviderToolCall, ProviderToolCallReference,
         RegisterProviderToolCallRequest, SameCallRetryConstraint, ToolObservationDetail,
         ToolObservationStatus, ToolRecoveryObservation, VisibleCapabilitySurface,
     },
@@ -441,17 +441,17 @@ fn generic_failure_recovery(error_kind: &CapabilityFailureKind) -> ToolRecoveryO
 
 fn input_issue_repair(issue: &CapabilityInputIssue) -> CapabilityInputRepair {
     match issue.code {
-        CapabilityInputIssueCode::MissingRequired => CapabilityInputRepair::ProvideRequiredField {
+        DispatchInputIssueCode::MissingRequired => CapabilityInputRepair::ProvideRequiredField {
             path: issue.path.clone(),
         },
-        CapabilityInputIssueCode::UnexpectedField => CapabilityInputRepair::RemoveUnexpectedField {
+        DispatchInputIssueCode::UnexpectedField => CapabilityInputRepair::RemoveUnexpectedField {
             path: issue.path.clone(),
         },
-        CapabilityInputIssueCode::TypeMismatch => CapabilityInputRepair::ChangeType {
+        DispatchInputIssueCode::TypeMismatch => CapabilityInputRepair::ChangeType {
             path: issue.path.clone(),
             expected: issue.expected.clone(),
         },
-        CapabilityInputIssueCode::InvalidValue => CapabilityInputRepair::UseAllowedValue {
+        DispatchInputIssueCode::InvalidValue => CapabilityInputRepair::UseAllowedValue {
             path: issue.path.clone(),
         },
     }
