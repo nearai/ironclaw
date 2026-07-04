@@ -12,6 +12,8 @@ pub struct OpenAiResponsesCreateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_response_id: Option<OpenAiResponseId>,
