@@ -841,7 +841,7 @@ fn prune_active_threads(active_threads: &mut ActiveThreads, now_millis: u64) -> 
 }
 
 // ============================================================================
-// Permission & Pairing
+// Permission
 // ============================================================================
 
 /// Check if a sender is permitted. Returns true if allowed.

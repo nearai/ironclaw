@@ -136,3 +136,79 @@ test("useExtensions merges registry and installed entries with installed first",
     "id-less registry and installed entries receive stable fallback ids",
   );
 });
+
+test("install/activate report a blocked auth popup as blocked, not as an HTTPS error", () => {
+  const stateUpdates = [];
+  const mutationConfigs = [];
+  const context = {
+    Date,
+    Error,
+    URL,
+    React: {
+      useCallback: (fn) => fn,
+      useEffect: () => {},
+      useRef: () => ({ current: null }),
+      useState: (initial) => [
+        typeof initial === "function" ? initial() : initial,
+        (value) => stateUpdates.push(value),
+      ],
+    },
+    activateExtension: () => {},
+    approvePairingCode: () => {},
+    fetchExtensionRegistry: () => {},
+    fetchExtensionSetup: () => {},
+    fetchExtensions: () => {},
+    fetchPairingRequests: () => {},
+    gatewayStatus: () => {},
+    globalThis: {},
+    installExtension: () => {},
+    isChannelExtensionKind: () => false,
+    listConnectableChannels: () => {},
+    removeExtension: () => {},
+    startExtensionOauth: () => {},
+    submitExtensionSetup: () => {},
+    useMutation: (config) => {
+      mutationConfigs.push(config);
+      return { isPending: false, mutate: () => {} };
+    },
+    useQuery: () => ({ data: {}, isLoading: false }),
+    useQueryClient: () => ({ invalidateQueries: () => {} }),
+    useT: () => (key) => key,
+    // A valid HTTPS auth URL whose popup the browser refuses to open:
+    // window.open returns null, which openAuthPopup reports as popup_blocked.
+    window: { clearInterval: () => {}, setInterval: () => 1, open: () => null },
+  };
+  vm.runInNewContext(useExtensionsSourceForTest(), context);
+  context.globalThis.__testExports.useExtensions();
+
+  // useExtensions declares its mutations in a fixed order: install first,
+  // activate second (same order-coupling convention the other vm tests use).
+  const [installConfig, activateConfig] = mutationConfigs;
+  const lastError = () =>
+    stateUpdates.filter((value) => value && value.type === "error").at(-1);
+
+  installConfig.onSuccess(
+    { success: true, auth_url: "https://slack.com/oauth/v2/authorize" },
+    { displayName: "Slack", kind: "extension" },
+  );
+  assert.match(lastError().message, /popup was blocked/i);
+
+  activateConfig.onSuccess(
+    { success: true, auth_url: "https://slack.com/oauth/v2/authorize" },
+    { displayName: "Slack" },
+  );
+  assert.match(lastError().message, /popup was blocked/i);
+
+  activateConfig.onSuccess(
+    { success: false, auth_url: "https://slack.com/oauth/v2/authorize" },
+    { displayName: "Slack" },
+  );
+  assert.match(lastError().message, /popup was blocked/i);
+
+  // A genuinely non-HTTPS URL still reports the HTTPS problem.
+  activateConfig.onSuccess(
+    { success: false, auth_url: "http://insecure.example/authorize" },
+    { displayName: "Slack" },
+  );
+  assert.match(lastError().message, /HTTPS/);
+});

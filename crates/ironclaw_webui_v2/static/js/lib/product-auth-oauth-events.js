@@ -98,6 +98,17 @@ export function completionMatchesFlow(payload, flowId) {
   return payload.flowId === flowId || payload.flow_id === flowId;
 }
 
+// A FAILURE signal from the callback popup (provider denial, exchange failure,
+// route rejection). Failures match only their own flow id, exactly like
+// completions: a stale or foreign failure must never flip an unrelated
+// surface into an error state.
+export function failureMatchesFlow(payload, flowId) {
+  if (payload?.type !== OAUTH_CALLBACK_MESSAGE_TYPE) return false;
+  if (payload?.status !== "failed") return false;
+  if (!flowId) return false;
+  return payload.flowId === flowId || payload.flow_id === flowId;
+}
+
 // A completion satisfies an in-chat auth gate. A `turn_gate_resume` continuation
 // must match the gate's run/gate refs; a completion without one falls back to a
 // timestamp check so a callback that fired after we started listening still

@@ -600,6 +600,39 @@ async fn oauth_provider_callback_handler(
     uri: Uri,
     headers: HeaderMap,
 ) -> Result<Response, ProductAuthRouteFailure> {
+    // Browser popups (Accept: text/html) must never see a bare JSON route
+    // failure: render the failure page instead, which emits the cross-window
+    // "failed" completion signal (with the flow id once the state decoded) and
+    // closes the popup so the parent surface can show a retryable error.
+    let mut known_flow_id = None;
+    match oauth_provider_callback_attempt(
+        state,
+        descriptor,
+        raw_query,
+        uri,
+        &headers,
+        &mut known_flow_id,
+    )
+    .await
+    {
+        Ok(response) => Ok(response),
+        Err(error) if wants_oauth_callback_html(&headers) => Ok(oauth_callback_failure_html(
+            error.status,
+            &error.body,
+            known_flow_id,
+        )),
+        Err(error) => Err(error),
+    }
+}
+
+async fn oauth_provider_callback_attempt(
+    state: ProductAuthRouteState,
+    descriptor: &OAuthCallbackDescriptor,
+    raw_query: Option<String>,
+    uri: Uri,
+    headers: &HeaderMap,
+    known_flow_id: &mut Option<AuthFlowId>,
+) -> Result<Response, ProductAuthRouteFailure> {
     validate_callback_raw_query(raw_query.as_deref())?;
     let query = axum::extract::Query::<GoogleOAuthCallbackQuery>::try_from_uri(&uri)
         .map_err(|_| ProductAuthRouteFailure::malformed_callback())?
@@ -613,6 +646,7 @@ async fn oauth_provider_callback_handler(
     let callback_state = OAuthCallbackState::decode(descriptor.state_kind, state_value.as_str())
         .map_err(ProductAuthRouteFailure::from)?;
     let flow_id = callback_state.flow_id();
+    *known_flow_id = Some(flow_id);
     let callback_scope = callback_state.scope();
     // Reject a callback state minted for another tenant before any provider
     // exchange. Applied to BOTH providers: unification strengthens Google, which
@@ -639,7 +673,7 @@ async fn oauth_provider_callback_handler(
         ))
         .await;
         state.remove_pkce_verifier(flow_id);
-        return oauth_callback_route_result_response(&headers, response);
+        return oauth_callback_route_result_response(headers, response);
     }
 
     let provider = match run_with_backend_timeout(
@@ -686,7 +720,7 @@ async fn oauth_provider_callback_handler(
                 },
             ))
             .await;
-            return oauth_callback_route_result_response(&headers, response);
+            return oauth_callback_route_result_response(headers, response);
         }
         Err(error) => {
             state.remove_pkce_verifier(flow_id);
@@ -738,7 +772,7 @@ async fn oauth_provider_callback_handler(
         }
     };
 
-    Ok(oauth_callback_response(&headers, response))
+    Ok(oauth_callback_response(headers, response))
 }
 
 /// Slack post-exchange identity hook: binds the exchanged `authed_user` identity
@@ -838,17 +872,13 @@ fn slack_personal_user_binding_auth_error(
     }
 }
 
+// Formats the success shape only; `Err` propagates so the handler wrapper
+// renders the (signal-emitting, flow-id-aware) failure page for browser popups.
 fn oauth_callback_route_result_response(
     headers: &HeaderMap,
     response: Result<RebornOAuthCallbackResponse, ProductAuthRouteFailure>,
 ) -> Result<Response, ProductAuthRouteFailure> {
-    match response {
-        Ok(response) => Ok(oauth_callback_response(headers, response)),
-        Err(error) if wants_oauth_callback_html(headers) => {
-            Ok(oauth_callback_failure_html(error.status, &error.body))
-        }
-        Err(error) => Err(error),
-    }
+    response.map(|response| oauth_callback_response(headers, response))
 }
 
 fn validate_google_callback_includes_requested_scopes(
@@ -891,10 +921,35 @@ fn wants_oauth_callback_html(headers: &HeaderMap) -> bool {
     accepts_html && !accepts_json
 }
 
+const OAUTH_CALLBACK_SIGNAL_CHANNEL: &str = "ironclaw-product-auth";
+const OAUTH_CALLBACK_SIGNAL_STORAGE_KEY: &str = "ironclaw:product-auth:oauth-complete";
+const OAUTH_CALLBACK_SIGNAL_MESSAGE_TYPE: &str = "ironclaw:product-auth:oauth-complete";
+
+/// Inline script that hands a completion/failure payload to the opener via
+/// BroadcastChannel + localStorage (both same-origin best-effort) and closes
+/// the popup. Shared by the success and failure callback pages so the two
+/// cannot drift on the signal contract the WebUI listens for.
+fn oauth_callback_signal_script(payload: &serde_json::Value) -> String {
+    format!(
+        r#"  <script>
+    (() => {{
+      const payload = {payload};
+      try {{
+        new BroadcastChannel("{OAUTH_CALLBACK_SIGNAL_CHANNEL}").postMessage(payload);
+      }} catch (_err) {{}}
+      try {{
+        localStorage.setItem(
+          "{OAUTH_CALLBACK_SIGNAL_STORAGE_KEY}",
+          JSON.stringify({{ ...payload, completedAt: Date.now() }})
+        );
+      }} catch (_err) {{}}
+      window.close();
+    }})();
+  </script>"#
+    )
+}
+
 fn oauth_callback_completion_html(response: &RebornOAuthCallbackResponse) -> Response {
-    const CHANNEL: &str = "ironclaw-product-auth";
-    const STORAGE_KEY: &str = "ironclaw:product-auth:oauth-complete";
-    const MESSAGE_TYPE: &str = "ironclaw:product-auth:oauth-complete";
     let (title, message) = match response.status {
         AuthFlowStatus::Completed => (
             "Authorization complete",
@@ -910,13 +965,12 @@ fn oauth_callback_completion_html(response: &RebornOAuthCallbackResponse) -> Res
         ),
     };
 
-    let payload = json!({
-        "type": MESSAGE_TYPE,
+    let script = oauth_callback_signal_script(&json!({
+        "type": OAUTH_CALLBACK_SIGNAL_MESSAGE_TYPE,
         "flowId": response.flow_id,
         "status": response.status,
         "continuation": response.continuation,
-    })
-    .to_string();
+    }));
     let html = format!(
         r#"<!doctype html>
 <html lang="en">
@@ -926,28 +980,18 @@ fn oauth_callback_completion_html(response: &RebornOAuthCallbackResponse) -> Res
 </head>
 <body>
   <p>{message}</p>
-  <script>
-    (() => {{
-      const payload = {payload};
-      try {{
-        new BroadcastChannel("{CHANNEL}").postMessage(payload);
-      }} catch (_err) {{}}
-      try {{
-        localStorage.setItem(
-          "{STORAGE_KEY}",
-          JSON.stringify({{ ...payload, completedAt: Date.now() }})
-        );
-      }} catch (_err) {{}}
-      window.close();
-    }})();
-  </script>
+{script}
 </body>
 </html>"#
     );
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
 
-fn oauth_callback_failure_html(status: StatusCode, error: &RebornOAuthCallbackError) -> Response {
+fn oauth_callback_failure_html(
+    status: StatusCode,
+    error: &RebornOAuthCallbackError,
+    flow_id: Option<AuthFlowId>,
+) -> Response {
     let message = match error.code {
         AuthErrorCode::ProviderDenied => {
             "Authorization failed. No permissions were selected, or authorization was denied. Please retry authorization and select the requested permissions."
@@ -957,6 +1001,12 @@ fn oauth_callback_failure_html(status: StatusCode, error: &RebornOAuthCallbackEr
         }
         _ => "Authorization failed. Please return to Reborn and retry authorization.",
     };
+    let script = oauth_callback_signal_script(&json!({
+        "type": OAUTH_CALLBACK_SIGNAL_MESSAGE_TYPE,
+        "flowId": flow_id,
+        "status": ironclaw_auth::AuthFlowStatus::Failed,
+        "errorCode": error.code,
+    }));
     let html = format!(
         r#"<!doctype html>
 <html lang="en">
@@ -966,6 +1016,7 @@ fn oauth_callback_failure_html(status: StatusCode, error: &RebornOAuthCallbackEr
 </head>
 <body>
   <p>{message}</p>
+{script}
 </body>
 </html>"#
     );
@@ -1411,6 +1462,141 @@ mod tests {
         assert!(body.contains("Authorization failed"));
         assert!(body.contains("No permissions were selected"));
         assert!(!body.contains("malformed_callback"));
+        // The failure page must emit the same cross-window completion signal as
+        // the success page (status "failed"), and close the popup, so the
+        // parent Extensions modal / in-chat card can surface a retryable error
+        // instead of spinning until timeout.
+        let flow_id = OAuthCallbackState::decode(OAuthCallbackStateKind::GOOGLE, &state_value)
+            .expect("decode callback state")
+            .flow_id();
+        assert!(
+            body.contains(r#"new BroadcastChannel("ironclaw-product-auth")"#),
+            "failure page must broadcast the completion signal: {body}"
+        );
+        assert!(
+            body.contains(r#""status":"failed""#),
+            "failure signal must carry status failed: {body}"
+        );
+        assert!(
+            body.contains(&flow_id.to_string()),
+            "failure signal must carry the flow id so only the owning window reacts: {body}"
+        );
+        assert!(body.contains("window.close()"));
+    }
+
+    #[tokio::test]
+    async fn oauth_callback_route_failure_renders_html_failure_with_completion_signal() {
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store_for_provider: Arc<dyn SecretStore> = secret_store.clone();
+        let dispatcher = Arc::new(RecordingDispatcher::default());
+        let google_gate = Arc::new(OAuthGateFlowDriver::new(
+            Arc::new(GoogleOAuthGateProvider::new(
+                OAuthClientConfig::new(
+                    "google-client.apps.googleusercontent.com",
+                    "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
+                    None,
+                )
+                .expect("google oauth client"),
+            )),
+            secret_store_for_provider,
+        ));
+        let product_auth = Arc::new(
+            RebornProductAuthServices::from_shared(shared.clone(), dispatcher)
+                .with_flow_record_source(shared)
+                .with_oauth_gate_registry(Arc::new(OAuthGateProviderRegistry::new(vec![
+                    google_gate,
+                ]))),
+        );
+        // The flow's callback state is minted for tenant-alpha, but the route
+        // serves tenant-beta: the post-decode cross-tenant rejection is a route
+        // `Err` (not a handled callback outcome), which used to reach the
+        // browser popup as a bare JSON failure with no signal and no close.
+        let state = ProductAuthRouteState::new(
+            product_auth.clone(),
+            TenantId::new("tenant-beta").expect("tenant"),
+            None,
+            None,
+        );
+        let turn_scope = TurnScope::new(
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+            ThreadId::new("thread-alpha").expect("thread"),
+        );
+        let owner_user_id = UserId::new("user-alpha").expect("user");
+        let requirements = vec![RuntimeCredentialAuthRequirement {
+            provider: RuntimeCredentialAccountProviderId::new("google").expect("provider"),
+            setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                scopes: vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()],
+            },
+            requester_extension: ExtensionId::new("gmail").expect("extension"),
+            provider_scopes: vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()],
+        }];
+
+        let challenge = product_auth
+            .challenge_for_gate(
+                &turn_scope,
+                &owner_user_id,
+                TurnRunId::new(),
+                "gate:gmail-auth",
+                &requirements,
+            )
+            .await
+            .expect("challenge lookup")
+            .expect("google oauth challenge");
+        let authorization_url = challenge.authorization_url.expect("authorization url");
+        let state_value = Url::parse(authorization_url.as_str())
+            .expect("authorization url")
+            .query_pairs()
+            .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
+            .expect("oauth state");
+        let flow_id = OAuthCallbackState::decode(OAuthCallbackStateKind::GOOGLE, &state_value)
+            .expect("decode callback state")
+            .flow_id();
+        let encoded_state =
+            url::form_urlencoded::byte_serialize(state_value.as_bytes()).collect::<String>();
+        let encoded_scope =
+            url::form_urlencoded::byte_serialize(GOOGLE_CALENDAR_READONLY_SCOPE.as_bytes())
+                .collect::<String>();
+        let uri = format!(
+            "{GOOGLE_OAUTH_CALLBACK_PATH}?state={encoded_state}&code=google-auth-code&scope={encoded_scope}"
+        )
+        .parse::<Uri>()
+        .expect("callback uri");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            "text/html,application/xhtml+xml"
+                .parse()
+                .expect("accept header"),
+        );
+
+        let response = google_oauth_callback_handler(
+            State(state),
+            RawQuery(uri.query().map(str::to_string)),
+            uri,
+            headers,
+        )
+        .await
+        .expect("a route failure must render an HTML failure page for a browser popup");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE),
+            Some(&"text/html; charset=utf-8".parse().expect("content type"))
+        );
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let body = String::from_utf8(body.to_vec()).expect("utf8 body");
+        assert!(
+            body.contains(r#"new BroadcastChannel("ironclaw-product-auth")"#),
+            "exchange-failure page must broadcast the completion signal: {body}"
+        );
+        assert!(body.contains(r#""status":"failed""#));
+        assert!(body.contains(&flow_id.to_string()));
+        assert!(body.contains("window.close()"));
     }
 
     #[tokio::test]

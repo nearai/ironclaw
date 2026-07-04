@@ -330,3 +330,47 @@ test("OnboardingPairingCard keeps OAuth configuration loading after the popup op
     [true],
   );
 });
+
+test("OnboardingPairingCard exits the connect spinner and surfaces the error when the OAuth flow fails", () => {
+  const stateUpdates = [];
+  let stateIndex = 0;
+  const context = {
+    Button() {},
+    channelConnectionDisplayName,
+    globalThis: {},
+    html: (strings, ...values) => ({ strings: Array.from(strings), values }),
+    React: {
+      // code="", error="", status="idle", isConfiguring=true (spinner held by
+      // an in-flight OAuth flow whose popup has since failed/expired).
+      useState: (initial) => {
+        const index = stateIndex++;
+        return [
+          ["", "", "idle", true][index] ?? initial,
+          (value) => stateUpdates.push({ index, value }),
+        ];
+      },
+    },
+  };
+  vm.runInNewContext(onboardingPairingCardSourceForTest(), context);
+
+  context.globalThis.__testExports.OnboardingPairingCard({
+    onboarding: {
+      extensionName: "slack",
+      strategy: "oauth",
+      oauthError: "Authorization failed. Try connecting again.",
+    },
+    onConfigure: async () => {},
+  });
+
+  assert.ok(
+    stateUpdates.some((update) => update.index === 3 && update.value === false),
+    "a failed OAuth flow must exit the connect spinner",
+  );
+  assert.ok(
+    stateUpdates.some(
+      (update) =>
+        update.index === 1 && update.value === "Authorization failed. Try connecting again.",
+    ),
+    "a failed OAuth flow must surface the retryable error copy",
+  );
+});

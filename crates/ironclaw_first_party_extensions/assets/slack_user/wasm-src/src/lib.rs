@@ -56,7 +56,7 @@ impl exports::near::agent::tool::Guest for SlackUserTool {
         // Derived from `SlackUserAction` via `schemars::JsonSchema` so the
         // advertised schema can never drift from the serde contract.
         let schema = schemars::schema_for!(types::SlackUserAction);
-        serde_json::to_string(&schema).expect("schema serialization is infallible")
+        serde_json::to_string(&schema).unwrap_or_else(|_| "{}".to_string())
     }
 
     fn description() -> String {

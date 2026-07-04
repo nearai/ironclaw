@@ -3637,6 +3637,273 @@ test("useChat: Slack OAuth completion consumes the in-chat connection card", asy
   assert.equal(sendBodies[0].content, channelConnectionContinuationMessage("slack"));
 });
 
+test("useChat: a failed Slack OAuth signal surfaces a retryable error on the connection card", async () => {
+  const threadId = "thread-chat-oauth-failed";
+  const sourceMessageId = "tool-slack-oauth-failed";
+  const stateUpdates = [];
+  const sendBodies = [];
+  const store = new Map();
+  const intervalCallbacks = [];
+  const storage = {
+    getItem: (key) => store.get(key) || null,
+    setItem: (key, value) => store.set(key, value),
+  };
+  const popup = { closed: false, location: { href: "about:blank" }, opener: "test" };
+  const windowObject = {
+    open: () => popup,
+    localStorage: storage,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    setInterval: (callback) => {
+      intervalCallbacks.push(callback);
+      return intervalCallbacks.length;
+    },
+    clearInterval: () => {},
+  };
+  const context = channelConnectionContext({
+    threadId,
+    messages: [channelConnectionRequiredCard({ id: sourceMessageId })],
+    stateUpdates,
+    storage,
+    initialByIndex: new Map([
+      [
+        STATE_SLOT.pendingOnboarding,
+        {
+          extensionName: "slack",
+          state: "pairing_required",
+          threadId,
+          sourceMessageId,
+          strategy: "oauth",
+        },
+      ],
+    ]),
+    fetchExtensionSetup: async () => ({
+      secrets: [
+        {
+          provider: "slack_personal",
+          setup: { kind: "oauth", invocation_id: "invocation-slack" },
+        },
+      ],
+    }),
+    startExtensionOauth: async () => ({
+      flow_id: "flow-slack-failed",
+      authorization_url: "https://slack.com/oauth/v2/authorize?client_id=client",
+    }),
+    sendMessage: async (body) => {
+      sendBodies.push(body);
+      return { run_id: "run-continue", status: "queued", thread_id: body.threadId };
+    },
+    windowObject,
+  });
+
+  runUseChatSource(context);
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  await chat.startOnboardingOAuth();
+  // The callback popup broadcast a FAILURE for this exact flow (provider
+  // denial / exchange failure) and closed itself.
+  store.set(
+    "ironclaw:product-auth:oauth-complete",
+    JSON.stringify({
+      type: "ironclaw:product-auth:oauth-complete",
+      flowId: "flow-slack-failed",
+      status: "failed",
+    }),
+  );
+  for (const callback of intervalCallbacks) callback();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.ok(
+    stateUpdates.some(
+      (update) =>
+        update.index === STATE_SLOT.pendingOnboarding &&
+        typeof update.value?.oauthError === "string" &&
+        /authorization failed/i.test(update.value.oauthError),
+    ),
+    "a flow-matched failure must surface a retryable error on the card",
+  );
+  assert.ok(
+    !stateUpdates.some(
+      (update) => update.index === STATE_SLOT.pendingOnboarding && update.value === null,
+    ),
+    "the card must stay mounted so the user can retry",
+  );
+  assert.equal(sendBodies.length, 0, "a failed flow must not send the continuation");
+});
+
+test("useChat: an abandoned Slack OAuth flow times out instead of polling forever", async () => {
+  const threadId = "thread-chat-oauth-timeout";
+  const sourceMessageId = "tool-slack-oauth-timeout";
+  const stateUpdates = [];
+  const store = new Map();
+  const intervalCallbacks = [];
+  let fetchExtensionsCalls = 0;
+  let nowValue = 1_000_000;
+  class FakeDate extends Date {
+    static now() {
+      return nowValue;
+    }
+  }
+  const storage = {
+    getItem: (key) => store.get(key) || null,
+    setItem: (key, value) => store.set(key, value),
+  };
+  const popup = { closed: true, location: { href: "about:blank" }, opener: "test" };
+  const windowObject = {
+    open: () => popup,
+    localStorage: storage,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    setInterval: (callback) => {
+      intervalCallbacks.push(callback);
+      return intervalCallbacks.length;
+    },
+    clearInterval: () => {},
+  };
+  const context = channelConnectionContext({
+    threadId,
+    messages: [channelConnectionRequiredCard({ id: sourceMessageId })],
+    stateUpdates,
+    storage,
+    initialByIndex: new Map([
+      [
+        STATE_SLOT.pendingOnboarding,
+        {
+          extensionName: "slack",
+          state: "pairing_required",
+          threadId,
+          sourceMessageId,
+          strategy: "oauth",
+        },
+      ],
+    ]),
+    fetchExtensions: async () => {
+      fetchExtensionsCalls += 1;
+      return { extensions: [] };
+    },
+    fetchExtensionSetup: async () => ({
+      secrets: [
+        {
+          provider: "slack_personal",
+          setup: { kind: "oauth", invocation_id: "invocation-slack" },
+        },
+      ],
+    }),
+    startExtensionOauth: async () => ({
+      flow_id: "flow-slack-timeout",
+      authorization_url: "https://slack.com/oauth/v2/authorize?client_id=client",
+    }),
+    windowObject,
+  });
+  context.Date = FakeDate;
+
+  runUseChatSource(context);
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  await chat.startOnboardingOAuth();
+
+  // Within the timeout budget the watcher polls the per-user extension state.
+  for (const callback of intervalCallbacks) callback();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.ok(fetchExtensionsCalls >= 1, "the watcher polls server state before the timeout");
+
+  // The user closed/abandoned the popup and never authorized: past the budget
+  // the watcher must stop polling and surface a retryable timeout error.
+  nowValue += 11 * 60 * 1000;
+  for (const callback of intervalCallbacks) callback();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.ok(
+    stateUpdates.some(
+      (update) =>
+        update.index === STATE_SLOT.pendingOnboarding &&
+        typeof update.value?.oauthError === "string" &&
+        /timed out/i.test(update.value.oauthError),
+    ),
+    "an expired flow must surface a retryable timeout error",
+  );
+  const callsAtTimeout = fetchExtensionsCalls;
+  for (const callback of intervalCallbacks) callback();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(
+    fetchExtensionsCalls,
+    callsAtTimeout,
+    "polling must stop once the flow timed out",
+  );
+});
+
+test("useChat: dismissing the connection card stops the pending OAuth flow's polling", async () => {
+  const threadId = "thread-chat-oauth-dismiss";
+  const sourceMessageId = "tool-slack-oauth-dismiss";
+  const stateUpdates = [];
+  const store = new Map();
+  const intervalCallbacks = [];
+  let fetchExtensionsCalls = 0;
+  const storage = {
+    getItem: (key) => store.get(key) || null,
+    setItem: (key, value) => store.set(key, value),
+  };
+  const popup = { closed: false, location: { href: "about:blank" }, opener: "test" };
+  const windowObject = {
+    open: () => popup,
+    localStorage: storage,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    setInterval: (callback) => {
+      intervalCallbacks.push(callback);
+      return intervalCallbacks.length;
+    },
+    clearInterval: () => {},
+  };
+  const context = channelConnectionContext({
+    threadId,
+    messages: [channelConnectionRequiredCard({ id: sourceMessageId })],
+    stateUpdates,
+    storage,
+    initialByIndex: new Map([
+      [
+        STATE_SLOT.pendingOnboarding,
+        {
+          extensionName: "slack",
+          state: "pairing_required",
+          threadId,
+          sourceMessageId,
+          strategy: "oauth",
+        },
+      ],
+    ]),
+    fetchExtensions: async () => {
+      fetchExtensionsCalls += 1;
+      return { extensions: [] };
+    },
+    fetchExtensionSetup: async () => ({
+      secrets: [
+        {
+          provider: "slack_personal",
+          setup: { kind: "oauth", invocation_id: "invocation-slack" },
+        },
+      ],
+    }),
+    startExtensionOauth: async () => ({
+      flow_id: "flow-slack-dismiss",
+      authorization_url: "https://slack.com/oauth/v2/authorize?client_id=client",
+    }),
+    windowObject,
+  });
+
+  runUseChatSource(context);
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  await chat.startOnboardingOAuth();
+  chat.dismissOnboardingPairing();
+
+  for (const callback of intervalCallbacks) callback();
+  for (const callback of intervalCallbacks) callback();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(
+    fetchExtensionsCalls,
+    0,
+    "dismissing the card must clear the pending flow so nothing polls the server",
+  );
+});
+
 test("useChat: Slack OAuth completion polls per-user extension state when callback storage is unavailable", async () => {
   const threadId = "thread-chat-oauth-polling-complete";
   const sourceMessageId = "tool-slack-oauth-polling-complete";

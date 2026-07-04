@@ -25,6 +25,15 @@ const DISMISSED_ONBOARDING_STORAGE_PREFIX =
   "ironclaw.chat.dismissedOnboarding.v1:";
 const DISMISSED_ONBOARDING_STORAGE_LIMIT = 100;
 
+// In-chat OAuth watcher bounds. Mirror the Extensions page watcher
+// (`OAUTH_SETUP_TIMEOUT_MS` / `OAUTH_SETUP_REFRESH_MS` in useExtensions.js) so
+// an abandoned popup cannot leave the card polling the server forever.
+const CHAT_OAUTH_TIMEOUT_MS = 10 * 60 * 1000;
+const CHAT_OAUTH_POLL_MS = 2000;
+const CHAT_OAUTH_FAILED_MESSAGE = "Authorization failed. Try connecting again.";
+const CHAT_OAUTH_TIMED_OUT_MESSAGE =
+  "Authorization timed out. Try connecting again.";
+
 // A pairing panel is per-thread. Exported because `useChat`'s send-admission and
 // visible-panel computation share this exact rule with the onboarding hook.
 export function onboardingBelongsToThread(onboarding, threadId) {
@@ -361,10 +370,27 @@ export function useChannelOnboarding(
         source: "chat-oauth",
       });
     };
+    // A failed or expired flow clears the pending ref (stopping the poll) and
+    // stamps a retryable error onto the still-mounted card, so the user gets a
+    // visible way out instead of a spinner the popup can no longer resolve.
+    const failOauthFlow = (pending, message) => {
+      pendingOnboardingOauthFlowRef.current = null;
+      setPendingOnboarding((current) =>
+        current &&
+        normalizeConnectionChannel(current.extensionName) ===
+          normalizeConnectionChannel(pending.channel)
+          ? { ...current, oauthError: message }
+          : current,
+      );
+    };
     const handleCompletion = (payload) => {
       const pending = pendingOnboardingOauthFlowRef.current;
       if (!pending) return;
       if (!payload || payload.flowId !== pending.flowId) return;
+      if (payload.status === "failed") {
+        failOauthFlow(pending, CHAT_OAUTH_FAILED_MESSAGE);
+        return;
+      }
       if (payload.status !== "completed") return;
       Promise.resolve(finishCompletion(pending)).catch(() => {
         pendingOnboardingOauthFlowRef.current = pending;
@@ -392,14 +418,24 @@ export function useChannelOnboarding(
 
     const unsubscribe = subscribeProductAuthOAuthCompletion(browserWindow, handleCompletion);
     const timer = browserWindow.setInterval(() => {
+      const pending = pendingOnboardingOauthFlowRef.current;
+      if (
+        pending &&
+        !pending.completing &&
+        pending.startedAt &&
+        Date.now() - pending.startedAt > CHAT_OAUTH_TIMEOUT_MS
+      ) {
+        failOauthFlow(pending, CHAT_OAUTH_TIMED_OUT_MESSAGE);
+        return;
+      }
       handleCompletion(readLatestProductAuthOAuthCompletion(browserWindow));
       pollServerState();
-    }, 500);
+    }, CHAT_OAUTH_POLL_MS);
     return () => {
       browserWindow.clearInterval(timer);
       unsubscribe();
     };
-  }, [clearOnboardingAfterChannelConnected, threadId]);
+  }, [clearOnboardingAfterChannelConnected, setPendingOnboarding, threadId]);
 
   const resumeOnboardingAfterChannelConnected = React.useCallback(
     async (onboarding, event = {}) => {
@@ -546,22 +582,25 @@ export function useChannelOnboarding(
     }
     const packageRef = { kind: "extension", id: onboarding.extensionName };
     const packageKey = onboarding.extensionName;
-    const setup =
-      typeof queryClient.fetchQuery === "function"
-        ? await queryClient.fetchQuery({
-            queryKey: ["extension-setup", packageKey],
-            queryFn: () => fetchExtensionSetup(packageRef),
-          })
-        : await fetchExtensionSetup(packageRef);
-    const secret = (setup?.secrets || []).find(
-      (item) => (item?.setup?.kind || "manual_token") === "oauth",
-    );
-    if (!secret) {
-      throw new Error("OAuth setup is unavailable for this channel");
-    }
+    // Open the placeholder popup BEFORE any await: a slow setup fetch would
+    // otherwise burn the click's user activation and get the real popup
+    // blocked. Any failure below closes it again.
     const popup = window.open("about:blank", "_blank", "width=600,height=600");
     if (popup) popup.opener = null;
     try {
+      const setup =
+        typeof queryClient.fetchQuery === "function"
+          ? await queryClient.fetchQuery({
+              queryKey: ["extension-setup", packageKey],
+              queryFn: () => fetchExtensionSetup(packageRef),
+            })
+          : await fetchExtensionSetup(packageRef);
+      const secret = (setup?.secrets || []).find(
+        (item) => (item?.setup?.kind || "manual_token") === "oauth",
+      );
+      if (!secret) {
+        throw new Error("OAuth setup is unavailable for this channel");
+      }
       const response = await startExtensionOauth(packageRef, secret);
       if (response?.success === false) {
         throw new Error(response.message || "OAuth setup failed");
@@ -580,19 +619,27 @@ export function useChannelOnboarding(
             : "Authorization URL must use HTTPS.",
         );
       }
+      // A retry after a failed/timed-out attempt clears the stale card error.
+      setPendingOnboarding((current) =>
+        current?.oauthError ? { ...current, oauthError: null } : current,
+      );
       pendingOnboardingOauthFlowRef.current = {
         flowId: response.flow_id,
         channel: onboarding.extensionName,
         threadId: onboarding.threadId || threadId || null,
+        startedAt: Date.now(),
       };
       return response;
     } catch (error) {
       if (popup && !popup.closed) popup.close();
       throw error;
     }
-  }, [threadId]);
+  }, [threadId, setPendingOnboarding]);
 
   const dismissOnboardingPairing = React.useCallback(() => {
+    // Dismissing the card also abandons any in-flight OAuth flow it started —
+    // otherwise the watcher keeps polling the server for a card that is gone.
+    pendingOnboardingOauthFlowRef.current = null;
     const onboarding = pendingOnboardingRef.current;
     if (onboarding) {
       const threadForDismiss = onboarding.threadId || threadId;

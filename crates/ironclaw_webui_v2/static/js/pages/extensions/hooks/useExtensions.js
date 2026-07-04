@@ -4,6 +4,7 @@ import { gatewayStatus } from "../../../lib/api.js";
 import { listConnectableChannels } from "../../../lib/channel-connect.js";
 import {
   completionMatchesFlow,
+  failureMatchesFlow,
   isHttpsAuthUrl,
   openAuthPopup,
   readLatestProductAuthOAuthCompletion,
@@ -31,6 +32,12 @@ const OAUTH_SETUP_TIMEOUT_MS = 10 * 60 * 1000;
 // parsing/matching are the shared product-auth OAuth event contract — see
 // `lib/product-auth-oauth-events.js`. This hook keeps only its setup-watcher
 // state machine below.
+
+function authPopupFailureMessage(reason) {
+  return reason === "popup_blocked"
+    ? "Authorization popup was blocked."
+    : "Authorization URL must use HTTPS.";
+}
 
 function oauthResponseFlowId(response) {
   return response?.flow_id || response?.flowId || null;
@@ -121,10 +128,14 @@ export function useExtensions() {
           type: "success",
           message,
         });
-        if (res.auth_url && !openAuthPopup(res.auth_url).ok) {
+        let installAuthPopup = null;
+        if (res.auth_url) {
+          installAuthPopup = openAuthPopup(res.auth_url);
+        }
+        if (installAuthPopup && !installAuthPopup.ok) {
           setActionResult({
             type: "error",
-            message: "Authentication URL must use HTTPS.",
+            message: authPopupFailureMessage(installAuthPopup.reason),
           });
         } else if (
           !res.auth_url &&
@@ -169,19 +180,23 @@ export function useExtensions() {
               name: displayName || t("extensions.defaultName"),
             }),
         });
-        if (res.auth_url && !openAuthPopup(res.auth_url).ok) {
-          setActionResult({
-            type: "error",
-            message: "Authentication URL must use HTTPS.",
-          });
+        if (res.auth_url) {
+          const opened = openAuthPopup(res.auth_url);
+          if (!opened.ok) {
+            setActionResult({
+              type: "error",
+              message: authPopupFailureMessage(opened.reason),
+            });
+          }
         }
       } else if (res.auth_url) {
-        if (openAuthPopup(res.auth_url).ok) {
+        const opened = openAuthPopup(res.auth_url);
+        if (opened.ok) {
           setActionResult({ type: "info", message: t("extensions.openingAuth") });
         } else {
           setActionResult({
             type: "error",
-            message: "Authentication URL must use HTTPS.",
+            message: authPopupFailureMessage(opened.reason),
           });
         }
       } else if (res.awaiting_token) {
@@ -340,6 +355,16 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
   const watcherRef = React.useRef(null);
   const configuredRef = React.useRef(false);
   const [isAuthorizing, setIsAuthorizing] = React.useState(false);
+  // Retryable error surfaced when the callback popup reports a flow-matched
+  // FAILURE (provider denial, exchange failure). Ref-guarded setter so the
+  // reset at watcher start is a no-op unless an error was actually showing.
+  const [authError, setAuthErrorState] = React.useState(null);
+  const authErrorRef = React.useRef(null);
+  const setAuthError = React.useCallback((value) => {
+    if (Object.is(authErrorRef.current, value)) return;
+    authErrorRef.current = value;
+    setAuthErrorState(value);
+  }, []);
 
   const clearWatcher = React.useCallback(() => {
     const cleanup = watcherRef.current;
@@ -380,7 +405,15 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
         typeof window !== "undefined" ? window : globalThis?.window || null;
       if (!browserWindow) return;
       setIsAuthorizing(true);
+      setAuthError(null);
       const startedAt = Date.now();
+      // A reconnect starts from an already-configured server snapshot, so
+      // "configured" alone cannot prove THIS flow finished: only a
+      // not-configured → configured transition observed by the poll (or the
+      // flow-id-matched callback signal) may complete the watcher.
+      const configuredBeforeFlow = setupIsConfigured({
+        allowProvidedSecrets: !requireCallbackCompletion,
+      });
       let stopped = false;
       let timer = null;
       let unsubscribe = () => {};
@@ -409,6 +442,12 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
       }
 
       function handleCompletion(payload) {
+        if (failureMatchesFlow(payload, flowId)) {
+          setAuthError("Authorization failed. Try connecting again.");
+          stopWatcher();
+          refreshSetupState();
+          return true;
+        }
         if (!completionMatchesFlow(payload, flowId)) return false;
         complete();
         return true;
@@ -424,7 +463,7 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
         const configured = setupIsConfigured({
           allowProvidedSecrets: !requireCallbackCompletion,
         });
-        if (configured) {
+        if (configured && !configuredBeforeFlow) {
           complete();
           return;
         }
@@ -438,7 +477,7 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
       watcherRef.current = cleanup;
       handleCompletion(readLatestProductAuthOAuthCompletion(browserWindow));
     },
-    [clearWatcher, onConfigured, refreshSetupState, setupIsConfigured]
+    [clearWatcher, onConfigured, refreshSetupState, setAuthError, setupIsConfigured]
   );
 
   React.useEffect(() => clearWatcher, [clearWatcher]);
@@ -460,11 +499,7 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
         const opened = openAuthPopup(res.authorization_url, popup);
         authPopup = opened.popup;
         if (!opened.ok) {
-          throw new Error(
-            opened.reason === "popup_blocked"
-              ? "Authorization popup was blocked."
-              : "Authorization URL must use HTTPS.",
-          );
+          throw new Error(authPopupFailureMessage(opened.reason));
         }
       } else if (popup && !popup.closed) {
         popup.close();
@@ -484,7 +519,7 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
       if (popup && !popup.closed) popup.close();
     },
   });
-  return { ...mutation, isAuthorizing };
+  return { ...mutation, isAuthorizing, authError };
 }
 
 export function usePairing(channel, options = {}) {

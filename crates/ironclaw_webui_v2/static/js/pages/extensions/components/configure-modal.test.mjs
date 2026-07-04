@@ -45,6 +45,7 @@ function renderModal({
   const oauthCalls = [];
   const oauthSetupArgs = [];
   const openedPopups = [];
+  const notifications = [];
   let mutationConfig = null;
   const redeem =
     redeemPairingCode ||
@@ -108,6 +109,9 @@ function renderModal({
     setupReadyForActivation: () => setupReady,
     isChannelExtensionKind: (k) => k === "channel" || k === "wasm_channel",
     redeemPairingCode: redeem,
+    notifyChannelConnected: async (payload) => {
+      notifications.push(payload);
+    },
     activateExtension: async (ref) => {
       calls.push(["activate", ref]);
       await activate();
@@ -140,6 +144,7 @@ function renderModal({
     calls,
     invalidations,
     mutationConfig,
+    notifications,
     oauthCalls,
     oauthSetupArgs,
     openedPopups,
@@ -252,7 +257,7 @@ test("ConfigureModal activates the Slack extension after OAuth setup completes",
     },
   };
   let closed = false;
-  const { calls, invalidations, oauthSetupArgs } = renderModal({
+  const { calls, invalidations, notifications, oauthSetupArgs } = renderModal({
     kind: "channel",
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
@@ -288,6 +293,42 @@ test("ConfigureModal activates the Slack extension after OAuth setup completes",
     ["extension-setup", "slack"],
   ]);
   assert.equal(closed, true);
+  // Connecting from the Extensions page must also resume any chat thread that
+  // parked a request behind this channel's connection card (the same
+  // channel-connected broadcast pairing redemption already sends).
+  assert.deepEqual(JSON.parse(JSON.stringify(notifications)), [
+    { channel: "slack", source: "extensions-oauth" },
+  ]);
+});
+
+test("ConfigureModal surfaces a failed OAuth flow as a retryable error", () => {
+  const { rendered } = renderModal({
+    kind: "channel",
+    packageRef: { kind: "extension", id: "slack" },
+    channel: "slack",
+    displayName: "Slack",
+    onboardingState: "setup_required",
+    setupResult: {
+      secrets: [
+        {
+          name: "slack_personal_oauth",
+          provider: "slack_personal",
+          provided: false,
+          setup: { kind: "oauth", invocation_id: "invocation-alpha" },
+        },
+      ],
+      fields: [],
+      onboarding: null,
+      isLoading: false,
+      error: null,
+    },
+    oauthMutationState: { authError: "Authorization failed. Try connecting again." },
+  });
+
+  assert.ok(
+    JSON.stringify(rendered).includes("Authorization failed. Try connecting again."),
+    "the modal must render the watcher's flow-failure error",
+  );
 });
 
 test("ConfigureModal closes as soon as Slack OAuth setup completes", async () => {

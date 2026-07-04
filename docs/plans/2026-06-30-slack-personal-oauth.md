@@ -110,3 +110,17 @@ The shared exchanger sends `grant_type=authorization_code` + PKCE `code_verifier
 Slack `oauth.v2.access` supports PKCE and ignores unknown params; verify against
 the live app during test. If PKCE proves problematic, add a spec flag to omit it
 for Slack.
+
+## Deferred follow-ups (accepted at review, 2026-07-04)
+
+- **F-009 — served Slack OAuth journey test.** No served WebUI/API test yet
+  drives Extensions/Chat → OAuth start → callback → activation → source-chat
+  resume end-to-end. Accepted as a follow-up risk: the path is triangulated by
+  direct-handler tests (scope enforcement, callback claim/PKCE, identity
+  binding), the `slack_user` per-user runtime dispatch proof, and the JS
+  behavioral suites now running in CI.
+- **Generic proof-code redeem route.** The WebUI keeps a generic proof-code
+  panel + `PAIRING_REDEEM_PATH` client as scaffolding, but no Reborn backend
+  mounts that route after the Slack-only redeem was removed. The first
+  non-Slack inbound channel must mount a generic redeem route (and emit its
+  connect requirement) in one change.

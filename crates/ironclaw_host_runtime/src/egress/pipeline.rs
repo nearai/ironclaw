@@ -115,6 +115,18 @@ where
     N: NetworkHttpEgress + Send + Sync,
     S: SecretStore + Send + Sync,
 {
+    // Skipping response sanitization is only safe because exchange requests
+    // carry no injected credentials for the sanitizer to redact. Enforce that
+    // precondition instead of trusting callers to uphold it.
+    if !request.credential_injections.is_empty() {
+        return Err(PipelineError::pre_transport(
+            RuntimeHttpEgressError::Request {
+                reason: "credential_exchange_injections_unsupported".to_string(),
+                request_bytes: 0,
+                response_bytes: 0,
+            },
+        ));
+    }
     execute_inner(service, request, false, true).await
 }
 
@@ -276,7 +288,8 @@ where
         // the host auth system and never surfaced to the model, so the response
         // sanitizer is bypassed; it would otherwise redact or hard-block the
         // token this call exists to fetch. Safe here because such requests
-        // carry no injected credentials to redact (redaction_values is empty).
+        // carry no injected credentials to redact — enforced fail-closed at
+        // `execute_credential_exchange` before credential staging runs.
         trace_http_egress_latency_ok(
             "sanitize_response",
             latency_fields.as_ref(),

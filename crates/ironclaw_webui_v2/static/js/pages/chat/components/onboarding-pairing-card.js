@@ -19,6 +19,19 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onConfigure, onCan
   // hold the spinner while the parked turn resumes and this gate clears).
   const [status, setStatus] = React.useState("idle");
   const [isConfiguring, setIsConfiguring] = React.useState(false);
+  // Derived-from-props during render (not an effect) so the minimal test
+  // harness stays useState-only: when the onboarding hook stamps a failed or
+  // timed-out OAuth flow onto the card, exit the connect spinner and surface
+  // the retryable error — the popup is gone, so this is the only signal.
+  const [lastOauthError, setLastOauthError] = React.useState(null);
+  const oauthError = onboarding?.oauthError || null;
+  if (oauthError !== lastOauthError) {
+    setLastOauthError(oauthError);
+    if (oauthError) {
+      setError(oauthError);
+      setIsConfiguring(false);
+    }
+  }
   const copy = pairingCardCopy(onboarding);
   const busy = status !== "idle";
 

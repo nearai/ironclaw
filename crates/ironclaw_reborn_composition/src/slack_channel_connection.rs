@@ -8,18 +8,53 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use ironclaw_host_api::TenantId;
+use ironclaw_auth::{
+    AuthProductScope, AuthSurface, SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest,
+};
+use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope, TenantId};
 use ironclaw_product_workflow::{
     ChannelConnectionFacade, RebornServicesError, WebUiAuthenticatedCaller,
 };
 
 use crate::{
-    SlackHostBetaMounts,
+    RebornProductAuthServices, SlackHostBetaMounts,
+    available_extensions::SLACK_EXTENSION_ID,
     slack_actor_identity::{RebornUserIdentityLookup, SLACK_IDENTITY_PROVIDER},
     slack_host_beta::{SlackPersonalConnectionScope, SlackPersonalConnectionScopeResolver},
     slack_outbound_targets::SlackPersonalDmTargetStore,
     slack_personal_binding::RebornUserIdentityBindingDeleteStore,
 };
+
+/// Narrow disconnect-side port over product-auth lifecycle cleanup, so the
+/// per-user Slack disconnect can revoke the caller's `slack_personal`
+/// credential without depending on the whole product-auth bundle (and so tests
+/// can record the issued cleanup). Production forwards to
+/// [`RebornProductAuthServices::cleanup_credentials_for_lifecycle`], the
+/// guardrail-sanctioned lifecycle cleanup entry point.
+#[async_trait::async_trait]
+pub(crate) trait SlackPersonalCredentialCleanup: Send + Sync {
+    async fn cleanup_credentials_for_lifecycle(
+        &self,
+        request: SecretCleanupRequest,
+    ) -> Result<SecretCleanupReport, RebornServicesError>;
+}
+
+#[async_trait::async_trait]
+impl SlackPersonalCredentialCleanup for RebornProductAuthServices {
+    async fn cleanup_credentials_for_lifecycle(
+        &self,
+        request: SecretCleanupRequest,
+    ) -> Result<SecretCleanupReport, RebornServicesError> {
+        RebornProductAuthServices::cleanup_credentials_for_lifecycle(self, request)
+            .await
+            .map_err(|error| {
+                RebornServicesError::internal_from(format!(
+                    "slack personal credential cleanup failed: {:?}",
+                    error.code
+                ))
+            })
+    }
+}
 
 /// Per-user channel connection facade backed by the Slack personal-binding
 /// identity store. Reports whether the calling WebUI user has connected their
@@ -32,6 +67,10 @@ struct SlackChannelConnectionFacade {
     user_identity_lookup: Arc<dyn RebornUserIdentityLookup>,
     user_identity_delete_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
     personal_dm_target_store: Arc<dyn SlackPersonalDmTargetStore>,
+    // Genuinely optional (not an `optional_arc` smell): compositions without
+    // product auth cannot have minted a `slack_personal` credential in the
+    // first place, so there is nothing to clean up on disconnect.
+    personal_credential_cleanup: Option<Arc<dyn SlackPersonalCredentialCleanup>>,
 }
 
 impl SlackChannelConnectionFacade {
@@ -95,6 +134,31 @@ impl ChannelConnectionFacade for SlackChannelConnectionFacade {
             )
             .await
             .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
+        // Revoke the caller's `slack_personal` credential before deleting the
+        // identity binding: the binding is the "connected" signal, so a cleanup
+        // failure leaves the caller connected and the whole disconnect
+        // retryable (extension removal runs this before `ExtensionRemove`).
+        if let Some(cleanup) = &self.personal_credential_cleanup {
+            cleanup
+                .cleanup_credentials_for_lifecycle(SecretCleanupRequest {
+                    scope: AuthProductScope::new(
+                        ResourceScope {
+                            tenant_id: caller.tenant_id.clone(),
+                            user_id: caller.user_id.clone(),
+                            agent_id: caller.agent_id.clone(),
+                            project_id: caller.project_id.clone(),
+                            mission_id: None,
+                            thread_id: None,
+                            invocation_id: InvocationId::new(),
+                        },
+                        AuthSurface::Callback,
+                    ),
+                    extension_id: ExtensionId::new(SLACK_EXTENSION_ID)
+                        .map_err(|error| RebornServicesError::internal_from(error.to_string()))?,
+                    action: SecretCleanupAction::Uninstall,
+                })
+                .await?;
+        }
         let provider_user_id_prefix = format!("{}:", scope.installation_id.as_str());
         self.user_identity_delete_store
             .delete_user_identity_bindings_for_user(
@@ -110,6 +174,7 @@ impl ChannelConnectionFacade for SlackChannelConnectionFacade {
 
 pub(crate) fn slack_channel_connection_facade(
     mounts: &SlackHostBetaMounts,
+    personal_credential_cleanup: Option<Arc<dyn SlackPersonalCredentialCleanup>>,
 ) -> Arc<dyn ChannelConnectionFacade> {
     Arc::new(SlackChannelConnectionFacade {
         tenant_id: mounts.tenant_id.clone(),
@@ -118,6 +183,7 @@ pub(crate) fn slack_channel_connection_facade(
         user_identity_lookup: mounts.user_identity_lookup.clone(),
         user_identity_delete_store: mounts.user_identity_delete_store.clone(),
         personal_dm_target_store: mounts.personal_dm_target_store.clone(),
+        personal_credential_cleanup,
     })
 }
 
@@ -144,6 +210,7 @@ mod tests {
     #[tokio::test]
     async fn slack_channel_connection_facade_disconnects_identity_and_personal_dm_target() {
         let tenant_id = TenantId::new("tenant:test").expect("tenant");
+        let expected_tenant_id = tenant_id.clone();
         let installation_id = AdapterInstallationId::new("install-alpha").expect("installation id");
         let team_id = SlackTeamId::new("T123");
         let user_id = UserId::new("user:alice").expect("user");
@@ -171,6 +238,7 @@ mod tests {
             )
             .await
             .expect("seed dm target");
+        let cleanup = Arc::new(RecordingCleanupService::default());
         let facade = SlackChannelConnectionFacade {
             tenant_id: tenant_id.clone(),
             personal_connection_scope: Some(SlackPersonalConnectionScope {
@@ -181,6 +249,7 @@ mod tests {
             user_identity_lookup: identity_store.clone(),
             user_identity_delete_store: identity_store.clone(),
             personal_dm_target_store: dm_target_store.clone(),
+            personal_credential_cleanup: Some(cleanup.clone()),
         };
         let caller =
             WebUiAuthenticatedCaller::new(tenant_id, user_id.clone(), None::<AgentId>, None);
@@ -197,6 +266,23 @@ mod tests {
             .disconnect_channel_for_caller(caller.clone(), "slack")
             .await
             .expect("disconnect succeeds");
+
+        // Disconnect must also revoke the caller's `slack_personal` credential
+        // through the product-auth lifecycle cleanup port, scoped to exactly
+        // this tenant + caller and the public Slack extension.
+        let cleanup_requests = cleanup.requests();
+        assert_eq!(
+            cleanup_requests.len(),
+            1,
+            "disconnect must issue exactly one credential cleanup"
+        );
+        assert_eq!(cleanup_requests[0].extension_id.as_str(), "slack");
+        assert_eq!(cleanup_requests[0].action, SecretCleanupAction::Uninstall);
+        assert_eq!(
+            cleanup_requests[0].scope.resource.tenant_id,
+            expected_tenant_id
+        );
+        assert_eq!(cleanup_requests[0].scope.resource.user_id, user_id);
 
         assert_eq!(
             facade
@@ -238,6 +324,11 @@ mod tests {
                 .expect("connection lookup after repeat disconnect"),
             HashMap::from([("slack".to_string(), false)])
         );
+        assert_eq!(
+            cleanup.requests().len(),
+            2,
+            "the removal-retry repeat disconnect re-issues the (idempotent) credential cleanup"
+        );
     }
 
     #[tokio::test]
@@ -261,6 +352,7 @@ mod tests {
             user_identity_lookup: identity_store.clone(),
             user_identity_delete_store: identity_store.clone(),
             personal_dm_target_store: Arc::new(FailingSlackPersonalDmTargetStore),
+            personal_credential_cleanup: None,
         };
         let caller =
             WebUiAuthenticatedCaller::new(tenant_id, user_id.clone(), None::<AgentId>, None);
@@ -307,6 +399,7 @@ mod tests {
             user_identity_lookup: identity_store.clone(),
             user_identity_delete_store: identity_store.clone(),
             personal_dm_target_store: Arc::new(InMemorySlackPersonalDmTargetStore::new()),
+            personal_credential_cleanup: None,
         };
         let caller =
             WebUiAuthenticatedCaller::new(tenant_id, user_id.clone(), None::<AgentId>, None);
@@ -337,6 +430,7 @@ mod tests {
             user_identity_lookup: identity_store.clone(),
             user_identity_delete_store: identity_store.clone(),
             personal_dm_target_store: Arc::new(InMemorySlackPersonalDmTargetStore::new()),
+            personal_credential_cleanup: None,
         };
         let caller = WebUiAuthenticatedCaller::new(tenant_id, user_id, None::<AgentId>, None);
 
@@ -378,6 +472,7 @@ mod tests {
             user_identity_lookup: identity_store.clone(),
             user_identity_delete_store: identity_store.clone(),
             personal_dm_target_store: Arc::new(InMemorySlackPersonalDmTargetStore::new()),
+            personal_credential_cleanup: None,
         };
         let caller = WebUiAuthenticatedCaller::new(
             TenantId::new("tenant:other").expect("other tenant"),
@@ -393,6 +488,86 @@ mod tests {
                 .expect("connection lookup"),
             HashMap::from([("slack".to_string(), false)])
         );
+    }
+
+    #[tokio::test]
+    async fn slack_channel_connection_facade_keeps_identity_when_credential_cleanup_fails() {
+        let tenant_id = TenantId::new("tenant:test").expect("tenant");
+        let installation_id = AdapterInstallationId::new("install-alpha").expect("installation id");
+        let team_id = SlackTeamId::new("T123");
+        let user_id = UserId::new("user:alice").expect("user");
+        let slack_provider_user_id = slack_user_identity_provider_user_id(&installation_id, "U123");
+        let identity_store = Arc::new(RecordingSlackIdentityStore::new([(
+            slack_provider_user_id,
+            user_id.clone(),
+        )]));
+        let facade = SlackChannelConnectionFacade {
+            tenant_id: tenant_id.clone(),
+            personal_connection_scope: Some(SlackPersonalConnectionScope {
+                installation_id,
+                team_id,
+            }),
+            personal_connection_scope_resolver: None,
+            user_identity_lookup: identity_store.clone(),
+            user_identity_delete_store: identity_store.clone(),
+            personal_dm_target_store: Arc::new(InMemorySlackPersonalDmTargetStore::new()),
+            personal_credential_cleanup: Some(Arc::new(FailingCleanupService)),
+        };
+        let caller =
+            WebUiAuthenticatedCaller::new(tenant_id, user_id.clone(), None::<AgentId>, None);
+
+        assert!(
+            facade
+                .disconnect_channel_for_caller(caller.clone(), "slack")
+                .await
+                .is_err(),
+            "credential cleanup failure must fail the disconnect"
+        );
+        assert_eq!(
+            facade
+                .caller_channel_connections(caller)
+                .await
+                .expect("connection lookup after failed disconnect"),
+            HashMap::from([("slack".to_string(), true)]),
+            "identity binding must remain until credential cleanup succeeds, so the removal retry re-runs the full disconnect"
+        );
+        assert_eq!(identity_store.deletes(), Vec::new());
+    }
+
+    #[derive(Default)]
+    struct RecordingCleanupService {
+        requests: Mutex<Vec<SecretCleanupRequest>>,
+    }
+
+    impl RecordingCleanupService {
+        fn requests(&self) -> Vec<SecretCleanupRequest> {
+            self.requests.lock().expect("lock").clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SlackPersonalCredentialCleanup for RecordingCleanupService {
+        async fn cleanup_credentials_for_lifecycle(
+            &self,
+            request: SecretCleanupRequest,
+        ) -> Result<SecretCleanupReport, RebornServicesError> {
+            self.requests.lock().expect("lock").push(request);
+            Ok(SecretCleanupReport::default())
+        }
+    }
+
+    struct FailingCleanupService;
+
+    #[async_trait::async_trait]
+    impl SlackPersonalCredentialCleanup for FailingCleanupService {
+        async fn cleanup_credentials_for_lifecycle(
+            &self,
+            _request: SecretCleanupRequest,
+        ) -> Result<SecretCleanupReport, RebornServicesError> {
+            Err(RebornServicesError::internal_from(
+                "credential cleanup unavailable",
+            ))
+        }
     }
 
     #[derive(Default)]

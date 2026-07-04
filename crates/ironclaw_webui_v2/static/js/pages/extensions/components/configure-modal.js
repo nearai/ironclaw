@@ -16,6 +16,7 @@ import {
 import { isChannelExtensionKind } from "../lib/extensions-schema.js";
 import { redeemPairingCode } from "../lib/pairing-api.js";
 import { activateExtension } from "../lib/extensions-api.js";
+import { notifyChannelConnected } from "../../../lib/channel-connection-events.js";
 
 export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
   const t = useT();
@@ -56,8 +57,18 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
       queryKey: ["extension-setup", packageId],
       type: "active",
     });
+    // Broadcast channel-connected (same event pairing redemption sends) so an
+    // open chat card for this channel clears and its parked request resumes —
+    // connecting from the Extensions page must not strand the chat surface.
+    if (isChannelExtensionKind(extension?.kind) && channelId) {
+      try {
+        await notifyChannelConnected({ channel: channelId, source: "extensions-oauth" });
+      } catch {
+        console.error("channel connection broadcast after OAuth failed.");
+      }
+    }
     if (onSaved) onSaved();
-  }, [isSlackChannel, onClose, onSaved, packageId, queryClient]);
+  }, [channelId, extension?.kind, isSlackChannel, onClose, onSaved, packageId, queryClient]);
   const oauthMutation = useOauthSetup(extension?.packageRef, {
     onConfigured: handleOauthConfigured,
   });
@@ -358,6 +369,15 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
           className="mt-4 rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200"
         >
           ${oauthMutation.error.message}
+        </div>
+      `}
+      ${!oauthMutation.error &&
+      oauthMutation.authError &&
+      html`
+        <div
+          className="mt-4 rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200"
+        >
+          ${oauthMutation.authError}
         </div>
       `}
 

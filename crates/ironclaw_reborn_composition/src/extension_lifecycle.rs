@@ -1424,7 +1424,11 @@ fn activation_success_message(
 // copy is kept identical to the connectable-channels descriptor so the in-chat
 // panel and the Settings panel read identically — enforced by
 // `slack_requirement_copy_matches_connectable_descriptor`, not just by convention.
-// Any other inbound channel gets a generic proof-code prompt.
+// Any other inbound channel gets a generic proof-code prompt. NOTE: no such
+// channel ships today (Slack is the only inbound product adapter), and no
+// backend mounts the generic proof-code redeem route — the first non-Slack
+// inbound channel must mount one alongside this requirement or its submit
+// will 404 (see PAIRING_REDEEM_PATH in the webui pairing-api.js).
 pub(crate) fn channel_connection_requirement(
     channel_id: &str,
     display_name: &str,

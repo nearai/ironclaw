@@ -331,11 +331,13 @@ mod tests {
 
         // The channel-connection/onboarding state machine — the channel-connected
         // subscription, pairing redemption through the generic pairing API
-        // (submitOnboardingPairing -> redeemPairingCode) that resumes the parked
-        // turn, and the waiter/onboarding-resume wiring that resumes a chat
-        // blocked on a channel connected in another tab — moved out of useChat
-        // into the dedicated useChannelOnboarding hook (PR #5604 mn10). useChat
-        // still wires that hook in and re-exposes its handles, so the wiring is
+        // (submitOnboardingPairing -> redeemPairingCode; frontend scaffolding —
+        // no backend mounts the generic redeem route until the first non-Slack
+        // inbound channel lands, see PAIRING_REDEEM_PATH), and the
+        // waiter/onboarding-resume wiring that resumes a chat blocked on a
+        // channel connected in another tab — moved out of useChat into the
+        // dedicated useChannelOnboarding hook (PR #5604 mn10). useChat still
+        // wires that hook in and re-exposes its handles, so the wiring is
         // verified here and the state machine itself in its new home below.
         let use_chat = asset_text("js/pages/chat/hooks/useChat.js");
         assert!(use_chat.contains("useChannelOnboarding(threadId, {"));

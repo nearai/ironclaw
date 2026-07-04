@@ -3949,6 +3949,71 @@ async fn credential_exchange_passes_token_body_that_default_execute_blocks() {
     );
 }
 
+/// The skip-sanitization contract of `execute_credential_exchange` is only safe
+/// because token-exchange requests carry no injected credentials to redact (the
+/// response sanitizer is the layer that would scrub them from the body). A
+/// request that *does* carry injections on this path is a contract violation by
+/// the caller, so the pipeline fails closed before any credential staging or
+/// network dispatch instead of trusting the doc comment.
+#[tokio::test]
+async fn credential_exchange_rejects_requests_carrying_credential_injections() {
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let requests = Arc::clone(&network.requests);
+    let service = services.host_http_egress(network);
+
+    let error = service
+        .execute_credential_exchange(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::System,
+            scope,
+            capability_id: capability_id.clone(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/api/oauth.v2.access".to_string(),
+            headers: vec![],
+            body: b"grant_type=authorization_code&code=stub-auth-code".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle: SecretHandle::new("stub-cred").expect("secret handle"),
+                source: RuntimeCredentialSource::StagedObligation { capability_id },
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        })
+        .await
+        .expect_err("credential exchange must reject requests carrying credential injections");
+
+    assert!(
+        matches!(
+            error,
+            RuntimeHttpEgressError::Request { ref reason, .. }
+                if reason == "credential_exchange_injections_unsupported"
+        ),
+        "expected credential_exchange_injections_unsupported, got {error:?}"
+    );
+    assert!(
+        requests.lock().unwrap().is_empty(),
+        "the rejected exchange must never reach the network transport"
+    );
+}
+
 #[tokio::test]
 async fn host_http_egress_blocks_percent_encoded_credential_path_before_network() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {

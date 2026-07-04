@@ -501,6 +501,294 @@ test("useOauthSetup keeps polling reconnect after Slack closes the OAuth popup",
   ]);
 });
 
+test("useOauthSetup surfaces a flow-matched failure signal as a retryable error and stops the watcher", () => {
+  const stateUpdates = [];
+  const intervals = [];
+  const storage = new Map();
+  let mutationConfig = null;
+  let stateIndex = 0;
+  let configuredCount = 0;
+  const popup = { closed: false, location: { href: "about:blank" } };
+  const context = {
+    Date,
+    Error,
+    React: {
+      useCallback: (fn) => fn,
+      useEffect: () => {},
+      useRef: (initial) => ({ current: initial }),
+      useState: (initial) => {
+        const index = stateIndex++;
+        return [
+          typeof initial === "function" ? initial() : initial,
+          (value) => stateUpdates.push({ index, value }),
+        ];
+      },
+    },
+    URL,
+    activateExtension: () => {},
+    approvePairingCode: () => {},
+    fetchExtensionRegistry: () => {},
+    fetchExtensionSetup: () => {},
+    fetchExtensions: () => {},
+    fetchPairingRequests: () => {},
+    gatewayStatus: () => {},
+    globalThis: {},
+    installExtension: () => {},
+    isChannelExtensionKind: () => false,
+    listConnectableChannels: () => {},
+    removeExtension: () => {},
+    startExtensionOauth: () => {},
+    submitExtensionSetup: () => {},
+    useMutation: (config) => {
+      mutationConfig = config;
+      return { isPending: false, mutate: () => {}, error: null };
+    },
+    useQuery: () => ({ data: {}, isLoading: false }),
+    useQueryClient: () => ({
+      getQueryData: () => null,
+      invalidateQueries: () => {},
+    }),
+    useT: () => (key) => key,
+    window: {
+      clearInterval: () => {},
+      localStorage: {
+        getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+        setItem: (key, value) => storage.set(key, String(value)),
+      },
+      open: () => popup,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      setInterval: (callback) => {
+        intervals.push(callback);
+        return intervals.length;
+      },
+    },
+  };
+  vm.runInNewContext(useExtensionsOauthSourceForTest(), context);
+
+  context.globalThis.__testExports.useOauthSetup(
+    { id: "slack" },
+    {
+      onConfigured: () => {
+        configuredCount += 1;
+      },
+    },
+  );
+
+  mutationConfig.onSuccess(
+    {
+      res: {
+        authorization_url: "https://slack.com/oauth/v2/authorize",
+        flow_id: "flow-fails",
+      },
+      popup,
+    },
+    {},
+  );
+
+  // The callback popup reported a FAILURE for this exact flow and closed.
+  storage.set(
+    "ironclaw:product-auth:oauth-complete",
+    JSON.stringify({
+      type: "ironclaw:product-auth:oauth-complete",
+      status: "failed",
+      flowId: "flow-fails",
+    }),
+  );
+  intervals[0]();
+
+  assert.equal(configuredCount, 0, "a failed flow must not report configured");
+  // isAuthorizing (first useState) flips true -> false: the watcher stopped.
+  assert.ok(
+    stateUpdates.some((update) => update.index === 0 && update.value === false),
+    "the watcher must stop on a flow-matched failure",
+  );
+  // authError (second useState) carries the retryable error for the modal.
+  assert.ok(
+    stateUpdates.some(
+      (update) =>
+        update.index === 1 &&
+        typeof update.value === "string" &&
+        /authorization failed/i.test(update.value),
+    ),
+    "a flow-matched failure must surface a retryable error",
+  );
+
+  // A failure for a DIFFERENT flow must not disturb a fresh watcher.
+  const before = stateUpdates.length;
+  mutationConfig.onSuccess(
+    {
+      res: {
+        authorization_url: "https://slack.com/oauth/v2/authorize",
+        flow_id: "flow-second",
+      },
+      popup,
+    },
+    {},
+  );
+  storage.set(
+    "ironclaw:product-auth:oauth-complete",
+    JSON.stringify({
+      type: "ironclaw:product-auth:oauth-complete",
+      status: "failed",
+      flowId: "flow-other",
+    }),
+  );
+  intervals.at(-1)();
+  assert.ok(
+    !stateUpdates
+      .slice(before)
+      .some(
+        (update) =>
+          update.index === 1 &&
+          typeof update.value === "string" &&
+          /authorization failed/i.test(update.value),
+      ),
+    "a foreign flow's failure must not error this watcher",
+  );
+});
+
+test("useOauthSetup reconnect ignores the pre-flow configured snapshot and waits for a fresh signal", () => {
+  const stateUpdates = [];
+  const intervals = [];
+  const storage = new Map();
+  let mutationConfig = null;
+  let stateIndex = 0;
+  let configuredCount = 0;
+  // The caller is ALREADY connected: a true reconnect. The extensions cache
+  // reports configured before the OAuth flow even starts, so "configured" is
+  // not evidence that THIS flow completed — the old watcher completed on the
+  // first poll tick while the user was still on Slack's consent screen.
+  const extensionState = {
+    package_ref: { id: "slack" },
+    active: true,
+    authenticated: true,
+    needs_setup: false,
+    activation_status: "active",
+    onboarding_state: null,
+  };
+  const popup = { closed: false, location: { href: "about:blank" } };
+  const context = {
+    Date,
+    Error,
+    React: {
+      useCallback: (fn) => fn,
+      useEffect: () => {},
+      useRef: (initial) => ({ current: initial }),
+      useState: (initial) => {
+        const index = stateIndex++;
+        return [
+          typeof initial === "function" ? initial() : initial,
+          (value) => stateUpdates.push({ index, value }),
+        ];
+      },
+    },
+    URL,
+    activateExtension: () => {},
+    approvePairingCode: () => {},
+    fetchExtensionRegistry: () => {},
+    fetchExtensionSetup: () => {},
+    fetchExtensions: () => {},
+    fetchPairingRequests: () => {},
+    gatewayStatus: () => {},
+    globalThis: {},
+    installExtension: () => {},
+    isChannelExtensionKind: () => false,
+    listConnectableChannels: () => {},
+    removeExtension: () => {},
+    startExtensionOauth: () => {},
+    submitExtensionSetup: () => {},
+    useMutation: (config) => {
+      mutationConfig = config;
+      return { isPending: false, mutate: () => {}, error: null };
+    },
+    useQuery: () => ({ data: {}, isLoading: false }),
+    useQueryClient: () => ({
+      getQueryData: (queryKey) => {
+        if (JSON.stringify(queryKey) === JSON.stringify(["extension-setup", "slack"])) {
+          return {
+            secrets: [
+              {
+                name: "slack_personal_oauth",
+                provider: "slack_personal",
+                provided: true,
+              },
+            ],
+          };
+        }
+        if (JSON.stringify(queryKey) === JSON.stringify(["extensions"])) {
+          return { extensions: [extensionState] };
+        }
+        return null;
+      },
+      invalidateQueries: () => {},
+    }),
+    useT: () => (key) => key,
+    window: {
+      clearInterval: () => {},
+      localStorage: {
+        getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+        setItem: (key, value) => storage.set(key, String(value)),
+      },
+      open: () => popup,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      setInterval: (callback) => {
+        intervals.push(callback);
+        return intervals.length;
+      },
+    },
+  };
+  vm.runInNewContext(useExtensionsOauthSourceForTest(), context);
+
+  context.globalThis.__testExports.useOauthSetup(
+    { id: "slack" },
+    {
+      onConfigured: () => {
+        configuredCount += 1;
+      },
+    },
+  );
+
+  mutationConfig.onSuccess(
+    {
+      res: {
+        authorization_url: "https://slack.com/oauth/v2/authorize",
+        flow_id: "flow-new",
+      },
+      popup,
+    },
+    {
+      secret: {
+        provider: "slack_personal",
+        provided: true,
+      },
+    },
+  );
+
+  // Stale pre-flow "configured" must not complete the reconnect — the user is
+  // still authorizing in the popup.
+  intervals[0]();
+  intervals[0]();
+  assert.equal(configuredCount, 0);
+
+  // The flow-id-matched callback signal is what proves THIS flow completed.
+  storage.set(
+    "ironclaw:product-auth:oauth-complete",
+    JSON.stringify({
+      type: "ironclaw:product-auth:oauth-complete",
+      status: "completed",
+      flowId: "flow-new",
+    }),
+  );
+  intervals[0]();
+  assert.equal(configuredCount, 1);
+  assert.deepEqual(stateUpdates, [
+    { index: 0, value: true },
+    { index: 0, value: false },
+  ]);
+});
+
 test("useOauthSetup ignores a stale OAuth callback when the flow response carried no flow id", () => {
   const stateUpdates = [];
   const intervals = [];
