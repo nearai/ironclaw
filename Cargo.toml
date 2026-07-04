@@ -294,6 +294,7 @@ ironclaw_product_workflow = { path = "crates/ironclaw_product_workflow", version
 ironclaw_reborn = { path = "crates/ironclaw_reborn", version = "0.1.0", features = ["root-llm-provider"] }
 ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support", "libsql"] }
 ironclaw_reborn_config = { path = "crates/ironclaw_reborn_config", version = "0.1.0" }
+ironclaw_reborn_openai_compat = { path = "crates/ironclaw_reborn_openai_compat", version = "0.1.0", features = ["openai-compat-beta"] }
 ironclaw_run_state = { path = "crates/ironclaw_run_state", version = "0.1.0" }
 ironclaw_threads = { path = "crates/ironclaw_threads", version = "0.1.0" }
 # `test-support` unlocks `TrustedTriggerSubmitRequest::new_for_test` (E-TRIGGERED-SUBMIT

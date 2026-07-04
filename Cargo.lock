@@ -3946,6 +3946,7 @@ dependencies = [
  "ironclaw_reborn",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",
+ "ironclaw_reborn_openai_compat",
  "ironclaw_reborn_traces",
  "ironclaw_resources",
  "ironclaw_run_state",
