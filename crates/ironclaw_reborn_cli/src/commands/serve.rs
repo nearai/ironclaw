@@ -75,13 +75,16 @@ impl ServeCommand {
         // the local-dev-yolo host-access disclosure gate fires before any
         // WebUI env-var resolution below; the owner is aligned to the
         // authenticated WebUI user once it is resolved (see `with_owner_id`).
-        let runtime_input = crate::runtime::build_runtime_input_with_options(
+        let built = crate::runtime::build_runtime_input_with_options(
             context.boot_config(),
             crate::runtime::RuntimeInputCaller::Serve,
             RuntimeInputOptions {
                 confirm_host_access: self.confirm_host_access,
             },
         )?;
+        #[cfg(feature = "slack-v2-host-beta")]
+        let slack_personal_lazy_slot = built.slack_personal_lazy_slot;
+        let runtime_input = built.inner;
         let boot_config = context.boot_config();
         let config_file =
             ironclaw_reborn_config::RebornConfigFile::load(&boot_config.home().config_file_path())
@@ -395,7 +398,12 @@ impl ServeCommand {
                     .await
                     .context("failed to compose Slack host-beta routes")
                 {
-                    Ok(mounts) => Some(mounts),
+                    Ok(mounts) => {
+                        if let Some(slot) = &slack_personal_lazy_slot {
+                            mounts.fill_slack_personal_oauth_slot(slot);
+                        }
+                        Some(mounts)
+                    }
                     Err(error) => {
                         let shutdown_result = runtime.shutdown().await;
                         if let Err(shutdown_error) = shutdown_result {
@@ -507,6 +515,12 @@ impl ServeCommand {
                 }
                 serve_config = serve_config.with_google_oauth(route_config);
             }
+            #[cfg(feature = "slack-v2-host-beta")]
+            {
+                if let Some(slot) = slack_personal_lazy_slot {
+                    serve_config = serve_config.with_slack_personal_oauth(slot);
+                }
+            }
             if let Some(value) = csp_override {
                 serve_config = serve_config
                     .with_csp_header_str(value)
@@ -520,10 +534,10 @@ impl ServeCommand {
             }
             #[cfg(feature = "slack-v2-host-beta")]
             if let Some(slack_mounts) = slack_mounts {
+                let slack_personal_oauth_binding = slack_mounts.personal_oauth_binding_config();
                 serve_config = serve_config
                     .with_public_route_mount(slack_mounts.events)
-                    .with_public_route_mount(slack_mounts.commands)
-                    .with_slack_personal_binding_pairing(slack_mounts.personal_binding_pairing)
+                    .with_slack_personal_oauth_binding(slack_personal_oauth_binding)
                     .with_slack_channel_routes(slack_mounts.channel_routes);
             }
             // Public NEAR AI login callback route (token redirect target). Built

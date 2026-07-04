@@ -204,9 +204,6 @@ impl ProductAuthRouteState {
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
-    // Wired by the webui_serve/serve composition layer in the next PR of the
-    // Slack OAuth stack (#5604 re-slice); dormant until then.
-    #[allow(dead_code)]
     pub(crate) fn with_slack_personal_oauth(
         mut self,
         slot: crate::slack_setup::SlackPersonalSetupServiceSlot,
@@ -244,9 +241,6 @@ impl ProductAuthRouteState {
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
-    // Wired by the slack_host_beta/serve composition layer in the next PR of
-    // the Slack OAuth stack (#5604 re-slice); dormant until then.
-    #[allow(dead_code)]
     pub(crate) fn with_slack_personal_oauth_binding(
         mut self,
         config: SlackPersonalOAuthBindingConfig,
@@ -321,9 +315,6 @@ pub struct SlackPersonalOAuthBindingConfig {
 
 #[cfg(feature = "slack-v2-host-beta")]
 impl SlackPersonalOAuthBindingConfig {
-    // Constructed by the slack_host_beta composition layer in the next PR of
-    // the Slack OAuth stack (#5604 re-slice); dormant until then.
-    #[allow(dead_code)]
     pub(crate) fn new(
         binding_service: Arc<dyn SlackPersonalUserBinder>,
         connection_scope_resolver: Arc<dyn SlackPersonalConnectionScopeResolver>,

@@ -214,6 +214,8 @@ test("SlackSetupPanel clears secrets and accepts saved status after successful s
     shared_subject_user_id: "",
     bot_token: "",
     signing_secret: "",
+    oauth_client_id: "",
+    oauth_client_secret: "",
   });
   assert.deepEqual(JSON.parse(JSON.stringify(setQueryDataCalls)), [
     [["slack-setup"], savedStatus],
@@ -263,4 +265,6 @@ test("SlackSetupPanel defines field guidance for Slack credentials", () => {
   assert.equal(help.appId.example, "Example: A0123456789");
   assert.match(help.botToken.body, /Bot User OAuth Token/);
   assert.match(help.signingSecret.body, /Signing Secret/);
+  assert.match(help.oauthClientId.body, /Client ID/);
+  assert.match(help.oauthClientSecret.body, /Client Secret/);
 });

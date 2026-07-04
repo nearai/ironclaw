@@ -357,6 +357,13 @@ fn tenant_app_selector_matches_request(
             api_app_id,
             team_id,
         } => Ok(team_id == &request.team_id && api_app_id == &request.api_app_id),
+        SlackInstallationSelector::AppEnterpriseTeam {
+            api_app_id,
+            enterprise_id,
+            team_id,
+        } => Ok(team_id == &request.team_id
+            && api_app_id == &request.api_app_id
+            && request.enterprise_id.as_ref() == Some(enterprise_id)),
         _ => unreachable!("ensure_tenant_app_scoped rejects non-AppTeam selectors"),
     }
 }
@@ -367,7 +374,8 @@ fn ensure_tenant_app_scoped(
     installation_id: &AdapterInstallationId,
 ) -> Result<(), SlackPersonalUserBindingError> {
     match selector {
-        SlackInstallationSelector::AppTeam { .. } => Ok(()),
+        SlackInstallationSelector::AppTeam { .. }
+        | SlackInstallationSelector::AppEnterpriseTeam { .. } => Ok(()),
         _ => Err(SlackPersonalUserBindingError::InstallationNotTenantScoped {
             tenant_id: principal.tenant_id.clone(),
             installation_id: installation_id.clone(),
@@ -490,6 +498,28 @@ mod tests {
             .bind_personal_user(principal("tenant-alpha", "user:alice"), request)
             .await
             .expect_err("wrong team is rejected");
+
+        assert!(matches!(
+            error,
+            SlackPersonalUserBindingError::SlackInstallationContextMismatch { .. }
+        ));
+        assert_eq!(store.bindings(), Vec::<RebornUserIdentityBinding>::new());
+    }
+
+    #[tokio::test]
+    async fn bind_personal_user_rejects_wrong_enterprise_without_write() {
+        let store = Arc::new(RecordingBindingStore::default());
+        let service = service(
+            SlackInstallationSelector::app_enterprise_team("A-app", "E-good", "T-team"),
+            store.clone(),
+        );
+        let mut request = request("install-alpha");
+        request.enterprise_id = Some(SlackEnterpriseId::new("E-other"));
+
+        let error = service
+            .bind_personal_user(principal("tenant-alpha", "user:alice"), request)
+            .await
+            .expect_err("wrong enterprise is rejected");
 
         assert!(matches!(
             error,

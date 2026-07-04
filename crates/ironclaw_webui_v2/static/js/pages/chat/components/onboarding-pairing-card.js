@@ -2,22 +2,36 @@ import { React, html } from "../../../lib/html.js";
 import { Button } from "../../../design-system/button.js";
 import { channelConnectionDisplayName } from "../../../lib/channel-connection-events.js";
 
-// Strategies whose in-chat affordance is "paste a code". Other strategies (OAuth,
-// QR, admin-managed channels) can't be completed from this inline panel, so the
-// user is pointed at the Extensions page rather than shown a code box they can't
-// use. An absent strategy defaults to the paste panel for backward compatibility.
+// Strategies whose in-chat affordance is "paste a code". OAuth gets a direct
+// configure button; QR/admin-managed channels render guidance instead of a code
+// box they can't use. An absent strategy defaults to the paste panel for
+// backward compatibility.
 const PASTE_CODE_STRATEGIES = new Set(["inbound_proof_code", "web_generated_code"]);
 
 function acceptsPastedCode(strategy) {
   return !strategy || PASTE_CODE_STRATEGIES.has(strategy);
 }
 
-export function OnboardingPairingCard({ onboarding, onSubmit, onCancel }) {
+export function OnboardingPairingCard({ onboarding, onSubmit, onConfigure, onCancel }) {
   const [code, setCode] = React.useState("");
   const [error, setError] = React.useState("");
-  // "idle" → "submitting" (redeem in flight) → "resuming" (redeem succeeded;
+  // "idle" -> "submitting" (redeem in flight) -> "resuming" (redeem succeeded;
   // hold the spinner while the parked turn resumes and this gate clears).
   const [status, setStatus] = React.useState("idle");
+  const [isConfiguring, setIsConfiguring] = React.useState(false);
+  // Derived-from-props during render (not an effect) so the minimal test
+  // harness stays useState-only: when the onboarding hook stamps a failed or
+  // timed-out OAuth flow onto the card, exit the connect spinner and surface
+  // the retryable error — the popup is gone, so this is the only signal.
+  const [lastOauthError, setLastOauthError] = React.useState(null);
+  const oauthError = onboarding?.oauthError || null;
+  if (oauthError !== lastOauthError) {
+    setLastOauthError(oauthError);
+    if (oauthError) {
+      setError(oauthError);
+      setIsConfiguring(false);
+    }
+  }
   const copy = pairingCardCopy(onboarding);
   const busy = status !== "idle";
 
@@ -43,9 +57,20 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onCancel }) {
     }
   };
 
-  // Non-paste strategy: this channel is connected from the Extensions page, not by
-  // pasting a code here. Render guidance instead of a code box that would submit a
-  // meaningless value.
+  const configure = async () => {
+    if (!onConfigure || isConfiguring) return;
+    setError("");
+    setIsConfiguring(true);
+    try {
+      await onConfigure(onboarding);
+    } catch {
+      setError(copy.errorMessage);
+      setIsConfiguring(false);
+    }
+  };
+
+  // Non-paste strategy: render the channel's configured connection action rather
+  // than a code box that would submit a meaningless value.
   if (!acceptsPastedCode(onboarding?.strategy)) {
     return html`
       <div
@@ -53,17 +78,39 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onCancel }) {
         className="mx-auto mt-4 w-full max-w-lg rounded-lg border border-signal/25 bg-signal/5 p-4"
       >
         <h3 className="text-sm font-semibold text-iron-100">${copy.title}</h3>
-        <p className="mt-1 text-sm leading-6 text-iron-300">
-          Connect ${copy.displayName} from the Extensions page to continue.
-        </p>
-        ${onCancel &&
-        html`
-          <div className="mt-3">
-            <${Button} variant="ghost" className="h-9 px-3 text-xs" onClick=${onCancel}>
+        <p className="mt-1 text-sm leading-6 text-iron-300">${copy.instructions}</p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          ${onConfigure &&
+          html`
+            <${Button}
+              variant="secondary"
+              className="h-9 gap-2 px-3 text-xs"
+              onClick=${configure}
+              disabled=${isConfiguring}
+            >
+              ${isConfiguring && spinnerGlyph()}
+              ${isConfiguring ? copy.submittingLabel : copy.submitLabel}
+            <//>
+          `}
+          ${onCancel &&
+          html`
+            <${Button}
+              variant="ghost"
+              className="h-9 px-3 text-xs"
+              onClick=${onCancel}
+            >
               Dismiss
             <//>
-          </div>
+          `}
+        </div>
+        ${!onConfigure &&
+        html`
+          <p className="mt-2 text-xs leading-5 text-iron-400">
+            Connect ${copy.displayName} from the Extensions page to continue.
+          </p>
         `}
+        ${error &&
+        html`<p role="alert" className="mt-3 text-xs leading-5 text-red-300">${error}</p>`}
       </div>
     `;
   }

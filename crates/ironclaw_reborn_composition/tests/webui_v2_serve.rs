@@ -647,188 +647,6 @@ mod openai_compat_mount_tests {
     }
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_personal_binding_pairing_mount_tests {
-    use super::*;
-    use ironclaw_product_adapters::AdapterInstallationId;
-    use ironclaw_product_workflow::{
-        ChannelConnectionResumeService, ProductWorkflowError, ResumeChannelConnectionRequest,
-        ResumeChannelConnectionResponse,
-    };
-    use ironclaw_reborn_composition::slack_serve::SlackUserId;
-    use ironclaw_reborn_composition::{
-        IssuedSlackPersonalBindingPairingChallenge, RebornUserIdentityBinding,
-        RebornUserIdentityBindingError, RebornUserIdentityBindingStore, SlackInstallationSelector,
-        SlackPersonalBindingInstallation, SlackPersonalBindingPairingChallenge,
-        SlackPersonalBindingPairingChallengeStore, SlackPersonalBindingPairingCode,
-        SlackPersonalBindingPairingError, SlackPersonalBindingPairingNotification,
-        SlackPersonalBindingPairingNotifier, SlackPersonalBindingPairingRouteConfig,
-        SlackPersonalBindingPairingService, SlackPersonalUserBindingService,
-        WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH,
-    };
-
-    /// No-op resume: this test exercises route mounting/auth, not resume.
-    struct NoopChannelConnectionResume;
-
-    #[async_trait::async_trait]
-    impl ChannelConnectionResumeService for NoopChannelConnectionResume {
-        async fn resume_channel_connection(
-            &self,
-            _request: ResumeChannelConnectionRequest,
-        ) -> Result<ResumeChannelConnectionResponse, ProductWorkflowError> {
-            Ok(ResumeChannelConnectionResponse {
-                resumed_runs: Vec::new(),
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn pairing_route_mounted_when_config_provided() {
-        let binding_store = Arc::new(RecordingBindingStore::default());
-        let pairing = SlackPersonalBindingPairingService::new(
-            SlackPersonalUserBindingService::new(
-                [SlackPersonalBindingInstallation {
-                    tenant_id: TenantId::new(TENANT).expect("tenant"),
-                    installation_id: installation("install-a"),
-                    selector: SlackInstallationSelector::app_team("A-app", "T-team"),
-                }],
-                binding_store.clone(),
-            ),
-            Arc::new(StaticChallengeStore),
-            Arc::new(NoopNotifier),
-        );
-        let bundle = RebornWebuiBundle {
-            api: Arc::new(StubServices::default()),
-            product_auth: None,
-            readiness: RebornReadiness::disabled(),
-        };
-        let config = WebuiServeConfig::new(
-            TenantId::new(TENANT).expect("tenant"),
-            Arc::new(OnlyValidToken),
-            vec![HeaderValue::from_static("http://localhost:1234")],
-        )
-        .with_slack_personal_binding_pairing(SlackPersonalBindingPairingRouteConfig::new(
-            pairing,
-            Arc::new(NoopChannelConnectionResume),
-        ));
-        let app = webui_v2_app(bundle, config).expect("webui v2 app");
-
-        let unauthenticated = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri(WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"channel":"slack","code":"abc12345"}"#))
-                    .expect("request"),
-            )
-            .await
-            .expect("oneshot");
-        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
-
-        let authenticated = app
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri(WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH)
-                    .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"channel":"slack","code":"abc12345"}"#))
-                    .expect("request"),
-            )
-            .await
-            .expect("oneshot");
-        assert_eq!(authenticated.status(), StatusCode::OK);
-        assert_eq!(binding_store.bound_user_ids(), vec![USER.to_string()]);
-    }
-
-    fn installation(value: &str) -> AdapterInstallationId {
-        AdapterInstallationId::new(value).expect("installation")
-    }
-
-    #[derive(Default)]
-    struct RecordingBindingStore {
-        bindings: Mutex<Vec<RebornUserIdentityBinding>>,
-    }
-
-    impl RecordingBindingStore {
-        fn bound_user_ids(&self) -> Vec<String> {
-            self.bindings
-                .lock()
-                .expect("bindings lock should not be poisoned")
-                .iter()
-                .map(|binding| binding.user_id.to_string())
-                .collect()
-        }
-    }
-
-    #[async_trait]
-    impl RebornUserIdentityBindingStore for RecordingBindingStore {
-        async fn bind_user_identity(
-            &self,
-            binding: RebornUserIdentityBinding,
-        ) -> Result<(), RebornUserIdentityBindingError> {
-            self.bindings
-                .lock()
-                .expect("bindings lock should not be poisoned")
-                .push(binding);
-            Ok(())
-        }
-    }
-
-    struct StaticChallengeStore;
-
-    #[async_trait]
-    impl SlackPersonalBindingPairingChallengeStore for StaticChallengeStore {
-        async fn issue_challenge(
-            &self,
-            challenge: SlackPersonalBindingPairingChallenge,
-        ) -> Result<IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
-        {
-            Ok(IssuedSlackPersonalBindingPairingChallenge {
-                code: SlackPersonalBindingPairingCode::new("ABC12345").expect("code"),
-                challenge,
-            })
-        }
-
-        async fn get_challenge(
-            &self,
-            code: &SlackPersonalBindingPairingCode,
-        ) -> Result<SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
-        {
-            if code.as_str() != "ABC12345" {
-                return Err(SlackPersonalBindingPairingError::ChallengeNotFound);
-            }
-            Ok(SlackPersonalBindingPairingChallenge {
-                installation_id: installation("install-a"),
-                slack_user_id: SlackUserId::new("U123"),
-                setup_revision: None,
-            })
-        }
-
-        async fn consume_challenge(
-            &self,
-            code: &SlackPersonalBindingPairingCode,
-        ) -> Result<SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
-        {
-            self.get_challenge(code).await
-        }
-    }
-
-    struct NoopNotifier;
-
-    #[async_trait]
-    impl SlackPersonalBindingPairingNotifier for NoopNotifier {
-        async fn send_pairing_challenge(
-            &self,
-            _notification: SlackPersonalBindingPairingNotification,
-        ) -> Result<(), SlackPersonalBindingPairingError> {
-            Ok(())
-        }
-    }
-}
-
 #[derive(Default)]
 struct StubServices {
     create_thread_calls: Mutex<Vec<WebUiAuthenticatedCaller>>,
@@ -2400,7 +2218,16 @@ async fn static_chat_oauth_card_exposes_https_only_authorization_link() {
 #[tokio::test]
 async fn static_chat_hook_listens_for_oauth_callback_completion() {
     let (app, _) = build_app();
-    let response = app
+
+    // The chat hook's OAuth-gate callback listener stayed in useChat.js, but the
+    // cross-tab transport it depends on — the BroadcastChannel consumer, the
+    // localStorage `storage`-event fallback, the localStorage poll read, and the
+    // completion-signal constant — was extracted into the shared
+    // lib/product-auth-oauth-events.js module (PR #5604 Dup-4, shared with
+    // useExtensions). Assert both halves so neither the listener nor the
+    // transport it wires to regresses.
+    let use_chat_response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method(Method::GET)
@@ -2410,34 +2237,68 @@ async fn static_chat_hook_listens_for_oauth_callback_completion() {
         )
         .await
         .expect("oneshot");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = read_body_string(response).await;
+    assert_eq!(use_chat_response.status(), StatusCode::OK);
+    let use_chat = read_body_string(use_chat_response).await;
 
+    let oauth_events_response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/js/lib/product-auth-oauth-events.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(oauth_events_response.status(), StatusCode::OK);
+    let oauth_events = read_body_string(oauth_events_response).await;
+
+    // useChat.js arms the listener only while an OAuth gate is pending,
+    // subscribes to the shared completion contract, polls the latest persisted
+    // completion, matches it to the visible gate, and clears ONLY a pending
+    // OAuth auth gate.
     assert!(
-        body.contains("ironclaw:product-auth:oauth-complete"),
-        "chat hook must listen for the OAuth callback completion signal"
+        use_chat.contains("if (!isPendingOAuthGate(pendingGate)) return;"),
+        "chat hook must arm the OAuth callback listener only while an OAuth gate is pending"
     );
     assert!(
-        body.contains("new window.BroadcastChannel(OAUTH_CALLBACK_CHANNEL)"),
-        "chat hook must consume same-origin OAuth callback broadcasts"
+        use_chat.contains("subscribeProductAuthOAuthCompletion(browserWindow, handleCompletion)"),
+        "chat hook must subscribe to the shared OAuth callback completion transport"
     );
     assert!(
-        body.contains("window.addEventListener(\"storage\", onStorage)"),
-        "chat hook must keep a localStorage fallback for browsers without BroadcastChannel"
+        use_chat.contains("readLatestProductAuthOAuthCompletion(browserWindow)"),
+        "chat hook must poll the latest persisted OAuth callback completion in case the callback write happened before the listener observed it"
     );
     assert!(
-        body.contains("window.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY)"),
-        "chat hook must poll localStorage in case the callback write happened before the storage event listener observed it"
-    );
-    assert!(
-        body.contains("oauthCompletionMatchesGate(payload, pendingGate, listeningSince)"),
+        use_chat.contains("completionMatchesGate(payload, pendingGate, listeningSince)"),
         "chat hook must match callback completion to the visible OAuth gate when continuation metadata is present"
     );
     assert!(
-        body.contains(
+        use_chat.contains(
             "setPendingGate((current) => (isPendingOAuthGate(current) ? null : current))"
         ),
         "OAuth callback completion must clear only a pending OAuth auth gate"
+    );
+
+    // product-auth-oauth-events.js owns the cross-tab transport the listener
+    // consumes: the completion signal, the same-origin BroadcastChannel, and the
+    // localStorage storage-event + poll fallback for browsers without
+    // BroadcastChannel.
+    assert!(
+        oauth_events.contains("ironclaw:product-auth:oauth-complete"),
+        "shared OAuth events module must define the callback completion signal"
+    );
+    assert!(
+        oauth_events.contains("new browserWindow.BroadcastChannel(OAUTH_CALLBACK_CHANNEL)"),
+        "shared OAuth events module must consume same-origin OAuth callback broadcasts"
+    );
+    assert!(
+        oauth_events.contains("browserWindow.addEventListener?.(\"storage\", onStorage)"),
+        "shared OAuth events module must keep a localStorage fallback for browsers without BroadcastChannel"
+    );
+    assert!(
+        oauth_events.contains("browserWindow?.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY)"),
+        "shared OAuth events module must read the persisted OAuth callback completion from localStorage"
     );
 }
 

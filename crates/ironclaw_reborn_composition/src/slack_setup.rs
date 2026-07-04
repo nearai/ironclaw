@@ -719,9 +719,6 @@ impl SlackPersonalSetupServiceSlot {
         }
     }
 
-    // Filled by the reborn_cli serve wiring in the next PR of the Slack
-    // OAuth stack (#5604 re-slice); dormant until then.
-    #[allow(dead_code)]
     pub(crate) fn fill(&self, service: Arc<SlackSetupService>) {
         let _ = self.slot.set(service);
     }

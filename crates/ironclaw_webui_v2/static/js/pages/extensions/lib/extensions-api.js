@@ -6,6 +6,8 @@
 import { apiFetch, setupExtension } from "../../../lib/api.js";
 import { redeemPairingCode } from "./pairing-api.js";
 
+const OAUTH_START_TTL_MS = 5 * 60 * 1000;
+
 export function fetchExtensions() {
   return apiFetch("/api/webchat/v2/extensions");
 }
@@ -39,7 +41,7 @@ export function submitExtensionSetup(packageRef, secrets, fields) {
 }
 export function startExtensionOauth(packageRef, secret) {
   const setup = secret?.setup || {};
-  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  const expiresAt = new Date(Date.now() + OAUTH_START_TTL_MS).toISOString();
   return apiFetch(
     `/api/webchat/v2/extensions/${encodeURIComponent(packageId(packageRef))}/setup/oauth/start`,
     {

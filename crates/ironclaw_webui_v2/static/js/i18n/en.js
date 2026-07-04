@@ -834,9 +834,9 @@ registerPack("en", {
   "automations.delivery.webOption": "Web app only (no external delivery)",
   "automations.delivery.webOptionDesc":
     "Results are stored in the run history. No DM or notification is sent.",
-  "automations.delivery.unpairedNotice": "Slack DM — not available",
-  "automations.delivery.unpairedDesc":
-    "Pair your Slack account to enable DM delivery.",
+  "automations.delivery.unavailableNotice": "Slack DM — not available",
+  "automations.delivery.unavailableDesc":
+    "Connect your Slack account to enable DM delivery.",
   "automations.delivery.save": "Save",
   "automations.delivery.clear": "Clear",
   "automations.delivery.saved": "Saved",
@@ -1002,13 +1002,7 @@ registerPack("en", {
   "pairing.success": "Pairing complete.",
   "pairing.error": "Pairing failed.",
   "pairing.none": "No pending pairing requests.",
-  "pairing.slackTitle": "Slack account connection",
-  "pairing.slackInstructions": "Message the IronClaw Reborn app in Slack to get a pairing code, then paste it here. Codes expire in 10 minutes. If a code is invalid or expired, run /pair in Slack for a fresh one.",
-  "pairing.slackPlaceholder": "Enter Slack pairing code…",
   "pairing.connect": "Connect",
-  "pairing.reconnectHint": "Connected — paste a new code to re-pair.",
-  "pairing.slackSuccess": "Slack account connected.",
-  "pairing.slackError": "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one.",
 
   // Admin — tabs
   "admin.tab.dashboard": "Dashboard",
