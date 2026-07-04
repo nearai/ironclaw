@@ -1,6 +1,7 @@
 //! Runtime-wiring setters for [`RebornIntegrationGroupBuilder`] — `storage`,
-//! `safety_context`, `with_turn_event_sink`, `budget_accounting`,
-//! `communication_context_provider`, `hook_dispatcher_builder_factory`.
+//! `safety_context`, `with_turn_event_sink`, `with_tool_disclosure_bridged`,
+//! `budget_accounting`, `communication_context_provider`,
+//! `hook_dispatcher_builder_factory`.
 //! Private child module of `group.rs` (owns the struct + `build_base`/
 //! `into_group`), so it reaches the builder's private fields at module-
 //! private visibility instead of widening them to `pub(crate)`. New builder
@@ -14,6 +15,7 @@
 use std::sync::Arc;
 
 use ironclaw_reborn::loop_driver_host::HookDispatcherBuilderFactory;
+use ironclaw_reborn::runtime::ToolDisclosureMode;
 use ironclaw_turns::InMemoryTurnEventSink;
 use ironclaw_turns::run_profile::{CommunicationContextProvider, InstructionSafetyContext};
 
@@ -48,6 +50,16 @@ impl RebornIntegrationGroupBuilder {
     /// siblings' events. No raw sink accessor, deliberately.
     pub fn with_turn_event_sink(mut self) -> Self {
         self.turn_event_sink = Some(Arc::new(InMemoryTurnEventSink::default()));
+        self
+    }
+
+    /// Force `ToolDisclosureMode::Bridged` into the group's ONE planned
+    /// runtime config (enabler (b)), regardless of `REBORN_TOOL_DISCLOSURE` —
+    /// avoids the shared-process env-var race `apply_hermetic_env()` already
+    /// guards against (see `ToolDisclosureMode::from_env`). Defaults `None`
+    /// (resolves via `from_env()`, matching today's behavior).
+    pub fn with_tool_disclosure_bridged(mut self) -> Self {
+        self.tool_disclosure = Some(ToolDisclosureMode::Bridged);
         self
     }
 

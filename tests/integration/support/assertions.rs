@@ -261,6 +261,46 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Assert some captured `tools` argument (the provider tool-calling schema
+    /// shipped alongside the messages, NOT system-prompt text — see
+    /// `TraceLlm::captured_tool_definitions`) contains a definition named
+    /// `name`, across every request this thread has sent so far (C-TOOLDISCLOSURE).
+    /// This is the channel `ToolDisclosureMode::Bridged` rewrites: bridged runs
+    /// replace the flat per-capability tool list with the 3 bridge meta tools
+    /// (`tool_search`/`tool_describe`/`tool_call`).
+    pub async fn assert_model_tools_contains(&self, name: &str) -> HarnessResult<()> {
+        let definitions = self.scripted_llm.captured_tool_definitions();
+        if definitions
+            .iter()
+            .flatten()
+            .any(|definition| definition.name == name)
+        {
+            return Ok(());
+        }
+        let seen: Vec<String> = definitions
+            .iter()
+            .flatten()
+            .map(|definition| definition.name.clone())
+            .collect();
+        Err(format!("no captured tool definition named {name:?}; saw {seen:?}").into())
+    }
+
+    /// Inverse of [`assert_model_tools_contains`]: assert NO captured `tools`
+    /// argument contains a definition named `name`. Paired with the positive
+    /// assertion to prove disclosure mode *replaces* the tool surface rather
+    /// than merely adding to it.
+    pub async fn assert_model_tools_excludes(&self, name: &str) -> HarnessResult<()> {
+        let definitions = self.scripted_llm.captured_tool_definitions();
+        if definitions
+            .iter()
+            .flatten()
+            .any(|definition| definition.name == name)
+        {
+            return Err(format!("captured tool definition unexpectedly named {name:?}").into());
+        }
+        Ok(())
+    }
+
     /// Collects the persisted `safe_summary` field of every `ToolResultReference`
     /// message on this thread's FULL history (not baseline-sliced — safe only
     /// for single-turn harnesses today). Shared collector for

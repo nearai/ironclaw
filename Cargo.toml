@@ -487,6 +487,10 @@ name = "reborn_integration_tool_call"
 path = "tests/integration/tool_call.rs"
 
 [[test]]
+name = "reborn_integration_tool_disclosure"
+path = "tests/integration/tool_disclosure.rs"
+
+[[test]]
 name = "reborn_integration_tracecap"
 path = "tests/integration/tracecap.rs"
 

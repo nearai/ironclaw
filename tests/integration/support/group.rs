@@ -61,8 +61,9 @@ use ironclaw_host_runtime::TurnRunSchedulerHandle;
 use ironclaw_llm::testing::provider_chain_over;
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
 use ironclaw_loop_support::{
-    HostManagedModelGateway, HostUserProfileSource, JsonSpawnSubagentInputCodec, ModelCostTable,
-    SubagentSpawnLimits, ZeroCostTable,
+    CapabilityAllowSet, CapabilitySurfaceProfileResolver, HostManagedModelGateway,
+    HostUserProfileSource, JsonSpawnSubagentInputCodec, ModelCostTable, SubagentSpawnLimits,
+    ZeroCostTable,
 };
 use ironclaw_product_adapters::ProductTriggerReason;
 use ironclaw_product_workflow::{
@@ -76,7 +77,7 @@ use ironclaw_reborn::loop_exit_applier::{
 use ironclaw_reborn::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
 use ironclaw_reborn::runtime::{
     DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, RuntimeTurnStateStore,
-    build_default_planned_runtime,
+    ToolDisclosureMode, build_default_planned_runtime,
 };
 use ironclaw_reborn::subagent::{
     flavors::StaticSubagentDefinitionResolver, gate_resolution::BoundedSubagentGateResolutionStore,
@@ -106,7 +107,7 @@ use super::builder::{
 use super::harness::{
     EmptyIdentityContextSource, HarnessCapabilityMode, HarnessCapabilityRecorder,
     HarnessTurnBackend, HostRuntimeCapabilityHarness, RecordingTestCapabilityPort,
-    test_product_scope,
+    StaticCapabilitySurfaceProfileResolver, test_product_scope,
 };
 use super::product_workflow::RebornProductWorkflowHarness;
 use super::reply::RebornScriptedReply;
@@ -127,7 +128,7 @@ use crate::support::trace_llm::TraceLlm;
 mod group_constructors;
 
 /// Optional-runtime-wiring setters (`storage`, `safety_context`,
-/// `with_turn_event_sink`, `budget_accounting`,
+/// `with_turn_event_sink`, `with_tool_disclosure_bridged`, `budget_accounting`,
 /// `communication_context_provider`, `hook_dispatcher_builder_factory`) on
 /// [`RebornIntegrationGroupBuilder`]. A private child module (not `pub mod`
 /// from `mod.rs`), same precedent as `group_constructors` above — it reaches
@@ -320,6 +321,7 @@ impl RebornIntegrationGroup {
             storage: StorageMode::InMemory,
             safety_context: None,
             turn_event_sink: None,
+            tool_disclosure: None,
             budget: false,
             communication_context_provider: None,
             hook_dispatcher_builder_factory: None,
@@ -469,6 +471,10 @@ pub struct RebornIntegrationGroupBuilder {
     safety_context: Option<InstructionSafetyContext>,
     /// C-TRACECAP seam: `Some` once `.with_turn_event_sink()` has been called.
     turn_event_sink: Option<Arc<InMemoryTurnEventSink>>,
+    /// Enabler (b): `Some(ToolDisclosureMode::Bridged)` once
+    /// `.with_tool_disclosure_bridged()` has been called; `None` resolves via
+    /// `ToolDisclosureMode::from_env()` in `into_group` (today's behavior).
+    tool_disclosure: Option<ToolDisclosureMode>,
     /// C-BUDGET: when `true`, `into_group` wires the production
     /// `build_default_budget_accountant` (in-memory governor + gate store +
     /// zero-cost table + compiled-default seeding) into the group's ONE planned
@@ -586,6 +592,24 @@ impl RebornIntegrationGroupBuilder {
             capability_recorder,
         ) = capability.mode().into_parts(milestone_sink.clone())?;
 
+        // Enabler (b): production resolves `CapabilityAllowSet::All` for a
+        // top-level user turn, making `CapabilitySurfaceProfileFilter` a no-op
+        // — so the disclosure decorator's synthetic bridge ids
+        // (`ironclaw.tool_search` etc., never in any granted set) survive to
+        // the model. The harness default (allowlist of exactly the granted
+        // capability ids) is NARROWER than production there and would strip
+        // the deferred bridge surface down to zero tools. Mirror production
+        // for bridged groups only; every non-bridged group keeps the strict
+        // allowlist.
+        let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
+            if self.tool_disclosure == Some(ToolDisclosureMode::Bridged) {
+                Arc::new(StaticCapabilitySurfaceProfileResolver {
+                    allow_set: CapabilityAllowSet::All,
+                })
+            } else {
+                capability_surface_resolver
+            };
+
         // --- loop-exit evidence (group-level, built once) -----------------
         // `.with_checkpoint_state_store` is the de-mask fix: without it a
         // genuinely-`Failed` run is reported as the masking
@@ -665,6 +689,13 @@ impl RebornIntegrationGroupBuilder {
             loop_exit_evidence,
             config: DefaultPlannedRuntimeConfig {
                 poll_interval: Duration::from_millis(10),
+                // Enabler (b): explicit builder opt-in wins; otherwise resolve
+                // via `from_env()` exactly like `DefaultPlannedRuntimeConfig`'s
+                // own `Default` impl — never mutate the process env from a
+                // test (see `ToolDisclosureMode::from_env` doc, `apply_hermetic_env`).
+                tool_disclosure: self
+                    .tool_disclosure
+                    .unwrap_or_else(ToolDisclosureMode::from_env),
                 ..DefaultPlannedRuntimeConfig::default()
             },
             model_route_resolver: None,
