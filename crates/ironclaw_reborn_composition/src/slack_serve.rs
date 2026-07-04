@@ -7,7 +7,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use axum::{
     Json, Router,
@@ -239,8 +239,14 @@ pub fn slack_events_route_mount(state: SlackEventsRouteState) -> PublicRouteMoun
 }
 
 pub fn slack_events_route_descriptors() -> Vec<IngressRouteDescriptor> {
-    vec![bundled_slack_ingress_descriptor(SLACK_EVENTS_ROUTE_ID)]
+    vec![SLACK_EVENTS_DESCRIPTOR.clone()]
 }
+
+/// The Slack events route descriptor, projected from the bundled manifest
+/// exactly once on first use (the manifest is a compile-time constant, so the
+/// projection is deterministic and cached for the process lifetime).
+static SLACK_EVENTS_DESCRIPTOR: LazyLock<IngressRouteDescriptor> =
+    LazyLock::new(|| bundled_slack_ingress_descriptor(SLACK_EVENTS_ROUTE_ID));
 
 /// Project a Slack host-ingress route descriptor from the bundled Slack
 /// extension manifest.
@@ -508,8 +514,13 @@ pub fn slack_commands_route_mount(state: SlackCommandsRouteState) -> PublicRoute
 }
 
 pub fn slack_commands_route_descriptors() -> Vec<IngressRouteDescriptor> {
-    vec![bundled_slack_ingress_descriptor(SLACK_COMMANDS_ROUTE_ID)]
+    vec![SLACK_COMMANDS_DESCRIPTOR.clone()]
 }
+
+/// The Slack commands route descriptor, projected from the bundled manifest
+/// exactly once on first use (see [`SLACK_EVENTS_DESCRIPTOR`]).
+static SLACK_COMMANDS_DESCRIPTOR: LazyLock<IngressRouteDescriptor> =
+    LazyLock::new(|| bundled_slack_ingress_descriptor(SLACK_COMMANDS_ROUTE_ID));
 
 async fn slack_commands_handler(
     State(state): State<SlackCommandsRouteState>,
