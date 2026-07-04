@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# Regression tests for the three Reborn coverage CI helpers:
+# Regression tests for the Reborn coverage CI helpers:
+#   - reborn-coverage-merge-lcov.sh     (per-lane lcov merge + crate filter)
 #   - reborn-coverage-summary.sh        (report + --zero-crates modes)
 #   - reborn-coverage-comment.sh        (sticky PR comment upsert via `gh api`)
 #   - reborn-coverage-int-tier-tests.sh (int-tier suite discovery)
@@ -10,8 +11,16 @@
 # fixtures in a mktemp dir, and reports PASS/FAIL per case. Unlike that
 # precedent (which exits on the first failure), this suite runs every case
 # and prints a final summary, exiting non-zero only if something failed —
-# with three scripts and ~20 cases, seeing the full picture in one run beats
+# with four scripts and ~25 cases, seeing the full picture in one run beats
 # stopping at the first mismatch.
+#
+# reborn-coverage-summary.sh and reborn-coverage-comment.sh consume a merged,
+# crate-filtered lcov tracefile (scripts/ci/reborn-coverage-merge-lcov.sh) plus
+# the exemptions manifest (tests/integration/coverage-exemptions.toml schema),
+# not a cargo-llvm-cov JSON export — the coverage-report job in
+# .github/workflows/reborn-tests.yml downloads 5 per-lane lcov artifacts,
+# merges+filters them, then renders. Fixtures below build lcov tracefiles and
+# exemptions TOML by hand rather than shelling out to cargo-llvm-cov.
 #
 # reborn-coverage-comment.sh shells out to `gh api`. It is exercised here
 # against a fake `gh` (a fixture script placed first on PATH) that emulates
@@ -21,13 +30,15 @@
 #
 # reborn-coverage-int-tier-tests.sh derives its repo root from its own path
 # (`$(dirname BASH_SOURCE)/../..`) and `cd`s there, so it cannot simply be
-# pointed at a fixture tree via an argument. Each case here copies the real
-# script into a temp tree's scripts/ci/ and builds a tests/ subtree next to
-# it, so the copy's own repo-root resolution lands on the temp tree.
+# pointed at a fixture tree via an argument. Each case copies the real
+# script into a temp tree's scripts/ci/ and builds a tests/integration/
+# subtree next to it, so the copy's own repo-root resolution lands on the
+# temp tree.
 
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+merge_sh="${script_dir}/reborn-coverage-merge-lcov.sh"
 summary_sh="${script_dir}/reborn-coverage-summary.sh"
 comment_sh="${script_dir}/reborn-coverage-comment.sh"
 int_tier_sh="${script_dir}/reborn-coverage-int-tier-tests.sh"
@@ -37,6 +48,13 @@ trap 'rm -rf "${tmp_root}"' EXIT
 
 fixtures_dir="${tmp_root}/fixtures"
 mkdir -p "${fixtures_dir}"
+
+# Empty-but-valid exemptions manifest reused by cases that don't care about
+# exemption behavior specifically.
+empty_exemptions="${fixtures_dir}/empty-exemptions.toml"
+cat > "${empty_exemptions}" <<'TOML'
+# No entries.
+TOML
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -131,167 +149,238 @@ capture() {
 }
 
 # ---------------------------------------------------------------------------
+# M. reborn-coverage-merge-lcov.sh
+# ---------------------------------------------------------------------------
+
+cat > "${fixtures_dir}/m1_part0.lcov" <<'EOF'
+SF:/work/ironclaw/crates/ironclaw_reborn/src/runtime.rs
+DA:1,1
+DA:2,0
+DA:3,1
+LF:3
+LH:2
+end_of_record
+SF:/work/ironclaw/src/main.rs
+DA:1,1
+LF:1
+LH:1
+end_of_record
+EOF
+
+cat > "${fixtures_dir}/m1_part1.lcov" <<'EOF'
+SF:/work/ironclaw/crates/ironclaw_reborn/src/runtime.rs
+DA:1,0
+DA:2,1
+DA:3,0
+LF:3
+LH:1
+end_of_record
+SF:/work/ironclaw/crates/ironclaw_product_workflow/src/lib.rs
+DA:1,1
+DA:2,1
+LF:2
+LH:2
+end_of_record
+EOF
+
+capture "${merge_sh}" "${tmp_root}/m1_merged.lcov" "${fixtures_dir}/m1_part0.lcov" "${fixtures_dir}/m1_part1.lcov"
+assert_exit_code "M1: merge exits 0" 0 "${CAP_RC}"
+
+m1_merged_body="$(cat "${tmp_root}/m1_merged.lcov")"
+assert_contains "M1: merged output keeps crates/ironclaw_reborn" "${m1_merged_body}" "SF:/work/ironclaw/crates/ironclaw_reborn/src/runtime.rs"
+assert_not_contains "M1: merged output drops non-crates/ src/main.rs" "${m1_merged_body}" "src/main.rs"
+assert_contains "M1: merged output keeps crates/ironclaw_product_workflow" "${m1_merged_body}" "ironclaw_product_workflow"
+assert_contains "M1: per-line DA counts are SUMMED across lanes (line1: 1+0=1)" "${m1_merged_body}" "DA:1,1"
+assert_contains "M1: per-line DA counts are SUMMED across lanes (line2: 0+1=1)" "${m1_merged_body}" "DA:2,1"
+assert_contains "M1: per-line DA counts are SUMMED across lanes (line3: 1+0=1)" "${m1_merged_body}" "DA:3,1"
+assert_contains "M1: LH recomputed from merged counts, not trusted from either lane (all 3 lines now covered)" \
+  "${m1_merged_body}" "$(printf 'LF:3\nLH:3')"
+
+# M2: missing input -> non-zero exit, no output file written over a bad arg.
+capture "${merge_sh}" "${tmp_root}/m2_merged.lcov" "${fixtures_dir}/does_not_exist.lcov"
+assert_exit_code "M2: merge exits non-zero for missing input" 1 "${CAP_RC}"
+assert_contains "M2: merge reports missing input file" "${CAP_ERR}" "input lcov file not found"
+
+# M3: single input with zero matching (crates/ironclaw_*) files -> empty output, exit 0.
+cat > "${fixtures_dir}/m3_no_match.lcov" <<'EOF'
+SF:/work/ironclaw/src/other.rs
+DA:1,1
+LF:1
+LH:1
+end_of_record
+EOF
+capture "${merge_sh}" "${tmp_root}/m3_merged.lcov" "${fixtures_dir}/m3_no_match.lcov"
+assert_exit_code "M3: merge exits 0 when nothing matches the crate filter" 0 "${CAP_RC}"
+assert_eq "M3: merge writes an empty tracefile when nothing matches" "" "$(cat "${tmp_root}/m3_merged.lcov")"
+
+# ---------------------------------------------------------------------------
 # A. reborn-coverage-summary.sh (default report mode)
 # ---------------------------------------------------------------------------
 
-cat > "${fixtures_dir}/a1_mixed.json" <<'JSON'
-{
-  "data": [
-    {
-      "files": [
-        { "filename": "/work/ironclaw/crates/ironclaw_reborn/src/runtime.rs", "summary": { "lines": { "covered": 80, "count": 100 } } },
-        { "filename": "/work/ironclaw/crates/ironclaw_product_workflow/src/lib.rs", "summary": { "lines": { "covered": 50, "count": 50 } } },
-        { "filename": "/work/ironclaw/crates/ironclaw_engine/src/lib.rs", "summary": { "lines": { "covered": 10, "count": 10 } } }
-      ]
-    }
-  ]
-}
-JSON
+cat > "${fixtures_dir}/a1_mixed.lcov" <<'EOF'
+SF:/work/ironclaw/crates/ironclaw_reborn/src/runtime.rs
+DA:1,1
+LF:100
+LH:80
+end_of_record
+SF:/work/ironclaw/crates/ironclaw_product_workflow/src/lib.rs
+LF:50
+LH:50
+end_of_record
+EOF
 
-capture "${summary_sh}" "${fixtures_dir}/a1_mixed.json"
-assert_exit_code "A1: summary exits 0 for mixed Reborn/non-Reborn fixture" 0 "${CAP_RC}"
-assert_not_contains "A1: non-Reborn crate excluded from output" "${CAP_OUT}" "ironclaw_engine"
+capture "${summary_sh}" "${fixtures_dir}/a1_mixed.lcov" "${empty_exemptions}"
+assert_exit_code "A1: summary exits 0 for a mixed-crate fixture" 0 "${CAP_RC}"
 assert_contains "A1: aggregate matches hand-computed 86.67% (130/150)" "${CAP_OUT}" \
   '**Line coverage (Reborn crates): 86.67%** — 130 / 150 lines'
 assert_contains "A1: table includes ironclaw_reborn row" "${CAP_OUT}" "| \`ironclaw_reborn\` | 80% | 80 / 100 |"
 assert_contains "A1: table includes ironclaw_product_workflow row" "${CAP_OUT}" \
   "| \`ironclaw_product_workflow\` | 100% | 50 / 50 |"
 
-cat > "${fixtures_dir}/a2_non_reborn_only.json" <<'JSON'
-{
-  "data": [
-    { "files": [ { "filename": "/work/ironclaw/crates/ironclaw_engine/src/lib.rs", "summary": { "lines": { "covered": 10, "count": 10 } } } ] }
-  ]
-}
-JSON
-
-capture "${summary_sh}" "${fixtures_dir}/a2_non_reborn_only.json"
-assert_exit_code "A2: summary exits 0 when only non-Reborn crates present" 0 "${CAP_RC}"
-assert_contains "A2: prints no-data message when no Reborn files match" "${CAP_OUT}" \
+# A2: no data at all -> exit 0, "no data" message.
+: > "${fixtures_dir}/a2_empty.lcov"
+capture "${summary_sh}" "${fixtures_dir}/a2_empty.lcov" "${empty_exemptions}"
+assert_exit_code "A2: summary exits 0 for an empty lcov file" 0 "${CAP_RC}"
+assert_contains "A2: prints no-data message when the lcov file is empty" "${CAP_OUT}" \
   "No Reborn crate coverage data found"
 
-printf '{"data":[]}' > "${fixtures_dir}/a3_empty_data.json"
-printf '{}' > "${fixtures_dir}/a3_absent_data.json"
+# A3: missing lcov file -> non-zero exit + not-found error on stderr.
+capture "${summary_sh}" "${fixtures_dir}/does_not_exist.lcov" "${empty_exemptions}"
+assert_exit_code "A3: summary exits non-zero for missing coverage lcov" 1 "${CAP_RC}"
+assert_contains "A3: summary reports missing coverage lcov" "${CAP_ERR}" "coverage lcov file not found"
 
-capture "${summary_sh}" "${fixtures_dir}/a3_empty_data.json"
-assert_exit_code 'A3: {"data":[]} exits 0' 0 "${CAP_RC}"
-assert_contains 'A3: {"data":[]} prints no-data message' "${CAP_OUT}" "No Reborn crate coverage data found"
+# A4: missing exemptions manifest -> non-zero exit + not-found error.
+capture "${summary_sh}" "${fixtures_dir}/a1_mixed.lcov" "${fixtures_dir}/does_not_exist_exemptions.toml"
+assert_exit_code "A4: summary exits non-zero for missing exemptions manifest" 1 "${CAP_RC}"
+assert_contains "A4: summary reports missing exemptions manifest" "${CAP_ERR}" "coverage exemptions manifest not found"
 
-capture "${summary_sh}" "${fixtures_dir}/a3_absent_data.json"
-assert_exit_code 'A3: {} exits 0' 0 "${CAP_RC}"
-assert_contains 'A3: {} prints no-data message' "${CAP_OUT}" "No Reborn crate coverage data found"
-
-cat > "${fixtures_dir}/a4_multi_dataset.json" <<'JSON'
-{
-  "data": [
-    { "files": [ { "filename": "/work/ironclaw/crates/ironclaw_reborn/src/a.rs", "summary": { "lines": { "covered": 10, "count": 20 } } } ] },
-    { "files": [ { "filename": "/work/ironclaw/crates/ironclaw_reborn_cli/src/main.rs", "summary": { "lines": { "covered": 5, "count": 5 } } } ] }
-  ]
-}
-JSON
-
-capture "${summary_sh}" "${fixtures_dir}/a4_multi_dataset.json"
-assert_exit_code "A4: multi-dataset summary exits 0" 0 "${CAP_RC}"
-assert_contains "A4: aggregate counts files from BOTH data[] entries (15/25)" "${CAP_OUT}" \
-  '**Line coverage (Reborn crates): 60%** — 15 / 25 lines'
-assert_contains "A4: includes crate from data[0]" "${CAP_OUT}" "\`ironclaw_reborn\`"
-assert_contains "A4: includes crate from data[1]" "${CAP_OUT}" "\`ironclaw_reborn_cli\`"
-
-cat > "${fixtures_dir}/a5_zero_sorted.json" <<'JSON'
-{
-  "data": [
-    {
-      "files": [
-        { "filename": "/work/ironclaw/crates/ironclaw_reborn_zero/src/a.rs", "summary": { "lines": { "covered": 0, "count": 10 } } },
-        { "filename": "/work/ironclaw/crates/ironclaw_reborn_half/src/a.rs", "summary": { "lines": { "covered": 5, "count": 10 } } }
-      ]
-    }
-  ]
-}
-JSON
-
-capture "${summary_sh}" "${fixtures_dir}/a5_zero_sorted.json"
+# A5: zero-covered-crate fixture, sorted lowest-covered-first.
+cat > "${fixtures_dir}/a5_zero_sorted.lcov" <<'EOF'
+SF:/work/ironclaw/crates/ironclaw_reborn_zero/src/a.rs
+LF:10
+LH:0
+end_of_record
+SF:/work/ironclaw/crates/ironclaw_reborn_half/src/a.rs
+LF:10
+LH:5
+end_of_record
+EOF
+capture "${summary_sh}" "${fixtures_dir}/a5_zero_sorted.lcov" "${empty_exemptions}"
 assert_exit_code "A5: zero-covered-crate fixture summary exits 0" 0 "${CAP_RC}"
 assert_contains "A5: zero-covered crate row shows 0%" "${CAP_OUT}" "| \`ironclaw_reborn_zero\` | 0% | 0 / 10 |"
 assert_line_before "A5: zero-covered crate sorted to top (lowest-covered first)" "${CAP_OUT}" \
   "\`ironclaw_reborn_zero\`" "\`ironclaw_reborn_half\`"
 
-# A6: allowlist boundary — two exact-match single crates, one family-prefix
-# crate, and a lookalike (ironclaw_architecture_extra) that must be dropped:
-# it is not one of the four exact-match crates and does not start with a
-# reborn/product/webui_v2 family prefix.
-cat > "${fixtures_dir}/a6_allowlist_boundary.json" <<'JSON'
-{
-  "data": [
-    {
-      "files": [
-        { "filename": "/work/ironclaw/crates/ironclaw_architecture/src/a.rs", "summary": { "lines": { "covered": 5, "count": 10 } } },
-        { "filename": "/work/ironclaw/crates/ironclaw_slack_v2_adapter/src/a.rs", "summary": { "lines": { "covered": 3, "count": 10 } } },
-        { "filename": "/work/ironclaw/crates/ironclaw_reborn_config/src/a.rs", "summary": { "lines": { "covered": 8, "count": 10 } } },
-        { "filename": "/work/ironclaw/crates/ironclaw_architecture_extra/src/a.rs", "summary": { "lines": { "covered": 0, "count": 999 } } }
-      ]
-    }
-  ]
-}
-JSON
+# A6: the crate filter now covers ALL crates/ironclaw_* (all workspace
+# crates the int-tier suites link — a superset of the historical Reborn-only
+# allowlist), but files outside crates/ entirely (or under a different
+# top-level crates-like dir) are still excluded from the aggregate.
+cat > "${fixtures_dir}/a6_boundary.lcov" <<'EOF'
+SF:/work/ironclaw/crates/ironclaw_engine/src/a.rs
+LF:10
+LH:5
+end_of_record
+SF:/work/ironclaw/src/main.rs
+LF:999
+LH:0
+end_of_record
+EOF
+capture "${summary_sh}" "${fixtures_dir}/a6_boundary.lcov" "${empty_exemptions}"
+assert_exit_code "A6: boundary fixture summary exits 0" 0 "${CAP_RC}"
+assert_contains "A6: any crates/ironclaw_* crate is included (not just the old Reborn allowlist)" "${CAP_OUT}" \
+  "| \`ironclaw_engine\` | 50% | 5 / 10 |"
+assert_not_contains "A6: non-crates/ file excluded from the table" "${CAP_OUT}" "main.rs"
+assert_contains "A6: aggregate drops the non-crates file's 999 lines (5/10, not 5/1009)" "${CAP_OUT}" \
+  '**Line coverage (Reborn crates): 50%** — 5 / 10 lines'
 
-capture "${summary_sh}" "${fixtures_dir}/a6_allowlist_boundary.json"
-assert_exit_code "A6: allowlist boundary fixture summary exits 0" 0 "${CAP_RC}"
-assert_contains "A6: table includes exact-match ironclaw_architecture row" "${CAP_OUT}" \
-  "| \`ironclaw_architecture\` | 50% | 5 / 10 |"
-assert_contains "A6: table includes exact-match ironclaw_slack_v2_adapter row" "${CAP_OUT}" \
-  "| \`ironclaw_slack_v2_adapter\` | 30% | 3 / 10 |"
-assert_contains "A6: table includes family-prefix ironclaw_reborn_config row" "${CAP_OUT}" \
-  "| \`ironclaw_reborn_config\` | 80% | 8 / 10 |"
-assert_not_contains "A6: lookalike ironclaw_architecture_extra excluded from table" "${CAP_OUT}" \
-  "ironclaw_architecture_extra"
-assert_contains "A6: aggregate drops lookalike's 999 lines (16/30, not 16/1029)" "${CAP_OUT}" \
-  '**Line coverage (Reborn crates): 53.33%** — 16 / 30 lines'
+# A7: exemptions manifest excludes a file from the accounting entirely and
+# lists it in the report's own Exemptions section.
+cat > "${fixtures_dir}/a7_exemptions.toml" <<'TOML'
+[[exemption]]
+module = "crates/ironclaw_engine/src/a.rs"
+reason = "generated code, not exercisable by int-tier tests"
+issue = "https://github.com/nearai/ironclaw/issues/1"
+TOML
 
-# A7: missing coverage JSON -> non-zero exit + not-found error on stderr.
-capture "${summary_sh}" "${fixtures_dir}/does_not_exist.json"
-assert_exit_code "A7: summary exits non-zero for missing coverage JSON" 1 "${CAP_RC}"
-assert_contains "A7: summary reports missing coverage JSON" "${CAP_ERR}" "coverage JSON not found"
+capture "${summary_sh}" "${fixtures_dir}/a6_boundary.lcov" "${fixtures_dir}/a7_exemptions.toml"
+assert_exit_code "A7: summary with an exemption exits 0" 0 "${CAP_RC}"
+# The exempted crate's file path still legitimately appears in the report's
+# own Exemptions section below, so assert against the per-crate table ROW
+# specifically (not "the whole output"), matching the A6/A5 row-shaped checks.
+assert_not_contains "A7: exempted crate dropped from the per-crate table" "${CAP_OUT}" "| \`ironclaw_engine\` |"
+assert_contains "A7: exempted file listed in its own Exemptions section" "${CAP_OUT}" \
+  "\`crates/ironclaw_engine/src/a.rs\`"
+assert_contains "A7: exemption reason rendered" "${CAP_OUT}" "generated code, not exercisable by int-tier tests"
+assert_contains "A7: exemption issue link rendered" "${CAP_OUT}" "https://github.com/nearai/ironclaw/issues/1"
+assert_contains "A7: aggregate becomes 'no data' once the only crate is fully exempted" "${CAP_OUT}" \
+  "No Reborn crate coverage data found"
+
+# A8: malformed exemption (missing reason/issue) -> summary refuses to render.
+cat > "${fixtures_dir}/a8_malformed_exemptions.toml" <<'TOML'
+[[exemption]]
+module = "crates/ironclaw_engine/src/a.rs"
+reason = "missing issue link"
+TOML
+capture "${summary_sh}" "${fixtures_dir}/a6_boundary.lcov" "${fixtures_dir}/a8_malformed_exemptions.toml"
+assert_exit_code "A8: malformed exemption (no issue) exits non-zero" 1 "${CAP_RC}"
+assert_contains "A8: malformed exemption reports the missing issue" "${CAP_ERR}" "missing 'issue'"
+
+# A9: a non-repo-relative exemption module path (missing the "crates/" prefix)
+# would otherwise match every same-named file across all crates via the
+# endswith("/" + m) check in the summary's own accounting — reject it at
+# parse time instead of silently over-exempting.
+cat > "${fixtures_dir}/a9_bare_module_exemptions.toml" <<'TOML'
+[[exemption]]
+module = "a.rs"
+reason = "bare filename, not repo-relative"
+issue = "https://github.com/nearai/ironclaw/issues/1"
+TOML
+capture "${summary_sh}" "${fixtures_dir}/a6_boundary.lcov" "${fixtures_dir}/a9_bare_module_exemptions.toml"
+assert_exit_code "A9: non-crates/-prefixed exemption module exits non-zero" 1 "${CAP_RC}"
+assert_contains "A9: non-crates/-prefixed exemption module reports the validation error" "${CAP_ERR}" \
+  "must be repo-relative and start with 'crates/'"
 
 # ---------------------------------------------------------------------------
 # B. reborn-coverage-summary.sh --zero-crates
 # ---------------------------------------------------------------------------
 
-cat > "${fixtures_dir}/b1_mixed_zero.json" <<'JSON'
-{
-  "data": [
-    {
-      "files": [
-        { "filename": "/work/ironclaw/crates/ironclaw_reborn_zero_a/src/a.rs", "summary": { "lines": { "covered": 0, "count": 5 } } },
-        { "filename": "/work/ironclaw/crates/ironclaw_reborn_zero_b/src/a.rs", "summary": { "lines": { "covered": 0, "count": 3 } } },
-        { "filename": "/work/ironclaw/crates/ironclaw_reborn_partial/src/a.rs", "summary": { "lines": { "covered": 4, "count": 10 } } },
-        { "filename": "/work/ironclaw/crates/ironclaw_reborn_full/src/a.rs", "summary": { "lines": { "covered": 10, "count": 10 } } }
-      ]
-    }
-  ]
-}
-JSON
+cat > "${fixtures_dir}/b1_mixed_zero.lcov" <<'EOF'
+SF:/work/ironclaw/crates/ironclaw_reborn_zero_a/src/a.rs
+LF:5
+LH:0
+end_of_record
+SF:/work/ironclaw/crates/ironclaw_reborn_zero_b/src/a.rs
+LF:3
+LH:0
+end_of_record
+SF:/work/ironclaw/crates/ironclaw_reborn_partial/src/a.rs
+LF:10
+LH:4
+end_of_record
+SF:/work/ironclaw/crates/ironclaw_reborn_full/src/a.rs
+LF:10
+LH:10
+end_of_record
+EOF
 
-capture "${summary_sh}" --zero-crates "${fixtures_dir}/b1_mixed_zero.json"
+capture "${summary_sh}" --zero-crates "${fixtures_dir}/b1_mixed_zero.lcov" "${empty_exemptions}"
 assert_exit_code "B1: --zero-crates exits 0" 0 "${CAP_RC}"
 assert_eq "B1: --zero-crates emits exactly the 2 zero-covered crate names" \
   "$(printf 'ironclaw_reborn_zero_a\nironclaw_reborn_zero_b')" "${CAP_OUT}"
 
-cat > "${fixtures_dir}/b2_all_covered.json" <<'JSON'
-{
-  "data": [
-    { "files": [ { "filename": "/work/ironclaw/crates/ironclaw_reborn_full/src/a.rs", "summary": { "lines": { "covered": 10, "count": 10 } } } ] }
-  ]
-}
-JSON
-
-capture "${summary_sh}" --zero-crates "${fixtures_dir}/b2_all_covered.json"
+cat > "${fixtures_dir}/b2_all_covered.lcov" <<'EOF'
+SF:/work/ironclaw/crates/ironclaw_reborn_full/src/a.rs
+LF:10
+LH:10
+end_of_record
+EOF
+capture "${summary_sh}" --zero-crates "${fixtures_dir}/b2_all_covered.lcov" "${empty_exemptions}"
 assert_exit_code "B2: all-covered fixture --zero-crates exits 0" 0 "${CAP_RC}"
 assert_eq "B2: all-covered fixture --zero-crates emits nothing" "" "${CAP_OUT}"
 
-capture "${summary_sh}" --zero-crates "${fixtures_dir}/a3_empty_data.json"
-assert_exit_code "B3: empty data --zero-crates exits 0" 0 "${CAP_RC}"
-assert_eq "B3: empty data --zero-crates emits nothing" "" "${CAP_OUT}"
+capture "${summary_sh}" --zero-crates "${fixtures_dir}/a2_empty.lcov" "${empty_exemptions}"
+assert_exit_code "B3: empty lcov --zero-crates exits 0" 0 "${CAP_RC}"
+assert_eq "B3: empty lcov --zero-crates emits nothing" "" "${CAP_OUT}"
 
 # ---------------------------------------------------------------------------
 # C. reborn-coverage-comment.sh (sticky PR comment upsert via a fake `gh`)
@@ -376,21 +465,19 @@ echo '{}'
 GHEOF
 chmod +x "${gh_bin_dir}/gh"
 
-cat > "${fixtures_dir}/c_basic_coverage.json" <<'JSON'
-{
-  "data": [
-    { "files": [ { "filename": "/work/ironclaw/crates/ironclaw_reborn/src/a.rs", "summary": { "lines": { "covered": 8, "count": 10 } } } ] }
-  ]
-}
-JSON
+cat > "${fixtures_dir}/c_basic_coverage.lcov" <<'EOF'
+SF:/work/ironclaw/crates/ironclaw_reborn/src/a.rs
+LF:10
+LH:8
+end_of_record
+EOF
 
-cat > "${fixtures_dir}/c_zero_coverage.json" <<'JSON'
-{
-  "data": [
-    { "files": [ { "filename": "/work/ironclaw/crates/ironclaw_reborn_zero/src/a.rs", "summary": { "lines": { "covered": 0, "count": 5 } } } ] }
-  ]
-}
-JSON
+cat > "${fixtures_dir}/c_zero_coverage.lcov" <<'EOF'
+SF:/work/ironclaw/crates/ironclaw_reborn_zero/src/a.rs
+LF:5
+LH:0
+end_of_record
+EOF
 
 cat > "${fixtures_dir}/c1_comments_empty.json" <<'JSON'
 []
@@ -417,7 +504,7 @@ capture env \
   PATH="${gh_bin_dir}:${PATH}" \
   FAKE_GH_COMMENTS_JSON="${fixtures_dir}/c1_comments_empty.json" \
   FAKE_GH_LOG="${c1_log}" \
-  "${comment_sh}" "${fixtures_dir}/c_basic_coverage.json"
+  "${comment_sh}" "${fixtures_dir}/c_basic_coverage.lcov" "${empty_exemptions}"
 assert_exit_code "C1: comment script exits 0 (no existing sticky)" 0 "${CAP_RC}"
 
 if [ -f "${c1_log}" ]; then
@@ -440,7 +527,7 @@ capture env \
   PATH="${gh_bin_dir}:${PATH}" \
   FAKE_GH_COMMENTS_JSON="${fixtures_dir}/c2_comments_with_sticky.json" \
   FAKE_GH_LOG="${c2_log}" \
-  "${comment_sh}" "${fixtures_dir}/c_basic_coverage.json"
+  "${comment_sh}" "${fixtures_dir}/c_basic_coverage.lcov" "${empty_exemptions}"
 assert_exit_code "C2: comment script exits 0 (existing sticky)" 0 "${CAP_RC}"
 
 if [ -f "${c2_log}" ]; then
@@ -460,7 +547,7 @@ capture env \
   PATH="${gh_bin_dir}:${PATH}" \
   FAKE_GH_COMMENTS_JSON="${fixtures_dir}/c1_comments_empty.json" \
   FAKE_GH_LOG="${c3_log}" \
-  "${comment_sh}" "${fixtures_dir}/c_zero_coverage.json"
+  "${comment_sh}" "${fixtures_dir}/c_zero_coverage.lcov" "${empty_exemptions}"
 assert_exit_code "C3: comment script exits 0 (zero-covered crate present)" 0 "${CAP_RC}"
 
 if [ -f "${c3_log}" ]; then
@@ -478,7 +565,7 @@ fi
 capture env -u GH_TOKEN \
   GITHUB_REPOSITORY="${gh_repo}" \
   PR_NUMBER="${gh_pr}" \
-  "${comment_sh}" "${fixtures_dir}/c_basic_coverage.json"
+  "${comment_sh}" "${fixtures_dir}/c_basic_coverage.lcov" "${empty_exemptions}"
 assert_exit_code "C4: GH_TOKEN unset exits non-zero" 1 "${CAP_RC}"
 assert_contains "C4: GH_TOKEN unset reports the missing-var guard" "${CAP_ERR}" "GH_TOKEN must be set"
 
@@ -486,7 +573,7 @@ assert_contains "C4: GH_TOKEN unset reports the missing-var guard" "${CAP_ERR}" 
 capture env -u PR_NUMBER \
   GH_TOKEN="fake-token" \
   GITHUB_REPOSITORY="${gh_repo}" \
-  "${comment_sh}" "${fixtures_dir}/c_basic_coverage.json"
+  "${comment_sh}" "${fixtures_dir}/c_basic_coverage.lcov" "${empty_exemptions}"
 assert_exit_code "C5: PR_NUMBER unset exits non-zero" 1 "${CAP_RC}"
 assert_contains "C5: PR_NUMBER unset reports the missing-var guard" "${CAP_ERR}" "PR_NUMBER must be set"
 
@@ -494,11 +581,11 @@ assert_contains "C5: PR_NUMBER unset reports the missing-var guard" "${CAP_ERR}"
 capture env -u GITHUB_REPOSITORY \
   GH_TOKEN="fake-token" \
   PR_NUMBER="${gh_pr}" \
-  "${comment_sh}" "${fixtures_dir}/c_basic_coverage.json"
+  "${comment_sh}" "${fixtures_dir}/c_basic_coverage.lcov" "${empty_exemptions}"
 assert_exit_code "C6: GITHUB_REPOSITORY unset exits non-zero" 1 "${CAP_RC}"
 assert_contains "C6: GITHUB_REPOSITORY unset reports the missing-var guard" "${CAP_ERR}" "GITHUB_REPOSITORY must be set"
 
-# C7: missing coverage JSON -> the "if [ ! -f ]" guard at the top of
+# C7: missing coverage lcov -> the "if [ ! -f ]" guard at the top of
 # comment.sh fires before GH_TOKEN/GITHUB_REPOSITORY/PR_NUMBER are even
 # consulted, so no `gh` call — and therefore no mutation — is ever recorded.
 c7_log="${tmp_root}/c7-gh.log"
@@ -509,26 +596,16 @@ capture env \
   PATH="${gh_bin_dir}:${PATH}" \
   FAKE_GH_COMMENTS_JSON="${fixtures_dir}/c1_comments_empty.json" \
   FAKE_GH_LOG="${c7_log}" \
-  "${comment_sh}" "${fixtures_dir}/does_not_exist.json"
-assert_exit_code "C7: comment script exits non-zero for missing coverage JSON" 1 "${CAP_RC}"
-assert_contains "C7: comment script reports missing coverage JSON" "${CAP_ERR}" "coverage JSON not found"
+  "${comment_sh}" "${fixtures_dir}/does_not_exist.lcov" "${empty_exemptions}"
+assert_exit_code "C7: comment script exits non-zero for missing coverage lcov" 1 "${CAP_RC}"
+assert_contains "C7: comment script reports missing coverage lcov" "${CAP_ERR}" "coverage lcov file not found"
 if [ -f "${c7_log}" ]; then
   report_fail "C7: fake gh did not record a mutation (guard fires before gh use)"
 else
   report_pass "C7: fake gh did not record a mutation (guard fires before gh use)"
 fi
 
-# C8: existing-but-malformed coverage JSON aborts before any gh mutation.
-#
-# Distinct path from C7: this fixture file exists, so it passes comment.sh's
-# "[ -f ]" guard and proceeds to call reborn-coverage-summary.sh to render
-# the body — and that render fails on jq's parse error under `set -e`,
-# before any POST/PATCH is ever issued. Pins the "render-before-mutate"
-# ordering.
-cat > "${fixtures_dir}/c8_malformed.json" <<'JSON'
-{ this is not valid json
-JSON
-
+# C8: missing exemptions manifest -> same "fires before gh use" guard shape.
 c8_log="${tmp_root}/c8-gh.log"
 capture env \
   GH_TOKEN="fake-token" \
@@ -537,17 +614,13 @@ capture env \
   PATH="${gh_bin_dir}:${PATH}" \
   FAKE_GH_COMMENTS_JSON="${fixtures_dir}/c1_comments_empty.json" \
   FAKE_GH_LOG="${c8_log}" \
-  "${comment_sh}" "${fixtures_dir}/c8_malformed.json"
-# Non-zero, not an exact code: jq's parse-error exit differs across versions.
-if [ "${CAP_RC}" -ne 0 ]; then
-  report_pass "C8: comment script exits non-zero on malformed coverage JSON"
-else
-  report_fail "C8: comment script exits non-zero on malformed coverage JSON (got 0)"
-fi
+  "${comment_sh}" "${fixtures_dir}/c_basic_coverage.lcov" "${fixtures_dir}/does_not_exist_exemptions.toml"
+assert_exit_code "C8: comment script exits non-zero for missing exemptions manifest" 1 "${CAP_RC}"
+assert_contains "C8: comment script reports missing exemptions manifest" "${CAP_ERR}" "coverage exemptions manifest not found"
 if [ -f "${c8_log}" ]; then
-  report_fail "C8: fake gh did not record a mutation (render fails before gh use)"
+  report_fail "C8: fake gh did not record a mutation (guard fires before gh use)"
 else
-  report_pass "C8: fake gh did not record a mutation (render fails before gh use)"
+  report_pass "C8: fake gh did not record a mutation (guard fires before gh use)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -556,53 +629,79 @@ fi
 #
 # The script derives its repo root from its own path and `cd`s there, so
 # each case copies it into a fresh temp tree's scripts/ci/ and builds a
-# tests/ subtree alongside it, then invokes the copy.
+# tests/integration/ subtree alongside it, then invokes the copy.
 
 setup_int_tier_case() {
   local case_dir="$1"
-  mkdir -p "${case_dir}/scripts/ci" "${case_dir}/tests"
+  mkdir -p "${case_dir}/scripts/ci" "${case_dir}/tests/integration"
   cp "${int_tier_sh}" "${case_dir}/scripts/ci/reborn-coverage-int-tier-tests.sh"
   chmod +x "${case_dir}/scripts/ci/reborn-coverage-int-tier-tests.sh"
 }
 
-# D1: empty tests/ -> non-zero exit + discovery error.
+# D1: empty tests/integration/ -> non-zero exit + discovery error.
 d1="${tmp_root}/d1"
 setup_int_tier_case "${d1}"
 capture "${d1}/scripts/ci/reborn-coverage-int-tier-tests.sh"
-assert_exit_code "D1: empty tests/ exits non-zero" 1 "${CAP_RC}"
-assert_contains "D1: empty tests/ prints the discovery error" "${CAP_ERR}" \
+assert_exit_code "D1: empty tests/integration/ exits non-zero" 1 "${CAP_RC}"
+assert_contains "D1: empty tests/integration/ prints the discovery error" "${CAP_ERR}" \
   "No Reborn integration-tier test binaries discovered"
 
-# D2: one tests/reborn_integration_foo.rs -> --test / reborn_integration_foo.
+# D2: one tests/integration/foo.rs -> --test / reborn_integration_foo.
 d2="${tmp_root}/d2"
 setup_int_tier_case "${d2}"
-: > "${d2}/tests/reborn_integration_foo.rs"
+: > "${d2}/tests/integration/foo.rs"
 capture "${d2}/scripts/ci/reborn-coverage-int-tier-tests.sh"
-assert_exit_code "D2: single integration file exits 0" 0 "${CAP_RC}"
-assert_eq "D2: single integration file emits its --test pair" \
+assert_exit_code "D2: single flat integration file exits 0" 0 "${CAP_RC}"
+assert_eq "D2: single flat integration file emits its --test pair" \
   "$(printf -- '--test\nreborn_integration_foo')" "${CAP_OUT}"
 
-# D3: one tests/reborn_group_bar/ -> --test / reborn_group_bar.
+# D3: one tests/integration/group_bar/main.rs -> --test / reborn_group_bar.
 d3="${tmp_root}/d3"
 setup_int_tier_case "${d3}"
-mkdir -p "${d3}/tests/reborn_group_bar"
+mkdir -p "${d3}/tests/integration/group_bar"
+: > "${d3}/tests/integration/group_bar/main.rs"
 capture "${d3}/scripts/ci/reborn-coverage-int-tier-tests.sh"
 assert_exit_code "D3: single group dir exits 0" 0 "${CAP_RC}"
-assert_eq "D3: single group dir emits its --test pair" \
+assert_eq "D3: single group dir emits its --test pair, dir->name rewrite applied" \
+  "$(printf -- '--test\nreborn_group_bar')" "${CAP_OUT}"
+
+# D3b: a half-scaffolded group dir (no main.rs yet) is skipped, not errored.
+d3b="${tmp_root}/d3b"
+setup_int_tier_case "${d3b}"
+mkdir -p "${d3b}/tests/integration/group_bar" "${d3b}/tests/integration/group_incomplete"
+: > "${d3b}/tests/integration/group_bar/main.rs"
+capture "${d3b}/scripts/ci/reborn-coverage-int-tier-tests.sh"
+assert_exit_code "D3b: half-scaffolded group dir does not error the whole discovery" 0 "${CAP_RC}"
+assert_eq "D3b: half-scaffolded group dir (no main.rs) is skipped" \
   "$(printf -- '--test\nreborn_group_bar')" "${CAP_OUT}"
 
 # D4: multiple files + dirs, created out of alphabetical order -> sorted,
 # deduped output. Group dirs ('g') sort before integration files ('i').
 d4="${tmp_root}/d4"
 setup_int_tier_case "${d4}"
-: > "${d4}/tests/reborn_integration_zeta.rs"
-: > "${d4}/tests/reborn_integration_alpha.rs"
-mkdir -p "${d4}/tests/reborn_group_omega" "${d4}/tests/reborn_group_beta"
+: > "${d4}/tests/integration/zeta.rs"
+: > "${d4}/tests/integration/alpha.rs"
+mkdir -p "${d4}/tests/integration/group_omega" "${d4}/tests/integration/group_beta"
+: > "${d4}/tests/integration/group_omega/main.rs"
+: > "${d4}/tests/integration/group_beta/main.rs"
 capture "${d4}/scripts/ci/reborn-coverage-int-tier-tests.sh"
 assert_exit_code "D4: multiple suites exits 0" 0 "${CAP_RC}"
 assert_eq "D4: multiple suites sorted+deduped in expected order" \
   "$(printf -- '--test\nreborn_group_beta\n--test\nreborn_group_omega\n--test\nreborn_integration_alpha\n--test\nreborn_integration_zeta')" \
   "${CAP_OUT}"
+
+# D5: a `support/` subdirectory alongside the flat files must not be
+# mistaken for a suite (no main.rs, and doesn't match the `group_*` name
+# pattern either) — mirrors the real tests/integration/support/ harness tree.
+d5="${tmp_root}/d5"
+setup_int_tier_case "${d5}"
+: > "${d5}/tests/integration/only.rs"
+mkdir -p "${d5}/tests/integration/support"
+: > "${d5}/tests/integration/support/mod.rs"
+capture "${d5}/scripts/ci/reborn-coverage-int-tier-tests.sh"
+assert_exit_code "D5: support/ dir alongside flat suites exits 0" 0 "${CAP_RC}"
+assert_eq "D5: support/ dir is not discovered as a suite" \
+  "$(printf -- '--test\nreborn_integration_only')" "${CAP_OUT}"
 
 # ---------------------------------------------------------------------------
 # Summary
