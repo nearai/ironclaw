@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::Command;
 
 #[cfg(unix)]

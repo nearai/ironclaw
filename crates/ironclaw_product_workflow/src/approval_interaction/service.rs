@@ -287,13 +287,8 @@ impl DefaultApprovalInteractionService {
             grantee,
             approved_by: Principal::User(request.actor.user_id.clone()),
             constraints: ironclaw_host_api::GrantConstraints {
-                allowed_effects: terms.allowed_effects,
-                mounts: terms.mounts,
-                network: terms.network,
-                secrets: terms.secrets,
-                resource_ceiling: terms.resource_ceiling,
-                expires_at: terms.expires_at,
                 max_invocations: None,
+                ..terms.constraints
             },
             source_approval_request_id: Some(gate.request().id),
         };

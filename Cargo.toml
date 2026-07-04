@@ -26,6 +26,10 @@ exclude = [
 rust-version = "1.96"
 
 [workspace.dependencies]
+# WASM sandbox for untrusted tool execution.
+# Floor 46.0.1: minimum current major patch containing the fixes for the
+# Wasmtime WASI FilePerms advisories RUSTSEC-2026-0149 and RUSTSEC-2026-0188.
+wasmtime = { version = "46.0.1", features = ["component-model"] }
 # Only the WASI p2 host API is linked (`p2::add_to_linker_sync`). Keeping
 # defaults off avoids compiling unused p0/p1 WITX proc macros under remote CI
 # sccache workers, where registry sidecar WITX files are not present.
@@ -187,11 +191,8 @@ open = "5"
 # The postgres feature provides ToSql/FromSql for postgres-types (shared by tokio-postgres)
 pgvector = { version = "0.4", features = ["postgres"], optional = true }
 
-# WASM sandbox for untrusted tool execution.
-# Floor 46.0.1: minimum current major patch containing the fixes for the
-# Wasmtime WASI FilePerms advisories RUSTSEC-2026-0149 and RUSTSEC-2026-0188.
-wasmtime = { version = "46.0.1", features = ["component-model"] }
-wasmtime-wasi.workspace = true
+wasmtime = { workspace = true }
+wasmtime-wasi = { workspace = true }  # WASI support for component model
 wasmparser = "0.250.0"  # WASM binary parsing for validation
 
 # Cryptography for secrets management
@@ -281,7 +282,7 @@ ironclaw_filesystem = { path = "crates/ironclaw_filesystem", version = "0.1.0" }
 ironclaw_mcp = { path = "crates/ironclaw_mcp", version = "0.1.0" }
 ironclaw_first_party_extensions = { path = "crates/ironclaw_first_party_extensions", version = "0.1.0" }
 # Recording hook doubles + `HookDispatcherBuilderFactory` builders for the
-# C-HOOKS / E-HOOK-INFRA int-tier coverage (tests/support/reborn/hooks.rs).
+# C-HOOKS / E-HOOK-INFRA int-tier coverage (tests/integration/support/hooks.rs).
 ironclaw_hooks = { path = "crates/ironclaw_hooks", version = "0.1.0" }
 ironclaw_host_runtime = { path = "crates/ironclaw_host_runtime", version = "0.1.0" }
 ironclaw_network = { path = "crates/ironclaw_network", version = "0.1.0" }
@@ -293,6 +294,7 @@ ironclaw_product_workflow = { path = "crates/ironclaw_product_workflow", version
 ironclaw_reborn = { path = "crates/ironclaw_reborn", version = "0.1.0", features = ["root-llm-provider"] }
 ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support", "libsql"] }
 ironclaw_reborn_config = { path = "crates/ironclaw_reborn_config", version = "0.1.0" }
+ironclaw_reborn_openai_compat = { path = "crates/ironclaw_reborn_openai_compat", version = "0.1.0", features = ["openai-compat-beta"] }
 ironclaw_run_state = { path = "crates/ironclaw_run_state", version = "0.1.0" }
 ironclaw_threads = { path = "crates/ironclaw_threads", version = "0.1.0" }
 # `test-support` unlocks `TrustedTriggerSubmitRequest::new_for_test` (E-TRIGGERED-SUBMIT
@@ -361,35 +363,140 @@ pr7-ready = []
 
 [[test]]
 name = "reborn_group_approvals"
-path = "tests/reborn_group_approvals/main.rs"
+path = "tests/integration/group_approvals/main.rs"
 
 [[test]]
 name = "reborn_group_memory"
-path = "tests/reborn_group_memory/main.rs"
+path = "tests/integration/group_memory/main.rs"
 
 [[test]]
 name = "reborn_group_extensions"
-path = "tests/reborn_group_extensions/main.rs"
+path = "tests/integration/group_extensions/main.rs"
 
 [[test]]
 name = "reborn_group_triggers"
-path = "tests/reborn_group_triggers/main.rs"
+path = "tests/integration/group_triggers/main.rs"
 
 [[test]]
 name = "reborn_group_multiuser"
-path = "tests/reborn_group_multiuser/main.rs"
+path = "tests/integration/group_multiuser/main.rs"
 
 [[test]]
 name = "reborn_group_skills"
-path = "tests/reborn_group_skills/main.rs"
+path = "tests/integration/group_skills/main.rs"
 
 [[test]]
 name = "reborn_group_journeys"
-path = "tests/reborn_group_journeys/main.rs"
+path = "tests/integration/group_journeys/main.rs"
 
 [[test]]
 name = "reborn_integration_oauth_refresh"
+path = "tests/integration/oauth_refresh.rs"
 required-features = ["libsql"]
+
+[[test]]
+name = "reborn_integration_attach"
+path = "tests/integration/attach.rs"
+
+[[test]]
+name = "reborn_integration_auth_failure"
+path = "tests/integration/auth_failure.rs"
+
+[[test]]
+name = "reborn_integration_auth_gate"
+path = "tests/integration/auth_gate.rs"
+
+[[test]]
+name = "reborn_integration_backend_matrix"
+path = "tests/integration/backend_matrix.rs"
+
+[[test]]
+name = "reborn_integration_budget"
+path = "tests/integration/budget.rs"
+
+[[test]]
+name = "reborn_integration_cancel"
+path = "tests/integration/cancel.rs"
+
+[[test]]
+name = "reborn_integration_comm_context"
+path = "tests/integration/comm_context.rs"
+
+[[test]]
+name = "reborn_integration_durable"
+path = "tests/integration/durable.rs"
+
+[[test]]
+name = "reborn_integration_golden_payload"
+path = "tests/integration/golden_payload.rs"
+
+[[test]]
+name = "reborn_integration_greeting"
+path = "tests/integration/greeting.rs"
+
+[[test]]
+name = "reborn_integration_hooks"
+path = "tests/integration/hooks.rs"
+
+[[test]]
+name = "reborn_integration_http_matcher"
+path = "tests/integration/http_matcher.rs"
+
+[[test]]
+name = "reborn_integration_mcp"
+path = "tests/integration/mcp.rs"
+
+[[test]]
+name = "reborn_integration_oauth_connect"
+path = "tests/integration/oauth_connect.rs"
+
+[[test]]
+name = "reborn_integration_outbound_target"
+path = "tests/integration/outbound_target.rs"
+
+[[test]]
+name = "reborn_integration_process_port"
+path = "tests/integration/process_port.rs"
+
+[[test]]
+name = "reborn_integration_profile"
+path = "tests/integration/profile.rs"
+
+[[test]]
+name = "reborn_integration_project_create"
+path = "tests/integration/project_create.rs"
+
+[[test]]
+name = "reborn_integration_safety"
+path = "tests/integration/safety.rs"
+
+[[test]]
+name = "reborn_integration_secret_injection"
+path = "tests/integration/secret_injection.rs"
+
+[[test]]
+name = "reborn_integration_secrets"
+path = "tests/integration/secrets.rs"
+
+[[test]]
+name = "reborn_integration_skill_activate"
+path = "tests/integration/skill_activate.rs"
+
+[[test]]
+name = "reborn_integration_tool_call"
+path = "tests/integration/tool_call.rs"
+
+[[test]]
+name = "reborn_integration_tracecap"
+path = "tests/integration/tracecap.rs"
+
+[[test]]
+name = "reborn_integration_triggered_submit"
+path = "tests/integration/triggered_submit.rs"
+
+[[test]]
+name = "reborn_integration_web_access"
+path = "tests/integration/web_access.rs"
 
 [[test]]
 name = "e2e_thread_scheduling"

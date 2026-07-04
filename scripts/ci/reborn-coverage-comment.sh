@@ -17,16 +17,22 @@
 #      informational too — the "target: 0" is the roadmap goal, not a check that
 #      can fail.
 #
-# Usage: reborn-coverage-comment.sh <llvm-cov-json-export>
+# Usage: reborn-coverage-comment.sh <lcov-path> <exemptions-toml-path>
 #
 # Requires env: GH_TOKEN (for gh), GITHUB_REPOSITORY, PR_NUMBER.
 
 set -euo pipefail
 
-json_path="${1:?usage: reborn-coverage-comment.sh <llvm-cov-json-export>}"
+lcov_path="${1:?usage: reborn-coverage-comment.sh <lcov-path> <exemptions-toml-path>}"
+exemptions_path="${2:?usage: reborn-coverage-comment.sh <lcov-path> <exemptions-toml-path>}"
 
-if [ ! -f "${json_path}" ]; then
-  echo "coverage JSON not found: ${json_path}" >&2
+if [ ! -f "${lcov_path}" ]; then
+  echo "coverage lcov file not found: ${lcov_path}" >&2
+  exit 1
+fi
+
+if [ ! -f "${exemptions_path}" ]; then
+  echo "coverage exemptions manifest not found: ${exemptions_path}" >&2
   exit 1
 fi
 
@@ -40,9 +46,9 @@ summary_sh="${script_dir}/reborn-coverage-summary.sh"
 marker='<!-- reborn-coverage-sticky -->'
 
 # Reuse the canonical summary renderer for the body and the breadth holes — no
-# duplicated %/table/aggregation jq lives here.
-summary_body="$("${summary_sh}" "${json_path}")"
-mapfile -t zero_crates < <("${summary_sh}" --zero-crates "${json_path}")
+# duplicated %/table/aggregation logic lives here.
+summary_body="$("${summary_sh}" "${lcov_path}" "${exemptions_path}")"
+mapfile -t zero_crates < <("${summary_sh}" --zero-crates "${lcov_path}" "${exemptions_path}")
 
 callout=""
 if [ "${#zero_crates[@]}" -gt 0 ]; then

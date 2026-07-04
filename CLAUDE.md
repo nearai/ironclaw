@@ -61,7 +61,7 @@ Two rules are non-negotiable for **all** tests:
 
 Where to look: hard rules (tiers, test-through-the-caller,
 regression-with-every-fix) in `.claude/rules/testing.md`; **Reborn
-integration tests** authoring guide in `tests/support/reborn/CLAUDE.md`;
+integration tests** authoring guide in `tests/integration/CLAUDE.md`;
 Python/Playwright suite in `tests/e2e/CLAUDE.md`.
 
 ## Code Style
@@ -284,7 +284,9 @@ When modifying a module with a spec, read the spec first. Code follows spec; spe
 | `src/tools/` | `src/tools/README.md` |
 | `src/workspace/` | `src/workspace/README.md` |
 | `crates/ironclaw_reborn_webui_ingress/` | `crates/ironclaw_reborn_webui_ingress/CLAUDE.md` |
-| `tests/support/reborn/` | `tests/support/reborn/CLAUDE.md` |
+| `crates/ironclaw_reborn_identity/` | `crates/ironclaw_reborn_identity/CONTRACT.md` |
+| `tests/integration/` | `tests/integration/CLAUDE.md` |
+| `tests/support/reborn_parity_qa/` | `tests/support/reborn_parity_qa/CLAUDE.md` |
 | `tests/e2e/` | `tests/e2e/CLAUDE.md` |
 
 ## Job State Machine

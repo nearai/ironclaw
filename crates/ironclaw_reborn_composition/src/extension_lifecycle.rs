@@ -222,7 +222,7 @@ impl RebornLocalExtensionManagementPort {
         );
         if extension_search_has_installed_external_channel_result(response.payload.as_ref()) {
             response.message = Some(
-                "Search found installed external channel results. Search cannot prove the calling user's channel account is personally connected, so do not treat those results as ready for delivery or message access. Call builtin.extension_activate now for the matching extension id; activation surfaces the channel-specific pairing/setup instructions and, for proof-code flows, the user must paste the code into the WebChat connection panel rather than normal chat."
+                "Search found installed external channel results. Search cannot prove the calling user's channel account is personally connected. For an explicit connect, pair, authenticate, or account-access request, call builtin.extension_activate for the matching extension id so channel-specific pairing/setup instructions can be surfaced. For routine, trigger, or notification delivery, prefer the configured outbound delivery target when one is available; do not activate the channel just to send to an already configured delivery target."
                     .to_string(),
             );
         } else if extension_search_has_ready_result(response.payload.as_ref()) {
@@ -1782,7 +1782,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn extension_search_routes_active_external_channel_to_activation_pairing_flow() {
+    async fn extension_search_distinguishes_external_channel_connect_from_delivery() {
         let (_dir, _storage_root, facade, _active_registry, _installation_store) =
             extension_lifecycle_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_packages(vec![fixture_external_channel_package(
@@ -1824,11 +1824,11 @@ mod tests {
         let message = search.message.as_deref().expect("search guidance");
         assert!(
             message.contains("external channel")
-                && message.contains("do not treat")
+                && message.contains("explicit connect")
                 && message.contains("builtin.extension_activate")
-                && message.contains("WebChat connection panel")
-                && message.contains("rather than normal chat"),
-            "active external channel search should route models into activation/pairing, got: {message}"
+                && message.contains("outbound delivery target")
+                && message.contains("do not activate"),
+            "active external channel search should distinguish connect requests from delivery, got: {message}"
         );
         assert!(
             !message.contains("Treat those results as ready"),
