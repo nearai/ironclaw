@@ -285,87 +285,9 @@ fn is_safety_warning(msg: &str) -> bool {
     lower.contains("sanitiz") || lower.contains("inject") || lower.contains("warning")
 }
 
-#[cfg(feature = "libsql")]
 async fn capture_engine_threads() -> Vec<ThreadSummary> {
-    let traces = ironclaw::bridge::engine_retrospectives_for_test().await;
-    traces.into_iter().map(thread_summary_from).collect()
-}
-
-#[cfg(not(feature = "libsql"))]
-async fn capture_engine_threads() -> Vec<ThreadSummary> {
+    // Engine v2 has been removed; there are no engine threads to snapshot.
     Vec::new()
-}
-
-#[cfg(feature = "libsql")]
-fn thread_summary_from(trace: ironclaw_engine::executor::trace::ExecutionTrace) -> ThreadSummary {
-    use ironclaw_engine::executor::trace::IssueSeverity;
-
-    let issues = trace
-        .issues
-        .into_iter()
-        .map(|issue| {
-            let severity = match issue.severity {
-                IssueSeverity::Error => "error",
-                IssueSeverity::Warning => "warning",
-                IssueSeverity::Info => "info",
-            }
-            .to_string();
-            TraceIssueSummary {
-                severity,
-                category: issue.category,
-            }
-        })
-        .collect();
-
-    let message_roles = trace.messages.iter().map(|m| m.role.clone()).collect();
-
-    let event_kinds = trace
-        .events
-        .iter()
-        .map(|e| event_kind_name(&e.kind).to_string())
-        .collect();
-
-    ThreadSummary {
-        final_state: format!("{:?}", trace.final_state),
-        step_count: trace.step_count,
-        message_roles,
-        event_kinds,
-        issues,
-    }
-}
-
-/// Exhaustive `match` on `EventKind` — not pulled from `Debug` or a `strum`
-/// derive on purpose. Adding a variant upstream breaks this match, which is
-/// the signal we want: a new engine event must be consciously classified as
-/// either worth snapshotting or explicitly ignored, not silently swallowed
-/// under the default `Debug` string. The duplication is the enforcement.
-#[cfg(feature = "libsql")]
-fn event_kind_name(kind: &ironclaw_engine::EventKind) -> &'static str {
-    use ironclaw_engine::EventKind;
-    match kind {
-        EventKind::StateChanged { .. } => "StateChanged",
-        EventKind::StepStarted { .. } => "StepStarted",
-        EventKind::StepCompleted { .. } => "StepCompleted",
-        EventKind::StepFailed { .. } => "StepFailed",
-        EventKind::ActionExecuted { .. } => "ActionExecuted",
-        EventKind::ActionFailed { .. } => "ActionFailed",
-        EventKind::LeaseGranted { .. } => "LeaseGranted",
-        EventKind::LeaseRevoked { .. } => "LeaseRevoked",
-        EventKind::LeaseExpired { .. } => "LeaseExpired",
-        EventKind::MessageAdded { .. } => "MessageAdded",
-        EventKind::ChildSpawned { .. } => "ChildSpawned",
-        EventKind::ChildCompleted { .. } => "ChildCompleted",
-        EventKind::ApprovalRequested { .. } => "ApprovalRequested",
-        EventKind::ApprovalReceived { .. } => "ApprovalReceived",
-        EventKind::SelfImprovementStarted => "SelfImprovementStarted",
-        EventKind::SelfImprovementComplete { .. } => "SelfImprovementComplete",
-        EventKind::SelfImprovementFailed { .. } => "SelfImprovementFailed",
-        EventKind::SkillActivated { .. } => "SkillActivated",
-        EventKind::CodeExecutionFailed { .. } => "CodeExecutionFailed",
-        EventKind::CodeExecuted { .. } => "CodeExecuted",
-        EventKind::OrchestratorRollback { .. } => "OrchestratorRollback",
-        EventKind::Unknown => "Unknown",
-    }
 }
 
 /// Assert that `outcome` matches the saved YAML snapshot for `name`.

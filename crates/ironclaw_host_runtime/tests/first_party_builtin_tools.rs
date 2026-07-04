@@ -6488,7 +6488,9 @@ async fn read_file_enforces_byte_budget_on_long_lines_and_offers_continuation() 
     );
     let next = read["next_offset"].as_u64().unwrap();
     assert_eq!(next, shown + 1);
-    assert!(content.contains(&format!("Use offset={next} to continue")));
+    assert!(content.contains("run ONE shell command or script"));
+    assert!(content.contains("do NOT page through it"));
+    assert!(content.contains(&format!("offset={next}")));
 
     // Resuming from next_offset advances past the already-shown lines.
     let resumed = invoke_with_context(

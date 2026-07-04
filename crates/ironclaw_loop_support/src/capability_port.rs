@@ -23,13 +23,13 @@ use ironclaw_turns::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
         CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailure,
-        CapabilityFailureDetail, CapabilityFailureKind, CapabilityInputIssue,
-        CapabilityInputIssueCode, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-        CapabilityResultMessage, CapabilityResumeToken, ConcurrencyHint, ContentDigest,
-        LoopCapabilityPort, LoopHostMilestone, LoopHostMilestoneKind, LoopHostMilestoneSink,
-        LoopProcessRef, LoopRunContext, LoopSafeSummary, ProcessHandleSummary, ProviderToolCall,
-        ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
-        RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        CapabilityFailureDetail, CapabilityFailureKind, CapabilityInputIssue, CapabilityInputRef,
+        CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, CapabilityResumeToken,
+        ConcurrencyHint, ContentDigest, LoopCapabilityPort, LoopHostMilestone,
+        LoopHostMilestoneKind, LoopHostMilestoneSink, LoopProcessRef, LoopRunContext,
+        LoopSafeSummary, ProcessHandleSummary, ProviderToolCall, ProviderToolCallCapabilityIds,
+        ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 use serde_json::Value;
@@ -351,10 +351,10 @@ const CAPABILITY_INPUT_ISSUE_FIELD_MAX_BYTES: usize = 160;
 
 fn render_capability_input_issue(issue: &CapabilityInputIssue) -> Option<String> {
     let code = match issue.code {
-        CapabilityInputIssueCode::MissingRequired => "missing required field",
-        CapabilityInputIssueCode::UnexpectedField => "unexpected field",
-        CapabilityInputIssueCode::TypeMismatch => "type mismatch",
-        CapabilityInputIssueCode::InvalidValue => "invalid value",
+        DispatchInputIssueCode::MissingRequired => "missing required field",
+        DispatchInputIssueCode::UnexpectedField => "unexpected field",
+        DispatchInputIssueCode::TypeMismatch => "type mismatch",
+        DispatchInputIssueCode::InvalidValue => "invalid value",
     };
     let path = capability_input_issue_display_text(&issue.path)?;
     match issue
@@ -2778,19 +2778,10 @@ fn dispatch_failure_detail_to_loop(detail: DispatchFailureDetail) -> CapabilityF
 fn dispatch_input_issue_to_loop(issue: DispatchInputIssue) -> CapabilityInputIssue {
     CapabilityInputIssue {
         path: issue.path,
-        code: dispatch_input_issue_code_to_loop(issue.code),
+        code: issue.code,
         expected: issue.expected,
         received: issue.received,
         schema_path: issue.schema_path,
-    }
-}
-
-fn dispatch_input_issue_code_to_loop(code: DispatchInputIssueCode) -> CapabilityInputIssueCode {
-    match code {
-        DispatchInputIssueCode::MissingRequired => CapabilityInputIssueCode::MissingRequired,
-        DispatchInputIssueCode::UnexpectedField => CapabilityInputIssueCode::UnexpectedField,
-        DispatchInputIssueCode::TypeMismatch => CapabilityInputIssueCode::TypeMismatch,
-        DispatchInputIssueCode::InvalidValue => CapabilityInputIssueCode::InvalidValue,
     }
 }
 
@@ -3331,9 +3322,9 @@ mod tests {
                 ..
             }) if issues.len() == 2
                 && issues[0].path == "schedule.kind"
-                && issues[0].code == CapabilityInputIssueCode::MissingRequired
+                && issues[0].code == DispatchInputIssueCode::MissingRequired
                 && issues[1].path == "schedule.timezone"
-                && issues[1].code == CapabilityInputIssueCode::InvalidValue
+                && issues[1].code == DispatchInputIssueCode::InvalidValue
         ));
 
         let denied = runtime_failure_to_loop(RuntimeCapabilityFailure::new(
@@ -3426,14 +3417,14 @@ mod tests {
                 issues: vec![
                     CapabilityInputIssue {
                         path: "schedule.kind".to_string(),
-                        code: CapabilityInputIssueCode::MissingRequired,
+                        code: DispatchInputIssueCode::MissingRequired,
                         expected: Some("cron or once".to_string()),
                         received: Some("super-secret-raw-value".to_string()),
                         schema_path: None,
                     },
                     CapabilityInputIssue {
                         path: "schedule.timezone".to_string(),
-                        code: CapabilityInputIssueCode::InvalidValue,
+                        code: DispatchInputIssueCode::InvalidValue,
                         expected: None,
                         received: None,
                         schema_path: None,
@@ -3473,7 +3464,7 @@ mod tests {
             detail: Some(CapabilityFailureDetail::InvalidInput {
                 issues: vec![CapabilityInputIssue {
                     path: "payload</script>".to_string(),
-                    code: CapabilityInputIssueCode::InvalidValue,
+                    code: DispatchInputIssueCode::InvalidValue,
                     expected: Some("safe".to_string()),
                     received: None,
                     schema_path: None,
@@ -3495,7 +3486,7 @@ mod tests {
             detail: Some(CapabilityFailureDetail::InvalidInput {
                 issues: vec![CapabilityInputIssue {
                     path: "secret_api_key".to_string(),
-                    code: CapabilityInputIssueCode::TypeMismatch,
+                    code: DispatchInputIssueCode::TypeMismatch,
                     expected: Some("password string".to_string()),
                     received: None,
                     schema_path: None,
@@ -6757,10 +6748,7 @@ mod tests {
         };
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].path, "message");
-        assert_eq!(
-            issues[0].code,
-            ironclaw_turns::run_profile::CapabilityInputIssueCode::MissingRequired
-        );
+        assert_eq!(issues[0].code, DispatchInputIssueCode::MissingRequired);
         assert_eq!(issues[0].expected.as_deref(), Some("required field"));
         assert!(
             runtime.take_requests().is_empty(),
@@ -6851,8 +6839,7 @@ mod tests {
         assert!(
             issues.iter().any(|issue| {
                 issue.path == "message"
-                    && issue.code
-                        == ironclaw_turns::run_profile::CapabilityInputIssueCode::TypeMismatch
+                    && issue.code == DispatchInputIssueCode::TypeMismatch
                     && issue.expected.as_deref() == Some("string")
                     && issue.received.as_deref() == Some("integer")
             }),
@@ -6946,9 +6933,7 @@ mod tests {
         };
         assert!(
             issues.iter().any(|issue| {
-                issue.path == "unexpected"
-                    && issue.code
-                        == ironclaw_turns::run_profile::CapabilityInputIssueCode::UnexpectedField
+                issue.path == "unexpected" && issue.code == DispatchInputIssueCode::UnexpectedField
             }),
             "unexpected field issue should identify the field to remove"
         );

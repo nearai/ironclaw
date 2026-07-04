@@ -1,18 +1,16 @@
 //! Regression coverage for #3317 — chat-surface pairing claim.
 //!
 //! Drives the full chain: submission parser → agent loop dispatch →
-//! `bridge::handle_pairing_claim` → `PairingStore::approve`. The unit
-//! tests in `src/bridge/router.rs` cover the no-extension-manager and
-//! invalid-channel branches; this integration test exercises the
-//! happy path through a real `Agent` + `ExtensionManager` +
-//! `PairingStore`.
+//! `Agent::process_pairing_claim` → `PairingStore::approve`. This
+//! integration test exercises the happy path through a real `Agent` +
+//! `ExtensionManager` + `PairingStore`.
 //!
 //! Why this lives at the integration tier (per
 //! `.claude/rules/testing.md` "Test Through the Caller"): the parser
 //! and handler are correct individually, but the wiring between them
-//! — `agent_loop.rs` calling `crate::bridge::handle_pairing_claim` —
-//! is exactly where #3317 would silently regress if the new arm is
-//! ever dropped from the dispatch match.
+//! — `agent_loop.rs` calling `Agent::process_pairing_claim` — is
+//! exactly where #3317 would silently regress if the arm is ever
+//! dropped from the dispatch match.
 
 #[cfg(feature = "libsql")]
 mod support;
@@ -64,7 +62,7 @@ mod pairing_chat_claim_tests {
     async fn chat_approve_telegram_code_completes_pairing() {
         let _guard = engine_v2_test_lock().lock().await;
 
-        let rig = TestRigBuilder::new().with_engine_v2().build().await;
+        let rig = TestRigBuilder::new().build().await;
         rig.clear().await;
 
         // Pairing approval writes `channel_identities.owner_id` which
@@ -120,7 +118,7 @@ mod pairing_chat_claim_tests {
     async fn chat_approve_invalid_code_responds_clearly() {
         let _guard = engine_v2_test_lock().lock().await;
 
-        let rig = TestRigBuilder::new().with_engine_v2().build().await;
+        let rig = TestRigBuilder::new().build().await;
         rig.clear().await;
 
         // No pairing request was minted, so any code is "invalid". The

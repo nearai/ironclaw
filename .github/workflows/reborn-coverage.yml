@@ -88,6 +88,18 @@ jobs:
           # (invisible to other PRs) that evicts the useful seed.
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
+      - name: Setup OVH sccache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
+          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
+          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
+          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
+          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
+          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
+
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # cargo-llvm-cov
 

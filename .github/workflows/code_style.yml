@@ -191,6 +191,17 @@ jobs:
           # Keep saves to protected-branch and merge_group runs so the ~10 GB
           # repo cache LRU is seeded by shared states, not arbitrary PR branches.
           save-if: ${{ matrix.name == 'all-features' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group') }}
+      - name: Setup OVH sccache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
+          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
+          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
+          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
+          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
+          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Check lints
         run: cargo clippy --all --tests --examples ${{ matrix.flags }} -- -D warnings
 
@@ -244,6 +255,18 @@ jobs:
           # Keep saves to protected-branch and merge_group runs so the ~10 GB
           # repo cache LRU is seeded by shared states, not arbitrary PR branches.
           save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
+      - name: Setup OVH sccache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          # Keep this Wasmtime-heavy smoke target cache-only. sccache-dist can
+          # corrupt generated Wasmtime/Wiggle inputs and produce bogus type
+          # resolution failures.
+          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
+          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
+          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
+          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
+          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
+          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Test Reborn boot config crate
         run: cargo test -p ironclaw_reborn_config
       - name: Test Reborn CLI binary crate

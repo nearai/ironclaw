@@ -57,7 +57,6 @@ mod live_tests {
         let harness = LiveTestHarnessBuilder::new("portfolio_scan_root_near")
             .with_max_tool_iterations(20)
             .with_auto_approve_tools(true)
-            .with_engine_v2(true)
             .with_no_trace_recording()
             .build()
             .await;
@@ -140,7 +139,6 @@ mod live_tests {
         let harness = LiveTestHarnessBuilder::new("portfolio_scan_and_propose_root_near")
             .with_max_tool_iterations(30)
             .with_auto_approve_tools(true)
-            .with_engine_v2(true)
             .with_no_trace_recording()
             .build()
             .await;

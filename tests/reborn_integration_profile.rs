@@ -32,7 +32,7 @@ use reborn_support::reply::RebornScriptedReply;
 /// Build the `LoopRunContext` `resolve_user_profile` reads from, scoped to the
 /// same `(tenant, user)` the `profile_set` write dispatched under: the
 /// thread's binding tenant and the capability harness's dispatch user, which
-/// `RebornIntegrationGroup::profile_tools()` now aligns to the run's
+/// `RebornIntegrationGroup::profile_tools()` aligns to the run's
 /// canonical binding subject user via `with_user_id` (mirroring
 /// `live_approvals`) — see `HostRuntimeCapabilityHarness::with_user_id` doc
 /// comment — dispatch's `ResourceScope` is keyed on the harness user, not the
@@ -87,9 +87,8 @@ async fn profile_set_write_is_readable_through_the_wired_profile_source() {
 
     // Read back through the SAME `HostUserProfileSource` the group's planned
     // runtime was built with (E-PROFILE seam), keyed by the dispatch tenant
-    // (the thread's binding tenant) and the capability harness's dispatch
-    // user (now the run's aligned canonical binding subject user, per the
-    // `profile_tools()` alignment fix in `group.rs`).
+    // and the capability harness's dispatch user (see `read_back_run_context`
+    // above for how that user is derived).
     let dispatch_user = group
         .capability_harness()
         .expect("profile_tools always uses HostRuntime")
@@ -122,9 +121,8 @@ async fn profile_set_write_is_readable_through_the_wired_profile_source() {
 
     // The profile is resolved once per loop spawn (before turn 1's profile_set write), so a
     // SECOND loop is needed to observe it in the model-visible prompt. A second thread in the
-    // same group now shares the profile source under the SAME aligned (tenant, user) as turn 1
-    // (group.rs profile_tools() alignment fix), so its fresh loop renders the now-written
-    // profile into the runtime-context system message.
+    // same group shares the profile source under the SAME aligned (tenant, user) as turn 1, so
+    // its fresh loop renders the newly written profile into the runtime-context system message.
     let prompt_thread = group
         .thread("conv-profile-prompt")
         .script([RebornScriptedReply::text("ok")])

@@ -6,8 +6,8 @@ use std::sync::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    AgentId, CapabilityId, MissionId, ProjectId, ProviderToolName, ResourceScope, TenantId,
-    ThreadId, UserId,
+    AgentId, CapabilityId, DispatchInputIssueCode, MissionId, ProjectId, ProviderToolName,
+    ResourceScope, TenantId, ThreadId, UserId,
 };
 use ironclaw_loop_support::{
     EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
@@ -43,8 +43,8 @@ use ironclaw_turns::{
         AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
         AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityBatchInvocation,
         CapabilityBatchOutcome, CapabilityDenied, CapabilityDeniedReasonKind, CapabilityInputIssue,
-        CapabilityInputIssueCode, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-        CapabilitySurfaceVersion, FinalizeAssistantMessage, HostManagedLoopPromptPort,
+        CapabilityInputRef, CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion,
+        FinalizeAssistantMessage, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
         InMemoryRunProfileResolver, LoopCapabilityPort, LoopContextBundle,
         LoopContextCompactionKind, LoopContextMessage, LoopContextPort, LoopContextRequest,
@@ -2372,7 +2372,7 @@ async fn transcript_port_appends_model_observation_in_tool_result_reference_enve
         detail: ToolObservationDetail::InvalidInput {
             issues: vec![CapabilityInputIssue {
                 path: "file_path".to_string(),
-                code: CapabilityInputIssueCode::MissingRequired,
+                code: DispatchInputIssueCode::MissingRequired,
                 expected: Some("required field".to_string()),
                 received: None,
                 schema_path: Some("required".to_string()),

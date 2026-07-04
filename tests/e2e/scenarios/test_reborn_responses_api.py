@@ -6,11 +6,12 @@ import os
 import signal
 import socket
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
 
-from helpers import REBORN_V2_AUTH_TOKEN, wait_for_ready
+from helpers import REBORN_V2_AUTH_TOKEN, sse_stream, wait_for_ready
 
 USER_ID = "reborn-responses-e2e-user"
 PROFILE = "local-dev"
@@ -179,9 +180,18 @@ async def reborn_responses_client(reborn_responses_server):
         yield client
 
 
-async def create_response(client: httpx.AsyncClient, **payload) -> dict:
+async def create_response(
+    client: httpx.AsyncClient, path: str = "/v1/responses", **payload: Any
+) -> dict:
     body = {"model": "mock-model", **payload}
-    response = await client.post("/v1/responses", json=body)
+    response = await client.post(path, json=body)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+async def create_chat_completion(client: httpx.AsyncClient, **payload: Any) -> dict:
+    body = {"model": "mock-model", **payload}
+    response = await client.post("/v1/chat/completions", json=body)
     assert response.status_code == 200, response.text
     return response.json()
 
@@ -239,88 +249,229 @@ def _lookup_weather_tool() -> dict:
     }
 
 
-async def test_reborn_responses_non_streaming_text_input(reborn_responses_client):
-    response = await create_response(
+async def test_reborn_responses_lookup_and_cancel_missing_id_match_not_found_shape(
+    reborn_responses_client,
+):
+    retrieve = await reborn_responses_client.get("/api/v1/responses/resp_missing")
+    cancel = await reborn_responses_client.post("/api/v1/responses/resp_missing/cancel")
+
+    assert retrieve.status_code == 404
+    assert cancel.status_code == 404
+    assert retrieve.json() == cancel.json()
+
+
+async def test_reborn_openai_compat_route_mounts_require_bearer_served(
+    reborn_responses_server,
+):
+    routes = [
+        ("POST", "/v1/chat/completions", {"model": "mock-model", "messages": []}),
+        ("GET", "/v1/models", None),
+        ("GET", "/api/v1/models", None),
+        ("POST", "/v1/responses", {"model": "mock-model", "input": "hello"}),
+        ("POST", "/api/v1/responses", {"model": "mock-model", "input": "hello"}),
+        ("GET", "/v1/responses/resp_missing", None),
+        ("GET", "/api/v1/responses/resp_missing", None),
+        ("POST", "/v1/responses/resp_missing/cancel", None),
+        ("POST", "/api/v1/responses/resp_missing/cancel", None),
+    ]
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        for method, path, body in routes:
+            response = await client.request(
+                method,
+                f"{reborn_responses_server}{path}",
+                json=body,
+            )
+            assert response.status_code == 401, (method, path, response.text)
+
+
+async def test_reborn_openai_compat_route_mounts_authenticated_aliases_served(
+    reborn_responses_client,
+):
+    chat = await create_chat_completion(
         reborn_responses_client,
-        input="Say hello in exactly 3 words",
+        messages=[{"role": "user", "content": "Reply ok."}],
     )
-    assert response["id"].startswith("resp_")
-    assert response["status"] == "completed"
-    assert len(response["output"]) > 0
+    assert chat["object"] == "chat.completion"
 
-
-async def test_reborn_responses_non_streaming_messages_input(reborn_responses_client):
-    response = await create_response(
+    response_v1 = await create_response(
         reborn_responses_client,
-        input=[
+        path="/v1/responses",
+        input="Route mount v1 response",
+    )
+    response_api = await create_response(
+        reborn_responses_client,
+        path="/api/v1/responses",
+        input="Route mount api response",
+    )
+
+    for prefix, response_id in [
+        ("/v1/responses", response_v1["id"]),
+        ("/api/v1/responses", response_v1["id"]),
+        ("/v1/responses", response_api["id"]),
+        ("/api/v1/responses", response_api["id"]),
+    ]:
+        retrieved = await reborn_responses_client.get(f"{prefix}/{response_id}")
+        assert retrieved.status_code == 200, (prefix, retrieved.text)
+        assert retrieved.json()["id"] == response_id
+
+    models_v1 = await reborn_responses_client.get("/v1/models")
+    models_api = await reborn_responses_client.get("/api/v1/models")
+    assert models_v1.status_code == 200, models_v1.text
+    assert models_api.status_code == 200, models_api.text
+    assert models_v1.json()["object"] == "list"
+    assert models_api.json()["object"] == "list"
+
+    cancel_v1 = await reborn_responses_client.post(
+        "/v1/responses/resp_route_mount_missing/cancel"
+    )
+    cancel_api = await reborn_responses_client.post(
+        "/api/v1/responses/resp_route_mount_missing/cancel"
+    )
+    assert cancel_v1.status_code == 404
+    assert cancel_api.status_code == 404
+    assert cancel_v1.json() == cancel_api.json()
+
+
+async def test_reborn_chat_completions_non_streaming_served(reborn_responses_client):
+    response = await create_chat_completion(
+        reborn_responses_client,
+        messages=[
             {
-                "type": "message",
                 "role": "user",
-                "content": "What is 2+2? Reply with just the number.",
+                "content": "Say hello in exactly three words.",
             }
         ],
     )
-    assert response["status"] == "completed"
-    assert len(response["output"]) > 0
+
+    assert response["id"].startswith("chatcmpl-")
+    assert response["object"] == "chat.completion"
+    assert response["model"] == "mock-model"
+    assert response["choices"][0]["message"]["role"] == "assistant"
+    assert response["choices"][0]["message"]["content"]
 
 
-async def test_reborn_responses_continue_conversation(reborn_responses_client):
-    first = await create_response(reborn_responses_client, input="Say hello")
-    assert first["status"] == "completed"
+async def test_reborn_chat_completions_idempotency_replay_and_conflict_served(
+    reborn_responses_client,
+):
+    payload = {
+        "model": "mock-model",
+        "messages": [{"role": "user", "content": "Reply with one short sentence."}],
+    }
+    headers = {"idempotency-key": "served-chat-idempotency"}
 
-    second = await create_response(
-        reborn_responses_client,
-        input="Now say goodbye",
-        previous_response_id=first["id"],
+    first = await reborn_responses_client.post(
+        "/v1/chat/completions",
+        json=payload,
+        headers=headers,
     )
-    assert second["status"] == "completed"
-    assert second["id"] != first["id"]
-
-
-async def test_reborn_responses_get_response_by_id(reborn_responses_client):
-    response = await create_response(
-        reborn_responses_client, input="Remember this: the sky is blue"
+    replay = await reborn_responses_client.post(
+        "/v1/chat/completions",
+        json=payload,
+        headers=headers,
     )
-    retrieved = await reborn_responses_client.get(f"/v1/responses/{response['id']}")
-    assert retrieved.status_code == 200, retrieved.text
-    data = retrieved.json()
-    assert data["id"] == response["id"]
-    assert len(data["output"]) > 0
+    conflict = await reborn_responses_client.post(
+        "/v1/chat/completions",
+        json={
+            **payload,
+            "messages": [{"role": "user", "content": "Different request body."}],
+        },
+        headers=headers,
+    )
+
+    assert first.status_code == 200, first.text
+    assert replay.status_code == 200, replay.text
+    assert first.json()["id"] == replay.json()["id"]
+    assert conflict.status_code == 409
+    assert conflict.json()["error"]["code"] == "conflict"
 
 
-async def test_reborn_responses_streaming_raw_sse(reborn_responses_client):
-    async with reborn_responses_client.stream(
-        "POST",
-        "/v1/responses",
-        json={"model": "mock-model", "input": "Say hi", "stream": True},
+async def test_reborn_chat_completions_streaming_raw_sse_served(
+    reborn_responses_server,
+):
+    async with sse_stream(
+        reborn_responses_server,
+        path="/v1/chat/completions",
+        method="POST",
+        token=REBORN_V2_AUTH_TOKEN,
+        headers={"Content-Type": "application/json"},
+        json={
+            "model": "mock-model",
+            "messages": [{"role": "user", "content": "Say hi"}],
+            "stream": True,
+        },
     ) as response:
-        assert response.status_code == 200
+        assert response.status == 200
         raw = ""
-        async for line in response.aiter_lines():
+        while True:
+            line = (await response.content.readline()).decode(
+                "utf-8",
+                errors="replace",
+            ).rstrip("\r\n")
             raw += line + "\n"
             if line == "data: [DONE]":
                 break
 
-    assert "event: response.created" in raw
-    assert "event: response.completed" in raw
+    assert "chat.completion.chunk" in raw
+    assert "data: [DONE]" in raw
 
 
-async def test_reborn_responses_error_no_auth(reborn_responses_server):
+async def test_reborn_chat_completions_auth_and_validation_served(
+    reborn_responses_server,
+    reborn_responses_client,
+):
     async with httpx.AsyncClient(timeout=10) as client:
-        response = await client.post(
-            f"{reborn_responses_server}/v1/responses",
+        unauthenticated = await client.post(
+            f"{reborn_responses_server}/v1/chat/completions",
             headers={"Content-Type": "application/json"},
-            json={"model": "mock-model", "input": "hello"},
+            json={
+                "model": "mock-model",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
         )
-    assert response.status_code == 401
-
-
-async def test_reborn_responses_rejects_empty_input_items(reborn_responses_client):
-    response = await reborn_responses_client.post(
-        "/v1/responses",
-        json={"model": "mock-model", "input": []},
+    invalid = await reborn_responses_client.post(
+        "/v1/chat/completions",
+        json={"model": "mock-model", "messages": []},
     )
-    assert response.status_code == 400
+
+    assert unauthenticated.status_code == 401
+    assert invalid.status_code == 400
+    assert invalid.json()["error"]["param"] == "messages"
+
+
+async def test_reborn_models_v1_lists_configured_mock_model(reborn_responses_client):
+    response = await reborn_responses_client.get("/v1/models")
+    assert response.status_code == 200, response.text
+
+    body = response.json()
+    assert body["object"] == "list"
+    models = body["data"]
+    assert models
+
+    mock_model = next(model for model in models if model["id"] == "mock-model")
+    assert mock_model["object"] == "model"
+    assert mock_model["owned_by"] == "openai"
+    assert isinstance(mock_model["created"], int)
+
+
+async def test_reborn_models_api_v1_alias_matches_v1_models(reborn_responses_client):
+    v1 = await reborn_responses_client.get("/v1/models")
+    api_v1 = await reborn_responses_client.get("/api/v1/models")
+
+    assert v1.status_code == 200, v1.text
+    assert api_v1.status_code == 200, api_v1.text
+    assert [model["id"] for model in api_v1.json()["data"]] == [
+        model["id"] for model in v1.json()["data"]
+    ]
+
+
+async def test_reborn_models_requires_auth(reborn_responses_server):
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.get(f"{reborn_responses_server}/v1/models")
+        alias = await client.get(f"{reborn_responses_server}/api/v1/models")
+
+    assert response.status_code == 401
+    assert alias.status_code == 401
 
 
 async def test_reborn_responses_repeated_external_tools_round_trip(

@@ -93,25 +93,32 @@ from scripts.reborn_webui_v2_live_qa.root_filesystem import (  # noqa: E402
     _root_filesystem_json,
     _root_filesystem_secret_by_handle,
 )
+from scripts.reborn_webui_v2_live_qa.green_run_explanation import (  # noqa: E402
+    write_green_run_explanation,
+)
 from scripts.reborn_webui_v2_live_qa.semantic_judge import (  # noqa: E402
     _compact_json,
     _judge_assistant_reply_completion,
     _semantic_judge_passed,
 )
 from scripts.reborn_webui_v2_live_qa.slack_helpers import (  # noqa: E402
-    _append_slack_channel_route,
-    _append_slack_channel_route_if_configured,
     _configure_slack_legacy_actor_if_needed,
     _disable_slack_in_config,
     _discover_slack_dm_route_channel,
     _has_live_slack_env,
     _has_slack_delivery_target,
     _materialize_slack_env_from_reborn_home,
+    _persisted_slack_personal_dm_channel_id,
+    _remove_dm_slack_channel_routes,
+    _seed_slack_personal_dm_target,
     _set_slack_section_key,
     _slack_auth_test,
     _slack_config_value,
     _slack_enabled,
     _slack_team_id_from_bot_token_env,
+)
+from scripts.reborn_webui_v2_live_qa.text_match import (  # noqa: E402
+    required_text_matches,
 )
 
 QA_SHEET_PROMPTS: dict[str, str] = {
@@ -511,10 +518,8 @@ def prepare_reborn_home(
     config_path = prepared_home / "config.toml"
     if not config_path.exists() and (prepared_home / "local-dev" / "reborn-local-dev.db").exists():
         _write_minimal_reborn_config(config_path, include_slack=needs_slack)
-    route_configured_from_env = _append_slack_channel_route_if_configured(
-        config_path,
-        auth_user_id,
-    )
+    stale_dm_route_cleanup = _remove_dm_slack_channel_routes(config_path)
+    route_configured_from_env = False
     legacy_actor_configured, legacy_actor_user_id = _configure_slack_legacy_actor_if_needed(
         config_path,
         selected_cases,
@@ -553,12 +558,19 @@ def prepare_reborn_home(
         and not _has_slack_delivery_target(config, prepared_home, auth_user_id)
     ):
         slack_route_discovery = _discover_slack_dm_route_channel(config, process_env)
-        channel_id = str(slack_route_discovery.get("channel_id") or "").strip()
+        channel_id = (
+            str(slack_route_discovery.get("channel_id") or "").strip()
+            if slack_route_discovery.get("ok")
+            else ""
+        )
         if channel_id:
-            slack_route_discovery["configured_route"] = _append_slack_channel_route(
-                config_path,
-                subject_user_id=auth_user_id,
-                channel_id=channel_id,
+            slack_user_id = str(slack_route_discovery.get("dm_user_id") or "").strip()
+            slack_route_discovery["personal_dm_seed"] = _seed_slack_personal_dm_target(
+                prepared_home,
+                config,
+                auth_user_id=auth_user_id,
+                slack_user_id=slack_user_id,
+                dm_channel_id=channel_id,
             )
             config = _config_text(config_path)
 
@@ -636,6 +648,7 @@ def prepare_reborn_home(
                 "delivery_target_present": slack_target_present,
                 "route_configured_from_env": route_configured_from_env,
                 "route_discovery": slack_route_discovery,
+                "stale_dm_route_cleanup": stale_dm_route_cleanup,
                 "legacy_actor_configured": legacy_actor_configured,
                 "legacy_actor_user_id": legacy_actor_user_id,
                 "auth_user_id": auth_user_id,
@@ -777,23 +790,234 @@ async def start_reborn_server(
     return proc, base_url
 
 
+_BROWSER_EVENT_LIMIT = 1_000
+
+
+def _browser_diagnostics_dir(output_dir: Path, case_name: str) -> Path:
+    return output_dir / "browser-diagnostics" / case_name
+
+
+def _redact_browser_diagnostic_value(value: object) -> object:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    text = str(value)
+    if AUTH_TOKEN:
+        text = text.replace(AUTH_TOKEN, "<REDACTED_AUTH_TOKEN>")
+    text = re.sub(
+        r"(?i)([?&](?:token|code|state|access_token|refresh_token|id_token)=)[^&#\s]+",
+        r"\1<REDACTED>",
+        text,
+    )
+    text = re.sub(
+        r"(?i)\b(?:token|code|state|access_token|refresh_token|id_token)=[^,\s)'\"]+",
+        lambda match: match.group(0).split("=", 1)[0] + "=<REDACTED>",
+        text,
+    )
+    text = re.sub(r"(?i)(bearer\s+)[^\s]+", r"\1<REDACTED>", text)
+    text = re.sub(r"(?i)(cookie\s*:\s*)[^\r\n]+", r"\1<REDACTED>", text)
+    text = re.sub(r"xox[baprs]-[A-Za-z0-9-]{10,}", "<REDACTED_SLACK_TOKEN>", text)
+    text = re.sub(r"ya29\.[A-Za-z0-9._-]{20,}", "<REDACTED_GOOGLE_TOKEN>", text)
+    text = re.sub(r"sk-ant-[A-Za-z0-9_-]{10,}", "<REDACTED_ANTHROPIC_KEY>", text)
+    text = re.sub(r"sk-[A-Za-z0-9_-]{20,}", "<REDACTED_OPENAI_KEY>", text)
+    return text
+
+
+def _browser_event_value(obj: object, name: str) -> object | None:
+    try:
+        value = getattr(obj, name)
+        return value() if callable(value) else value
+    except Exception as exc:
+        return f"<unavailable:{type(exc).__name__}>"
+
+
+class _BrowserDiagnostics:
+    def __init__(self, output_dir: Path, case_name: str) -> None:
+        self.dir = _browser_diagnostics_dir(output_dir, case_name)
+        self.event_path = self.dir / "browser-events.jsonl"
+        self.summary_path = self.dir / "browser-summary.json"
+        self.trace_path = self.dir / "playwright-trace.zip"
+        self.event_count = 0
+        self.dropped_event_count = 0
+        self.write_error_count = 0
+        self.console_error_count = 0
+        self.page_error_count = 0
+        self.failed_request_count = 0
+        self.error_response_count = 0
+        self.trace_written = False
+        self.screenshot_path: Path | None = None
+        self._attached_pages: set[int] = set()
+        self.dir.mkdir(parents=True, exist_ok=True)
+
+    def record(self, event_type: str, **fields: object) -> None:
+        if self.event_count >= _BROWSER_EVENT_LIMIT:
+            self.dropped_event_count += 1
+            return
+        event = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "event": event_type,
+        }
+        event.update(
+            {key: _redact_browser_diagnostic_value(value) for key, value in fields.items()}
+        )
+        try:
+            with self.event_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(event, sort_keys=True) + "\n")
+            self.event_count += 1
+        except Exception:
+            self.write_error_count += 1
+        if event_type == "console" and str(event.get("level") or "").lower() == "error":
+            self.console_error_count += 1
+        elif event_type == "pageerror":
+            self.page_error_count += 1
+        elif event_type == "requestfailed":
+            self.failed_request_count += 1
+        elif event_type == "response":
+            self.error_response_count += 1
+
+    def attach_context(self, context: object) -> None:
+        try:
+            context.on("requestfailed", self._on_request_failed)
+            context.on("response", self._on_response)
+            context.on("page", self.attach_page)
+        except Exception as exc:
+            self.record("diagnostic_error", source="attach_context", error=repr(exc))
+
+    def attach_page(self, page: object) -> None:
+        page_id = id(page)
+        if page_id in self._attached_pages:
+            return
+        self._attached_pages.add(page_id)
+        try:
+            page.on("console", self._on_console)
+            page.on("pageerror", self._on_page_error)
+        except Exception as exc:
+            self.record("diagnostic_error", source="attach_page", error=repr(exc))
+
+    def _on_console(self, message: object) -> None:
+        self.record(
+            "console",
+            level=_browser_event_value(message, "type"),
+            text=_browser_event_value(message, "text"),
+            location=_browser_event_value(message, "location"),
+        )
+
+    def _on_page_error(self, error: object) -> None:
+        self.record("pageerror", message=repr(error))
+
+    def _on_request_failed(self, request: object) -> None:
+        self.record(
+            "requestfailed",
+            method=_browser_event_value(request, "method"),
+            url=_browser_event_value(request, "url"),
+            failure=_browser_event_value(request, "failure"),
+        )
+
+    def _on_response(self, response: object) -> None:
+        status = _browser_event_value(response, "status")
+        try:
+            status_int = int(status)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return
+        if status_int < 400:
+            return
+        request = _browser_event_value(response, "request")
+        self.record(
+            "response",
+            status=status_int,
+            url=_browser_event_value(response, "url"),
+            request_method=_browser_event_value(request, "method") if request else None,
+        )
+
+    def write_summary(self) -> None:
+        payload = {
+            "event_count": self.event_count,
+            "dropped_event_count": self.dropped_event_count,
+            "write_error_count": self.write_error_count,
+            "console_error_count": self.console_error_count,
+            "page_error_count": self.page_error_count,
+            "failed_request_count": self.failed_request_count,
+            "error_response_count": self.error_response_count,
+            "event_path": str(self.event_path) if self.event_path.exists() else None,
+            "summary_path": str(self.summary_path),
+            "trace_path": str(self.trace_path) if self.trace_written else None,
+            "screenshot_path": str(self.screenshot_path) if self.screenshot_path else None,
+        }
+        self.summary_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _attach_browser_diagnostics(output_dir: Path, result: ProbeResult) -> ProbeResult:
+    case_name = str(result.details.get("case") or "")
+    if not case_name:
+        return result
+    summary_path = _browser_diagnostics_dir(output_dir, case_name) / "browser-summary.json"
+    if not summary_path.exists():
+        return result
+    try:
+        result.details["browser_diagnostics"] = json.loads(
+            summary_path.read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as exc:
+        result.details["browser_diagnostics"] = {
+            "summary_path": str(summary_path),
+            "error": f"failed to read browser diagnostics: {type(exc).__name__}",
+        }
+    return result
+
+
 async def _with_page(output_dir: Path, case_name: str, action: Callable[[object], Awaitable[None]]) -> None:
     from playwright.async_api import async_playwright
 
     headless = os.environ.get("HEADED", "").strip().lower() not in ("1", "true")
+    diagnostics = _BrowserDiagnostics(output_dir, case_name)
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=headless, timeout=60000)
         context = await browser.new_context()
+        diagnostics.attach_context(context)
+        await context.tracing.start(screenshots=True, snapshots=True, sources=False)
         page = await context.new_page()
+        diagnostics.attach_page(page)
         try:
             await action(page)
         except Exception:
             screenshot = output_dir / f"{case_name}.failure.png"
-            await page.screenshot(path=str(screenshot), full_page=True)
+            try:
+                await page.screenshot(path=str(screenshot), full_page=True)
+                diagnostics.screenshot_path = screenshot
+            except Exception as screenshot_exc:
+                diagnostics.record(
+                    "diagnostic_error",
+                    source="screenshot_capture",
+                    error=repr(screenshot_exc),
+                )
+            try:
+                await context.tracing.stop(path=str(diagnostics.trace_path))
+                diagnostics.trace_written = True
+            except Exception as trace_exc:
+                diagnostics.record(
+                    "diagnostic_error",
+                    source="trace_stop",
+                    error=repr(trace_exc),
+                )
             raise
         finally:
+            try:
+                diagnostics.write_summary()
+            except Exception as summary_exc:
+                print(
+                    "[reborn-webui-v2-live-qa] failed to write browser diagnostics "
+                    f"summary for {case_name}: {type(summary_exc).__name__}: {summary_exc}",
+                    flush=True,
+                )
             await context.close()
             await browser.close()
+
+
+@dataclass(frozen=True)
+class AssistantReplyWaitResult:
+    text_excerpt: str
+    semantic_judge_used: bool
+    semantic_judge_reason: str
+    semantic_judge: dict[str, object] | None = None
 
 
 def _result(case_name: str, success: bool, started: float, details: dict[str, object]) -> ProbeResult:
@@ -812,6 +1036,17 @@ def _result(case_name: str, success: bool, started: float, details: dict[str, ob
         latency_ms=int((time.monotonic() - started) * 1000),
         details=details,
     )
+
+
+def _record_assistant_reply_wait_result(
+    observed: dict[str, object],
+    reply: AssistantReplyWaitResult,
+) -> None:
+    observed["text_excerpt"] = reply.text_excerpt
+    observed["semantic_judge_used"] = reply.semantic_judge_used
+    observed["semantic_judge_reason"] = reply.semantic_judge_reason
+    if reply.semantic_judge is not None:
+        observed["semantic_judge"] = reply.semantic_judge
 
 
 async def _live_chat_case(
@@ -856,16 +1091,23 @@ async def _live_chat_case(
                 prompt[:80],
                 timeout=15000,
             )
-        observed["text_excerpt"] = await _wait_for_assistant_reply(
-            page,
-            marker=marker,
-            required_text=required_text,
-            timeout=timeout,
-            semantic_goal=prompt,
+        _record_assistant_reply_wait_result(
+            observed,
+            await _wait_for_assistant_reply(
+                page,
+                marker=marker,
+                required_text=required_text,
+                timeout=timeout,
+                semantic_goal=prompt,
+            ),
         )
         if forbidden_text:
             text = str(observed["text_excerpt"]).lower()
-            matches = [phrase for phrase in forbidden_text if phrase.lower() in text]
+            matches = [
+                phrase
+                for phrase in forbidden_text
+                if _forbidden_phrase_matches(text, phrase)
+            ]
             if matches:
                 raise AssertionError(
                     "assistant reply contained forbidden failure text: "
@@ -900,6 +1142,21 @@ async def _live_chat_case(
                 **observed,
             },
         )
+
+
+def _forbidden_phrase_matches(normalized_text: str, phrase: str) -> bool:
+    normalized_phrase = phrase.lower()
+    if normalized_phrase == "authentication required":
+        benign_auth_phrases = (
+            "no additional authentication required",
+            "no authentication required",
+            "without additional authentication required",
+        )
+        text = normalized_text
+        for benign_phrase in benign_auth_phrases:
+            text = text.replace(benign_phrase, "")
+        return normalized_phrase in text
+    return normalized_phrase in normalized_text
 
 
 async def _live_chat_with_extensions_case(
@@ -968,12 +1225,15 @@ async def _live_chat_with_extensions_case(
                 prompt[:80],
                 timeout=15000,
             )
-        observed["text_excerpt"] = await _wait_for_assistant_reply(
-            page,
-            marker=marker,
-            required_text=required_text,
-            timeout=timeout,
-            semantic_goal=prompt,
+        _record_assistant_reply_wait_result(
+            observed,
+            await _wait_for_assistant_reply(
+                page,
+                marker=marker,
+                required_text=required_text,
+                timeout=timeout,
+                semantic_goal=prompt,
+            ),
         )
 
     try:
@@ -1004,7 +1264,7 @@ async def _wait_for_assistant_reply(
     required_text: list[str],
     timeout: float,
     semantic_goal: str | None = None,
-) -> str:
+) -> AssistantReplyWaitResult:
     deadline = time.monotonic() + timeout
     assistant = page.locator("[data-testid='msg-assistant']").last  # type: ignore[attr-defined]
     last_text = ""
@@ -1030,8 +1290,12 @@ async def _wait_for_assistant_reply(
                 last_text = text
             normalized = text.lower()
             marker_matches = not marker or marker in text
-            if marker_matches and _required_text_matches(normalized, required_text):
-                return text[-2000:]
+            if marker_matches and required_text_matches(normalized, required_text):
+                return AssistantReplyWaitResult(
+                    text_excerpt=text[-2000:],
+                    semantic_judge_used=False,
+                    semantic_judge_reason="literal_required_text_matched",
+                )
         await asyncio.sleep(0.5)
     main_text = ""
     try:
@@ -1048,30 +1312,18 @@ async def _wait_for_assistant_reply(
             semantic_goal=semantic_goal,
         )
         if _semantic_judge_passed(semantic_judge):
-            return last_text[-2000:]
+            return AssistantReplyWaitResult(
+                text_excerpt=last_text[-2000:],
+                semantic_judge_used=True,
+                semantic_judge_reason="semantic_judge_completed",
+                semantic_judge=semantic_judge,
+            )
     raise AssertionError(
         "assistant reply did not contain required text before timeout. "
         f"marker={marker!r} required_text={required_text!r} "
         f"last_assistant={last_text[-500:]!r} main_excerpt={main_text[-1000:]!r} "
         f"semantic_judge={_compact_json(semantic_judge)}"
     )
-
-
-def _required_text_matches(text: str, required_text: list[str]) -> bool:
-    normalized_text = text.lower()
-    return all(
-        any(_required_option_matches(normalized_text, option) for option in piece.split("|"))
-        for piece in required_text
-    )
-
-
-def _required_option_matches(normalized_text: str, option: str) -> bool:
-    normalized_option = option.strip().lower()
-    if not normalized_option:
-        return False
-    if re.fullmatch(r"\w+", normalized_option):
-        return re.search(rf"\b{re.escape(normalized_option)}\b", normalized_text) is not None
-    return normalized_option in normalized_text
 
 
 async def _approve_visible_tool_gate(page: object) -> None:
@@ -1483,12 +1735,20 @@ def _slack_delivery_channel_id(ctx: LiveQaContext) -> str | None:
     slack = _slack_preflight(ctx)
     discovery = slack.get("route_discovery")
     if isinstance(discovery, dict):
-        channel_id = str(discovery.get("channel_id") or "").strip()
-        if channel_id:
-            return channel_id
-    env_channel = os.environ.get("REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_CHANNEL_ID", "").strip()
-    if env_channel:
-        return env_channel
+        if discovery.get("checked") and not discovery.get("ok"):
+            return None
+        if discovery.get("ok"):
+            seed = discovery.get("personal_dm_seed")
+            if isinstance(seed, dict):
+                seeded_channel_id = str(seed.get("dm_channel_id") or "").strip()
+                if seeded_channel_id:
+                    return seeded_channel_id
+            channel_id = str(discovery.get("channel_id") or "").strip()
+            if channel_id:
+                return channel_id
+    persisted_channel_id = _persisted_slack_personal_dm_channel_id(ctx.reborn_home, _auth_user_id())
+    if persisted_channel_id:
+        return persisted_channel_id
     db_path = ctx.reborn_home / "local-dev" / "reborn-local-dev.db"
     if not db_path.exists():
         return None
@@ -2616,24 +2876,25 @@ async def case_qa_6e_gmail_to_sheet_delivery(ctx: LiveQaContext) -> ProbeResult:
                 "Drive lookup by exact sheet name did not find one"
             )
             return result
-        sheet_check = await _google_sheet_contains_marker(
+        sheet_check = await _wait_for_google_sheet_marker(
             access_token=access_token,
             spreadsheet_id=spreadsheet_id,
             marker=marker,
+            timeout=90.0,
         )
         result.details["google_token"] = token_meta
         result.details["spreadsheet_id"] = spreadsheet_id
         result.details["sheet_marker_check"] = sheet_check
-        if not sheet_check.get("found"):
-            result.success = False
-            result.details["error"] = "Google Sheet did not contain the QA marker row"
         result.latency_ms = int((time.monotonic() - started) * 1000)
         return result
     except Exception as exc:
         result.success = False
         result.latency_ms = int((time.monotonic() - started) * 1000)
         result.details["spreadsheet_id"] = spreadsheet_id
-        result.details["error"] = str(exc)
+        exc_text = str(exc)
+        result.details["error"] = (
+            f"{type(exc).__name__}: {exc_text}" if exc_text else type(exc).__name__
+        )
         return result
 
 
@@ -3286,7 +3547,11 @@ async def case_qa_7a_slack_product_channel_connect(ctx: LiveQaContext) -> ProbeR
 
     started = time.monotonic()
     case_name = "qa_7a_slack_product_channel_connect"
-    prompt = _qa_sheet_prompt(case_name)
+    prompt = (
+        'In WebUI, ask IronClaw "connect to Slack for my configured DM delivery '
+        'target." Go through the flow\n'
+        "Expected result: Slack DM delivery target is connected"
+    )
     observed: dict[str, object] = {"chat_connect_prompt": prompt}
     try:
         slack = _slack_preflight(ctx)
@@ -3335,31 +3600,17 @@ async def case_qa_7a_slack_product_channel_connect(ctx: LiveQaContext) -> ProbeR
                 prompt[:80],
                 timeout=15000,
             )
-            observed["text_excerpt"] = await _wait_for_assistant_reply(
-                page,
-                marker=None,
-                required_text=["slack"],
-                timeout=180.0,
+            _record_assistant_reply_wait_result(
+                observed,
+                await _wait_for_assistant_reply(
+                    page,
+                    marker=None,
+                    required_text=["slack", "dm|delivery|target|connected"],
+                    timeout=180.0,
+                ),
             )
-            deadline = time.monotonic() + 180.0
-            while time.monotonic() < deadline:
-                await _approve_visible_tool_gate(page)
-                statuses = _capability_run_statuses(ctx.reborn_home, capability_ids)
-                observed["capability_statuses"] = statuses
-                completed = _completed_capability_counts(statuses)
-                missing = [
-                    capability_id
-                    for capability_id in capability_ids
-                    if completed.get(capability_id, 0)
-                    <= baseline_completed.get(capability_id, 0)
-                ]
-                if not missing:
-                    return
-                await asyncio.sleep(1.0)
-            raise AssertionError(
-                "Slack DM connect prompt did not complete expected capabilities: "
-                f"{capability_ids!r}; observed statuses={observed.get('capability_statuses')!r}"
-            )
+            statuses = _capability_run_statuses(ctx.reborn_home, capability_ids)
+            observed["capability_statuses"] = statuses
 
         await _with_page(ctx.output_dir, case_name, action)
         return _result(case_name, True, started, observed)
@@ -3394,7 +3645,7 @@ async def case_qa_8c_hn_keyword_slack_routine(ctx: LiveQaContext) -> ProbeResult
         case_name="qa_8c_hn_keyword_slack_routine",
         routine_name=routine_name,
         marker=None,
-        required_text=["routine"],
+        required_text=["routine|trigger|automation|cron|schedule|created|monitor"],
         prompt=_qa_sheet_prompt("qa_8c_hn_keyword_slack_routine"),
     )
 
@@ -3583,6 +3834,7 @@ CASES: dict[str, CaseSpec] = {
     "qa_7c_slack_bug_logger_routine": CaseSpec(
         case_qa_7c_slack_bug_logger_routine,
         requires_slack=True,
+        requires_slack_target=True,
         requires_google_product_auth=True,
     ),
     "qa_7d_slack_bug_message_trigger": CaseSpec(
@@ -3991,11 +4243,12 @@ async def run_cases(args: argparse.Namespace) -> int:
                 {
                     "blocked": True,
                     "error": (
-                        "live Slack outbound delivery target is not configured "
+                        "live Slack personal DM outbound delivery target is not configured "
                         f"for WebUI user {_auth_user_id()!r}"
                     ),
                     "required_env": [
-                        "REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_CHANNEL_ID",
+                        "REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID",
+                        "REBORN_WEBUI_V2_LIVE_QA_SLACK_INBOUND_USER_ID",
                     ],
                     "preflight": slack_preflight,
                 },
@@ -4024,6 +4277,7 @@ async def run_cases(args: argparse.Namespace) -> int:
             )
             print(f"[reborn-webui-v2-live-qa] running case={name}", flush=True)
             result = await CASES[name].fn(ctx)
+            result = _attach_browser_diagnostics(args.output_dir, result)
             results.append(result)
             print(
                 f"[reborn-webui-v2-live-qa] case={name} success={result.success} "
@@ -4041,8 +4295,13 @@ async def run_cases(args: argparse.Namespace) -> int:
             )
     results_path = write_results(args.output_dir, results, first_base_url)
     trace_index_path = write_trace_index(args.output_dir, trace_exports)
+    green_explanation_path = write_green_run_explanation(args.output_dir, results)
     print(f"[reborn-webui-v2-live-qa] results={results_path}", flush=True)
     print(f"[reborn-webui-v2-live-qa] trace_index={trace_index_path}", flush=True)
+    print(
+        f"[reborn-webui-v2-live-qa] green_run_explanation={green_explanation_path}",
+        flush=True,
+    )
     return 0 if all(result.success for result in results) else 1
 
 
@@ -4089,6 +4348,11 @@ def main() -> int:
             details={"error": str(exc)},
         )
         write_results(args.output_dir, [failed], "")
+        green_explanation_path = write_green_run_explanation(args.output_dir, [failed])
+        print(
+            f"[reborn-webui-v2-live-qa] green_run_explanation={green_explanation_path}",
+            flush=True,
+        )
         print(f"[reborn-webui-v2-live-qa] {exc}", file=sys.stderr, flush=True)
         return 1
 

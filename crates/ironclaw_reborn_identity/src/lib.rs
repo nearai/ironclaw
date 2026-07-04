@@ -100,23 +100,6 @@ pub struct ExternalIdentityKey {
     pub external_subject_id: ExternalSubjectId,
 }
 
-/// A persisted canonical user.
-///
-/// `status` and `role` are intentionally absent: the store has no typed
-/// semantics for them yet, so the `users` table carries them as columns
-/// with DB-level defaults (`active` / `member`) rather than threading
-/// stringly-typed values through this record (see `.claude/rules/types.md`
-/// — fixed small sets must be enums, not strings). Reintroduce them as
-/// `UserStatus` / `UserRole` enums when a caller actually reads them.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UserRecord {
-    pub id: UserId,
-    pub email: Option<String>,
-    pub display_name: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
 /// Failure modes of the canonical identity layer.
 #[derive(Debug, thiserror::Error)]
 pub enum RebornIdentityError {
@@ -192,42 +175,4 @@ pub trait RebornIdentityResolver: Send + Sync {
         identity: ResolveExternalIdentity,
         user_id: &UserId,
     ) -> Result<(), RebornIdentityError>;
-}
-
-#[async_trait]
-impl<T> RebornIdentityResolver for std::sync::Arc<T>
-where
-    T: RebornIdentityResolver + ?Sized,
-{
-    async fn resolve_or_create(
-        &self,
-        identity: ResolveExternalIdentity,
-    ) -> Result<UserId, RebornIdentityError> {
-        self.as_ref().resolve_or_create(identity).await
-    }
-
-    async fn lookup(
-        &self,
-        key: ExternalIdentityKey,
-    ) -> Result<Option<UserId>, RebornIdentityError> {
-        self.as_ref().lookup(key).await
-    }
-
-    async fn bind(
-        &self,
-        key: ExternalIdentityKey,
-        user_id: &UserId,
-    ) -> Result<(), RebornIdentityError> {
-        self.as_ref().bind(key, user_id).await
-    }
-
-    async fn adopt_migrated_identity(
-        &self,
-        identity: ResolveExternalIdentity,
-        user_id: &UserId,
-    ) -> Result<(), RebornIdentityError> {
-        self.as_ref()
-            .adopt_migrated_identity(identity, user_id)
-            .await
-    }
 }

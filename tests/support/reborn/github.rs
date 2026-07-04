@@ -46,17 +46,26 @@ pub fn api_policy() -> NetworkPolicy {
 }
 
 pub fn extension_registry() -> GithubSupportResult<ExtensionRegistry> {
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(extension_package()?)?;
+    Ok(registry)
+}
+
+/// The parsed github `ExtensionPackage` alone (no registry wrapper). C-JOURNEY:
+/// fed into `RebornServices::publish_bundled_extension_for_test` to make
+/// `github.*` capabilities dispatchable on the `build_reborn_services`
+/// local-dev runtime without a scripted install/activate handshake.
+pub fn extension_package() -> GithubSupportResult<ExtensionPackage> {
     let manifest = ExtensionManifest::parse_with_host_api_contracts(
         &std::fs::read_to_string(asset_root().join("manifest.toml"))?,
         ManifestSource::HostBundled,
         &default_host_port_catalog()?,
         &default_host_api_contract_registry()?,
     )?;
-    let package =
-        ExtensionPackage::from_manifest(manifest, VirtualPath::new("/system/extensions/github")?)?;
-    let mut registry = ExtensionRegistry::new();
-    registry.insert(package)?;
-    Ok(registry)
+    Ok(ExtensionPackage::from_manifest(
+        manifest,
+        VirtualPath::new("/system/extensions/github")?,
+    )?)
 }
 
 pub fn asset_root() -> PathBuf {

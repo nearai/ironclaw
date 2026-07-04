@@ -22,8 +22,8 @@
 //!    without duplicating the wiring logic.
 //! 4. [`project_create`] — `project_create` synthetic-capability test support
 //!    (E-PROJ seam).
-//! 5. [`durable`] — extension-installation durable-store test support
-//!    (E-DURABLE seam).
+//! 5. [`durable`] — extension-installation, approval-request, and trigger
+//!    durable-store test support (E-DURABLE / C-DURABLE seam).
 //! 6. [`skill_activation`] — `skill_activate` synthetic-capability test
 //!    support (E-SKILL seam).
 //! 7. [`user_profile`] — `HostUserProfileSource` test support (E-PROFILE
@@ -33,6 +33,7 @@ mod budget_gateway;
 mod durable;
 mod local_dev_boot;
 mod oauth_product_auth;
+mod outbound_delivery;
 mod project_create;
 mod skill_activation;
 mod user_profile;
@@ -42,6 +43,10 @@ pub use budget_gateway::{
 };
 #[cfg(feature = "test-support")]
 pub use durable::open_local_dev_extension_installation_store_for_test;
+#[cfg(all(feature = "test-support", feature = "libsql"))]
+pub use durable::{
+    open_local_dev_approval_request_store_for_test, open_local_dev_trigger_repository_for_test,
+};
 pub use local_dev_boot::LOCAL_DEV_DB_FILENAME;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use local_dev_boot::build_local_dev_secret_store_for_test;
@@ -54,6 +59,11 @@ pub use local_dev_boot::{
 pub use oauth_product_auth::build_google_oauth_product_auth_for_test;
 pub use oauth_product_auth::{
     OAuthProductAuthTestBundle, ScriptedOAuthTokenEgress, build_oauth_product_auth_for_test,
+};
+#[cfg(feature = "test-support")]
+pub use outbound_delivery::{
+    OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
+    OutboundDeliveryCapabilityTestParts, wrap_outbound_delivery_capabilities_for_test,
 };
 #[cfg(feature = "test-support")]
 pub use project_create::{PROJECT_CREATE_CAPABILITY_ID, wrap_project_create_capability_for_test};

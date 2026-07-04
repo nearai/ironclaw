@@ -44,6 +44,22 @@ async fn replies_to_greeting() {
 `RebornScriptedReply::text(..)` — one line each. The harness is single-
 conversation; `submit_turn`/`assert_reply_contains` take just the text.
 
+### Script discipline — one script entry per model call
+
+The script is a FIFO of model calls, consumed across every turn on the harness.
+Count entries by model calls, not by "turns":
+
+- Plain reply turn = **1** entry (`text(..)`).
+- Ungated tool-call turn = **2** entries: `tool_call(..)` + the post-execution
+  model call (usually `text(..)`).
+- Gated tool-call turn (approval OR auth) = **exactly 2 entries**, whether the
+  gate is approved or denied: `tool_call(..)` + one post-resume model call
+  (reacting to the granted result or the authorization-failure tool error). A
+  third entry over-runs the FIFO and silently bleeds into the next turn.
+
+So a two-turn thread where both turns raise and resolve a gate needs 4 entries
+(`tool_call, text, tool_call, text`).
+
 ## Requirements & expectations (non-negotiable)
 
 1. **Test-first & consolidate.** Per root `CLAUDE.md` → Testing Discipline (and
@@ -90,6 +106,12 @@ conversation; `submit_turn`/`assert_reply_contains` take just the text.
   harness struct to widen); it delegates the MCP wiring to the `pub(super)` factories
   in `harness_mcp.rs`. `harness.rs` remains large (a further `harness_auth.rs`
   split is tracked in the coverage roadmap).
+- `group_constructors.rs` — the per-capability `RebornIntegrationGroup` /
+  `RebornIntegrationGroupBuilder` preset constructors (`live_approvals`,
+  `builtin_tools`, `extension_lifecycle`, `skill_management_tools`, etc.), a
+  private child module of `group.rs` (same `harness_mcp.rs` split precedent)
+  so it can reach `group.rs`'s shared assembly internals at module-private
+  visibility. See [Group tests](#group-tests) below.
 - `process.rs` — `RecordingProcessPort`, the inert process port: records every
   `CommandExecutionRequest.command` and returns exit 0 / empty output without
   spawning any OS process. Injected by default when `with_builtin_http_tools()` is
@@ -154,11 +176,26 @@ Richer assertions in `assertions.rs` (all check the `[baseline..]` delta per thr
 - `assert_egress_body_contains(url_substr, body_substr)` — body of the (first) captured egress request whose URL contains the substring.
 - `assert_egress_body_contains_any(url_substr, body_substr)` — body of ANY (not just the first) captured egress request whose URL contains the substring; for a multi-request handshake where every leg shares one URL (e.g. web-access's Exa MCP `initialize`/`notifications/initialized`/`tools/call` sequence) and only one leg's body carries the substring under test. Prefer `assert_egress_body_contains` whenever `url_substr` matches exactly one request.
 - `assert_tool_result_contains(needle)` — a recorded capability result's output contains the text (proves the scripted body surfaced back to the model on the *Completed* path; reads the in-process recorder).
-- `assert_tool_error(class, reason)` — a persisted `ToolResultReference` envelope's parsed `safe_summary` field is of outcome `class` (`ToolErrorClass::{Failed, Denied}`) and carries `reason`. Distinct from `assert_tool_result_contains`: this reads the *Failed*/*Denied* capability-error path (persisted via `append_tool_result_reference`), not the in-process recorder, so it's the assertion for `egress_error`-scripted responses and other capability failures/denials. `class` is a typed arg (not a needle prefix) so it discriminates Failed-vs-Denied structurally — a `Failed{PolicyDenied}` and a `Denied{policy_denied}` render the same `reason` token but different classes. Parses the `safe_summary` field (not a raw-JSON substring). Scans full thread history (not baseline-sliced) — safe only for single-turn harnesses today; a multi-turn/group reuse must add baseline scoping first.
+- `assert_tool_error(class, reason)` — a persisted `ToolResultReference` envelope's parsed `safe_summary` field is of outcome `class` (`ToolErrorClass::{Failed, Denied}`) and carries `reason`. Distinct from `assert_tool_result_contains`: this reads the *Failed*/*Denied* capability-error path (persisted via `append_tool_result_reference`), not the in-process recorder, so it's the assertion for `egress_error`-scripted responses and other capability failures/denials. `class` is a typed arg (not a needle prefix) so it discriminates Failed-vs-Denied structurally — a `Failed{PolicyDenied}` and a `Denied{policy_denied}` render the same `reason` token but different classes. Parses the `safe_summary` field (not a raw-JSON substring). Scans full thread history (not baseline-sliced) — on multi-turn threads use the `*_since` variant with a `history_len()` baseline (see below).
 - `assert_no_tool_error(class, reason)` — the inverse of `assert_tool_error`: passes when NO persisted `ToolResultReference` summary matches `class`'s prefix and contains `reason`, and fails (listing what was found) when one is. Built on the same collector, so it shares the same full-thread-history caveat. Prefer this over pattern-matching `assert_tool_error`'s `Err` string when a test needs to prove absence — matching the negative directly avoids coupling the test to `assert_tool_error`'s diagnostic wording.
-- `assert_tool_error_summary_contains(text)` — raw `safe_summary` substring check on a persisted `ToolResultReference`, with NO class-prefix requirement. Use for `CapabilityErrorSummary`s the executor builds via `SanitizedStrategySummary::from_trusted_static` (`crates/ironclaw_agent_loop/src/executor/capabilities.rs`: filtered-surface denial, stale-surface retry, gate-declined short-circuit) — those are fixed host-authored literals with no host-returned text to prefix, so `assert_tool_error`'s `capability_{failed,denied}_summary` prefix match never succeeds for them. Scans full thread history (not baseline-sliced) — safe only for single-turn harnesses today; a multi-turn/group reuse must add baseline scoping first.
+- `assert_tool_error_summary_contains(text)` — raw `safe_summary` substring check on a persisted `ToolResultReference`, with NO class-prefix requirement. Use for `CapabilityErrorSummary`s the executor builds via `SanitizedStrategySummary::from_trusted_static` (`crates/ironclaw_agent_loop/src/executor/capabilities.rs`: filtered-surface denial, stale-surface retry, gate-declined short-circuit) — those are fixed host-authored literals with no host-returned text to prefix, so `assert_tool_error`'s `capability_{failed,denied}_summary` prefix match never succeeds for them. Scans full thread history (not baseline-sliced) — on multi-turn threads use the `*_since` variant with a `history_len()` baseline (see below).
 - `assert_network_egress_header_contains(url_substr, header_name, value_substr)` — reads the **network** egress lane (`captured_network_requests()`), not the runtime lane the four assertions above read. Needed for `.with_github_issue_tools()`: that harness's `try_with_host_http_egress` overwrites the runtime port with the host egress pipeline over the network recorder, so the runtime-lane `assert_egress_*` family is inert for it — assert here instead.
 - `tool_result_output(capability_id)` — the parsed JSON output of the most-recent recorded capability result for that id, for reading server-minted fields (e.g. `trigger_id`) a static script can't reference ahead of time.
+
+Multi-turn (baseline-sliced) variants: the `assert_tool_error*` and
+`assert_conversation_history_*` families scan the FULL thread history — safe
+only on a single-turn harness. On multi-turn threads, capture
+`history_len()` at the START of the turn under test and pass it as `baseline`
+to the `*_since` forms (`assert_tool_error_since`, `assert_no_tool_error_since`,
+`assert_tool_error_summary_contains_since`,
+`assert_conversation_history_contains_since`) so only that turn's appended
+messages are considered. `assert_conversation_history_contains(needle)` checks
+persisted-transcript containment across ANY role (the stored-history analogue
+of `assert_system_prompt_contains`, which reads only System-role model
+requests); `assert_conversation_history_role_contains(kind, needle)` restricts
+it to one `MessageKind`. Contracts (class discrimination, fail-loud decode)
+match the full-history siblings — see their doc-comments. Demo + regression:
+`tests/reborn_integration_http_matcher.rs::multi_turn_baseline_sliced_history_assertions`.
 
 ### Keyed HTTP responses
 
@@ -220,6 +257,40 @@ Script with `RebornScriptedReply::tool_call("github.get_repo", json!({"owner": .
 followed by a trailing `RebornScriptedReply::text(..)` turn.
 
 - `assert_network_egress_header_contains(url_substr, header_name, value_substr)` — see the "Richer assertions" list below; this is the assertion for this capability.
+
+### Turn lifecycle events
+
+`.with_turn_event_sink()` (harness or group builder) installs an in-memory
+`ironclaw_turns::InMemoryTurnEventSink` into the ONE planned runtime via the
+production `lifecycle_bus.subscribe_best_effort` seam — the entry point Trace
+Commons capture and skill learning hang off in production. Off by default
+(`turn_event_sink: None`, matching every pre-existing test).
+
+- `assert_turn_event_recorded(kind)` — at least one recorded `TurnLifecycleEvent`
+  of that `TurnEventKind` (e.g. `Completed`). The sink is group-shared, but the
+  harness records `baseline_turn_event_count` at construction and
+  `recorded_turn_events` slices `[baseline..]` (R2), so each thread only sees
+  events its own turns published — a sibling thread's earlier event can't make
+  this assertion pass.
+
+### Attachments (multimodal)
+
+`RebornIntegrationGroup::attachment_tools()` wires the real production
+attachment pair over the local-dev workspace filesystem:
+`ProjectScopedAttachmentLander` (lands inbound bytes) +
+`ProjectScopedAttachmentReader` (the `attachment_read_port` the loop model port
+reads bytes back through). Route the thread at a vision-capable model id with
+`.with_model_override(model_id)` (see `ironclaw_llm::vision_models`) — the
+scripted default id is not a vision pattern, so image parts are dropped for it.
+
+- `submit_turn_with_image_attachment(text, filename, mime, bytes)` — lands the
+  image through the real `submit_inbound_with_attachments` entry point and waits
+  for completion. Errors if the harness has no lander (i.e. not an
+  `attachment_tools()` group).
+- `assert_model_saw_image_attachment(mime, bytes)` — a captured model request
+  carried a `ContentPart::ImageUrl` part whose `data:` URL is exactly
+  `data:<mime>;base64,<encode(bytes)>` — byte-fidelity through lander →
+  filesystem → read port, not just the textual `<attachments>` pointer.
 
 ### OAuth / product-auth
 
@@ -376,7 +447,45 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 | `RebornIntegrationGroup::builtin_tools()` | core built-in (http/echo/time/json/shell) | enabled |
 | `RebornIntegrationGroup::extension_lifecycle()` | extension_search/install/activate/remove | enabled |
 | `RebornIntegrationGroup::triggers()` | trigger_create/list/pause/resume/remove | enabled |
+| `RebornIntegrationGroup::skill_management_tools()` | skill_list/skill_install/skill_remove | enabled |
+| `RebornIntegrationGroup::attachment_tools()` | attachment lander + read port (no tool dispatch) | n/a (no capability dispatch) |
+| `RebornIntegrationGroup::live_auth_and_approval()` | file tools @ Ask + unseeded `github.get_repo` (raises BlockedApproval AND BlockedAuth on one runtime; C-JOURNEY) | disabled |
 | `RebornIntegrationGroup::builder().storage(LibSql).live_approvals()` | same + LibSql storage | disabled |
+| `RebornIntegrationGroup::multiuser_memory_tools()` | core built-in (memory/http/shell/…) with per-actor run-owner-scoped capability dispatch (C-MULTIUSER) | enabled |
+| `RebornIntegrationGroup::multiuser_approvals()` | file tools (write_file/read_file @ Ask) with per-actor capability scoping (C-MULTIUSER) | enabled per owner (default; toggle per-owner in test) |
+| `RebornIntegrationGroup::outbound_target_tools()` | `outbound_delivery_targets_list`/`target_set` over an injected `FakeOutboundPreferencesFacade` (C-SYNTH) | enabled |
+
+### Auth-gate resolution (C-JOURNEY)
+
+On a `live_auth_and_approval()` group thread:
+
+- `resolve_auth_gate(run_id, &gate_ref)` — the "user submitted credentials"
+  happy arm: seeds a real GitHub credential account WITH secret material
+  through the production manual-token flow
+  (`request_manual_token_setup` -> `submit_manual_token`), then resumes with
+  `ResumeTurnPrecondition::BlockedAuthGate`; the parked `github.*` capability
+  re-dispatches and completes. Only valid on this group (needs the
+  `build_reborn_services` product-auth wiring; `live_auth_gate()`'s
+  lower-level fixture cannot complete an auth resume).
+- `deny_auth_gate(run_id, &gate_ref)` — works on both auth-gate groups.
+
+Multi-turn journey chaining (gate -> resolve -> next turn on ONE
+conversation) is pinned by `tests/reborn_group_journeys/`; per-turn resume
+idempotency keys are `(run_id, gate_ref)`-scoped so one run can resume
+through an approval gate and a subsequent auth gate without replay collision.
+
+### Distinct actors per thread (E-MULTIUSER)
+
+`g.thread(conv).with_actor_id("some-actor")` resolves that thread's binding
+under a DISTINCT actor instead of the default `HARNESS_ACTOR_ID` — both at
+the build-time binding probe and at every `submit_turn` for that thread, so
+probe and submit always resolve the same binding/owner. The group's one
+shared runtime resolves each turn's thread by the run's own owner
+(production's `ThreadScopeResolver::resolve_for_turn` over the harness's
+per-op `/threads` mount), so two actors' threads coexist over one
+coordinator with their history isolated under separate
+`/tenants/<tenant>/users/<user>/threads` subtrees. Driving test:
+`tests/reborn_group_multiuser/`.
 
 ### Key accessors on `RebornIntegrationGroup`
 

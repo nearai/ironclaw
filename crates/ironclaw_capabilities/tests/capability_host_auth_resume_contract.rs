@@ -21,13 +21,15 @@ use support::*;
 fn dispatch_lease_approval() -> LeaseApproval {
     LeaseApproval {
         issued_by: Principal::HostRuntime,
-        allowed_effects: vec![EffectKind::DispatchCapability],
-        mounts: MountView::default(),
-        network: NetworkPolicy::default(),
-        secrets: vec![],
-        resource_ceiling: None,
-        expires_at: None,
-        max_invocations: Some(1),
+        constraints: GrantConstraints {
+            allowed_effects: vec![EffectKind::DispatchCapability],
+            mounts: MountView::default(),
+            network: NetworkPolicy::default(),
+            secrets: vec![],
+            resource_ceiling: None,
+            expires_at: None,
+            max_invocations: Some(1),
+        },
     }
 }
 

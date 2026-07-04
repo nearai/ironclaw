@@ -23,26 +23,20 @@
 //! `scenario_gate_then_approve` / `scenario_gate_then_deny` /
 //! `scenario_approve_always_persists_cross_thread` each drive ONE thread's gate
 //! to resolution *before* the next thread submits a turn — fully sequential.
-//! Before this refactor, that was also the only coverage *possible*: each
-//! group thread built its OWN `TurnRunScheduler` worker + coordinator, so two
-//! "concurrent" gates would have lived on two independent schedulers and never
-//! exercised shared dispatch state.
-//!
-//! Option P collapsed that to ONE coordinator/scheduler per group
+//! All group threads share ONE coordinator/scheduler
 //! (`GroupSharedStorage::coordinator`, built once in
-//! `RebornIntegrationGroupBuilder::into_group`, `tests/support/reborn/group.rs`).
-//! That is exactly the failure mode the original flake lived in: a global
-//! worker pool claims runs off one shared queue, so a worker can in principle
-//! pick up the wrong run for the wrong thread. The only way to prove resume
-//! dispatch is keyed correctly (by `run_id`, not by registration order or a
-//! shared scope) is to put TWO runs on the shared coordinator in `Blocked`
-//! state AT THE SAME TIME — both turns in flight, both parked on a gate,
-//! before either is resolved — then resolve them with DIFFERENT, divergent
-//! dispositions and assert each thread's own real side effect. No existing
-//! scenario can absorb this: doing it sequentially (as the three existing
-//! scenarios do) cannot distinguish "resume keys on run_id" from "resume keys
-//! on registration order" or "resume keys on a constant", because there is
-//! never more than one blocked run on the coordinator at a time to confuse.
+//! `RebornIntegrationGroupBuilder::into_group`, `tests/support/reborn/group.rs`),
+//! so a worker can in principle pick up the wrong run for the wrong thread.
+//! The only way to prove resume dispatch is keyed correctly (by `run_id`, not
+//! by registration order or a shared scope) is to put TWO runs on the shared
+//! coordinator in `Blocked` state AT THE SAME TIME — both turns in flight,
+//! both parked on a gate, before either is resolved — then resolve them with
+//! DIFFERENT, divergent dispositions and assert each thread's own real side
+//! effect. No existing scenario can absorb this: doing it sequentially (as
+//! the three existing scenarios do) cannot distinguish "resume keys on
+//! run_id" from "resume keys on registration order" or "resume keys on a
+//! constant", because there is never more than one blocked run on the
+//! coordinator at a time to confuse.
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
@@ -96,7 +90,6 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let (run_b, gate_b) = thread_b
         .submit_turn_until_blocked("write the concurrent B file")
         .await?;
-    // Both runs are now parked on the shared coordinator at the same time.
 
     // Non-vacuity: two genuinely distinct runs/gates are actually in flight —
     // if the harness collapsed both threads onto one run this would catch it
@@ -150,13 +143,10 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     thread_b
         .assert_workspace_file_absent("concurrent_b.txt")
         .await?;
-    // The negative-space check in the other direction: B's content must never
-    // have landed at all (rules out a resume path that writes to "whichever
-    // gate resolved last" regardless of which run it came from). Checked via
-    // `thread_a`'s handle, but recall both handles read the same shared
-    // workspace (see module note above) — this is the same on-disk fact as
-    // the `thread_b` check above, re-asserted for readability at the call
-    // site, not an independent per-thread isolation proof.
+    // Same on-disk fact, re-checked via `thread_a`'s handle (both handles
+    // read the same shared workspace — see module note above): rules out a
+    // resume path that writes to "whichever gate resolved last" regardless
+    // of which run it came from.
     thread_a
         .assert_workspace_file_absent("concurrent_b.txt")
         .await?;

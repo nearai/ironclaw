@@ -1,7 +1,7 @@
 # Reborn Agent Architecture
 
 This document maps the Reborn agent architecture as implemented in the `crates/`
-workspace on `reborn-integration`. It focuses on the crates-level shape: how a
+workspace. It focuses on the crates-level shape: how a
 user turn enters Reborn, how a runner executes it, how model and capability work
 flow through host ports, and where each component is allowed to depend.
 
@@ -39,6 +39,18 @@ Reborn should not grow:
   paths, or backend diagnostics;
 - separate subagent execution machinery outside the normal runner/driver loop;
 - local-dev shortcuts that silently become hosted or production behavior.
+
+### Relationship to the legacy v1 engine
+
+`crates/ironclaw_engine` ("engine v2") is the **v1 monolith's** agent loop — a
+complete parallel machinery with its own capability registry, lease manager,
+and policy engine, consumed only by the root `ironclaw` crate through
+`src/bridge/`. It is **not part of Reborn**: the dependency-boundary tests
+forbid Reborn crates from importing it, and nothing else in this document
+describes it. Do not build new Reborn behavior on it; it retires with the
+monolith. `ironclaw_tui`, `ironclaw_gateway`, `ironclaw_oauth`, and
+`ironclaw_embeddings` are in the same v1-only category despite living in
+`crates/`.
 
 ## Mental Model
 
@@ -175,7 +187,8 @@ policy.
 In crates, product-facing assembly currently enters through
 `ironclaw_reborn_composition::RebornRuntime`. CLI and WebUI code should treat
 that facade as the public runtime handle instead of wiring `TurnStateStore`,
-`TurnRunnerWorker`, `HostRuntimeServices`, or concrete drivers directly.
+the `TurnRunScheduler`/`TurnRunExecutor` pair, `HostRuntimeServices`, or
+concrete drivers directly.
 
 ### Userland Loops
 
@@ -253,7 +266,7 @@ services that decide whether work may proceed and how recovery remains safe.
 ```text
 Kernel-facing mediators
   TurnCoordinator / TurnRunTransitionPort
-  TurnRunnerWorker + LoopExitApplier
+  TurnRunScheduler + TurnRunExecutor + LoopExitApplier
   CapabilityHost + obligation handler
   authorization and approval services
   resource reservation and process ownership
@@ -284,7 +297,7 @@ flowchart TD
     Factory["build_reborn_runtime /\nbuild_reborn_services"]
     Coordinator["ironclaw_turns::TurnCoordinator\nadapter-safe turn API"]
     Store["TurnStateStore + Checkpoint stores\nmemory/filesystem/libSQL/Postgres slices"]
-    Worker["ironclaw_reborn::TurnRunnerWorker\nclaim, heartbeat, invoke, apply"]
+    Worker["TurnRunScheduler (ironclaw_host_runtime)\n+ RebornTurnRunExecutor (ironclaw_reborn)\nclaim, heartbeat, invoke, apply"]
     Registry["DriverRegistry\nregistered loop drivers"]
     Planned["PlannedDriver\nAgentLoopDriver adapter"]
     Executor["ironclaw_agent_loop::CanonicalAgentLoopExecutor\ncanonical tick pipeline"]
@@ -325,7 +338,7 @@ flowchart TD
 | Crate | Owns | Does not own |
 | --- | --- | --- |
 | `ironclaw_reborn_composition` | Product-facing runtime assembly, facade handles, local/prod profiles, WebUI/runtime integration, projection services. | Low-level policy internals or direct product traffic bypassing Reborn adapters. |
-| `ironclaw_reborn` | Concrete Reborn loop driver registry, planned/text driver adapters, turn-runner worker, loop host factory, exit applier wiring. | Loop strategy internals, neutral turn contracts, product idempotency/binding policy. |
+| `ironclaw_reborn` | Concrete Reborn loop driver registry, planned/text driver adapters, the per-run turn-run executor (`RebornTurnRunExecutor`), loop host factory, exit applier wiring. The claiming/heartbeat scheduler (`TurnRunScheduler`) lives in `ironclaw_host_runtime`. | Loop strategy internals, neutral turn contracts, product idempotency/binding policy. |
 | `ironclaw_turns` | Turn/run IDs, scopes, coordinator API, runner transition ports, state machine contracts, loop-exit DTOs, run profiles, checkpoint contracts. | Runtime dispatch, product adapters, raw prompts/tool inputs/secrets. |
 | `ironclaw_agent_loop` | Canonical executor, loop families, sealed strategy composition, resumable loop state. | Host services, runtime lanes, product transport, provider auth. |
 | `ironclaw_loop_support` | Reusable adapters that implement loop host ports over threads, model gateways, capabilities, skills, checkpoints, cancellation, subagents. | Product-facing runtime facade or durable turn state ownership. |
@@ -473,18 +486,21 @@ The normal single-message flow is:
 2. Caller submits SubmitTurnRequest to TurnCoordinator.
 3. TurnCoordinator persists turn/run state, enforces active-thread ownership,
    resolves the run profile, and emits a wake hint.
-4. TurnRunnerWorker wakes or polls, recovers expired leases, and atomically
-   claims one queued run.
-5. Worker builds a per-run AgentLoopDriverHost from the host factory.
-6. Worker resolves the assigned AgentLoopDriver from DriverRegistry.
+4. TurnRunScheduler (in ironclaw_host_runtime) wakes or polls, recovers
+   expired leases, and claims queued runs — concurrently, bounded by a
+   semaphore plus per-user and per-inbound-type caps.
+5. For each claimed run, RebornTurnRunExecutor (in ironclaw_reborn) resolves
+   the assigned AgentLoopDriver from DriverRegistry.
+6. The executor builds a per-run AgentLoopDriverHost from the host factory
+   and persists a model-route snapshot before invoking the driver.
 7. PlannedDriver validates the request/profile and starts or resumes the
    CanonicalAgentLoopExecutor with LoopExecutionState.
 8. Executor asks host ports for prompt context, model calls, tool/capability
    calls, transcript writes, checkpoints, input, progress, compaction, and
    cancellation.
 9. Executor returns a LoopExit containing durable refs only.
-10. Worker applies the LoopExit through LoopExitApplier and trusted runner
-    transition ports.
+10. The executor applies the LoopExit through LoopExitApplier (owned by
+    `ironclaw_turns`) and trusted runner transition ports.
 11. Product/runtime caller waits for terminal state, then reads the assistant
     reply from SessionThreadService and observes events/projections.
 ```
@@ -495,7 +511,7 @@ sequenceDiagram
     participant Threads as SessionThreadService
     participant Coord as TurnCoordinator
     participant Store as TurnStateStore
-    participant Worker as TurnRunnerWorker
+    participant Worker as TurnRunScheduler + RebornTurnRunExecutor
     participant Driver as AgentLoopDriver
     participant Host as AgentLoopDriverHost
     participant Kernel as HostRuntime / CapabilityHost
@@ -524,8 +540,11 @@ sequenceDiagram
 
 ## Runner And Lease Flow
 
-`TurnRunnerWorker` is the trusted worker-side control plane. It does not accept
-traffic directly; it claims durable work already accepted by `TurnCoordinator`.
+`TurnRunScheduler` (in `ironclaw_host_runtime`) plus `RebornTurnRunExecutor`
+(in `ironclaw_reborn`) form the trusted worker-side control plane. It does not
+accept traffic directly; the scheduler claims durable work already accepted by
+`TurnCoordinator` and runs claimed executions concurrently under a bounded
+semaphore with per-user and per-inbound-type caps.
 
 ```mermaid
 stateDiagram-v2
@@ -541,8 +560,7 @@ stateDiagram-v2
     Running --> Completed: validated Completed exit
     Running --> Failed: validated Failed exit
     Running --> Cancelled: validated Cancelled exit
-    Running --> RecoveryRequired: lease expired or unsafe exit
-    RecoveryRequired --> Cancelled: explicit cancellation
+    Running --> Failed: lease expired or unverifiable exit (sanitized)
     Completed --> [*]
     Failed --> [*]
     Cancelled --> [*]
@@ -553,8 +571,10 @@ Important invariants:
 - `submit_turn` creates queued work, but no model/tool side effect runs before
   `claim_next_run` succeeds.
 - Heartbeats require the matching runner id and lease token.
-- Expired running or cancel-requested leases move to `RecoveryRequired`, not
-  automatic retry.
+- Expired running leases move to terminal `Failed` (sanitized
+  `lease_expired`); expired cancel-requested leases move to `Cancelled`.
+  Never automatic retry of side-effecting work. (`TurnStatus::RecoveryRequired`
+  survives only as a legacy variant.)
 - `LoopExit` is a driver claim, not trusted durable state.
 - `LoopExitApplier` validates host-owned evidence before mapping the exit to a
   trusted transition.
@@ -600,14 +620,14 @@ recovery over pretending the run was safely cancelled.
 ```text
 runner crashes or stops heartbeating
   -> reconciler sees expired Running/CancelRequested lease
-  -> run moves to RecoveryRequired
-  -> active-thread lock stays held
-  -> duplicate/new submit remains ThreadBusy
-  -> operator/user must explicitly cancel or recover
+  -> Running          => terminal Failed (sanitized "lease_expired")
+  -> CancelRequested  => terminal Cancelled
+  -> the terminal transition releases the active-thread lock
 ```
 
 Reborn does not automatically retry uncertain side-effecting work after a lost
-lease.
+lease — expiry is terminal, and the user resubmits explicitly. `RecoveryRequired`
+is legacy-only and is not the Reborn lease-expiry path.
 
 ### Invalid Loop Exit
 
@@ -615,7 +635,8 @@ lease.
 driver returns LoopExit
   -> LoopExitApplier checks host-owned evidence
   -> valid refs map to Completed/Blocked/Failed/Cancelled
-  -> missing or unverified evidence maps to sanitized failure or RecoveryRequired
+  -> missing or unverified evidence maps to a sanitized terminal failure
+     (driver_protocol_violation / interrupted_unexpectedly)
 ```
 
 A syntactically valid ref is not evidence by itself. The host/runner verifies the
@@ -803,12 +824,18 @@ not a workflow or permission API.
 
 Subagent work is modeled as child runs, not as a second private loop engine.
 
+> **Status note (2026-07):** the machinery below is wired and tested, but the
+> `builtin.spawn_subagent` capability is currently deny-filtered off in all
+> shipped profiles (`TEMP(disable-spawn-subagents)` in
+> `crates/ironclaw_reborn/src/runtime.rs`) — the model cannot invoke it until
+> that filter is lifted.
+
 ```text
 parent loop capability
   -> subagent spawn capability port
   -> TurnCoordinator child-run reservation/submission
   -> queued child TurnRunId
-  -> TurnRunnerWorker claims child run
+  -> TurnRunScheduler claims child run
   -> subagent planned driver/family executes on the same host/runner contracts
   -> child LoopExit is validated and recorded
   -> parent observes gate/result refs
@@ -823,7 +850,7 @@ flowchart TD
     Spawn["SubagentSpawnCapabilityPort"]
     ChildSubmit["TurnCoordinator\nchild run"]
     ChildQueue["Queued child run"]
-    Runner["TurnRunnerWorker"]
+    Runner["TurnRunScheduler"]
     SubDriver["Subagent planned driver/family"]
     Exit["Validated child LoopExit"]
     ParentResume["Parent observes gate/result refs"]
@@ -876,7 +903,7 @@ entry point for CLI, WebUI, and harness callers. It:
 - wires thread, turn, checkpoint, event, approval, auth, skill, and projection
   services;
 - builds the default planned runtime through `ironclaw_reborn`;
-- starts a `TurnRunnerWorker`;
+- starts the `TurnRunScheduler` + `RebornTurnRunExecutor` pair;
 - exposes task-level methods such as `new_conversation`, `send_user_message`,
   cancellation, approval/auth interactions, WebUI handles, and skill execution.
 
@@ -918,7 +945,8 @@ Implemented or strongly established:
 
 - product-facing `RebornRuntime` facade for local CLI/WebUI/harness usage;
 - `TurnCoordinator`, turn state contracts, active locks, idempotency, runner
-  leases, and recovery-required semantics;
+  leases, terminal lease-expiry semantics, and the legacy
+  `RecoveryRequired` terminal variant;
 - planned loop driver path over `CanonicalAgentLoopExecutor`;
 - loop-exit validation/application model;
 - host-runtime capability path with authorization, approvals, obligations,
@@ -932,7 +960,7 @@ Partial or evolving:
 - productized process/event projection read APIs;
 - complete hosted/enterprise runtime profile coverage;
 - generalized artifact references for large/sensitive/streaming outputs;
-- richer recovery/fork/retry UX for `RecoveryRequired`;
+- richer recovery/fork/retry UX after terminal lease-expiry failures;
 - full product adapter coverage beyond current local/WebUI/CLI slices;
 - complete extension lifecycle/product installability semantics across all
   runtime lanes.
@@ -976,6 +1004,8 @@ Partial or evolving:
 - `crates/ironclaw_agent_loop/src/state.rs`
 - `crates/ironclaw_reborn/src/planned_driver.rs`
 - `crates/ironclaw_reborn/src/turn_runner.rs`
+- `crates/ironclaw_reborn/src/turn_run_executor.rs`
+- `crates/ironclaw_host_runtime/src/turn_scheduler.rs`
 - `crates/ironclaw_reborn/src/runtime.rs`
 - `crates/ironclaw_reborn/src/loop_driver_host.rs`
 - `crates/ironclaw_reborn_composition/src/runtime.rs`
