@@ -62,6 +62,7 @@ is report-only unless a new benchmark experiment is intentionally in flight.
 | H8 | Merge only the two smallest Reborn crate buckets, `auth-security` and `memory-skills`. | Reduce crate bucket jobs by one while leaving all long-pole buckets unchanged. | Tested | Reverted by decision: total jobs dropped from `28` to `27`, but the compile-heavy long poles remained unchanged. |
 | H9 | Enable sccache distributed compilation for all Reborn crate buckets. | Reduce compile time for the existing long-pole buckets without changing coverage. | Tested | Rejected: wall clock regressed from `8m35s` to `9m11s`; long-pole buckets were slower. |
 | H10 | Remove the duplicate `libsql-restart-tests` feature from the broad `ironclaw_reborn` crate bucket. | Reduce `reborn-core` runtime while preserving the dedicated restart-test PR gate. | Reverted | Abandoned: package-node evidence showed no compile-graph shrink, and the active run still left the compile-heavy long poles as the blocker. |
+| H11 | Move libSQL-heavy coverage out of broad long-pole crate buckets into narrow dedicated libSQL jobs. | Reduce compile graph size for `host-runtime`, `composition-core`, and `reborn-core` without dropping persistence coverage. | Evidence review | Promising next benchmark: `libsql` adds `+85` to `+89` dependency-tree entries on the slowest buckets; naked removal is unsafe, but a replacement-coverage split is the best remaining compile-time lever. |
 
 ## H1: Narrow Crate Bucket Targets
 
@@ -480,3 +481,71 @@ Benchmark result:
   the `ironclaw_reborn` package-node count stayed at `478` before and after
   removing `libsql-restart-tests`, so it could not materially reduce compile
   time.
+
+## H11: Move libSQL Coverage Out Of Broad Long-Pole Buckets
+
+Change under consideration:
+
+- Remove the broad `libsql`-pulling feature sets from the slow crate buckets
+  only after adding narrower replacement coverage for the libSQL-specific
+  integration paths.
+- Candidate crate-bucket feature reductions:
+  - `ironclaw_host_runtime`: `--features test-support,libsql` ->
+    `--features test-support`
+  - `ironclaw_reborn_composition`:
+    `--features test-support,webui-v2-beta,slack-v2-host-beta,libsql` ->
+    a split where the broad bucket avoids redundant libSQL work and a narrow
+    job runs the libSQL-required tests.
+  - `ironclaw_reborn`: keep the dedicated restart job for
+    `libsql-restart-tests`; evaluate whether `libsql-secrets` belongs in the
+    broad bucket or in a narrow secrets persistence job.
+
+Evidence:
+
+Dependency-tree counts were collected with the same package feature script that
+the Reborn crate bucket workflow uses, plus explicit candidate variants:
+
+```text
+host-runtime: no features                                      deps=648 features=2243
+host-runtime: test-support                                     deps=648 features=2243
+host-runtime: libsql                                           deps=735 features=2515
+host-runtime: test-support,libsql CI                           deps=735 features=2515
+composition: no features                                       deps=707 features=2345
+composition: test-support only                                 deps=707 features=2345
+composition: test-support,libsql                               deps=792 features=2617
+composition: test-support,webui-v2-beta,slack-v2-host-beta     deps=804 features=2659
+composition: full CI                                           deps=804 features=2659
+reborn: no features                                            deps=639 features=2180
+reborn: root-llm-provider only                                 deps=640 features=2181
+reborn: root,libsql-secrets                                    deps=729 features=2465
+reborn: root,libsql-secrets,webui-user-store                   deps=729 features=2465
+reborn: full CI                                                deps=729 features=2465
+webui-ingress: no features                                     deps=792 features=2669
+webui-ingress: dev-in-memory-session CI                        deps=792 features=2669
+```
+
+Interpretation:
+
+- `libsql` is the meaningful compile-graph expander in the slowest buckets:
+  `+87` dependency-tree entries for `host-runtime`, `+85` for composition's
+  `test-support,libsql` variant, and `+89` for `reborn` through
+  `libsql-secrets`.
+- `test-support`, `webui-user-store`, `libsql-restart-tests`, and
+  `dev-in-memory-session` do not materially change the graph in these
+  measurements.
+- `webui-v2-beta` / `slack-v2-host-beta` still cannot simply be removed from
+  composition: they are part of the host-mounted WebUI/Slack coverage surface.
+- Existing CI already has explicit libSQL coverage in
+  `scripts/ci/run-reborn-group-tests.sh` (`cargo test --test reborn_group_* --features libsql`)
+  and coverage lanes (`cargo llvm-cov --workspace --features libsql test ...`),
+  but those do not prove every crate-bucket libSQL test can be removed safely.
+
+Decision:
+
+- Do not run or keep a naked "remove libSQL from the slow buckets" change; that
+  would optimize compile time by weakening persistence coverage.
+- The next benchmarkable implementation should first identify the exact
+  libSQL-required tests in `host-runtime`, `composition-core`, and
+  `reborn-core`, then move only those tests into narrow dedicated libSQL jobs.
+  Success means the broad long-pole buckets get smaller while the added narrow
+  jobs do not become the new wall-clock critical path.
