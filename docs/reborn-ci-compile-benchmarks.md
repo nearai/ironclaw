@@ -61,6 +61,7 @@ is report-only unless a new benchmark experiment is intentionally in flight.
 | H7 | Remove the duplicate instrumented `reborn_group_*` coverage lane from PR CI. | Reduce Reborn job count while keeping the uninstrumented group pass/fail gate. | Tested | Rejected: total jobs dropped from `28` to `27`, but wall clock regressed from `8m35s` to `9m39s`. |
 | H8 | Merge only the two smallest Reborn crate buckets, `auth-security` and `memory-skills`. | Reduce crate bucket jobs by one while leaving all long-pole buckets unchanged. | Tested | Reverted by decision: total jobs dropped from `28` to `27`, but the compile-heavy long poles remained unchanged. |
 | H9 | Enable sccache distributed compilation for all Reborn crate buckets. | Reduce compile time for the existing long-pole buckets without changing coverage. | Tested | Rejected: wall clock regressed from `8m35s` to `9m11s`; long-pole buckets were slower. |
+| H10 | Remove the duplicate `libsql-restart-tests` feature from the broad `ironclaw_reborn` crate bucket. | Reduce `reborn-core` runtime while preserving the dedicated restart-test PR gate. | Running | Pending CI result. |
 
 ## H1: Narrow Crate Bucket Targets
 
@@ -449,3 +450,29 @@ all three long-pole buckets that determine wall clock. The existing opt-out
 list is justified by this benchmark; the remaining compile-time work needs to
 reduce the dependency/feature graph or avoid repeated compiles, not simply send
 the same graph through sccache-dist.
+
+## H10: Remove Duplicate Reborn Restart Feature From Crate Bucket
+
+Change under test:
+
+- Remove `libsql-restart-tests` from the broad `ironclaw_reborn` feature set in
+  `scripts/ci/package-feature-flags.sh`.
+- Keep `root-llm-provider`, `libsql-secrets`, and `webui-user-store` enabled in
+  the `reborn-core` crate bucket.
+- Keep the dedicated code-style PR job that runs the exact restart test:
+  `cargo test -p ironclaw_reborn --features libsql-restart-tests --test loop_driver_host turn_runner_worker_completes_after_libsql_turn_and_thread_services_reopen`.
+
+Why this is safe to test:
+
+- The restart integration is already covered by a dedicated PR job outside the
+  Reborn crate bucket.
+- This does not remove the `ironclaw_reborn` crate from the Reborn bucket and
+  does not change other Reborn test features.
+- Dependency-node evidence says this will not shrink the compile graph
+  (`478` package nodes before and after), so the only plausible win is removing
+  duplicate restart-test runtime from `reborn-core`.
+
+Benchmark result:
+
+- Branch/PR: [`codex/ci-compile-benchmarks`, PR #5648](https://github.com/nearai/ironclaw/pull/5648)
+- Workflow run: pending.
