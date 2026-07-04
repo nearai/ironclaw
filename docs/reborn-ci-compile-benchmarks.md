@@ -63,6 +63,7 @@ is report-only unless a new benchmark experiment is intentionally in flight.
 | H9 | Enable sccache distributed compilation for all Reborn crate buckets. | Reduce compile time for the existing long-pole buckets without changing coverage. | Tested | Rejected: wall clock regressed from `8m35s` to `9m11s`; long-pole buckets were slower. |
 | H10 | Remove the duplicate `libsql-restart-tests` feature from the broad `ironclaw_reborn` crate bucket. | Reduce `reborn-core` runtime while preserving the dedicated restart-test PR gate. | Reverted | Abandoned: package-node evidence showed no compile-graph shrink, and the active run still left the compile-heavy long poles as the blocker. |
 | H11 | Move libSQL-heavy coverage out of broad long-pole crate buckets into the existing Reborn group job. | Reduce compile graph size for `host-runtime` and `reborn-core` without dropping persistence coverage or adding a new job. | Tested | Rejected: wall clock regressed from `8m35s` to `9m50s`; `host-runtime`, `reborn-core`, and `composition-core` were all slower. |
+| H12 | Move `ironclaw_reborn_cli` from `reborn-core` to `webui-ingress`. | Keep job count flat while grouping the WebUI-shaped CLI build with the WebUI ingress bucket instead of the core Reborn bucket. | Running | Pending CI result. |
 
 ## H1: Narrow Crate Bucket Targets
 
@@ -595,3 +596,41 @@ dependency graph is smaller on paper for `host-runtime` and `reborn-core`, CI
 did not translate that into shorter buckets. The moved focused tests also made
 the existing group job heavier, so this does not meet either acceptance
 criterion.
+
+## H12: Move Reborn CLI Into WebUI Ingress Bucket
+
+Change under test:
+
+- Move `ironclaw_reborn_cli` from the `reborn-core` crate bucket to the
+  `webui-ingress` bucket in `scripts/ci/reborn-crate-test-buckets.sh`.
+- Keep total crate bucket count unchanged at `12`.
+- Keep the same package test coverage; this changes only bucket placement.
+
+Why this is safe to test:
+
+- `ironclaw_reborn_cli` is still tested by the Reborn crate buckets with the
+  same feature flags: `--features webui-v2-beta,slack-v2-host-beta`.
+- The CLI package has a WebUI-shaped dependency graph because those features
+  pull in `ironclaw_reborn_composition/webui-v2-beta`,
+  `ironclaw_reborn_webui_ingress`, and Slack host-beta wiring.
+- `webui-ingress` already installs Node and builds WebUI-shaped dependencies,
+  while `reborn-core` otherwise does not need to be the bucket that pays that
+  setup/compile cost.
+
+Dependency-tree evidence:
+
+```text
+ironclaw_reborn_cli --features webui-v2-beta,slack-v2-host-beta
+  deps=799, feature tree entries=2666
+
+ironclaw_reborn_webui_ingress --features dev-in-memory-session
+  deps=792, feature tree entries=2669
+
+ironclaw_webui_v2 --features webui-v2-beta
+  deps=413, feature tree entries=1408
+```
+
+Benchmark result:
+
+- Branch/PR: [`codex/ci-compile-benchmarks`, PR #5648](https://github.com/nearai/ironclaw/pull/5648)
+- Workflow run: pending.
