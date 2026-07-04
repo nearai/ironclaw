@@ -58,6 +58,7 @@ is report-only unless a new benchmark experiment is intentionally in flight.
 | H4 | Reduce feature flags for slow crates where the coverage is duplicated elsewhere. | Less compile graph expansion in PR crate buckets. | Evidence review | Still the best compile-time lever, but no safe duplicate coverage was found for removing `webui-v2-beta` / `slack-v2-host-beta` from Reborn crate tests. |
 | H5 | Remove OVH sccache from Reborn crate buckets. | Verify whether remote cache overhead is hiding any local cache gain. | Tested | Rejected: wall clock regressed from `8m35s` to `9m45s`; job count unchanged. |
 | H6 | Disable incremental compilation across all Reborn crate buckets. | Avoid CI-only incremental bookkeeping and target-dir churn for one-shot builds. | Tested | Rejected: wall clock regressed from `8m35s` to `8m49s`; job count unchanged. |
+| H7 | Remove the duplicate instrumented `reborn_group_*` coverage lane from PR CI. | Reduce Reborn job count while keeping the uninstrumented group pass/fail gate. | Running | Pending CI result. |
 
 ## H1: Narrow Crate Bucket Targets
 
@@ -285,3 +286,27 @@ Disabling incremental globally helped `composition-core` and `wasm-sandbox`, but
 it made `reborn-core`, `webui-ingress`, and the overall workflow slower. Keeping
 the narrower existing composition-only incremental disable remains the better
 shape.
+
+## H7: Remove Duplicate Instrumented Group Coverage Lane
+
+Change under test:
+
+- Remove the `groups` member from the `reborn-integration-coverage` matrix.
+- Keep the existing `Reborn group tests` job, which runs the 7 `reborn_group_*`
+  suites as the PR pass/fail gate.
+- Keep coverage lanes `0`, `1`, `2`, and `3`, which are the only execution of
+  the 27 flat `reborn_integration_*` suites.
+
+Why this is safe to test:
+
+- The workflow comments state that the `groups` coverage lane is an additional,
+  instrumented run of suites already covered by `reborn-group-tests`.
+- The experiment reduces duplicate instrumented coverage work, not the normal
+  group test pass/fail coverage.
+- The expected win is one fewer Reborn job at roughly the same wall clock,
+  because the baseline `groups` coverage lane was not the overall long pole.
+
+Benchmark result:
+
+- Branch/PR: [`codex/ci-compile-benchmarks`, PR #5648](https://github.com/nearai/ironclaw/pull/5648)
+- Workflow run: pending.

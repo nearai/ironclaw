@@ -471,8 +471,8 @@ jobs:
     # This is the ONLY execution of the 27 flat reborn_integration_* suites
     # (there is no separate uninstrumented pass/fail run of them — `cargo
     # llvm-cov ... test` has the same pass/fail semantics as `cargo test`, just
-    # instrumented) plus one more, instrumented, run of the 7 reborn_group_*
-    # suites already covered uninstrumented by reborn-group-tests above.
+    # instrumented). The 7 reborn_group_* suites are covered by the
+    # reborn-group-tests job above.
     # Generous backstop: a cold-cache instrumented build of the Reborn closure
     # is heavier than a plain build (see the retired reborn-coverage.yml's
     # 180m budget for the same closure, run as a single job); each of these 5
@@ -488,7 +488,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: ["0", "1", "2", "3", "groups"]
+        lane: ["0", "1", "2", "3"]
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
