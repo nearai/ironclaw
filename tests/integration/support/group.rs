@@ -128,8 +128,9 @@ use crate::support::trace_llm::TraceLlm;
 mod group_constructors;
 
 /// Optional-runtime-wiring setters (`storage`, `safety_context`,
-/// `with_turn_event_sink`, `with_tool_disclosure_bridged`, `budget_accounting`,
-/// `communication_context_provider`, `hook_dispatcher_builder_factory`) on
+/// `with_turn_event_sink`, `with_trace_capture`, `with_tool_disclosure_bridged`,
+/// `budget_accounting`, `communication_context_provider`,
+/// `hook_dispatcher_builder_factory`) on
 /// [`RebornIntegrationGroupBuilder`]. A private child module (not `pub mod`
 /// from `mod.rs`), same precedent as `group_constructors` above — it reaches
 /// the builder's private fields at plain module-private visibility instead
@@ -201,6 +202,11 @@ pub(crate) struct GroupSharedStorage {
     /// opted in (C-TRACECAP seam); `None` otherwise. Concrete type (not `Arc<dyn
     /// TurnEventSink>`) so a test can read `.events()` back directly.
     pub(crate) turn_event_sink: Option<Arc<InMemoryTurnEventSink>>,
+    /// Enabler (c): the `trace_scope_key(tenant, owner)` the production
+    /// trace-capture sink was seeded with when `.with_trace_capture()` opted
+    /// in; `None` otherwise. Recorded at wiring time so a test asserts against
+    /// EXACTLY the scope the sink observes, not a re-derived equivalent.
+    pub(crate) trace_capture_scope: Option<String>,
     /// C-BUDGET: the in-memory `ResourceGovernor` behind the group's
     /// `model_budget_accountant`. Retained so a test can read back the account
     /// the accountant seeds on a turn's first model call — proof the
@@ -321,11 +327,20 @@ impl RebornIntegrationGroup {
             storage: StorageMode::InMemory,
             safety_context: None,
             turn_event_sink: None,
+            trace_capture: false,
             tool_disclosure: None,
             budget: false,
             communication_context_provider: None,
             hook_dispatcher_builder_factory: None,
         }
+    }
+
+    /// Enabler (c): the trace scope key the production trace-capture sink was
+    /// seeded with; `Some` only after `.with_trace_capture()`. Pair with
+    /// `ironclaw_reborn_traces::contribution::queued_trace_envelope_paths_for_scope`
+    /// to assert an enrolled turn queued a contribution envelope.
+    pub fn trace_capture_scope(&self) -> Option<&str> {
+        self.shared.trace_capture_scope.as_deref()
     }
 
     /// Create a per-thread *workflow* builder for `conversation_id`, over the
@@ -471,6 +486,12 @@ pub struct RebornIntegrationGroupBuilder {
     safety_context: Option<InstructionSafetyContext>,
     /// C-TRACECAP seam: `Some` once `.with_turn_event_sink()` has been called.
     turn_event_sink: Option<Arc<InMemoryTurnEventSink>>,
+    /// Enabler (c): `true` once `.with_trace_capture()` has been called —
+    /// `into_group` wires the PRODUCTION `TraceCaptureTurnEventSink` (via
+    /// composition's `trace_capture_turn_event_sink_for_test`) into the
+    /// group's one planned runtime, fan-out-composed with the in-memory sink
+    /// when both are opted in.
+    trace_capture: bool,
     /// Enabler (b): `Some(ToolDisclosureMode::Bridged)` once
     /// `.with_tool_disclosure_bridged()` has been called; `None` resolves via
     /// `ToolDisclosureMode::from_env()` in `into_group` (today's behavior).
@@ -631,6 +652,43 @@ impl RebornIntegrationGroupBuilder {
         }
         let loop_exit_evidence: Arc<dyn LoopExitEvidencePort> = Arc::new(evidence);
 
+        // --- trace capture (enabler (c), C-TRACECAP) ------------------------
+        // The PRODUCTION TraceCaptureTurnEventSink over the group's thread
+        // service, seeded with the runtime owner's trace scope — the same
+        // recipe `build_reborn_runtime` uses. Policy-gated per scope, so it
+        // is inert until the test enrolls the scope.
+        let trace_capture = if self.trace_capture {
+            let subject_user = base.canonical_subject_user()?;
+            let scope = ironclaw_reborn_traces::contribution::trace_scope_key(
+                base.canonical_binding.tenant_id.as_str(),
+                subject_user.as_str(),
+            );
+            let sink =
+                ironclaw_reborn_composition::test_support::trace_capture_turn_event_sink_for_test(
+                    group_thread_harness.service.clone() as Arc<dyn SessionThreadService>,
+                    base.canonical_binding.tenant_id.as_str(),
+                    subject_user.as_str(),
+                );
+            Some((sink, scope))
+        } else {
+            None
+        };
+        // The planned runtime has ONE turn-event-sink slot; compose the two
+        // opt-in sinks through the fan-out only when both are present so
+        // single-sink groups keep today's wiring byte-for-byte.
+        let mut turn_event_sinks: Vec<Arc<dyn TurnEventSink>> = Vec::new();
+        if let Some(sink) = self.turn_event_sink.clone() {
+            turn_event_sinks.push(sink as Arc<dyn TurnEventSink>);
+        }
+        if let Some((sink, _)) = &trace_capture {
+            turn_event_sinks.push(Arc::clone(sink));
+        }
+        let composed_turn_event_sink: Option<Arc<dyn TurnEventSink>> = match turn_event_sinks.len()
+        {
+            0 | 1 => turn_event_sinks.pop(),
+            _ => Some(Arc::new(FanOutTurnEventSink(turn_event_sinks))),
+        };
+
         // --- the group's ONE planned runtime -------------------------------
         let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
         let model_gateway: Arc<dyn HostManagedModelGateway> =
@@ -733,10 +791,7 @@ impl RebornIntegrationGroupBuilder {
             // only when `communication_context_provider()` was set).
             communication_context_provider: self.communication_context_provider,
             hook_security_audit_sink: None,
-            turn_event_sink: self
-                .turn_event_sink
-                .clone()
-                .map(|sink| sink as Arc<dyn TurnEventSink>),
+            turn_event_sink: composed_turn_event_sink,
             attachment_read_port: capability_recorder
                 .attachment_test_support()
                 .map(|support| support.read_port),
@@ -757,10 +812,32 @@ impl RebornIntegrationGroupBuilder {
                 capability_recorder,
                 user_profile_source,
                 turn_event_sink: self.turn_event_sink,
+                trace_capture_scope: trace_capture.map(|(_, scope)| scope),
                 budget_governor,
                 budget_account,
             }),
         })
+    }
+}
+
+/// Fan-out `TurnEventSink`: the planned runtime exposes ONE sink slot
+/// (`DefaultPlannedRuntimeParts.turn_event_sink`), so `.with_turn_event_sink()`
+/// (in-memory recorder) and `.with_trace_capture()` (production trace sink)
+/// compose through this when both are opted in. Test-local because
+/// production's equivalent (`CompositeTurnEventSink`) is `pub(crate)` inside
+/// composition.
+struct FanOutTurnEventSink(Vec<Arc<dyn TurnEventSink>>);
+
+#[async_trait::async_trait]
+impl TurnEventSink for FanOutTurnEventSink {
+    async fn publish(
+        &self,
+        event: ironclaw_turns::TurnLifecycleEvent,
+    ) -> Result<(), ironclaw_turns::TurnError> {
+        for sink in &self.0 {
+            sink.publish(event.clone()).await?;
+        }
+        Ok(())
     }
 }
 

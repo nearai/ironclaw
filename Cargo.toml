@@ -503,6 +503,10 @@ name = "reborn_integration_tool_disclosure"
 path = "tests/integration/tool_disclosure.rs"
 
 [[test]]
+name = "reborn_integration_trace_capture"
+path = "tests/integration/trace_capture.rs"
+
+[[test]]
 name = "reborn_integration_tracecap"
 path = "tests/integration/tracecap.rs"
 

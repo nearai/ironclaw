@@ -1,7 +1,7 @@
 //! Runtime-wiring setters for [`RebornIntegrationGroupBuilder`] — `storage`,
-//! `safety_context`, `with_turn_event_sink`, `with_tool_disclosure_bridged`,
-//! `budget_accounting`, `communication_context_provider`,
-//! `hook_dispatcher_builder_factory`.
+//! `safety_context`, `with_turn_event_sink`, `with_trace_capture`,
+//! `with_tool_disclosure_bridged`, `budget_accounting`,
+//! `communication_context_provider`, `hook_dispatcher_builder_factory`.
 //! Private child module of `group.rs` (owns the struct + `build_base`/
 //! `into_group`), so it reaches the builder's private fields at module-
 //! private visibility instead of widening them to `pub(crate)`. New builder
@@ -50,6 +50,20 @@ impl RebornIntegrationGroupBuilder {
     /// siblings' events. No raw sink accessor, deliberately.
     pub fn with_turn_event_sink(mut self) -> Self {
         self.turn_event_sink = Some(Arc::new(InMemoryTurnEventSink::default()));
+        self
+    }
+
+    /// Wire the PRODUCTION `TraceCaptureTurnEventSink` into the group's ONE
+    /// planned runtime (enabler (c), C-TRACECAP), via composition's
+    /// `trace_capture_turn_event_sink_for_test` — the same sink + scope-seed
+    /// recipe `build_reborn_runtime` composes. Read the seeded scope back with
+    /// `RebornIntegrationGroup::trace_capture_scope()`. Composes with
+    /// `.with_turn_event_sink()` through the group's fan-out. NOTE: capture
+    /// resolves policy/queue paths through `IRONCLAW_BASE_DIR` (a process-wide
+    /// `LazyLock`) — the consuming test binary must point it at a tempdir as
+    /// its FIRST action (see `tests/integration/trace_capture.rs`).
+    pub fn with_trace_capture(mut self) -> Self {
+        self.trace_capture = true;
         self
     }
 
