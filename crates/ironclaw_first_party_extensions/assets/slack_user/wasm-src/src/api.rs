@@ -44,9 +44,12 @@ fn slack_api_call(
 
     let body_bytes = body.map(|b| b.as_bytes().to_vec());
 
+    // Log only the static resource name; the query string carries private
+    // lookup data (search terms, DM/channel IDs, pagination timestamps).
+    let resource = endpoint.split('?').next().unwrap_or(endpoint);
     host::log(
         host::LogLevel::Debug,
-        &format!("Slack API: {} {}", method, endpoint),
+        &format!("Slack API: {} {}", method, resource),
     );
 
     let response = host::http_request(method, &url, headers, body_bytes.as_deref(), None)?;

@@ -69,7 +69,9 @@ use crate::auth::{RebornDcrOAuthStartFlowRequest, RebornOAuthStartFlowRequest};
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::slack_host_beta::SlackPersonalConnectionScopeResolver;
 #[cfg(feature = "slack-v2-host-beta")]
-use crate::slack_personal_binding::SlackPersonalUserBinder;
+use crate::slack_personal_binding::{
+    RebornUserIdentityBindingDeleteStore, SlackPersonalUserBinder,
+};
 use crate::{
     RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse,
     RebornOAuthCallbackError, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
@@ -317,6 +319,11 @@ impl std::fmt::Debug for ProductAuthRouteState {
 pub struct SlackPersonalOAuthBindingConfig {
     pub(crate) binding_service: Arc<dyn SlackPersonalUserBinder>,
     pub(crate) connection_scope_resolver: Arc<dyn SlackPersonalConnectionScopeResolver>,
+    /// Undoes an identity binding written by the callback identity hook when
+    /// `complete_oauth_callback` fails afterwards; the binding is the
+    /// user-visible "connected" signal, so it must not survive a completion
+    /// failure that already deleted the token material.
+    pub(crate) binding_rollback_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
@@ -327,10 +334,12 @@ impl SlackPersonalOAuthBindingConfig {
     pub(crate) fn new(
         binding_service: Arc<dyn SlackPersonalUserBinder>,
         connection_scope_resolver: Arc<dyn SlackPersonalConnectionScopeResolver>,
+        binding_rollback_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
     ) -> Self {
         Self {
             binding_service,
             connection_scope_resolver,
+            binding_rollback_store,
         }
     }
 }
@@ -344,6 +353,10 @@ impl std::fmt::Debug for SlackPersonalOAuthBindingConfig {
             .field(
                 "connection_scope_resolver",
                 &"Arc<dyn SlackPersonalConnectionScopeResolver>",
+            )
+            .field(
+                "binding_rollback_store",
+                &"Arc<dyn RebornUserIdentityBindingDeleteStore>",
             )
             .finish()
     }
