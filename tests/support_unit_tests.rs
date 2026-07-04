@@ -4,6 +4,9 @@
 //! and run exactly once, rather than being duplicated across every `e2e_*.rs`
 //! test binary that declares `mod support;`.
 
+#[allow(dead_code)]
+#[path = "support/reborn_parity_qa/mod.rs"]
+mod parity_qa_support;
 #[path = "integration/support/mod.rs"]
 mod reborn_support;
 mod support;
@@ -410,13 +413,13 @@ mod reborn_support_tests {
     };
     use tokio::sync::Barrier;
 
-    use crate::reborn_support::delivery::RecordingOutboundDeliverySink;
-    use crate::reborn_support::filesystem::local_filesystem;
-    use crate::reborn_support::harness::RecordingTestCapabilityPort;
-    use crate::reborn_support::model_replay::{
+    use crate::parity_qa_support::model_replay::{
         RebornModelReplayStep, RebornScriptedProviderToolCall, RebornTraceReplayError,
         RebornTraceReplayModelGateway, capability_call_from_trace_with_surface,
     };
+    use crate::reborn_support::delivery::RecordingOutboundDeliverySink;
+    use crate::reborn_support::filesystem::local_filesystem;
+    use crate::reborn_support::harness::RecordingTestCapabilityPort;
     use crate::reborn_support::network::RecordingNetworkHttpTransport;
     use crate::reborn_support::product_workflow::{
         FilesystemIdempotencyLedger, RebornProductWorkflowHarness,

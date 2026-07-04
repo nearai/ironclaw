@@ -1,4 +1,7 @@
 #[allow(dead_code)]
+#[path = "support/reborn_parity_qa/mod.rs"]
+mod parity_qa_support;
+#[allow(dead_code)]
 #[path = "integration/support/mod.rs"]
 mod reborn_support;
 mod support;
@@ -8,11 +11,9 @@ use std::time::Duration;
 use ironclaw_loop_support::HostManagedModelResponse;
 use ironclaw_product_adapters::ProductInboundAck;
 use ironclaw_turns::TurnStatus;
-use reborn_support::harness::{
-    RebornBinaryE2EHarness, RebornHarnessSharedStorage, RecordingTestCapabilityPort,
-    test_product_scope,
-};
-use reborn_support::model_replay::RebornTraceReplayModelGateway;
+use parity_qa_support::binary_e2e::{RebornBinaryE2EHarness, RebornHarnessSharedStorage};
+use parity_qa_support::model_replay::RebornTraceReplayModelGateway;
+use reborn_support::harness::{RecordingTestCapabilityPort, test_product_scope};
 
 #[tokio::test]
 async fn reborn_user_submit_completes_while_another_turn_state_write_is_blocked() {
