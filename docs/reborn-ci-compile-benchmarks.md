@@ -60,6 +60,7 @@ is report-only unless a new benchmark experiment is intentionally in flight.
 | H6 | Disable incremental compilation across all Reborn crate buckets. | Avoid CI-only incremental bookkeeping and target-dir churn for one-shot builds. | Tested | Rejected: wall clock regressed from `8m35s` to `8m49s`; job count unchanged. |
 | H7 | Remove the duplicate instrumented `reborn_group_*` coverage lane from PR CI. | Reduce Reborn job count while keeping the uninstrumented group pass/fail gate. | Tested | Rejected: total jobs dropped from `28` to `27`, but wall clock regressed from `8m35s` to `9m39s`. |
 | H8 | Merge only the two smallest Reborn crate buckets, `auth-security` and `memory-skills`. | Reduce crate bucket jobs by one while leaving all long-pole buckets unchanged. | Tested | Reverted by decision: total jobs dropped from `28` to `27`, but the compile-heavy long poles remained unchanged. |
+| H9 | Enable sccache distributed compilation for all Reborn crate buckets. | Reduce compile time for the existing long-pole buckets without changing coverage. | Running | Pending CI result. |
 
 ## H1: Narrow Crate Bucket Targets
 
@@ -395,3 +396,28 @@ a compile-time optimization. The result still spends the critical path in
 by compiling large dependency graphs. Per the updated direction, this benchmark
 branch restored the original buckets and should focus next on reducing the
 compile graph or avoiding repeated compiles for those long poles.
+
+## H9: Enable Distributed Compilation for All Crate Buckets
+
+Change under test:
+
+- Remove the per-package `sccache_dist_enabled=false` override in
+  `crate-tests`.
+- Keep the existing OVH Redis cache and sccache action.
+- Keep every crate bucket, package, feature flag, and `cargo test` command
+  unchanged.
+
+Why this is safe to test:
+
+- This changes compile execution only; it does not drop or move tests.
+- The current workflow already configures the sccache action and passes the
+  scheduler URL/token for buckets that are not in the opt-out list.
+- Prior benchmarks show the long poles are compile-bound, and removing OVH
+  cache entirely regressed. This isolates the remaining question: whether the
+  distributed scheduler helps or hurts the compile-heavy buckets that currently
+  opt out.
+
+Benchmark result:
+
+- Branch/PR: [`codex/ci-compile-benchmarks`, PR #5648](https://github.com/nearai/ironclaw/pull/5648)
+- Workflow run: pending.
