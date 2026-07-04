@@ -1,3 +1,4 @@
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "../../../design-system/button.js";
 import { Icon } from "../../../design-system/icons.js";
 import { React, html } from "../../../lib/html.js";
@@ -7,7 +8,13 @@ import {
   useOauthSetup,
   useSetupSubmit,
 } from "../hooks/useExtensions.js";
-import { extensionIsActive, setupReadyForActivation } from "../lib/extension-actions.js";
+import {
+  extensionIsActive,
+  setupReadyForActivation,
+} from "../lib/extension-actions.js";
+import { isChannelExtensionKind } from "../lib/extensions-schema.js";
+import { redeemPairingCode } from "../lib/pairing-api.js";
+import { activateExtension } from "../lib/extensions-api.js";
 
 export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
   const t = useT();
@@ -41,6 +48,65 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
     },
     [oauthMutation]
   );
+
+  // Channel extensions configure their per-user connection (e.g. Slack account
+  // pairing) here instead of credential/OAuth fields: redeem a proof code, then
+  // best-effort activate so the channel goes live.
+  const queryClient = useQueryClient();
+  const packageId =
+    typeof extension?.packageRef === "string"
+      ? extension.packageRef
+      : extension?.packageRef?.id || "";
+  const channelId = extension?.channel || packageId;
+  const isSlackChannel = channelId.toLowerCase() === "slack";
+  // Connectable channels (Slack, Telegram, …) are configured by pairing a user
+  // account here — never by operator credential/OAuth fields, and never "no
+  // configuration required". A freshly-installed channel is in `setup_required`
+  // but still needs the user to connect, so render the Connect panel for any
+  // channel kind: a connect step before pairing, and a re-pair affordance once
+  // connected. Only genuinely-no-config non-channel extensions may fall through
+  // to the "no configuration required" branch below.
+  const isChannelExtension = isChannelExtensionKind(extension?.kind);
+  const isConnectedChannel = isChannelExtension && Boolean(extension?.authenticated);
+  const isPairingChannel = isChannelExtension;
+  const channelPairingInstructions = isSlackChannel
+    ? t("pairing.slackInstructions")
+    : t("pairing.instructions");
+  const channelPairingPlaceholder = isSlackChannel
+    ? t("pairing.slackPlaceholder")
+    : t("pairing.placeholder");
+  const channelPairingError = isSlackChannel
+    ? t("pairing.slackError")
+    : t("pairing.error");
+  const [pairingCode, setPairingCode] = React.useState("");
+  const pairingMutation = useMutation({
+    mutationFn: async (code) => {
+      const result = await redeemPairingCode(channelId, code);
+      try {
+        await activateExtension({ id: packageId || channelId });
+      } catch {
+        console.error("channel activation after pairing failed.");
+      }
+      return result;
+    },
+    onSuccess: () => {
+      for (const queryKey of [
+        ["extensions"],
+        ["connectable-channels"],
+        ["pairing", channelId],
+      ]) {
+        queryClient.invalidateQueries({ queryKey });
+      }
+      if (onSaved) onSaved();
+      onClose();
+    },
+  });
+  const submitPairing = React.useCallback(() => {
+    const code = pairingCode.trim();
+    if (!code || pairingMutation.isPending) return;
+    pairingMutation.mutate(code);
+  }, [pairingCode, pairingMutation]);
+
   const manualSecrets = secrets.filter(
     (secret) => (secret.setup?.kind || "manual_token") === "manual_token"
   );
@@ -48,6 +114,45 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
   const isActive = extensionIsActive(extension);
   const canActivate = setupReadyForActivation({ extension, secrets, fields });
   const setupUrl = httpsUrl(onboarding?.setup_url);
+
+  if (isPairingChannel) {
+    return html`
+      <${ModalShell}
+        onClose=${onClose}
+        title=${t("extensions.configureName").replace("{name}", extensionName)}
+      >
+        ${isConnectedChannel &&
+        html`<p className="mb-2 text-xs leading-5 text-mint">
+          ${t("pairing.reconnectHint")}
+        </p>`}
+        <p className="mb-4 text-sm leading-6 text-iron-300">
+          ${channelPairingInstructions}
+        </p>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <input
+            type="text"
+            value=${pairingCode}
+            onChange=${(event) => setPairingCode(event.target.value)}
+            onKeyDown=${(event) => event.key === "Enter" && submitPairing()}
+            placeholder=${channelPairingPlaceholder}
+            aria-label=${channelPairingPlaceholder}
+            className="h-9 min-w-0 flex-1 rounded-md border border-white/12 bg-white/[0.04] px-3 font-mono text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
+          />
+          <${Button}
+            variant="primary"
+            onClick=${submitPairing}
+            disabled=${pairingMutation.isPending || !pairingCode.trim()}
+          >
+            ${pairingMutation.isPending ? t("common.saving") : t("pairing.connect")}
+          <//>
+        </div>
+        ${pairingMutation.isError &&
+        html`<p role="alert" className="mt-3 text-xs leading-5 text-red-300">
+          ${channelPairingError}
+        </p>`}
+      <//>
+    `;
+  }
 
   if (isLoading) {
     return html`

@@ -120,9 +120,8 @@ impl<F: RootFilesystem> RebornThreadHarness<F> {
     }
 }
 
-/// `InMemoryBackend`-specific constructors (default tier). CAS-capable, models
-/// the production database-backed filesystem mount — see e3e155803 for why a
-/// byte-only `LocalFilesystem` is wrong for these record-shaped stores.
+/// `InMemoryBackend`-specific constructors (default tier); see the type doc
+/// above for why this is the default.
 impl RebornThreadHarness<InMemoryBackend> {
     pub fn filesystem_temp(scope: ThreadScope) -> Result<Self, RebornThreadHarnessError> {
         let backend = Arc::new(InMemoryBackend::new());

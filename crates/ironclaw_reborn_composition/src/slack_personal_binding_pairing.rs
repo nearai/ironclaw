@@ -32,8 +32,18 @@ const SLACK_PAIRING_CODE_MIN_LEN: usize = 8;
 const SLACK_PAIRING_CODE_MAX_LEN: usize = 32;
 const SLACK_PAIRING_CHALLENGE_DEDUP_TTL: Duration = Duration::from_secs(60);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct SlackPersonalBindingPairingCode(String);
+
+impl std::fmt::Debug for SlackPersonalBindingPairingCode {
+    // security: never print the raw pairing code via `{:?}` (logs, error chains,
+    // assert output). The containing Issued/Notification types derive Debug and
+    // therefore inherit this redaction. `Display` still yields the code for the
+    // single place that needs it (the ephemeral Slack slash reply).
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SlackPersonalBindingPairingCode(<redacted>)")
+    }
+}
 
 impl SlackPersonalBindingPairingCode {
     pub fn new(value: impl Into<String>) -> Result<Self, SlackPersonalBindingPairingError> {
@@ -114,6 +124,17 @@ pub trait SlackPersonalBindingPairingChallengeStore: Send + Sync {
         &self,
         code: &SlackPersonalBindingPairingCode,
     ) -> Result<SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>;
+
+    /// Force-mint a brand-new pairing code for the actor, invalidating any
+    /// outstanding code. Used by explicit recovery (the `/pair` command). The
+    /// default delegates to [`Self::issue_challenge`]; durable stores override
+    /// this to guarantee a fresh code even when an active challenge exists.
+    async fn reissue_challenge(
+        &self,
+        challenge: SlackPersonalBindingPairingChallenge,
+    ) -> Result<IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError> {
+        self.issue_challenge(challenge).await
+    }
 }
 
 #[async_trait::async_trait]
@@ -255,6 +276,28 @@ impl SlackPersonalBindingPairingService {
             })
             .await?;
         Ok(issued)
+    }
+
+    /// Force-mint a brand-new pairing code for an explicit `/pair` recovery,
+    /// invalidating any outstanding code, and return it to the caller.
+    ///
+    /// Unlike [`Self::issue_challenge`], this does **not** DM the code: the
+    /// spec delivers `/pair` codes *ephemerally* in the slash response and
+    /// keeps the code out of DM history ("DM/channel delivery of the code" is
+    /// a non-goal; "Code never enters a non-ephemeral message"). The handler
+    /// places the returned code in the ephemeral reply.
+    pub async fn reissue_challenge(
+        &self,
+        installation_id: AdapterInstallationId,
+        slack_user_id: SlackUserId,
+    ) -> Result<IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError> {
+        self.challenge_store
+            .reissue_challenge(SlackPersonalBindingPairingChallenge {
+                installation_id,
+                slack_user_id,
+                setup_revision: None,
+            })
+            .await
     }
 
     pub async fn redeem_challenge(
@@ -457,6 +500,25 @@ mod tests {
         SlackPersonalBindingInstallation, SlackPersonalUserBindingService,
     };
     use crate::slack_serve::SlackInstallationSelector;
+
+    #[test]
+    fn pairing_code_debug_is_redacted() {
+        let secret = "ABC12345";
+        let pairing = code(secret);
+        assert!(
+            !format!("{pairing:?}").contains(secret),
+            "Debug leaked the raw pairing code",
+        );
+        // Display still yields the real code (the ephemeral slash reply needs it).
+        assert_eq!(pairing.to_string(), secret);
+        // Containing types inherit the redaction through their derived Debug.
+        let notification = SlackPersonalBindingPairingNotification {
+            installation_id: installation("install-a"),
+            slack_user_id: SlackUserId::new("U123"),
+            code: code(secret),
+        };
+        assert!(!format!("{notification:?}").contains(secret));
+    }
 
     #[tokio::test]
     async fn redeem_challenge_binds_authenticated_user_to_slack_actor() {
@@ -732,6 +794,86 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn reissue_challenge_service_mints_fresh_without_dm() {
+        let store = Arc::new(ReissueRecordingStore::default());
+        let notifier = Arc::new(RecordingNotifier::default());
+        let pairing = SlackPersonalBindingPairingService::new(
+            binding_service(Arc::new(RecordingBindingStore::default())),
+            store.clone(),
+            notifier.clone(),
+        );
+
+        let issued = pairing
+            .reissue_challenge(installation("install-a"), SlackUserId::new("U123"))
+            .await
+            .expect("reissue mints a fresh code");
+
+        // Force-mint path: the store's `reissue_challenge` was used, not `issue_challenge`.
+        assert_eq!(store.reissued(), 1);
+        assert_eq!(issued.code.as_str(), "REISSUE1");
+        // Spec contract: `/pair` codes are delivered ephemerally by the handler and
+        // never DM'd ("Code never enters a non-ephemeral message"), so the notifier
+        // must be untouched by reissue.
+        assert!(notifier.notifications().is_empty());
+    }
+
+    /// Store fake that returns a distinct code from `issue_challenge` vs
+    /// `reissue_challenge` and counts reissues, so a service test can prove the
+    /// force-mint path was taken rather than the reuse path.
+    #[derive(Default)]
+    struct ReissueRecordingStore {
+        reissued: Mutex<usize>,
+    }
+
+    impl ReissueRecordingStore {
+        fn reissued(&self) -> usize {
+            *self.reissued.lock().unwrap()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SlackPersonalBindingPairingChallengeStore for ReissueRecordingStore {
+        async fn issue_challenge(
+            &self,
+            challenge: SlackPersonalBindingPairingChallenge,
+        ) -> Result<IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
+        {
+            Ok(IssuedSlackPersonalBindingPairingChallenge {
+                code: super::tests::code("ISSUE000"),
+                challenge,
+            })
+        }
+
+        async fn get_challenge(
+            &self,
+            _code: &SlackPersonalBindingPairingCode,
+        ) -> Result<SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
+        {
+            Err(SlackPersonalBindingPairingError::ChallengeNotFound)
+        }
+
+        async fn consume_challenge(
+            &self,
+            _code: &SlackPersonalBindingPairingCode,
+        ) -> Result<SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
+        {
+            Err(SlackPersonalBindingPairingError::ChallengeNotFound)
+        }
+
+        async fn reissue_challenge(
+            &self,
+            challenge: SlackPersonalBindingPairingChallenge,
+        ) -> Result<IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
+        {
+            *self.reissued.lock().unwrap() += 1;
+            Ok(IssuedSlackPersonalBindingPairingChallenge {
+                code: super::tests::code("REISSUE1"),
+                challenge,
+            })
+        }
+    }
+
     fn binding_service(
         store: Arc<dyn RebornUserIdentityBindingStore>,
     ) -> SlackPersonalUserBindingService {
@@ -976,6 +1118,14 @@ mod tests {
         ) -> Result<Option<UserId>, RebornUserIdentityLookupError> {
             Ok(None)
         }
+
+        async fn user_has_provider_binding(
+            &self,
+            _provider: &str,
+            _user_id: &UserId,
+        ) -> Result<bool, RebornUserIdentityLookupError> {
+            Ok(false)
+        }
     }
 
     struct StaticLookup {
@@ -997,6 +1147,14 @@ mod tests {
         ) -> Result<Option<UserId>, RebornUserIdentityLookupError> {
             Ok(self.user_id.clone())
         }
+
+        async fn user_has_provider_binding(
+            &self,
+            _provider: &str,
+            user_id: &UserId,
+        ) -> Result<bool, RebornUserIdentityLookupError> {
+            Ok(self.user_id.as_ref() == Some(user_id))
+        }
     }
 
     struct FailingLookup;
@@ -1008,6 +1166,14 @@ mod tests {
             _provider: &str,
             _provider_user_id: &str,
         ) -> Result<Option<UserId>, RebornUserIdentityLookupError> {
+            Err(RebornUserIdentityLookupError::Backend("lookup down".into()))
+        }
+
+        async fn user_has_provider_binding(
+            &self,
+            _provider: &str,
+            _user_id: &UserId,
+        ) -> Result<bool, RebornUserIdentityLookupError> {
             Err(RebornUserIdentityLookupError::Backend("lookup down".into()))
         }
     }

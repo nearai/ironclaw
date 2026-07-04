@@ -179,6 +179,16 @@ fn setup_projection(
                 invocation_id: scope.resource.invocation_id.to_string(),
             }
         }
+        // Channel-pairing requirements are synthesized only for the activation
+        // gate (see `activation_credential_requirements`) and never enter the
+        // durable extension summary that feeds this Extensions-page credential
+        // setup projection — per-user channel connection is handled by the chat
+        // connection gate and the channels tab, not credential setup. This arm
+        // is unreachable in practice and exists for match exhaustiveness; a
+        // manual-token projection is an inert, secret-less fallback.
+        LifecycleExtensionCredentialSetup::ChannelPairing { .. } => {
+            RebornExtensionCredentialSetup::ManualToken
+        }
     }
 }
 

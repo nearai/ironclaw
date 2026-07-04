@@ -10,24 +10,27 @@ function channelsTabSourceForTest() {
     if (line.startsWith("import ")) continue;
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { ChannelsTab, SlackConnectActionSections, isSlackPackage, isSlackAdminManagedAction, isSlackInboundProofCodeAction, findSlackConnectAction, findSlackConnectActions };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { ChannelsTab, ChannelConnectActionSections, SlackConnectActionSections, isSlackPackage, isAdminManagedChannelsAction, isInboundProofCodeAction, isSlackAdminManagedAction, isSlackInboundProofCodeAction, connectActionsForChannel, connectActionsForPackage, findSlackConnectAction, findSlackConnectActions };`;
 }
 
-function slackConnectActionSectionsForTest(slackConnectAction, slackConnectActions) {
+function connectActionSectionsForTest(connectAction, connectActions) {
   const context = {
     globalThis: {},
+    PairingSection() {},
     SlackAdminManagedSection() {},
     SlackPairingSection() {},
     html(strings, ...values) {
       return { strings: Array.from(strings), values };
     },
+    redeemPairingCode() {},
   };
   vm.runInNewContext(channelsTabSourceForTest(), context);
   return {
-    rendered: context.globalThis.__testExports.SlackConnectActionSections({
-      slackConnectAction,
-      slackConnectActions,
+    rendered: context.globalThis.__testExports.ChannelConnectActionSections({
+      connectAction,
+      connectActions,
     }),
+    PairingSection: context.PairingSection,
     SlackAdminManagedSection: context.SlackAdminManagedSection,
     SlackPairingSection: context.SlackPairingSection,
   };
@@ -39,6 +42,7 @@ function channelsTabForTest(props) {
     PairingSection() {},
     RegistryCard() {},
     SlackChannelPicker() {},
+    SlackAdminManagedSection() {},
     SlackPairingSection() {},
     StatusPill() {},
     globalThis: {},
@@ -46,12 +50,14 @@ function channelsTabForTest(props) {
       return { strings: Array.from(strings), values };
     },
     useT: () => (key) => key,
+    redeemPairingCode() {},
   };
   vm.runInNewContext(channelsTabSourceForTest(), context);
   return {
     rendered: context.globalThis.__testExports.ChannelsTab(props),
+    ChannelConnectActionSections: context.globalThis.__testExports.ChannelConnectActionSections,
+    PairingSection: context.PairingSection,
     RegistryCard: context.RegistryCard,
-    SlackConnectActionSections: context.globalThis.__testExports.SlackConnectActionSections,
     SlackChannelPicker: context.SlackChannelPicker,
     SlackPairingSection: context.SlackPairingSection,
   };
@@ -99,6 +105,29 @@ function renderedContainsSlackActionPair(rendered) {
   return false;
 }
 
+function renderedContainsChannelAction(rendered, channel, strategy) {
+  if (!rendered || typeof rendered !== "object") {
+    return false;
+  }
+  if (Array.isArray(rendered)) {
+    return rendered.some((value) => renderedContainsChannelAction(value, channel, strategy));
+  }
+  if (Array.isArray(rendered.values)) {
+    for (const value of rendered.values) {
+      if (
+        Array.isArray(value) &&
+        value.some((action) => action?.channel === channel && action.strategy === strategy)
+      ) {
+        return true;
+      }
+      if (renderedContainsChannelAction(value, channel, strategy)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 function renderedNodeContainingComponent(rendered, component) {
   if (!rendered || typeof rendered !== "object") {
     return undefined;
@@ -122,6 +151,25 @@ function renderedNodeContainingComponent(rendered, component) {
   return undefined;
 }
 
+function renderedComponentCount(rendered, component) {
+  if (!rendered || typeof rendered !== "object") {
+    return rendered === component ? 1 : 0;
+  }
+  if (Array.isArray(rendered)) {
+    return rendered.reduce(
+      (count, value) => count + renderedComponentCount(value, component),
+      0,
+    );
+  }
+  if (Array.isArray(rendered.values)) {
+    return rendered.values.reduce(
+      (count, value) => count + renderedComponentCount(value, component),
+      0,
+    );
+  }
+  return 0;
+}
+
 test("isSlackPackage recognizes the Slack extension package", () => {
   const context = { globalThis: {} };
   vm.runInNewContext(channelsTabSourceForTest(), context);
@@ -132,12 +180,24 @@ test("isSlackPackage recognizes the Slack extension package", () => {
   assert.equal(isSlackPackage({}), false);
 });
 
-test("Slack action predicates keep admin picker and proof-code pairing distinct", () => {
+test("connect action predicates keep admin picker and proof-code pairing distinct", () => {
   const context = { globalThis: {} };
   vm.runInNewContext(channelsTabSourceForTest(), context);
-  const { isSlackAdminManagedAction, isSlackInboundProofCodeAction } =
-    context.globalThis.__testExports;
+  const {
+    isAdminManagedChannelsAction,
+    isInboundProofCodeAction,
+    isSlackAdminManagedAction,
+    isSlackInboundProofCodeAction,
+  } = context.globalThis.__testExports;
 
+  assert.equal(
+    isAdminManagedChannelsAction({ channel: "teams", strategy: "admin_managed_channels" }),
+    true,
+  );
+  assert.equal(
+    isInboundProofCodeAction({ channel: "teams", strategy: "inbound_proof_code" }),
+    true,
+  );
   assert.equal(
     isSlackAdminManagedAction({ channel: "slack", strategy: "admin_managed_channels" }),
     true,
@@ -156,13 +216,14 @@ test("Slack action predicates keep admin picker and proof-code pairing distinct"
   );
 });
 
-test("findSlackConnectActions keeps admin channel management and personal pairing", () => {
+test("connectActionsForChannel keeps admin channel management and personal pairing", () => {
   const context = { globalThis: {} };
   vm.runInNewContext(channelsTabSourceForTest(), context);
-  const { findSlackConnectAction, findSlackConnectActions } =
+  const { connectActionsForChannel, findSlackConnectAction, findSlackConnectActions } =
     context.globalThis.__testExports;
   const personal = { channel: "slack", strategy: "inbound_proof_code" };
   const admin = { channel: "slack", strategy: "admin_managed_channels" };
+  const telegram = { channel: "telegram", strategy: "inbound_proof_code" };
 
   assert.equal(findSlackConnectAction([personal]), personal);
   assert.equal(findSlackConnectAction([personal, admin]), admin);
@@ -170,28 +231,46 @@ test("findSlackConnectActions keeps admin channel management and personal pairin
   assert.equal(actions.length, 2);
   assert.equal(actions[0].strategy, "admin_managed_channels");
   assert.equal(actions[1].strategy, "inbound_proof_code");
+  const telegramActions = connectActionsForChannel([personal, admin, telegram], "telegram");
+  assert.equal(telegramActions.length, 1);
+  assert.equal(telegramActions[0].channel, "telegram");
+  assert.equal(telegramActions[0].strategy, "inbound_proof_code");
 });
 
-test("SlackConnectActionSections renders every supported Slack action", () => {
+test("ChannelConnectActionSections renders Slack setup and proof-code actions", () => {
   const personal = { channel: "slack", strategy: "inbound_proof_code", action: {} };
   const admin = { channel: "slack", strategy: "admin_managed_channels", action: {} };
 
-  const adminView = slackConnectActionSectionsForTest(admin);
+  const adminView = connectActionSectionsForTest(admin);
   assert.equal(adminView.rendered.values[0][0].values[0], adminView.SlackAdminManagedSection);
 
-  const personalView = slackConnectActionSectionsForTest(personal);
+  const personalView = connectActionSectionsForTest(personal);
   assert.equal(personalView.rendered.values[0][0].values[0], personalView.SlackPairingSection);
 
-  const combinedView = slackConnectActionSectionsForTest(null, [admin, personal]);
+  const combinedView = connectActionSectionsForTest(null, [admin, personal]);
   assert.equal(combinedView.rendered.values[0][0].values[0], combinedView.SlackAdminManagedSection);
   assert.equal(combinedView.rendered.values[0][1].values[0], combinedView.SlackPairingSection);
 
-  const unhandledView = slackConnectActionSectionsForTest({
+  const unhandledView = connectActionSectionsForTest({
     channel: "slack",
     strategy: "admin_managed_unknown",
     action: {},
   });
   assert.equal(unhandledView.rendered, null);
+});
+
+test("ChannelConnectActionSections renders non-Slack proof-code actions with generic pairing", () => {
+  const telegram = {
+    channel: "telegram",
+    strategy: "inbound_proof_code",
+    action: { title: "Telegram account connection" },
+  };
+
+  const view = connectActionSectionsForTest(telegram);
+
+  assert.equal(view.rendered.values[0][0].values[0], view.PairingSection);
+  assert.equal(view.rendered.values[0][0].values[1], "telegram");
+  assert.deepEqual(view.rendered.values[0][0].values[2], telegram.action);
 });
 
 test("ChannelsTab keeps Slack controls in the builtin location when Slack is not installed", () => {
@@ -212,10 +291,10 @@ test("ChannelsTab keeps Slack controls in the builtin location when Slack is not
 
   const builtinSlackSection = renderedNodeContainingComponent(
     view.rendered,
-    view.SlackConnectActionSections,
+    view.ChannelConnectActionSections,
   );
   assert.notEqual(builtinSlackSection, undefined, "expected builtin Slack section");
-  assert.equal(renderedContainsComponent(builtinSlackSection, view.SlackConnectActionSections), true);
+  assert.equal(renderedContainsComponent(builtinSlackSection, view.ChannelConnectActionSections), true);
   assert.equal(renderedContainsSlackActionPair(builtinSlackSection), true);
 
   // The registry heading is now localized via t(...), so it is an interpolated
@@ -229,7 +308,7 @@ test("ChannelsTab keeps Slack controls in the builtin location when Slack is not
 
   assert.equal(renderedContainsComponent(registryCard, view.RegistryCard), true);
   assert.equal(
-    renderedContainsComponent(registryCard, view.SlackConnectActionSections),
+    renderedContainsComponent(registryCard, view.ChannelConnectActionSections),
     false,
   );
   assert.equal(
@@ -256,9 +335,88 @@ test("ChannelsTab renders Slack connect controls under the installed Slack card"
 
   const installedCard = renderedNodeContainingComponent(
     view.rendered,
-    view.SlackConnectActionSections,
+    view.ChannelConnectActionSections,
   );
   assert.notEqual(installedCard, undefined, "expected installed Slack card wrapper");
 
   assert.equal(renderedContainsSlackActionPair(installedCard), true);
+});
+
+test("ChannelsTab renders generic connect controls under installed non-Slack channels", () => {
+  const view = channelsTabForTest({
+    status: { enabled_channels: [], sse_connections: 0, ws_connections: 0 },
+    channels: [
+      { package_ref: { id: "telegram" }, kind: "channel", activation_status: "installed" },
+    ],
+    connectableChannels: [
+      {
+        channel: "telegram",
+        strategy: "inbound_proof_code",
+        action: { title: "Telegram account connection" },
+      },
+    ],
+    channelRegistry: [],
+    isBusy: false,
+    onActivate() {},
+    onConfigure() {},
+    onInstall() {},
+    onRemove() {},
+  });
+
+  const installedCard = renderedNodeContainingComponent(
+    view.rendered,
+    view.ChannelConnectActionSections,
+  );
+  assert.notEqual(installedCard, undefined, "expected installed channel card wrapper");
+  assert.equal(
+    renderedContainsChannelAction(installedCard, "telegram", "inbound_proof_code"),
+    true,
+  );
+});
+
+test("ChannelsTab does not render duplicate fallback pairing when connect action owns pairing", () => {
+  const view = channelsTabForTest({
+    status: { enabled_channels: [], sse_connections: 0, ws_connections: 0 },
+    channels: [
+      {
+        package_ref: { id: "telegram" },
+        kind: "channel",
+        activation_status: "installed",
+        onboarding_state: "pairing_required",
+      },
+    ],
+    connectableChannels: [
+      {
+        channel: "telegram",
+        strategy: "inbound_proof_code",
+        action: { title: "Telegram account connection" },
+      },
+    ],
+    channelRegistry: [],
+    isBusy: false,
+    onActivate() {},
+    onConfigure() {},
+    onInstall() {},
+    onRemove() {},
+  });
+
+  const installedCard = renderedNodeContainingComponent(
+    view.rendered,
+    view.ChannelConnectActionSections,
+  );
+  assert.notEqual(installedCard, undefined, "expected installed channel card wrapper");
+  assert.equal(
+    renderedContainsChannelAction(installedCard, "telegram", "inbound_proof_code"),
+    true,
+  );
+  assert.equal(
+    renderedComponentCount(view.rendered, view.ChannelConnectActionSections),
+    1,
+    "the connect action still owns the pairing UI",
+  );
+  assert.equal(
+    renderedComponentCount(view.rendered, view.PairingSection),
+    0,
+    "the legacy fallback pairing section must not duplicate the connect action",
+  );
 });

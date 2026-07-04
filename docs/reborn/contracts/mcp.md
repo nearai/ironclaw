@@ -50,7 +50,7 @@ A successful execution returns the normalized lane result:
 
 ```rust
 pub struct McpExecutionResult {
-    pub result: McpCapabilityResult,
+    pub result: CapabilityHostResult,
     pub receipt: ResourceReceipt,
 }
 ```

@@ -2456,10 +2456,6 @@ impl<T> AgentLoopDriverHost for T where
 {
 }
 
-pub trait AgentLoopHost: AgentLoopDriverHost {}
-
-impl<T> AgentLoopHost for T where T: AgentLoopDriverHost + ?Sized {}
-
 fn unsupported_host_method(method: &'static str) -> AgentLoopHostError {
     AgentLoopHostError::new(
         AgentLoopHostErrorKind::Unavailable,

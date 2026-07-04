@@ -7,6 +7,7 @@
 use std::fmt;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -80,7 +81,12 @@ pub struct CapabilityDispatchResult {
 }
 
 /// Stable input issue code for dispatch validation failures.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// Also the canonical code for the loop/turns-side `CapabilityInputIssue` wire
+/// type, so it carries `rename_all = "snake_case"` serde: serialized as
+/// `missing_required` / `unexpected_field` / `type_mismatch` / `invalid_value`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DispatchInputIssueCode {
     MissingRequired,
     UnexpectedField,

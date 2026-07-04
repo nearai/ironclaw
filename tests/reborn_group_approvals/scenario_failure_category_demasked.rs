@@ -71,9 +71,8 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .as_ref()
         .ok_or("run reached Failed but TurnRunState::failure was None")?;
 
-    // The de-mask fix's entire point: the TRUE failure category must survive,
-    // not the masking sentinel that `UnverifiedFailureEvidence` rewrites
-    // every unverified `Failed` exit to.
+    // The de-mask fix's entire point (see module doc): the TRUE category
+    // must survive, not the masking sentinel.
     if failure.category() == "driver_protocol_violation" {
         return Err(format!(
             "failure category was the masking sentinel \"driver_protocol_violation\"; \

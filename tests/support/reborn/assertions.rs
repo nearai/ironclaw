@@ -1,21 +1,14 @@
-//! Egress + tool-result + model-prompt assertions for [`RebornIntegrationHarness`]
-//! — the canonical, richer egress-assertion API (design §3.3 `assertions.rs`,
-//! §3.6 P1 ergonomics).
+//! Egress + tool-result + model-prompt assertions for [`RebornIntegrationHarness`].
 //!
-//! Slice 2 co-located three asserts in `builder.rs`
-//! (`assert_reply_contains`/`assert_tool_invoked`/`assert_egress_request_matching`,
-//! a single substring host check). This slice grows the `assert_*` family past
-//! that threshold, so the egress/tool-result assertions move to their own file
-//! per the long-planned split. They read the captured Tier-2
-//! `RuntimeHttpEgressRequest`s and recorded capability results through the
-//! `pub(super)` accessors on the harness (`captured_egress_requests` /
-//! `captured_capability_results`) rather than re-reaching internals.
+//! These read the captured Tier-2 `RuntimeHttpEgressRequest`s and recorded
+//! capability results through the `pub(super)` accessors on the harness
+//! (`captured_egress_requests` / `captured_capability_results`) rather than
+//! re-reaching internals.
 //!
 //! The egress-assertion group (`assert_egress_count` / `assert_egress_url_order`
 //! / `assert_egress_method_order` / `assert_egress_body_contains`) all assert
-//! over the SAME captured `RecordingRuntimeHttpEgress` request log slice 2 wired
-//! — there is one runtime-lane egress-assertion API, not a parallel one (the
-//! O-egress MCP/OAuth interceptor folds its per-URL needs in here). The one
+//! over the SAME captured `RecordingRuntimeHttpEgress` request log — there is
+//! one runtime-lane egress-assertion API, not a parallel one. The one
 //! exception is `assert_network_egress_header_contains`, which reads the
 //! recording *network* egress lane — required for the T0-SECRET-INJECT
 //! credential-injection proof, whose harness routes through the host egress
@@ -29,6 +22,10 @@
 // its symbols read as dead there under the all-features `-D warnings` lane.
 // Module-level allow matches `builder.rs`/`reply.rs`/`http_matcher.rs`.
 #![allow(dead_code)]
+
+use ironclaw_reborn_config::BudgetDefaults;
+use ironclaw_resources::ResourceGovernor;
+use rust_decimal::Decimal;
 
 use super::builder::RebornIntegrationHarness;
 
@@ -234,6 +231,32 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Assert that some SINGLE model request this thread sent to the scripted
+    /// provider contains EVERY needle in `needles` (all in one request, not
+    /// spread across several). This is the multi-turn "sees prior context"
+    /// proof: pass a needle unique to an earlier turn plus one unique to the
+    /// current turn — only the current turn's request carries BOTH, because the
+    /// earlier turn's own request predates the later text. Scanning with the
+    /// single-needle [`assert_model_request_contains`] cannot express this (each
+    /// needle would trivially match its own originating request), so a genuine
+    /// context-carryover regression (the loop rebuilding the request without
+    /// prior history) would slip through it but not through this.
+    pub async fn assert_model_request_contains_all(&self, needles: &[&str]) -> HarnessResult<()> {
+        let requests = self.scripted_llm.captured_requests();
+        for messages in &requests {
+            let rendered = serde_json::to_string(messages)
+                .map_err(|e| format!("serialize captured model request: {e}"))?;
+            if needles.iter().all(|needle| rendered.contains(needle)) {
+                return Ok(());
+            }
+        }
+        Err(format!(
+            "no single model request contained all of {needles:?}; captured {} request(s)",
+            requests.len()
+        )
+        .into())
+    }
+
     /// Collects the persisted `safe_summary` field of every `ToolResultReference`
     /// message on this thread's FULL history (not baseline-sliced — same caveat
     /// as `assert_tool_error`/`assert_tool_error_summary_contains`: safe only for
@@ -253,11 +276,8 @@ impl RebornIntegrationHarness {
             .iter()
             .filter(|message| message.kind == ironclaw_threads::MessageKind::ToolResultReference)
             .map(|message| {
-                // Fail loud on a missing `content` field, and on a decode
-                // error, rather than silently dropping the message
-                // (.claude/rules/error-handling.md) — a malformed or
-                // content-less envelope must surface as its own diagnosis,
-                // not degrade into a misleading "not found" from the caller.
+                // Fail loud, per .claude/rules/error-handling.md — see doc
+                // comment above for why this must not silently skip.
                 let Some(content) = message.content.as_deref() else {
                     return Err("ToolResultReference message missing content".into());
                 };
@@ -280,6 +300,55 @@ impl RebornIntegrationHarness {
                     })
             })
             .collect()
+    }
+
+    /// Assert the in-memory `TurnEventSink` installed via `.with_turn_event_sink()`
+    /// (C-TRACECAP) recorded at least one event of `kind`. Proves
+    /// `subscribe_best_effort` actually fired the sink for a real turn, not just
+    /// that the harness wired the field.
+    pub async fn assert_turn_event_recorded(
+        &self,
+        kind: ironclaw_turns::TurnEventKind,
+    ) -> HarnessResult<()> {
+        let events = self.recorded_turn_events();
+        if events.iter().any(|event| event.kind == kind) {
+            return Ok(());
+        }
+        let seen: Vec<_> = events.iter().map(|event| &event.kind).collect();
+        Err(format!("no recorded turn event of kind {kind:?}; saw {seen:?}").into())
+    }
+
+    /// Assert a captured model request carried a multimodal `data:` image part
+    /// holding exactly `bytes` under `mime_type` (C-ATTACH) — proves the landed
+    /// attachment round-tripped intact (lander → project filesystem →
+    /// `attachment_read_port` → base64) and reached the model as
+    /// `ContentPart::ImageUrl`, not just the textual `<attachments>` pointer.
+    pub async fn assert_model_saw_image_attachment(
+        &self,
+        mime_type: &str,
+        bytes: &[u8],
+    ) -> HarnessResult<()> {
+        use base64::Engine;
+        let urls = self.captured_image_data_urls();
+        let expected = format!(
+            "data:{mime_type};base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        );
+        if urls.iter().any(|url| url == &expected) {
+            return Ok(());
+        }
+        // Redacted: the full base64-encoded attachment bytes must never land in
+        // CI logs on assertion failure (a future test using a sensitive/screenshot
+        // fixture would otherwise leak its contents). Report mime type, byte
+        // length, and a short digest instead — enough to distinguish "wrong bytes"
+        // from "no image part at all" without reproducing the content.
+        let seen: Vec<String> = urls.iter().map(|url| redact_data_url(url)).collect();
+        Err(format!(
+            "no captured image data: URL matching {}; saw {} image part(s): {seen:?}",
+            redact_data_url(&expected),
+            seen.len()
+        )
+        .into())
     }
 
     /// Assert a model-visible tool error of `class` carrying `reason` was
@@ -442,6 +511,51 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// C-BUDGET liveness assertion: the group's wired `model_budget_accountant`
+    /// seeded the run owner's daily USD cap on the turn's first model call.
+    ///
+    /// Reads the in-memory `ResourceGovernor` retained behind the production
+    /// `build_default_budget_accountant` accountant (wired via
+    /// `with_budget_accounting()` / `budget_accounting()`). Before any turn the
+    /// run-owner account does not exist; after a completed turn the accountant's
+    /// `pre_model_call` has fired through the real coordinator → loop → model-port
+    /// path and its compiled-default seeding policy has installed the daily cap.
+    /// Asserting the cap equals the compiled default (`$5.00`) proves the value
+    /// came from the production helper's `BudgetDefaults`, not an incidental path.
+    ///
+    /// This is wiring-liveness only — budget SEMANTICS (thresholds, gates,
+    /// `BudgetEvent` cascade) are covered at crate tier (`budget_e2e.rs`).
+    pub async fn assert_budget_user_cap_seeded(&self) -> HarnessResult<()> {
+        let governor = self._shared.budget_governor.as_ref().ok_or(
+            "harness was not built with budget accounting wired (call with_budget_accounting)",
+        )?;
+        let account = self
+            ._shared
+            .budget_account
+            .as_ref()
+            .ok_or("budget-accounting harness is missing its run-owner account")?;
+        let snapshot = governor
+            .account_snapshot(account)
+            .map_err(|e| format!("budget account snapshot failed: {e}"))?
+            .ok_or(
+                "budget accountant never seeded the run owner's account \
+                 (pre_model_call did not fire through the wired accountant)",
+            )?;
+        let limits = snapshot
+            .limits
+            .ok_or("budget account exists but carries no seeded limits")?;
+        let expected = Decimal::from_f64_retain(BudgetDefaults::compiled_defaults().user_daily_usd)
+            .unwrap_or_default();
+        if limits.max_usd == Some(expected) {
+            return Ok(());
+        }
+        Err(format!(
+            "expected seeded user daily cap {expected:?} (compiled default), saw {:?}",
+            limits.max_usd
+        )
+        .into())
+    }
+
     /// Assert some recorded capability result (tool output) — i.e. a surfaced
     /// HTTP response — serializes to text containing `needle`. Proves the keyed
     /// scripted body actually surfaced back to the model as a tool result.
@@ -491,5 +605,269 @@ impl RebornIntegrationHarness {
             "no recorded capability result for {capability_id:?}; saw results for {seen:?}"
         )
         .into())
+    }
+}
+
+/// Redact a `data:<mime>;base64,<bytes>` URL for safe inclusion in an assertion
+/// failure message — never prints the base64 payload itself (which is the raw
+/// attachment content) or even a prefix of it. Reports the mime type, decoded
+/// byte length, and a short SHA-256 prefix, which is enough to tell "wrong
+/// bytes" apart from "no image part at all" without reconstructing the content.
+fn redact_data_url(url: &str) -> String {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    let Some(rest) = url.strip_prefix("data:") else {
+        return "<non-data: URL>".to_string();
+    };
+    let Some((mime, b64)) = rest.split_once(";base64,") else {
+        return format!(
+            "data:{}...<unparseable, redacted>",
+            rest.chars().take(40).collect::<String>()
+        );
+    };
+    match base64::engine::general_purpose::STANDARD.decode(b64) {
+        Ok(bytes) => {
+            let digest_hex: String = Sha256::digest(&bytes)
+                .iter()
+                .take(4)
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            format!(
+                "data:{mime};base64=<redacted, {} byte(s), sha256={digest_hex}>",
+                bytes.len(),
+            )
+        }
+        Err(_) => format!("data:{mime};base64=<redacted, undecodable>"),
+    }
+}
+
+/// Multi-turn baseline-sliced variants of the thread-history assertions
+/// (`assert_tool_error*`, conversation-history containment).
+///
+/// The full-history family above is safe only for single-turn harnesses (see
+/// the `assert_tool_error` doc). These `*_since` methods close that gap using
+/// the same `[baseline..]` slice idiom as the egress assertions, but over
+/// thread-history message COUNT: capture [`history_len`] at the start of a
+/// turn, then assert `*_since(baseline, ..)` after it.
+impl RebornIntegrationHarness {
+    /// Full persisted thread-history for this harness's thread, in sequence
+    /// order. The baseline-sliced `*_since` assertions read this; kept private
+    /// so tests assert through the typed helpers rather than raw records.
+    async fn persisted_history(&self) -> HarnessResult<Vec<ironclaw_threads::ThreadMessageRecord>> {
+        Ok(self
+            .thread_harness
+            .history(self.binding.thread_id.clone())
+            .await?)
+    }
+
+    /// Number of persisted thread-history messages right now. Capture this at
+    /// the START of a turn to scope a subsequent `*_since` assertion to only the
+    /// messages that turn appends — the thread-history analogue of the
+    /// `baseline_egress_count` snapshot the egress assertions take at
+    /// construction, but caller-controlled so it can be re-taken per turn on a
+    /// multi-turn harness.
+    pub async fn history_len(&self) -> HarnessResult<usize> {
+        Ok(self.persisted_history().await?.len())
+    }
+
+    /// Slice `history[baseline..]`, failing loud on an out-of-range `baseline` —
+    /// a baseline greater than the current history length is always a caller bug
+    /// (a stale or foreign-thread value; history never shrinks). Degrading it to
+    /// an empty slice would turn that bug into a misleading "not found" (or a
+    /// vacuous `assert_no_*` pass), violating the support tree's fail-loud
+    /// contract.
+    fn history_slice(
+        history: &[ironclaw_threads::ThreadMessageRecord],
+        baseline: usize,
+    ) -> HarnessResult<&[ironclaw_threads::ThreadMessageRecord]> {
+        history.get(baseline..).ok_or_else(|| {
+            format!(
+                "history baseline {baseline} exceeds current history length {} — stale or \
+                 foreign-thread baseline",
+                history.len()
+            )
+            .into()
+        })
+    }
+
+    /// `persisted_tool_error_summaries`, but over only the `[baseline..]` slice —
+    /// shared collector for the `*_since` tool-error assertions. Same fail-loud
+    /// decode contract as the full-history collector above.
+    async fn persisted_tool_error_summaries_since(
+        &self,
+        baseline: usize,
+    ) -> HarnessResult<Vec<String>> {
+        let history = self.persisted_history().await?;
+        Self::history_slice(&history, baseline)?
+            .iter()
+            .filter(|message| message.kind == ironclaw_threads::MessageKind::ToolResultReference)
+            .map(|message| {
+                let Some(content) = message.content.as_deref() else {
+                    return Err("ToolResultReference message missing content".into());
+                };
+                serde_json::from_str::<ironclaw_threads::ToolResultReferenceEnvelope>(content)
+                    .map(|envelope| envelope.safe_summary.as_str().to_string())
+                    .map_err(|err| {
+                        let truncated = match content.char_indices().nth(200) {
+                            Some((cutoff, _)) => format!("{}...[truncated]", &content[..cutoff]),
+                            None => content.to_string(),
+                        };
+                        format!(
+                            "failed to decode ToolResultReferenceEnvelope: {err}; raw: {truncated}"
+                        )
+                        .into()
+                    })
+            })
+            .collect()
+    }
+
+    /// [`assert_tool_error`], scoped to the thread-history messages appended
+    /// SINCE `baseline` (a value from [`history_len`] captured at the start of
+    /// the turn under test). Use on a multi-turn harness where the full-history
+    /// `assert_tool_error` would also see prior turns' tool errors.
+    pub async fn assert_tool_error_since(
+        &self,
+        baseline: usize,
+        class: ToolErrorClass,
+        reason: &str,
+    ) -> HarnessResult<()> {
+        let summaries = self.persisted_tool_error_summaries_since(baseline).await?;
+        let prefix = class.summary_prefix();
+        if summaries
+            .iter()
+            .any(|summary| summary.starts_with(prefix) && summary.contains(reason))
+        {
+            return Ok(());
+        }
+        Err(format!(
+            "no tool-error summary of class {class:?} with reason {reason:?} since baseline {baseline}; saw {summaries:?}"
+        )
+        .into())
+    }
+
+    /// [`assert_no_tool_error`], scoped to the `[baseline..]` slice — passes when
+    /// NO tool error of `class` carrying `reason` was persisted since `baseline`.
+    /// The multi-turn proof that a prior turn's error does NOT leak into the turn
+    /// under test.
+    pub async fn assert_no_tool_error_since(
+        &self,
+        baseline: usize,
+        class: ToolErrorClass,
+        reason: &str,
+    ) -> HarnessResult<()> {
+        let summaries = self.persisted_tool_error_summaries_since(baseline).await?;
+        let prefix = class.summary_prefix();
+        let matching: Vec<&String> = summaries
+            .iter()
+            .filter(|summary| summary.starts_with(prefix) && summary.contains(reason))
+            .collect();
+        if matching.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "expected no tool-error summary of class {class:?} with reason {reason:?} since baseline {baseline}; found {matching:?}"
+        )
+        .into())
+    }
+
+    /// [`assert_tool_error_summary_contains`], scoped to the `[baseline..]`
+    /// slice — a raw `safe_summary` substring check with no class-prefix
+    /// requirement, for the executor-synthesized literals documented on the
+    /// full-history sibling, usable across turns.
+    pub async fn assert_tool_error_summary_contains_since(
+        &self,
+        baseline: usize,
+        text: &str,
+    ) -> HarnessResult<()> {
+        let summaries = self.persisted_tool_error_summaries_since(baseline).await?;
+        if summaries.iter().any(|summary| summary.contains(text)) {
+            return Ok(());
+        }
+        Err(format!(
+            "no tool-error summary containing {text:?} since baseline {baseline}; saw {summaries:?}"
+        )
+        .into())
+    }
+
+    /// Shared implementation for the conversation-history containment asserts:
+    /// scans the `[baseline..]` slice of thread history for a message whose
+    /// `content` contains `needle`, optionally restricted to a single
+    /// [`MessageKind`](ironclaw_threads::MessageKind) (role).
+    async fn conversation_history_contains_impl(
+        &self,
+        baseline: usize,
+        kind: Option<ironclaw_threads::MessageKind>,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        let history = self.persisted_history().await?;
+        let slice = Self::history_slice(&history, baseline)?;
+        let matched = slice
+            .iter()
+            .filter(|message| kind.is_none_or(|k| message.kind == k))
+            .any(|message| {
+                message
+                    .content
+                    .as_deref()
+                    .is_some_and(|content| content.contains(needle))
+            });
+        if matched {
+            return Ok(());
+        }
+        let seen: Vec<String> = slice
+            .iter()
+            .filter(|message| kind.is_none_or(|k| message.kind == k))
+            .map(|message| {
+                let body = message.content.as_deref().unwrap_or("<no-content>");
+                let body = match body.char_indices().nth(80) {
+                    Some((cutoff, _)) => format!("{}...", &body[..cutoff]),
+                    None => body.to_string(),
+                };
+                format!("{:?}:{body:?}", message.kind)
+            })
+            .collect();
+        let scope = match kind {
+            Some(k) => format!("{k:?}-role message"),
+            None => "message".to_string(),
+        };
+        Err(format!(
+            "no conversation-history {scope} containing {needle:?} since baseline {baseline}; saw {seen:?}"
+        )
+        .into())
+    }
+
+    /// Assert some persisted thread-history message's `content` contains
+    /// `needle`, across the FULL history and ANY role. The general
+    /// conversation-history containment check — the persisted-transcript
+    /// analogue of [`assert_system_prompt_contains`] (which only reads
+    /// System-role model REQUESTS, not persisted history). Reads user prompts,
+    /// assistant replies, summaries, etc.
+    pub async fn assert_conversation_history_contains(&self, needle: &str) -> HarnessResult<()> {
+        self.conversation_history_contains_impl(0, None, needle)
+            .await
+    }
+
+    /// [`assert_conversation_history_contains`], scoped to the `[baseline..]`
+    /// slice (a [`history_len`] value from the start of the turn under test) —
+    /// the multi-turn variant.
+    pub async fn assert_conversation_history_contains_since(
+        &self,
+        baseline: usize,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        self.conversation_history_contains_impl(baseline, None, needle)
+            .await
+    }
+
+    /// [`assert_conversation_history_contains`], restricted to messages of a
+    /// single [`MessageKind`](ironclaw_threads::MessageKind) (role) across the
+    /// full history — e.g. assert a `User` prompt or an `Assistant` reply landed
+    /// in the transcript without matching the same text in another role.
+    pub async fn assert_conversation_history_role_contains(
+        &self,
+        kind: ironclaw_threads::MessageKind,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        self.conversation_history_contains_impl(0, Some(kind), needle)
+            .await
     }
 }

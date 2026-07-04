@@ -83,14 +83,15 @@ use ironclaw_host_runtime::TurnRunSchedulerHandle;
 use ironclaw_llm::testing::provider_chain_over;
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
 use ironclaw_loop_support::{
-    HostManagedModelGateway, HostUserProfileSource, JsonSpawnSubagentInputCodec,
-    SubagentSpawnLimits,
+    HostManagedModelGateway, HostUserProfileSource, JsonSpawnSubagentInputCodec, ModelCostTable,
+    SubagentSpawnLimits, ZeroCostTable,
 };
 use ironclaw_product_adapters::ProductTriggerReason;
 use ironclaw_product_workflow::{
     ConversationBindingService, DefaultInboundTurnService, DefaultProductWorkflow,
     IdempotencyLedger, InboundTurnService, ResolvedBinding,
 };
+use ironclaw_reborn::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_reborn::loop_exit_applier::{
     LoopExitEvidencePort, ThreadCheckpointLoopExitEvidencePort,
 };
@@ -103,13 +104,20 @@ use ironclaw_reborn::subagent::{
     flavors::StaticSubagentDefinitionResolver, gate_resolution::BoundedSubagentGateResolutionStore,
     goal_store::InMemoryBoundedSubagentGoalStore,
 };
+use ironclaw_reborn_composition::build_default_budget_accountant;
+use ironclaw_reborn_config::BudgetDefaults;
+use ironclaw_resources::{
+    BudgetEventSink, BudgetGateStore, InMemoryBudgetEventSink, InMemoryBudgetGateStore,
+    InMemoryResourceGovernor, ResourceAccount, ResourceGovernor,
+};
 use ironclaw_threads::SessionThreadService;
 use ironclaw_turns::run_profile::{
-    InMemoryLoopHostMilestoneSink, InstructionSafetyContext, ModelProfileId,
+    CommunicationContextProvider, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
+    ModelProfileId,
 };
 use ironclaw_turns::{
-    FilesystemTurnStateStore, InMemoryCheckpointStateStore, LoopCheckpointStore, TurnCoordinator,
-    TurnScope, TurnStateStore,
+    FilesystemTurnStateStore, InMemoryCheckpointStateStore, InMemoryTurnEventSink,
+    LoopCheckpointStore, TurnCoordinator, TurnEventSink, TurnScope, TurnStateStore,
 };
 
 use super::builder::{
@@ -203,6 +211,27 @@ pub(crate) struct GroupSharedStorage {
     /// that breaks the `into_group` wiring (not just `build_user_profile_source_for_test`
     /// itself) is caught.
     pub(crate) user_profile_source: Arc<dyn HostUserProfileSource>,
+    /// In-memory turn-lifecycle event sink wired into the group's ONE planned
+    /// runtime when `.with_turn_event_sink()` opted in (C-TRACECAP seam).
+    /// `None` for every group that did not opt in (`turn_event_sink` stays
+    /// `None` in `DefaultPlannedRuntimeParts`, matching prior behavior).
+    /// Kept as the concrete `InMemoryTurnEventSink` (not `Arc<dyn TurnEventSink>`)
+    /// so a test can read `.events()` back directly.
+    pub(crate) turn_event_sink: Option<Arc<InMemoryTurnEventSink>>,
+    /// C-BUDGET: the in-memory `ResourceGovernor` wired behind the group's
+    /// `model_budget_accountant` (via the production `build_default_budget_accountant`
+    /// helper). Retained so a test can read back the account the accountant seeds
+    /// on the first model call of a turn — the liveness proof that the accountant
+    /// is wired through `DefaultPlannedRuntimeParts` and fires on the coordinator
+    /// path. `None` unless the group/harness was built with budget accounting
+    /// wired (`budget_accounting()` / `with_budget_accounting()`).
+    pub(crate) budget_governor: Option<Arc<InMemoryResourceGovernor>>,
+    /// C-BUDGET: the `(tenant, run-owner-user)` account the group's turns reserve
+    /// against — computed once from the canonical binding so a budget test reads
+    /// the SAME account the loop's accountant seeds (keyed on the run actor, i.e.
+    /// the binding subject user, per `GovernorBackedAccountant::resource_scope`).
+    /// `None` unless budget accounting is wired.
+    pub(crate) budget_account: Option<ResourceAccount>,
 }
 
 impl GroupSharedStorage {
@@ -218,6 +247,25 @@ impl GroupSharedStorage {
             GroupCapability::HostRuntime(arc) => {
                 let mut scope = self.product_harness.scope.clone();
                 scope.user_id = arc.user_id().clone();
+                Some(scope)
+            }
+            GroupCapability::Recording => None,
+        }
+    }
+
+    /// C-MULTIUSER: the auto-approve `(tenant, user)` scope for a SPECIFIC run
+    /// owner. Uses the group's real run tenant (`product_harness.scope`, e.g.
+    /// `tenant-itest`) with `owner`'s user id — the exact key the dispatch-time
+    /// auto-approve check reads for a run OWNED by `owner` once the capability
+    /// backend is built with `with_run_owner_scoped_capability_dispatch`. Unlike
+    /// [`auto_approve_scope`] (which keys on the fixed capability user, shared by
+    /// all actors), this keys per actor, so a grant seeded here applies to that
+    /// owner's runs only. `None` for the Echo backend (no approval stores).
+    pub(crate) fn auto_approve_scope_for_owner(&self, owner: &UserId) -> Option<ResourceScope> {
+        match &self.capability {
+            GroupCapability::HostRuntime(_) => {
+                let mut scope = self.product_harness.scope.clone();
+                scope.user_id = owner.clone();
                 Some(scope)
             }
             GroupCapability::Recording => None,
@@ -279,7 +327,7 @@ impl GroupCapability {
 /// The per-capability preset constructors themselves (`live_approvals`,
 /// `builtin_tools`, `extension_lifecycle`, `live_auth_gate`,
 /// `project_lifecycle`, `profile_tools`, `triggers`, `skill_activation_tools`,
-/// `skill_management_tools`, and their `RebornIntegrationGroupBuilder`
+/// `skill_management_tools`, `attachment_tools`, and their `RebornIntegrationGroupBuilder`
 /// counterparts) live in the child `group_constructors` module (file:
 /// `group_constructors.rs`, kept private to `group` — see the `mod
 /// group_constructors` declaration below) — a thin catalog of "which
@@ -297,6 +345,10 @@ impl RebornIntegrationGroup {
         RebornIntegrationGroupBuilder {
             storage: StorageMode::InMemory,
             safety_context: None,
+            turn_event_sink: None,
+            budget: false,
+            communication_context_provider: None,
+            hook_dispatcher_builder_factory: None,
         }
     }
 
@@ -314,6 +366,7 @@ impl RebornIntegrationGroup {
             replies: Vec::new(),
             actor_id: None,
             model_mode: ThreadModelMode::Normal,
+            model_override: None,
         }
     }
 
@@ -338,6 +391,41 @@ impl RebornIntegrationGroup {
             GroupCapability::HostRuntime(arc) => Some(arc),
             GroupCapability::Recording => None,
         }
+    }
+
+    /// C-MULTIUSER: grant global always-allow (auto-approve) for a SPECIFIC run
+    /// owner's `(tenant, user)` scope over the shared CAS-persisted
+    /// `AutoApproveSettingStore`. In a `multiuser_approvals` group (built with
+    /// `with_run_owner_scoped_capability_dispatch`), a turn OWNED by `owner`
+    /// then dispatches its capability without raising an approval gate, while
+    /// any OTHER owner's identical call still gates — the per-actor isolation
+    /// proof. Errors for the Echo backend (no approval stores).
+    pub async fn enable_auto_approve_for_owner(&self, owner: &UserId) -> HarnessResult<()> {
+        let scope = self
+            .shared
+            .auto_approve_scope_for_owner(owner)
+            .ok_or("group has no host-runtime capability backend for auto-approve")?;
+        self.shared
+            .capability_recorder
+            .enable_auto_approve_for(scope)
+            .await
+    }
+
+    /// C-MULTIUSER: set a SPECIFIC run owner's always-allow OFF over the shared
+    /// `AutoApproveSettingStore`. Auto-approve defaults ON when a user has no
+    /// record (`AUTO_APPROVE_DEFAULT_ENABLED = true`, production), so a per-actor
+    /// isolation test that needs owner B to still GATE must give B its own
+    /// explicit OFF setting — exactly as `live_approvals` disables its dispatch
+    /// scope to make gates fire. Errors for the Echo backend.
+    pub async fn disable_auto_approve_for_owner(&self, owner: &UserId) -> HarnessResult<()> {
+        let scope = self
+            .shared
+            .auto_approve_scope_for_owner(owner)
+            .ok_or("group has no host-runtime capability backend for auto-approve")?;
+        self.shared
+            .capability_recorder
+            .disable_auto_approve_for(scope)
+            .await
     }
 
     /// The exact `HostUserProfileSource` wired into this group's ONE planned
@@ -410,6 +498,24 @@ impl GroupBaseData {
 pub struct RebornIntegrationGroupBuilder {
     storage: StorageMode,
     safety_context: Option<InstructionSafetyContext>,
+    /// C-TRACECAP seam: `Some` once `.with_turn_event_sink()` has been called.
+    turn_event_sink: Option<Arc<InMemoryTurnEventSink>>,
+    /// C-BUDGET: when `true`, `into_group` wires the production
+    /// `build_default_budget_accountant` (in-memory governor + gate store +
+    /// zero-cost table + compiled-default seeding) into the group's ONE planned
+    /// runtime and retains the governor for read-back. Default `false` (no
+    /// accountant — byte-identical to today's behavior).
+    budget: bool,
+    /// C-COMMCTX: an optional `CommunicationContextProvider` wired into the
+    /// group's ONE planned runtime, so the delivery-preference / connected-channel
+    /// slice it resolves lands in the model request. Default `None` (no comm
+    /// section, matching today's behavior).
+    communication_context_provider: Option<Arc<dyn CommunicationContextProvider>>,
+    /// C-HOOKS / E-HOOK-INFRA: an optional per-run hook dispatcher builder
+    /// factory wired into the group's ONE planned runtime, so hooks fire at the
+    /// lifecycle points on a coordinator-path turn. Default `None` (hook
+    /// framework dormant, matching today's behavior).
+    hook_dispatcher_builder_factory: Option<HookDispatcherBuilderFactory>,
 }
 
 impl RebornIntegrationGroupBuilder {
@@ -429,6 +535,60 @@ impl RebornIntegrationGroupBuilder {
     /// C-SAFETY). Defaults to `None` (no banner, matching today's behavior).
     pub fn safety_context(mut self, ctx: InstructionSafetyContext) -> Self {
         self.safety_context = Some(ctx);
+        self
+    }
+
+    /// Install an in-memory `TurnEventSink` (`ironclaw_turns::InMemoryTurnEventSink`,
+    /// a real, already-shipped production type with zero callers today — this is the
+    /// seam production wires via `subscribe_best_effort` in `build_default_planned_runtime_inner`,
+    /// `crates/ironclaw_reborn/src/runtime.rs:613-619`) into the group's ONE planned
+    /// runtime (C-TRACECAP). Read the recorded events back with
+    /// [`RebornIntegrationHarness::recorded_turn_events`] — the ONLY read path;
+    /// it slices `[baseline_turn_event_count..]` so a group thread never sees a
+    /// sibling thread's events. Deliberately no raw group-level sink accessor:
+    /// one would bypass that slicing and reintroduce cross-thread bleed.
+    pub fn with_turn_event_sink(mut self) -> Self {
+        self.turn_event_sink = Some(Arc::new(InMemoryTurnEventSink::default()));
+        self
+    }
+
+    /// Wire the production `build_default_budget_accountant` (over in-memory
+    /// governor, gate store, zero-cost table, and compiled-default seeding) into
+    /// the group's ONE shared planned runtime (`DefaultPlannedRuntimeParts::model_budget_accountant`),
+    /// and retain the governor for read-back. This is the C-BUDGET liveness seam:
+    /// on the first model call of any turn the accountant seeds the run owner's
+    /// daily USD cap into the governor, which
+    /// `RebornIntegrationHarness::assert_budget_user_cap_seeded` reads back.
+    /// Budget SEMANTICS (thresholds, gates, `BudgetEvent` cascade) are covered at
+    /// crate tier (`budget_e2e.rs`); this only proves the harness bypass path
+    /// (`build_default_planned_runtime`) wires the accountant live. Defaults off.
+    pub fn budget_accounting(mut self) -> Self {
+        self.budget = true;
+        self
+    }
+
+    /// Wire a `CommunicationContextProvider` into the group's ONE shared planned
+    /// runtime (`DefaultPlannedRuntimeParts::communication_context_provider`), so
+    /// the delivery-preference / connected-channel slice it resolves renders into
+    /// the model request. This is the C-COMMCTX seam — distinct from the outbound
+    /// delivery **sink** (E-OUTBOUND): this is prompt **context**. Defaults `None`.
+    pub fn communication_context_provider(
+        mut self,
+        provider: Arc<dyn CommunicationContextProvider>,
+    ) -> Self {
+        self.communication_context_provider = Some(provider);
+        self
+    }
+
+    /// Wire a per-run `HookDispatcherBuilderFactory` into the group's ONE shared
+    /// planned runtime (`DefaultPlannedRuntimeParts::hook_dispatcher_builder_factory`),
+    /// so hooks fire at their lifecycle points on a coordinator-path turn. This is
+    /// the E-HOOK-INFRA / C-HOOKS seam. Defaults `None` (hook framework dormant).
+    pub fn hook_dispatcher_builder_factory(
+        mut self,
+        factory: HookDispatcherBuilderFactory,
+    ) -> Self {
+        self.hook_dispatcher_builder_factory = Some(factory);
         self
     }
 
@@ -559,6 +719,35 @@ impl RebornIntegrationGroupBuilder {
             ironclaw_reborn_composition::test_support::build_user_profile_source_for_test(
                 capability_recorder.profile_filesystem(),
             );
+
+        // --- C-BUDGET: production budget accountant (wiring-liveness only) -----
+        // Build the SAME `GovernorBackedAccountant` production composes, via the
+        // shared `build_default_budget_accountant` helper, over in-memory leaf
+        // ports + compiled-default seeding. Retain the governor + the run-owner
+        // account so `assert_budget_user_cap_seeded` can read back the daily cap
+        // the accountant seeds on the turn's first model call. Built here (not
+        // per-thread) because the group's ONE planned runtime is assembled once.
+        // The governor/account are stashed independent of the struct field so a
+        // mutation that drops `model_budget_accountant` (setting it `None`) still
+        // has a governor to read — surfacing "never seeded" (RED), not a panic.
+        let (budget_accountant, budget_governor, budget_account) = if self.budget {
+            let governor: Arc<InMemoryResourceGovernor> = Arc::new(InMemoryResourceGovernor::new());
+            let accountant = build_default_budget_accountant(
+                Arc::clone(&governor) as Arc<dyn ResourceGovernor>,
+                Arc::new(ZeroCostTable) as Arc<dyn ModelCostTable>,
+                Arc::new(InMemoryBudgetGateStore::new()) as Arc<dyn BudgetGateStore>,
+                Arc::new(InMemoryBudgetEventSink::new()) as Arc<dyn BudgetEventSink>,
+                &BudgetDefaults::compiled_defaults(),
+            );
+            let account = ResourceAccount::user(
+                base.canonical_binding.tenant_id.clone(),
+                base.canonical_subject_user()?,
+            );
+            (Some(accountant), Some(governor), Some(account))
+        } else {
+            (None, None, None)
+        };
+
         let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
             turn_state: turn_state_for_runtime,
             thread_service: group_thread_harness.service.clone() as Arc<dyn SessionThreadService>,
@@ -617,13 +806,25 @@ impl RebornIntegrationGroupBuilder {
             // test to read from directly (see `user_profile_source` field docs).
             user_profile_source: Arc::clone(&user_profile_source),
             model_policy_guard: None,
-            model_budget_accountant: None,
+            // C-BUDGET: production `build_default_budget_accountant` (Some only
+            // for `budget_accounting()` groups; `None` otherwise, so all existing
+            // group/flat tests are behavior-identical).
+            model_budget_accountant: budget_accountant,
             safety_context: self.safety_context,
-            hook_dispatcher_builder_factory: None,
-            communication_context_provider: None,
+            // C-HOOKS / E-HOOK-INFRA: per-run hook dispatcher builder factory
+            // (Some only when `hook_dispatcher_builder_factory()` was set).
+            hook_dispatcher_builder_factory: self.hook_dispatcher_builder_factory,
+            // C-COMMCTX: delivery-preference / connected-channel provider (Some
+            // only when `communication_context_provider()` was set).
+            communication_context_provider: self.communication_context_provider,
             hook_security_audit_sink: None,
-            turn_event_sink: None,
-            attachment_read_port: None,
+            turn_event_sink: self
+                .turn_event_sink
+                .clone()
+                .map(|sink| sink as Arc<dyn TurnEventSink>),
+            attachment_read_port: capability_recorder
+                .attachment_test_support()
+                .map(|support| support.read_port),
             scheduler_wake_wiring: None,
         })?;
 
@@ -640,6 +841,9 @@ impl RebornIntegrationGroupBuilder {
                 turn_store,
                 capability_recorder,
                 user_profile_source,
+                turn_event_sink: self.turn_event_sink,
+                budget_governor,
+                budget_account,
             }),
         })
     }
@@ -666,6 +870,12 @@ pub struct RebornThreadBuilder<'g> {
     replies: Vec<RebornScriptedReply>,
     actor_id: Option<String>,
     model_mode: ThreadModelMode,
+    /// C-ATTACH seam: overrides `LlmModelProfileRoute.model_override` (the same
+    /// production model-pin field, `model_gateway.rs:160-162`). `None` keeps the
+    /// prior behavior (scripted model id, not a vision pattern, so image parts
+    /// are dropped); `Some` routes through a vision-capable id so `convert_messages`
+    /// builds `ContentPart::ImageUrl` parts.
+    model_override: Option<String>,
 }
 
 /// A thread's model-call behavior: exactly one of normal scripted playback,
@@ -747,6 +957,14 @@ impl<'g> RebornThreadBuilder<'g> {
         if fail && !matches!(self.model_mode, ThreadModelMode::Parked(_)) {
             self.model_mode = ThreadModelMode::Failing;
         }
+        self
+    }
+
+    /// Route this thread at a specific provider model id (see
+    /// `ironclaw_llm::vision_models::VISION_PATTERNS` for vision-capable ids) —
+    /// C-ATTACH seam.
+    pub fn with_model_override(mut self, model: impl Into<String>) -> Self {
+        self.model_override = Some(model.into());
         self
     }
 
@@ -836,7 +1054,8 @@ impl<'g> RebornThreadBuilder<'g> {
         let provider = provider_chain_over(raw, &llm_config, session).await?;
         let model_profile_id = ModelProfileId::new(INTERACTIVE_MODEL_PROFILE)
             .map_err(|reason| format!("invalid model profile id: {reason}"))?;
-        let policy = LlmModelProfilePolicy::new().allow_model_profile(model_profile_id, None);
+        let policy = LlmModelProfilePolicy::new()
+            .allow_model_profile(model_profile_id, self.model_override.clone());
         let thread_gateway: Arc<dyn HostManagedModelGateway> =
             Arc::new(LlmProviderModelGateway::new(provider, policy));
 
@@ -857,15 +1076,27 @@ impl<'g> RebornThreadBuilder<'g> {
         let baseline_result_count = capability_recorder.capability_results().len();
         let baseline_process_count = capability_recorder.recorded_process_commands().len();
         let baseline_network_count = capability_recorder.network_http_requests().len();
+        let baseline_turn_event_count = shared
+            .turn_event_sink
+            .as_ref()
+            .map(|sink| sink.events().len())
+            .unwrap_or(0);
 
         // --- per-thread workflow over the SHARED coordinator --------------------
         let binding_service: Arc<dyn ConversationBindingService> =
             Arc::new(shared.product_harness.binding_service()?);
-        let inbound: Arc<dyn InboundTurnService> = Arc::new(DefaultInboundTurnService::new(
+        let mut inbound_service = DefaultInboundTurnService::new(
             Arc::clone(&binding_service),
             thread_harness.service_instance()?,
             Arc::clone(&shared.coordinator),
-        ));
+        );
+        // C-ATTACH: wire the real lander when the backend has one (`attachment_tools()`)
+        // so `submit_inbound_with_attachments` lands through it instead of
+        // failing closed. `None` for every other group (unchanged behavior).
+        if let Some(support) = capability_recorder.attachment_test_support() {
+            inbound_service = inbound_service.with_inbound_attachments(support.lander);
+        }
+        let inbound: Arc<dyn InboundTurnService> = Arc::new(inbound_service);
         let ledger: Arc<dyn IdempotencyLedger> =
             Arc::new(shared.product_harness.idempotency_ledger());
         let workflow = DefaultProductWorkflow::new(inbound, ledger, binding_service);
@@ -904,6 +1135,7 @@ impl<'g> RebornThreadBuilder<'g> {
             baseline_result_count,
             baseline_process_count,
             baseline_network_count,
+            baseline_turn_event_count,
         })
     }
 }
