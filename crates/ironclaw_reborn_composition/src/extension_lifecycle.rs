@@ -972,13 +972,17 @@ impl RebornLocalExtensionManagementPort {
         // — a capability-id collision against ANOTHER extension (extension ids
         // may contain dots, so `a` v2 declaring `a.b.tool` collides with an
         // installed `a.b`) would then leave the user's tool dead with no way to
-        // retry. `validate_replacement` runs the same collision check the swap
-        // would, excluding the v1 package about to be superseded, so a colliding
-        // bundle is rejected while the private install is still intact.
+        // retry. `validate_slot_replaceable` runs that collision check excluding
+        // this id, so a colliding bundle is rejected while the private install is
+        // still intact. It deliberately does NOT require the previous package to
+        // still be registered: a prior replace that evicted (deregistering the
+        // package) then failed at materialize/persist leaves the store row
+        // present but the package gone, and the admin's retry must still heal the
+        // slot rather than dead-end on `ExtensionNotFound`.
         {
             let lifecycle = self.lifecycle_service.lock().await;
             lifecycle
-                .validate_replacement(&package.package)
+                .validate_slot_replaceable(&package.package)
                 .map_err(map_extension_error)?;
         }
 
@@ -2682,6 +2686,103 @@ mod tests {
             owners
                 .get(&ExtensionId::new("fixture").unwrap())
                 .expect("fixture installed")
+                .is_tenant(),
+            "the slot must heal to a tenant install, not stay bricked"
+        );
+    }
+
+    /// Regression for the fix E pre-check: an import-REPLACE over a private slot
+    /// that fails at persist AFTER eviction (deregistering the previous package)
+    /// must still heal on retry. The slot-replaceable pre-check must NOT require
+    /// the superseded package to be registered — otherwise the retry dead-ends on
+    /// `ExtensionNotFound` and the private slot stays bricked until a restart.
+    #[tokio::test]
+    async fn import_replace_over_private_retry_heals_after_persist_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
+        let mut filesystem = LocalFilesystem::new();
+        filesystem
+            .mount_local(
+                VirtualPath::new("/projects").expect("valid virtual path"),
+                HostPath::from_path_buf(storage_root.clone()),
+            )
+            .expect("mount storage root");
+        filesystem
+            .mount_local(
+                VirtualPath::new("/system/extensions").expect("valid virtual path"),
+                HostPath::from_path_buf(storage_root.join("system/extensions")),
+            )
+            .expect("mount system extensions");
+        let root_filesystem: Arc<dyn RootFilesystem> = Arc::new(filesystem);
+        let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let store = Arc::new(DeleteInstallationFailingStore::default());
+        let store_dyn: Arc<dyn ExtensionInstallationStore> = store.clone();
+        let port = RebornLocalExtensionManagementPort::new(
+            root_filesystem,
+            AvailableExtensionCatalog::from_packages(vec![]),
+            store_dyn,
+            Arc::new(Mutex::new(ExtensionLifecycleService::new(
+                ExtensionRegistry::new(),
+            ))),
+            test_active_extension_publisher(
+                Arc::clone(&active_registry),
+                test_extension_trust_policy(),
+            ),
+            lifecycle_owner(),
+        );
+
+        let admin = lifecycle_owner();
+        let member = UserId::new("member").expect("member");
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "replace-me")
+            .expect("replace-me ref");
+
+        // Admin imports v1 into a vacant slot; a member installs it privately.
+        let v1 = replace_test_manifest("replace-me", "0.1.0", &["one"]);
+        port.import_bundle(
+            &replace_test_bundle(&v1, b"\0asm\x01\0\0\0v1"),
+            ExtensionImportMode::Add,
+            None,
+            &admin,
+        )
+        .await
+        .expect("v1 import");
+        port.install(package_ref, &member)
+            .await
+            .expect("member installs v1 privately");
+
+        // Admin replace fails at persist, AFTER eviction has deregistered the
+        // private package (the replace path persists via
+        // upsert_manifest_and_installation).
+        store
+            .fail_next_upsert_manifest_and_installation
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let v2 = replace_test_manifest("replace-me", "0.2.0", &["one", "two"]);
+        port.import_bundle(
+            &replace_test_bundle(&v2, b"\0asm\x01\0\0\0v2"),
+            ExtensionImportMode::Replace,
+            None,
+            &admin,
+        )
+        .await
+        .expect_err("persist failure aborts the replace");
+
+        // Retry: the pre-check must tolerate the already-evicted (deregistered)
+        // package and heal the slot to a tenant install.
+        port.import_bundle(
+            &replace_test_bundle(&v2, b"\0asm\x01\0\0\0v2"),
+            ExtensionImportMode::Replace,
+            None,
+            &admin,
+        )
+        .await
+        .expect("admin retry heals the private slot after a partial replace");
+
+        let owners = port.installation_owners().await.expect("owners");
+        assert!(
+            owners
+                .get(&ExtensionId::new("replace-me").unwrap())
+                .expect("replace-me installed")
                 .is_tenant(),
             "the slot must heal to a tenant install, not stay bricked"
         );
@@ -5616,6 +5717,10 @@ mod tests {
         /// #5459 P1: fail the NEXT `upsert_installation` once, then clear —
         /// simulates a mid-install persist failure so the retry can heal.
         fail_next_upsert_installation: std::sync::atomic::AtomicBool,
+        /// #5459 P1.5: fail the NEXT `upsert_manifest_and_installation` once,
+        /// then clear — simulates a mid-replace persist failure (the replace path
+        /// persists through this call, not `upsert_installation`).
+        fail_next_upsert_manifest_and_installation: std::sync::atomic::AtomicBool,
     }
 
     impl DeleteInstallationFailingStore {
@@ -5675,6 +5780,14 @@ mod tests {
             manifest: ExtensionManifestRecord,
             installation: ExtensionInstallation,
         ) -> Result<(), ExtensionInstallationError> {
+            if self
+                .fail_next_upsert_manifest_and_installation
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(ExtensionInstallationError::InvalidInstallation {
+                    reason: "upsert manifest and installation failed".to_string(),
+                });
+            }
             self.inner
                 .upsert_manifest_and_installation(manifest, installation)
                 .await

@@ -90,14 +90,20 @@ impl ExtensionLifecycleService {
         self.registry.get_extension(id).is_some() && !self.disabled_extensions.contains(id)
     }
 
-    /// Check whether `package` could atomically replace the currently-registered
-    /// package of the same id — capability collisions validated against OTHER
-    /// extensions, excluding the package being superseded — WITHOUT committing
-    /// the swap. Callers that must fail before a destructive pre-step (e.g. the
+    /// Check whether `package` could take the slot of the same id — capability
+    /// collisions validated against OTHER extensions, excluding this id — WITHOUT
+    /// committing the swap and WITHOUT requiring the superseded package to be
+    /// registered. Callers that must fail before a destructive pre-step (e.g. the
     /// admin-wins eviction of a private install) use this so a bundle that would
-    /// not be insertable is rejected before the previous install is torn down.
-    pub fn validate_replacement(&self, package: &ExtensionPackage) -> Result<(), ExtensionError> {
-        self.registry.validate_replacement(package)
+    /// not be insertable is rejected before the previous install is torn down —
+    /// and, crucially, so a retry after a partial-failure rollback (where the
+    /// previous package was already deregistered) still succeeds instead of
+    /// dead-ending on `ExtensionNotFound`.
+    pub fn validate_slot_replaceable(
+        &self,
+        package: &ExtensionPackage,
+    ) -> Result<(), ExtensionError> {
+        self.registry.validate_slot_replaceable(package)
     }
 
     pub async fn install(&mut self, package: ExtensionPackage) -> Result<(), ExtensionError> {

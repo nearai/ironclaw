@@ -54,6 +54,22 @@ impl ExtensionRegistry {
         self.validate_capabilities_available(package, Some(&package.id))
     }
 
+    /// Like [`validate_replacement`], but does NOT require the superseded
+    /// package of the same id to currently be registered. Capability collisions
+    /// are checked against OTHER extensions, excluding this id: if a same-id
+    /// package is registered its capabilities are treated as replaceable, and if
+    /// it is absent this degrades to a plain insertability check. Callers that
+    /// must pre-validate a slot takeover which may run after the previous
+    /// package was already deregistered (e.g. a retried admin-wins eviction)
+    /// use this so a partial-failure retry cannot dead-end on `ExtensionNotFound`.
+    pub(crate) fn validate_slot_replaceable(
+        &self,
+        package: &ExtensionPackage,
+    ) -> Result<(), ExtensionError> {
+        validate_package_consistency(package)?;
+        self.validate_capabilities_available(package, Some(&package.id))
+    }
+
     fn validate_capabilities_available(
         &self,
         package: &ExtensionPackage,
