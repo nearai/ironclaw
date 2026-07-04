@@ -749,6 +749,79 @@ impl fmt::Debug for SlackPersonalSetupServiceSlot {
     }
 }
 
+/// Minimal in-memory [`SlackInstallationSetupStore`] backing the tests-only
+/// filled-slot seam below.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Default)]
+struct InMemorySlackSetupStore {
+    setup: std::sync::Mutex<Option<SlackInstallationSetup>>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[async_trait]
+impl SlackInstallationSetupStore for InMemorySlackSetupStore {
+    async fn get_slack_installation_setup(
+        &self,
+    ) -> Result<Option<SlackInstallationSetup>, SlackSetupError> {
+        Ok(self.setup.lock().expect("setup lock").clone())
+    }
+
+    async fn put_slack_installation_setup(
+        &self,
+        setup: &SlackInstallationSetup,
+    ) -> Result<(), SlackSetupError> {
+        *self.setup.lock().expect("setup lock") = Some(setup.clone());
+        Ok(())
+    }
+
+    async fn delete_slack_installation_setup(&self) -> Result<(), SlackSetupError> {
+        *self.setup.lock().expect("setup lock") = None;
+        Ok(())
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl SlackPersonalSetupServiceSlot {
+    /// Tests-only filled slot mirroring the production fill path
+    /// (`SlackHostBetaMounts::fill_slack_personal_oauth_slot`, driven by the
+    /// `ironclaw-reborn serve` wiring): an in-memory [`SlackSetupService`]
+    /// seeded with bot credentials plus the given personal-OAuth client
+    /// id/secret. Exists so caller-level serve tests can drive the composed
+    /// router's Slack OAuth start route; ships zero bytes in production
+    /// binaries.
+    pub async fn filled_with_in_memory_setup_for_tests(
+        redirect_uri: OAuthRedirectUri,
+        oauth_client_id: &str,
+        oauth_client_secret: &str,
+    ) -> Self {
+        let slot = Self::new(redirect_uri);
+        let service = Arc::new(SlackSetupService::new(
+            TenantId::new("tenant:test").expect("valid test tenant"),
+            AgentId::new("agent:test").expect("valid test agent"),
+            None,
+            UserId::new("user:operator").expect("valid test operator"),
+            Arc::new(InMemorySlackSetupStore::default()),
+            Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
+        ));
+        service
+            .save(SlackInstallationSetupUpdate {
+                installation_id: "install-test".to_string(),
+                team_id: "T-test".to_string(),
+                api_app_id: "A-test".to_string(),
+                user_id: Some("user:operator".to_string()),
+                shared_subject_user_id: None,
+                bot_token: Some(SecretString::from("xoxb-test")),
+                signing_secret: Some(SecretString::from("signing-test")),
+                oauth_client_id: Some(oauth_client_id.to_string()),
+                oauth_client_secret: Some(SecretString::from(oauth_client_secret.to_string())),
+            })
+            .await
+            .expect("seed in-memory Slack setup");
+        slot.fill(service);
+        slot
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

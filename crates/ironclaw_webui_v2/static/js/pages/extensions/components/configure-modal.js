@@ -80,10 +80,20 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
     }
     submitMutation.mutate({ secrets: secretPayload, fields: fieldValues });
   }, [values, fieldValues, submitMutation]);
+  const [popupBlockedError, setPopupBlockedError] = React.useState("");
   const handleOauth = React.useCallback(
     (secret) => {
       const popup = window.open("about:blank", "_blank", "width=600,height=600");
       if (popup) popup.opener = null;
+      // Unlike the later noopener open (which returns null even on success
+      // per spec), a null pre-open reliably means the browser blocked the
+      // popup — surface it and stop before burning the OAuth flow start,
+      // mirroring the in-chat startOnboardingOAuth guard.
+      if (!popup) {
+        setPopupBlockedError("Authorization popup was blocked.");
+        return;
+      }
+      setPopupBlockedError("");
       oauthMutation.mutate({ secret, popup });
     },
     [oauthMutation]
@@ -370,6 +380,16 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
           className="mt-4 rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200"
         >
           ${oauthMutation.authError}
+        </div>
+      `}
+      ${!oauthMutation.error &&
+      !oauthMutation.authError &&
+      popupBlockedError &&
+      html`
+        <div
+          className="mt-4 rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200"
+        >
+          ${popupBlockedError}
         </div>
       `}
 

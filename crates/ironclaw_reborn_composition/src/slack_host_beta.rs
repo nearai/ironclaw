@@ -437,6 +437,7 @@ impl SlackHostBetaMounts {
         SlackPersonalOAuthBindingConfig::new(
             Arc::clone(&self.personal_oauth_binder),
             Arc::clone(&self.personal_connection_scope_resolver),
+            Arc::clone(&self.user_identity_delete_store),
         )
     }
 }

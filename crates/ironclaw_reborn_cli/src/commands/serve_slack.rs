@@ -4,7 +4,6 @@ use std::path::Path;
 #[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_reborn_composition::SlackHostBetaRuntimeConfig;
 
-#[cfg(feature = "slack-v2-host-beta")]
 const SLACK_ENABLED_ENV: &str = "IRONCLAW_REBORN_SLACK_ENABLED";
 
 #[cfg(feature = "slack-v2-host-beta")]
@@ -29,7 +28,6 @@ pub(crate) fn resolve_slack_config_for_serve(
     Ok(Some(runtime_config))
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 fn slack_enabled(section: Option<&ironclaw_reborn_config::SlackSection>) -> anyhow::Result<bool> {
     match std::env::var(SLACK_ENABLED_ENV) {
         Ok(value) => parse_slack_enabled_bool(SLACK_ENABLED_ENV, value.as_str()),
@@ -40,7 +38,6 @@ fn slack_enabled(section: Option<&ironclaw_reborn_config::SlackSection>) -> anyh
     }
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 fn parse_slack_enabled_bool(field: &str, value: &str) -> anyhow::Result<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Ok(true),
@@ -51,13 +48,21 @@ fn parse_slack_enabled_bool(field: &str, value: &str) -> anyhow::Result<bool> {
 
 #[cfg(not(feature = "slack-v2-host-beta"))]
 pub(crate) fn resolve_slack_config_for_serve(
-    _section: Option<&ironclaw_reborn_config::SlackSection>,
+    section: Option<&ironclaw_reborn_config::SlackSection>,
     _tenant_id: &ironclaw_reborn_composition::host_api::TenantId,
     _default_agent_id: &ironclaw_reborn_composition::host_api::AgentId,
     _default_project_id: Option<&ironclaw_reborn_composition::host_api::ProjectId>,
     _default_user_id: &ironclaw_reborn_composition::host_api::UserId,
     _config_path: &std::path::Path,
 ) -> anyhow::Result<Option<()>> {
+    // Fail loud instead of silently starting without Slack: an operator who
+    // explicitly enabled Slack must learn the binary lacks the feature.
+    if slack_enabled(section)? {
+        anyhow::bail!(
+            "Slack enablement ([slack].enabled = true or {SLACK_ENABLED_ENV}=true) requires \
+             an ironclaw-reborn binary built with the `slack-v2-host-beta` Cargo feature"
+        );
+    }
     Ok(None)
 }
 
@@ -111,6 +116,64 @@ mod tests {
         .expect("Slack config resolves without section");
 
         assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn parse_slack_enabled_bool_accepts_known_values_and_rejects_garbage() {
+        for value in ["1", "true", "YES", " on "] {
+            assert!(parse_slack_enabled_bool("test_field", value).expect("truthy value parses"));
+        }
+        for value in ["0", "false", "No", "off"] {
+            assert!(!parse_slack_enabled_bool("test_field", value).expect("falsy value parses"));
+        }
+        assert!(parse_slack_enabled_bool("test_field", "maybe").is_err());
+    }
+
+    #[cfg(not(feature = "slack-v2-host-beta"))]
+    #[test]
+    fn slack_config_rejects_enabled_section_without_feature() {
+        let section = ironclaw_reborn_config::SlackSection {
+            enabled: Some(true),
+            ..Default::default()
+        };
+
+        let err = resolve_slack_config_for_serve(
+            Some(&section),
+            &ironclaw_reborn_composition::host_api::TenantId::new("tenant").expect("valid tenant"),
+            &ironclaw_reborn_composition::host_api::AgentId::new("agent").expect("valid agent"),
+            None,
+            &ironclaw_reborn_composition::host_api::UserId::new("web-user").expect("valid user"),
+            std::path::Path::new("/tmp/reborn-config.toml"),
+        )
+        .expect_err("explicitly enabled Slack must fail loud without the feature");
+
+        assert!(
+            err.to_string()
+                .contains("requires an ironclaw-reborn binary built with")
+        );
+    }
+
+    #[cfg(not(feature = "slack-v2-host-beta"))]
+    #[test]
+    fn slack_config_is_noop_without_feature_when_disabled_or_unset() {
+        let disabled = ironclaw_reborn_config::SlackSection {
+            enabled: Some(false),
+            ..Default::default()
+        };
+        for section in [None, Some(&disabled)] {
+            let resolved = resolve_slack_config_for_serve(
+                section,
+                &ironclaw_reborn_composition::host_api::TenantId::new("tenant")
+                    .expect("valid tenant"),
+                &ironclaw_reborn_composition::host_api::AgentId::new("agent").expect("valid agent"),
+                None,
+                &ironclaw_reborn_composition::host_api::UserId::new("web-user")
+                    .expect("valid user"),
+                std::path::Path::new("/tmp/reborn-config.toml"),
+            )
+            .expect("disabled or unset Slack resolves without the feature");
+            assert!(resolved.is_none());
+        }
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
