@@ -96,16 +96,33 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
   (`submit_turn_until_blocked` / `approve_gate` / `deny_gate` / `enable_auto_approve`),
   and the `pub(super)` capture accessors (`captured_egress_requests` /
   `captured_capability_results` / `captured_system_prompts`) the assertion file reads.
-- `harness_mcp.rs` — the mock-MCP scaffolding extracted from `harness.rs`:
+- `harness_mcp.rs` — the mock-MCP scaffolding extracted from the harness:
   `LoopbackMcpRuntimeHttpEgress` (the real-HTTP loopback egress), the
   `LoopbackMcpRuntime` type alias + `build_loopback_mcp_runtime` factory,
   `mock_mcp_extension_package`, `local_dev_host_runtime_with_registry_egress_and_mcp`,
   and the MCP trust/network policies. `HostRuntimeCapabilityHarness::mock_mcp_tools`
-  stays in `harness.rs` (it is a full `Self {..}` constructor co-located with its
-  sibling constructors and would otherwise force every private field of the central
-  harness struct to widen); it delegates the MCP wiring to the `pub(super)` factories
-  in `harness_mcp.rs`. `harness.rs` remains large (a further `harness_auth.rs`
-  split is tracked in the coverage roadmap).
+  lives in `harness/profiles/mock_mcp.rs` (part of the `ToolsProfile` split below);
+  it delegates the MCP wiring to the `pub(super)` factories in `harness_mcp.rs`.
+- `harness/` — the `HostRuntimeCapabilityHarness` split (was a single `harness.rs`):
+  `harness/mod.rs` (the central struct, `new_with_options`, and constructors),
+  `harness/assembly.rs` (composition/wiring helpers), `harness/options.rs`
+  (`HostRuntimeHarnessOptions`, `ToolsProfile` + `build()`), `harness/recorder.rs`
+  (`HarnessCapabilityRecorder`, `RecordedCapabilityResult`), and
+  `harness/profiles/<domain>.rs` — one file per capability domain (`attachment`,
+  `coding_read`, `core_builtin`, `extension`, `file`, `github`, `mock_mcp`,
+  `outbound`, `process`, `profile`, `project`, `qa_smoke`, `skill`,
+  `trace_commons`, `trigger`, `web_access`) — each returning a `ToolsProfile` via
+  a constructor like `profiles::file::file_tools_requiring_approval()` or
+  `profiles::core_builtin::core_builtin_tools(CoreBuiltinOptions)`.
+- `doubles/` — one file per production-port test double substituted into the
+  harness (`RecordingTestCapabilityPort`, `RecordingHostRuntime`,
+  `RecordingRuntimeHttpEgress`, `RecordingNetworkHttpEgress`,
+  `RecordingApprovalRequestStore`, `RecordingCapabilityResultWriter`,
+  `GithubHarnessAuthorizer`, `StaticSecretStore`,
+  `StaticCapabilitySurfaceProfileResolver`,
+  `FixedRuntimeCredentialAccountResolver`, `EmptyIdentityContextSource`,
+  `HarnessCapabilityPortFactory`, `HostRuntimeHarnessCapabilityPortFactory`),
+  re-exported from `doubles/mod.rs`.
 - `group_constructors.rs` — the per-capability `RebornIntegrationGroup` /
   `RebornIntegrationGroupBuilder` preset constructors (`live_approvals`,
   `builtin_tools`, `extension_lifecycle`, `skill_management_tools`, etc.), a
@@ -127,9 +144,19 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
   model-prompt assertion `assert_system_prompt_contains` (reads the scripted
   `TraceLlm`'s captured requests via `captured_system_prompts`, not the egress
   log).
-- Tests live as flat `tests/reborn_*.rs` (Cargo requires top-level test files).
+- Tests live as flat `tests/integration/<name>.rs` bins (Cargo requires
+  top-level-per-bin test files), each registered as its own `[[test]]` in the
+  workspace `Cargo.toml` with `name = "reborn_integration_<name>"`.
 
-Module paths: each `tests/reborn_*.rs` declares both `#[path = "support/reborn/mod.rs"] mod reborn_support;` and `mod support;`, then `use reborn_support::builder::RebornIntegrationHarness;` / `use reborn_support::reply::RebornScriptedReply;`. Inside the support tree, siblings reference each other via `super::` and `trace_llm` via `crate::support::trace_llm` (there is no `crate::support::reborn` path). Copy the includes from `tests/reborn_integration_greeting.rs`.
+Module paths: each `tests/integration/<name>.rs` declares both
+`#[path = "support/mod.rs"] mod reborn_support;` and
+`#[path = "../support/mod.rs"] mod support;`, then
+`use reborn_support::builder::RebornIntegrationHarness;` /
+`use reborn_support::reply::RebornScriptedReply;`. Inside the support tree,
+siblings reference each other via `super::` and `trace_llm` via
+`crate::support::trace_llm` (the top-level `tests/support/` tree, mounted
+separately from `tests/integration/support/` via the second `#[path]`). Copy
+the includes from `tests/integration/greeting.rs`.
 
 Design rationale: see git history.
 
@@ -195,7 +222,7 @@ of `assert_system_prompt_contains`, which reads only System-role model
 requests); `assert_conversation_history_role_contains(kind, needle)` restricts
 it to one `MessageKind`. Contracts (class discrimination, fail-loud decode)
 match the full-history siblings — see their doc-comments. Demo + regression:
-`tests/reborn_integration_http_matcher.rs::multi_turn_baseline_sliced_history_assertions`.
+`tests/integration/http_matcher.rs::multi_turn_baseline_sliced_history_assertions`.
 
 ### Keyed HTTP responses
 
@@ -339,7 +366,7 @@ On a harness built from a `live_approvals` group:
 
 ### Test-support crate accessors
 
-`HostRuntimeCapabilityHarness` (in `harness.rs`, gated on `#[cfg(feature = "test-support")]`) exposes:
+`HostRuntimeCapabilityHarness` (in `harness/mod.rs`, gated on `#[cfg(feature = "test-support")]`) exposes:
 
 - `extension_installation_store_for_test()` — returns the `Option<Arc<dyn ExtensionInstallationStore>>` wired into the local-dev extension management port; mirrors the production installation store for test read-back assertions. Returns `None` when the local runtime has no extension management wired.
 
@@ -371,14 +398,14 @@ the shared runtime** — either:
   model can exercise.
 
 A scenario that submits + asserts in one thread belongs in a flat
-`tests/reborn_integration_*.rs` test as always.
+`tests/integration/<name>.rs` test as always.
 
 ### Group test binary layout
 
-Group tests live in subdirectories under `tests/`:
+Group tests live in subdirectories under `tests/integration/`:
 
 ```
-tests/reborn_group_approvals/
+tests/integration/group_approvals/
     main.rs                              # one #[tokio::test], drives scenarios in order
     scenario_gate_then_resolve.rs        # pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()>
     scenario_approve_always_persists.rs
@@ -390,14 +417,14 @@ Cargo discovers multi-file integration test binaries via `[[test]]` entries in
 ```toml
 [[test]]
 name = "reborn_group_approvals"
-path = "tests/reborn_group_approvals/main.rs"
+path = "tests/integration/group_approvals/main.rs"
 ```
 
 ### `main.rs` boilerplate (required)
 
 ```rust
-#[allow(dead_code)] #[path = "../support/reborn/mod.rs"] mod reborn_support;
-#[allow(dead_code)] #[path = "../support/mod.rs"] mod support;
+#[allow(dead_code)] #[path = "../support/mod.rs"] mod reborn_support;
+#[allow(dead_code)] #[path = "../../support/mod.rs"] mod support;
 
 mod scenario_gate_then_resolve;
 mod scenario_approve_always_persists;
@@ -470,7 +497,7 @@ On a `live_auth_and_approval()` group thread:
 - `deny_auth_gate(run_id, &gate_ref)` — works on both auth-gate groups.
 
 Multi-turn journey chaining (gate -> resolve -> next turn on ONE
-conversation) is pinned by `tests/reborn_group_journeys/`; per-turn resume
+conversation) is pinned by `tests/integration/group_journeys/`; per-turn resume
 idempotency keys are `(run_id, gate_ref)`-scoped so one run can resume
 through an approval gate and a subsequent auth gate without replay collision.
 
@@ -485,7 +512,7 @@ shared runtime resolves each turn's thread by the run's own owner
 per-op `/threads` mount), so two actors' threads coexist over one
 coordinator with their history isolated under separate
 `/tenants/<tenant>/users/<user>/threads` subtrees. Driving test:
-`tests/reborn_group_multiuser/`.
+`tests/integration/group_multiuser/`.
 
 ### Key accessors on `RebornIntegrationGroup`
 

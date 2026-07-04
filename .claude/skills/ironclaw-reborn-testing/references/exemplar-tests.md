@@ -12,13 +12,13 @@ Living companions to the tier tree in `../SKILL.md`. Each exemplar is a real in-
 
 ## 1. Side-effect proof at the caller
 
-`tests/reborn_group_approvals/scenario_gate_then_approve.rs` — drives a scripted `builtin.write_file` through the **real** stack: first-party runtime → `PermissionMode::Ask` → `TurnStatus::BlockedApproval` → real `ApprovalResolver::approve_dispatch` (lease issued) → `coordinator.resume_turn` → `Completed` — and then **asserts the file exists on disk**. The assertion target is the side effect itself, not a mock's call count. When your change gates a side effect, this is the shape: drive the public entry point, assert the world changed. Re-verify: `ls tests/reborn_group_approvals/`.
+`tests/integration/group_approvals/scenario_gate_then_approve.rs` — drives a scripted `builtin.write_file` through the **real** stack: first-party runtime → `PermissionMode::Ask` → `TurnStatus::BlockedApproval` → real `ApprovalResolver::approve_dispatch` (lease issued) → `coordinator.resume_turn` → `Completed` — and then **asserts the file exists on disk**. The assertion target is the side effect itself, not a mock's call count. When your change gates a side effect, this is the shape: drive the public entry point, assert the world changed. Re-verify: `ls tests/integration/group_approvals/`.
 
 ## 2. The scripted-model harness seam
 
-The in-process harness (`tests/support/reborn/`, spec in its `CLAUDE.md`) fakes exactly one thing: the vendor SDK at the bottom (`TraceLlm`). Everything else — product workflow, coordinator, scheduler, agent loop, the real `ironclaw_llm` retry/failover/circuit-breaker chain — executes for real, and assertions read *persisted state* (filesystem, thread history), never internals.
+The in-process harness (`tests/integration/support/`, spec in its `CLAUDE.md`) fakes exactly one thing: the vendor SDK at the bottom (`TraceLlm`). Everything else — product workflow, coordinator, scheduler, agent loop, the real `ironclaw_llm` retry/failover/circuit-breaker chain — executes for real, and assertions read *persisted state* (filesystem, thread history), never internals.
 
-- **Right**: mock at the vendor-SDK seam; assert from durable state; `cargo test --test reborn_<name>` runs offline with zero setup.
+- **Right**: mock at the vendor-SDK seam; assert from durable state; `cargo test --test reborn_integration_<name>` runs offline with zero setup.
 - **Wrong**: mocking at the gateway seam (skips the whole `ironclaw_llm` chain — that's the separate binary-replay tier's job); hand-building `TraceStep`s; asserting on internal structs.
 
 ## 3. The declare/enforce contract pair
