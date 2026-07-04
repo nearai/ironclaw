@@ -3,14 +3,9 @@
 //!
 //! Single production-owned entry point for driving a triggered run's
 //! materialization step in an integration-test harness — see
-//! [`materialize_trigger_prompt_for_test`]. Extracted per the PR #5584 review
-//! ("This helper now hand-mirrors most of `ConversationContentRefMaterializer::materialize_prompt`
-//! ... trusted-trigger materialization is an ownership boundary called out in
-//! `AGENTS.md:61`, and duplicating it here means future changes to trigger
-//! binding/thread recording can drift from the integration path"): the
-//! integration-test crate now calls ONE production-owned helper instead of
-//! hand-mirroring `trigger_resolve_request` + `record_trigger_prompt` + the
-//! content-ref shape field-by-field.
+//! [`materialize_trigger_prompt_for_test`]. This helper routes tests through
+//! `ConversationContentRefMaterializer::materialize_prompt` so they avoid
+//! duplicating trusted-trigger materialization.
 
 /// Materialize a `TriggerFire`'s prompt through the REAL trusted-trigger
 /// pipeline (`ConversationContentRefMaterializer::materialize_prompt` —
