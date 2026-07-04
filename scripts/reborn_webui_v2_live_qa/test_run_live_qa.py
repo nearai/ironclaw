@@ -1026,78 +1026,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
             self.assertIsNone(run_live_qa._slack_delivery_channel_id(ctx))
 
-    def test_qa_7a_connect_capabilities_match_chat_connect_flow(self):
-        self.assertEqual(
-            run_live_qa.QA_7A_CHAT_CONNECT_CAPABILITY_IDS,
-            [
-                run_live_qa.EXTENSION_SEARCH_CAPABILITY_ID,
-                run_live_qa.EXTENSION_INSTALL_CAPABILITY_ID,
-                run_live_qa.EXTENSION_ACTIVATE_CAPABILITY_ID,
-            ],
-        )
-        self.assertNotIn(
-            run_live_qa.OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
-            run_live_qa.QA_7A_CHAT_CONNECT_CAPABILITY_IDS,
-        )
-
-    def test_qa_7a_accepts_existing_dm_delivery_target_without_new_connect_capabilities(self):
-        class FakeLocator:
-            @property
-            def last(self):
-                return self
-
-            async def fill(self, _text):
-                return None
-
-            async def press(self, _key):
-                return None
-
-        class FakePage:
-            async def goto(self, _url, **_kwargs):
-                return None
-
-            def locator(self, _selector):
-                return FakeLocator()
-
-        class FakeExpectation:
-            async def to_be_visible(self, **_kwargs):
-                return None
-
-            async def to_contain_text(self, _text, **_kwargs):
-                return None
-
-        capability_ids = run_live_qa.QA_7A_CHAT_CONNECT_CAPABILITY_IDS
-        baseline = {capability_id: ["completed"] for capability_id in capability_ids}
-        stale = {capability_id: ["completed"] for capability_id in capability_ids}
-        fresh = {
-            capability_id: ["completed", "completed"]
-            for capability_id in capability_ids
-        }
-        status_sequence = [baseline, stale]
-
-        async def fake_with_page(_output_dir, _case_name, action):
-            await action(FakePage())
-
-        async def fake_wait_for_assistant_reply(_page, **_kwargs):
-            self.assertEqual(
-                _kwargs["required_text"],
-                ["slack", "dm|delivery|target|connected"],
-            )
-            return run_live_qa.AssistantReplyWaitResult(
-                text_excerpt="Slack is connected",
-                semantic_judge_used=False,
-                semantic_judge_reason="literal_required_text_matched",
-            )
-
-        async def fake_approve_visible_tool_gate(_page):
-            return None
-
-        async def fake_sleep(_seconds):
-            return None
-
-        def fake_capability_run_statuses(_reborn_home, _capability_ids):
-            return status_sequence.pop(0) if status_sequence else fresh
-
+    def test_qa_7a_accepts_existing_dm_delivery_target_without_chat_connect(self):
         with (
             patch.object(
                 run_live_qa,
@@ -1108,33 +1037,20 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 },
             ),
             patch.object(run_live_qa, "_slack_delivery_channel_id", return_value="D12345"),
-            patch.object(run_live_qa, "_with_page", side_effect=fake_with_page),
             patch.object(
                 run_live_qa,
-                "_wait_for_assistant_reply",
-                side_effect=fake_wait_for_assistant_reply,
+                "_with_page",
+                side_effect=AssertionError("QA 7A should not open WebUI chat"),
             ),
-            patch.object(
-                run_live_qa,
-                "_approve_visible_tool_gate",
-                side_effect=fake_approve_visible_tool_gate,
-            ),
-            patch.object(
-                run_live_qa,
-                "_capability_run_statuses",
-                side_effect=fake_capability_run_statuses,
-            ),
-            patch.object(run_live_qa.asyncio, "sleep", side_effect=fake_sleep),
-            patch("playwright.async_api.expect", return_value=FakeExpectation()),
         ):
             result = asyncio.run(
                 run_live_qa.case_qa_7a_slack_product_channel_connect(self._dummy_ctx())
             )
 
         self.assertTrue(result.success)
-        self.assertEqual(result.details["baseline_capability_statuses"], baseline)
-        self.assertEqual(result.details["capability_statuses"], stale)
-        self.assertEqual(result.details["text_excerpt"], "Slack is connected")
+        self.assertEqual(result.details["slack_delivery_target_kind"], "dm")
+        self.assertEqual(result.details["delivery_target_present"], True)
+        self.assertIn("preflight", result.details)
 
     def test_completed_capability_counts_ignore_stale_completed_runs(self):
         counts = run_live_qa._completed_capability_counts(

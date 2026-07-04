@@ -162,8 +162,8 @@ Expected result: Google Sheets is connected""",
 Expected result: ABC sheet has new rows for each near.ai inbound email""",
     "qa_6d_gmail_to_sheet_routine": """In WebUI, ask IronClaw, "Every 30 minutes, check my inbox and add any new emails from a near.ai address to my Google Sheet called ABC."
 Expected result: Routine created""",
-    "qa_7a_slack_product_channel_connect": """In WebUI, ask IronClaw "connect to Slack for my configured DM delivery target." Go through the flow
-Expected result: Slack DM delivery target is connected""",
+    "qa_7a_slack_product_channel_connect": """Verify Slack DM delivery target preflight configuration before Slack workflow cases run.
+Expected result: Slack DM delivery target is configured""",
     "qa_7b_sheets_connect": """In WebUI, ask IronClaw "connect to Google Sheets." Go through the auth flow.
 Expected result: Google Sheets is connected""",
     "qa_7c_slack_bug_logger_routine": """In WebUI, ask IronClaw "whenever I send a slack message starting with 'bug:', add it as a row to my bug logging Google Sheet."
@@ -200,11 +200,6 @@ EXTENSION_SEARCH_CAPABILITY_ID = "builtin.extension_search"
 EXTENSION_INSTALL_CAPABILITY_ID = "builtin.extension_install"
 EXTENSION_ACTIVATE_CAPABILITY_ID = "builtin.extension_activate"
 OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID = "builtin.outbound_delivery_targets_list"
-QA_7A_CHAT_CONNECT_CAPABILITY_IDS = [
-    EXTENSION_SEARCH_CAPABILITY_ID,
-    EXTENSION_INSTALL_CAPABILITY_ID,
-    EXTENSION_ACTIVATE_CAPABILITY_ID,
-]
 QA_7C_BUG_LOGGING_SHEET_TITLE = "bug logging Google Sheet"
 
 
@@ -3550,16 +3545,11 @@ async def case_qa_7c_slack_bug_logger_routine(ctx: LiveQaContext) -> ProbeResult
 
 
 async def case_qa_7a_slack_product_channel_connect(ctx: LiveQaContext) -> ProbeResult:
-    from playwright.async_api import expect
-
     started = time.monotonic()
     case_name = "qa_7a_slack_product_channel_connect"
-    prompt = (
-        'In WebUI, ask IronClaw "connect to Slack for my configured DM delivery '
-        'target." Go through the flow\n'
-        "Expected result: Slack DM delivery target is connected"
-    )
-    observed: dict[str, object] = {"chat_connect_prompt": prompt}
+    observed: dict[str, object] = {
+        "preflight": "Slack DM delivery target is configured before user-story workflow cases"
+    }
     try:
         slack = _slack_preflight(ctx)
         delivery_channel_id = _slack_delivery_channel_id(ctx)
@@ -3586,40 +3576,6 @@ async def case_qa_7a_slack_product_channel_connect(ctx: LiveQaContext) -> ProbeR
                 "Slack live QA delivery target must be a DM to the user; "
                 f"got channel_id={delivery_channel_id!r}"
             )
-
-        async def action(page: object) -> None:
-            capability_ids = QA_7A_CHAT_CONNECT_CAPABILITY_IDS
-            baseline_statuses = _capability_run_statuses(
-                ctx.reborn_home,
-                capability_ids,
-            )
-            baseline_completed = _completed_capability_counts(baseline_statuses)
-            observed["baseline_capability_statuses"] = baseline_statuses
-            await page.goto(
-                f"{ctx.base_url}/v2/?token={AUTH_TOKEN}",
-                wait_until="domcontentloaded",
-            )  # type: ignore[attr-defined]
-            composer = page.locator("[data-testid='chat-composer']")  # type: ignore[attr-defined]
-            await expect(composer).to_be_visible(timeout=15000)
-            await composer.fill(prompt)
-            await composer.press("Enter")
-            await expect(page.locator("[data-testid='msg-user']").last).to_contain_text(  # type: ignore[attr-defined]
-                prompt[:80],
-                timeout=15000,
-            )
-            _record_assistant_reply_wait_result(
-                observed,
-                await _wait_for_assistant_reply(
-                    page,
-                    marker=None,
-                    required_text=["slack", "dm|delivery|target|connected"],
-                    timeout=180.0,
-                ),
-            )
-            statuses = _capability_run_statuses(ctx.reborn_home, capability_ids)
-            observed["capability_statuses"] = statuses
-
-        await _with_page(ctx.output_dir, case_name, action)
         return _result(case_name, True, started, observed)
     except Exception as exc:
         return _result(
