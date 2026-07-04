@@ -430,14 +430,24 @@ fn slack_authed_user_token_response_extracts_user_token_and_scopes() {
 #[cfg(feature = "slack-v2-host-beta")]
 fn slack_token_response_rejects_ok_false() {
     let body = br#"{"ok":false,"error":"invalid_code"}"#;
-    assert!(parse_token_response(body, TokenResponseShape::SlackAuthedUser).is_err());
+    let error = parse_token_response(body, TokenResponseShape::SlackAuthedUser)
+        .expect_err("ok:false slack body must fail token parsing");
+    assert_eq!(
+        error.code(),
+        ironclaw_auth::AuthErrorCode::TokenExchangeFailed
+    );
 }
 
 #[test]
 #[cfg(feature = "slack-v2-host-beta")]
 fn slack_token_response_rejects_missing_authed_user() {
     let body = br#"{"ok":true,"access_token":"xoxb-bot-only"}"#;
-    assert!(parse_token_response(body, TokenResponseShape::SlackAuthedUser).is_err());
+    let error = parse_token_response(body, TokenResponseShape::SlackAuthedUser)
+        .expect_err("bot-only slack body must fail token parsing");
+    assert_eq!(
+        error.code(),
+        ironclaw_auth::AuthErrorCode::TokenExchangeFailed
+    );
 }
 
 fn google_spec() -> HostOAuthProviderSpec {
