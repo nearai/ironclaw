@@ -2000,13 +2000,53 @@ fn registry_with_github_package() -> ExtensionRegistry {
     )
 }
 
+const GITHUB_RUNTIME_AUTH_CREDENTIAL: &str =
+    r#"target = { type = "header", name = "authorization", prefix = "Bearer " } }"#;
+const OPTIONAL_GITHUB_RUNTIME_AUTH_CREDENTIAL: &str = r#"target = { type = "header", name = "authorization", prefix = "Bearer " }, required = false }"#;
+
 fn registry_with_optional_github_runtime_credentials() -> ExtensionRegistry {
     let manifest = std::fs::read_to_string(github_asset_root().join("manifest.toml")).unwrap();
-    let manifest = manifest.replace(
-        r#"target = { type = "header", name = "authorization", prefix = "Bearer " } }"#,
-        r#"target = { type = "header", name = "authorization", prefix = "Bearer " }, required = false }"#,
+    let replacement_count = manifest.matches(GITHUB_RUNTIME_AUTH_CREDENTIAL).count();
+    assert!(
+        replacement_count > 0,
+        "GitHub manifest auth credential shape changed; update optional credential test fixture"
     );
-    registry_from_github_manifest(&manifest)
+    let manifest = manifest.replace(
+        GITHUB_RUNTIME_AUTH_CREDENTIAL,
+        OPTIONAL_GITHUB_RUNTIME_AUTH_CREDENTIAL,
+    );
+    assert_eq!(
+        manifest
+            .matches(OPTIONAL_GITHUB_RUNTIME_AUTH_CREDENTIAL)
+            .count(),
+        replacement_count,
+        "optional GitHub credential rewrite should preserve the runtime credential count"
+    );
+
+    let registry = registry_from_github_manifest(&manifest);
+    let github_runtime_token = SecretHandle::new("github_runtime_token").unwrap();
+    let mut optional_github_runtime_credentials = 0;
+    let mut required_github_runtime_credentials = 0;
+    for credential in registry
+        .capabilities()
+        .flat_map(|descriptor| descriptor.runtime_credentials.iter())
+        .filter(|credential| credential.handle == github_runtime_token)
+    {
+        if credential.required {
+            required_github_runtime_credentials += 1;
+        } else {
+            optional_github_runtime_credentials += 1;
+        }
+    }
+    assert_eq!(
+        optional_github_runtime_credentials, replacement_count,
+        "optional credential fixture must rewrite every GitHub runtime token credential"
+    );
+    assert_eq!(
+        required_github_runtime_credentials, 0,
+        "optional credential fixture must not leave required GitHub runtime token credentials"
+    );
+    registry
 }
 
 fn registry_from_github_manifest(manifest: &str) -> ExtensionRegistry {
