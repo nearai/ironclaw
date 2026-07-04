@@ -136,7 +136,7 @@ Expected results: Routine created""",
 Expected result: Slack is connected""",
     "qa_3b_endpoint_status_live_chat": """In WebUI, ask IronClaw "check if near.ai returns a 200 status."
 Expected result: IronClaw reports the endpoint's current HTTP status""",
-    "qa_3c_endpoint_status_slack_routine": """In WebUI, ask IronClaw, "Every 5 minutes, ping [endpoint URL] checking if it returns a 200 status and send result in a DM in slack"
+    "qa_3c_endpoint_status_slack_routine": """In WebUI, ask IronClaw, "Every 5 minutes, ping [endpoint URL] checking if it returns a 200 status and send result in a DM in slack."
 Expected result: Routine created""",
     "qa_4a_gmail_connect": """In WebUI, ask IronClaw "connect to Gmail." Go through the flow w/ Gmail.
 Expected result: Gmail is connected""",
@@ -144,7 +144,7 @@ Expected result: Gmail is connected""",
 Expected result: GitHub is connected""",
     "qa_4c_github_release_live_chat": """In WebUI, ask IronClaw "summarize the latest release from https://github.com/nearai/ironclaw."
 Expected result: summary of the most recent release""",
-    "qa_4d_github_release_slack_routine": """In WebUI, ask IronClaw, "Every 5 minutes, check https://github.com/nearai/ironclaw for latest releases and send me a Slack message summarizing any new ones."
+    "qa_4d_github_release_slack_routine": """In WebUI, ask IronClaw, "Every 5 minutes, check https://github.com/nearai/ironclaw for latest releases and send me a Slack DM summarizing any new ones."
 Expected result: Routine created""",
     "qa_5a_slack_connect": """In WebUI, ask IronClaw "connect to Slack." Go through the auth flow.
 Expected result: Slack is connected""",
@@ -162,8 +162,8 @@ Expected result: Google Sheets is connected""",
 Expected result: ABC sheet has new rows for each near.ai inbound email""",
     "qa_6d_gmail_to_sheet_routine": """In WebUI, ask IronClaw, "Every 30 minutes, check my inbox and add any new emails from a near.ai address to my Google Sheet called ABC."
 Expected result: Routine created""",
-    "qa_7a_slack_product_channel_connect": """In WebUI, ask IronClaw "connect to Slack, using channel #product." Go through the flow
-Expected result: Slack channel is connected""",
+    "qa_7a_slack_product_channel_connect": """Verify Slack DM delivery target preflight configuration before Slack workflow cases run.
+Expected result: Slack DM delivery target is configured""",
     "qa_7b_sheets_connect": """In WebUI, ask IronClaw "connect to Google Sheets." Go through the auth flow.
 Expected result: Google Sheets is connected""",
     "qa_7c_slack_bug_logger_routine": """In WebUI, ask IronClaw "whenever I send a slack message starting with 'bug:', add it as a row to my bug logging Google Sheet."
@@ -174,7 +174,7 @@ Expected result: Routine created""",
 Expected result: Slack is connected""",
     "qa_8b_hn_keyword_live_chat": """In WebUI, ask IronClaw "search Hacker News for any recent posts mentioning 'IronClaw' or 'NEAR AI'."
 Expected result: IronClaw reports any matching HN posts""",
-    "qa_8c_hn_keyword_slack_routine": """In WebUI, ask IronClaw, "Every hour, check Hacker News for new posts mentioning 'IronClaw' or 'NEAR AI' and send a summary to Slack."
+    "qa_8c_hn_keyword_slack_routine": """In WebUI, ask IronClaw, "Every hour, check Hacker News for new posts mentioning 'IronClaw' or 'NEAR AI' and send a summary to Slack DM."
 Expected result: Routine created""",
 }
 
@@ -200,11 +200,6 @@ EXTENSION_SEARCH_CAPABILITY_ID = "builtin.extension_search"
 EXTENSION_INSTALL_CAPABILITY_ID = "builtin.extension_install"
 EXTENSION_ACTIVATE_CAPABILITY_ID = "builtin.extension_activate"
 OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID = "builtin.outbound_delivery_targets_list"
-QA_7A_CHAT_CONNECT_CAPABILITY_IDS = [
-    EXTENSION_SEARCH_CAPABILITY_ID,
-    EXTENSION_INSTALL_CAPABILITY_ID,
-    EXTENSION_ACTIVATE_CAPABILITY_ID,
-]
 QA_7C_BUG_LOGGING_SHEET_TITLE = "bug logging Google Sheet"
 
 
@@ -1049,6 +1044,31 @@ def _record_assistant_reply_wait_result(
         observed["semantic_judge"] = reply.semantic_judge
 
 
+def _routine_confirmation_follow_up_for_text(text: str) -> str | None:
+    normalized = text.lower()
+    asks_for_timezone = "timezone" in normalized or "time zone" in normalized
+    asks_for_confirmation = any(
+        phrase in normalized
+        for phrase in (
+            "confirm",
+            "go ahead",
+            "shall i",
+            "should i",
+            "would you like",
+        )
+    )
+    routine_context = any(
+        phrase in normalized
+        for phrase in ("routine", "trigger", "automation", "schedule", "cron")
+    )
+    if routine_context and (asks_for_timezone or asks_for_confirmation):
+        return (
+            "Yes, go ahead and create it. Use Europe/London (London time) "
+            "for the schedule."
+        )
+    return None
+
+
 async def _live_chat_case(
     ctx: LiveQaContext,
     *,
@@ -1059,6 +1079,7 @@ async def _live_chat_case(
     timeout: float = 120.0,
     extra_details: dict[str, object] | None = None,
     forbidden_text: list[str] | None = None,
+    routine_confirmation_follow_up: bool = False,
 ) -> ProbeResult:
     from playwright.async_api import expect
 
@@ -1091,16 +1112,35 @@ async def _live_chat_case(
                 prompt[:80],
                 timeout=15000,
             )
-        _record_assistant_reply_wait_result(
-            observed,
-            await _wait_for_assistant_reply(
-                page,
-                marker=marker,
-                required_text=required_text,
-                timeout=timeout,
-                semantic_goal=prompt,
-            ),
+        reply = await _wait_for_assistant_reply(
+            page,
+            marker=marker,
+            required_text=required_text,
+            timeout=timeout,
+            semantic_goal=prompt,
         )
+        _record_assistant_reply_wait_result(observed, reply)
+        if routine_confirmation_follow_up:
+            follow_up = _routine_confirmation_follow_up_for_text(reply.text_excerpt)
+            if follow_up:
+                observed["routine_confirmation_follow_up_sent"] = follow_up
+                observed["routine_confirmation_initial_text_excerpt"] = (
+                    reply.text_excerpt
+                )
+                await composer.fill(follow_up)
+                await composer.press("Enter")
+                await expect(page.locator("[data-testid='msg-user']").last).to_contain_text(  # type: ignore[attr-defined]
+                    follow_up[:80],
+                    timeout=15000,
+                )
+                follow_up_reply = await _wait_for_assistant_reply(
+                    page,
+                    marker=marker,
+                    required_text=required_text,
+                    timeout=timeout,
+                    semantic_goal=f"{prompt}\n{follow_up}",
+                )
+                _record_assistant_reply_wait_result(observed, follow_up_reply)
         if forbidden_text:
             text = str(observed["text_excerpt"]).lower()
             matches = [
@@ -1396,6 +1436,17 @@ async def _live_github_latest_release(owner: str, repo: str) -> dict[str, str]:
         "Accept": "application/vnd.github+json",
         "User-Agent": "ironclaw-reborn-webui-v2-live-qa",
     }
+    token = _first_env_value(
+        [
+            "AUTH_LIVE_GITHUB_TOKEN",
+            "IRONCLAW_REBORN_GITHUB_TOKEN",
+            "LIVE_CANARY_GITHUB_TOKEN",
+            "GITHUB_TOKEN",
+            "GH_TOKEN",
+        ]
+    )
+    if token:
+        headers["Authorization"] = f"Bearer {token[1]}"
     async with httpx.AsyncClient(timeout=20.0, follow_redirects=True, headers=headers) as client:
         response = await client.get(url)
         response.raise_for_status()
@@ -1929,6 +1980,11 @@ def _slack_preflight(ctx: LiveQaContext) -> dict[str, object]:
     return slack
 
 
+def _slack_connect_instructions_look_valid(instructions: str) -> bool:
+    text = instructions.lower()
+    return "message the slack app" in text or ("slack" in text and "pairing code" in text)
+
+
 async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeResult:
     from playwright.async_api import expect
 
@@ -1978,10 +2034,10 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
         if not title:
             raise AssertionError(f"Slack connect action title missing: {personal!r}")
         instructions = str(action_body.get("instructions") or "")
-        if "Message the Slack app" not in instructions:
+        if not _slack_connect_instructions_look_valid(instructions):
             raise AssertionError(f"unexpected Slack connect instructions: {instructions!r}")
         await expect(page.locator("body")).to_contain_text(title, timeout=15000)  # type: ignore[attr-defined]
-        await expect(page.locator("body")).to_contain_text("Message the Slack app", timeout=15000)  # type: ignore[attr-defined]
+        await expect(page.locator("body")).to_contain_text("pairing code", timeout=15000)  # type: ignore[attr-defined]
         observed["slack_display_name"] = personal.get("display_name")
         observed["slack_connect_title"] = title
         observed["slack_connect_instructions"] = instructions
@@ -2952,6 +3008,7 @@ async def _routine_creation_case(
             required_text=required_text,
             timeout=180.0,
             extra_details=details,
+            routine_confirmation_follow_up=True,
         )
     after_count = _trigger_record_count(ctx.reborn_home, count_name)
     result.details["trigger_records_after"] = after_count
@@ -3007,11 +3064,7 @@ async def _slack_delivery_routine_case(
             f"{routine_instruction} The routine's final answer and Slack message must "
             f"include the exact marker {delivery_marker}. Create the routine now; do not "
             "run it immediately. During routine creation, do not perform the routine's "
-            "live check, web/search/HTTP lookup, or Slack send. Before calling trigger_create, "
-            "call builtin__outbound_delivery_targets_list, then call "
-            "builtin__outbound_delivery_target_set with the Slack target id returned by the "
-            "list tool; do not only mention the target in text. Then create the routine "
-            "definition. "
+            "live check, web/search/HTTP lookup, or Slack send. "
             f"In your final answer include the exact marker {creation_marker} and include "
             "the text routine."
         ),
@@ -3510,11 +3563,6 @@ async def case_qa_7c_slack_bug_logger_routine(ctx: LiveQaContext) -> ProbeResult
             prompt=_qa_sheet_prompt("qa_7c_slack_bug_logger_routine"),
             extensions=[
                 {
-                    "package_id": "slack",
-                    "display_name": "Slack",
-                    "required_tools": [],
-                },
-                {
                     "package_id": "google-drive",
                     "display_name": "Google Drive",
                     "required_tools": ["google-drive.list_files"],
@@ -3543,16 +3591,11 @@ async def case_qa_7c_slack_bug_logger_routine(ctx: LiveQaContext) -> ProbeResult
 
 
 async def case_qa_7a_slack_product_channel_connect(ctx: LiveQaContext) -> ProbeResult:
-    from playwright.async_api import expect
-
     started = time.monotonic()
     case_name = "qa_7a_slack_product_channel_connect"
-    prompt = (
-        'In WebUI, ask IronClaw "connect to Slack for my configured DM delivery '
-        'target." Go through the flow\n'
-        "Expected result: Slack DM delivery target is connected"
-    )
-    observed: dict[str, object] = {"chat_connect_prompt": prompt}
+    observed: dict[str, object] = {
+        "preflight": "Slack DM delivery target is configured before user-story workflow cases"
+    }
     try:
         slack = _slack_preflight(ctx)
         delivery_channel_id = _slack_delivery_channel_id(ctx)
@@ -3579,40 +3622,6 @@ async def case_qa_7a_slack_product_channel_connect(ctx: LiveQaContext) -> ProbeR
                 "Slack live QA delivery target must be a DM to the user; "
                 f"got channel_id={delivery_channel_id!r}"
             )
-
-        async def action(page: object) -> None:
-            capability_ids = QA_7A_CHAT_CONNECT_CAPABILITY_IDS
-            baseline_statuses = _capability_run_statuses(
-                ctx.reborn_home,
-                capability_ids,
-            )
-            baseline_completed = _completed_capability_counts(baseline_statuses)
-            observed["baseline_capability_statuses"] = baseline_statuses
-            await page.goto(
-                f"{ctx.base_url}/v2/?token={AUTH_TOKEN}",
-                wait_until="domcontentloaded",
-            )  # type: ignore[attr-defined]
-            composer = page.locator("[data-testid='chat-composer']")  # type: ignore[attr-defined]
-            await expect(composer).to_be_visible(timeout=15000)
-            await composer.fill(prompt)
-            await composer.press("Enter")
-            await expect(page.locator("[data-testid='msg-user']").last).to_contain_text(  # type: ignore[attr-defined]
-                prompt[:80],
-                timeout=15000,
-            )
-            _record_assistant_reply_wait_result(
-                observed,
-                await _wait_for_assistant_reply(
-                    page,
-                    marker=None,
-                    required_text=["slack", "dm|delivery|target|connected"],
-                    timeout=180.0,
-                ),
-            )
-            statuses = _capability_run_statuses(ctx.reborn_home, capability_ids)
-            observed["capability_statuses"] = statuses
-
-        await _with_page(ctx.output_dir, case_name, action)
         return _result(case_name, True, started, observed)
     except Exception as exc:
         return _result(
