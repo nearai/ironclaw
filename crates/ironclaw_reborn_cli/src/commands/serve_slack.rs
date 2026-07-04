@@ -14,11 +14,14 @@ pub(crate) fn resolve_slack_config_for_serve(
     default_agent_id: &ironclaw_reborn_composition::host_api::AgentId,
     default_project_id: Option<&ironclaw_reborn_composition::host_api::ProjectId>,
     default_user_id: &ironclaw_reborn_composition::host_api::UserId,
-    _config_path: &Path,
+    config_path: &Path,
 ) -> anyhow::Result<Option<SlackHostBetaRuntimeConfig>> {
     let enabled = slack_enabled(section)?;
     if !enabled {
         return Ok(None);
+    }
+    if let Some(section) = section {
+        reject_legacy_slack_setup_fields(section, config_path)?;
     }
     let runtime_config = SlackHostBetaRuntimeConfig::new(
         tenant_id.clone(),
@@ -47,6 +50,42 @@ fn parse_slack_enabled_bool(field: &str, value: &str) -> anyhow::Result<bool> {
         "0" | "false" | "no" | "off" => Ok(false),
         _ => anyhow::bail!("{field} must be a boolean value"),
     }
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+fn reject_legacy_slack_setup_fields(
+    section: &ironclaw_reborn_config::SlackSection,
+    config_path: &Path,
+) -> anyhow::Result<()> {
+    let deprecated_fields = [
+        ("installation_id", section.installation_id.as_ref()),
+        ("team_id", section.team_id.as_ref()),
+        ("api_app_id", section.api_app_id.as_ref()),
+        ("slack_user_id", section.slack_user_id.as_ref()),
+        ("user_id", section.user_id.as_ref()),
+        (
+            "shared_subject_user_id",
+            section.shared_subject_user_id.as_ref(),
+        ),
+        ("signing_secret_env", section.signing_secret_env.as_ref()),
+        ("bot_token_env", section.bot_token_env.as_ref()),
+    ];
+    if let Some((field, _)) = deprecated_fields
+        .into_iter()
+        .find(|(_, value)| value.is_some())
+    {
+        anyhow::bail!(
+            "[slack].{field} is no longer supported in {}; configure Slack from the WebUI and connect the user through Slack OAuth",
+            config_path.display()
+        );
+    }
+    if !section.channel_routes.is_empty() {
+        anyhow::bail!(
+            "[slack].channel_routes is no longer supported in {}; configure Slack routing from the WebUI",
+            config_path.display()
+        );
+    }
+    Ok(())
 }
 
 #[cfg(not(feature = "slack-v2-host-beta"))]
@@ -111,6 +150,31 @@ mod tests {
         .expect("Slack config resolves without section");
 
         assert!(resolved.is_none());
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn slack_host_beta_runtime_config_rejects_legacy_static_user_binding() {
+        let section = ironclaw_reborn_config::SlackSection {
+            enabled: Some(true),
+            slack_user_id: Some("U123".to_string()),
+            ..Default::default()
+        };
+
+        let error = resolve_slack_config_for_serve(
+            Some(&section),
+            &tenant_id("tenant"),
+            &agent_id("agent"),
+            None,
+            &user_id("web-user"),
+            std::path::Path::new("/tmp/reborn-config.toml"),
+        )
+        .expect_err("legacy static Slack user binding must be rejected");
+
+        assert!(
+            error.to_string().contains("slack_user_id"),
+            "error should name the rejected field: {error}"
+        );
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
