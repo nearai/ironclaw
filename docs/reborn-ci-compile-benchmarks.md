@@ -64,6 +64,7 @@ is report-only unless a new benchmark experiment is intentionally in flight.
 | H10 | Remove the duplicate `libsql-restart-tests` feature from the broad `ironclaw_reborn` crate bucket. | Reduce `reborn-core` runtime while preserving the dedicated restart-test PR gate. | Reverted | Abandoned: package-node evidence showed no compile-graph shrink, and the active run still left the compile-heavy long poles as the blocker. |
 | H11 | Move libSQL-heavy coverage out of broad long-pole crate buckets into the existing Reborn group job. | Reduce compile graph size for `host-runtime` and `reborn-core` without dropping persistence coverage or adding a new job. | Tested | Rejected: wall clock regressed from `8m35s` to `9m50s`; `host-runtime`, `reborn-core`, and `composition-core` were all slower. |
 | H12 | Move `ironclaw_reborn_cli` from `reborn-core` to `webui-ingress`. | Keep job count flat while grouping the WebUI-shaped CLI build with the WebUI ingress bucket instead of the core Reborn bucket. | Tested | Rejected: `reborn-core` improved from `367s` to `238s`, but `webui-ingress` grew from `334s` to `377s`; wall clock stayed flat at `8m37s` with no job-count reduction. |
+| H13 | Remove the separate uninstrumented `reborn-group-tests` job and rely on the existing instrumented coverage `groups` lane for those same suites. | Reduce total Reborn jobs by one without dropping group-suite pass/fail coverage. | Running | Pending CI result. |
 
 ## H1: Narrow Crate Bucket Targets
 
@@ -659,3 +660,29 @@ Decision:
 - The workflow still has the same job count and the same compile-bound long
   poles: `host-runtime`, `composition-core`, `webui-ingress`, root tests, and
   group tests.
+
+## H13: Remove Duplicate Uninstrumented Group Job
+
+Change under test:
+
+- Remove the standalone `reborn-group-tests` job from
+  `.github/workflows/reborn-tests.yml`.
+- Keep the `reborn-integration-coverage` matrix lane `groups`, which already
+  runs the same `reborn_group_*` test binaries through `cargo llvm-cov`.
+- Keep the aggregate `Tests (Reborn)` gate on `reborn-integration-coverage`, so
+  group-suite failures still fail PR CI.
+
+Why this is safe to test:
+
+- `cargo llvm-cov ... test` keeps normal test pass/fail semantics while adding
+  instrumentation.
+- The workflow already treats `reborn-integration-coverage` as a real test gate
+  for the flat `reborn_integration_*` suites.
+- The baseline `Reborn group tests` job took `324s`, while the existing
+  instrumented `groups` lane took `329s`, so keeping both jobs appears to
+  duplicate compile/test work without improving the critical path.
+
+Benchmark result:
+
+- Branch/PR: [`codex/ci-compile-benchmarks`, PR #5648](https://github.com/nearai/ironclaw/pull/5648)
+- Workflow run: pending.
