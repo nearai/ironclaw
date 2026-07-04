@@ -44,7 +44,7 @@ mostly compile/link/setup time, with one notable runtime-heavy exception:
 
 | ID | Hypothesis | Expected effect | Status | Result |
 | --- | --- | --- | --- | --- |
-| H1 | Narrow Reborn crate bucket targets from `--all-targets` to the default `cargo test` target set. | Less compile/link work per crate bucket. | In progress | Pending CI benchmark. |
+| H1 | Narrow Reborn crate bucket targets from `--all-targets` to the default `cargo test` target set. | Less compile/link work per crate bucket. | Tested | Rejected: wall clock regressed from `8m35s` to `8m43s`; job count unchanged. |
 | H2 | Split compile-heavy buckets by dependency shape instead of package count. | Lower max bucket duration if closures are separable. | Not started | Pending. |
 | H3 | Move `host_runtime_services.rs` out of the normal `host-runtime` bucket. | Reduce the slowest bucket and isolate the runtime-heavy WASM service tests. | Not started | Pending. |
 | H4 | Reduce feature flags for slow crates where the coverage is duplicated elsewhere. | Less compile graph expansion in PR crate buckets. | Not started | Pending. |
@@ -69,9 +69,29 @@ Why this is safe to test:
 
 Benchmark result:
 
-- Branch/PR: pending
-- Workflow run: pending
-- Wall clock: pending
-- Crate bucket job count: pending
-- Slowest bucket: pending
-- Decision: pending
+- Branch/PR: [`codex/ci-compile-benchmarks`, PR #5648](https://github.com/nearai/ironclaw/pull/5648)
+- Workflow run: [`28719290187`](https://github.com/nearai/ironclaw/actions/runs/28719290187)
+- Status: success
+- Wall clock: `8m43s` (`2026-07-04T20:51:27Z` to `2026-07-04T21:00:10Z`)
+- Crate bucket job count: `12`
+- Slowest bucket: `host-runtime` at `461s`
+- Decision: reject. This did not meet either acceptance criterion.
+
+Comparison against baseline:
+
+| Metric | Baseline | H1 | Delta |
+| --- | ---: | ---: | ---: |
+| Reborn workflow wall clock | `8m35s` | `8m43s` | `+8s` |
+| Crate bucket job count | `12` | `12` | `0` |
+| `host-runtime` | `473s` | `461s` | `-12s` |
+| `composition-core` | `419s` | `457s` | `+38s` |
+| `reborn-core` | `367s` | `309s` | `-58s` |
+| `webui-ingress` | `334s` | `310s` | `-24s` |
+| `wasm-sandbox` | `307s` | `279s` | `-28s` |
+
+Interpretation:
+
+Removing `--all-targets` helped some buckets, but it made `composition-core`
+slower and did not reduce overall wall clock. The result is within normal CI
+variance for several buckets and does not justify weakening or changing the
+crate-test target selection.
