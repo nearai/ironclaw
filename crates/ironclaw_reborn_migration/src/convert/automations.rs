@@ -127,10 +127,27 @@ async fn convert_routine(
     };
     let now = routine.next_fire_at.unwrap_or(routine.created_at);
 
+    record_routine_field_losses(report, &source_id, &routine, is_cron);
+
+    // A malformed source user id is a per-item loss, not a run abort.
+    let creator_user_id = match UserId::new(&routine.user_id) {
+        Ok(user_id) => user_id,
+        Err(e) => {
+            report.record_loss(
+                Domain::Routine,
+                &source_id,
+                "user_id",
+                LossReason::Unparseable,
+                format!("v1 routine user id is not a valid Reborn UserId (trigger skipped): {e}"),
+            );
+            return Ok(());
+        }
+    };
+
     let record = TriggerRecord {
         trigger_id: ironclaw_triggers::TriggerId::new(),
         tenant_id: tgt.tenant_id.clone(),
-        creator_user_id: to_user_id(&routine.user_id, &source_id)?,
+        creator_user_id,
         agent_id: Some(tgt.agent_id.clone()),
         project_id: Option::<ProjectId>::None,
         name: routine.name.clone(),
@@ -146,8 +163,6 @@ async fn convert_routine(
         active_run_ref: None,
         created_at: routine.created_at,
     };
-
-    record_routine_field_losses(report, &source_id, &routine, is_cron);
 
     if !options.dry_run {
         tgt.trigger_repo
@@ -293,16 +308,45 @@ async fn convert_missions(
                         format!("could not parse mission.json: {e}"),
                     ),
                 }
-            } else if doc.path.contains("/threads/")
-                && doc.path.ends_with(".json")
-                && let Ok(thread) = serde_json::from_str::<EngineThread>(&doc.content)
-            {
-                engine_threads.insert(thread.id, thread);
+            } else if doc.path.contains("/threads/") && doc.path.ends_with(".json") {
+                match serde_json::from_str::<EngineThread>(&doc.content) {
+                    Ok(thread) => {
+                        engine_threads.insert(thread.id, thread);
+                    }
+                    Err(e) => report.record_loss(
+                        Domain::Mission,
+                        doc.path.clone(),
+                        "*",
+                        LossReason::Unparseable,
+                        format!("could not parse engine thread blob: {e}"),
+                    ),
+                }
             }
         }
 
-        for mission in missions {
-            convert_mission(tgt, options, report, user_id, &mission, &engine_threads).await?;
+        // Threads referenced by a mission's `thread_history`; anything parsed but
+        // never referenced has no Reborn owner to migrate it under.
+        let referenced: std::collections::HashSet<Uuid> = missions
+            .iter()
+            .flat_map(|m| m.thread_history.iter().copied())
+            .collect();
+
+        for mission in &missions {
+            convert_mission(tgt, options, report, user_id, mission, &engine_threads).await?;
+        }
+
+        for id in engine_threads.keys() {
+            if !referenced.contains(id) {
+                report.record_loss(
+                    Domain::Mission,
+                    format!("thread:{id}"),
+                    "*",
+                    LossReason::NoTargetConcept,
+                    "engine thread blob is not referenced by any mission thread_history; \
+                     there is no Reborn mission owner to migrate it under"
+                        .to_string(),
+                );
+            }
         }
     }
     Ok(())
@@ -350,36 +394,53 @@ async fn convert_mission(
                             TriggerState::Paused
                         }
                     };
-                    let record = TriggerRecord {
-                        trigger_id: ironclaw_triggers::TriggerId::new(),
-                        tenant_id: tgt.tenant_id.clone(),
-                        creator_user_id: to_user_id(&owner, &source_id)?,
-                        agent_id: Some(tgt.agent_id.clone()),
-                        project_id: Option::<ProjectId>::None,
-                        name: mission.name.clone(),
-                        source: TriggerSourceKind::Schedule,
-                        schedule,
-                        prompt: if mission.goal.trim().is_empty() {
-                            mission.name.clone()
-                        } else {
-                            mission.goal.clone()
-                        },
-                        state,
-                        next_run_at: mission.next_fire_at.unwrap_or(mission.created_at),
-                        last_run_at: None,
-                        last_fired_slot: None,
-                        last_status: None,
-                        active_fire_slot: None,
-                        active_run_ref: None,
-                        created_at: mission.created_at,
-                    };
-                    if !options.dry_run {
-                        tgt.trigger_repo.upsert_trigger(record).await.map_err(|e| {
-                            MigrationError::WriteTarget {
-                                domain: format!("trigger for {source_id}"),
-                                reason: e.to_string(),
+                    // A malformed mission owner id is a per-item loss (the
+                    // trigger is skipped); mission threads below still validate
+                    // their own owner independently.
+                    match UserId::new(&owner) {
+                        Ok(creator_user_id) => {
+                            let record = TriggerRecord {
+                                trigger_id: ironclaw_triggers::TriggerId::new(),
+                                tenant_id: tgt.tenant_id.clone(),
+                                creator_user_id,
+                                agent_id: Some(tgt.agent_id.clone()),
+                                project_id: Option::<ProjectId>::None,
+                                name: mission.name.clone(),
+                                source: TriggerSourceKind::Schedule,
+                                schedule,
+                                prompt: if mission.goal.trim().is_empty() {
+                                    mission.name.clone()
+                                } else {
+                                    mission.goal.clone()
+                                },
+                                state,
+                                next_run_at: mission.next_fire_at.unwrap_or(mission.created_at),
+                                last_run_at: None,
+                                last_fired_slot: None,
+                                last_status: None,
+                                active_fire_slot: None,
+                                active_run_ref: None,
+                                created_at: mission.created_at,
+                            };
+                            if !options.dry_run {
+                                tgt.trigger_repo.upsert_trigger(record).await.map_err(|e| {
+                                    MigrationError::WriteTarget {
+                                        domain: format!("trigger for {source_id}"),
+                                        reason: e.to_string(),
+                                    }
+                                })?;
                             }
-                        })?;
+                        }
+                        Err(e) => report.record_loss(
+                            Domain::Mission,
+                            &source_id,
+                            "user_id",
+                            LossReason::Unparseable,
+                            format!(
+                                "mission owner user id is not a valid Reborn UserId \
+                                 (trigger skipped): {e}"
+                            ),
+                        ),
                     }
                 }
                 Err(e) => report.record_loss(
@@ -448,6 +509,10 @@ async fn convert_mission(
                 .iter()
                 .filter(|m| m.role != ImportRole::Other)
                 .count();
+            // Match the real write path, which records a loss per non-user/
+            // assistant transcript message, so `--dry-run` reports the same gap
+            // set instead of under-counting.
+            crate::convert::threads::record_other_role_losses(report, &import);
         } else {
             write_thread(tgt, options, report, import).await?;
         }
@@ -480,11 +545,4 @@ fn engine_role(role: v2_model::MessageRole) -> ImportRole {
         v2_model::MessageRole::Assistant => ImportRole::Assistant,
         v2_model::MessageRole::System | v2_model::MessageRole::ActionResult => ImportRole::Other,
     }
-}
-
-fn to_user_id(raw: &str, source_id: &str) -> Result<UserId, MigrationError> {
-    UserId::new(raw).map_err(|e| MigrationError::WriteTarget {
-        domain: format!("creator_user_id for {source_id}"),
-        reason: e.to_string(),
-    })
 }

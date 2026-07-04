@@ -50,8 +50,8 @@ async fn migrate_user_identities(
     // enumerate users from the users table (tolerant) unioned with data-derived
     // users so installs without a users table still resolve identities.
     let mut users: std::collections::BTreeSet<String> = src
-        .distinct_user_ids_in("users")
-        .await
+        .distinct_user_ids_in("users", "id")
+        .await?
         .into_iter()
         .collect();
     users.extend(src.distinct_users().await?);
@@ -66,8 +66,25 @@ async fn migrate_user_identities(
         if identities.is_empty() {
             continue;
         }
-        let Ok(host_user) = UserId::new(&user) else {
-            continue;
+        // Consistent with `migrate_channel_identities` below: a malformed source
+        // user id skips that user's identities but is recorded, not dropped
+        // silently.
+        let host_user = match UserId::new(&user) {
+            Ok(host_user) => host_user,
+            Err(e) => {
+                report.record_loss(
+                    Domain::Identity,
+                    format!("user:{user}"),
+                    "user_id",
+                    LossReason::Unparseable,
+                    format!(
+                        "v1 user id is not a valid Reborn UserId; \
+                         {} identity/identities for this user were skipped: {e}",
+                        identities.len()
+                    ),
+                );
+                continue;
+            }
         };
         let resolver = tgt.identity_store(host_user);
 
@@ -134,7 +151,7 @@ async fn migrate_channel_identities(
     options: &MigrationOptions,
     report: &mut MigrationReport,
 ) -> Result<(), MigrationError> {
-    let rows = read_channel_identities(src).await;
+    let rows = read_channel_identities(src, report).await?;
     for (owner_id, channel, external_id) in rows {
         let source_id = format!("channel_identity:{channel}:{external_id}");
         let Ok(host_user) = UserId::new(&owner_id) else {
@@ -176,51 +193,77 @@ async fn migrate_channel_identities(
     Ok(())
 }
 
-/// Raw read of `channel_identities` (no `Database` accessor exists). Tolerant of
-/// the table being absent (returns empty).
-async fn read_channel_identities(src: &V1Source) -> Vec<(String, String, String)> {
+/// Raw read of `channel_identities` (no `Database` accessor exists).
+///
+/// Only an **absent table** is tolerated (returns empty) — v1 installs without
+/// the table legitimately have no channel identities. Connect / query failures
+/// are real infrastructure errors and propagate. A row that fails to decode is
+/// recorded as a per-row loss rather than silently skipped.
+async fn read_channel_identities(
+    src: &V1Source,
+    report: &mut MigrationReport,
+) -> Result<Vec<(String, String, String)>, MigrationError> {
     let sql = "SELECT owner_id, channel, external_id FROM channel_identities";
+    let read_err = |e: &dyn std::fmt::Display| MigrationError::ReadSource {
+        domain: "channel_identities".to_string(),
+        reason: e.to_string(),
+    };
+    let record_bad_row = |report: &mut MigrationReport, e: &dyn std::fmt::Display| {
+        report.record_loss(
+            Domain::Identity,
+            "channel_identities",
+            "row",
+            LossReason::Unparseable,
+            format!("channel_identities row could not be decoded (skipped): {e}"),
+        );
+    };
     #[cfg(feature = "libsql")]
     if let Some(db) = src.handles.libsql_db.as_ref() {
-        let Ok(conn) = db.connect() else {
-            return Vec::new();
-        };
-        let Ok(mut rows) = conn.query(sql, ()).await else {
-            return Vec::new();
+        let conn = db.connect().map_err(|e| read_err(&e))?;
+        let mut rows = match conn.query(sql, ()).await {
+            Ok(rows) => rows,
+            Err(e) if crate::source::is_missing_table_error(&e.to_string()) => {
+                return Ok(Vec::new());
+            }
+            Err(e) => return Err(read_err(&e)),
         };
         let mut out = Vec::new();
-        while let Ok(Some(row)) = rows.next().await {
+        while let Some(row) = rows.next().await.map_err(|e| read_err(&e))? {
             match (
                 row.get::<String>(0),
                 row.get::<String>(1),
                 row.get::<String>(2),
             ) {
                 (Ok(owner), Ok(channel), Ok(external)) => out.push((owner, channel, external)),
-                _ => continue,
+                (Err(e), ..) | (_, Err(e), _) | (.., Err(e)) => record_bad_row(report, &e),
             }
         }
-        return out;
+        return Ok(out);
     }
     #[cfg(feature = "postgres")]
     if let Some(pool) = src.handles.pg_pool.as_ref() {
-        let Ok(client) = pool.get().await else {
-            return Vec::new();
+        let client = pool.get().await.map_err(|e| read_err(&e))?;
+        let rows = match client.query(sql, &[]).await {
+            Ok(rows) => rows,
+            Err(e) if crate::source::is_missing_table_error(&e.to_string()) => {
+                return Ok(Vec::new());
+            }
+            Err(e) => return Err(read_err(&e)),
         };
-        let Ok(rows) = client.query(sql, &[]).await else {
-            return Vec::new();
-        };
-        return rows
-            .iter()
-            .filter_map(|row| {
-                Some((
-                    row.try_get::<_, String>(0).ok()?,
-                    row.try_get::<_, String>(1).ok()?,
-                    row.try_get::<_, String>(2).ok()?,
-                ))
-            })
-            .collect();
+        let mut out = Vec::new();
+        for row in &rows {
+            match (
+                row.try_get::<_, String>(0),
+                row.try_get::<_, String>(1),
+                row.try_get::<_, String>(2),
+            ) {
+                (Ok(owner), Ok(channel), Ok(external)) => out.push((owner, channel, external)),
+                (Err(e), ..) | (_, Err(e), _) | (.., Err(e)) => record_bad_row(report, &e),
+            }
+        }
+        return Ok(out);
     }
-    Vec::new()
+    Ok(Vec::new())
 }
 
 async fn adopt(

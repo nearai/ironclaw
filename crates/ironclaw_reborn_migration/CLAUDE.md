@@ -22,7 +22,7 @@ state** into the **Reborn** state substrate. Ships as its own binary
 ```
 cargo run -p ironclaw_reborn_migration -- \
   --source-libsql ~/.ironclaw/ironclaw.db \
-  --target-libsql /tmp/reborn-local-dev.db \
+  --target-libsql ./reborn-local-dev.db \
   --tenant-id default --agent-id default --dry-run
 ```
 

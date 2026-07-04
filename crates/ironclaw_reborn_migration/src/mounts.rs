@@ -15,7 +15,8 @@
 //! independently of that reconciliation.
 
 use ironclaw_host_api::{
-    HostApiError, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, VirtualPath,
+    HostApiError, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
+    SYSTEM_RESERVED_ID, VirtualPath,
 };
 
 fn grant(alias: &str, target: String) -> Result<MountGrant, HostApiError> {
@@ -26,6 +27,20 @@ fn grant(alias: &str, target: String) -> Result<MountGrant, HostApiError> {
     ))
 }
 
+/// Map a scope segment to its on-disk path form, mirroring production's
+/// `ironclaw_reborn_composition::invocation_mount_view`: the system sentinel
+/// ([`SYSTEM_RESERVED_ID`]) carries control bytes and must render as
+/// `__system__` (a valid path segment) so system-scoped service operations
+/// (e.g. `FilesystemSessionThreadService` idempotency lookups under
+/// `ResourceScope::system()`) resolve to the same paths the runtime reads back.
+fn scope_segment(value: &str) -> &str {
+    if value == SYSTEM_RESERVED_ID {
+        "__system__"
+    } else {
+        value
+    }
+}
+
 /// `/threads` → `/tenants/<t>/users/<u>/threads`. Sub-scope (agent, project,
 /// mission) is path-encoded by `FilesystemSessionThreadService` inside the alias.
 pub(crate) fn threads_mount_view(scope: &ResourceScope) -> Result<MountView, HostApiError> {
@@ -33,8 +48,8 @@ pub(crate) fn threads_mount_view(scope: &ResourceScope) -> Result<MountView, Hos
         "/threads",
         format!(
             "/tenants/{}/users/{}/threads",
-            scope.tenant_id.as_str(),
-            scope.user_id.as_str()
+            scope_segment(scope.tenant_id.as_str()),
+            scope_segment(scope.user_id.as_str())
         ),
     )?])
 }
@@ -46,8 +61,8 @@ pub(crate) fn secrets_mount_view(scope: &ResourceScope) -> Result<MountView, Hos
         "/secrets",
         format!(
             "/tenants/{}/users/{}/secrets",
-            scope.tenant_id.as_str(),
-            scope.user_id.as_str()
+            scope_segment(scope.tenant_id.as_str()),
+            scope_segment(scope.user_id.as_str())
         ),
     )?])
 }

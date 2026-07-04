@@ -63,7 +63,7 @@ pub(crate) struct Mission {
     pub notify_channels: Vec<String>,
     #[serde(default)]
     pub next_fire_at: Option<DateTime<Utc>>,
-    #[serde(default = "now")]
+    #[serde(default = "epoch_fallback")]
     pub created_at: DateTime<Utc>,
 }
 
@@ -127,7 +127,7 @@ pub(crate) struct Project {
     pub description: String,
     #[serde(default)]
     pub goals: Vec<String>,
-    #[serde(default = "now")]
+    #[serde(default = "epoch_fallback")]
     pub created_at: DateTime<Utc>,
 }
 
@@ -148,7 +148,7 @@ pub(crate) struct EngineThread {
     pub state: EngineThreadState,
     #[serde(default)]
     pub messages: Vec<ThreadMessage>,
-    #[serde(default = "now")]
+    #[serde(default = "epoch_fallback")]
     pub created_at: DateTime<Utc>,
 }
 
@@ -169,7 +169,7 @@ pub(crate) enum EngineThreadState {
 pub(crate) struct ThreadMessage {
     pub role: MessageRole,
     pub content: String,
-    #[serde(default = "now")]
+    #[serde(default = "epoch_fallback")]
     pub timestamp: DateTime<Utc>,
 }
 
@@ -181,9 +181,11 @@ pub(crate) enum MessageRole {
     ActionResult,
 }
 
-/// Placeholder "now" for optional timestamps in drifted blobs. Migration
-/// converters prefer the real persisted timestamp; this only fires when a blob
-/// omits one entirely.
-fn now() -> DateTime<Utc> {
+/// Epoch fallback timestamp (`1970-01-01T00:00:00Z`) for optional timestamps in
+/// drifted blobs. Migration converters prefer the real persisted timestamp; this
+/// only fires when a blob omits one entirely, and the epoch value makes such
+/// synthesized timestamps obvious in logs/reports rather than masquerading as a
+/// real "now".
+fn epoch_fallback() -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp(0, 0).unwrap_or_default()
 }

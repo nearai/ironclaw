@@ -59,8 +59,8 @@ pub(crate) async fn run(
     // Installed tools/channels are keyed by user_id; enumerate from both tables.
     let mut users: std::collections::BTreeSet<String> =
         src.distinct_users().await?.into_iter().collect();
-    users.extend(src.distinct_user_ids_in("wasm_tools").await);
-    users.extend(src.distinct_user_ids_in("wasm_channels").await);
+    users.extend(src.distinct_user_ids_in("wasm_tools", "user_id").await?);
+    users.extend(src.distinct_user_ids_in("wasm_channels", "user_id").await?);
 
     for user in users {
         if let Some(store) = tool_store.as_ref() {
@@ -72,7 +72,7 @@ pub(crate) async fn run(
                     reason: e.to_string(),
                 })?;
             for tool in tools {
-                let bindings = tool_credential_bindings(store.as_ref(), &tool, report).await;
+                let bindings = tool_credential_bindings(store.as_ref(), &tool, report).await?;
                 convert_installation(
                     tgt,
                     options,
@@ -80,6 +80,7 @@ pub(crate) async fn run(
                     &catalog,
                     &registry,
                     InstallInput {
+                        owner: &user,
                         raw_name: &tool.name,
                         version: &tool.version,
                         description: &tool.description,
@@ -107,7 +108,7 @@ pub(crate) async fn run(
                     report,
                     &catalog,
                     &registry,
-                    channel_input(&channel),
+                    channel_input(&user, &channel),
                 )
                 .await?;
                 report.record_loss(
@@ -127,6 +128,11 @@ pub(crate) async fn run(
 }
 
 struct InstallInput<'a> {
+    /// v1 owner user id. Folded into the synthesized `ExtensionInstallationId`
+    /// so two users with a same-named install do not collide (the store is keyed
+    /// by installation id, so a bare name would let the second overwrite the
+    /// first with no loss recorded).
+    owner: &'a str,
     raw_name: &'a str,
     version: &'a str,
     description: &'a str,
@@ -135,8 +141,9 @@ struct InstallInput<'a> {
     bindings: Vec<ExtensionCredentialBinding>,
 }
 
-fn channel_input(channel: &StoredWasmChannel) -> InstallInput<'_> {
+fn channel_input<'a>(owner: &'a str, channel: &'a StoredWasmChannel) -> InstallInput<'a> {
     InstallInput {
+        owner,
         raw_name: &channel.name,
         version: &channel.version,
         description: &channel.description,
@@ -216,7 +223,10 @@ async fn convert_installation(
     } else {
         ExtensionActivationState::Disabled
     };
-    let installation_id = match ExtensionInstallationId::new(&ext_id_str) {
+    // Installation id is scoped by owner so per-user installs of the same tool
+    // name each get a distinct record instead of silently overwriting.
+    let installation_id_str = sanitize_extension_id(&format!("{}-{}", input.owner, input.raw_name));
+    let installation_id = match ExtensionInstallationId::new(&installation_id_str) {
         Ok(id) => id,
         Err(e) => {
             report.record_loss(
@@ -270,9 +280,18 @@ async fn tool_credential_bindings(
     store: &dyn WasmToolStore,
     tool: &StoredWasmTool,
     report: &mut MigrationReport,
-) -> Vec<ExtensionCredentialBinding> {
-    let Ok(Some(capabilities)) = store.get_capabilities(tool.id).await else {
-        return Vec::new();
+) -> Result<Vec<ExtensionCredentialBinding>, MigrationError> {
+    // A read *error* is a real infrastructure failure and aborts the run; a
+    // legitimate "no capabilities row" (`Ok(None)`) just yields no bindings.
+    let capabilities = match store.get_capabilities(tool.id).await {
+        Ok(Some(capabilities)) => capabilities,
+        Ok(None) => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(MigrationError::ReadSource {
+                domain: "tool_capabilities".into(),
+                reason: e.to_string(),
+            });
+        }
     };
     report.record_loss(
         Domain::Extension,
@@ -285,14 +304,24 @@ async fn tool_credential_bindings(
     );
     let mut bindings = Vec::new();
     for secret_name in capabilities.allowed_secrets {
-        if let (Ok(handle), Ok(secret_handle)) = (
+        match (
             ExtensionCredentialHandle::new(secret_name.clone()),
             SecretHandle::new(&secret_name),
         ) {
-            bindings.push(ExtensionCredentialBinding::new(handle, secret_handle));
+            (Ok(handle), Ok(secret_handle)) => {
+                bindings.push(ExtensionCredentialBinding::new(handle, secret_handle));
+            }
+            // An unconvertible secret name is recorded, not dropped silently.
+            _ => report.record_loss(
+                Domain::Extension,
+                format!("tool:{}", tool.name),
+                "allowed_secret",
+                LossReason::Unparseable,
+                format!("secret name '{secret_name}' is not a valid Reborn credential binding"),
+            ),
         }
     }
-    bindings
+    Ok(bindings)
 }
 
 fn build_tool_store(src: &V1Source) -> Option<Arc<dyn WasmToolStore>> {

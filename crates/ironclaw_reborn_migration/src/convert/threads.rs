@@ -142,15 +142,31 @@ pub(crate) async fn write_thread(
     report: &mut MigrationReport,
     import: ThreadImport,
 ) -> Result<(), MigrationError> {
-    let owner_user = UserId::new(import.owner_user.clone())
-        .map_err(|e| invalid("thread owner_user_id", &import.thread_id, e.to_string()))?;
-    let thread_id = ThreadId::new(import.thread_id.to_string())
-        .map_err(|e| invalid("thread_id", &import.thread_id, e.to_string()))?;
+    // Malformed identity on one source thread is a per-item loss, not a run
+    // abort: record it and skip this thread so the rest of the migration
+    // continues (`run_migration` must not be short-circuited by one bad row).
+    let owner_user = match UserId::new(import.owner_user.clone()) {
+        Ok(owner_user) => owner_user,
+        Err(e) => {
+            record_thread_id_loss(report, &import.thread_id, "owner_user_id", e.to_string());
+            return Ok(());
+        }
+    };
+    let thread_id = match ThreadId::new(import.thread_id.to_string()) {
+        Ok(thread_id) => thread_id,
+        Err(e) => {
+            record_thread_id_loss(report, &import.thread_id, "thread_id", e.to_string());
+            return Ok(());
+        }
+    };
     let mission_id = match import.mission_id {
-        Some(id) => Some(
-            MissionId::new(id.to_string())
-                .map_err(|e| invalid("mission_id", &import.thread_id, e.to_string()))?,
-        ),
+        Some(id) => match MissionId::new(id.to_string()) {
+            Ok(mission_id) => Some(mission_id),
+            Err(e) => {
+                record_thread_id_loss(report, &import.thread_id, "mission_id", e.to_string());
+                return Ok(());
+            }
+        },
         None => None,
     };
 
@@ -247,12 +263,29 @@ fn build_metadata_json(import: &ThreadImport) -> Result<String, MigrationError> 
     .map_err(MigrationError::Serde)
 }
 
-fn record_other_role_losses(report: &mut MigrationReport, import: &ThreadImport) {
+pub(crate) fn record_other_role_losses(report: &mut MigrationReport, import: &ThreadImport) {
     for message in &import.messages {
         if message.role == ImportRole::Other {
             record_other_role_loss(report, import.thread_id, &message.raw_role);
         }
     }
+}
+
+/// Record a thread skipped because one of its identity fields
+/// (`owner_user_id` / `thread_id` / `mission_id`) is not a valid Reborn id.
+fn record_thread_id_loss(
+    report: &mut MigrationReport,
+    thread_id: &Uuid,
+    field: &str,
+    reason: String,
+) {
+    report.record_loss(
+        Domain::Thread,
+        thread_id.to_string(),
+        field,
+        LossReason::Unparseable,
+        format!("v1 thread {field} is not a valid Reborn id (thread skipped): {reason}"),
+    );
 }
 
 fn record_other_role_loss(report: &mut MigrationReport, thread_id: Uuid, raw_role: &str) {
@@ -265,13 +298,6 @@ fn record_other_role_loss(report: &mut MigrationReport, thread_id: Uuid, raw_rol
          retained in thread metadata legacy_v1.messages"
             .to_string(),
     );
-}
-
-fn invalid(field: &str, id: &Uuid, reason: String) -> MigrationError {
-    MigrationError::WriteTarget {
-        domain: format!("thread {field} for {id}"),
-        reason,
-    }
 }
 
 fn write_err(what: &str, id: &Uuid, reason: String) -> MigrationError {

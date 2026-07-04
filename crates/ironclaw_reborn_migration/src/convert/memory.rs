@@ -41,11 +41,23 @@ pub(crate) async fn run(
                 continue; // engine-v2 state — handled by the automations converter
             }
 
-            let user =
-                UserId::new(doc.user_id.clone()).map_err(|e| MigrationError::WriteTarget {
-                    domain: format!("memory user_id for {}", doc.path),
-                    reason: e.to_string(),
-                })?;
+            // A malformed source user id is a per-item loss, not a run abort.
+            let user = match UserId::new(doc.user_id.clone()) {
+                Ok(user) => user,
+                Err(e) => {
+                    report.record_loss(
+                        Domain::Memory,
+                        doc.path.clone(),
+                        "user_id",
+                        LossReason::Unparseable,
+                        format!(
+                            "v1 memory document user id is not a valid Reborn UserId \
+                             (document skipped): {e}"
+                        ),
+                    );
+                    continue;
+                }
+            };
 
             if options.dry_run {
                 report.stats.memory_documents += 1;

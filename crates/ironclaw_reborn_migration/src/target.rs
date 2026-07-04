@@ -232,14 +232,7 @@ async fn open_backend(target: &TargetStore) -> Result<Backend, MigrationError> {
         )),
         #[cfg(feature = "postgres")]
         TargetStore::Postgres { url } => {
-            let config = url
-                .parse::<tokio_postgres::Config>()
-                .map_err(|e| MigrationError::OpenTarget(format!("parse Postgres URL: {e}")))?;
-            let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
-            let pool = deadpool_postgres::Pool::builder(manager)
-                .max_size(4)
-                .build()
-                .map_err(|e| MigrationError::OpenTarget(e.to_string()))?;
+            let pool = open_postgres_pool(url)?;
             let root = Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(
                 pool.clone(),
             ));
@@ -253,4 +246,78 @@ async fn open_backend(target: &TargetStore) -> Result<Backend, MigrationError> {
             "binary built without the postgres feature".into(),
         )),
     }
+}
+
+/// Build the Reborn target Postgres pool with the repo's remote-TLS rule:
+/// remote hosts must use TLS (mirrors `ironclaw_reborn_event_store` and
+/// `src/db/tls.rs`). A remote `sslmode=disable` is rejected rather than sending
+/// migration traffic — including decrypted secrets — in cleartext; local
+/// connections keep plain TCP. TLS wiring is reused from `ironclaw::db::tls`.
+#[cfg(feature = "postgres")]
+fn open_postgres_pool(
+    url: &secrecy::SecretString,
+) -> Result<deadpool_postgres::Pool, MigrationError> {
+    use secrecy::ExposeSecret;
+
+    let raw = url.expose_secret();
+    let pg_config = raw
+        .parse::<tokio_postgres::Config>()
+        .map_err(|e| MigrationError::OpenTarget(format!("parse Postgres URL: {e}")))?;
+    let remote = !is_local_postgres_config(&pg_config);
+    let ssl_mode = match pg_config.get_ssl_mode() {
+        tokio_postgres::config::SslMode::Disable => {
+            if remote {
+                return Err(MigrationError::OpenTarget(
+                    "remote Postgres target requires TLS; sslmode=disable is rejected for \
+                     migration traffic (it carries decrypted secrets)"
+                        .into(),
+                ));
+            }
+            ironclaw::config::SslMode::Disable
+        }
+        // `Prefer`/`Require`/future variants: force TLS on remote, allow the
+        // parsed intent on local.
+        _ if remote => ironclaw::config::SslMode::Require,
+        _ => ironclaw::config::SslMode::Prefer,
+    };
+
+    let mut dp_config = deadpool_postgres::Config::new();
+    dp_config.url = Some(raw.to_string());
+    ironclaw::db::tls::create_pool(&dp_config, ssl_mode)
+        .map_err(|e| MigrationError::OpenTarget(e.to_string()))
+}
+
+/// True when the parsed Postgres `Config` targets only loopback hosts / Unix
+/// sockets. Anything else is treated as remote and must use TLS. Mirrors the
+/// event-store's `is_local_postgres_config`.
+#[cfg(feature = "postgres")]
+fn is_local_postgres_config(config: &tokio_postgres::Config) -> bool {
+    use tokio_postgres::config::Host;
+
+    let hosts = config.get_hosts();
+    let hostaddrs = config.get_hostaddrs();
+    if hosts.is_empty() && hostaddrs.is_empty() {
+        // Empty host list means libpq's compiled-in default socket directory.
+        return true;
+    }
+    for host in hosts {
+        match host {
+            #[cfg(unix)]
+            Host::Unix(_) => continue,
+            Host::Tcp(name) => {
+                if !matches!(
+                    name.as_str(),
+                    "localhost" | "127.0.0.1" | "::1" | "[::1]" | "0.0.0.0"
+                ) {
+                    return false;
+                }
+            }
+        }
+    }
+    for addr in hostaddrs {
+        if !addr.is_loopback() && !addr.is_unspecified() {
+            return false;
+        }
+    }
+    true
 }

@@ -312,8 +312,9 @@ async fn seed_secret(handles: &DatabaseHandles) {
 
 async fn seed_wasm_tool(handles: &DatabaseHandles) {
     let db = handles.libsql_db.clone().expect("libsql handle");
-    let store = LibSqlWasmToolStore::new(db);
-    store
+    let store = LibSqlWasmToolStore::new(db.clone());
+    // A default (Active) install so the migration derives Enabled activation.
+    let tool = store
         .store(StoreToolParams {
             user_id: USER.to_string(),
             name: "weather".to_string(),
@@ -327,6 +328,22 @@ async fn seed_wasm_tool(handles: &DatabaseHandles) {
         })
         .await
         .expect("seed wasm tool");
+
+    // Seed tool_capabilities with an allowed secret (no trait writer exists) so
+    // the migration derives a credential binding to the migrated secret and
+    // records the capability-config gap. `openai_api_key` matches the seeded
+    // secret above.
+    let conn = db.connect().expect("connect");
+    conn.execute(
+        "INSERT INTO tool_capabilities (id, wasm_tool_id, allowed_secrets) VALUES (?1, ?2, ?3)",
+        (
+            Uuid::new_v4().to_string(),
+            tool.id.to_string(),
+            serde_json::json!(["openai_api_key"]).to_string(),
+        ),
+    )
+    .await
+    .expect("seed tool capabilities");
 }
 
 fn cron(expr: &str) -> Trigger {
@@ -378,6 +395,26 @@ async fn reborn_entry_count(path: &Path, like: &str) -> i64 {
         .expect("query entries");
     let row = rows.next().await.expect("row").expect("some row");
     row.get::<i64>(0).expect("count")
+}
+
+/// Read the `contents` blob of the first Reborn entry matching a LIKE pattern,
+/// as UTF-8 — used to assert the shape of a written installation/thread doc.
+async fn reborn_entry_content(path: &Path, like: &str) -> String {
+    let db = libsql::Builder::new_local(path)
+        .build()
+        .await
+        .expect("open reborn db");
+    let conn = db.connect().expect("connect");
+    let mut rows = conn
+        .query(
+            "SELECT contents FROM root_filesystem_entries WHERE path LIKE ?1 LIMIT 1",
+            [like],
+        )
+        .await
+        .expect("query entry contents");
+    let row = rows.next().await.expect("row").expect("some row");
+    let blob = row.get::<Vec<u8>>(0).expect("contents blob");
+    String::from_utf8(blob).expect("utf-8 contents")
 }
 
 async fn reborn_triggers(path: &Path) -> Vec<ironclaw_triggers::TriggerRecord> {
@@ -438,8 +475,55 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
         report.stats
     );
 
-    // ── the gap set: exactly the expected lossy items, nothing silent ──
-    // 4 non-cron routine trigger sources rejected.
+    // ── the gap set: the EXACT expected lossy count per domain, so any newly
+    // dropped (or newly-recovered) value fails the build. Counts are pinned to
+    // the fixture above; see the inline breakdown per domain. ──
+    let expected_losses = [
+        // owner/thread/mission ids are all valid → no thread-identity losses.
+        (Domain::Thread, 0),
+        // conv1's single "system" transcript message (no first-class append path).
+        (Domain::Message, 1),
+        // 6 routines: each cron routine records 3 field losses
+        // (action + guardrails/notify/counters + routine_runs); each non-cron
+        // routine records 1 trigger-source loss + 2 field losses. 6 × 3 = 18.
+        (Domain::Routine, 18),
+        // daily-digest: mission_only_fields + status.failed (2); on-deploy:
+        // cadence.on_event (1). No orphan threads (the blob is referenced).
+        (Domain::Mission, 3),
+        // fixture seeds no jobs → the job converter records nothing.
+        (Domain::Job, 0),
+        // single unconditional memory_document_versions gap.
+        (Domain::Memory, 1),
+        // the seeded secret decrypts, re-encrypts, and carries no expiry → 0.
+        (Domain::Secret, 0),
+        // the migrated wasm tool: manifest_fidelity + capabilities (2).
+        (Domain::Extension, 2),
+        // unconditional pairing_requests gap (both identities adopt cleanly).
+        (Domain::Identity, 1),
+        // unconditional heartbeat_state gap.
+        (Domain::Heartbeat, 1),
+        // one gap per seeded setting key (model, timezone).
+        (Domain::Setting, 2),
+    ];
+    for (domain, expected) in expected_losses {
+        assert_eq!(
+            report.losses_in(domain),
+            expected,
+            "expected exactly {expected} recorded gap(s) for {domain:?}; \
+             all losses: {:#?}",
+            report.lossy
+        );
+    }
+    // The per-domain buckets must sum to the whole report — a newly-dropped
+    // value in an unasserted domain would break this even if it slipped past the
+    // per-domain checks above.
+    let expected_total: usize = expected_losses.iter().map(|(_, n)| n).sum();
+    assert_eq!(
+        report.lossy.len(),
+        expected_total,
+        "total lossy count must equal the sum of every asserted domain bucket"
+    );
+    // Semantic spot-checks on the gap set (field names, not just counts).
     let routine_trigger_gaps = report
         .lossy
         .iter()
@@ -449,36 +533,18 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
         routine_trigger_gaps, 4,
         "event/sysevent/webhook/manual routines"
     );
-    // non-cron mission cadence rejected (on_event).
-    assert!(
-        report
-            .lossy
-            .iter()
-            .any(|l| l.domain == Domain::Mission && l.field == "cadence.on_event"),
-        "on-event mission cadence must be a recorded gap"
-    );
-    // failed mission status degraded to paused.
-    assert!(
-        report
-            .lossy
-            .iter()
-            .any(|l| l.domain == Domain::Mission && l.field == "status.failed"),
-    );
-    // system transcript message has no first-class Reborn append path.
-    assert!(report.losses_in(Domain::Message) >= 1, "system message gap");
-    // Domains whose gap is recorded unconditionally: settings (no KV target),
-    // identities (pairing_requests has no store), memory (no version history),
-    // heartbeat (no heartbeat record). Jobs correctly records zero (fixture
-    // seeds none).
-    for domain in [
-        Domain::Setting,
-        Domain::Identity,
-        Domain::Heartbeat,
-        Domain::Memory,
+    for (domain, field) in [
+        (Domain::Mission, "cadence.on_event"),
+        (Domain::Mission, "status.failed"),
+        (Domain::Extension, "manifest_fidelity"),
+        (Domain::Extension, "capabilities"),
     ] {
         assert!(
-            report.losses_in(domain) >= 1,
-            "expected a recorded gap for {domain:?}"
+            report
+                .lossy
+                .iter()
+                .any(|l| l.domain == domain && l.field == field),
+            "expected a recorded {domain:?} gap for field `{field}`"
         );
     }
 
@@ -489,6 +555,20 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
     assert_eq!(report.stats.identities, 2, "identities: {:?}", report.stats);
     // 1 installed wasm tool → ExtensionInstallation.
     assert_eq!(report.stats.extensions, 1, "extensions: {:?}", report.stats);
+
+    // Extension installation invariants: the on-disk installation record must
+    // carry Enabled activation (v1 tool status was Active) and the credential
+    // binding derived from tool_capabilities.allowed_secrets (openai_api_key).
+    let installation_doc =
+        reborn_entry_content(&dst, "%/system/extensions/.installations/state.json").await;
+    assert!(
+        installation_doc.contains("openai_api_key"),
+        "installation record must carry the allowed_secrets credential binding; got: {installation_doc}"
+    );
+    assert!(
+        installation_doc.to_ascii_lowercase().contains("enabled"),
+        "an Active v1 tool must migrate to Enabled activation; got: {installation_doc}"
+    );
 
     // On-disk durability of the deferred domains (fresh connection).
     assert!(
@@ -518,6 +598,28 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
     assert!(
         reborn_thread_doc_count(&dst).await >= 3,
         "expected >=3 persisted thread.json docs"
+    );
+
+    // ── idempotency: re-running the migration into the same target re-adopts
+    // identities (first-writer-wins) and upserts the extension installation by
+    // its deterministic id, so no duplicate installation doc is written. (Trigger
+    // ids are freshly minted per run, so triggers are intentionally not
+    // deduplicated — the tool is a one-shot converter.) ──
+    let report2 = run_migration(options(src, dst.clone(), false))
+        .await
+        .expect("second migration run");
+    assert_eq!(
+        report2.stats.identities, 2,
+        "re-run must re-adopt the same 2 identities"
+    );
+    assert_eq!(
+        report2.stats.extensions, 1,
+        "re-run must upsert the same installation, not duplicate"
+    );
+    assert_eq!(
+        reborn_entry_count(&dst, "%/system/extensions/.installations/state.json").await,
+        1,
+        "re-run must not write a second installation state document"
     );
 }
 

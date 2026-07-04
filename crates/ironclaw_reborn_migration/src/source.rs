@@ -17,11 +17,15 @@ use crate::error::MigrationError;
 use crate::options::SourceDb;
 
 /// A live, migrations-applied handle to the v1 source database.
-pub struct V1Source {
-    pub db: Arc<dyn Database>,
+///
+/// Crate-internal: the only public entry point is [`crate::run_migration`], and
+/// this handle is consumed exclusively by the in-crate converters (mirrors the
+/// symmetric `RebornTarget` visibility).
+pub(crate) struct V1Source {
+    pub(crate) db: Arc<dyn Database>,
     /// Backend-specific handles for satellite v1 stores (secrets) and raw
     /// distinct-user / channel-identity discovery.
-    pub handles: DatabaseHandles,
+    pub(crate) handles: DatabaseHandles,
 }
 
 /// Tables a v1 user_id can appear in. Queried independently so a DB missing one
@@ -30,7 +34,7 @@ pub struct V1Source {
 const USER_ID_TABLES: [&str; 4] = ["conversations", "routines", "memory_documents", "settings"];
 
 impl V1Source {
-    pub async fn open(source: &SourceDb) -> Result<Self, MigrationError> {
+    pub(crate) async fn open(source: &SourceDb) -> Result<Self, MigrationError> {
         let config = source_to_config(source);
         let (db, handles) = connect_with_handles(&config)
             .await
@@ -45,7 +49,7 @@ impl V1Source {
     pub(crate) async fn distinct_users(&self) -> Result<Vec<String>, MigrationError> {
         let mut users = std::collections::BTreeSet::new();
         for table in USER_ID_TABLES {
-            for uid in self.distinct_user_ids_in(table).await {
+            for uid in self.distinct_user_ids_in(table, "user_id").await? {
                 if !uid.is_empty() {
                     users.insert(uid);
                 }
@@ -54,42 +58,65 @@ impl V1Source {
         Ok(users.into_iter().collect())
     }
 
-    /// Best-effort `SELECT DISTINCT user_id FROM <table>` against the raw handle.
-    /// Returns an empty vec (not an error) if the table is absent — a missing
-    /// table means "no users here", not a migration failure.
-    pub(crate) async fn distinct_user_ids_in(&self, table: &str) -> Vec<String> {
-        let sql = format!("SELECT DISTINCT user_id FROM {table}");
+    /// `SELECT DISTINCT <column> FROM <table>` against the raw handle. `column`
+    /// is the user-id column, which is `user_id` on data tables but `id` on the
+    /// `users` table.
+    ///
+    /// A **missing table** is tolerated (returns an empty vec) — minimal v1
+    /// installs legitimately lack some tables (e.g. libSQL without `settings`),
+    /// and "table absent" means "no users here". Every *other* failure —
+    /// connect, query, or row decode — is a real infrastructure error and
+    /// propagates, so a transient pool/permission/connection fault can never be
+    /// silently mistaken for "0 users" and drop everything keyed to them.
+    ///
+    /// `table`/`column` are always internal constants, never user input.
+    pub(crate) async fn distinct_user_ids_in(
+        &self,
+        table: &str,
+        column: &str,
+    ) -> Result<Vec<String>, MigrationError> {
+        let read_err = |e: &dyn std::fmt::Display| MigrationError::ReadSource {
+            domain: table.to_string(),
+            reason: e.to_string(),
+        };
+        let sql = format!("SELECT DISTINCT {column} FROM {table}");
         #[cfg(feature = "libsql")]
         if let Some(db) = self.handles.libsql_db.as_ref() {
-            let Ok(conn) = db.connect() else {
-                return Vec::new();
-            };
-            let Ok(mut rows) = conn.query(&sql, ()).await else {
-                return Vec::new();
+            let conn = db.connect().map_err(|e| read_err(&e))?;
+            let mut rows = match conn.query(&sql, ()).await {
+                Ok(rows) => rows,
+                Err(e) if is_missing_table_error(&e.to_string()) => return Ok(Vec::new()),
+                Err(e) => return Err(read_err(&e)),
             };
             let mut out = Vec::new();
-            while let Ok(Some(row)) = rows.next().await {
-                if let Ok(value) = row.get::<String>(0) {
-                    out.push(value);
-                }
+            while let Some(row) = rows.next().await.map_err(|e| read_err(&e))? {
+                out.push(row.get::<String>(0).map_err(|e| read_err(&e))?);
             }
-            return out;
+            return Ok(out);
         }
         #[cfg(feature = "postgres")]
         if let Some(pool) = self.handles.pg_pool.as_ref() {
-            let Ok(client) = pool.get().await else {
-                return Vec::new();
-            };
-            let Ok(stmt_rows) = client.query(sql.as_str(), &[]).await else {
-                return Vec::new();
+            let client = pool.get().await.map_err(|e| read_err(&e))?;
+            let stmt_rows = match client.query(sql.as_str(), &[]).await {
+                Ok(rows) => rows,
+                Err(e) if is_missing_table_error(&e.to_string()) => return Ok(Vec::new()),
+                Err(e) => return Err(read_err(&e)),
             };
             return stmt_rows
                 .iter()
-                .filter_map(|row| row.try_get::<_, String>(0).ok())
+                .map(|row| row.try_get::<_, String>(0).map_err(|e| read_err(&e)))
                 .collect();
         }
-        Vec::new()
+        Ok(Vec::new())
     }
+}
+
+/// True when a DB error string denotes an absent table/relation, the one case
+/// [`V1Source::distinct_user_ids_in`] tolerates. Covers SQLite/libSQL
+/// (`no such table`) and PostgreSQL (`relation "…" does not exist`).
+pub(crate) fn is_missing_table_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("no such table") || lower.contains("does not exist")
 }
 
 fn source_to_config(source: &SourceDb) -> DatabaseConfig {
@@ -106,7 +133,7 @@ fn source_to_config(source: &SourceDb) -> DatabaseConfig {
         },
         SourceDb::Postgres { url } => DatabaseConfig {
             backend: DatabaseBackend::Postgres,
-            url: SecretString::from(url.clone()),
+            url: url.clone(),
             pool_size: 4,
             ssl_mode: SslMode::default(),
             libsql_path: None,

@@ -16,7 +16,12 @@ use ironclaw_reborn_migration::{
 use secrecy::SecretString;
 
 /// Migrate IronClaw v1 / engine-v2 persisted state into Reborn state.
-#[derive(Debug, Parser)]
+///
+/// Deliberately no `Debug` derive: this struct holds the secrets master key and
+/// PostgreSQL connection URLs (which embed `user:password@host`) as plain
+/// strings, so a stray `{cli:?}` must not be able to leak them. `clap::Parser`
+/// does not require `Debug`.
+#[derive(Parser)]
 #[command(name = "ironclaw-reborn-migration", version, about)]
 struct Cli {
     /// v1 source: path to a libSQL/SQLite database file.
@@ -76,12 +81,16 @@ impl Cli {
     fn into_options(self) -> anyhow::Result<(MigrationOptions, Option<PathBuf>)> {
         let source = match (self.source_libsql, self.source_postgres) {
             (Some(path), None) => SourceDb::LibSql { path },
-            (None, Some(url)) => SourceDb::Postgres { url },
+            (None, Some(url)) => SourceDb::Postgres {
+                url: SecretString::from(url),
+            },
             _ => anyhow::bail!("exactly one of --source-libsql / --source-postgres is required"),
         };
         let target = match (self.target_libsql, self.target_postgres) {
             (Some(path), None) => TargetStore::LibSql { path },
-            (None, Some(url)) => TargetStore::Postgres { url },
+            (None, Some(url)) => TargetStore::Postgres {
+                url: SecretString::from(url),
+            },
             _ => anyhow::bail!("exactly one of --target-libsql / --target-postgres is required"),
         };
         let tenant_id = TenantId::new(self.tenant_id)?;

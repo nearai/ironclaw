@@ -65,7 +65,7 @@ pub(crate) async fn run(
     };
 
     // v1 `list`/`get_decrypted` are per-user; enumerate users from the raw table.
-    let users = src.distinct_user_ids_in("secrets").await;
+    let users = src.distinct_user_ids_in("secrets", "user_id").await?;
     for user_id in users {
         let refs = v1_store
             .list(&user_id)
@@ -90,6 +90,9 @@ pub(crate) async fn run(
     Ok(())
 }
 
+// arch-exempt: too_many_args, secret converter threads both v1 + Reborn store
+// handles plus scope/options and the user/name key; the aggregation would be a
+// per-secret context struct, plan v1-migration
 #[allow(clippy::too_many_arguments)]
 async fn migrate_one(
     v1_store: &(dyn ironclaw::secrets::SecretsStore + Send + Sync),
@@ -115,12 +118,25 @@ async fn migrate_one(
             return Ok(());
         }
     };
-    // Preserve expiry when the record carries one.
-    let expires_at = v1_store
-        .get(user_id, name)
-        .await
-        .ok()
-        .and_then(|secret| secret.expires_at);
+    // Preserve expiry when the record carries one. `get_decrypted` above does
+    // not surface the record metadata, so this second read fetches `expires_at`;
+    // a read failure here is not silently dropped — the secret still migrates,
+    // but the lost expiry is recorded.
+    let expires_at = match v1_store.get(user_id, name).await {
+        Ok(secret) => secret.expires_at,
+        Err(e) => {
+            report.record_loss(
+                Domain::Secret,
+                format!("{user_id}:{name}"),
+                "expires_at",
+                LossReason::Degraded,
+                format!(
+                    "could not re-read v1 secret metadata for expiry (migrated without it): {e}"
+                ),
+            );
+            None
+        }
+    };
 
     let handle = match SecretHandle::new(name) {
         Ok(handle) => handle,
@@ -135,10 +151,21 @@ async fn migrate_one(
             return Ok(());
         }
     };
-    let user = UserId::new(user_id).map_err(|e| MigrationError::WriteTarget {
-        domain: format!("secret user_id {user_id}"),
-        reason: e.to_string(),
-    })?;
+    // A malformed source user id is a per-item loss, not a run abort: skip this
+    // secret and keep migrating the rest.
+    let user = match UserId::new(user_id) {
+        Ok(user) => user,
+        Err(e) => {
+            report.record_loss(
+                Domain::Secret,
+                format!("{user_id}:{name}"),
+                "user_id",
+                LossReason::Unparseable,
+                format!("v1 secret user id is not a valid Reborn UserId (skipped): {e}"),
+            );
+            return Ok(());
+        }
+    };
 
     if options.dry_run {
         report.stats.secrets += 1;

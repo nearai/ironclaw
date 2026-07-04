@@ -31,8 +31,10 @@ pub struct MigrationOptions {
 pub enum SourceDb {
     /// libSQL/SQLite file on disk.
     LibSql { path: PathBuf },
-    /// PostgreSQL connection URL.
-    Postgres { url: String },
+    /// PostgreSQL connection URL. Held as a `SecretString` because the URL
+    /// typically embeds `user:password@host`; `secrecy` redacts it under the
+    /// derived `Debug`.
+    Postgres { url: SecretString },
 }
 
 /// Where Reborn state is written. The `RootFilesystem` KV substrate (threads,
@@ -42,6 +44,6 @@ pub enum SourceDb {
 pub enum TargetStore {
     /// Local libSQL file (the `reborn-local-dev.db` shape).
     LibSql { path: PathBuf },
-    /// PostgreSQL connection URL.
-    Postgres { url: String },
+    /// PostgreSQL connection URL. Held as a `SecretString` (see [`SourceDb`]).
+    Postgres { url: SecretString },
 }
