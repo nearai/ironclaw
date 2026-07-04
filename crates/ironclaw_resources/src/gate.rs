@@ -80,7 +80,9 @@ pub enum BudgetGateStatus {
 ///
 /// Keep this in lockstep with [`BudgetGateStatus`] variants: each terminal
 /// state has required fields, and variants must reject fields owned by other
-/// states so durable snapshots cannot silently drift across releases.
+/// states so durable snapshots cannot silently drift across releases. The
+/// persisted wire shapes accepted here are pinned by decode tests below; audit
+/// existing snapshots before tightening or renaming those fields.
 impl<'de> Deserialize<'de> for BudgetGateStatus {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -427,6 +429,28 @@ mod tests {
                 && thresholds.warn_at == 1.0
                 && thresholds.pause_at == 1.0
         ));
+    }
+
+    #[test]
+    fn status_decode_accepts_persisted_wire_shapes() {
+        let persisted_shapes = [
+            serde_json::json!({
+                "kind": "pending"
+            }),
+            serde_json::json!({
+                "kind": "cancelled",
+                "by": "alice",
+                "at": "2026-07-03T14:18:49.505189Z"
+            }),
+            serde_json::json!({
+                "kind": "expired",
+                "at": "2026-07-03T14:18:49.505189Z"
+            }),
+        ];
+
+        for raw in persisted_shapes {
+            serde_json::from_value::<BudgetGateStatus>(raw).unwrap();
+        }
     }
 
     #[test]

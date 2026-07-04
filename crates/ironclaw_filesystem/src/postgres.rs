@@ -805,7 +805,13 @@ impl RootFilesystem for PostgresRootFilesystem {
                 let raw_path = row.try_get::<_, String>("path").map_err(|error| {
                     db_error(path.clone(), FilesystemOperation::CreateDirAll, error)
                 })?;
-                let conflict_path = VirtualPath::new(raw_path)?;
+                let conflict_path = VirtualPath::new(raw_path.clone()).map_err(|error| {
+                    FilesystemError::Backend {
+                        path: path.clone(),
+                        operation: FilesystemOperation::CreateDirAll,
+                        reason: format!("invalid backend conflict path {raw_path:?}: {error}"),
+                    }
+                })?;
                 return Err(FilesystemError::Backend {
                     path: conflict_path,
                     operation: FilesystemOperation::CreateDirAll,
