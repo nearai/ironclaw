@@ -57,6 +57,7 @@ is report-only unless a new benchmark experiment is intentionally in flight.
 | H3 | Move the runtime-heavy host WASM contract tests out of the normal `host-runtime` bucket. | Reduce the slowest bucket and isolate slow test execution. | Evidence review | Rejected as a compile-time optimization: `github_wasm_runtime_contract.rs` takes `142.73s`, but the bucket spends about `5m21s` compiling before tests start. Splitting would add a job and duplicate compile. |
 | H4 | Reduce feature flags for slow crates where the coverage is duplicated elsewhere. | Less compile graph expansion in PR crate buckets. | Evidence review | Still the best compile-time lever, but no safe duplicate coverage was found for removing `webui-v2-beta` / `slack-v2-host-beta` from Reborn crate tests. |
 | H5 | Remove OVH sccache from Reborn crate buckets. | Verify whether remote cache overhead is hiding any local cache gain. | Tested | Rejected: wall clock regressed from `8m35s` to `9m45s`; job count unchanged. |
+| H6 | Disable incremental compilation across all Reborn crate buckets. | Avoid CI-only incremental bookkeeping and target-dir churn for one-shot builds. | Running | Pending CI result. |
 
 ## H1: Narrow Crate Bucket Targets
 
@@ -238,3 +239,25 @@ OVH sccache is not producing a 30-50% win overall, but fully removing it from
 crate buckets made this benchmark worse. The current evidence says the OVH path
 still helps enough on repeated Reborn crate builds that removal should not be
 merged as a speed optimization.
+
+## H6: Disable Incremental Compilation for All Crate Buckets
+
+Change under test:
+
+- Set `CARGO_INCREMENTAL=0` at the `crate-tests` job level.
+- Remove the per-package special case that only disabled incremental
+  compilation for `ironclaw_reborn_composition`.
+
+Why this is safe to test:
+
+- It does not change which crates, features, or tests run.
+- GitHub hosted CI runs one-shot builds, where incremental bookkeeping and
+  larger target directories can be overhead rather than a win.
+- The workflow already disabled incremental for the heaviest composition crate
+  to keep disk usage bounded; this tests whether applying the same policy to
+  every crate bucket improves compile time.
+
+Benchmark result:
+
+- Branch/PR: [`codex/ci-compile-benchmarks`, PR #5648](https://github.com/nearai/ironclaw/pull/5648)
+- Workflow run: pending.

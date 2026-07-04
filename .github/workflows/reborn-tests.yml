@@ -186,6 +186,7 @@ jobs:
       LLM_USE_CODEX_AUTH: "false"
       OLLAMA_BASE_URL: ""
       OPENAI_API_KEY: ""
+      CARGO_INCREMENTAL: "0"
     strategy:
       fail-fast: false
       matrix:
@@ -283,11 +284,6 @@ jobs:
           while IFS= read -r package; do
             feature_flags="$(scripts/ci/package-feature-flags.sh "$package")"
             echo "::group::cargo test -p ${package} ${feature_flags}"
-
-            if [ "$package" = "ironclaw_reborn_composition" ]; then
-              echo "Disabling incremental compilation for ironclaw_reborn_composition to keep runner disk usage bounded."
-              export CARGO_INCREMENTAL=0
-            fi
 
             # shellcheck disable=SC2086 # feature_flags intentionally expands to zero or more Cargo args.
             timeout --signal=INT --kill-after=30s 28m \
