@@ -188,6 +188,9 @@ pub(crate) fn build_reborn_projection_services(
     let projection: Arc<dyn EventProjectionService> =
         Arc::new(ReplayEventProjectionService::from_runtime_log(event_log));
     let live_updates = Arc::new(InMemoryProjectionUpdateSource::new(128));
+    // One counter per projection-services bundle keeps all live publishers in
+    // the same SSE cursor space; per-publisher counters can collide after a
+    // durable cursor has advanced.
     let live_sequence = Arc::new(AtomicU64::new(0));
     let event_stream_manager = Arc::new(EventStreamManager::from_services(
         projection,

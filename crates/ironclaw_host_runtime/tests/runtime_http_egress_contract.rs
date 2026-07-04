@@ -4,13 +4,14 @@ use ironclaw_capabilities::{
 use ironclaw_events::InMemoryAuditSink;
 use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    AgentId, CapabilityId, CapabilitySet, CredentialStageError, ExecutionContext, ExtensionId,
-    InvocationId, MountAlias, MountGrant, MountPermissions, MountView, NetworkMethod,
-    NetworkPolicy, NetworkScheme, NetworkTargetPattern, Obligation, ProjectId, ResourceEstimate,
-    ResourceScope, RuntimeCredentialAccountProviderId, RuntimeCredentialInjection,
-    RuntimeCredentialSource, RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError,
-    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeHttpSaveTarget, RuntimeKind,
-    ScopedPath, SecretHandle, TenantId, TrustClass, UserId, VirtualPath,
+    AgentId, CapabilityHostHttpRequest, CapabilityId, CapabilitySet, CredentialStageError,
+    ExecutionContext, ExtensionId, InvocationId, MountAlias, MountGrant, MountPermissions,
+    MountView, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Obligation,
+    ProjectId, ResourceEstimate, ResourceScope, RuntimeCredentialAccountProviderId,
+    RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
+    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
+    RuntimeHttpSaveTarget, RuntimeKind, ScopedPath, SecretHandle, TenantId, TrustClass, UserId,
+    VirtualPath,
 };
 use ironclaw_host_runtime::{
     BuiltinObligationServices, RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
@@ -18,15 +19,15 @@ use ironclaw_host_runtime::{
     ToolCallHttpEgress,
 };
 use ironclaw_mcp::{
-    McpClient, McpClientRequest, McpHostHttpClient, McpHostHttpEgressPlan, McpHostHttpRequest,
-    McpRuntimeHttpAdapter, StaticMcpHostHttpEgressPlanner,
+    McpClient, McpClientRequest, McpHostHttpClient, McpHostHttpEgressPlan, McpRuntimeHttpAdapter,
+    StaticMcpHostHttpEgressPlanner,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
     PolicyNetworkHttpEgress, ReqwestNetworkTransport,
 };
 use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_scripts::{ScriptHostHttpRequest, ScriptRuntimeHttpAdapter};
+use ironclaw_scripts::ScriptRuntimeHttpAdapter;
 use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
 use ironclaw_wasm::{
     WasmHostHttp, WasmHttpRequest, WasmRuntimeHttpAdapter, WasmStagedRuntimeCredential,
@@ -2174,7 +2175,7 @@ async fn script_http_adapter_borrows_real_host_staged_network_policy() {
     let adapter = ScriptRuntimeHttpAdapter::new(Arc::new(service));
 
     let response = adapter
-        .request(ScriptHostHttpRequest {
+        .request(CapabilityHostHttpRequest {
             scope: scope.clone(),
             capability_id: capability_id.clone(),
             method: NetworkMethod::Post,
@@ -2221,7 +2222,7 @@ async fn mcp_http_adapter_borrows_real_host_staged_network_policy() {
     let adapter = McpRuntimeHttpAdapter::new(Arc::new(service));
 
     let response = adapter
-        .request(McpHostHttpRequest {
+        .request(CapabilityHostHttpRequest {
             scope: scope.clone(),
             capability_id: capability_id.clone(),
             method: NetworkMethod::Post,

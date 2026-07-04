@@ -26,6 +26,10 @@ exclude = [
 rust-version = "1.96"
 
 [workspace.dependencies]
+# WASM sandbox for untrusted tool execution.
+# Floor 46.0.1: minimum current major patch containing the fixes for the
+# Wasmtime WASI FilePerms advisories RUSTSEC-2026-0149 and RUSTSEC-2026-0188.
+wasmtime = { version = "46.0.1", features = ["component-model"] }
 # Only the WASI p2 host API is linked (`p2::add_to_linker_sync`). Keeping
 # defaults off avoids compiling unused p0/p1 WITX proc macros under remote CI
 # sccache workers, where registry sidecar WITX files are not present.
@@ -187,11 +191,8 @@ open = "5"
 # The postgres feature provides ToSql/FromSql for postgres-types (shared by tokio-postgres)
 pgvector = { version = "0.4", features = ["postgres"], optional = true }
 
-# WASM sandbox for untrusted tool execution.
-# Floor 46.0.1: minimum current major patch containing the fixes for the
-# Wasmtime WASI FilePerms advisories RUSTSEC-2026-0149 and RUSTSEC-2026-0188.
-wasmtime = { version = "46.0.1", features = ["component-model"] }
-wasmtime-wasi.workspace = true
+wasmtime = { workspace = true }
+wasmtime-wasi = { workspace = true }  # WASI support for component model
 wasmparser = "0.250.0"  # WASM binary parsing for validation
 
 # Cryptography for secrets management
@@ -293,6 +294,7 @@ ironclaw_product_workflow = { path = "crates/ironclaw_product_workflow", version
 ironclaw_reborn = { path = "crates/ironclaw_reborn", version = "0.1.0", features = ["root-llm-provider"] }
 ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support", "libsql"] }
 ironclaw_reborn_config = { path = "crates/ironclaw_reborn_config", version = "0.1.0" }
+ironclaw_reborn_openai_compat = { path = "crates/ironclaw_reborn_openai_compat", version = "0.1.0", features = ["openai-compat-beta"] }
 ironclaw_run_state = { path = "crates/ironclaw_run_state", version = "0.1.0" }
 ironclaw_threads = { path = "crates/ironclaw_threads", version = "0.1.0" }
 # `test-support` unlocks `TrustedTriggerSubmitRequest::new_for_test` (E-TRIGGERED-SUBMIT

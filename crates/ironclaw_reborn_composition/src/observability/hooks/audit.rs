@@ -6,7 +6,7 @@
 //! documented follow-up — and a hard prerequisite for production enablement of
 //! `HOOKS_THIRD_PARTY_ENABLED`, alongside `openat2` FS hardening. See the
 //! production-enablement gate on
-//! [`crate::hooks::HooksActivationConfig`] for the full prerequisite list.
+//! [`crate::observability::hooks::HooksActivationConfig`] for the full prerequisite list.
 
 /// Structured target for the security-audit `tracing` channel. Composition is a
 /// pre-run phase (no run-scoped `LoopHostMilestoneSink` exists yet), so
@@ -61,7 +61,7 @@ pub(super) mod test_capture {
     /// Run `body` with capture armed on this thread; returns the recorded
     /// `(tenant_id, extension_id)` quarantine pairs. Nesting is not supported
     /// (a single test scope at a time), which matches the per-test usage.
-    pub(in crate::hooks) fn with_capture<R>(
+    pub(in crate::observability::hooks) fn with_capture<R>(
         body: impl FnOnce() -> R,
     ) -> (R, Vec<(String, String)>) {
         CAPTURED.with(|cell| *cell.borrow_mut() = Some(Vec::new()));

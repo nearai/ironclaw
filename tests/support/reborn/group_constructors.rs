@@ -78,6 +78,18 @@ impl RebornIntegrationGroup {
         Self::builder().project_lifecycle().await
     }
 
+    /// C-SYNTH `project_create` fault-injection arm: same surface as
+    /// `project_lifecycle()`, but the underlying `ProjectService` is wrapped
+    /// in `FaultInjectingProjectService`
+    /// (`HostRuntimeCapabilityHarness::project_tools_with_fault_injection`)
+    /// so a `create_project` naming
+    /// `FAULT_INJECT_DENIED_PROJECT_NAME` surfaces a real
+    /// `ProjectServiceError::Denied` through the actual capability
+    /// dispatch instead of only at the `project_service_outcome` unit level.
+    pub async fn project_lifecycle_fault_injected() -> HarnessResult<Self> {
+        Self::builder().project_lifecycle_fault_injected().await
+    }
+
     /// Group whose ONLY capability is `builtin.profile_set` (E-PROFILE seam).
     /// Auto-approve is enabled. Use `user_profile_source_for_test()` to read
     /// a written profile back through the same adapter the group's planned
@@ -270,6 +282,16 @@ impl RebornIntegrationGroupBuilder {
     /// Build a project-lifecycle group. See [`RebornIntegrationGroup::project_lifecycle`].
     pub async fn project_lifecycle(self) -> HarnessResult<RebornIntegrationGroup> {
         let host_runtime = HostRuntimeCapabilityHarness::project_tools().await?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.build_with_capability(capability).await
+    }
+
+    /// Build a project-lifecycle group with the `project_create`
+    /// fault-injection arm wired. See
+    /// [`RebornIntegrationGroup::project_lifecycle_fault_injected`].
+    pub async fn project_lifecycle_fault_injected(self) -> HarnessResult<RebornIntegrationGroup> {
+        let host_runtime =
+            HostRuntimeCapabilityHarness::project_tools_with_fault_injection().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.build_with_capability(capability).await
     }

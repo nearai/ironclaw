@@ -61,7 +61,7 @@ use ironclaw_product_workflow::{
     RunStateApprovalInteractionReadModel,
 };
 use ironclaw_reborn::loop_exit_applier::{
-    ApprovalGateEvidenceStore, ResourceGateEvidenceStore, ThreadCheckpointLoopExitEvidencePort,
+    ApprovalGateEvidenceStore, ThreadCheckpointLoopExitEvidencePort,
 };
 use ironclaw_reborn::milestone_events::{
     DurableLoopHostMilestoneScope, DurableLoopHostMilestoneSink,
@@ -106,14 +106,12 @@ use self::runtime_turn_scheduler::RuntimeTurnScheduler;
 use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore, builtin_extension_registry};
 use crate::local_dev_capability_policy::local_dev_capability_policy;
-use crate::outbound_delivery_capability_surface::{
-    OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, outbound_delivery_synthetic_provider,
-};
 #[cfg(any(test, feature = "test-support"))]
-use crate::outbound_preferences::OutboundDeliveryTargetEntry;
-use crate::outbound_preferences::{
-    MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetProvider,
-    OutboundDeliveryTargetRegistrationOutcome, RebornOutboundPreferencesFacade,
+use crate::outbound::OutboundDeliveryTargetEntry;
+use crate::outbound::{
+    MutableOutboundDeliveryTargetRegistry, OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
+    OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome,
+    RebornOutboundPreferencesFacade, outbound_delivery_synthetic_provider,
 };
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 
@@ -503,7 +501,7 @@ pub struct RebornRuntime {
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     credential_refresh_worker_handle:
         Option<crate::credential_refresh_worker::CredentialRefreshWorkerRuntimeHandle>,
-    trace_flush_worker: crate::trace_capture::TraceQueueFlushWorkerHandle,
+    trace_flush_worker: crate::observability::trace_capture::TraceQueueFlushWorkerHandle,
     #[cfg(feature = "root-llm-provider")]
     skill_learning_extraction_tasks:
         Option<Arc<crate::skill_learning::SkillLearningExtractionTasks>>,
@@ -517,7 +515,7 @@ pub struct RebornRuntime {
     trigger_conversation_pairing:
         Option<Arc<dyn ironclaw_conversations::ConversationActorPairingService>>,
     outbound_delivery_target_registry: Option<Arc<MutableOutboundDeliveryTargetRegistry>>,
-    budget_event_projection: Option<crate::budget_events::BudgetEventProjection>,
+    budget_event_projection: Option<crate::observability::budget_events::BudgetEventProjection>,
     poll_settings: PollSettings,
     actor_user_id: UserId,
     source_binding_ref: SourceBindingRef,
@@ -946,44 +944,6 @@ fn approval_request_id_from_gate_ref(gate_ref: &LoopGateRef) -> Option<ApprovalR
         .as_str()
         .strip_prefix("gate:approval-")
         .and_then(|value| ApprovalRequestId::parse(value).ok())
-}
-
-struct LocalDevResourceGateEvidence {
-    budget_gate_store: Arc<dyn ironclaw_resources::BudgetGateStore>,
-}
-
-#[async_trait::async_trait]
-impl ResourceGateEvidenceStore for LocalDevResourceGateEvidence {
-    async fn pending_resource_gate(
-        &self,
-        scope: &TurnScope,
-        gate_ref: &LoopGateRef,
-    ) -> Result<bool, TurnError> {
-        let Some(gate_id) = budget_gate_id_from_gate_ref(gate_ref)? else {
-            return Ok(false);
-        };
-        let record = self
-            .budget_gate_store
-            .get(&scope.to_resource_scope(), gate_id)
-            .map_err(|error| TurnError::Unavailable {
-                reason: format!("budget gate evidence lookup failed: {error}"),
-            })?;
-        Ok(record
-            .map(|record| record.status == ironclaw_resources::BudgetGateStatus::Pending)
-            .unwrap_or(false))
-    }
-}
-
-fn budget_gate_id_from_gate_ref(
-    gate_ref: &LoopGateRef,
-) -> Result<Option<ironclaw_resources::BudgetGateId>, TurnError> {
-    let Some(value) = gate_ref.as_str().strip_prefix("gate:budget-") else {
-        return Ok(None);
-    };
-    let id = uuid::Uuid::parse_str(value).map_err(|error| TurnError::InvalidRequest {
-        reason: format!("invalid budget gate ref `{}`: {error}", gate_ref.as_str()),
-    })?;
-    Ok(Some(ironclaw_resources::BudgetGateId::from_uuid(id)))
 }
 
 #[async_trait::async_trait]
@@ -1653,7 +1613,7 @@ impl RebornRuntime {
 
     /// Broadcast sink that fans every emitted `BudgetEvent` to any
     /// subscriber. The runtime always spawns its own subscriber — the
-    /// [`crate::budget_events::BudgetEventProjection`] task wired by
+    /// [`crate::observability::budget_events::BudgetEventProjection`] task wired by
     /// `build_reborn_runtime` and shut down via [`Self::shutdown`] —
     /// so this sink is never a no-op even when the caller does not
     /// install a custom observer (review feedback Thermo-Nuclear #3
@@ -3126,11 +3086,11 @@ pub async fn build_reborn_runtime(
                     as Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
             },
         ));
-        loop_exit_evidence = loop_exit_evidence.with_resource_gate_evidence(Arc::new(
-            LocalDevResourceGateEvidence {
-                budget_gate_store: Arc::clone(&local_runtime.budget_gate_store),
-            },
-        ));
+        loop_exit_evidence = loop_exit_evidence.with_resource_gate_evidence(
+            crate::observability::budget_evidence::local_dev_resource_gate_evidence(Arc::clone(
+                &local_runtime.budget_gate_store,
+            )),
+        );
     }
     let loop_exit_evidence = Arc::new(loop_exit_evidence);
     let milestone_thread_scope = ThreadScope {
@@ -3268,11 +3228,11 @@ pub async fn build_reborn_runtime(
     // metadata (no `ExtensionRegistry`, no `ExtensionPackage`) and reaches ONLY
     // this hook factory, not the capability catalog or surface resolver.
     let hook_dispatcher_builder_factory = if let Some(local_runtime) = local_runtime {
-        let third_party_input = crate::hooks::ThirdPartyDiscoveryInput {
+        let third_party_input = crate::observability::hooks::ThirdPartyDiscoveryInput {
             filesystem: local_runtime.extension_filesystem.as_ref(),
             tenant_id: &validated_identity.tenant_id,
         };
-        let projection_registry = crate::hooks::build_hook_projection_registry(
+        let projection_registry = crate::observability::hooks::build_hook_projection_registry(
             builtin_extension_registry()?,
             Some(third_party_input),
             hooks_config,
@@ -3281,7 +3241,7 @@ pub async fn build_reborn_runtime(
         .map_err(|error| RebornRuntimeError::InvalidArgument {
             reason: format!("hook projection registry assembly failed: {error}"),
         })?;
-        crate::hooks::build_hook_dispatcher_builder_factory_for_tenant(
+        crate::observability::hooks::build_hook_dispatcher_builder_factory_for_tenant(
             hooks_config,
             &projection_registry,
             &validated_identity.tenant_id,
@@ -3310,15 +3270,16 @@ pub async fn build_reborn_runtime(
         thread_scope.tenant_id.as_str(),
         actor_user_id.as_str(),
     );
-    let trace_capture_scopes: crate::trace_capture::ObservedTraceScopes =
+    let trace_capture_scopes: crate::observability::trace_capture::ObservedTraceScopes =
         Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::from([
             runtime_owner_trace_scope,
         ])));
-    let trace_capture_sink: Arc<dyn ironclaw_turns::TurnEventSink> =
-        Arc::new(crate::trace_capture::TraceCaptureTurnEventSink::new(
+    let trace_capture_sink: Arc<dyn ironclaw_turns::TurnEventSink> = Arc::new(
+        crate::observability::trace_capture::TraceCaptureTurnEventSink::new(
             Arc::clone(&thread_service),
             Arc::clone(&trace_capture_scopes),
-        ));
+        ),
+    );
     // Skill learning shares the turn-end seam with trace capture (composed
     // additively, so the trace-capture path is unchanged). It is active only
     // when a learning model is configured (a stronger model than the run's, via
@@ -3410,11 +3371,9 @@ pub async fn build_reborn_runtime(
         // vision-capable models. Only available when a local runtime (and thus a
         // workspace filesystem) is composed.
         attachment_read_port: local_runtime.map(|rt| {
-            Arc::new(
-                crate::attachment_landing::ProjectScopedAttachmentReader::new(Arc::clone(
-                    &rt.workspace_filesystem,
-                )),
-            ) as Arc<dyn ironclaw_loop_support::LoopAttachmentReadPort>
+            Arc::new(crate::support::fs::ProjectScopedAttachmentReader::new(
+                Arc::clone(&rt.workspace_filesystem),
+            )) as Arc<dyn ironclaw_loop_support::LoopAttachmentReadPort>
         }),
         model_gateway: Arc::clone(&model_gateway),
         checkpoint_state_store: Arc::clone(&checkpoint_state_store)
@@ -3718,7 +3677,7 @@ pub async fn build_reborn_runtime(
     let _ = credential_refresh;
 
     let trace_flush_worker =
-        crate::trace_capture::spawn_trace_queue_flush_worker(trace_capture_scopes);
+        crate::observability::trace_capture::spawn_trace_queue_flush_worker(trace_capture_scopes);
     // Scheduler is running (started inside build_default_planned_runtime); mark readiness.
     services.readiness.workers.turn_runner = true;
     services.readiness.workers.trigger_poller = trigger_poller_handle.is_some();
@@ -3736,7 +3695,7 @@ pub async fn build_reborn_runtime(
         let observer = budget_event_observer.unwrap_or_else(|| {
             Arc::new(crate::TracingBudgetEventObserver) as Arc<dyn crate::BudgetEventObserver>
         });
-        crate::budget_events::BudgetEventProjection::spawn(
+        crate::observability::budget_events::BudgetEventProjection::spawn(
             broadcast_budget_event_sink.as_ref(),
             observer,
         )
@@ -4356,32 +4315,15 @@ mod tests {
     use ironclaw_auth::{GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE};
 
     #[test]
-    fn budget_gate_ref_parser_rejects_malformed_budget_ref() {
-        let gate_ref =
-            ironclaw_turns::LoopGateRef::new("gate:budget-not-a-uuid").expect("gate ref");
-        let error = super::budget_gate_id_from_gate_ref(&gate_ref)
-            .expect_err("malformed budget gate refs should fail loudly");
-
-        assert!(matches!(
-            error,
-            ironclaw_turns::TurnError::InvalidRequest { reason }
-                if reason.contains("invalid budget gate ref")
-                    && reason.contains("gate:budget-not-a-uuid")
-        ));
-    }
-
-    #[test]
     fn persistent_grantee_resolver_maps_outbound_delivery_target_set_to_synthetic_provider() {
         let registry = Arc::new(ironclaw_extensions::ExtensionRegistry::new());
         let resolver = super::RegistryPersistentApprovalGranteeResolver::new(registry)
             .expect("resolver builds");
-        let capability_id = CapabilityId::new(
-            crate::outbound_delivery_capability_surface::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
-        )
-        .expect("capability id");
+        let capability_id =
+            CapabilityId::new(crate::outbound::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID)
+                .expect("capability id");
         let expected_provider =
-            crate::outbound_delivery_capability_surface::outbound_delivery_synthetic_provider()
-                .expect("synthetic provider id");
+            crate::outbound::outbound_delivery_synthetic_provider().expect("synthetic provider id");
 
         assert_eq!(
             ironclaw_product_workflow::PersistentApprovalGranteeResolver::persistent_approval_grantee(
@@ -4718,9 +4660,9 @@ output_schema_ref = "schemas/write.output.json"
 
     #[cfg(feature = "libsql")]
     use crate::RebornRuntimeProcessBinding;
-    #[cfg(feature = "libsql")]
-    use crate::hooks::HooksActivationConfig;
     use crate::input::RebornBuildInput;
+    #[cfg(feature = "libsql")]
+    use crate::observability::hooks::HooksActivationConfig;
     use crate::runtime_input::{
         PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessCheck,
         TriggerFireAccessChecker, TriggerFireAccessDecision, TriggerFireAccessError,
@@ -5156,6 +5098,9 @@ output_schema_ref = "schemas/write.output.json"
 
     #[cfg(feature = "root-llm-provider")]
     struct RuntimeEnvGuard {
+        // Serializes tokio tests that mutate the runtime env overlay. The
+        // set/remove helpers lock only the separate override map, not
+        // ENV_MUTEX, so restoration can safely run while this guard is held.
         _async_lock: tokio::sync::MutexGuard<'static, ()>,
         _env_lock: std::sync::MutexGuard<'static, ()>,
         previous: Vec<(&'static str, Option<String>)>,
@@ -5195,6 +5140,13 @@ output_schema_ref = "schemas/write.output.json"
                 match previous {
                     Some(value) => ironclaw_common::env_helpers::set_runtime_env(name, value),
                     None => ironclaw_common::env_helpers::remove_runtime_env(name),
+                }
+                if !std::thread::panicking() {
+                    debug_assert_eq!(
+                        ironclaw_common::env_helpers::env_or_override(name),
+                        previous.clone(),
+                        "RuntimeEnvGuard failed to restore {name}"
+                    );
                 }
             }
         }
@@ -8699,11 +8651,10 @@ output_schema_ref = "schemas/write.output.json"
         // Mirrors production's `attachment_read_port` wiring (read-only
         // `workspace_filesystem`), so the read side is the same authority a
         // vision-capable model's multimodal part would resolve through.
-        let read_port = crate::attachment_landing::ProjectScopedAttachmentReader::new(Arc::clone(
+        let read_port = crate::support::fs::ProjectScopedAttachmentReader::new(Arc::clone(
             &local_runtime.workspace_filesystem,
         ));
-        let lander =
-            crate::attachment_landing::ProjectScopedAttachmentLander::new(read_write_filesystem);
+        let lander = crate::support::fs::ProjectScopedAttachmentLander::new(read_write_filesystem);
 
         let thread_scope = ThreadScope {
             tenant_id: TenantId::new("runtime-attachment-mount-tenant").unwrap(),

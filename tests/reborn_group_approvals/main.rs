@@ -47,9 +47,17 @@
 //!    (its own gate, resolved before returning).
 //! 8. `approve_always_persists_cross_thread` (HEADLINE) — thread A flips
 //!    auto-approve ON; a DIFFERENT thread B then writes with NO gate. Proves the
-//!    setting persists across thread boundaries. MUST run last (it flips the
-//!    toggle ON for the whole group), so the gate scenarios above are the control
-//!    proving the gate was real before the flip.
+//!    setting persists across thread boundaries. MUST run before scenario 9 (it
+//!    flips the toggle ON for the whole group), so the gate scenarios above are
+//!    the control proving the gate was real before the flip.
+//! 9. `ask_each_time_resumes_once` (W4-ASK-EACH-ONCE, #5306 class) — installs a
+//!    persistent, group-wide `ToolPermissionOverride::AskEachTime` override on
+//!    `builtin.write_file`, so it MUST run LAST: every scenario above assumes
+//!    the plain default (no override) Ask-mode gate for that capability, and
+//!    this override is a separate CAS store from `AutoApproveSettingStore` that
+//!    force-gates fresh invocations regardless of auto-approve. Proves an
+//!    approved AskEachTime-gated resume completes in ONE round trip, not an
+//!    unresumable re-gate loop.
 
 #[allow(dead_code)]
 #[path = "../support/reborn/mod.rs"]
@@ -60,6 +68,7 @@ mod support;
 
 mod scenario_approval_request_persists_after_reopen;
 mod scenario_approve_always_persists_cross_thread;
+mod scenario_ask_each_time_resumes_once;
 mod scenario_concurrent_dual_gate_resume;
 mod scenario_failure_category_demasked;
 mod scenario_gate_ref_edge_cases;
@@ -111,6 +120,19 @@ async fn approvals_group_e2e() {
     scenario_approve_always_persists_cross_thread::run(&g)
         .await
         .expect("approve-always persists cross-thread");
+    // W4-ASK-EACH-ONCE: MUST run after every other `builtin.write_file`
+    // scenario above -- it installs a persistent, group-wide
+    // `ToolPermissionOverride::AskEachTime` override for `builtin.write_file`
+    // (the same shared per-`(tenant, user)` CAS store `disable_outbound_target_set_tool`
+    // uses), which would otherwise force-gate their plain-Ask-mode writes too.
+    // Independent of the auto-approve toggle's value (`ask_each_time` always
+    // gates fresh invocations regardless of auto-approve -- see the scenario's
+    // module doc), so running it after the toggle flip is a stronger proof,
+    // not a weaker one.
+    report.record(
+        "ask_each_time_resumes_once",
+        scenario_ask_each_time_resumes_once::run(&g).await,
+    );
     report.assert_all_passed();
 }
 
@@ -150,5 +172,11 @@ async fn approvals_group_libsql_e2e() {
     scenario_approve_always_persists_cross_thread::run(&g)
         .await
         .expect("approve-always persists cross-thread");
+    // W4-ASK-EACH-ONCE: MUST run after every other `builtin.write_file`
+    // scenario above -- see the non-libsql variant's comment above for why.
+    report.record(
+        "ask_each_time_resumes_once",
+        scenario_ask_each_time_resumes_once::run(&g).await,
+    );
     report.assert_all_passed();
 }

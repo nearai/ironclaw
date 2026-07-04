@@ -10,6 +10,7 @@ use std::{
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use crate::product_auth_durable::{FilesystemAuthProductServices, UnavailableAuthProviderClient};
+use crate::support::fs::RebornProjectService;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_approvals::{
     FilesystemAutoApproveSettingStore, FilesystemPersistentApprovalPolicyStore,
@@ -629,16 +630,12 @@ impl RebornServices {
         let local_runtime = self.local_runtime.as_ref()?;
         let read_write_workspace_filesystem = self.read_write_workspace_filesystem()?;
         Some(AttachmentTestSupport {
-            read_port: Arc::new(
-                crate::attachment_landing::ProjectScopedAttachmentReader::new(Arc::clone(
-                    &local_runtime.workspace_filesystem,
-                )),
-            ),
-            lander: Arc::new(
-                crate::attachment_landing::ProjectScopedAttachmentLander::new(
-                    read_write_workspace_filesystem,
-                ),
-            ),
+            read_port: Arc::new(crate::support::fs::ProjectScopedAttachmentReader::new(
+                Arc::clone(&local_runtime.workspace_filesystem),
+            )),
+            lander: Arc::new(crate::support::fs::ProjectScopedAttachmentLander::new(
+                read_write_workspace_filesystem,
+            )),
         })
     }
 
@@ -2137,9 +2134,7 @@ async fn build_local_dev_store_graph(
         auto_approve_settings: Arc::clone(&auto_approve_settings),
         turn_state: Arc::clone(&turn_state),
         trigger_repository: Arc::clone(&trigger_repository),
-        project_service: Arc::new(crate::project_service::RebornProjectService::new(
-            Arc::clone(&project_repository),
-        )),
+        project_service: Arc::new(RebornProjectService::new(Arc::clone(&project_repository))),
         outbound_preferences: outbound_stores.outbound_preferences,
         skill_auto_activate_learned: Arc::new(AtomicBool::new(true)),
         #[cfg(feature = "slack-v2-host-beta")]
@@ -2288,9 +2283,7 @@ async fn build_local_dev_store_graph(
         auto_approve_settings: Arc::clone(&auto_approve_settings),
         turn_state: Arc::clone(&turn_state),
         trigger_repository: Arc::clone(&trigger_repository),
-        project_service: Arc::new(crate::project_service::RebornProjectService::new(
-            Arc::clone(&project_repository),
-        )),
+        project_service: Arc::new(RebornProjectService::new(Arc::clone(&project_repository))),
         outbound_preferences: outbound_stores.outbound_preferences,
         skill_auto_activate_learned: Arc::new(AtomicBool::new(true)),
         #[cfg(feature = "slack-v2-host-beta")]
@@ -2597,6 +2590,7 @@ async fn build_local_dev_root_filesystem(
 /// Filename of the local-dev libSQL database within the per-user root directory.
 /// One owner for the string — production factory, integration-test framework, and
 /// any on-disk path assertion all derive from this constant.
+#[cfg(any(feature = "libsql", feature = "test-support"))]
 pub(crate) const LOCAL_DEV_DB_FILENAME: &str = "reborn-local-dev.db";
 
 /// Open (or create) the local-dev libSQL database file at `root` — just the

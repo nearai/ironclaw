@@ -368,6 +368,7 @@ mod reborn_support_tests {
         NetworkMethod, NetworkPolicy, NetworkTargetPattern, ProjectId, ResourceScope, TenantId,
         ThreadId, UserId, VirtualPath,
     };
+    use ironclaw_llm::{LlmProvider, ToolCompletionRequest};
     use ironclaw_loop_support::{
         HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessage,
         HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
@@ -421,6 +422,8 @@ mod reborn_support_tests {
         FilesystemIdempotencyLedger, RebornProductWorkflowHarness,
         RebornProductWorkflowHarnessError, resource_scope,
     };
+    use crate::reborn_support::reply::RebornScriptedReply;
+    use crate::reborn_support::scripted_provider::scripted_trace_llm;
     use crate::reborn_support::session_thread::{RebornThreadHarness, RebornThreadHarnessError};
     use crate::reborn_support::test_adapter::{RebornTestIngress, RebornTestProductAdapter};
     use crate::support::trace_llm::{
@@ -774,6 +777,41 @@ mod reborn_support_tests {
             .expect("matching scripted follow-up tool result");
         assert_eq!(gateway.requests().len(), 2);
         gateway.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn scripted_trace_llm_canonicalizes_tool_call_ids_per_trace() {
+        let first = scripted_trace_llm([RebornScriptedReply::tool_calls([
+            (
+                "builtin.http",
+                serde_json::json!({"url": "https://a.example"}),
+            ),
+            (
+                "builtin.http",
+                serde_json::json!({"url": "https://b.example"}),
+            ),
+        ])]);
+
+        let first_response = first
+            .complete_with_tools(ToolCompletionRequest::new(Vec::new(), Vec::new()))
+            .await
+            .expect("first scripted tool-calls response");
+        assert_eq!(first_response.tool_calls[0].id, "call-1");
+        assert_eq!(first_response.tool_calls[1].id, "call-2");
+
+        let second = scripted_trace_llm([RebornScriptedReply::tool_call(
+            "builtin.http",
+            serde_json::json!({"url": "https://c.example"}),
+        )]);
+
+        let second_response = second
+            .complete_with_tools(ToolCompletionRequest::new(Vec::new(), Vec::new()))
+            .await
+            .expect("second scripted tool-call response");
+        assert_eq!(
+            second_response.tool_calls[0].id, "call-1",
+            "each materialized trace starts its deterministic id sequence fresh"
+        );
     }
 
     #[test]

@@ -23,11 +23,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 if __package__:
+    from . import google_api_helpers
     from . import run_live_qa
     from . import semantic_judge
     from . import text_match
 else:
     import run_live_qa
+    from scripts.reborn_webui_v2_live_qa import google_api_helpers
     import semantic_judge
     import text_match
 
@@ -1292,6 +1294,38 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             ["news.ycombinator.com|hacker news|hn|discussion|id="],
         )
 
+    def test_hn_routine_accepts_schedule_monitor_confirmation(self):
+        captured: dict[str, object] = {}
+
+        async def fake_live_chat_case(_ctx, **kwargs):
+            captured.update(kwargs)
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=True,
+                latency_ms=1,
+                details={
+                    "text_excerpt": (
+                        "Done! Here's what was created: HN Monitor. "
+                        "Schedule: Every hour at :00."
+                    )
+                },
+            )
+
+        with (
+            patch.object(run_live_qa, "_live_chat_case", side_effect=fake_live_chat_case),
+            patch.object(run_live_qa, "_trigger_record_count", side_effect=[0, 1]),
+        ):
+            result = asyncio.run(
+                run_live_qa.case_qa_8c_hn_keyword_slack_routine(self._dummy_ctx())
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(
+            captured["required_text"],
+            ["routine|trigger|automation|cron|schedule|created|monitor"],
+        )
+
     def test_live_google_side_effect_cases_install_required_extensions(self):
         captured: dict[str, dict[str, object]] = {}
         spreadsheet_id = "1AbCdEfGhIjKlMnOpQrStUvWxYz_1234567890"
@@ -1330,6 +1364,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         async def fake_google_sheet_contains_marker(**_kwargs):
             return {"found": True}
 
+        async def fake_wait_for_google_sheet_marker(**_kwargs):
+            return {"found": True}
+
         with (
             patch.object(
                 run_live_qa,
@@ -1365,6 +1402,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 run_live_qa,
                 "_google_sheet_contains_marker",
                 side_effect=fake_google_sheet_contains_marker,
+            ),
+            patch.object(
+                run_live_qa,
+                "_wait_for_google_sheet_marker",
+                side_effect=fake_wait_for_google_sheet_marker,
             ),
         ):
             ctx = self._dummy_ctx()
@@ -1458,9 +1500,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             captured_lookup.update(kwargs)
             return spreadsheet_id
 
-        async def fake_google_sheet_contains_marker(**kwargs):
+        async def fake_wait_for_google_sheet_marker(**kwargs):
             self.assertEqual(kwargs["spreadsheet_id"], spreadsheet_id)
             self.assertEqual(kwargs["marker"], captured_lookup["name"])
+            self.assertEqual(kwargs["timeout"], 90.0)
             return {"found": True}
 
         with (
@@ -1481,8 +1524,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             ),
             patch.object(
                 run_live_qa,
-                "_google_sheet_contains_marker",
-                side_effect=fake_google_sheet_contains_marker,
+                "_wait_for_google_sheet_marker",
+                side_effect=fake_wait_for_google_sheet_marker,
             ),
         ):
             result = asyncio.run(
@@ -1496,6 +1539,167 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             captured_lookup["mime_type"],
             "application/vnd.google-apps.spreadsheet",
         )
+
+    def test_gmail_to_sheet_delivery_records_empty_verifier_exception_type(self):
+        async def fake_live_chat_with_extensions_case(_ctx, **kwargs):
+            marker = kwargs["marker"]
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode="live:qa_6e_gmail_to_sheet_delivery",
+                success=True,
+                latency_ms=1,
+                details={
+                    "marker": marker,
+                    "text_excerpt": (
+                        "Google Sheet "
+                        "https://docs.google.com/spreadsheets/d/"
+                        "1AbCdEfGhIjKlMnOpQrStUvWxYz_1234567890/edit"
+                    ),
+                },
+            )
+
+        async def fake_wait_for_google_sheet_marker(**_kwargs):
+            raise TimeoutError()
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_live_chat_with_extensions_case",
+                side_effect=fake_live_chat_with_extensions_case,
+            ),
+            patch.object(
+                run_live_qa,
+                "_google_runtime_access_token",
+                return_value=("fresh-access-token", {"source": "test"}),
+            ),
+            patch.object(
+                run_live_qa,
+                "_wait_for_google_sheet_marker",
+                side_effect=fake_wait_for_google_sheet_marker,
+            ),
+        ):
+            result = asyncio.run(
+                run_live_qa.case_qa_6e_gmail_to_sheet_delivery(self._dummy_ctx())
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.details["error"], "TimeoutError")
+
+    def test_wait_for_google_sheet_marker_retries_transient_read_errors(self):
+        class FakeHttpxReadError(Exception):
+            pass
+
+        attempts = 0
+
+        async def fake_google_sheet_contains_marker(**_kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise FakeHttpxReadError("read timed out")
+            return {"found": True, "row_count": 2}
+
+        with (
+            patch.object(google_api_helpers, "_HTTPX_HTTP_ERROR", FakeHttpxReadError),
+            patch.object(
+                google_api_helpers,
+                "_google_sheet_contains_marker",
+                side_effect=fake_google_sheet_contains_marker,
+            ),
+            patch.object(google_api_helpers.asyncio, "sleep", return_value=None),
+        ):
+            result = asyncio.run(
+                google_api_helpers._wait_for_google_sheet_marker(
+                    access_token="access-token",
+                    spreadsheet_id="spreadsheet-id",
+                    marker="marker",
+                    timeout=1.0,
+                )
+            )
+
+        self.assertEqual(result, {"found": True, "row_count": 2})
+        self.assertEqual(attempts, 2)
+
+    def test_wait_for_google_sheet_marker_reports_empty_exception_type(self):
+        class FakeHttpxReadError(Exception):
+            pass
+
+        async def fake_google_sheet_contains_marker(**_kwargs):
+            raise FakeHttpxReadError("")
+
+        with (
+            patch.object(google_api_helpers, "_HTTPX_HTTP_ERROR", FakeHttpxReadError),
+            patch.object(
+                google_api_helpers,
+                "_google_sheet_contains_marker",
+                side_effect=fake_google_sheet_contains_marker,
+            ),
+            patch.object(google_api_helpers.asyncio, "sleep", return_value=None),
+        ):
+            with self.assertRaisesRegex(AssertionError, "last_error=FakeHttpxReadError"):
+                asyncio.run(
+                    google_api_helpers._wait_for_google_sheet_marker(
+                        access_token="access-token",
+                        spreadsheet_id="spreadsheet-id",
+                        marker="marker",
+                        timeout=0.001,
+                    )
+                )
+
+    def test_wait_for_google_sheet_marker_does_not_retry_explicit_api_failures(self):
+        attempts = 0
+
+        async def fake_google_sheet_contains_marker(**_kwargs):
+            nonlocal attempts
+            attempts += 1
+            raise AssertionError("Google Sheets read returned HTTP 403: forbidden")
+
+        with (
+            patch.object(
+                google_api_helpers,
+                "_google_sheet_contains_marker",
+                side_effect=fake_google_sheet_contains_marker,
+            ),
+            patch.object(google_api_helpers.asyncio, "sleep", return_value=None),
+        ):
+            with self.assertRaisesRegex(AssertionError, "HTTP 403"):
+                asyncio.run(
+                    google_api_helpers._wait_for_google_sheet_marker(
+                        access_token="access-token",
+                        spreadsheet_id="spreadsheet-id",
+                        marker="marker",
+                        timeout=1.0,
+                    )
+                )
+
+        self.assertEqual(attempts, 1)
+
+    def test_wait_for_google_sheet_marker_propagates_unexpected_errors(self):
+        attempts = 0
+
+        async def fake_google_sheet_contains_marker(**_kwargs):
+            nonlocal attempts
+            attempts += 1
+            raise ValueError("bad sheet payload")
+
+        with (
+            patch.object(
+                google_api_helpers,
+                "_google_sheet_contains_marker",
+                side_effect=fake_google_sheet_contains_marker,
+            ),
+            patch.object(google_api_helpers.asyncio, "sleep", return_value=None),
+        ):
+            with self.assertRaisesRegex(ValueError, "bad sheet payload"):
+                asyncio.run(
+                    google_api_helpers._wait_for_google_sheet_marker(
+                        access_token="access-token",
+                        spreadsheet_id="spreadsheet-id",
+                        marker="marker",
+                        timeout=1.0,
+                    )
+                )
+
+        self.assertEqual(attempts, 1)
 
     def test_slack_side_effect_setup_prompts_avoid_connect_action_trigger(self):
         captured_prompts: dict[str, str] = {}

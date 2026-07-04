@@ -129,3 +129,126 @@ async fn submit_with_image_attachment_fails_fast_without_a_lander() {
         "expected the no-lander fail-fast error, got: {err}"
     );
 }
+
+/// W4-ATTACH-VARIANTS: a `text/plain` attachment (`AttachmentKind::Document`,
+/// per `ironclaw_common::AttachmentKind::from_mime_type`) is landed through the
+/// real `InboundAttachmentLander`, its text extracted by
+/// `land_inbound_attachments` -> `extract_document_text`, and rendered into the
+/// `<attachments>` block `ironclaw_threads::attachment_context::augment_model_content`
+/// appends to the user message — the textual (non-multimodal) attachment path
+/// no `RebornIntegrationHarness` test exercised before this file only covered
+/// images. Reads the captured model request (not just tool output), proving
+/// the extracted text reached the model.
+#[tokio::test]
+async fn doc_attachment_reaches_the_model_with_extracted_text() {
+    const MARKER: &str = "ZAFFRE-DOCUMENT-MARKER-771";
+    let group = RebornIntegrationGroup::attachment_tools()
+        .await
+        .expect("attachment-tools group builds");
+    let harness = group
+        .thread("conv-attach-doc")
+        .script([RebornScriptedReply::text("read it")])
+        .build()
+        .await
+        .expect("thread builds");
+
+    harness
+        .submit_turn_with_attachments(
+            "summarize this note",
+            vec![(
+                "note.txt",
+                "text/plain",
+                format!("Reminder: the launch codeword is {MARKER}.").into_bytes(),
+            )],
+        )
+        .await
+        .expect("turn completes");
+
+    harness
+        .assert_model_request_contains(MARKER)
+        .await
+        .expect("extracted document text reached the model");
+    // `assert_model_request_contains` matches against the JSON-serialized
+    // captured request, so a literal `"` inside the rendered `<attachments>`
+    // XML is escaped to `\"` in that serialization — the needle must match the
+    // escaped form.
+    harness
+        .assert_model_request_contains("type=\\\"document\\\"")
+        .await
+        .expect("the attachment block tags the attachment as a document, not an image");
+
+    // Non-vacuity guard: a marker that was never written must be ABSENT, so
+    // `assert_model_request_contains` is proven to discriminate rather than
+    // pass unconditionally (e.g. on a captured-request stringification bug
+    // that always matches).
+    if harness
+        .assert_model_request_contains("UNWRITTEN-MARKER-999")
+        .await
+        .is_ok()
+    {
+        panic!("negative guard failed: model request must not contain an unwritten marker");
+    }
+}
+
+/// W4-ATTACH-VARIANTS: two attachments landed on a SINGLE turn both reach the
+/// model in one captured request — proves `submit_turn_with_attachments`
+/// carries N attachments through the real
+/// `DefaultProductWorkflow::submit_inbound_with_attachments` entry point (every
+/// prior attachment test in this file submitted exactly one), and that
+/// `land_inbound_attachments`/`augment_model_content` render every landed
+/// attachment into the `<attachments>` block, not just the first.
+#[tokio::test]
+async fn multiple_attachments_in_one_turn_all_reach_the_model() {
+    const MARKER_ONE: &str = "TOPAZ-MARKER-ALPHA";
+    const MARKER_TWO: &str = "TOPAZ-MARKER-BETA";
+    let group = RebornIntegrationGroup::attachment_tools()
+        .await
+        .expect("attachment-tools group builds");
+    let harness = group
+        .thread("conv-attach-multi")
+        .script([RebornScriptedReply::text("read both")])
+        .build()
+        .await
+        .expect("thread builds");
+
+    harness
+        .submit_turn_with_attachments(
+            "summarize both notes",
+            vec![
+                (
+                    "one.txt",
+                    "text/plain",
+                    format!("First note: {MARKER_ONE}.").into_bytes(),
+                ),
+                (
+                    "two.txt",
+                    "text/plain",
+                    format!("Second note: {MARKER_TWO}.").into_bytes(),
+                ),
+            ],
+        )
+        .await
+        .expect("turn completes");
+
+    harness
+        .assert_model_request_contains(MARKER_ONE)
+        .await
+        .expect("first attachment's extracted text reached the model");
+    harness
+        .assert_model_request_contains(MARKER_TWO)
+        .await
+        .expect("second attachment's extracted text reached the model");
+    // Both attachments are indexed distinctly in the rendered block, so both
+    // ordinal markers must be present — proves two DISTINCT attachment blocks
+    // were rendered, not one attachment whose body happens to contain both
+    // marker strings. (See the escaping note above: needles match the
+    // JSON-serialized, quote-escaped form.)
+    harness
+        .assert_model_request_contains("index=\\\"1\\\"")
+        .await
+        .expect("first attachment rendered at index 1");
+    harness
+        .assert_model_request_contains("index=\\\"2\\\"")
+        .await
+        .expect("second attachment rendered at index 2");
+}

@@ -15,7 +15,7 @@ use tokio::sync::Mutex;
 
 use crate::RebornRuntime;
 use crate::extension_lifecycle::{ExtensionActivationMode, RebornLocalExtensionManagementPort};
-use crate::outbound_preferences::{
+use crate::outbound::{
     OutboundDeliveryTargetEntry, OutboundDeliveryTargetProvider,
     OutboundDeliveryTargetRegistrationOutcome,
 };

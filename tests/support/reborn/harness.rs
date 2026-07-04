@@ -1675,6 +1675,14 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// parked `github.*` auth gate's `ProductAuthRuntimeCredentialResolver`
     /// lookup resolve on re-dispatch.
     product_auth: Option<Arc<RebornProductAuthServices>>,
+    /// W4-ASK-EACH-ONCE: local-dev per-tool permission override store (mirrors
+    /// `auto_approve_settings`). `Some` only for `new_with_options`-built
+    /// harnesses (which flow through `RebornServices`); `None` for the
+    /// lower-level constructors and the Echo backend. Lets a test install a
+    /// dynamic `ToolPermissionOverride::AskEachTime` override on any capability
+    /// via `set_ask_each_time_override_for_test`, independent of the
+    /// `outbound_target_tools()`-only `OutboundTargetToolsParts` copy.
+    tool_permission_overrides: Option<Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore>>,
 }
 
 struct HostRuntimeHarnessOptions {
@@ -1718,6 +1726,15 @@ struct HostRuntimeHarnessOptions {
     /// tool call never reaches `invoke_capability`). Empty for every harness
     /// that surfaces no bundled WASM capability.
     activate_bundled_extensions_for_test: Vec<ExtensionPackage>,
+    /// C-SYNTH `project_create` fault-injection seam: wrap the real
+    /// `Arc<dyn ProjectService>` (`services.local_dev_project_service_for_test()`)
+    /// in `FaultInjectingProjectService` before it reaches
+    /// `wrap_project_create_capability_for_test`, so a `create_project` call
+    /// naming `FAULT_INJECT_DENIED_PROJECT_NAME` returns
+    /// `ProjectServiceError::Denied` instead of reaching the real store.
+    /// Only `project_tools_with_fault_injection()` sets this; every other
+    /// harness leaves the real service unwrapped.
+    project_service_fault_injection: bool,
 }
 
 impl HostRuntimeHarnessOptions {
@@ -1733,6 +1750,7 @@ impl HostRuntimeHarnessOptions {
             outbound_target_facade: None,
             network_http_egress_for_test: None,
             activate_bundled_extensions_for_test: Vec::new(),
+            project_service_fault_injection: false,
         }
     }
 
@@ -1762,6 +1780,11 @@ impl HostRuntimeHarnessOptions {
 
     fn with_activated_bundled_extension(mut self, package: ExtensionPackage) -> Self {
         self.activate_bundled_extensions_for_test.push(package);
+        self
+    }
+
+    fn with_project_service_fault_injection(mut self) -> Self {
+        self.project_service_fault_injection = true;
         self
     }
 }
@@ -1958,6 +1981,7 @@ impl HostRuntimeCapabilityHarness {
             outbound_target_tools: None,
             scope_capability_by_run_owner: false,
             product_auth: None,
+            tool_permission_overrides: None,
         })
     }
 
@@ -2188,6 +2212,44 @@ impl HostRuntimeCapabilityHarness {
                     true,
                 )?),
             ),
+        )
+        .await?;
+        harness
+            .enable_global_auto_approve_for_product_and_harness_users()
+            .await?;
+        Ok(harness)
+    }
+
+    /// C-SYNTH `project_create` fault-injection arm: same surface as
+    /// `project_tools()`, but the real `Arc<dyn ProjectService>` is wrapped in
+    /// `FaultInjectingProjectService`
+    /// (`with_project_service_fault_injection`) so a `create_project` call
+    /// naming `FAULT_INJECT_DENIED_PROJECT_NAME` returns
+    /// `ProjectServiceError::Denied`/`PolicyDenied` and proves the real
+    /// capability dispatch's recoverable `Failed` behavior. This is *not*
+    /// the `project_service_outcome` `Unavailable` / internal-retry path.
+    /// Any other `create_project` name still reaches the real store.
+    pub(crate) async fn project_tools_with_fault_injection() -> HarnessResult<Self> {
+        let harness = Self::new_with_options(
+            "reborn-e2e-project-tools-fault-injection",
+            vec![CapabilityId::new(
+                ironclaw_reborn_composition::test_support::PROJECT_CREATE_CAPABILITY_ID,
+            )?],
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+            ],
+            Vec::new(),
+            ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            UserId::new("reborn-e2e-project-tools-fault-injection-user")?,
+            HostRuntimeHarnessOptions::new(
+                MountView::default(),
+                Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
+                    true,
+                )?),
+            )
+            .with_project_service_fault_injection(),
         )
         .await?;
         harness
@@ -2554,6 +2616,7 @@ impl HostRuntimeCapabilityHarness {
             outbound_target_facade,
             network_http_egress_for_test,
             activate_bundled_extensions_for_test,
+            project_service_fault_injection,
         } = options;
         let root = Arc::new(tempfile::tempdir()?);
         let storage_root = root.path().join("local-dev");
@@ -2603,7 +2666,19 @@ impl HostRuntimeCapabilityHarness {
         // before `services.host_runtime` is moved out below (E-PROFILE / E-PROJ /
         // C-ATTACH seams).
         let profile_filesystem = services.local_dev_profile_filesystem_for_test();
-        let project_service = services.local_dev_project_service_for_test();
+        // C-SYNTH `project_create` fault-injection seam: wrap the real service
+        // in `FaultInjectingProjectService` only when the harness opted in
+        // (`with_project_service_fault_injection`) — every other harness keeps
+        // the real service unwrapped and behaves exactly as before.
+        let project_service: Option<Arc<dyn ProjectService>> =
+            services.local_dev_project_service_for_test().map(|inner| {
+                if project_service_fault_injection {
+                    super::project_service_fault::FaultInjectingProjectService::wrapping(inner)
+                        as Arc<dyn ProjectService>
+                } else {
+                    inner
+                }
+            });
         // C-JOURNEY: capture product-auth before `services.host_runtime` is
         // moved out below, so `seed_github_credential_account` can create a
         // real credential account later (auth-gate happy-path resume).
@@ -2627,6 +2702,12 @@ impl HostRuntimeCapabilityHarness {
             None
         };
         let attachment_test_support = services.local_dev_attachment_test_support_for_test();
+        // W4-ASK-EACH-ONCE: capture the local-dev per-tool permission override
+        // store unconditionally (mirrors `auto_approve_settings` above), not just
+        // for `outbound_target_tools()`'s narrower `Some((facade, ..))` arm below
+        // -- any host-runtime-backed harness/group can now install a per-capability
+        // `AskEachTime` override via `set_ask_each_time_override_for_test`.
+        let tool_permission_overrides = services.local_dev_tool_permission_overrides_for_test();
         // C-SYNTH outbound: pair the injected facade double with the local-dev
         // settings stores production's `outbound_delivery_capabilities` consumes,
         // captured from `RebornServices` before the `host_runtime` move. Only
@@ -2686,6 +2767,7 @@ impl HostRuntimeCapabilityHarness {
             outbound_target_tools,
             scope_capability_by_run_owner: false,
             product_auth,
+            tool_permission_overrides,
         })
     }
 
@@ -2837,6 +2919,7 @@ impl HostRuntimeCapabilityHarness {
             outbound_target_tools: None,
             scope_capability_by_run_owner: false,
             product_auth: None,
+            tool_permission_overrides: None,
         })
     }
 
@@ -2936,6 +3019,7 @@ impl HostRuntimeCapabilityHarness {
             outbound_target_tools: None,
             scope_capability_by_run_owner: false,
             product_auth: None,
+            tool_permission_overrides: None,
         })
     }
 
@@ -3014,6 +3098,7 @@ impl HostRuntimeCapabilityHarness {
             outbound_target_tools: None,
             scope_capability_by_run_owner: false,
             product_auth: None,
+            tool_permission_overrides: None,
         })
     }
 
@@ -3078,6 +3163,7 @@ impl HostRuntimeCapabilityHarness {
             outbound_target_tools: None,
             scope_capability_by_run_owner: false,
             product_auth: None,
+            tool_permission_overrides: None,
         })
     }
 
@@ -3158,6 +3244,20 @@ impl HostRuntimeCapabilityHarness {
             .as_ref()
             .ok_or("host runtime harness has no recording http egress to script")?
             .install_scripted(responses);
+        Ok(())
+    }
+
+    /// W4-AUTHGATE-WIRE: enqueue a FIFO scripted status on the recording
+    /// **network** HTTP egress (see `RecordingNetworkHttpEgress::push_status`).
+    /// For `GithubIssueTools`-backed harnesses, the real WASM HTTP call flows
+    /// through this lane (not `install_http_responses`'s runtime-egress
+    /// matcher) — see `reborn_integration_secret_injection.rs`'s module doc.
+    /// Errors if this harness wired no recording network egress.
+    pub(crate) fn install_network_status_script(&self, status: u16) -> HarnessResult<()> {
+        self.network_egress
+            .as_ref()
+            .ok_or("host runtime harness has no recording network egress to script")?
+            .push_status(status);
         Ok(())
     }
 
@@ -3354,6 +3454,48 @@ impl HostRuntimeCapabilityHarness {
         Ok(())
     }
 
+    /// W4-ASK-EACH-ONCE: install a `ToolPermissionOverride::AskEachTime`
+    /// override for `capability_id` under `(tenant_id, user_id)` via the real
+    /// local-dev per-tool permission override store -- generalizes
+    /// `disable_outbound_target_set_tool`'s shape (same scope-key
+    /// convention: `agent_id`/`project_id` unset, matching how
+    /// `StoreApprovalSettingsProvider::tool_override` looks the override up)
+    /// to any host-runtime-backed harness/group, not just
+    /// `outbound_target_tools()`. Drives the SAME
+    /// `require_approval_for_profile_policy` `tool_override` consultation
+    /// the #5306 fix reordered relative to the one-shot approval-lease check.
+    /// Errors if this harness wired no local-dev tool-permission-override
+    /// store (i.e. not built via `new_with_options`).
+    pub(crate) async fn set_ask_each_time_override_for_test(
+        &self,
+        capability_id: &CapabilityId,
+        tenant_id: TenantId,
+        user_id: UserId,
+    ) -> HarnessResult<()> {
+        let store = self
+            .tool_permission_overrides
+            .as_ref()
+            .ok_or("harness has no local-dev tool-permission-override store")?;
+        let scope = ResourceScope {
+            tenant_id,
+            user_id: user_id.clone(),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        store
+            .set(ironclaw_approvals::CapabilityPermissionOverrideInput {
+                scope,
+                capability_id: capability_id.clone(),
+                state: ironclaw_approvals::CapabilityPermissionOverride::AskEachTime,
+                updated_by: Principal::User(user_id),
+            })
+            .await?;
+        Ok(())
+    }
+
     /// E-SKILL: the `HostSkillContextSource` to wire as the runtime's
     /// `skill_context_source` in `into_group`, so activated-skill instructions
     /// inject into the model request. `Some` only for `skill_activation_tools()`.
@@ -3419,6 +3561,46 @@ impl HostRuntimeCapabilityHarness {
         let dir = self
             .storage_root_for_test()
             .join("system")
+            .join("skills")
+            .join(name);
+        std::fs::create_dir_all(&dir)?;
+        let body = format!(
+            "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [\"{name}\"]\n---\n\n{prompt}"
+        );
+        std::fs::write(dir.join("SKILL.md"), body)?;
+        Ok(())
+    }
+
+    /// C-SYNTH `skill_activate` `AmbiguousSkill` seeding arm: seed a
+    /// USER-scoped skill (writes
+    /// `<storage_root>/tenants/<tenant>/users/<user>/skills/<name>/SKILL.md`,
+    /// mirroring the runtime.rs composition-test layout) so a name shared with
+    /// a system-scoped skill (`seed_system_skill_for_test`) resolves to TWO
+    /// Trusted candidates under different `SkillSourceKind`s — `System` root
+    /// and `User` root both default to `SkillTrust::Trusted`
+    /// (`FilesystemSkillBundleRoot::system`/`user`,
+    /// `crates/ironclaw_loop_support/src/filesystem_skill_bundle_source.rs`),
+    /// so `select_named_skill_activations`'s `active_candidates` filter
+    /// (`trust == Trusted`) admits both, and
+    /// `validate_explicit_mentions_are_unambiguous` then rejects the shared
+    /// name as `SkillActivationSelectionError::AmbiguousSkill`. `tenant`/`user`
+    /// must be the SAME `(tenant, actor_user_id)` the driving thread's run
+    /// resolves under (`harness.binding`), or the user root never matches the
+    /// run's own scoped `/skills` mount. Tests only.
+    pub(crate) fn seed_user_skill_for_test(
+        &self,
+        tenant: &TenantId,
+        user: &UserId,
+        name: &str,
+        description: &str,
+        prompt: &str,
+    ) -> HarnessResult<()> {
+        let dir = self
+            .storage_root_for_test()
+            .join("tenants")
+            .join(tenant.as_str())
+            .join("users")
+            .join(user.as_str())
             .join("skills")
             .join(name);
         std::fs::create_dir_all(&dir)?;
@@ -3596,13 +3778,15 @@ impl HostRuntimeCapabilityHarness {
             .unwrap_or_else(|| self.mounts.clone());
         LeaseApproval {
             issued_by: Principal::HostRuntime,
-            allowed_effects: self.effect_kinds.clone(),
-            mounts,
-            network: self.network_policy.clone(),
-            secrets: self.secrets.clone(),
-            resource_ceiling: None,
-            expires_at: None,
-            max_invocations: Some(1),
+            constraints: GrantConstraints {
+                allowed_effects: self.effect_kinds.clone(),
+                mounts,
+                network: self.network_policy.clone(),
+                secrets: self.secrets.clone(),
+                resource_ceiling: None,
+                expires_at: None,
+                max_invocations: Some(1),
+            },
         }
     }
 }
@@ -4682,6 +4866,16 @@ impl ironclaw_host_runtime::ToolCallHttpEgress for RecordingRuntimeHttpEgress {
 struct RecordingNetworkHttpEgress {
     default_body: Vec<u8>,
     response_bodies: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    /// W4-AUTHGATE-WIRE: FIFO of scripted non-default statuses, consumed ahead
+    /// of the hardcoded `200` default. Lets a test drive the runtime-401
+    /// (credential-injected-but-rejected) path for capabilities whose real
+    /// HTTP call flows through this **network** lane rather than the runtime
+    /// egress `ScriptedHttpResponse` matcher (`GithubIssueTools` — see
+    /// `reborn_integration_secret_injection.rs`'s module doc: `try_with_host_http_egress`
+    /// overwrites the runtime port with the host pipeline over THIS recorder).
+    /// Empty by default — every pre-existing caller keeps the old hardcoded-200
+    /// behavior byte-identical.
+    status_queue: Arc<Mutex<VecDeque<u16>>>,
     requests: Arc<Mutex<Vec<NetworkHttpRequest>>>,
 }
 
@@ -4690,12 +4884,19 @@ impl RecordingNetworkHttpEgress {
         Self {
             default_body: body,
             response_bodies: Arc::new(Mutex::new(VecDeque::new())),
+            status_queue: Arc::new(Mutex::new(VecDeque::new())),
             requests: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     fn requests(&self) -> Vec<NetworkHttpRequest> {
         self.requests.lock().unwrap().clone()
+    }
+
+    /// Enqueue one FIFO scripted status, consumed by the next `execute` call
+    /// ahead of the hardcoded `200` default.
+    fn push_status(&self, status: u16) {
+        self.status_queue.lock().unwrap().push_back(status);
     }
 }
 
@@ -4713,8 +4914,9 @@ impl NetworkHttpEgress for RecordingNetworkHttpEgress {
             .unwrap()
             .pop_front()
             .unwrap_or_else(|| self.default_body.clone());
+        let status = self.status_queue.lock().unwrap().pop_front().unwrap_or(200);
         Ok(NetworkHttpResponse {
-            status: 200,
+            status,
             headers: vec![("content-type".to_string(), "application/json".to_string())],
             body: body.clone(),
             usage: NetworkUsage {

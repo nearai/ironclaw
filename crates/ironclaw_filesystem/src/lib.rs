@@ -39,7 +39,7 @@ pub use cas::{
     CasApply, CasUpdateError, FILESYSTEM_APPLY_TIMEOUT, FILESYSTEM_CAS_BACKOFF_BASE,
     FILESYSTEM_CAS_BACKOFF_MAX, FILESYSTEM_CAS_RETRIES, cas_update,
 };
-pub use catalog::{CompositeRootFilesystem, FilesystemCatalog, MountDescriptor, PathPlacement};
+pub use catalog::{CompositeRootFilesystem, MountDescriptor, PathPlacement};
 pub use hsm::HsmBackend;
 pub use in_memory::InMemoryBackend;
 pub use index::{Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page};

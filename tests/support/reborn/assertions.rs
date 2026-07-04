@@ -66,6 +66,21 @@ impl RebornIntegrationHarness {
         Err(format!("expected {expected} captured egress request(s), saw {actual}").into())
     }
 
+    /// Assert exactly `expected` requests were captured on the **network**
+    /// egress lane (`captured_network_requests`) -- the lane
+    /// `GithubIssueTools`-backed harnesses actually dispatch through (see
+    /// `assert_network_egress_header_contains`'s docs). Sibling of
+    /// `assert_egress_count`, which reads the runtime-egress lane instead;
+    /// use this one for github/network-lane call-count proofs (e.g. that a
+    /// cancelled or failed-resume run triggered no further dispatch).
+    pub async fn assert_network_egress_count(&self, expected: usize) -> HarnessResult<()> {
+        let actual = self.captured_network_requests().len();
+        if actual == expected {
+            return Ok(());
+        }
+        Err(format!("expected {expected} captured network egress request(s), saw {actual}").into())
+    }
+
     /// Assert the captured egress URLs, IN CALL ORDER, each contain the matching
     /// substring in `expected` — and that the count matches `expected.len()`.
     /// Covers URL + ordering + count in one terse assertion.

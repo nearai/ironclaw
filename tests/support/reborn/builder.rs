@@ -101,6 +101,9 @@ pub struct RebornIntegrationHarnessBuilder {
     capability: RebornCapabilityBackend,
     keyed_http_responses: Vec<ScriptedHttpResponse>,
     web_access_response_bodies: Vec<Vec<u8>>,
+    /// W4-AUTHGATE-WIRE: FIFO scripted statuses for the `GithubIssueTools`
+    /// backend's **network**-egress lane (see `with_github_network_status`).
+    github_network_statuses: Vec<u16>,
     storage: StorageMode,
     safety_context: Option<InstructionSafetyContext>,
     /// How the `BuiltinHttpTools` backend wires `builtin.shell`. One enum instead
@@ -288,6 +291,23 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// W4-AUTHGATE-WIRE: script the GitHub WASM capability's real HTTP call to
+    /// come back with `status` instead of the default `200` fixture (FIFO,
+    /// one call consumed per queued status). Unlike `with_keyed_http_responses`
+    /// (the runtime-egress lane), the `GithubIssueTools` backend's real call
+    /// flows through the **network** egress lane — see
+    /// `reborn_integration_secret_injection.rs`'s module doc
+    /// (`try_with_host_http_egress` overwrites the runtime port with the host
+    /// pipeline over the recording network egress) — so a runtime-401 (the
+    /// credential-injected-but-401 auth-gate path, distinct from
+    /// `github_issue_tools_auth_required`'s credential-*missing* path) must be
+    /// scripted here instead. Implies [`with_github_issue_tools`](Self::with_github_issue_tools).
+    pub fn with_github_network_status(mut self, status: u16) -> Self {
+        self.capability = RebornCapabilityBackend::GithubIssueTools;
+        self.github_network_statuses.push(status);
+        self
+    }
+
     /// Wire the real first-party `web-access.search` / `web-access.get_content`
     /// capabilities (C-WEBACCESS). `response_bodies` scripts the three-leg Exa
     /// MCP handshake (`initialize` → `notifications/initialized` → `tools/call`)
@@ -345,6 +365,7 @@ impl RebornIntegrationHarnessBuilder {
                 self.shell_mode,
                 self.keyed_http_responses,
                 self.web_access_response_bodies,
+                self.github_network_statuses,
             )
             .await?;
 
@@ -473,6 +494,7 @@ impl RebornIntegrationHarness {
             capability: RebornCapabilityBackend::Echo,
             keyed_http_responses: Vec::new(),
             web_access_response_bodies: Vec::new(),
+            github_network_statuses: Vec::new(),
             storage: StorageMode::default(),
             safety_context: None,
             shell_mode: ShellMode::default(),
@@ -530,6 +552,49 @@ impl RebornIntegrationHarness {
         let ack = self
             .workflow
             .submit_inbound_with_attachments(envelope, vec![attachment])
+            .await?;
+        let run_id = Self::run_id_from_ack(ack)?;
+        self.wait_for_status(run_id, TurnStatus::Completed).await?;
+        Ok(run_id)
+    }
+
+    /// Submit a user turn carrying N inline attachments of any mime type, and
+    /// wait for it to complete (W4-ATTACH-VARIANTS). Generalizes
+    /// `submit_turn_with_image_attachment` to multiple attachments and
+    /// non-image kinds (e.g. `text/plain`, which `AttachmentKind::from_mime_type`
+    /// classifies as `Document` — its bytes are extracted to text by
+    /// `land_inbound_attachments` and rendered into the `<attachments>` block
+    /// `augment_model_content` appends to the message, rather than read back as
+    /// a multimodal part). Same production entry point
+    /// (`DefaultProductWorkflow::submit_inbound_with_attachments`) and lander
+    /// requirement as `submit_turn_with_image_attachment`.
+    pub async fn submit_turn_with_attachments(
+        &self,
+        text: &str,
+        attachments: Vec<(&str, &str, Vec<u8>)>,
+    ) -> HarnessResult<TurnRunId> {
+        if self.capability_recorder.attachment_test_support().is_none() {
+            return Err(
+                "no attachment lander wired — build the harness via RebornIntegrationGroup::attachment_tools()"
+                    .into(),
+            );
+        }
+        let (event_id, envelope) = self.build_user_envelope(text)?;
+        let inbound = attachments
+            .into_iter()
+            .enumerate()
+            .map(
+                |(index, (filename, mime_type, bytes))| ironclaw_attachments::InboundAttachment {
+                    id: format!("{event_id}-att-{index}"),
+                    mime_type: mime_type.to_string(),
+                    filename: Some(filename.to_string()),
+                    bytes,
+                },
+            )
+            .collect();
+        let ack = self
+            .workflow
+            .submit_inbound_with_attachments(envelope, inbound)
             .await?;
         let run_id = Self::run_id_from_ack(ack)?;
         self.wait_for_status(run_id, TurnStatus::Completed).await?;
@@ -955,7 +1020,11 @@ impl RebornIntegrationHarness {
         run_id: TurnRunId,
         expected: TurnStatus,
     ) -> HarnessResult<TurnRunState> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        // GitHub Actions Linux runners, and especially llvm-cov instrumented
+        // runs, can spend more than 10s in the real host-runtime/WASM path
+        // before persisting the next turn status. This helper is a state wait,
+        // not a performance assertion; terminal failures still fail fast below.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         loop {
             let state = self
                 .turn_store

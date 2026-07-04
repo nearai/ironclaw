@@ -30,7 +30,7 @@ async fn blocked_event_upserts_pending_gate_row() {
     assert_eq!(row.key.thread_id, scope.thread_id);
     assert_eq!(row.key.run_id, run_id);
     assert_eq!(row.source_cursor, TurnEventCursor(1));
-    assert_eq!(row.gate_kind, PendingGateKind::Approval);
+    assert_eq!(row.gate_kind, TurnBlockedGateKind::Approval);
     assert_eq!(row.gate_ref.as_str(), "gate:approval-a");
     assert_eq!(
         cursor_store
@@ -185,19 +185,19 @@ async fn non_approval_blocked_events_upsert_expected_gate_kinds() {
         (
             TurnStatus::BlockedAuth,
             TurnBlockedGateKind::Auth,
-            PendingGateKind::Auth,
+            TurnBlockedGateKind::Auth,
             "gate:auth-a",
         ),
         (
             TurnStatus::BlockedResource,
             TurnBlockedGateKind::Resource,
-            PendingGateKind::Resource,
+            TurnBlockedGateKind::Resource,
             "gate:resource-a",
         ),
         (
             TurnStatus::BlockedDependentRun,
             TurnBlockedGateKind::AwaitDependentRun,
-            PendingGateKind::AwaitDependentRun,
+            TurnBlockedGateKind::AwaitDependentRun,
             "gate:run-a",
         ),
     ] {

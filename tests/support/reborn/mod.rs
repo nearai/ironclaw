@@ -21,6 +21,7 @@ pub mod oauth_flow;
 pub mod outbound_preferences;
 pub mod process;
 pub mod product_workflow;
+pub mod project_service_fault;
 #[allow(dead_code)]
 pub mod qa_scenarios;
 pub mod qa_trace;

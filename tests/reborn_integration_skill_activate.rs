@@ -191,3 +191,86 @@ async fn skill_activate_over_budget_surfaces_recoverable_failed() {
         "expected the intended \"not found\" assertion failure, got a different harness error: {err}"
     );
 }
+
+/// C-SYNTH `AmbiguousSkill` seeding arm — a skill name that resolves to TWO
+/// Trusted candidates under different `SkillSourceKind`s (a system-scoped
+/// skill AND a user-scoped skill sharing the same name) drives the real
+/// `validate_explicit_mentions_are_unambiguous` reject path
+/// (`SkillActivationSelectionError::AmbiguousSkill` ->
+/// `skill_activation_selection_outcome`'s `AmbiguousSkill` arm), NOT the
+/// `ContextBudgetExceeded` arm the sibling test above already covers. Both
+/// arms map to a model-visible, recoverable `Failed(InvalidInput)` — this
+/// test proves the OTHER arm reaches that same outcome through the real
+/// capability dispatch, and that neither candidate's instructions leak into a
+/// later model request despite the name matching both.
+#[tokio::test]
+async fn skill_activate_ambiguous_name_surfaces_recoverable_failed() {
+    let group = RebornIntegrationGroup::skill_activation_tools()
+        .await
+        .expect("skill-activation group builds");
+    let capability_harness = group
+        .capability_harness()
+        .expect("skill-activation group has a host-runtime capability harness");
+    capability_harness
+        .seed_system_skill_for_test(
+            "duplicate",
+            "a system-scoped skill",
+            "SYSTEM_DUPLICATE_SKILL_SENTINEL",
+        )
+        .expect("system-scoped duplicate skill seeds");
+
+    let harness = group
+        .thread("conv-skill-activate-ambiguous")
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.skill_activate",
+                json!({"names": ["duplicate"]}),
+            ),
+            RebornScriptedReply::text("that name is ambiguous"),
+        ])
+        .build()
+        .await
+        .expect("thread builds");
+    // The user-scoped root is seeded under the SAME (tenant, actor) the built
+    // thread's run resolves under (`harness.binding`) — only then does the
+    // user `/skills` mount the run actually reads from contain this file.
+    capability_harness
+        .seed_user_skill_for_test(
+            &harness.binding.tenant_id,
+            &harness.binding.actor_user_id,
+            "duplicate",
+            "a user-scoped skill",
+            "USER_DUPLICATE_SKILL_SENTINEL",
+        )
+        .expect("user-scoped duplicate skill seeds");
+
+    harness
+        .submit_turn("activate the duplicate skill")
+        .await
+        .expect("turn completes despite the ambiguous activation");
+
+    // Model-visible Failed, not a terminal driver_unavailable.
+    harness
+        .assert_tool_error(ToolErrorClass::Failed, "ambiguous skill")
+        .await
+        .expect("ambiguous skill name surfaced as a recoverable Failed tool error");
+    harness
+        .assert_reply_contains("that name is ambiguous")
+        .await
+        .expect("run recovered and finalized");
+    // Neither candidate's instructions may leak into a later model request —
+    // an ambiguous selection activates nothing.
+    for sentinel in [
+        "SYSTEM_DUPLICATE_SKILL_SENTINEL",
+        "USER_DUPLICATE_SKILL_SENTINEL",
+    ] {
+        let err = harness
+            .assert_model_request_contains(sentinel)
+            .await
+            .expect_err("an ambiguous activation must not inject either candidate's instructions");
+        assert!(
+            err.to_string().starts_with("no model request contained"),
+            "expected the intended \"not found\" assertion failure, got a different harness error: {err}"
+        );
+    }
+}

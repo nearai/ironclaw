@@ -153,7 +153,7 @@ impl RefreshingLocalDevCapabilityPort {
         .with_trajectory_observer(
             self.trajectory_observer
                 .clone()
-                .map(crate::trajectory_observer::as_capability_observer),
+                .map(crate::observability::trajectory_observer::as_capability_observer),
         );
         for capability_id in self.policy.skill_management_capability_ids() {
             factory = factory

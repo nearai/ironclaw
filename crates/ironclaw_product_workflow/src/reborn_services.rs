@@ -1259,6 +1259,24 @@ fn tool_permission_state_wire(state: ToolPermissionState) -> &'static str {
     }
 }
 
+/// Wire enum for the WebUI settings/tools permission request body.
+///
+/// Request-side vocabulary on the RebornServicesApi contract surface: the
+/// three resolved [`ToolPermissionState`] values plus `default`, which clears
+/// the stored per-capability override. The serialized strings must stay
+/// byte-identical to what [`parse_tool_permission_state`] accepts and
+/// [`tool_permission_state_wire`] emits — the
+/// `settings_tool_permission_state_wire_strings_stay_linked` test pins that
+/// link so the request enum cannot drift from the storage vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsToolPermissionState {
+    Default,
+    AlwaysAllow,
+    AskEachTime,
+    Disabled,
+}
+
 enum ToolPermissionUpdate {
     Default,
     State(ToolPermissionState),
@@ -6347,6 +6365,53 @@ fn generated_thread_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The WebUI settings/tools request enum must use the exact wire strings
+    /// the operator-config storage parser accepts and the entry writer emits.
+    /// This pins the type link so the request vocabulary cannot drift from
+    /// the approvals-owned resolved-state vocabulary (audit 2026-07, 6a).
+    #[test]
+    fn settings_tool_permission_state_wire_strings_stay_linked() {
+        let cases = [
+            (SettingsToolPermissionState::Default, "default", None),
+            (
+                SettingsToolPermissionState::AlwaysAllow,
+                "always_allow",
+                Some(ToolPermissionState::AlwaysAllow),
+            ),
+            (
+                SettingsToolPermissionState::AskEachTime,
+                "ask_each_time",
+                Some(ToolPermissionState::AskEachTime),
+            ),
+            (
+                SettingsToolPermissionState::Disabled,
+                "disabled",
+                Some(ToolPermissionState::Disabled),
+            ),
+        ];
+        for (state, wire, resolved) in cases {
+            let serialized = serde_json::to_value(state).unwrap();
+            assert_eq!(serialized, serde_json::Value::String(wire.to_string()));
+            assert_eq!(
+                serde_json::from_value::<SettingsToolPermissionState>(serialized).unwrap(),
+                state
+            );
+            // Round-trips through the storage parser the facade applies on set.
+            let update =
+                parse_tool_permission_state(&serde_json::json!({ "state": wire })).unwrap();
+            match (update, resolved) {
+                (ToolPermissionUpdate::Default, None) => {}
+                (ToolPermissionUpdate::State(parsed), Some(expected)) => {
+                    assert_eq!(parsed, expected);
+                    // The resolved states serialize to the same strings the
+                    // config entry writer emits.
+                    assert_eq!(tool_permission_state_wire(expected), wire);
+                }
+                _ => panic!("wire string {wire} no longer parses to the expected update"),
+            }
+        }
+    }
 
     /// Every `ProjectServiceError` variant projects to a sanitized facade error
     /// with the expected coarse code/status, and `InvalidInput`'s field name is

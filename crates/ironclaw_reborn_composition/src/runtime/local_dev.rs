@@ -62,7 +62,7 @@ mod surface_disclosure;
 mod synthetic_capability;
 
 #[cfg(test)]
-pub(crate) use crate::outbound_delivery_capability_surface::{
+pub(crate) use crate::outbound::{
     OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
 };
 use extension_surface::{LocalDevExtensionSurface, LocalDevExtensionSurfaceSource};
