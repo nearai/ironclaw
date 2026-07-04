@@ -1044,6 +1044,31 @@ def _record_assistant_reply_wait_result(
         observed["semantic_judge"] = reply.semantic_judge
 
 
+def _routine_confirmation_follow_up_for_text(text: str) -> str | None:
+    normalized = text.lower()
+    asks_for_timezone = "timezone" in normalized or "time zone" in normalized
+    asks_for_confirmation = any(
+        phrase in normalized
+        for phrase in (
+            "confirm",
+            "go ahead",
+            "shall i",
+            "should i",
+            "would you like",
+        )
+    )
+    routine_context = any(
+        phrase in normalized
+        for phrase in ("routine", "trigger", "automation", "schedule", "cron")
+    )
+    if routine_context and (asks_for_timezone or asks_for_confirmation):
+        return (
+            "Yes, go ahead and create it. Use Europe/London (London time) "
+            "for the schedule."
+        )
+    return None
+
+
 async def _live_chat_case(
     ctx: LiveQaContext,
     *,
@@ -1054,6 +1079,7 @@ async def _live_chat_case(
     timeout: float = 120.0,
     extra_details: dict[str, object] | None = None,
     forbidden_text: list[str] | None = None,
+    routine_confirmation_follow_up: bool = False,
 ) -> ProbeResult:
     from playwright.async_api import expect
 
@@ -1086,16 +1112,35 @@ async def _live_chat_case(
                 prompt[:80],
                 timeout=15000,
             )
-        _record_assistant_reply_wait_result(
-            observed,
-            await _wait_for_assistant_reply(
-                page,
-                marker=marker,
-                required_text=required_text,
-                timeout=timeout,
-                semantic_goal=prompt,
-            ),
+        reply = await _wait_for_assistant_reply(
+            page,
+            marker=marker,
+            required_text=required_text,
+            timeout=timeout,
+            semantic_goal=prompt,
         )
+        _record_assistant_reply_wait_result(observed, reply)
+        if routine_confirmation_follow_up:
+            follow_up = _routine_confirmation_follow_up_for_text(reply.text_excerpt)
+            if follow_up:
+                observed["routine_confirmation_follow_up_sent"] = follow_up
+                observed["routine_confirmation_initial_text_excerpt"] = (
+                    reply.text_excerpt
+                )
+                await composer.fill(follow_up)
+                await composer.press("Enter")
+                await expect(page.locator("[data-testid='msg-user']").last).to_contain_text(  # type: ignore[attr-defined]
+                    follow_up[:80],
+                    timeout=15000,
+                )
+                follow_up_reply = await _wait_for_assistant_reply(
+                    page,
+                    marker=marker,
+                    required_text=required_text,
+                    timeout=timeout,
+                    semantic_goal=f"{prompt}\n{follow_up}",
+                )
+                _record_assistant_reply_wait_result(observed, follow_up_reply)
         if forbidden_text:
             text = str(observed["text_excerpt"]).lower()
             matches = [
@@ -2963,6 +3008,7 @@ async def _routine_creation_case(
             required_text=required_text,
             timeout=180.0,
             extra_details=details,
+            routine_confirmation_follow_up=True,
         )
     after_count = _trigger_record_count(ctx.reborn_home, count_name)
     result.details["trigger_records_after"] = after_count

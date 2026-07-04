@@ -467,9 +467,13 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
     def test_routine_creation_case_fails_when_no_trigger_is_created(self):
         captured_prompts: list[str] = []
+        captured_follow_up_flags: list[bool] = []
 
         async def fake_live_chat_case(_ctx, **kwargs):
             captured_prompts.append(kwargs["prompt"])
+            captured_follow_up_flags.append(
+                kwargs.get("routine_confirmation_follow_up", False)
+            )
             extra_details = kwargs.get("extra_details") or {}
             return run_live_qa.ProbeResult(
                 provider="test",
@@ -503,8 +507,29 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertEqual(captured_prompts, ["original sheet prompt"])
+        self.assertEqual(captured_follow_up_flags, [True])
         self.assertEqual(result.details["trigger_records_after"], 0)
         self.assertIn("did not add a trigger_record", result.details["error"])
+
+    def test_routine_confirmation_follow_up_answers_timezone_confirmation(self):
+        text = (
+            "I'll set up a trigger every 5 minutes and send a Slack DM. "
+            "I need a timezone for scheduling. Shall I go ahead and create this?"
+        )
+
+        self.assertEqual(
+            run_live_qa._routine_confirmation_follow_up_for_text(text),
+            "Yes, go ahead and create it. Use Europe/London (London time) "
+            "for the schedule.",
+        )
+
+    def test_routine_confirmation_follow_up_ignores_slack_pairing_gate(self):
+        text = (
+            "Connect Slack. Message the IronClaw Reborn app in Slack to get a "
+            "pairing code, then paste it here."
+        )
+
+        self.assertIsNone(run_live_qa._routine_confirmation_follow_up_for_text(text))
 
     def test_routine_creation_case_can_preinstall_extensions(self):
         captured: dict[str, object] = {}
