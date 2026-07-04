@@ -61,7 +61,7 @@ is report-only unless a new benchmark experiment is intentionally in flight.
 | H7 | Remove the duplicate instrumented `reborn_group_*` coverage lane from PR CI. | Reduce Reborn job count while keeping the uninstrumented group pass/fail gate. | Tested | Rejected: total jobs dropped from `28` to `27`, but wall clock regressed from `8m35s` to `9m39s`. |
 | H8 | Merge only the two smallest Reborn crate buckets, `auth-security` and `memory-skills`. | Reduce crate bucket jobs by one while leaving all long-pole buckets unchanged. | Tested | Reverted by decision: total jobs dropped from `28` to `27`, but the compile-heavy long poles remained unchanged. |
 | H9 | Enable sccache distributed compilation for all Reborn crate buckets. | Reduce compile time for the existing long-pole buckets without changing coverage. | Tested | Rejected: wall clock regressed from `8m35s` to `9m11s`; long-pole buckets were slower. |
-| H10 | Remove the duplicate `libsql-restart-tests` feature from the broad `ironclaw_reborn` crate bucket. | Reduce `reborn-core` runtime while preserving the dedicated restart-test PR gate. | Running | Pending CI result. |
+| H10 | Remove the duplicate `libsql-restart-tests` feature from the broad `ironclaw_reborn` crate bucket. | Reduce `reborn-core` runtime while preserving the dedicated restart-test PR gate. | Reverted | Abandoned: package-node evidence showed no compile-graph shrink, and the active run still left the compile-heavy long poles as the blocker. |
 
 ## H1: Narrow Crate Bucket Targets
 
@@ -475,4 +475,8 @@ Why this is safe to test:
 Benchmark result:
 
 - Branch/PR: [`codex/ci-compile-benchmarks`, PR #5648](https://github.com/nearai/ironclaw/pull/5648)
-- Workflow run: pending.
+- Workflow run: [`28721369125`](https://github.com/nearai/ironclaw/actions/runs/28721369125), canceled after the compile-heavy buckets were still the remaining long poles.
+- Decision: reverted. This experiment did not target the measured bottleneck:
+  the `ironclaw_reborn` package-node count stayed at `478` before and after
+  removing `libsql-restart-tests`, so it could not materially reduce compile
+  time.
