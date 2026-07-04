@@ -167,7 +167,7 @@ jobs:
     name: Test ${{ matrix.package }}
     needs: [changes, package-matrix]
     if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
-    runs-on: ${{ contains(fromJSON('["ironclaw_host_runtime","ironclaw_loop_support","ironclaw_product_workflow","ironclaw_reborn_composition","ironclaw_reborn_webui_ingress"]'), matrix.package) && 'ubuntu-latest-8-cores' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       ANTHROPIC_API_KEY: ""
@@ -284,7 +284,7 @@ jobs:
     name: Reborn root tests (${{ matrix.partition }})
     needs: changes
     if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
-    runs-on: ubuntu-latest-8-cores
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
       ANTHROPIC_API_KEY: ""
@@ -368,7 +368,7 @@ jobs:
     name: Reborn group tests
     needs: changes
     if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
-    runs-on: ubuntu-latest-8-cores
+    runs-on: ubuntu-latest
     # Group tests run sequentially in ONE job (build once, reuse artifacts), so
     # the budget must cover N suites at REBORN_GROUP_TEST_TIMEOUT each plus setup
     # — otherwise GitHub hard-kills the job before a hung suite reaches its own

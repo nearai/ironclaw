@@ -241,7 +241,7 @@ jobs:
       needs.changes.outputs.docs_only != 'true' &&
       needs.changes.outputs.has_legacy_tests == 'true' &&
       (github.event_name == 'push' || github.event_name == 'workflow_call' || needs.changes.outputs.has_wasm_abi_risk == 'true')
-    runs-on: ubuntu-latest-8-cores
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
