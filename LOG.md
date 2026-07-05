@@ -1951,3 +1951,48 @@ Budgets: 10 hours wall-clock / $0 spend
   `cargo check -p ironclaw_turns`, full dev score rerun, probe, and `git diff
   --check` passed. The unit-test target still emits the pre-existing
   `with_apply_timeout` dead-code warning under `cfg(test)`.
+
+## Cycle 37 - Sparse Snapshot Delta Encoding
+
+- Graph note: `codebase-memory-mcp` still fails immediately with
+  `Transport closed` for `index_status`; this cycle falls back to crate
+  guardrails and targeted source reads.
+- Baseline: cycle 36 is the current committed implementation. Full dev score
+  rerun passed 54 results and 36 comparisons; dev-shaped c4 `turn_lifecycle`
+  was libSQL p95 7310ms versus Postgres pool-2 p95 430ms. The unresolved
+  high-concurrency diagnostic is Postgres-only `turn_lifecycle` c100 p95
+  8666ms at payload 2048, 64 samples, pool size 2, with state hash
+  `660086a8484d5400`.
+- Hypothesis: Every row-store transition durably appends a JSON
+  `SnapshotDelta`. The common targeted deltas touch one or two row collections,
+  but the serialized JSON still contains every empty vector field and a null
+  `event_retention_floor`. Marking delta fields as serde-default and skipping
+  empty vectors/options should reduce serialization and filesystem append bytes
+  for every transition without changing replay semantics. Existing full-object
+  deltas should still deserialize because defaults are explicit.
+- Expected failure mode: Sparse delta JSON must deserialize with missing fields
+  as empty/default values, preserve full-snapshot fallback fields when present,
+  and leave state hashes unchanged. If any field lacks a default, replay from a
+  sparse delta log could drop records or fail after restart.
+- Result: The sparse delta encoding compiled and passed the focused row-store
+  contracts, but did not improve the high-concurrency signal. The code change
+  was abandoned before commit, so the durable delta wire format remains the
+  cycle-36 full-object JSON shape.
+- High-concurrency turn-state diagnostic: Postgres-only `turn_lifecycle` with
+  c32/c100, payload 2048, 64 samples, and pool size 2 completed with zero
+  errors and state hash `660086a8484d5400`. c32 was essentially flat/slightly
+  better, moving from cycle 36 p95 2314ms to 2299ms. c100 regressed slightly,
+  moving from 8666ms to 8700ms and throughput from 7.39 to 7.36 ops/sec.
+- Decision: Do not keep sparse delta encoding. The next cycle must change
+  approach rather than continue tuning durable delta JSON size; the remaining
+  signal is more likely in transition count/critical-section structure than
+  field-name payload overhead.
+- Validation before abandoning: `cargo fmt -p ironclaw_turns`, `cargo test -p
+  ironclaw_turns
+  filesystem_store::row_store::tests::snapshot_delta_serializes_sparse_and_defaults_missing_fields`,
+  `cargo test -p ironclaw_turns --test filesystem_turn_state_contract
+  filesystem_turn_state_row_store_persists_rows_without_state_blob`, `cargo
+  test -p ironclaw_turns --test loop_checkpoint_store_contract
+  filesystem_turn_state_row_store_loop_checkpoint_roundtrip_and_snapshot`, and
+  `cargo check -p ironclaw_turns` passed. The unit-test target emitted the
+  pre-existing `with_apply_timeout` dead-code warning under `cfg(test)`.
