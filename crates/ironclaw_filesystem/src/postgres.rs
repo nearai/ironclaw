@@ -71,6 +71,7 @@ impl PostgresRootFilesystem {
             .batch_execute(POSTGRES_ROOT_FILESYSTEM_SCHEMA)
             .await
             .map_err(|error| infrastructure_pg_error(FilesystemOperation::CreateDirAll, error))?;
+        drop_legacy_projection_indexes(&transaction).await?;
         transaction
             .commit()
             .await
@@ -125,6 +126,39 @@ impl PostgresRootFilesystem {
             }
         })
     }
+}
+
+#[cfg(feature = "postgres")]
+async fn drop_legacy_projection_indexes(
+    transaction: &tokio_postgres::Transaction<'_>,
+) -> Result<(), FilesystemError> {
+    let rows = transaction
+        .query(
+            "SELECT indexname \
+             FROM pg_indexes \
+             WHERE schemaname = current_schema() \
+               AND tablename = 'root_filesystem_entries' \
+               AND indexname LIKE 'idx_rfs_%' \
+               AND indexname NOT LIKE 'idx_rfs_shared_%' \
+               AND indexdef LIKE '%btree (((indexed ->>%'",
+            &[],
+        )
+        .await
+        .map_err(|error| infrastructure_pg_error(FilesystemOperation::CreateDirAll, error))?;
+    for row in rows {
+        let index_name: String = row.get(0);
+        let quoted = quote_postgres_identifier(&index_name);
+        transaction
+            .batch_execute(&format!("DROP INDEX IF EXISTS {quoted}"))
+            .await
+            .map_err(|error| infrastructure_pg_error(FilesystemOperation::CreateDirAll, error))?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "postgres")]
+fn quote_postgres_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
 #[cfg(feature = "postgres")]
@@ -301,14 +335,17 @@ impl RootFilesystem for PostgresRootFilesystem {
         let index_name = sql_index_name(path.as_str(), spec.name.as_str());
         match &spec.kind {
             IndexKind::Exact | IndexKind::Prefix => {
+                let index_name = postgres_shared_projection_index_name(spec);
                 let expressions: Vec<String> = spec
                     .keys
                     .iter()
                     .map(|k| format!("((indexed->>'{}'))", k.as_str()))
                     .collect();
+                let mut columns = expressions;
+                columns.push("path".to_string());
                 let ddl = format!(
                     "CREATE INDEX IF NOT EXISTS {index_name} ON root_filesystem_entries ({})",
-                    expressions.join(", ")
+                    columns.join(", ")
                 );
                 client.batch_execute(&ddl).await.map_err(|error| {
                     db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
@@ -426,8 +463,12 @@ impl RootFilesystem for PostgresRootFilesystem {
         let client = self.client().await?;
         let params_ref: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
             params.iter().map(|p| p.as_ref() as _).collect();
+        let statement = client
+            .prepare_cached(sql.as_str())
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::Query, error))?;
         let rows = client
-            .query(sql.as_str(), &params_ref[..])
+            .query(&statement, &params_ref[..])
             .await
             .map_err(|error| db_error(path.clone(), FilesystemOperation::Query, error))?;
         rows.into_iter()
@@ -1158,10 +1199,12 @@ impl Drop for PostgresStorageTxn {
 /// what keeps the small hosted pool from starving the heartbeat/webui and
 /// wedging the runner lease.
 ///
-/// Only use these with *static* SQL — dynamic SQL would grow the cache
-/// unbounded, so the filter `query` and index DDL paths stay on the uncached
-/// `tokio_postgres` calls. The error type stays `tokio_postgres::Error` so
-/// existing `db_error` mapping at call sites is unchanged.
+/// Prefer these with static or low-cardinality query-shape SQL. Filesystem
+/// `query` SQL is generated from the filter shape and indexed key names while
+/// paths and values stay bound parameters, so it uses `prepare_cached` directly
+/// at the call site. Index DDL remains uncached. The error type stays
+/// `tokio_postgres::Error` so existing `db_error` mapping at call sites is
+/// unchanged.
 #[cfg(feature = "postgres")]
 async fn cached_query_opt(
     client: &deadpool_postgres::Object,
@@ -1571,6 +1614,23 @@ fn descendant_path_range(path: &VirtualPath) -> (String, String) {
     (format!("{prefix}/"), format!("{prefix}0"))
 }
 
+#[cfg(feature = "postgres")]
+fn postgres_shared_projection_index_name(spec: &IndexSpec) -> String {
+    let kind = match &spec.kind {
+        IndexKind::Exact => "exact",
+        IndexKind::Prefix => "prefix",
+        IndexKind::Fts => "fts",
+        IndexKind::Vector { .. } => "vector",
+    };
+    let keys = spec
+        .keys
+        .iter()
+        .map(|key| key.as_str())
+        .collect::<Vec<_>>()
+        .join("_");
+    sql_index_name(&format!("/shared/{kind}/{keys}"), spec.name.as_str())
+}
+
 /// Translate a [`Filter`] tree into a postgres WHERE-clause fragment.
 /// Bound parameters use `$N` placeholders sized from `params.len() + 1`.
 ///
@@ -1931,5 +1991,56 @@ mod tests {
         assert!("/secrets/a/b/child" >= lower && "/secrets/a/b/child" < upper);
         assert!("/secrets/a/b" < lower); // the path itself is excluded
         assert!("/secrets/a/bb" >= upper); // prefix-sharing sibling excluded
+    }
+
+    #[test]
+    fn shared_projection_index_name_ignores_prefix_specific_declarations() {
+        let spec = IndexSpec::new(
+            crate::IndexName::new("bucket_exact").unwrap(),
+            vec![crate::IndexKey::new("bucket").unwrap()],
+            IndexKind::Exact,
+        );
+        let first = postgres_shared_projection_index_name(&spec);
+        let second = postgres_shared_projection_index_name(&spec);
+        assert_eq!(first, second);
+        assert!(first.contains("shared"));
+        assert!(first.contains("bucket_exact"));
+        assert!(first.len() <= 62);
+    }
+
+    #[test]
+    fn shared_projection_index_name_separates_kind_and_keys() {
+        let exact_bucket = IndexSpec::new(
+            crate::IndexName::new("bucket_exact").unwrap(),
+            vec![crate::IndexKey::new("bucket").unwrap()],
+            IndexKind::Exact,
+        );
+        let prefix_bucket = IndexSpec::new(
+            crate::IndexName::new("bucket_exact").unwrap(),
+            vec![crate::IndexKey::new("bucket").unwrap()],
+            IndexKind::Prefix,
+        );
+        let exact_tenant = IndexSpec::new(
+            crate::IndexName::new("bucket_exact").unwrap(),
+            vec![crate::IndexKey::new("tenant_id").unwrap()],
+            IndexKind::Exact,
+        );
+        assert_ne!(
+            postgres_shared_projection_index_name(&exact_bucket),
+            postgres_shared_projection_index_name(&prefix_bucket)
+        );
+        assert_ne!(
+            postgres_shared_projection_index_name(&exact_bucket),
+            postgres_shared_projection_index_name(&exact_tenant)
+        );
+    }
+
+    #[test]
+    fn quote_postgres_identifier_doubles_embedded_quotes() {
+        assert_eq!(quote_postgres_identifier("idx_simple"), "\"idx_simple\"");
+        assert_eq!(
+            quote_postgres_identifier("idx_\"quoted\""),
+            "\"idx_\"\"quoted\"\"\""
+        );
     }
 }

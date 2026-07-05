@@ -477,3 +477,59 @@ Budgets: 10 hours wall-clock / $0 spend
   still incomplete because the filesystem blob-store hot paths (`query_exact`,
   `put_get`, and occasionally `append_tail`) dominate remaining hard failures,
   and launch-ref/WebUI/turn holdout acceptance is still missing.
+
+## Cycle 11 - Shared Postgres Query Indexes
+
+- Graph: `codebase-memory-mcp` transport is still closed, so this cycle falls
+  back to local code reads after one probe.
+- Score (dev): Fresh Cycle 11 baseline `score.sh --dev` and `probe.sh` have
+  zero errors and matching hashes. Hosted-substrate and control-plane still
+  pass. `query_exact` is the stable hard failure: full score fails it for both
+  pools at concurrency 1/4, and probe fails it for both pools at concurrency
+  1/3/8. `put_get` and `append_tail` show intermittent p99 outliers, but their
+  p50/p95 are usually faster than libSQL.
+- Hypothesis: Postgres `ensure_index` creates one global expression index per
+  declaring prefix, with the path embedded only in the index name. Repeated
+  latency/prod prefixes therefore accumulate many duplicate indexes over the
+  same `indexed->>'bucket'` expression. `query_exact` then pays planning and
+  sort cost around a path-filtered equality lookup. A single shared
+  exact/prefix index keyed by `(indexed projection..., path)` should preserve
+  semantics, avoid duplicate DDL/index bloat, and let equality queries return
+  path-ordered rows with less planner work.
+- Expected failure mode: Index declarations are prefix-scoped for conflict
+  detection, but the physical exact/prefix index can be shared only if the
+  projection and index kind match. The change must not weaken `ensure_index`
+  conflict checks, FTS prefix isolation, range filter correctness, or libSQL
+  behavior. Existing duplicate indexes in the local dev database may still
+  affect one run until the database is rebuilt or old indexes are dropped, so
+  focused fresh-DB checks matter.
+- Diagnostic: Change only Postgres exact/prefix physical index naming/DDL,
+  add tests for the shared name shape, run filesystem tests with
+  `libsql,postgres`, then rerun focused `query_exact` and full dev/probe.
+- Change: Postgres exact/prefix `ensure_index` now creates one shared physical
+  projection index per spec kind/key/name, with `path` appended as the final
+  btree column, instead of creating one prefix-named global expression index
+  per declaring prefix. `query` now prepares the generated SQL through
+  `prepare_cached`, with paths and values still bound as parameters. Postgres
+  filesystem migration cleanup drops legacy prefix-named btree projection
+  indexes so existing dev/prod databases stop paying planner cost for duplicate
+  `indexed->>'...'` indexes; FTS indexes remain prefix-scoped.
+- Result: `cargo test -p ironclaw_filesystem --features libsql,postgres`
+  passed. Focused `query_exact` score with concurrency 1/4 passed all
+  comparisons: pool 1 p50/p95 dropped to 0.476/0.760ms at c1 and
+  0.389/0.606ms at c4; pool 2 dropped to 0.104/0.320ms at c1 and
+  0.116/0.241ms at c4. The live Postgres DB has 4
+  `root_filesystem_entries` indexes after cleanup, with 2 shared projection
+  indexes and 0 legacy projection duplicates. Full `harness/latency/score.sh
+  --dev` has zero failing comparisons, zero errors, and matching hashes;
+  `query_exact` remains sub-millisecond for both pools and both dev
+  concurrencies. `harness/latency/probe.sh` was rerun twice: both runs show
+  `query_exact` passing for both pools through concurrency 8, but both are not
+  clean probe evidence because the libSQL baseline hit one
+  `control_plane_snapshot` concurrency-8 filesystem/secret-store error, causing
+  state-hash mismatch for that workload.
+- Reflection: The stable Postgres query hard failure is removed in dev score
+  and probe query rows. The next cycle should not keep tuning Postgres query;
+  it should address the libSQL baseline control-plane instability at probe
+  concurrency 8 or move the harness closer to the real launch-ref/WebUI/turn
+  acceptance path. This is still not holdout acceptance.
