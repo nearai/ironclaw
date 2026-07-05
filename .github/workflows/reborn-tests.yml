@@ -311,14 +311,14 @@ jobs:
       LLM_USE_CODEX_AUTH: "false"
       OLLAMA_BASE_URL: ""
       OPENAI_API_KEY: ""
-      REBORN_ROOT_TEST_PARTITIONS: 2
+      REBORN_ROOT_TEST_PARTITIONS: 4
       REBORN_ROOT_TEST_PARTITION: ${{ matrix.partition }}
       REBORN_ROOT_TEST_TIMEOUT: 28m
       CARGO_INCREMENTAL: "0"
     strategy:
       fail-fast: false
       matrix:
-        partition: [0, 1]
+        partition: [0, 1, 2, 3]
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
