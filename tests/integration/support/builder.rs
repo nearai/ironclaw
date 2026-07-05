@@ -39,6 +39,7 @@ use ironclaw_product_workflow::{
     DefaultProductWorkflow, ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
 };
 use ironclaw_reborn::loop_driver_host::HookDispatcherBuilderFactory;
+use ironclaw_reborn::runtime::ToolDisclosureMode;
 use ironclaw_threads::ThreadScope;
 use ironclaw_turns::run_profile::{CommunicationContextProvider, InstructionSafetyContext};
 use ironclaw_turns::{
@@ -114,6 +115,12 @@ pub struct RebornIntegrationHarnessBuilder {
     fail_model: bool,
     /// C-TRACECAP seam: install an in-memory `TurnEventSink` when `true`.
     turn_event_sink: bool,
+    /// Force `ToolDisclosureMode::Bridged` into the underlying group's ONE
+    /// planned runtime, bypassing `REBORN_TOOL_DISCLOSURE`/`from_env()`
+    /// (test-only knob; see `RebornIntegrationGroupBuilder::tool_disclosure`).
+    /// `None` (default) resolves via `ToolDisclosureMode::from_env()`, matching
+    /// today's behavior byte-for-byte.
+    tool_disclosure: Option<ToolDisclosureMode>,
     /// C-BUDGET: when `true`, wire the production budget accountant into the
     /// degenerate one-thread group (see `RebornIntegrationGroupBuilder::budget_accounting`).
     budget_accounting: bool,
@@ -207,6 +214,38 @@ impl RebornIntegrationHarnessBuilder {
     /// [`RebornIntegrationHarness::recorded_turn_events`].
     pub fn with_turn_event_sink(mut self) -> Self {
         self.turn_event_sink = true;
+        self
+    }
+
+    /// Force `ToolDisclosureMode::Bridged` for this harness's underlying group
+    /// (enabler (b), `REBORN_TOOL_DISCLOSURE=Bridged`), so the bridged decorator
+    /// (`ToolDisclosureCapabilityDecorator`) replaces the flat per-capability
+    /// tool list with the bridge meta tools in the `tools` argument shipped
+    /// to the model. Only `tool_search` is ever ADVERTISED to the model;
+    /// `tool_describe`/`tool_call` are retained internally for describe-first
+    /// routing and never appear on the model-visible tool surface (see
+    /// `tool_disclosure.rs`'s `bridged_mode_defers_wide_catalog_to_bridge_meta_tools`).
+    /// Deferral is ALSO threshold-gated (`select_active_set`,
+    /// `DisclosureCaps::default().max_tools = 32`): backends under the cap
+    /// (e.g. `BuiltinHttpTools`, 13 tools) stay flat even in Bridged mode —
+    /// pair with `.with_github_issue_tools()` (48 tools) to observe deferral.
+    /// Read back with `assert_model_tools_contains`/
+    /// `assert_model_tools_excludes`. Never mutates the process env — avoids
+    /// the `#[tokio::test]` concurrent-test race a raw env var would hit (see
+    /// `ToolDisclosureMode::from_env`, `apply_hermetic_env`).
+    pub fn with_tool_disclosure_bridged(mut self) -> Self {
+        self.tool_disclosure = Some(ToolDisclosureMode::Bridged);
+        self
+    }
+
+    /// Force `ToolDisclosureMode::Off` for this harness's underlying group,
+    /// bypassing `REBORN_TOOL_DISCLOSURE`/`from_env()`. Use this to pin a
+    /// negative-control test's mode explicitly rather than relying on the
+    /// ambient env default — see
+    /// `RebornIntegrationGroupBuilder::with_tool_disclosure_off` for why the
+    /// env-resolution path alone is not control-safe.
+    pub fn with_tool_disclosure_off(mut self) -> Self {
+        self.tool_disclosure = Some(ToolDisclosureMode::Off);
         self
     }
 
@@ -368,6 +407,15 @@ impl RebornIntegrationHarnessBuilder {
         if self.turn_event_sink {
             group_builder = group_builder.with_turn_event_sink();
         }
+        match self.tool_disclosure {
+            Some(ToolDisclosureMode::Bridged) => {
+                group_builder = group_builder.with_tool_disclosure_bridged();
+            }
+            Some(ToolDisclosureMode::Off) => {
+                group_builder = group_builder.with_tool_disclosure_off();
+            }
+            None => {}
+        }
         if self.budget_accounting {
             group_builder = group_builder.budget_accounting();
         }
@@ -474,6 +522,7 @@ impl RebornIntegrationHarness {
             park_gate: None,
             fail_model: false,
             turn_event_sink: false,
+            tool_disclosure: None,
             budget_accounting: false,
             communication_context_provider: None,
             hook_dispatcher_builder_factory: None,
@@ -1390,6 +1439,11 @@ pub(crate) fn apply_hermetic_env() {
             std::env::remove_var("LLM_RESPONSE_CACHE_ENABLED");
             std::env::remove_var("RESPONSE_CACHE_ENABLED");
             std::env::remove_var("NEARAI_SESSION_TOKEN");
+            // No integration test should inherit the ambient tool-disclosure
+            // knob: `ToolDisclosureMode::from_env()` resolution is opt-in per
+            // test via `.with_tool_disclosure_bridged()`/`.with_tool_disclosure_off()`,
+            // never ambient (see `tool_disclosure.rs`'s negative control).
+            std::env::remove_var(ironclaw_reborn::runtime::REBORN_TOOL_DISCLOSURE_ENV);
         }
     });
 }
