@@ -451,6 +451,10 @@ name = "reborn_integration_http_matcher"
 path = "tests/integration/http_matcher.rs"
 
 [[test]]
+name = "reborn_integration_idempotent_replay"
+path = "tests/integration/idempotent_replay.rs"
+
+[[test]]
 name = "reborn_integration_identity_resolution_smoke"
 path = "tests/integration/identity_resolution_smoke.rs"
 
