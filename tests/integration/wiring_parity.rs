@@ -360,21 +360,24 @@ fn profile_capability_ids_by_domain() -> HarnessResult<Vec<(&'static str, Vec<St
                 .collect(),
         ),
         // extension_lifecycle_tools_profile() (harness/profiles/extension.rs)
-        // unions EXTENSION_LIFECYCLE_CAPABILITY_IDS (4 ids) then
-        // BUNDLED_EXTENSION_CAPABILITY_IDS, in that order. The leading 4 are
-        // skipped here: their real production values are visibility-blocked
-        // (see `production_capability_surface()`'s doc) — checking them
-        // against a surface that (correctly) no longer contains them would
-        // fail for a reason unrelated to real drift. The remaining ~130
-        // bundled-extension ids ARE checked, against the manifest-derived
+        // grants EXTENSION_LIFECYCLE_CAPABILITY_IDS (4 ids) plus
+        // BUNDLED_EXTENSION_CAPABILITY_IDS. The 4 lifecycle ids are filtered
+        // out BY NAME (order-independent): their real production values are
+        // visibility-blocked (see `production_capability_surface()`'s doc) —
+        // checking them against a surface that (correctly) no longer contains
+        // them would fail for a reason unrelated to real drift. The remaining
+        // ~130 bundled-extension ids ARE checked, against the manifest-derived
         // (not hand-transcribed) surface.
         ("extension", {
             let capability_ids =
                 profiles::extension::extension_lifecycle_tools_profile()?.capability_ids;
             capability_ids
                 .into_iter()
-                .skip(reborn_support::extension_surface::EXTENSION_LIFECYCLE_CAPABILITY_IDS.len())
                 .map(CapabilityId::into_string)
+                .filter(|id| {
+                    !reborn_support::extension_surface::EXTENSION_LIFECYCLE_CAPABILITY_IDS
+                        .contains(&id.as_str())
+                })
                 .collect()
         }),
         // Union of all three file-domain constructors' ids
