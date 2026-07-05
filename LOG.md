@@ -995,3 +995,51 @@ Budgets: 10 hours wall-clock / $0 spend
   hot transitions row-native, reduce `submit_turn` to one durable batch/append,
   compact or snapshot the append log for restart cost, and address the thread
   store blob path that now dominates the full user flow.
+
+## Cycle 21 - Harness Turn-State Blob Lifecycle Signal
+
+- Graph note: `codebase-memory-mcp` still fails closed with a closed transport
+  on project/status probes, so this cycle uses targeted source reads.
+- Baseline: The locked dev scorer and probe still pass the current storage and
+  control-plane workloads, but `acceptance_ready` remains false because the
+  harness does not yet run the local-runtime turn admission/queue/resume/cancel
+  flow required by `spec.md`. The current production-shaped turn store is still
+  `FilesystemTurnStateStore`, which persists a per-user `/turns/state.json`
+  blob and applies each mutation by reading, overlaying, mutating, and CAS
+  rewriting the snapshot.
+- Hypothesis: Adding a scorer workload that drives submit -> claim -> block ->
+  resume -> reclaim -> complete plus a separate submit -> claim ->
+  request_cancel -> cancel flow through `FilesystemTurnStateStore` will make
+  the blob growth problem visible in the locked latency harness. The workload
+  should use the same libSQL/Postgres root filesystem comparison and state-hash
+  parity checks as the rest of the scorer, so future row/append turn-state
+  changes can be evaluated without ad hoc stress-only commands.
+- Expected failure mode: This first harness slice may make Postgres fail the
+  current dev ratios because it intentionally measures the blob CAS path rather
+  than the experimental row store. That is acceptable diagnostic pressure; the
+  fix should then be a production-shaped row/append turn-state path, not a
+  memory-only shortcut or a benchmark-specific bypass.
+- Diagnostic: Add the workload to `harness/latency/runner`, run the runner
+  focused on that workload for compile/semantic parity, then run `lint.sh` and
+  the dev scorer to capture p50/p95/p99 and state-hash behavior.
+- Result: Added `turn_lifecycle_blob` to the locked latency runner. Each sample
+  now drives a blocked/resumed run and a cancelled run through
+  `FilesystemTurnStateStore`, including terminal readback, over the same libSQL
+  vs Postgres root filesystem comparison used by the other workloads. A first
+  c4 run exposed a harness bug: the c4 pass reused c1 sample/idempotency keys,
+  so both backends replayed terminal runs and had nothing to claim. The runner
+  now isolates workload run keys by workload and concurrency.
+- Score signal: Focused `turn_lifecycle_blob` c4 with six samples completed
+  with zero errors and matching state hashes. Full `score.sh --dev` also
+  completed with zero errors and matching state hashes for the new workload.
+  The new blob lifecycle rows pass at concurrency 1, but hard-fail at
+  concurrency 4: libSQL c4 p95 was 5.63s, Postgres pool-1 c4 p95 was 15.25s
+  (2.71x), and Postgres pool-2 c4 p95 was 9.12s (1.62x). This locks the
+  filesystem turn-state blob/CAS contention problem into the scorer instead of
+  leaving it only in stress-only diagnostics.
+- Validation: `cargo fmt --manifest-path harness/latency/runner/Cargo.toml
+  --check`, `cargo check --manifest-path harness/latency/runner/Cargo.toml`,
+  focused `turn_lifecycle_blob` c1/c4 runner invocations, and
+  `harness/latency/lint.sh` passed. Full `harness/latency/score.sh --dev`
+  completed and reported the intended hard-fail comparison rows for
+  `turn_lifecycle_blob` c4.

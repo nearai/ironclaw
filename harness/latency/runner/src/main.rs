@@ -3,7 +3,7 @@ use std::env;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use ironclaw_filesystem::{
     CasExpectation, Entry, Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue,
     LibSqlRootFilesystem, Page, PostgresRootFilesystem, RootFilesystem, ScopedFilesystem, SeqNo,
@@ -12,7 +12,7 @@ use ironclaw_host_api::{
     Action, AgentId, ApprovalRequest, ApprovalRequestId, AuditMode, CorrelationId, DeploymentMode,
     FilesystemBackendKind, MountAlias, MountGrant, MountPermissions, MountView, NetworkMode,
     Principal, ProcessBackendKind, ProjectId, ResourceEstimate, ResourceScope, ResourceUsage,
-    RuntimeProfile, ScopedPath, SecretHandle, SecretMode, TenantId, UserId, VirtualPath,
+    RuntimeProfile, ScopedPath, SecretHandle, SecretMode, TenantId, ThreadId, UserId, VirtualPath,
     runtime_policy::{ApprovalPolicy, EffectiveRuntimePolicy},
 };
 use ironclaw_host_runtime::{
@@ -37,7 +37,20 @@ use ironclaw_triggers::{
     LibSqlTriggerRepository, PostgresTriggerRepository, TriggerId, TriggerRecord,
     TriggerRepository, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
-use ironclaw_turns::{TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError};
+use ironclaw_turns::{
+    AcceptedMessageRef, AllowAllTurnAdmissionPolicy, BlockedReason, CancelRunRequest,
+    FilesystemTurnStateStore, GateRef, GetRunStateRequest, IdempotencyKey,
+    InMemoryRunProfileResolver, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
+    RunProfileRequest, SanitizedCancelReason, SourceBindingRef, SubmitTurnRequest,
+    SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnLeaseToken, TurnRunId, TurnRunWake,
+    TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnRunnerId, TurnScope, TurnStateStore,
+    TurnStatus,
+    run_profile::LoopCheckpointStateRef,
+    runner::{
+        BlockRunRequest, CancelRunCompletionRequest, ClaimRunRequest, CompleteRunRequest,
+        TurnRunTransitionPort,
+    },
+};
 use secrecy::ExposeSecret;
 use serde::Serialize;
 use tokio::sync::Semaphore;
@@ -72,6 +85,7 @@ enum WorkloadKind {
     ReserveSequence,
     TriggerSeedList,
     ControlPlaneSnapshot,
+    TurnLifecycleBlob,
     HostedSubstrateBuild,
 }
 
@@ -164,6 +178,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             kind: WorkloadKind::ControlPlaneSnapshot,
         },
         Workload {
+            name: "turn_lifecycle_blob",
+            kind: WorkloadKind::TurnLifecycleBlob,
+        },
+        Workload {
             name: "hosted_substrate_build",
             kind: WorkloadKind::HostedSubstrateBuild,
         },
@@ -227,8 +245,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         payload_bytes,
         acceptance_ready: false,
         notes: vec![
-            "dev scorer: storage hot paths plus production-shaped hosted substrate build/readiness",
-            "full acceptance still requires launch-ref libSQL baseline and hosted profile/WebUI/turn/trigger/approval/resource request workloads",
+            "dev scorer: storage hot paths, filesystem turn lifecycle, plus production-shaped hosted substrate build/readiness",
+            "full acceptance still requires launch-ref libSQL baseline and hosted profile/WebUI plus request-level trigger/approval/resource workloads",
         ],
         results,
         comparisons,
@@ -240,11 +258,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[derive(Clone)]
 struct BackendContext {
     fs: Arc<dyn RootFilesystem>,
+    turn_state: Arc<dyn TurnLifecycleStore>,
     trigger_repository: Arc<dyn TriggerRepository>,
     approval_requests: Arc<dyn ApprovalRequestStore>,
     secret_store: Arc<dyn SecretStore>,
     resource_governor: Arc<dyn ResourceGovernor>,
 }
+
+trait TurnLifecycleStore: TurnStateStore + TurnRunTransitionPort {}
+
+impl<T> TurnLifecycleStore for T where T: TurnStateStore + TurnRunTransitionPort + Send + Sync {}
 
 async fn open_backend(
     backend: BackendName,
@@ -259,9 +282,11 @@ async fn open_backend(
             fs.run_migrations().await?;
             let trigger_repository = LibSqlTriggerRepository::new(db);
             trigger_repository.run_migrations().await?;
+            let turn_state = filesystem_turn_state_store(Arc::clone(&fs), backend, None)?;
             let control_plane = control_plane_stores(Arc::clone(&fs));
             Ok(BackendContext {
                 fs,
+                turn_state,
                 trigger_repository: Arc::new(trigger_repository),
                 approval_requests: control_plane.approval_requests,
                 secret_store: control_plane.secret_store,
@@ -291,8 +316,11 @@ async fn open_backend(
             let mut control_plane = control_plane_stores(Arc::clone(&fs));
             control_plane.secret_store = Arc::new(secret_store);
             control_plane.resource_governor = Arc::new(resource_governor);
+            let turn_state =
+                filesystem_turn_state_store(Arc::clone(&fs), backend, postgres_pool_size)?;
             Ok(BackendContext {
                 fs,
+                turn_state,
                 trigger_repository: Arc::new(trigger_repository),
                 approval_requests: control_plane.approval_requests,
                 secret_store: control_plane.secret_store,
@@ -300,6 +328,31 @@ async fn open_backend(
             })
         }
     }
+}
+
+fn filesystem_turn_state_store<F>(
+    fs: Arc<F>,
+    backend: BackendName,
+    postgres_pool_size: Option<usize>,
+) -> Result<Arc<dyn TurnLifecycleStore>, Box<dyn std::error::Error>>
+where
+    F: RootFilesystem + 'static,
+{
+    let pool_label = postgres_pool_size
+        .map(|pool_size| format!("pool-{pool_size}"))
+        .unwrap_or_else(|| "baseline".to_string());
+    let run_label = uuid::Uuid::new_v4().simple().to_string();
+    let turns_root = VirtualPath::new(format!(
+        "/tenants/latency-turns-{}-{pool_label}-{run_label}/users/latency-user/turns",
+        backend.as_str()
+    ))?;
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/turns")?,
+        turns_root,
+        MountPermissions::read_write_list_delete(),
+    )])?;
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(fs, mounts));
+    Ok(Arc::new(FilesystemTurnStateStore::new(scoped)))
 }
 
 struct ControlPlaneStores {
@@ -374,11 +427,12 @@ async fn run_workload(
     path_depths: &[usize],
     payload_bytes: &[usize],
 ) -> Result<ResultRow, Box<dyn std::error::Error>> {
+    let workload_run_id = format!("{run_id}-{}-c{concurrency}", workload.name);
     for i in 0..warmup {
         setup_workload(
             backend_context.clone(),
             backend,
-            run_id,
+            &workload_run_id,
             workload,
             i,
             path_depths,
@@ -389,7 +443,7 @@ async fn run_workload(
             backend_context.clone(),
             backend,
             postgres_pool_size,
-            run_id,
+            &workload_run_id,
             workload,
             i,
             path_depths,
@@ -405,7 +459,7 @@ async fn run_workload(
         setup_workload(
             backend_context.clone(),
             backend,
-            run_id,
+            &workload_run_id,
             workload,
             i + warmup,
             path_depths,
@@ -414,7 +468,7 @@ async fn run_workload(
         .await?;
         let permit = Arc::clone(&sem).acquire_owned().await?;
         let backend_context = backend_context.clone();
-        let run_id = run_id.to_string();
+        let run_id = workload_run_id.clone();
         let path_depths = path_depths.to_vec();
         let payload_bytes = payload_bytes.to_vec();
         tasks.push(tokio::spawn(async move {
@@ -528,6 +582,17 @@ async fn run_one(
             )
             .await?
         }
+        WorkloadKind::TurnLifecycleBlob => {
+            turn_lifecycle_blob(
+                backend_context.turn_state,
+                backend,
+                postgres_pool_size,
+                run_id,
+                sample,
+                payload_len,
+            )
+            .await?
+        }
         WorkloadKind::HostedSubstrateBuild => {
             hosted_substrate_build(backend, sample, postgres_pool_size).await?
         }
@@ -549,7 +614,9 @@ async fn setup_workload(
 ) -> Result<(), Box<dyn std::error::Error>> {
     if matches!(
         workload.kind,
-        WorkloadKind::TriggerSeedList | WorkloadKind::HostedSubstrateBuild
+        WorkloadKind::TriggerSeedList
+            | WorkloadKind::TurnLifecycleBlob
+            | WorkloadKind::HostedSubstrateBuild
     ) {
         return Ok(());
     }
@@ -591,6 +658,7 @@ async fn setup_workload(
         }
         WorkloadKind::TriggerSeedList
         | WorkloadKind::ControlPlaneSnapshot
+        | WorkloadKind::TurnLifecycleBlob
         | WorkloadKind::HostedSubstrateBuild => {}
     }
     Ok(())
@@ -975,6 +1043,301 @@ fn resource_limits() -> ResourceLimits {
         max_concurrency_slots: Some(10_000),
         ..Default::default()
     }
+}
+
+async fn turn_lifecycle_blob(
+    store: Arc<dyn TurnLifecycleStore>,
+    backend: BackendName,
+    postgres_pool_size: Option<usize>,
+    run_id: &str,
+    sample: usize,
+    payload_len: usize,
+) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+    let key = turn_lifecycle_key(backend, postgres_pool_size, run_id, sample);
+    let actor = turn_lifecycle_actor(sample)?;
+    let resolver = InMemoryRunProfileResolver::default();
+
+    let complete_scope = turn_lifecycle_scope(&key, sample, "complete")?;
+    let complete_submit = store
+        .submit_turn(
+            turn_lifecycle_submit_request(
+                complete_scope.clone(),
+                actor.clone(),
+                &key,
+                "complete",
+                payload_len,
+            )?,
+            &AllowAllTurnAdmissionPolicy,
+            &resolver,
+        )
+        .await?;
+    let (complete_run_id, complete_submit_status) = accepted_run(&complete_submit);
+    let (runner_id, lease_token, claimed_state) = claim_expected_run(
+        Arc::clone(&store),
+        Some(complete_scope.clone()),
+        complete_run_id,
+        "complete first claim",
+    )
+    .await?;
+
+    let gate_ref = GateRef::new(format!("gate:latency-{key}-approval"))?;
+    let blocked = store
+        .block_run(BlockRunRequest {
+            run_id: complete_run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: LoopCheckpointStateRef::new(format!("checkpoint:latency-{key}"))?,
+            reason: BlockedReason::Approval {
+                gate_ref: gate_ref.clone(),
+            },
+        })
+        .await?;
+    ensure_status(blocked.status, TurnStatus::BlockedApproval, "block_run")?;
+
+    let resumed = store
+        .resume_turn(ResumeTurnRequest {
+            scope: complete_scope.clone(),
+            actor: actor.clone(),
+            run_id: complete_run_id,
+            gate_resolution_ref: gate_ref,
+            source_binding_ref: SourceBindingRef::new(format!("source-{key}-resume"))?,
+            reply_target_binding_ref: ReplyTargetBindingRef::new(format!("reply-{key}-resume"))?,
+            idempotency_key: IdempotencyKey::new(format!("idem-{key}-resume"))?,
+            precondition: ResumeTurnPrecondition::BlockedApprovalGate,
+            resume_disposition: None,
+        })
+        .await?;
+    ensure_status(resumed.status, TurnStatus::Queued, "resume_turn")?;
+
+    let (runner_id, lease_token, reclaimed_state) = claim_expected_run(
+        Arc::clone(&store),
+        Some(complete_scope.clone()),
+        complete_run_id,
+        "complete reclaim",
+    )
+    .await?;
+    let completed = store
+        .complete_run(CompleteRunRequest {
+            run_id: complete_run_id,
+            runner_id,
+            lease_token,
+        })
+        .await?;
+    ensure_status(completed.status, TurnStatus::Completed, "complete_run")?;
+    let completed_readback = store
+        .get_run_state(GetRunStateRequest {
+            scope: complete_scope,
+            run_id: complete_run_id,
+        })
+        .await?;
+    ensure_status(
+        completed_readback.status,
+        TurnStatus::Completed,
+        "complete readback",
+    )?;
+
+    let cancel_scope = turn_lifecycle_scope(&key, sample, "cancel")?;
+    let cancel_submit = store
+        .submit_turn(
+            turn_lifecycle_submit_request(
+                cancel_scope.clone(),
+                actor.clone(),
+                &key,
+                "cancel",
+                payload_len,
+            )?,
+            &AllowAllTurnAdmissionPolicy,
+            &resolver,
+        )
+        .await?;
+    let (cancel_run_id, cancel_submit_status) = accepted_run(&cancel_submit);
+    let (cancel_runner_id, cancel_lease_token, cancel_claimed_state) = claim_expected_run(
+        Arc::clone(&store),
+        Some(cancel_scope.clone()),
+        cancel_run_id,
+        "cancel claim",
+    )
+    .await?;
+    let cancel_requested = store
+        .request_cancel(CancelRunRequest {
+            scope: cancel_scope.clone(),
+            actor,
+            run_id: cancel_run_id,
+            reason: SanitizedCancelReason::UserRequested,
+            idempotency_key: IdempotencyKey::new(format!("idem-{key}-cancel"))?,
+        })
+        .await?;
+    ensure_status(
+        cancel_requested.status,
+        TurnStatus::CancelRequested,
+        "request_cancel",
+    )?;
+    let cancelled = store
+        .cancel_run(CancelRunCompletionRequest {
+            run_id: cancel_run_id,
+            runner_id: cancel_runner_id,
+            lease_token: cancel_lease_token,
+        })
+        .await?;
+    ensure_status(cancelled.status, TurnStatus::Cancelled, "cancel_run")?;
+    let cancelled_readback = store
+        .get_run_state(GetRunStateRequest {
+            scope: cancel_scope,
+            run_id: cancel_run_id,
+        })
+        .await?;
+    ensure_status(
+        cancelled_readback.status,
+        TurnStatus::Cancelled,
+        "cancel readback",
+    )?;
+
+    Ok(status_code(complete_submit_status)
+        ^ (status_code(claimed_state.status) << 4)
+        ^ (option_code(claimed_state.checkpoint_id.is_some()) << 8)
+        ^ (status_code(blocked.status) << 12)
+        ^ (status_code(resumed.status) << 16)
+        ^ (status_code(reclaimed_state.status) << 20)
+        ^ (option_code(reclaimed_state.checkpoint_id.is_some()) << 24)
+        ^ (status_code(completed.status) << 28)
+        ^ (status_code(completed_readback.status) << 32)
+        ^ (status_code(cancel_submit_status) << 36)
+        ^ (status_code(cancel_claimed_state.status) << 40)
+        ^ (option_code(cancel_claimed_state.checkpoint_id.is_some()) << 44)
+        ^ (status_code(cancel_requested.status) << 48)
+        ^ (status_code(cancelled.status) << 52)
+        ^ (status_code(cancelled_readback.status) << 56))
+}
+
+async fn claim_expected_run(
+    store: Arc<dyn TurnLifecycleStore>,
+    scope_filter: Option<TurnScope>,
+    expected_run_id: TurnRunId,
+    operation: &'static str,
+) -> Result<
+    (TurnRunnerId, TurnLeaseToken, ironclaw_turns::TurnRunState),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    let claimed = store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter,
+        })
+        .await?
+        .ok_or_else(|| format!("{operation} did not claim a run"))?;
+    if claimed.state.run_id != expected_run_id {
+        return Err(format!(
+            "{operation} claimed {}, expected {expected_run_id}",
+            claimed.state.run_id
+        )
+        .into());
+    }
+    ensure_status(claimed.state.status, TurnStatus::Running, operation)?;
+    Ok((runner_id, lease_token, claimed.state))
+}
+
+fn turn_lifecycle_key(
+    backend: BackendName,
+    postgres_pool_size: Option<usize>,
+    run_id: &str,
+    sample: usize,
+) -> String {
+    let pool_label = postgres_pool_size
+        .map(|pool_size| format!("p{pool_size}"))
+        .unwrap_or_else(|| "base".to_string());
+    format!("{}-{pool_label}-{run_id}-{sample}", backend.as_str())
+}
+
+fn turn_lifecycle_scope(
+    key: &str,
+    sample: usize,
+    lane: &str,
+) -> Result<TurnScope, Box<dyn std::error::Error + Send + Sync>> {
+    let owner = turn_lifecycle_user(sample)?;
+    Ok(TurnScope::new_with_owner(
+        TenantId::new(format!("latency-turn-tenant-{lane}"))?,
+        Some(AgentId::new(format!("latency-turn-agent-{lane}"))?),
+        Some(ProjectId::new(format!("latency-turn-project-{lane}"))?),
+        ThreadId::new(format!("latency-turn-{lane}-{key}"))?,
+        Some(owner),
+    ))
+}
+
+fn turn_lifecycle_actor(
+    sample: usize,
+) -> Result<TurnActor, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(TurnActor::new(turn_lifecycle_user(sample)?))
+}
+
+fn turn_lifecycle_user(sample: usize) -> Result<UserId, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(UserId::new(format!("latency-turn-user-{}", sample % 8))?)
+}
+
+fn turn_lifecycle_submit_request(
+    scope: TurnScope,
+    actor: TurnActor,
+    key: &str,
+    lane: &str,
+    payload_len: usize,
+) -> Result<SubmitTurnRequest, Box<dyn std::error::Error + Send + Sync>> {
+    let pad_len = payload_len.min(96);
+    let pad = "x".repeat(pad_len);
+    Ok(SubmitTurnRequest {
+        scope,
+        actor,
+        accepted_message_ref: AcceptedMessageRef::new(format!("message-{lane}-{key}-{pad}"))?,
+        source_binding_ref: SourceBindingRef::new(format!("source-{lane}-{key}"))?,
+        reply_target_binding_ref: ReplyTargetBindingRef::new(format!("reply-{lane}-{key}"))?,
+        requested_run_profile: Some(RunProfileRequest::new("default")?),
+        idempotency_key: IdempotencyKey::new(format!("idem-{lane}-{key}"))?,
+        received_at: Utc.with_ymd_and_hms(2026, 7, 5, 0, 0, 0).unwrap(),
+        requested_run_id: None,
+        parent_run_id: None,
+        subagent_depth: 0,
+        spawn_tree_root_run_id: None,
+        product_context: None,
+    })
+}
+
+fn accepted_run(response: &SubmitTurnResponse) -> (TurnRunId, TurnStatus) {
+    let SubmitTurnResponse::Accepted { run_id, status, .. } = response;
+    (*run_id, *status)
+}
+
+fn ensure_status(
+    actual: TurnStatus,
+    expected: TurnStatus,
+    operation: &'static str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if actual == expected {
+        return Ok(());
+    }
+    Err(format!("{operation} returned {actual:?}, expected {expected:?}").into())
+}
+
+fn status_code(status: TurnStatus) -> u64 {
+    match status {
+        TurnStatus::Queued => 1,
+        TurnStatus::Running => 2,
+        TurnStatus::BlockedApproval => 3,
+        TurnStatus::BlockedAuth => 4,
+        TurnStatus::BlockedResource => 5,
+        TurnStatus::BlockedDependentRun => 6,
+        TurnStatus::BlockedExternalTool => 7,
+        TurnStatus::CancelRequested => 8,
+        TurnStatus::Cancelled => 9,
+        TurnStatus::Completed => 10,
+        TurnStatus::Failed => 11,
+        TurnStatus::RecoveryRequired => 12,
+    }
+}
+
+fn option_code(present: bool) -> u64 {
+    if present { 1 } else { 0 }
 }
 
 async fn hosted_substrate_build(
