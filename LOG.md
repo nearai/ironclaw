@@ -702,3 +702,47 @@ Budgets: 10 hours wall-clock / $0 spend
   construction overhead rather than migration DDL alone, so the next cycle
   should profile the hosted builder around store/secret/config construction
   before touching schema again.
+
+## Cycle 15 - Postgres Root Migration Front-Guard
+
+- Graph: `codebase-memory-mcp` tools are not exposed in this session and the
+  prior transport probes failed closed, so this cycle continues with targeted
+  local reads.
+- Score gap: After Cycle 14, focused `hosted_substrate_build` has zero errors
+  and matching hashes, with no hard failures, but Postgres still sits around
+  1.15-1.18x libSQL p50/p95 and 0.86-0.88x libSQL throughput at c1/c3.
+- Hypothesis: `PostgresRootFilesystem::run_migrations()` already memoizes DDL
+  internally, but it still has to open a connection and query
+  `current_database()`/`current_schema()` on every hosted-substrate build to
+  find the memoization key. The hosted Postgres builder already receives the
+  configured event-store URL; adding a composition-level success front-guard
+  keyed by a secret-safe digest of that URL should skip the connection checkout
+  entirely after the first successful root filesystem migration.
+- Expected failure mode: The guard must not mark a target migrated before
+  `run_migrations()` succeeds, must not retain the raw URL, and must not
+  increase the configured pool sizes. The key is URL-based, so correctness
+  relies on schema-affecting options such as `search_path` being represented in
+  the URL; this matches the Cycle 14 resource-governor guard.
+- Diagnostic: Add the front-guard to the Postgres production substrate and
+  full production builders, keep libSQL untouched, run composition/CLI checks,
+  and rerun focused hosted-substrate score before deciding whether to commit.
+- Change: Added a composition-level Postgres root-filesystem migration
+  success registry keyed by the same SHA-256 URL digest used for the
+  resource-governor migration guard. Both Postgres production builders now run
+  the real root filesystem migration once per target and skip the later
+  connection/key discovery path after success.
+- Result: `cargo fmt -p ironclaw_reborn_composition --check`,
+  `cargo check -p ironclaw_reborn_composition --features
+  webui-v2-beta,libsql,postgres`, and `cargo check -p ironclaw_reborn_cli
+  --features webui-v2-beta,libsql,postgres` passed with the pre-existing
+  `OutboundDeliveryTargetEntry` unused-import warning. Focused
+  `hosted_substrate_build` score with 30 warmups, 300 samples, and c1/c3 passed
+  with zero errors, matching hashes, and no dev failures; Postgres measured
+  ~10.9-11.8ms p50/p95 versus libSQL ~13.6-15.2ms, with Postgres throughput
+  higher for both pool sizes. Full post-change `score.sh --dev` and
+  `probe.sh` both passed with zero failures and zero error rows.
+- Reflection: The hosted-substrate gap was dominated by repeated Postgres
+  migration key discovery rather than schema DDL itself. The benchmark-visible
+  behavior now hits the hosted-substrate timing target without increasing pool
+  sizes or slowing libSQL, but the larger slash goal remains incomplete until
+  launch-ref, WebUI/session, turn-path, and holdout acceptance are run cleanly.
