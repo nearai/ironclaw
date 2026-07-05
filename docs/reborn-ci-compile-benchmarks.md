@@ -67,7 +67,7 @@ improving measured wall clock.
 | H11 | Move libSQL-heavy coverage out of broad long-pole crate buckets into the existing Reborn group job. | Reduce compile graph size for `host-runtime` and `reborn-core` without dropping persistence coverage or adding a new job. | Tested | Rejected: wall clock regressed from `8m35s` to `9m50s`; `host-runtime`, `reborn-core`, and `composition-core` were all slower. |
 | H12 | Move `ironclaw_reborn_cli` from `reborn-core` to `webui-ingress`. | Keep job count flat while grouping the WebUI-shaped CLI build with the WebUI ingress bucket instead of the core Reborn bucket. | Tested | Rejected: `reborn-core` improved from `367s` to `238s`, but `webui-ingress` grew from `334s` to `377s`; wall clock stayed flat at `8m37s` with no job-count reduction. |
 | H13 | Remove the separate uninstrumented `reborn-group-tests` job and rely on the existing instrumented coverage `groups` lane for those same suites. | Reduce total Reborn jobs by one without dropping group-suite pass/fail coverage. | Retained | Accepted: total Reborn jobs dropped from `28` to `27`, and wall clock improved from `8m35s` to `8m21s`. |
-| H14 | Seed fresh shared Rust caches from deterministic broad producers: `reborn-core` for crate buckets and `groups` for coverage lanes. | Improve warm-start quality for compile-heavy jobs without adding jobs or changing coverage. | Retained | Accepted as a compile-time win: wall clock improved from H13 `8m21s` to `7m49s`; crate buckets improved materially, especially `reborn-core` `462s -> 160s`, but root tests became the long pole. |
+| H14 | Seed fresh shared Rust caches from deterministic broad producers: `reborn-core` for crate buckets and `groups` for coverage lanes. | Improve warm-start quality for compile-heavy jobs without adding jobs or changing coverage. | Retained with caveat | Accepted as a targeted cache-policy cleanup: the controlled measurement improved from H13 `8m21s` to `7m49s`, but a later final-state validation run regressed to `12m07s`, so this is not a stable wall-clock fix. |
 | H15 | Add a `cargo-hakari` workspace-hack crate to unify dependency feature sets across buckets. | Improve cross-bucket cache reuse by making shared dependency artifacts compatible across package feature combinations. | Feasibility review | Not a small config-only benchmark: no existing hakari metadata or workspace-hack crate; `cargo hakari` is not installed locally; this should be a separate dependency/lockfile-changing benchmark. |
 | H16 | Build a nightly dependency-warmed CI container image in GHCR and run heavy Reborn jobs inside it. | Escape GitHub cache LRU limits by pre-baking a broad warm target/dependency layer. | Feasibility review | Not safe to add as an inline benchmark: no existing Reborn dependency image path; requires package write permissions, GHCR retention policy, container hardening, and a separate seed/build workflow before PR timing is meaningful. |
 | H17 | Skip Reborn buckets by changed-file reverse dependency scope. | Improve average PR time by running only affected buckets while merge queue still runs everything. | Feasibility review | Not a compile-time benchmark for the current full-PR target: current scope detection is all-or-nothing for Reborn, and safe bucket-level skipping needs crate ownership plus reverse-dependency mapping before it can be trusted. |
@@ -821,6 +821,32 @@ Decision:
 - After H14, root tests are the measured long pole. This strengthens the advice
   that root partitioning/nextest only becomes interesting after cache quality
   improves.
+
+Final-state validation caveat:
+
+- After reverting the rejected H18 workflow change and adding the remaining
+  report sections, the final branch run
+  [`28732112974`](https://github.com/nearai/ironclaw/actions/runs/28732112974)
+  passed with the retained H13/H14 workflow shape, but took `12m07s`
+  (`2026-07-05T06:33:28Z` to `2026-07-05T06:45:35Z`).
+- That run still had `27` total Reborn jobs, but its long poles were much
+  slower than the H14 measurement:
+  - `Reborn root tests (3)`: `676s`.
+  - `Reborn root tests (2)`: `650s`.
+  - `adapters-misc`: `590s`.
+  - `host-runtime`: `540s`.
+  - coverage `groups`: `522s`.
+- Log evidence points to cache quality/latency variance, not test failures:
+  - root partition `3` restored `reborn-tests-root` from GitHub cache and got
+    `No cache found`, then relied on OVH Redis sccache.
+  - root partition `3` reported `1298` sccache hits, `1` miss, and average
+    cache read hit `0.600s`; the aggregate cache-read-hit time was about
+    `779s`.
+  - `host-runtime` and `reborn-core` reported `100%` sccache hit rates, but
+    still took `540s` and `448s` respectively.
+- This downgrades H14 from "stable wall-clock solution" to "reasonable
+  deterministic cache seeding cleanup". It should not be sold as solving the
+  compile-time problem by itself.
 
 ## H15: Cargo Hakari Workspace Hack
 
