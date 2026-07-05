@@ -516,12 +516,8 @@ impl ApprovalRequestStore for InMemoryApprovalRequestStore {
                 status: record.status,
             });
         }
-        // Mutate in place to a Discarded tombstone rather than removing the
-        // record outright — mirrors `FilesystemApprovalRequestStore::discard_pending`
-        // (which writes a Discarded tombstone via CAS so the file still exists,
-        // preventing a subsequent `save_pending` from reusing the same id).
-        // Return the pre-mutation clone (status `Pending`) as the caller-visible
-        // value, matching what `remove()` returned before this change.
+        // Tombstone in place (#5467), mirroring FilesystemApprovalRequestStore:
+        // blocks id reuse via save_pending. Return pre-mutation clone (Pending).
         let original = record.clone();
         record.status = ApprovalStatus::Discarded;
         Ok(original)

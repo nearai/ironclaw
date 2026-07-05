@@ -488,15 +488,8 @@ async fn filesystem_approval_request_store_discards_pending_request() {
     assert_eq!(store.records_for_scope(&scope).await.unwrap(), Vec::new());
 }
 
-/// Regression test (#5467): `InMemoryApprovalRequestStore::discard_pending`
-/// must mirror `FilesystemApprovalRequestStore`'s tombstone semantics — mutate
-/// the record to `Discarded` in place rather than removing it — specifically
-/// to block a later `save_pending` from reusing the same request id. Before
-/// the fix, `discard_pending` called `records.remove(&key)`, so a subsequent
-/// `save_pending` for the same id found no key and succeeded silently
-/// (diverging from the filesystem store's already-shipped #5234 semantics).
-/// Direct sibling of `filesystem_discard_tombstone_prevents_request_id_reuse`
-/// below, against `InMemoryApprovalRequestStore` instead.
+/// Regression (#5467): discard must tombstone, not delete, so id reuse fails
+/// closed. Sibling of `filesystem_discard_tombstone_prevents_request_id_reuse`.
 #[tokio::test]
 async fn in_memory_discard_tombstone_prevents_request_id_reuse() {
     let store = InMemoryApprovalRequestStore::new();
