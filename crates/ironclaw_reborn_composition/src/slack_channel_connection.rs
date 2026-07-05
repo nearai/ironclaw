@@ -122,9 +122,31 @@ impl ChannelConnectionFacade for SlackChannelConnectionFacade {
             return Ok(());
         }
         let Some(scope) = self.resolve_personal_connection_scope().await? else {
-            return Err(RebornServicesError::internal_from(
-                "Slack personal connection scope is unavailable; refusing unscoped disconnect",
-            ));
+            // No workspace setup means there is no installation scope to key
+            // the DM-target or prefix-scoped binding deletes — the state of a
+            // fresh instance, or one whose setup was deleted. Refusing here
+            // used to 500 extension uninstall before Slack was ever
+            // configured. Instead: still revoke the caller's provider-scoped
+            // credentials, then drop the caller's own Slack bindings without
+            // an installation prefix (the delete stays tenant + caller-user
+            // bound). DM targets are skipped — they are keyed by installation
+            // and unreachable while no setup exists.
+            if let Some(cleanup) = &self.personal_credential_cleanup {
+                cleanup
+                    .cleanup_credentials_for_lifecycle(personal_credential_cleanup_request(
+                        &caller,
+                    )?)
+                    .await?;
+            }
+            self.user_identity_delete_store
+                .delete_user_identity_bindings_for_user(
+                    SLACK_IDENTITY_PROVIDER,
+                    &caller.user_id,
+                    None,
+                )
+                .await
+                .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
+            return Ok(());
         };
         // Ordering: credential revoke → DM targets → identity binding. The
         // binding is the "connected" signal and deletes last (commit point);
@@ -134,31 +156,7 @@ impl ChannelConnectionFacade for SlackChannelConnectionFacade {
         // while the UI still shows connected.
         if let Some(cleanup) = &self.personal_credential_cleanup {
             cleanup
-                .cleanup_credentials_for_lifecycle(SecretCleanupRequest {
-                    scope: AuthProductScope::new(
-                        ResourceScope {
-                            tenant_id: caller.tenant_id.clone(),
-                            user_id: caller.user_id.clone(),
-                            agent_id: caller.agent_id.clone(),
-                            project_id: caller.project_id.clone(),
-                            mission_id: None,
-                            thread_id: None,
-                            invocation_id: InvocationId::new(),
-                        },
-                        AuthSurface::Callback,
-                    ),
-                    extension_id: ExtensionId::new(SLACK_EXTENSION_ID)
-                        .map_err(|error| RebornServicesError::internal_from(error.to_string()))?,
-                    // OAuth-minted personal credentials carry no extension
-                    // ownership/grants, so the provider selector is what
-                    // actually reaches the caller's `slack_personal` account.
-                    provider: Some(
-                        AuthProviderId::new(SLACK_PERSONAL_PROVIDER_ID).map_err(|error| {
-                            RebornServicesError::internal_from(error.to_string())
-                        })?,
-                    ),
-                    action: SecretCleanupAction::Uninstall,
-                })
+                .cleanup_credentials_for_lifecycle(personal_credential_cleanup_request(&caller)?)
                 .await?;
         }
         self.personal_dm_target_store
@@ -181,6 +179,36 @@ impl ChannelConnectionFacade for SlackChannelConnectionFacade {
             .map_err(|error| RebornServicesError::internal_from(error.to_string()))?;
         Ok(())
     }
+}
+
+// OAuth-minted personal credentials carry no extension ownership/grants, so
+// the provider selector is what actually reaches the caller's
+// `slack_personal` account. Shared by the scoped and no-scope disconnect
+// arms so the revoke request cannot drift between them.
+fn personal_credential_cleanup_request(
+    caller: &WebUiAuthenticatedCaller,
+) -> Result<SecretCleanupRequest, RebornServicesError> {
+    Ok(SecretCleanupRequest {
+        scope: AuthProductScope::new(
+            ResourceScope {
+                tenant_id: caller.tenant_id.clone(),
+                user_id: caller.user_id.clone(),
+                agent_id: caller.agent_id.clone(),
+                project_id: caller.project_id.clone(),
+                mission_id: None,
+                thread_id: None,
+                invocation_id: InvocationId::new(),
+            },
+            AuthSurface::Callback,
+        ),
+        extension_id: ExtensionId::new(SLACK_EXTENSION_ID)
+            .map_err(|error| RebornServicesError::internal_from(error.to_string()))?,
+        provider: Some(
+            AuthProviderId::new(SLACK_PERSONAL_PROVIDER_ID)
+                .map_err(|error| RebornServicesError::internal_from(error.to_string()))?,
+        ),
+        action: SecretCleanupAction::Uninstall,
+    })
 }
 
 pub(crate) fn slack_channel_connection_facade(
@@ -430,7 +458,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slack_channel_connection_facade_refuses_unscoped_disconnect() {
+    async fn slack_channel_connection_facade_disconnects_without_setup_scope() {
+        // A fresh instance (or one whose workspace setup was deleted) has no
+        // installation scope. Uninstall/disconnect must still succeed —
+        // refusing here used to 500 extension removal before Slack was ever
+        // configured — and must clean the caller's own bindings without an
+        // installation prefix while staying caller-bound.
         let tenant_id = TenantId::new("tenant:test").expect("tenant");
         let user_id = UserId::new("user:alice").expect("user");
         let installation_id = AdapterInstallationId::new("install-alpha").expect("installation id");
@@ -448,7 +481,8 @@ mod tests {
             personal_dm_target_store: Arc::new(InMemorySlackPersonalDmTargetStore::new()),
             personal_credential_cleanup: None,
         };
-        let caller = WebUiAuthenticatedCaller::new(tenant_id, user_id, None::<AgentId>, None);
+        let caller =
+            WebUiAuthenticatedCaller::new(tenant_id, user_id.clone(), None::<AgentId>, None);
 
         assert_eq!(
             facade
@@ -457,14 +491,15 @@ mod tests {
                 .expect("connection lookup"),
             HashMap::from([("slack".to_string(), false)])
         );
-        assert!(
-            facade
-                .disconnect_channel_for_caller(caller, "slack")
-                .await
-                .is_err(),
-            "disconnect must fail closed when no Slack installation scope is available"
+        facade
+            .disconnect_channel_for_caller(caller, "slack")
+            .await
+            .expect("disconnect succeeds without a setup scope");
+        assert_eq!(
+            identity_store.deletes(),
+            vec![(SLACK_IDENTITY_PROVIDER.to_string(), user_id, None)],
+            "caller's slack bindings are cleaned without an installation prefix"
         );
-        assert_eq!(identity_store.deletes(), Vec::new());
     }
 
     #[tokio::test]
