@@ -47,9 +47,8 @@
 # (Legacy)"), not this Reborn-scoped report. They are NOT untested; they are
 # out of this report's scope by product line.
 #
-# TODO(open item, not yet filed): file one tracking issue "v1-only crates
-# excluded from Reborn coverage scope" covering all four entries below and
-# replace the NNNN placeholder with its number before merge.
+# Tracked by issue #5657 ("v1-only crates excluded from Reborn coverage
+# scope"), referenced in each entry's `issue` field below.
 
 [[exemption]]
 crate  = "ironclaw_embeddings"
