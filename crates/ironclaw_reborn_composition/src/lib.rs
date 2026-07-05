@@ -28,6 +28,7 @@ mod auth_dcr_tests;
 mod auth_prompt;
 mod automation;
 mod available_extensions;
+mod blocked_auth_resume;
 mod bundled_skills;
 mod communication_context;
 #[cfg(any(feature = "libsql", feature = "postgres"))]

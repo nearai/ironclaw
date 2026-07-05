@@ -167,7 +167,7 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onConfigure, onCan
 function spinnerGlyph() {
   return html`
     <svg
-      className="h-3.5 w-3.5 animate-spin text-current"
+      className="h-3.5 w-3.5 v2-spin text-current"
       viewBox="0 0 24 24"
       fill="none"
       role="status"

@@ -997,13 +997,35 @@ pub async fn build_reborn_services(
 
 fn auth_continuation_dispatcher(
     turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
+    blocked_auth_snapshot_source: Option<
+        Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>,
+    >,
 ) -> Arc<dyn RebornAuthContinuationDispatcher> {
-    Arc::new(ProductAuthTurnGateResumeDispatcher::new(turn_coordinator))
+    let single_run: Arc<dyn RebornAuthContinuationDispatcher> = Arc::new(
+        ProductAuthTurnGateResumeDispatcher::new(Arc::clone(&turn_coordinator)),
+    );
+    match blocked_auth_snapshot_source {
+        // Local paths fan a completed flow out to the caller's other
+        // provider-blocked runs (pair/authorize once, all waiting chats
+        // continue). Production-shaped builders pass None until their
+        // turn-state snapshot source is wired.
+        Some(snapshot_source) => {
+            Arc::new(crate::blocked_auth_resume::BlockedAuthResumeFanout::new(
+                single_run,
+                snapshot_source,
+                turn_coordinator,
+            ))
+        }
+        None => single_run,
+    }
 }
 
 fn compose_product_auth_services(
     ports: RebornProductAuthServicePorts,
     turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
+    blocked_auth_snapshot_source: Option<
+        Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>,
+    >,
     provider_composition: OAuthProviderComposition,
     security_audit_sink: Option<Arc<dyn ironclaw_events::SecurityAuditSink>>,
     secret_store: Arc<dyn SecretStore>,
@@ -1013,8 +1035,10 @@ fn compose_product_auth_services(
         Some(provider_client) => ports.with_provider_client(provider_client),
         None => ports,
     };
-    let mut services =
-        ports.into_services(auth_continuation_dispatcher(turn_coordinator), secret_store);
+    let mut services = ports.into_services(
+        auth_continuation_dispatcher(turn_coordinator, blocked_auth_snapshot_source),
+        secret_store,
+    );
     if let Some(sink) = security_audit_sink {
         services = services.with_security_audit_sink(sink);
     }
@@ -1389,6 +1413,10 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         Some(ports) => compose_product_auth_services(
             ports,
             turn_coordinator.clone(),
+            Some(Arc::clone(&store_graph.turn_state)
+                as Arc<
+                    dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource,
+                >),
             provider_composition,
             security_audit_sink.clone(),
             Arc::clone(&secret_store),
@@ -1420,7 +1448,13 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                 )
                 .with_provider_client(Arc::clone(&provider_client))
                 .into_services(
-                    auth_continuation_dispatcher(turn_coordinator.clone()),
+                    auth_continuation_dispatcher(
+                        turn_coordinator.clone(),
+                        Some(Arc::clone(&store_graph.turn_state)
+                            as Arc<
+                                dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource,
+                            >),
+                    ),
                     Arc::clone(&secret_store),
                 )
                 .with_provider_client(Arc::clone(&provider_client))
@@ -1443,9 +1477,14 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             }
             #[cfg(not(any(feature = "libsql", feature = "postgres")))]
             {
-                let services = RebornProductAuthServices::local_dev_in_memory(
-                    auth_continuation_dispatcher(turn_coordinator.clone()),
-                );
+                let services =
+                    RebornProductAuthServices::local_dev_in_memory(auth_continuation_dispatcher(
+                        turn_coordinator.clone(),
+                        Some(Arc::clone(&store_graph.turn_state)
+                            as Arc<
+                                dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource,
+                            >),
+                    ));
                 let services = match provider_composition.client.clone() {
                     Some(provider_client) => services.with_provider_client(provider_client),
                     None => services,
@@ -4365,6 +4404,11 @@ where
     let product_auth_services = compose_product_auth_services(
         product_auth_ports,
         turn_coordinator.clone(),
+        // No blocked-auth fan-out here yet: this builder's turn state is the
+        // generic filesystem store, not the local-dev alias the snapshot
+        // source is implemented for. Completions resume only their own run,
+        // exactly this builder's prior behavior.
+        None,
         provider_composition,
         security_audit_sink,
         Arc::clone(&secret_store),
