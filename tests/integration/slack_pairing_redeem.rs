@@ -33,23 +33,25 @@ use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{LibSqlRootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::{
-    AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId, UserId,
-    VirtualPath,
-};
-use ironclaw_product_adapters::{AdapterInstallationId, ExternalActorRef, ProductAdapterId};
+use ironclaw_host_api::UserId;
+use ironclaw_product_adapters::{ExternalActorRef, ProductAdapterId};
 use ironclaw_product_workflow::{ProductActorUserResolutionRequest, ProductActorUserResolver};
 use ironclaw_reborn_composition::{
     RebornUserIdentityBindingStore, RebornUserIdentityLookup, SlackPairingActorResolver,
-    SlackPersonalBindingInstallation, SlackPersonalBindingPairingChallengeStore,
-    SlackPersonalBindingPairingCode, SlackPersonalBindingPairingError,
-    SlackPersonalBindingPairingNotification, SlackPersonalBindingPairingNotifier,
-    SlackPersonalBindingPairingService, SlackPersonalBindingPrincipal,
-    SlackPersonalUserBindingService,
-    slack_serve::{SlackApiAppId, SlackInstallationSelector, SlackTeamId, SlackUserId},
+    SlackPersonalBindingPairingChallengeStore, SlackPersonalBindingPairingCode,
+    SlackPersonalBindingPairingError, SlackPersonalBindingPairingNotification,
+    SlackPersonalBindingPairingNotifier, SlackPersonalBindingPairingService,
+    SlackPersonalBindingPrincipal,
+    slack_serve::SlackUserId,
     test_support::{slack_host_state_for_test, slack_host_state_for_test_with_pairing_ttl},
 };
 use ironclaw_slack_v2_adapter::{SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID};
+
+#[path = "slack_pairing_fixtures.rs"]
+mod slack_pairing_fixtures;
+use slack_pairing_fixtures::{
+    binding_service, host_ids, installation_id, tenant_id, tenant_shared_mount_view,
+};
 
 /// A `SlackPersonalBindingPairingNotifier` that never fails — pairing-code
 /// delivery (the real DM send) is not this scenario's subject.
@@ -76,25 +78,8 @@ struct SlackPairingStore {
     lookup: Arc<dyn RebornUserIdentityLookup>,
 }
 
-fn tenant_id() -> TenantId {
-    TenantId::new("tenant-alpha").expect("valid tenant id")
-}
-
-fn installation_id() -> AdapterInstallationId {
-    AdapterInstallationId::new("install-alpha").expect("valid installation id")
-}
-
 fn slack_user_id() -> SlackUserId {
     SlackUserId::new("U123")
-}
-
-fn tenant_shared_mount_view() -> MountView {
-    MountView::new(vec![MountGrant::new(
-        MountAlias::new("/tenant-shared").expect("valid mount alias"),
-        VirtualPath::new("/tenants/tenant-alpha/shared").expect("valid virtual path"),
-        MountPermissions::read_write_list_delete(),
-    )])
-    .expect("valid mount view")
 }
 
 /// Opens (or reopens) a real libSQL database at `db_path` and mounts a real
@@ -120,9 +105,7 @@ async fn open_slack_pairing_store(
         tenant_shared_mount_view(),
     ));
     let tenant = tenant_id();
-    let user = UserId::new("user:host").expect("valid user id");
-    let agent = AgentId::new("agent:host").expect("valid agent id");
-    let project = Some(ProjectId::new("project:host").expect("valid project id"));
+    let (user, agent, project) = host_ids();
     let store = match pairing_ttl {
         Some(ttl) => {
             slack_host_state_for_test_with_pairing_ttl(scoped, tenant, user, agent, project, ttl)
@@ -134,22 +117,6 @@ async fn open_slack_pairing_store(
         bindings: store.clone(),
         lookup: store,
     }
-}
-
-fn binding_service(
-    binding_store: Arc<dyn RebornUserIdentityBindingStore>,
-) -> SlackPersonalUserBindingService {
-    SlackPersonalUserBindingService::new(
-        [SlackPersonalBindingInstallation {
-            tenant_id: tenant_id(),
-            installation_id: installation_id(),
-            selector: SlackInstallationSelector::AppTeam {
-                api_app_id: SlackApiAppId::new("A123"),
-                team_id: SlackTeamId::new("T123"),
-            },
-        }],
-        binding_store,
-    )
 }
 
 fn pairing_service(store: &SlackPairingStore) -> SlackPersonalBindingPairingService {

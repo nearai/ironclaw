@@ -31,22 +31,23 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
-use ironclaw_host_api::{
-    AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId, UserId,
-    VirtualPath,
-};
-use ironclaw_product_adapters::{AdapterInstallationId, ExternalActorRef, ProductAdapterId};
+use ironclaw_host_api::UserId;
+use ironclaw_product_adapters::{ExternalActorRef, ProductAdapterId};
 use ironclaw_product_workflow::{ProductActorUserResolutionRequest, ProductActorUserResolver};
 use ironclaw_reborn_composition::{
     RebornUserIdentityBindingStore, RebornUserIdentityLookup, SlackPairingActorResolver,
-    SlackPersonalBindingInstallation, SlackPersonalBindingPairingChallengeStore,
-    SlackPersonalBindingPairingError, SlackPersonalBindingPairingNotification,
-    SlackPersonalBindingPairingNotifier, SlackPersonalBindingPairingService,
-    SlackPersonalBindingPrincipal, SlackPersonalUserBindingService,
-    slack_serve::{SlackApiAppId, SlackInstallationSelector, SlackTeamId, SlackUserId},
+    SlackPersonalBindingPairingChallengeStore, SlackPersonalBindingPairingError,
+    SlackPersonalBindingPairingNotification, SlackPersonalBindingPairingNotifier,
+    SlackPersonalBindingPairingService, SlackPersonalBindingPrincipal, slack_serve::SlackUserId,
     test_support::slack_host_state_for_test,
 };
 use ironclaw_slack_v2_adapter::{SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID};
+
+#[path = "slack_pairing_fixtures.rs"]
+mod slack_pairing_fixtures;
+use slack_pairing_fixtures::{
+    binding_service, host_ids, installation_id, tenant_id, tenant_shared_mount_view,
+};
 
 /// Captures every code a pairing challenge was minted for — lets a test read
 /// back the auto-issued code the resolver's own fallback path mints, without
@@ -81,23 +82,6 @@ impl SlackPersonalBindingPairingNotifier for CapturingPairingNotifier {
     }
 }
 
-fn tenant_id() -> TenantId {
-    TenantId::new("tenant-alpha").expect("valid tenant id")
-}
-
-fn installation_id() -> AdapterInstallationId {
-    AdapterInstallationId::new("install-alpha").expect("valid installation id")
-}
-
-fn tenant_shared_mount_view() -> MountView {
-    MountView::new(vec![MountGrant::new(
-        MountAlias::new("/tenant-shared").expect("valid mount alias"),
-        VirtualPath::new("/tenants/tenant-alpha/shared").expect("valid virtual path"),
-        MountPermissions::read_write_list_delete(),
-    )])
-    .expect("valid mount view")
-}
-
 #[allow(clippy::type_complexity)]
 fn slack_pairing_store_for_test() -> (
     Arc<dyn SlackPersonalBindingPairingChallengeStore>,
@@ -108,30 +92,9 @@ fn slack_pairing_store_for_test() -> (
         Arc::new(InMemoryBackend::default()),
         tenant_shared_mount_view(),
     ));
-    let store = slack_host_state_for_test(
-        scoped,
-        tenant_id(),
-        UserId::new("user:host").expect("valid user id"),
-        AgentId::new("agent:host").expect("valid agent id"),
-        Some(ProjectId::new("project:host").expect("valid project id")),
-    );
+    let (user, agent, project) = host_ids();
+    let store = slack_host_state_for_test(scoped, tenant_id(), user, agent, project);
     (store.clone(), store.clone(), store)
-}
-
-fn binding_service(
-    binding_store: Arc<dyn RebornUserIdentityBindingStore>,
-) -> SlackPersonalUserBindingService {
-    SlackPersonalUserBindingService::new(
-        [SlackPersonalBindingInstallation {
-            tenant_id: tenant_id(),
-            installation_id: installation_id(),
-            selector: SlackInstallationSelector::AppTeam {
-                api_app_id: SlackApiAppId::new("A123"),
-                team_id: SlackTeamId::new("T123"),
-            },
-        }],
-        binding_store,
-    )
 }
 
 fn actor_resolution_request(slack_user_id: &SlackUserId) -> ProductActorUserResolutionRequest {
