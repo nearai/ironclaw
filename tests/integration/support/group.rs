@@ -514,16 +514,9 @@ pub struct RebornIntegrationGroupBuilder {
     /// `.with_tool_disclosure_bridged()` has been called; `None` resolves via
     /// `ToolDisclosureMode::from_env()` in `into_group` (today's behavior).
     tool_disclosure: Option<ToolDisclosureMode>,
-    /// #5647 RED-pin seam: opt-in override of the `CapabilityAllowSet` used
-    /// in place of the forced `CapabilityAllowSet::All` that `into_group`
-    /// otherwise substitutes for any `tool_disclosure == Some(Bridged)`
-    /// group (see the `capability_surface_resolver` construction below).
-    /// `None` (default) preserves today's byte-identical forced-`All`
-    /// behavior for every existing bridged test. Only consumed when
-    /// `tool_disclosure == Some(Bridged)`; set via
-    /// `.with_narrowed_capability_allow_set_for_bridged_test()`
-    /// (`group_options.rs`). Setting this WITHOUT also selecting Bridged
-    /// mode is a harness-misuse footgun guarded fail-fast in `into_group`.
+    /// #5647 RED-pin seam: opt-in override of the forced `CapabilityAllowSet::All`
+    /// for Bridged-mode groups. `None` preserves today's behavior; only
+    /// consumed when `tool_disclosure == Some(Bridged)` (`into_group` fails fast otherwise).
     narrowed_bridged_allow_set: Option<CapabilityAllowSet>,
     /// C-BUDGET: when `true`, `into_group` wires the production
     /// `build_default_budget_accountant` (in-memory governor + gate store +
@@ -615,12 +608,8 @@ impl RebornIntegrationGroupBuilder {
         base: GroupBaseData,
         capability: GroupCapability,
     ) -> HarnessResult<RebornIntegrationGroup> {
-        // Harness-seam misuse guard (§7): the narrowed allow-set override is
-        // only ever consumed inside the `tool_disclosure == Some(Bridged)`
-        // branch below. Setting it without also selecting Bridged mode would
-        // otherwise be a silent no-op — fail fast instead so a future test
-        // author gets an immediate, legible error rather than a false-negative
-        // test that never exercises the override it thinks it configured.
+        // Harness-seam misuse guard (§7): fail fast instead of a silent no-op
+        // if the override is set without Bridged mode also selected.
         if self.narrowed_bridged_allow_set.is_some()
             && self.tool_disclosure != Some(ToolDisclosureMode::Bridged)
         {

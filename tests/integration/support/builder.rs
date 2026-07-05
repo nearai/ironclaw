@@ -123,9 +123,7 @@ pub struct RebornIntegrationHarnessBuilder {
     /// today's behavior byte-for-byte.
     tool_disclosure: Option<ToolDisclosureMode>,
     /// #5647 RED-pin seam: pass-through to
-    /// `RebornIntegrationGroupBuilder::with_narrowed_capability_allow_set_for_bridged_test`
-    /// (see there for full semantics). `None` (default) preserves today's
-    /// forced-`All` behavior for bridged single-shot harnesses.
+    /// `RebornIntegrationGroupBuilder::with_narrowed_capability_allow_set_for_bridged_test`. `None` (default) preserves today's forced-`All` behavior.
     narrowed_bridged_allow_set: Option<Vec<&'static str>>,
     /// C-BUDGET: when `true`, wire the production budget accountant into the
     /// degenerate one-thread group (see `RebornIntegrationGroupBuilder::budget_accounting`).

@@ -94,21 +94,9 @@ impl RebornIntegrationGroupBuilder {
         self
     }
 
-    /// #5647 RED-pin seam: override the `CapabilityAllowSet` `into_group`
-    /// substitutes for a `Bridged`-mode group, in place of the forced
-    /// `CapabilityAllowSet::All` it otherwise uses to mirror production's
-    /// top-level-turn resolution (see the `into_group` doc comment above the
-    /// `capability_surface_resolver` construction). Only takes effect when
-    /// paired with `.with_tool_disclosure_bridged()` — `into_group` fails
-    /// fast (§7 harness-seam misuse guard) if this is set without Bridged
-    /// mode also selected, since the override would otherwise silently no-op.
-    ///
-    /// Lets a test express a genuinely narrowed allow-set (e.g. a subagent
-    /// capability-surface profile) while still in Bridged mode, reproducing
-    /// the #5647 scenario: a narrowed profile applied on top of bridged
-    /// deferral strips the synthetic `ironclaw.*` bridge ids because
-    /// `CapabilitySurfaceProfileFilter` runs outside (after) the bridging
-    /// decorator and doesn't know about `is_bridge_capability_id`.
+    /// #5647 RED-pin seam: override the Bridged-mode `CapabilityAllowSet`
+    /// (default forces `All`) so a test can reproduce a narrowed profile atop
+    /// bridged deferral; requires `.with_tool_disclosure_bridged()` too — `into_group` fails fast otherwise.
     pub fn with_narrowed_capability_allow_set_for_bridged_test(
         mut self,
         ids: impl IntoIterator<Item = &'static str>,
