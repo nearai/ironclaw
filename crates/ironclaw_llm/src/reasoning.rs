@@ -9,6 +9,8 @@ use ironclaw_common::provider_transcript::strip_provider_transcript_artifact_lin
 
 use crate::error::LlmError;
 
+use crate::tool_args::parse_tool_call_args_lossy;
+use crate::tool_repair::repair_tool_args;
 use crate::{
     ChatMessage, CompletionRequest, FinishReason, LlmProvider, Role, ToolCall,
     ToolCompletionRequest, ToolDefinition,
@@ -1709,8 +1711,23 @@ pub fn recover_tool_calls_from_content(
                 // so find the last "]" on this logical line.
                 if let Some(bracket_end) = args_start.rfind(']') {
                     let args_str = &args_start[..bracket_end];
-                    let arguments = serde_json::from_str::<serde_json::Value>(args_str)
-                        .unwrap_or(serde_json::Value::Object(Default::default()));
+                    let (arguments, arguments_parse_error) =
+                        match serde_json::from_str::<serde_json::Value>(args_str) {
+                            Ok(arguments) => (arguments, None),
+                            Err(parse_error) => {
+                                if let Some(arguments) = repair_tool_args(args_str, false) {
+                                    tracing::debug!(
+                                        tool_name = %name,
+                                        raw_len = args_str.len(),
+                                        error = %parse_error,
+                                        "repaired recovered tool-call arguments JSON"
+                                    );
+                                    (arguments, None)
+                                } else {
+                                    parse_tool_call_args_lossy(args_str)
+                                }
+                            }
+                        };
                     calls.push(ToolCall {
                         id: super::provider::generate_tool_call_id(
                             calls.len(),
@@ -1720,7 +1737,7 @@ pub fn recover_tool_calls_from_content(
                         arguments,
                         reasoning: None,
                         signature: None,
-                        arguments_parse_error: None,
+                        arguments_parse_error,
                     });
                     remaining = &args_start[bracket_end + 1..];
                     continue;
@@ -3246,6 +3263,39 @@ That's my plan."#;
         assert_eq!(calls[0].name, "http");
         assert_eq!(calls[0].arguments["method"], "GET");
         assert_eq!(calls[0].arguments["url"], "https://example.com");
+        assert!(calls[0].arguments_parse_error.is_none());
+    }
+
+    #[test]
+    fn test_recover_bracket_format_repairs_trailing_tool_arg_tag() {
+        let tools = make_tools(&["shell"]);
+        let content = "Let me run that. [Called tool `shell` with arguments: {\"command\":\"cat\",\"content\":\"hello\"}</parameter>]";
+        let calls = recover_tool_calls_from_content(content, &tools);
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "shell");
+        assert_eq!(calls[0].arguments["command"], "cat");
+        assert_eq!(calls[0].arguments["content"], "hello");
+        assert!(calls[0].arguments_parse_error.is_none());
+    }
+
+    #[test]
+    fn test_recover_bracket_format_unrepairable_args_preserves_parse_error() {
+        let tools = make_tools(&["shell"]);
+        let content = "Let me run that. [Called tool `shell` with arguments: {not json}]";
+        let calls = recover_tool_calls_from_content(content, &tools);
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "shell");
+        assert_eq!(
+            calls[0].arguments,
+            serde_json::Value::Object(Default::default())
+        );
+        assert!(
+            calls[0].arguments_parse_error.as_deref().is_some_and(
+                |reason| reason.starts_with("failed to parse tool-call arguments JSON: ")
+            )
+        );
     }
 
     #[test]
