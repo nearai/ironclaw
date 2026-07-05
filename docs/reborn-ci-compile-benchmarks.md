@@ -46,6 +46,9 @@ What is not worth pursuing further in this PR:
   `adapters-misc`. It made `adapters-misc` shorter, but the new bucket became
   the long pole and the workflow regressed from the latest retained `9m55s` to
   `10m35s`.
+- Running root partitions through `cargo nextest run`. The run passed, but
+  wall clock regressed from `9m55s` to `10m21s` and root max regressed from
+  `547s` to `579s`.
 - Bucket skipping as an immediate optimization. The dry-run saved only `13%`
   of crate-bucket executions across recent Reborn-scoped PRs, with the median
   PR still at all `12` buckets.
@@ -122,6 +125,7 @@ improving measured wall clock.
 | H20 | Batch all packages inside each Reborn crate bucket into one package-scoped `cargo test` invocation. | Remove repeated per-package Cargo invocations in the same bucket. | Tested | Rejected and reverted: the run was cancelled at `12m08s`, with `adapters-misc` still running at `677s`; several completed buckets regressed. |
 | H21 | Reduce root-test partitions from 4 to 2 after H19 batching. | Compile the root graph in fewer jobs and reduce runner/cache pressure. | Tested | Rejected and reverted: workflow wall clock regressed from retained-state `10m36s` to `11m14s`; root max regressed from `522s` to `633s`. |
 | H22 | Split libSQL-heavy migration/trigger crates out of `adapters-misc`. | Let lightweight adapters finish separately from migration/trigger storage work. | Tested | Rejected and reverted: `adapters-misc` improved `543s -> 324s`, but the new `migration-triggers` bucket took `573s` and wall clock regressed `9m55s -> 10m35s`. |
+| H23 | Run root partitions with `cargo nextest run --profile ci` instead of `cargo test`. | Keep one compile per partition but improve test execution scheduling and reporting. | Tested | Rejected and reverted: the run passed, but wall clock regressed `9m55s -> 10m21s`; root max regressed `547s -> 579s`. |
 
 ## H1: Narrow Crate Bucket Targets
 
@@ -1420,3 +1424,52 @@ Decision:
 - The split correctly shortened `adapters-misc`, but it moved the heavy compile
   work into a new job that became the overall long pole. Because the split adds
   a runner slot and did not improve wall clock, it is not worth keeping.
+
+## H23: Run Root Partitions With Nextest
+
+Advice under test:
+
+- Use `cargo nextest run --profile ci` for the already-batched root partitions.
+  This keeps the H19 shape of one build per partition but lets nextest schedule
+  tests across binaries more efficiently than the standard libtest runner.
+
+Change under test:
+
+- Added `cargo-nextest` installation to the root partition job, using the same
+  pinned `taiki-e/install-action` version already used elsewhere in CI.
+- Changed `scripts/ci/run-reborn-root-partition.sh` from:
+  `cargo test --test <a> --test <b> ... -- --nocapture`
+  to:
+  `cargo nextest run --profile ci --test <a> --test <b> ...`.
+
+Local validation:
+
+- `bash -n scripts/ci/run-reborn-root-partition.sh` passed.
+- Empty-partition smoke passed.
+- A local `cargo nextest run --profile ci --test ... --no-run` probe accepted
+  the selected root test targets and began compiling before the local timeout.
+
+Benchmark result:
+
+- Retained state:
+  [`28737960545`](https://github.com/nearai/ironclaw/actions/runs/28737960545),
+  success, wall clock `9m55s`.
+- H23 run:
+  [`28738881978`](https://github.com/nearai/ironclaw/actions/runs/28738881978),
+  success, wall clock `10m21s`.
+
+| Metric | Retained state | H23 nextest | Delta |
+| --- | ---: | ---: | ---: |
+| Workflow wall clock | `595s` | `621s` | `+26s` |
+| Root max | `547s` | `579s` | `+32s` |
+| Root average | `498s` | `508s` | `+10s` |
+| `adapters-misc` | `543s` | `574s` | `+31s` |
+| `host-runtime` | `457s` | `564s` | `+107s` |
+| `composition-core` | `509s` | `480s` | `-29s` |
+
+Decision:
+
+- Reject and revert H23.
+- Nextest did not improve the root critical path enough to offset its install
+  and scheduling overhead. The root jobs remained compile dominated, and the
+  workflow wall clock regressed.
