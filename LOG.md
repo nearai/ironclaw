@@ -786,3 +786,42 @@ Budgets: 10 hours wall-clock / $0 spend
   local bottleneck is now the row resource governor
   (`resource_governor` p95 17.5ms in the 50-op sample); libSQL remains dominated
   by thread store writes (`thread_store_writes` p95 44.5ms).
+
+## Cycle 17 - Postgres Resource Governor Worker Serialization
+
+- Graph note: `codebase-memory-mcp` was available but its transport closed on
+  `list_projects`, so this cycle falls back to targeted local reads.
+- Stress signal: `ironclaw_stress mixed-user-session` with
+  `memory-persist-on-block`, 16 users, 4 threads per owner, model/tool latency
+  0, and at least 300 attempted operations per concurrency level showed
+  Postgres pool size 2 succeeding cleanly at c16 but dominated by resource
+  accounting: operation p95 104.0ms, resource-governor p95 95.9ms,
+  thread-store p95 19.7ms. Pool size 1 also succeeded but was slower:
+  operation p95 380.4ms, thread-store p95 196.4ms, resource-governor p95
+  134.9ms. The same libSQL stress configuration produced thread-busy/backend
+  failures at c4 and segfaulted at c16, so it is not a stable acceptance
+  baseline for this diagnostic grid.
+- Hypothesis: `PostgresResourceGovernor` is row-based but still serializes every
+  operation through one `run_on_worker` current-thread runtime. Under E2E
+  concurrency this turns reserve/reconcile into an artificial single-lane
+  queue and prevents the configured Postgres pool size 2 from doing useful
+  parallel work. Replacing the single worker with bounded parallel blocking
+  workers should lower resource-governor p95 without changing persistence
+  semantics, operation order within each transaction, or pool size.
+- Expected failure mode: Running more than one governor operation at once can
+  expose row-lock contention or deadlocks if account rows are locked in
+  inconsistent order. The code already uses `ResourceAccount::cascade` order
+  consistently, but the retest must include c16 pool-size 1 and 2 stress plus
+  resource-governor contract tests.
+- Change: Added a bounded `AsyncStorageWorkerPool` helper and moved
+  `PostgresResourceGovernor` from one worker to one worker per configured
+  deadpool Postgres connection. This keeps synchronous callers off Tokio worker
+  threads while allowing pool-size-2 row-governor transactions to overlap.
+- Result: c16 pool-size-2 mixed-user stress completed 320/320 operations with
+  operation p95 improving from 104.0ms to 86.0ms and resource-governor p95
+  improving from 95.9ms to 26.2ms. c16 pool-size-1 also completed 320/320 and
+  improved from 380.4ms to 228.3ms p95. c1 remained stable around 9-10ms p95;
+  c4 pool-size-2 completed 300/300 at 23.1ms p95 with resource-governor p95
+  down to 10.3ms. Remaining c16 pool-size-2 bottleneck is now split across
+  row-governor latency and thread/context writes rather than a single
+  serialized governor queue.

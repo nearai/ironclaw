@@ -5,7 +5,7 @@ use deadpool_postgres::Pool;
 use ironclaw_host_api::{ReservationStatus, ResourceReservationId, ResourceScope};
 use serde_json::Value;
 
-use crate::cas_snapshot::{AsyncStorageWorkerCell, new_worker_cell, run_on_worker};
+use crate::cas_snapshot::{AsyncStorageWorkerPoolCell, new_worker_pool_cell, run_on_worker_pool};
 use crate::{
     AccountSnapshot, BudgetEvent, BudgetPeriod, Clock, NoOpBudgetEventSink, ReservationOutcome,
     ReservationRecord, ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits,
@@ -24,7 +24,8 @@ pub struct PostgresResourceGovernor {
     pool: Pool,
     clock: Arc<dyn Clock>,
     event_sink: Arc<dyn BudgetEventSink>,
-    worker: AsyncStorageWorkerCell,
+    workers: AsyncStorageWorkerPoolCell,
+    worker_count: usize,
 }
 
 #[derive(Debug)]
@@ -38,11 +39,13 @@ struct AccountRow {
 
 impl PostgresResourceGovernor {
     pub fn new(pool: Pool) -> Self {
+        let worker_count = pool.status().max_size.max(1);
         Self {
             pool,
             clock: Arc::new(SystemClock),
             event_sink: Arc::new(NoOpBudgetEventSink),
-            worker: new_worker_cell(),
+            workers: new_worker_pool_cell(),
+            worker_count,
         }
     }
 
@@ -58,9 +61,10 @@ impl PostgresResourceGovernor {
 
     pub fn run_migrations(&self) -> Result<(), ResourceError> {
         let pool = self.pool.clone();
-        run_on_worker(
-            &self.worker,
+        run_on_worker_pool(
+            &self.workers,
             "resource-governor-postgres",
+            self.worker_count,
             move || async move {
                 let client = connect(&pool).await?;
                 client
@@ -105,9 +109,12 @@ impl PostgresResourceGovernor {
         F: FnOnce(Pool) -> Fut + Send + 'static,
     {
         let pool = self.pool.clone();
-        run_on_worker(&self.worker, "resource-governor-postgres", move || {
-            build(pool)
-        })
+        run_on_worker_pool(
+            &self.workers,
+            "resource-governor-postgres",
+            self.worker_count,
+            move || build(pool),
+        )
     }
 }
 
