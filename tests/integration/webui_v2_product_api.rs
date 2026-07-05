@@ -26,7 +26,9 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use ironclaw_filesystem::{CompositeRootFilesystem, LibSqlRootFilesystem};
 use ironclaw_host_api::{CapabilityId, EffectKind, ExtensionId, PermissionMode};
-use ironclaw_product_workflow::{RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornServices};
+use ironclaw_product_workflow::{
+    RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornServices,
+};
 use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
