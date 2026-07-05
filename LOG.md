@@ -283,3 +283,86 @@ Budgets: 10 hours wall-clock / $0 spend
   baseline capture, WebUI/session readiness, local-runtime turn
   admission/queue/resume/cancel, and approvals/secrets/resource snapshot paths
   before treating the harness as acceptance-ready.
+
+## Cycle 7 - Control-Plane Snapshot Coverage
+
+- Score (dev): Current committed dev score/probe pass expanded storage,
+  trigger, and hosted substrate workloads for Postgres pool sizes 1 and 2 with
+  zero errors, matching state hashes, and no hard failures.
+- Probe gap: The harness still does not time the persisted approval request,
+  secret metadata/lease, or resource governor snapshot paths as actual
+  workload operations. `hosted_substrate_build` validates production wiring,
+  but it does not mutate these stores inside the measured span.
+- Hypothesis: Adding a combined filesystem-backed control-plane workload will
+  expose the next blob-style JSON snapshot/CAS paths the hosted profile uses:
+  `FilesystemApprovalRequestStore`, `FilesystemSecretStore`, and
+  `PersistentResourceGovernor<FilesystemResourceGovernorStore>`. If Postgres
+  still matches libSQL here, the next bottleneck is more likely request/server
+  orchestration than row-vs-blob schema for these stores.
+- Expected failure mode: A synthetic workload could accidentally benchmark
+  in-memory stores, bypass `ScopedFilesystem` mount routing, or move durable
+  mutations into setup. It must construct the same filesystem-backed stores
+  over the real libSQL/Postgres root filesystems, use valid resource scopes and
+  mount aliases, and perform the approval/secret/resource writes inside the
+  timed span.
+- Diagnostic: Add the workload, run its focused score at the required pool
+  sizes, then run full dev score and probe. If the control-plane workload hard
+  fails, inspect which store dominates before changing schema or query shape.
+- Change: Added `control_plane_snapshot`, a timed workload that saves and
+  approves a durable approval request, stores and consumes a one-shot secret
+  lease, and sets/reserves/reconciles a resource-governor account through the
+  hosted filesystem-backed stores. The workload keeps setup empty for these
+  operations so the durable mutations remain inside the measured span.
+- Result: The runner compiles with `cargo check --manifest-path
+  harness/latency/runner/Cargo.toml`. A focused score
+  (`LATENCY_WORKLOADS=control_plane_snapshot LATENCY_WARMUP=1
+  LATENCY_SAMPLES=20 LATENCY_CONCURRENCY=1,4`) exposed a real Postgres
+  control-plane failure: concurrency 1/pool 1 passed with matching state hash,
+  but concurrency 4 hit `secret lease consume retry limit exceeded`; pool 2
+  was also too slow at concurrency 1 and hit the same consume retry class at
+  concurrency 4.
+- Reflection: The added workload is useful and should stay in the loop. It
+  confirms the user's concern that some control-plane paths are still
+  blob/CAS-shaped rather than row-shaped for Postgres. The first schema target
+  should be secrets, because that is the failing operation before the resource
+  governor is isolated.
+
+## Cycle 8 - Postgres Secret Rows
+
+- Score (dev): Cycle 7 focused score fails `control_plane_snapshot` on
+  Postgres secret lease consumption under concurrency and shows pool-2
+  single-concurrency latency well above libSQL.
+- Probe gap: This is still a focused dev workload, not full hosted WebUI/turn
+  acceptance. It covers real approval/secret/resource persistence but not the
+  server request path.
+- Hypothesis: Moving Postgres secrets from generic filesystem records to
+  native `ironclaw_secret_records` and `ironclaw_secret_leases` rows will remove
+  the secret lease CAS retry failure and let the combined workload reveal the
+  next bottleneck, likely the resource governor's single JSON snapshot.
+- Expected failure mode: A row store could weaken tenant/user/project lease
+  isolation, expose secret material, or diverge from `SecretStore` one-shot
+  semantics. The implementation must keep encrypted material only in the row
+  payload, validate full `ResourceScope` after reads, lock the lease row during
+  consume/revoke, and keep libSQL on the existing store.
+- Diagnostic: Wire the row store only for the Postgres latency path first,
+  rerun the focused control-plane score, and inspect the first failing store.
+- Change: Added `PostgresSecretStore` behind `ironclaw_secrets/postgres` with
+  one row per secret and one row per lease, row-level `FOR UPDATE` on
+  consume/revoke, and the same `SecretStore` trait surface. The latency runner
+  now uses this row-backed secret store only for Postgres; libSQL remains on
+  `FilesystemSecretStore`.
+- Result: `cargo check --manifest-path harness/latency/runner/Cargo.toml`
+  passes with the pre-existing `OutboundDeliveryTargetEntry` warning. A
+  focused five-sample control-plane score confirms the secret consume retry is
+  gone: concurrency 1 has zero errors and matching state hashes for Postgres
+  pool sizes 1 and 2. The combined span still hard-fails latency
+  (`postgres_p95_ratio` about 2.86 for pool 1 and 3.13 for pool 2 in that
+  sample). A five-sample concurrency-4 run no longer reports secret-store
+  errors; it fails in `resource governor storage error`, with very large
+  latencies caused by the filesystem resource governor's single
+  `/resources/snapshot.json` CAS path.
+- Reflection: Secret rows fixed the first correctness failure class but did not
+  make the combined control-plane workload pass. The next valid optimization is
+  not more secret tuning; it is a row-based Postgres resource governor or a
+  trait change that lets the resource governor persist account/reservation rows
+  instead of rewriting one JSON snapshot.

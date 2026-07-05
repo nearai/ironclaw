@@ -6,12 +6,13 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use ironclaw_filesystem::{
     CasExpectation, Entry, Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue,
-    LibSqlRootFilesystem, Page, PostgresRootFilesystem, RootFilesystem, SeqNo,
+    LibSqlRootFilesystem, Page, PostgresRootFilesystem, RootFilesystem, ScopedFilesystem, SeqNo,
 };
-use ironclaw_host_api::VirtualPath;
 use ironclaw_host_api::{
-    AgentId, AuditMode, DeploymentMode, FilesystemBackendKind, NetworkMode, ProcessBackendKind,
-    ProjectId, RuntimeProfile, SecretMode, TenantId, UserId,
+    Action, AgentId, ApprovalRequest, ApprovalRequestId, AuditMode, CorrelationId, DeploymentMode,
+    FilesystemBackendKind, MountAlias, MountGrant, MountPermissions, MountView, NetworkMode,
+    Principal, ProcessBackendKind, ProjectId, ResourceEstimate, ResourceScope, ResourceUsage,
+    RuntimeProfile, SecretHandle, SecretMode, TenantId, UserId, VirtualPath,
     runtime_policy::{ApprovalPolicy, EffectiveRuntimePolicy},
 };
 use ironclaw_host_runtime::{
@@ -24,11 +25,20 @@ use ironclaw_reborn_composition::{
     build_postgres_production_host_runtime_services,
 };
 use ironclaw_reborn_event_store::RebornEventStoreConfig;
+use ironclaw_resources::{
+    FilesystemResourceGovernorStore, PersistentResourceGovernor, ResourceAccount, ResourceGovernor,
+    ResourceLimits,
+};
+use ironclaw_run_state::{ApprovalRequestStore, ApprovalStatus, FilesystemApprovalRequestStore};
+use ironclaw_secrets::{
+    FilesystemSecretStore, PostgresSecretStore, SecretMaterial, SecretStore, SecretsCrypto,
+};
 use ironclaw_triggers::{
     LibSqlTriggerRepository, PostgresTriggerRepository, TriggerId, TriggerRecord,
     TriggerRepository, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
 use ironclaw_turns::{TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError};
+use secrecy::ExposeSecret;
 use serde::Serialize;
 use tokio::sync::Semaphore;
 
@@ -61,6 +71,7 @@ enum WorkloadKind {
     AppendTail,
     ReserveSequence,
     TriggerSeedList,
+    ControlPlaneSnapshot,
     HostedSubstrateBuild,
 }
 
@@ -149,6 +160,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             kind: WorkloadKind::TriggerSeedList,
         },
         Workload {
+            name: "control_plane_snapshot",
+            kind: WorkloadKind::ControlPlaneSnapshot,
+        },
+        Workload {
             name: "hosted_substrate_build",
             kind: WorkloadKind::HostedSubstrateBuild,
         },
@@ -226,6 +241,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 struct BackendContext {
     fs: Arc<dyn RootFilesystem>,
     trigger_repository: Arc<dyn TriggerRepository>,
+    approval_requests: Arc<dyn ApprovalRequestStore>,
+    secret_store: Arc<dyn SecretStore>,
+    resource_governor: Arc<dyn ResourceGovernor>,
 }
 
 async fn open_backend(
@@ -237,13 +255,17 @@ async fn open_backend(
             let dir = tempfile::tempdir()?;
             let db_path = dir.keep().join("latency-libsql.db");
             let db = Arc::new(libsql::Builder::new_local(db_path).build().await?);
-            let fs = LibSqlRootFilesystem::new(Arc::clone(&db));
+            let fs = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)));
             fs.run_migrations().await?;
             let trigger_repository = LibSqlTriggerRepository::new(db);
             trigger_repository.run_migrations().await?;
+            let control_plane = control_plane_stores(Arc::clone(&fs));
             Ok(BackendContext {
-                fs: Arc::new(fs),
+                fs,
                 trigger_repository: Arc::new(trigger_repository),
+                approval_requests: control_plane.approval_requests,
+                secret_store: control_plane.secret_store,
+                resource_governor: control_plane.resource_governor,
             })
         }
         BackendName::Postgres => {
@@ -258,16 +280,83 @@ async fn open_backend(
                         .unwrap_or_else(|| env_usize("IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE", 2)),
                 )
                 .build()?;
-            let fs = PostgresRootFilesystem::new(pool.clone());
+            let fs = Arc::new(PostgresRootFilesystem::new(pool.clone()));
             fs.run_migrations().await?;
+            let secret_store = PostgresSecretStore::new(pool.clone(), latency_secrets_crypto());
+            secret_store.run_migrations().await?;
             let trigger_repository = PostgresTriggerRepository::new(pool);
             trigger_repository.run_migrations().await?;
+            let mut control_plane = control_plane_stores(Arc::clone(&fs));
+            control_plane.secret_store = Arc::new(secret_store);
             Ok(BackendContext {
-                fs: Arc::new(fs),
+                fs,
                 trigger_repository: Arc::new(trigger_repository),
+                approval_requests: control_plane.approval_requests,
+                secret_store: control_plane.secret_store,
+                resource_governor: control_plane.resource_governor,
             })
         }
     }
+}
+
+struct ControlPlaneStores {
+    approval_requests: Arc<dyn ApprovalRequestStore>,
+    secret_store: Arc<dyn SecretStore>,
+    resource_governor: Arc<dyn ResourceGovernor>,
+}
+
+fn control_plane_stores<F>(fs: Arc<F>) -> ControlPlaneStores
+where
+    F: RootFilesystem + 'static,
+{
+    let scoped = scoped_control_plane_fs(fs);
+    let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(Arc::clone(&scoped)));
+    let secret_store = Arc::new(FilesystemSecretStore::new(
+        Arc::clone(&scoped),
+        latency_secrets_crypto(),
+    ));
+    let resource_store = FilesystemResourceGovernorStore::new(scoped);
+    let resource_governor = Arc::new(PersistentResourceGovernor::new(resource_store));
+    ControlPlaneStores {
+        approval_requests,
+        secret_store,
+        resource_governor,
+    }
+}
+
+fn scoped_control_plane_fs<F>(fs: Arc<F>) -> Arc<ScopedFilesystem<F>>
+where
+    F: RootFilesystem,
+{
+    let mounts = MountView::new(vec![
+        MountGrant::new(
+            MountAlias::new("/approvals").expect("valid mount alias"),
+            VirtualPath::new("/engine/tenants/latency/users/control/approvals")
+                .expect("valid mount target"),
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/resources").expect("valid mount alias"),
+            VirtualPath::new("/engine/tenants/latency/users/control/resources")
+                .expect("valid mount target"),
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/secrets").expect("valid mount alias"),
+            VirtualPath::new("/engine/tenants/latency/users/control/secrets")
+                .expect("valid mount target"),
+            MountPermissions::read_write_list_delete(),
+        ),
+    ])
+    .expect("valid control-plane mount view");
+    Arc::new(ScopedFilesystem::with_fixed_view(fs, mounts))
+}
+
+fn latency_secrets_crypto() -> Arc<SecretsCrypto> {
+    Arc::new(
+        SecretsCrypto::new(latency_secret_master_key())
+            .expect("latency secret master key must be valid"),
+    )
 }
 
 async fn run_workload(
@@ -424,6 +513,18 @@ async fn run_one(
             )
             .await?
         }
+        WorkloadKind::ControlPlaneSnapshot => {
+            control_plane_snapshot(
+                backend_context.approval_requests,
+                backend_context.secret_store,
+                backend_context.resource_governor,
+                backend,
+                postgres_pool_size,
+                run_id,
+                sample,
+            )
+            .await?
+        }
         WorkloadKind::HostedSubstrateBuild => {
             hosted_substrate_build(backend, sample, postgres_pool_size).await?
         }
@@ -445,7 +546,9 @@ async fn setup_workload(
 ) -> Result<(), Box<dyn std::error::Error>> {
     if matches!(
         workload.kind,
-        WorkloadKind::TriggerSeedList | WorkloadKind::HostedSubstrateBuild
+        WorkloadKind::TriggerSeedList
+            | WorkloadKind::ControlPlaneSnapshot
+            | WorkloadKind::HostedSubstrateBuild
     ) {
         return Ok(());
     }
@@ -480,7 +583,9 @@ async fn setup_workload(
             let parent = child(&prefix, "sequence")?;
             setup_create_dir_all(fs, &parent).await?;
         }
-        WorkloadKind::TriggerSeedList | WorkloadKind::HostedSubstrateBuild => {}
+        WorkloadKind::TriggerSeedList
+        | WorkloadKind::ControlPlaneSnapshot
+        | WorkloadKind::HostedSubstrateBuild => {}
     }
     Ok(())
 }
@@ -693,6 +798,135 @@ fn trigger_record(
 
 fn timestamp(seconds: i64) -> Result<DateTime<Utc>, Box<dyn std::error::Error + Send + Sync>> {
     DateTime::from_timestamp(seconds, 0).ok_or_else(|| "invalid trigger timestamp".into())
+}
+
+async fn control_plane_snapshot(
+    approval_requests: Arc<dyn ApprovalRequestStore>,
+    secret_store: Arc<dyn SecretStore>,
+    resource_governor: Arc<dyn ResourceGovernor>,
+    backend: BackendName,
+    postgres_pool_size: Option<usize>,
+    run_id: &str,
+    sample: usize,
+) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+    let scope = control_plane_scope(backend, postgres_pool_size, run_id, sample)?;
+
+    let request_id = ApprovalRequestId::new();
+    let approval = ApprovalRequest {
+        id: request_id,
+        correlation_id: CorrelationId::new(),
+        requested_by: Principal::User(scope.user_id.clone()),
+        action: Box::new(Action::ReserveResources {
+            estimate: resource_estimate(sample),
+        }),
+        invocation_fingerprint: None,
+        reason: format!("latency control-plane sample {sample}"),
+        reusable_scope: None,
+    };
+    let pending = approval_requests
+        .save_pending(scope.clone(), approval)
+        .await?;
+    let approved = approval_requests.approve(&scope, request_id).await?;
+    let approval_rows = approval_requests.records_for_scope(&scope).await?;
+
+    let handle = SecretHandle::new(format!("latency_secret_{sample}"))?;
+    secret_store
+        .put(
+            scope.clone(),
+            handle.clone(),
+            SecretMaterial::from(format!("secret-material-{sample}-{run_id}")),
+            None,
+        )
+        .await?;
+    let metadata = secret_store
+        .metadata(&scope, &handle)
+        .await?
+        .ok_or("missing secret metadata")?;
+    let metadata_rows = secret_store.metadata_for_scope(&scope).await?;
+    let lease = secret_store.lease_once(&scope, &handle).await?;
+    let material = secret_store.consume(&scope, lease.id).await?;
+
+    let account = ResourceAccount::project(
+        scope.tenant_id.clone(),
+        scope.user_id.clone(),
+        scope
+            .project_id
+            .clone()
+            .ok_or("control-plane scope missing project id")?,
+    );
+    resource_governor.set_limit(account.clone(), resource_limits())?;
+    let reservation = resource_governor.reserve(scope.clone(), resource_estimate(sample))?;
+    let receipt = resource_governor.reconcile(reservation.id, resource_usage(sample))?;
+    let account_snapshot = resource_governor
+        .account_snapshot(&account)?
+        .ok_or("missing resource account snapshot")?;
+
+    let approval_state = match (pending.status, approved.status) {
+        (ApprovalStatus::Pending, ApprovalStatus::Approved) => 0x11,
+        _ => 0xff,
+    };
+    Ok(approval_state
+        ^ ((approval_rows.len() as u64) << 8)
+        ^ ((metadata_rows.len() as u64) << 16)
+        ^ ((metadata.handle.as_str().len() as u64) << 24)
+        ^ ((material.expose_secret().len() as u64) << 32)
+        ^ ((receipt.actual.is_some() as u64) << 40)
+        ^ ((account_snapshot.ledger.spent.output_bytes as u64) << 48))
+}
+
+fn control_plane_scope(
+    backend: BackendName,
+    postgres_pool_size: Option<usize>,
+    run_id: &str,
+    sample: usize,
+) -> Result<ResourceScope, Box<dyn std::error::Error + Send + Sync>> {
+    let pool_label = postgres_pool_size
+        .map(|pool_size| format!("pool-{pool_size}"))
+        .unwrap_or_else(|| "baseline".to_string());
+    let scope = format!("{}-{pool_label}-{run_id}-{sample}", backend.as_str());
+    Ok(ResourceScope {
+        tenant_id: TenantId::new(format!("latency-control-tenant-{scope}"))?,
+        user_id: UserId::new(format!("latency-control-user-{scope}"))?,
+        agent_id: Some(AgentId::new(format!("latency-control-agent-{scope}"))?),
+        project_id: Some(ProjectId::new(format!("latency-control-project-{scope}"))?),
+        mission_id: None,
+        thread_id: None,
+        invocation_id: ironclaw_host_api::InvocationId::new(),
+    })
+}
+
+fn resource_estimate(sample: usize) -> ResourceEstimate {
+    ResourceEstimate {
+        input_tokens: Some(64 + sample as u64 % 16),
+        output_tokens: Some(32 + sample as u64 % 8),
+        wall_clock_ms: Some(250),
+        output_bytes: Some(512),
+        concurrency_slots: Some(1),
+        ..Default::default()
+    }
+}
+
+fn resource_usage(sample: usize) -> ResourceUsage {
+    ResourceUsage {
+        input_tokens: 64 + sample as u64 % 16,
+        output_tokens: 32 + sample as u64 % 8,
+        wall_clock_ms: 125,
+        output_bytes: 256,
+        network_egress_bytes: 0,
+        process_count: 0,
+        ..Default::default()
+    }
+}
+
+fn resource_limits() -> ResourceLimits {
+    ResourceLimits {
+        max_input_tokens: Some(1_000_000),
+        max_output_tokens: Some(1_000_000),
+        max_wall_clock_ms: Some(1_000_000),
+        max_output_bytes: Some(1_000_000),
+        max_concurrency_slots: Some(10_000),
+        ..Default::default()
+    }
 }
 
 async fn hosted_substrate_build(

@@ -6,11 +6,13 @@ publish = false
 
 [features]
 default = []
+postgres = ["dep:deadpool-postgres", "dep:tokio-postgres"]
 
 [dependencies]
 aes-gcm = "0.10"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
+deadpool-postgres = { version = "0.14", optional = true }
 hkdf = "0.13"
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
@@ -22,6 +24,7 @@ sha2 = "0.11"
 subtle = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt", "sync"] }
+tokio-postgres = { version = "0.7", optional = true, features = ["with-serde_json-1"] }
 tracing = "0.1"
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
