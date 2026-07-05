@@ -123,6 +123,7 @@ pub(crate) async fn qa_smoke_tools() -> HarnessResult<HostRuntimeCapabilityHarne
         project_service: None,
         skill_activation_source: None,
         attachment_test_support: None,
+        inbound_attachment_reader: None,
         outbound_target_tools: None,
         scope_capability_by_run_owner: false,
         product_auth: None,

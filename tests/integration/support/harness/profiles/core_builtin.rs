@@ -225,6 +225,7 @@ fn core_builtin_tools_from_runtime(
         project_service: None,
         skill_activation_source: None,
         attachment_test_support: None,
+        inbound_attachment_reader: None,
         outbound_target_tools: None,
         scope_capability_by_run_owner: false,
         product_auth: None,

@@ -192,6 +192,15 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// both over); `None` for the lower-level constructors and the Echo backend.
     /// Read back via `attachment_test_support_for_test`.
     attachment_test_support: Option<ironclaw_reborn_composition::AttachmentTestSupport>,
+    /// W5-WEBUI-API-1 (attachments cold-GET scenario): the WebUI-facing
+    /// `InboundAttachmentReader` view over the same local-dev workspace
+    /// filesystem `attachment_test_support`'s read port reads (Enabler C,
+    /// `RebornServices::local_dev_inbound_attachment_reader_for_test`). A
+    /// separate field because it is a DIFFERENT trait than
+    /// `attachment_test_support.read_port` (`LoopAttachmentReadPort`, the
+    /// model-injection view) — the same concrete `ProjectScopedAttachmentReader`
+    /// implements both. `Some` only for `new_with_options`-built harnesses.
+    inbound_attachment_reader: Option<Arc<dyn ironclaw_product_workflow::InboundAttachmentReader>>,
     /// Backing handles for the synthetic `outbound_delivery_*` capabilities
     /// (C-SYNTH outbound seam). `Some` only for `outbound_target_tools()`;
     /// `create_capability_port` wraps the port with the two capabilities via
@@ -482,6 +491,9 @@ impl HostRuntimeCapabilityHarness {
             None
         };
         let attachment_test_support = services.local_dev_attachment_test_support_for_test();
+        // W5-WEBUI-API-1 (attachments scenario): capture the WebUI-facing
+        // reader view alongside the model-injection one above.
+        let inbound_attachment_reader = services.local_dev_inbound_attachment_reader_for_test();
         // W5-WEBUI-API-1 Enabler B.3: capture the SAME live, shared trigger
         // repository the capability dispatch path uses, before
         // `services.host_runtime` is moved out below.
@@ -552,6 +564,7 @@ impl HostRuntimeCapabilityHarness {
             project_service,
             skill_activation_source,
             attachment_test_support,
+            inbound_attachment_reader,
             outbound_target_tools,
             scope_capability_by_run_owner: false,
             product_auth,
@@ -1002,6 +1015,15 @@ impl HostRuntimeCapabilityHarness {
         &self,
     ) -> Option<ironclaw_reborn_composition::AttachmentTestSupport> {
         self.attachment_test_support.clone()
+    }
+
+    /// W5-WEBUI-API-1 (attachments cold-GET scenario): the WebUI-facing
+    /// `InboundAttachmentReader` view, for wiring
+    /// `RebornServices::with_inbound_attachment_reader`.
+    pub(crate) fn inbound_attachment_reader_for_test(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_product_workflow::InboundAttachmentReader>> {
+        self.inbound_attachment_reader.clone()
     }
 
     /// W5-WEBUI-API-1 Enabler B.3: the SAME live, shared trigger repository
