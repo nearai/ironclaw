@@ -11,6 +11,8 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserI
 use ironclaw_turns::TurnRunId;
 #[cfg(feature = "libsql")]
 use libsql::params;
+#[cfg(feature = "libsql")]
+use tokio::sync::Mutex;
 
 #[cfg(feature = "libsql")]
 use crate::{
@@ -99,12 +101,16 @@ const RUN_COMPLETED_AT_COL: usize = 7;
 #[cfg(feature = "libsql")]
 pub struct LibSqlTriggerRepository {
     db: Arc<libsql::Database>,
+    operation_gate: Arc<Mutex<()>>,
 }
 
 #[cfg(feature = "libsql")]
 impl LibSqlTriggerRepository {
     pub fn new(db: Arc<libsql::Database>) -> Self {
-        Self { db }
+        Self {
+            db,
+            operation_gate: Arc::new(Mutex::new(())),
+        }
     }
 
     pub async fn run_migrations(&self) -> Result<(), TriggerError> {
@@ -376,7 +382,7 @@ impl LibSqlTriggerRepository {
             .db
             .connect()
             .map_err(|error| backend_error("connect trigger repository", error))?;
-        conn.query("PRAGMA busy_timeout = 5000", ())
+        conn.execute_batch("PRAGMA busy_timeout = 5000;")
             .await
             .map_err(|error| backend_error("set trigger repository busy_timeout", error))?;
         Ok(conn)
@@ -388,6 +394,7 @@ impl LibSqlTriggerRepository {
 impl TriggerRepository for LibSqlTriggerRepository {
     async fn upsert_trigger(&self, record: TriggerRecord) -> Result<(), TriggerError> {
         record.validate()?;
+        let _guard = self.operation_gate.lock().await;
         let conn = self.connect().await?;
         write_record(&conn, &record).await?;
         Ok(())
@@ -398,6 +405,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         tenant_id: TenantId,
         trigger_id: TriggerId,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let _guard = self.operation_gate.lock().await;
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
@@ -419,6 +427,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
     }
 
     async fn list_triggers(&self, tenant_id: TenantId) -> Result<Vec<TriggerRecord>, TriggerError> {
+        let _guard = self.operation_gate.lock().await;
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
@@ -455,6 +464,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        let _guard = self.operation_gate.lock().await;
         let limit = limit.min(crate::MAX_TRIGGER_LIST_LIMIT) as i64;
         let conn = self.connect().await?;
         let agent_id = agent_id.as_ref().map(AgentId::as_str);
@@ -512,6 +522,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         tenant_id: TenantId,
         trigger_id: TriggerId,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let _guard = self.operation_gate.lock().await;
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
@@ -539,6 +550,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         project_id: Option<ProjectId>,
         trigger_id: TriggerId,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let _guard = self.operation_gate.lock().await;
         let conn = self.connect().await?;
         let agent_id = agent_id.as_ref().map(AgentId::as_str);
         let project_id = project_id.as_ref().map(ProjectId::as_str);
@@ -583,6 +595,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         new_state: TriggerState,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
         crate::validate_user_settable_trigger_state(new_state)?;
+        let _guard = self.operation_gate.lock().await;
         let conn = self.connect().await?;
         let agent_id = agent_id.as_ref().map(AgentId::as_str);
         let project_id = project_id.as_ref().map(ProjectId::as_str);
@@ -626,6 +639,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        let _guard = self.operation_gate.lock().await;
         let limit = limit.min(super::MAX_DUE_TRIGGER_POLL_LIMIT);
         let conn = self.connect().await?;
         let mut rows = conn
@@ -671,6 +685,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        let _guard = self.operation_gate.lock().await;
         let limit = limit.min(super::MAX_DUE_TRIGGER_POLL_LIMIT);
         let conn = self.connect().await?;
         let mut rows = match after {
@@ -727,6 +742,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         &self,
         request: ClaimDueFireRequest,
     ) -> Result<ClaimDueFireOutcome, TriggerError> {
+        let _guard = self.operation_gate.lock().await;
         let conn = self.connect().await?;
         let fire_slot = fmt_ts(&request.fire_slot);
         let now = fmt_ts(&request.now);
@@ -816,6 +832,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         &self,
         request: FireAcceptedRequest,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let _guard = self.operation_gate.lock().await;
         let conn = self.connect().await?;
         mark_successful_fire_result(
             &conn,
@@ -837,6 +854,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         &self,
         request: FireReplayedRequest,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let _guard = self.operation_gate.lock().await;
         let conn = self.connect().await?;
         mark_successful_fire_result(
             &conn,
@@ -863,6 +881,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
             trigger_id,
             fire_slot,
         } = request;
+        let _guard = self.operation_gate.lock().await;
         let conn = self.connect().await?;
         let Some(record) = fetch_record(&conn, &tenant_id, trigger_id).await? else {
             return Ok(None);
@@ -949,6 +968,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
             fire_slot,
             next_run_at,
         } = request;
+        let _guard = self.operation_gate.lock().await;
         let conn = self.connect().await?;
         let Some(record) = fetch_record(&conn, &tenant_id, trigger_id).await? else {
             return Ok(None);
@@ -1032,6 +1052,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         let fire_slot_text = fmt_ts(&fire_slot);
         let last_status = crate::status_text_codec(TriggerRunStatus::Error);
         let completed = crate::state_text_codec(TriggerState::Completed);
+        let _guard = self.operation_gate.lock().await;
         let conn = self.connect().await?;
         begin_immediate(&conn, "begin terminal trigger fire failure").await?;
         let update_result = async {
@@ -1095,6 +1116,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         &self,
         request: ClearActiveFireRequest,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let _guard = self.operation_gate.lock().await;
         let conn = self.connect().await?;
         begin_immediate(&conn, "begin clear active trigger fire").await?;
         let clear_result = async {
@@ -1178,6 +1200,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         tenant_id: TenantId,
         thread_id: &crate::ThreadId,
     ) -> Result<Option<(crate::TriggerRecord, crate::TriggerRunRecord)>, crate::TriggerError> {
+        let _guard = self.operation_gate.lock().await;
         let conn = self.connect().await?;
         // Look up the run row by (tenant_id, thread_id) using the dedicated index.
         let mut run_rows = conn
@@ -1229,6 +1252,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        let _guard = self.operation_gate.lock().await;
         let limit = limit.min(crate::MAX_TRIGGER_RUN_HISTORY_LIMIT) as i64;
         let conn = self.connect().await?;
         let mut rows = conn
@@ -1265,6 +1289,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         if limit == 0 || trigger_ids.is_empty() {
             return Ok(runs_by_trigger);
         }
+        let _guard = self.operation_gate.lock().await;
         let limit = limit.min(crate::MAX_TRIGGER_RUN_HISTORY_LIMIT) as i64;
         let trigger_ids_json = trigger_ids_json_array(trigger_ids);
         let sql = format!(

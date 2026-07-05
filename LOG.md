@@ -533,3 +533,62 @@ Budgets: 10 hours wall-clock / $0 spend
   it should address the libSQL baseline control-plane instability at probe
   concurrency 8 or move the harness closer to the real launch-ref/WebUI/turn
   acceptance path. This is still not holdout acceptance.
+
+## Cycle 12 - LibSQL Trigger PRAGMA Drain
+
+- Graph: `codebase-memory-mcp` transport is still closed, so this cycle falls
+  back to local code reads after one probe.
+- Score (dev): Fresh Cycle 12 baseline `score.sh --dev` has one noisy
+  `reserve_sequence` p95/p99 hard failure at concurrency 1; Postgres itself is
+  zero-error, hashes match, and `query_exact` remains fixed. `probe.sh` is
+  clean: zero failing comparisons, zero error rows, and matching hashes.
+- Holdout-shaped diagnostic: Local `score.sh --holdout` exposes invalid
+  comparisons, but the error rows are in the libSQL baseline:
+  `trigger_seed_list` concurrency 4 reports two
+  `query tenant trigger records: SQLite failure: bad parameter or other API
+  misuse` errors, and `control_plane_snapshot` concurrency 16 reports three
+  filesystem secret-store `stat` errors with the same SQLite misuse class.
+  Postgres has zero errors in those rows and is much faster for
+  `control_plane_snapshot`.
+- Hypothesis: The trigger-specific libSQL error is caused by
+  `LibSqlTriggerRepository::connect` issuing `PRAGMA busy_timeout` via
+  `query()` and dropping the returned row stream before subsequent statements
+  on that same connection. The filesystem backend already uses
+  `execute_batch()` for connection PRAGMAs, which drains/discards returned
+  rows. Matching that pattern should remove the trigger baseline correctness
+  failure without changing Postgres or benchmark workload logic.
+- Expected failure mode: This may fix only `trigger_seed_list`; the
+  `control_plane_snapshot` error can still be the known libSQL driver limit
+  around concurrent independent local-file handles. Do not treat a partial
+  libSQL-baseline cleanup as Postgres holdout acceptance.
+- Diagnostic: Change only the libSQL trigger connection PRAGMA path, run the
+  trigger repository tests, then rerun a trigger-focused latency score with
+  holdout concurrency and enough samples to reproduce the prior c4 failure.
+- Change: Replaced the trigger repository's un-drained
+  `conn.query("PRAGMA busy_timeout = 5000", ())` with
+  `conn.execute_batch("PRAGMA busy_timeout = 5000;")`, matching the
+  filesystem backend's connection-setup pattern. A subsequent full
+  holdout-shaped run crashed inside native SQLite/libSQL while concurrent
+  trigger tasks were preparing/executing `upsert_trigger` and
+  `list_scoped_triggers`, so `LibSqlTriggerRepository` now serializes public
+  DB operations behind a repository-local async mutex. The delegating
+  `list_active_triggers` method does not take the lock itself; its callee does.
+- Result: `cargo fmt -p ironclaw_triggers --check` passed. The full
+  `cargo test -p ironclaw_triggers --features libsql,postgres --test
+  repository_contract` suite passed twice after the final lock shape (49
+  tests). The repeated trigger-focused holdout shape
+  (`LATENCY_WORKLOADS=trigger_seed_list`, 30 warmups, 300 samples,
+  concurrency 1/4/16) completed without native crashes, has zero error rows,
+  and has matching state hashes. One trigger-focused run caught a Postgres
+  pool-1 c4 p99 outlier, but the immediate repeat passed all comparisons; a
+  focused c1 trigger score with 10 warmups and 120 samples also passed all
+  comparisons. Full post-change `harness/latency/probe.sh` is clean. Full
+  `score.sh --dev` is not stable evidence yet: one run hit the known libSQL
+  filesystem/control-plane `bad parameter or other API misuse` row at
+  concurrency 4, and the repeat hit a Postgres trigger p95 outlier that the
+  focused c1 check did not reproduce.
+- Reflection: This cleans up the libSQL trigger baseline correctness failure
+  and native crash without touching Postgres or relaxing score policy. It is
+  still not acceptance: the libSQL filesystem/control-plane misuse remains
+  unresolved under dev/holdout concurrency, and the goal still lacks
+  launch-ref hosted-volume, WebUI/session, and turn-path acceptance.
