@@ -585,6 +585,20 @@ where
                 .expect("row snapshot cache is initialized above");
             let store = match overlay {
                 RunnerLeaseOverlay::None => Arc::clone(&state.store),
+                RunnerLeaseOverlay::Run(run_id) => {
+                    let store = Arc::clone(&state.store);
+                    if let Some(run) = state
+                        .snapshot
+                        .runs
+                        .iter()
+                        .find(|record| record.run_id == run_id)
+                        .cloned()
+                    {
+                        let overlaid = self.runner_lease_store().overlay_run_record(run).await?;
+                        store.overlay_runner_lease_record(overlaid)?;
+                    }
+                    store
+                }
                 _ => {
                     let (overlaid_snapshot, _) = self
                         .runner_lease_store()

@@ -476,6 +476,35 @@ impl InMemoryTurnStateStore {
         }
     }
 
+    pub(crate) fn overlay_runner_lease_record(
+        &self,
+        overlaid: TurnRunRecord,
+    ) -> Result<(), TurnError> {
+        let mut inner = self.lock_inner()?;
+        let Some(record) = inner.records.get_mut(&overlaid.run_id) else {
+            return Err(TurnError::ScopeNotFound);
+        };
+        if !matches!(
+            record.status.get(),
+            TurnStatus::Running | TurnStatus::CancelRequested
+        ) || record.runner_id != overlaid.runner_id
+            || record.lease_token != overlaid.lease_token
+            || record.runner_id.is_none()
+            || record.lease_token.is_none()
+        {
+            return Ok(());
+        }
+        if let (Some(current), Some(incoming)) =
+            (record.last_heartbeat_at, overlaid.last_heartbeat_at)
+            && incoming < current
+        {
+            return Ok(());
+        }
+        record.last_heartbeat_at = overlaid.last_heartbeat_at;
+        record.lease_expires_at = overlaid.lease_expires_at;
+        Ok(())
+    }
+
     pub(crate) fn active_lock_record(&self, scope: &TurnScope) -> Option<TurnActiveLockRecord> {
         let key = TurnActiveLockKey::from(scope);
         match self.inner.lock() {
@@ -3589,5 +3618,77 @@ mod tests {
             snapshot.turns[0].turn_id, snapshot.runs[0].turn_id,
             "remaining turn record should belong to the retained run"
         );
+    }
+
+    #[tokio::test]
+    async fn overlay_runner_lease_record_ignores_stale_heartbeat() {
+        let store = InMemoryTurnStateStore::default();
+        let policy = AllowAllTurnAdmissionPolicy;
+        let resolver = TestRunProfileResolver;
+        let scope = TurnScope::new(
+            TenantId::new("tenant-lease-overlay").unwrap(),
+            Some(AgentId::new("agent-lease-overlay").unwrap()),
+            Some(ProjectId::new("project-lease-overlay").unwrap()),
+            ThreadId::new("thread-lease-overlay").unwrap(),
+        );
+        let response = store
+            .submit_turn(
+                SubmitTurnRequest {
+                    scope: scope.clone(),
+                    actor: TurnActor::new(UserId::new("user-lease-overlay").unwrap()),
+                    accepted_message_ref: AcceptedMessageRef::new("accepted-lease-overlay")
+                        .unwrap(),
+                    source_binding_ref: SourceBindingRef::new("source-lease-overlay").unwrap(),
+                    reply_target_binding_ref: ReplyTargetBindingRef::new("reply-lease-overlay")
+                        .unwrap(),
+                    idempotency_key: IdempotencyKey::new("submit-lease-overlay").unwrap(),
+                    requested_run_profile: None,
+                    requested_run_id: None,
+                    received_at: Utc::now(),
+                    parent_run_id: None,
+                    subagent_depth: 0,
+                    spawn_tree_root_run_id: None,
+                    product_context: None,
+                },
+                &policy,
+                &resolver,
+            )
+            .await
+            .unwrap();
+        let SubmitTurnResponse::Accepted { run_id, .. } = response;
+        store
+            .claim_next_run(ClaimRunRequest {
+                runner_id: TurnRunnerId::new(),
+                lease_token: TurnLeaseToken::new(),
+                scope_filter: Some(scope),
+            })
+            .await
+            .unwrap()
+            .expect("submitted run should be claimable");
+        let original = store.run_record(run_id).expect("claimed run record");
+        let original_heartbeat = original
+            .last_heartbeat_at
+            .expect("claimed run has heartbeat timestamp");
+        let original_expiry = original
+            .lease_expires_at
+            .expect("claimed run has lease expiry");
+
+        let mut stale = original.clone();
+        stale.last_heartbeat_at = Some(original_heartbeat - ChronoDuration::seconds(1));
+        stale.lease_expires_at = Some(original_expiry - ChronoDuration::seconds(1));
+        store.overlay_runner_lease_record(stale).unwrap();
+        let after_stale = store.run_record(run_id).expect("claimed run record");
+        assert_eq!(after_stale.last_heartbeat_at, Some(original_heartbeat));
+        assert_eq!(after_stale.lease_expires_at, Some(original_expiry));
+
+        let mut newer = original.clone();
+        let newer_heartbeat = original_heartbeat + ChronoDuration::seconds(1);
+        let newer_expiry = original_expiry + ChronoDuration::seconds(1);
+        newer.last_heartbeat_at = Some(newer_heartbeat);
+        newer.lease_expires_at = Some(newer_expiry);
+        store.overlay_runner_lease_record(newer).unwrap();
+        let after_newer = store.run_record(run_id).expect("claimed run record");
+        assert_eq!(after_newer.last_heartbeat_at, Some(newer_heartbeat));
+        assert_eq!(after_newer.lease_expires_at, Some(newer_expiry));
     }
 }

@@ -1882,3 +1882,72 @@ Budgets: 10 hours wall-clock / $0 spend
   `cargo check -p ironclaw_turns`, and `git diff --check` passed. The
   runner-lease unit-test target still emits the pre-existing
   `with_apply_timeout` dead-code warning under `cfg(test)`.
+
+## Cycle 36 - Single-Run Overlay Without Full Store Rebuild
+
+- Graph note: `codebase-memory-mcp` still fails immediately with
+  `Transport closed` for `index_status`; this cycle falls back to crate
+  guardrails and targeted source reads.
+- Baseline: cycle 35 is the current committed implementation. Full dev score
+  passed 54 results and 36 comparisons; dev-shaped c4 `turn_lifecycle` was
+  libSQL p95 7244ms versus Postgres pool-2 p95 487ms. The unresolved
+  high-concurrency diagnostic is Postgres-only `turn_lifecycle` c100 p95
+  10195ms at payload 2048, 64 samples, pool size 2, with state hash
+  `660086a8484d5400`.
+- Hypothesis: Most remaining lifecycle transitions use
+  `RunnerLeaseOverlay::Run`. The row store currently handles that by cloning
+  the entire hot snapshot, overlaying one runner lease, and rebuilding a full
+  `InMemoryTurnStateStore` before running a single-run transition. The
+  transition authority only needs the current lease metadata on that run, so
+  applying the overlaid lease metadata directly to the hot in-memory store's
+  single run before the transition should remove full snapshot clone/rebuild
+  from `block_run`, `request_cancel`, `complete_run`, and `cancel_run` without
+  changing durable delta semantics.
+- Expected failure mode: The in-place overlay must preserve current no-op
+  behavior when the runner id/token no longer match, must not resurrect a
+  non-running/non-cancel-requested run, must ignore stale heartbeat timestamps,
+  and must still let the transition authority raise `LeaseMismatch`, expired
+  lease, or invalid-transition errors. If the subsequent transition fails, the
+  row-store cache must still be discarded exactly as before so overlay-only
+  metadata is not treated as a durable write.
+- Result: `apply_with_targeted_delta` now handles `RunnerLeaseOverlay::Run` by
+  reading the single run row from the hot snapshot, applying any external
+  runner-lease heartbeat overlay to that row, and copying only the overlaid
+  lease metadata into the hot `InMemoryTurnStateStore`. `RunnerLeaseOverlay::All`
+  still uses the full snapshot overlay path. A new in-memory unit test verifies
+  that stale heartbeat overlays are ignored and newer heartbeat/expiry metadata
+  is accepted.
+- Dev score: The first `harness/latency/score.sh --dev` run had two unrelated
+  pool-1 hard-fail outliers in `append_tail` and `trigger_seed_list`, both
+  outside this diff and both clean for pool-2. A full rerun passed with 54
+  results, 36 comparisons, and zero failures. The rerun `turn_lifecycle` state
+  hash stayed `7fc054292d2f85f0`; libSQL c4 p95 was 7310ms, Postgres pool-1
+  c4 p95 was 429ms, and Postgres pool-2 c4 p95 was 430ms.
+- Probe: `harness/latency/probe.sh` completed with 81 results and 54
+  comparisons, but was not clean because the known high-concurrency libSQL
+  `turn_lifecycle` c8 baseline produced 5 errors and a mismatched hash
+  `0fa873b89e21ddc0`. Postgres pool-1 and pool-2 c8 had zero errors and the
+  expected hash `3fa07e3dc3c7e320`, with p95 2229ms and 2187ms respectively.
+  This is not a treatment regression, but the probe result is recorded as
+  non-clean rather than hidden.
+- High-concurrency turn-state diagnostic: Postgres-only `turn_lifecycle` with
+  c32/c100, payload 2048, 64 samples, and pool size 2 completed with zero
+  errors and state hash `660086a8484d5400`. c32 p95 improved from cycle 35's
+  2666ms to 2314ms, and throughput improved from 16.22 to 18.36 ops/sec. c100
+  p95 improved from 10195ms to 8666ms, and throughput improved from 6.28 to
+  7.39 ops/sec.
+- Decision: Keep the change. This is the first cycle in this stretch that
+  materially attacks the global transition serialization cost: single-run
+  overlay transitions no longer rebuild the whole in-memory authority. The
+  remaining c100 p95 is still high, so the next structural step should continue
+  reducing whole-snapshot work inside targeted transitions, especially terminal
+  fallback scans and full-vector delta construction.
+- Validation: `cargo fmt -p ironclaw_turns`, `cargo test -p ironclaw_turns
+  memory::tests::overlay_runner_lease_record_ignores_stale_heartbeat`, `cargo
+  test -p ironclaw_turns --test filesystem_turn_state_contract
+  filesystem_turn_state_row_store_persists_rows_without_state_blob`, `cargo
+  test -p ironclaw_turns --test loop_checkpoint_store_contract
+  filesystem_turn_state_row_store_loop_checkpoint_roundtrip_and_snapshot`,
+  `cargo check -p ironclaw_turns`, full dev score rerun, probe, and `git diff
+  --check` passed. The unit-test target still emits the pre-existing
+  `with_apply_timeout` dead-code warning under `cfg(test)`.
