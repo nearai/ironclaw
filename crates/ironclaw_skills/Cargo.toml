@@ -41,6 +41,7 @@ urlencoding = { version = "2", optional = true }
 # Optional (registry feature — tempfile needed for dev-dep in tests, but also
 # the registry module itself uses no extra deps beyond tokio::fs)
 tempfile = { version = "3", optional = true }
+ironclaw_workspace_hack = { version = "0.1", path = "../ironclaw_workspace_hack" }
 
 [dev-dependencies]
 tempfile = "3"

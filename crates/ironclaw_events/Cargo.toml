@@ -13,6 +13,7 @@ serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
+ironclaw_workspace_hack = { version = "0.1", path = "../ironclaw_workspace_hack" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

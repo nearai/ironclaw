@@ -50,6 +50,7 @@ async-stream = { version = "0.3", optional = true }
 axum = { version = "0.8", optional = true, features = ["ws"] }
 futures = { version = "0.3", optional = true }
 tokio = { version = "1", features = ["sync", "time"], optional = true }
+ironclaw_workspace_hack = { version = "0.1", path = "../ironclaw_workspace_hack" }
 
 [dev-dependencies]
 ironclaw_webui_v2 = { path = ".", features = ["webui-v2-beta"] }

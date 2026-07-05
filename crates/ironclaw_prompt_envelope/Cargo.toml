@@ -7,5 +7,6 @@ description = "Shared envelope helper that wraps untrusted prompt content with a
 
 [dependencies]
 thiserror = "2"
+ironclaw_workspace_hack = { version = "0.1", path = "../ironclaw_workspace_hack" }
 
 [dev-dependencies]

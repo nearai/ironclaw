@@ -19,3 +19,4 @@ ironclaw_common = { path = "../ironclaw_common", version = "0.4.1" }
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "net", "time", "macros", "rt"] }
 urlencoding = "2"
+ironclaw_workspace_hack = { version = "0.1", path = "../ironclaw_workspace_hack" }

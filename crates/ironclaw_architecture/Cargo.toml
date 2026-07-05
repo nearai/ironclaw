@@ -6,3 +6,6 @@ publish = false
 
 [dev-dependencies]
 serde_json = "1"
+
+[dependencies]
+ironclaw_workspace_hack = { version = "0.1", path = "../ironclaw_workspace_hack" }

@@ -21,6 +21,7 @@ sha2 = "0.11"
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 zeroize = "1"
+ironclaw_workspace_hack = { version = "0.1", path = "../ironclaw_workspace_hack" }
 
 [dev-dependencies]
 rust_decimal_macros = "1"

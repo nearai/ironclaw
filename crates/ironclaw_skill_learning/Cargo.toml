@@ -16,6 +16,7 @@ dist = false
 async-trait = "0.1"
 ironclaw_skills = { path = "../ironclaw_skills", version = "0.3.0" }
 thiserror = "2"
+ironclaw_workspace_hack = { version = "0.1", path = "../ironclaw_workspace_hack" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

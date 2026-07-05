@@ -50,6 +50,7 @@ serde_json = "1"
 sha2 = "0.11"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
+ironclaw_workspace_hack = { version = "0.1", path = "../ironclaw_workspace_hack" }
 
 [dev-dependencies]
 # Self dev-dependency enables `contract-tests` for the crate's

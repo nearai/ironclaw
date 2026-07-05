@@ -13,6 +13,7 @@ ironclaw_memory = { path = "../ironclaw_memory" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
+ironclaw_workspace_hack = { version = "0.1", path = "../ironclaw_workspace_hack" }
 
 [dev-dependencies]
 ironclaw_extensions = { path = "../ironclaw_extensions" }

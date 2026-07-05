@@ -17,6 +17,7 @@ ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 toml = "1.1"
+ironclaw_workspace_hack = { version = "0.1", path = "../ironclaw_workspace_hack" }
 
 [dev-dependencies]
 chrono = { version = "0.4", features = ["serde"] }

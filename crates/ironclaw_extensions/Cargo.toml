@@ -23,6 +23,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["sync"] }
 toml = "1.1"
 url = "2"
+ironclaw_workspace_hack = { version = "0.1", path = "../ironclaw_workspace_hack" }
 
 [dev-dependencies]
 tempfile = "3"

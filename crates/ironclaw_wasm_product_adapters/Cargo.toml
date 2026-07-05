@@ -25,6 +25,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 tracing = "0.1"
 wasmtime = { workspace = true }
+ironclaw_workspace_hack = { version = "0.1", path = "../ironclaw_workspace_hack" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "sync"] }

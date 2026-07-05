@@ -11,6 +11,7 @@ ironclaw_resources = { path = "../ironclaw_resources" }
 futures-util = "0.3"
 serde_json = "1"
 thiserror = "2"
+ironclaw_workspace_hack = { version = "0.1", path = "../ironclaw_workspace_hack" }
 
 [dev-dependencies]
 async-trait = "0.1"
