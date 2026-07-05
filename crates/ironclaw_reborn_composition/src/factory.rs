@@ -611,6 +611,24 @@ impl RebornServices {
         Some(Arc::clone(&local_runtime.project_service))
     }
 
+    /// W6-COLD-SPOTS: the SAME `Arc` production wires as `outbound_preferences`.
+    /// `None` without a local-dev runtime.
+    #[cfg(feature = "test-support")]
+    pub fn local_dev_outbound_preferences_for_test(
+        &self,
+    ) -> Option<Arc<dyn CommunicationPreferenceRepository>> {
+        let local_runtime = self.local_runtime.as_ref()?;
+        Some(Arc::clone(&local_runtime.outbound_preferences))
+    }
+
+    /// W6-COLD-SPOTS: on-disk local-dev root, for reopen tests (see
+    /// `open_local_dev_outbound_preferences_store_for_test`).
+    #[cfg(feature = "test-support")]
+    pub fn local_dev_storage_root_for_test(&self) -> Option<PathBuf> {
+        let local_runtime = self.local_runtime.as_ref()?;
+        Some(local_runtime.local_dev_storage_root.clone())
+    }
+
     /// Test-support access to the attachment read port + inbound lander backing
     /// the C-ATTACH seam. The read port is built over `local_runtime.workspace_filesystem`,
     /// exactly like production's `attachment_read_port` (`runtime.rs` ~line 3328) —
@@ -2754,6 +2772,22 @@ pub(crate) async fn open_local_dev_approval_request_store_for_test(
     mount_default_local_dev_database_roots(storage_root, &mut composite).await?;
     let scoped = crate::wrap_scoped(Arc::new(composite));
     Ok(Arc::new(FilesystemApprovalRequestStore::new(scoped)))
+}
+
+/// W6-COLD-SPOTS: fresh `CommunicationPreferenceRepository` reopen, mirrors
+/// [`open_local_dev_approval_request_store_for_test`]. Tests only.
+#[cfg(all(feature = "test-support", feature = "libsql"))]
+// A reopen over the same on-disk root, not a second live store (clippy.toml's
+// disallowed-methods guardrail targets the latter — see its reason string).
+#[allow(clippy::disallowed_methods)]
+pub(crate) async fn open_local_dev_outbound_preferences_store_for_test(
+    storage_root: &Path,
+) -> Result<Arc<dyn CommunicationPreferenceRepository>, RebornBuildError> {
+    let mut composite = CompositeRootFilesystem::new();
+    mount_default_local_dev_database_roots(storage_root, &mut composite).await?;
+    let scoped = crate::wrap_scoped(Arc::new(composite));
+    Ok(Arc::new(FilesystemOutboundStateStore::new(scoped))
+        as Arc<dyn CommunicationPreferenceRepository>)
 }
 
 /// Test-only (C-DURABLE seam): open a FRESH, independent
