@@ -22,4 +22,3 @@ tempfile = "3"
 thiserror = "2"
 toml = "1.1"
 toml_edit = "0.25"
-ironclaw_workspace_hack = { version = "0.1", path = "../ironclaw_workspace_hack" }

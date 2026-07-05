@@ -182,7 +182,6 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
-ironclaw_workspace_hack = { version = "0.1", path = "../ironclaw_workspace_hack" }
 
 [dev-dependencies]
 async-trait = "0.1"

@@ -93,7 +93,6 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
-ironclaw_workspace_hack = { version = "0.1", path = "../ironclaw_workspace_hack" }
 
 [dev-dependencies]
 # Enable the composition crate's `test-support` seam for CLI unit tests so

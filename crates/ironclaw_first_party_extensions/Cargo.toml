@@ -33,7 +33,6 @@ tokio = { version = "1", features = ["rt", "sync"] }
 tracing = "0.1"
 unicode-normalization = "0.1"
 url = "2"
-ironclaw_workspace_hack = { version = "0.1", path = "../ironclaw_workspace_hack" }
 
 [dev-dependencies]
 tempfile = "3"

@@ -50,7 +50,6 @@ urlencoding = "2"
 # `cfg(test)` gate activated the `use uuid::Uuid;` import without
 # pulling in the optional crate.
 uuid = { version = "1", features = ["v4"] }
-ironclaw_workspace_hack = { version = "0.1", path = "../ironclaw_workspace_hack" }
 
 [dev-dependencies]
 axum = { version = "0.8", features = ["macros"] }

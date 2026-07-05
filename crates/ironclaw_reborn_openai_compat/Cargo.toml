@@ -44,7 +44,6 @@ async-stream = { version = "0.3", optional = true }
 axum = { version = "0.8", optional = true }
 futures-core = { version = "0.3", optional = true }
 tokio = { version = "1", features = ["sync", "time"] }
-ironclaw_workspace_hack = { version = "0.1", path = "../ironclaw_workspace_hack" }
 
 [dev-dependencies]
 # Force `storage` on for this crate's own test builds so the folded-in

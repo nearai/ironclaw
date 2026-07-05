@@ -12,7 +12,6 @@ ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_resources = { path = "../ironclaw_resources" }
 serde_json = "1"
 thiserror = "2"
-ironclaw_workspace_hack = { version = "0.1", path = "../ironclaw_workspace_hack" }
 
 [dev-dependencies]
 tempfile = "3"

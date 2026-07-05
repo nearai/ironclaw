@@ -13,4 +13,3 @@ publish = false
 [dependencies]
 serde_json = "1"
 tracing = "0.1"
-ironclaw_workspace_hack = { version = "0.1", path = "../ironclaw_workspace_hack" }

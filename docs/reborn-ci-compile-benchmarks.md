@@ -67,8 +67,8 @@ improving measured wall clock.
 | H11 | Move libSQL-heavy coverage out of broad long-pole crate buckets into the existing Reborn group job. | Reduce compile graph size for `host-runtime` and `reborn-core` without dropping persistence coverage or adding a new job. | Tested | Rejected: wall clock regressed from `8m35s` to `9m50s`; `host-runtime`, `reborn-core`, and `composition-core` were all slower. |
 | H12 | Move `ironclaw_reborn_cli` from `reborn-core` to `webui-ingress`. | Keep job count flat while grouping the WebUI-shaped CLI build with the WebUI ingress bucket instead of the core Reborn bucket. | Tested | Rejected: `reborn-core` improved from `367s` to `238s`, but `webui-ingress` grew from `334s` to `377s`; wall clock stayed flat at `8m37s` with no job-count reduction. |
 | H13 | Remove the separate uninstrumented `reborn-group-tests` job and rely on the existing instrumented coverage `groups` lane for those same suites. | Reduce total Reborn jobs by one without dropping group-suite pass/fail coverage. | Retained | Accepted: total Reborn jobs dropped from `28` to `27`, and wall clock improved from `8m35s` to `8m21s`. |
-| H14 | Seed fresh shared Rust caches from deterministic broad producers: `reborn-core` for crate buckets and `groups` for coverage lanes. | Improve warm-start quality for compile-heavy jobs without adding jobs or changing coverage. | Retained with caveat | Accepted as a targeted cache-policy cleanup: the controlled measurement improved from H13 `8m21s` to `7m49s`, but later final-state validation runs regressed to `12m07s`, `12m44s`, and `12m22s`, so this is not a stable wall-clock fix. |
-| H15 | Add a `cargo-hakari` workspace-hack crate to unify dependency feature sets across buckets. | Improve cross-bucket cache reuse by making shared dependency artifacts compatible across package feature combinations. | Benchmark in progress | Local graph validation passes after adding the generated workspace-hack crate, but this is broad dependency/lockfile churn and still needs PR CI timing before a keep/revert decision. |
+| H14 | Seed fresh shared Rust caches from deterministic broad producers: `reborn-core` for crate buckets and `groups` for coverage lanes. | Improve warm-start quality for compile-heavy jobs without adding jobs or changing coverage. | Retained with caveat | Accepted as a targeted cache-policy cleanup: the controlled measurement improved from H13 `8m21s` to `7m49s`, but later final-state validation runs regressed to `12m07s` and `12m44s`, so this is not a stable wall-clock fix. |
+| H15 | Add a `cargo-hakari` workspace-hack crate to unify dependency feature sets across buckets. | Improve cross-bucket cache reuse by making shared dependency artifacts compatible across package feature combinations. | Feasibility review | Not a small config-only benchmark: no existing hakari metadata or workspace-hack crate; `cargo hakari` is not installed locally; this should be a separate dependency/lockfile-changing benchmark. |
 | H16 | Build a nightly dependency-warmed CI container image in GHCR and run heavy Reborn jobs inside it. | Escape GitHub cache LRU limits by pre-baking a broad warm target/dependency layer. | Feasibility review | Not safe to add as an inline benchmark: no existing Reborn dependency image path; requires package write permissions, GHCR retention policy, container hardening, and a separate seed/build workflow before PR timing is meaningful. |
 | H17 | Skip Reborn buckets by changed-file reverse dependency scope. | Improve average PR time by running only affected buckets while merge queue still runs everything. | Feasibility review | Not a compile-time benchmark for the current full-PR target: current scope detection is all-or-nothing for Reborn, and safe bucket-level skipping needs crate ownership plus reverse-dependency mapping before it can be trusted. |
 | H18 | Increase Reborn root-test partitions from 4 to 6. | Shave the new post-H14 root-test long pole without changing test coverage. | Tested | Rejected: wall clock regressed from H14 `7m49s` to `10m41s`; the slowest root partition worsened from `450s` to `595s`. |
@@ -833,10 +833,6 @@ Final-state validation caveat:
   [`28732426390`](https://github.com/nearai/ironclaw/actions/runs/28732426390),
   also passed with the same retained workflow shape and `27` Reborn jobs, but
   took `12m44s` (`2026-07-05T06:47:48Z` to `2026-07-05T07:00:32Z`).
-- A third validation run,
-  [`28732787177`](https://github.com/nearai/ironclaw/actions/runs/28732787177),
-  also passed with the same retained workflow shape and `27` Reborn jobs, but
-  took `12m22s` (`2026-07-05T07:05:13Z` to `2026-07-05T07:17:35Z`).
 - These validation runs still had `27` total Reborn jobs, but their long poles
   were much slower than the H14 measurement. The first validation run's slowest
   jobs were:
@@ -852,13 +848,6 @@ Final-state validation caveat:
   - `composition-core`: `580s`.
   - coverage `2`: `568s`.
   - `host-runtime`: `545s`.
-- The third validation run's slowest jobs were:
-  - `adapters-misc`: `676s`.
-  - `Reborn root tests (1)`: `627s`.
-  - `Reborn root tests (3)`: `602s`.
-  - `Reborn root tests (2)`: `593s`.
-  - `host-runtime`: `587s`.
-  - `composition-core`: `564s`.
 - Log evidence points to cache quality/latency variance, not test failures:
   - root partition `3` restored `reborn-tests-root` from GitHub cache and got
     `No cache found`, then relied on OVH Redis sccache.
@@ -883,36 +872,18 @@ Red-team notes:
 
 - There is no existing `hakari`, `workspace-hack`, or `workspace_hack` setup in
   the repo.
+- `cargo hakari` is not installed in the local toolchain used for this branch.
 - The root manifest does use `[workspace.dependencies]`, but adding hakari would
   still require a new workspace member, manifest edits across crates, and
   `Cargo.lock` churn.
 - This is a qualitatively higher-risk benchmark than H14 because it changes the
   Rust dependency graph rather than only cache key/save policy.
-- The generated workspace-hack changes the lockfile and dependency graph, so
-  the first PR run after this change may be penalized by changed cache keys.
-  A single cold or partially cold run should not be over-interpreted.
 
 Benchmark status:
 
-- Implemented on the benchmark branch using `cargo-hakari 0.9.38`.
-- Added `.config/hakari.toml` with the CI platform
-  `x86_64-unknown-linux-gnu`.
-- Generated the new `crates/ironclaw_workspace_hack` workspace member.
-- Ran `cargo hakari manage-deps --yes`, adding the generated workspace-hack
-  dependency to workspace packages so their dependency feature sets are unified.
-- Local validation passed:
-  - `cargo hakari verify`
-  - `cargo metadata --no-deps --format-version 1` with `72` packages
-  - `git diff --check`
-- Diff size before CI timing: `72` tracked files changed, `287` insertions,
-  `1` deletion, plus the new hakari config and generated workspace-hack crate.
-
-Benchmark decision threshold:
-
-- Keep only if PR CI shows a repeatable, material wall-clock win large enough
-  to justify broad manifest and lockfile churn.
-- Revert if the result is neutral, noisy, or slower. Unlike H14, this is not a
-  small cache-policy cleanup.
+- Not started in this branch state. Treat as a separate H15 benchmark PR or a
+  follow-up commit only after deciding that dependency/lockfile churn is
+  acceptable for the CI optimization experiment.
 
 ## H16: Nightly Dependency-Warmed GHCR Image
 

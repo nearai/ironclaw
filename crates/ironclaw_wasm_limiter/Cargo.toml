@@ -15,4 +15,3 @@ publish = false
 [dependencies]
 tracing = "0.1"
 wasmtime = { workspace = true }
-ironclaw_workspace_hack = { version = "0.1", path = "../ironclaw_workspace_hack" }

@@ -68,7 +68,6 @@ tracing = "0.1"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 zip = { version = "8", default-features = false, features = ["deflate"] }
-ironclaw_workspace_hack = { version = "0.1", path = "../ironclaw_workspace_hack" }
 
 [dev-dependencies]
 axum = { version = "0.8", features = ["json"] }

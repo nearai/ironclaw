@@ -20,7 +20,6 @@ ironclaw_skills = { path = "../ironclaw_skills" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 thiserror = "2"
 tracing = "0.1"
-ironclaw_workspace_hack = { version = "0.1", path = "../ironclaw_workspace_hack" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

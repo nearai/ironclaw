@@ -15,7 +15,6 @@ publish = false
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
-ironclaw_workspace_hack = { version = "0.1", path = "../ironclaw_workspace_hack" }
 
 [dev-dependencies]
 serde_json = "1"
