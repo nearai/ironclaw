@@ -1,6 +1,4 @@
 // arch-exempt: large_file, needs Reborn composition helper extraction, plan #4469
-#[cfg(test)]
-use std::cell::RefCell;
 use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
@@ -94,15 +92,11 @@ use ironclaw_product_workflow::{
     ProjectService,
 };
 use ironclaw_projects::ProjectRepository;
-#[cfg(feature = "postgres")]
-use ironclaw_resources::PostgresResourceGovernor;
+use ironclaw_resources::InMemoryResourceGovernor;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_resources::{
     BroadcastBudgetEventSink, BudgetGateStore, FilesystemBudgetGateStore,
-    FilesystemResourceGovernorStore, ResourceGovernor,
-};
-use ironclaw_resources::{
-    InMemoryResourceGovernor, PersistentResourceGovernor, ResourceGovernorStore,
+    FilesystemResourceGovernor, ResourceGovernor,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_run_state::{FilesystemApprovalRequestStore, FilesystemRunStateStore};
@@ -259,20 +253,9 @@ pub(crate) type LocalDevTurnStateStore = FilesystemTurnStateStore<LocalDevRootFi
 pub(crate) type LocalDevTurnStateStore = InMemoryTurnStateStore;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-type LocalDevResourceGovernor =
-    PersistentResourceGovernor<FilesystemResourceGovernorStore<LocalDevRootFilesystem>>;
+type LocalDevResourceGovernor = FilesystemResourceGovernor<LocalDevRootFilesystem>;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 type LocalDevResourceGovernor = InMemoryResourceGovernor;
-
-#[cfg(test)]
-thread_local! {
-    static RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV_OVERRIDE: RefCell<Option<String>> =
-        const { RefCell::new(None) };
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres", test))]
-const RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV: &str =
-    "IRONCLAW_RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH";
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 type LocalDevRunStateStore = FilesystemRunStateStore<LocalDevRootFilesystem>;
@@ -1917,20 +1900,6 @@ fn local_dev_extension_installation_state_path(
     })
 }
 
-#[cfg_attr(not(any(feature = "libsql", feature = "postgres")), allow(dead_code))]
-fn apply_resource_governor_unlimited_fast_path<S>(
-    governor: PersistentResourceGovernor<S>,
-) -> Result<PersistentResourceGovernor<S>, String>
-where
-    S: ResourceGovernorStore,
-{
-    if resource_governor_unlimited_fast_path_enabled_from_env()? {
-        Ok(governor.with_unlimited_fast_path())
-    } else {
-        Ok(governor)
-    }
-}
-
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 trait ProductionResourceGovernorBudgetSink: ResourceGovernor + Sized {
     fn with_production_budget_event_sink(
@@ -1940,9 +1909,9 @@ trait ProductionResourceGovernorBudgetSink: ResourceGovernor + Sized {
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-impl<S> ProductionResourceGovernorBudgetSink for PersistentResourceGovernor<S>
+impl<F> ProductionResourceGovernorBudgetSink for FilesystemResourceGovernor<F>
 where
-    S: ResourceGovernorStore,
+    F: RootFilesystem + 'static,
 {
     fn with_production_budget_event_sink(
         self,
@@ -1951,21 +1920,6 @@ where
         self.with_event_sink(sink)
     }
 }
-
-#[cfg(feature = "postgres")]
-impl ProductionResourceGovernorBudgetSink for PostgresResourceGovernor {
-    fn with_production_budget_event_sink(
-        self,
-        sink: Arc<dyn ironclaw_resources::BudgetEventSink>,
-    ) -> Self {
-        self.with_event_sink(sink)
-    }
-}
-
-#[cfg(feature = "postgres")]
-static POSTGRES_RESOURCE_GOVERNOR_MIGRATED_TARGETS: std::sync::OnceLock<
-    tokio::sync::Mutex<std::collections::HashSet<String>>,
-> = std::sync::OnceLock::new();
 
 #[cfg(feature = "postgres")]
 static POSTGRES_ROOT_FILESYSTEM_MIGRATED_TARGETS: std::sync::OnceLock<
@@ -1992,25 +1946,6 @@ async fn ensure_postgres_root_filesystem_migrations(
 }
 
 #[cfg(feature = "postgres")]
-async fn ensure_postgres_resource_governor_migrations(
-    migration_key: String,
-    governor: PostgresResourceGovernor,
-) -> Result<(), String> {
-    let registry = POSTGRES_RESOURCE_GOVERNOR_MIGRATED_TARGETS
-        .get_or_init(|| tokio::sync::Mutex::new(std::collections::HashSet::new()));
-    let mut migrated_targets = registry.lock().await;
-    if migrated_targets.contains(&migration_key) {
-        return Ok(());
-    }
-    tokio::task::spawn_blocking(move || governor.run_migrations())
-        .await
-        .map_err(|error| format!("PostgreSQL resource governor migration task failed: {error}"))?
-        .map_err(|error| format!("PostgreSQL resource governor migrations failed: {error}"))?;
-    migrated_targets.insert(migration_key);
-    Ok(())
-}
-
-#[cfg(feature = "postgres")]
 fn postgres_migration_key_from_url(url: &ironclaw_secrets::SecretMaterial) -> String {
     use secrecy::ExposeSecret;
     use sha2::{Digest, Sha256};
@@ -2021,72 +1956,6 @@ fn postgres_migration_key_from_url(url: &ironclaw_secrets::SecretMaterial) -> St
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     format!("postgres-url-sha256:{digest_hex}")
-}
-
-#[cfg_attr(not(any(feature = "libsql", feature = "postgres")), allow(dead_code))]
-fn resource_governor_unlimited_fast_path_enabled_from_env() -> Result<bool, String> {
-    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-    {
-        return Ok(false);
-    }
-
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
-    match resource_governor_unlimited_fast_path_env_value() {
-        Ok(Some(value)) => parse_bool_env_value(&value).ok_or_else(|| {
-            format!(
-                "{RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV} must be one of true, false, 1, 0, yes, no, on, or off"
-            )
-        }),
-        Ok(None) => Ok(false),
-        Err(reason) => Err(reason),
-    }
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-fn resource_governor_unlimited_fast_path_env_value() -> Result<Option<String>, String> {
-    #[cfg(test)]
-    if let Some(value) =
-        RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV_OVERRIDE.with(|value| value.borrow().clone())
-    {
-        return Ok(Some(value));
-    }
-
-    match std::env::var(RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV) {
-        Ok(value) => Ok(Some(value)),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(std::env::VarError::NotUnicode(_)) => Err(format!(
-            "{RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV} must be valid UTF-8"
-        )),
-    }
-}
-
-#[cfg(test)]
-fn set_resource_governor_unlimited_fast_path_env_override_for_test(
-    value: impl Into<String>,
-) -> Result<ResourceGovernorFastPathEnvOverrideGuard, String> {
-    RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV_OVERRIDE
-        .with(|override_value| *override_value.borrow_mut() = Some(value.into()));
-    Ok(ResourceGovernorFastPathEnvOverrideGuard)
-}
-
-#[cfg(test)]
-struct ResourceGovernorFastPathEnvOverrideGuard;
-
-#[cfg(test)]
-impl Drop for ResourceGovernorFastPathEnvOverrideGuard {
-    fn drop(&mut self) {
-        RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV_OVERRIDE
-            .with(|override_value| *override_value.borrow_mut() = None);
-    }
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-fn parse_bool_env_value(value: &str) -> Option<bool> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "" | "0" | "false" | "no" | "off" => Some(false),
-        "1" | "true" | "yes" | "on" => Some(true),
-        _ => None,
-    }
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -2180,11 +2049,7 @@ async fn build_local_dev_store_graph(
     let budget_gate_store: Arc<dyn BudgetGateStore> = Arc::new(FilesystemBudgetGateStore::new(
         Arc::clone(&scoped_filesystem),
     ));
-    let resource_governor =
-        apply_resource_governor_unlimited_fast_path(PersistentResourceGovernor::new(
-            FilesystemResourceGovernorStore::new(Arc::clone(&scoped_filesystem)),
-        ))
-        .map_err(|reason| RebornBuildError::InvalidConfig { reason })?
+    let resource_governor = FilesystemResourceGovernor::new(Arc::clone(&scoped_filesystem))
         .with_event_sink(Arc::clone(&budget_event_sink));
     let resource_governor: Arc<LocalDevResourceGovernor> = Arc::new(resource_governor);
     let skill_mounts =
@@ -3988,10 +3853,7 @@ where
     let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&config.database)));
     filesystem.run_migrations().await?;
     let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
-    let resource_governor = apply_resource_governor_unlimited_fast_path(
-        PersistentResourceGovernor::new(FilesystemResourceGovernorStore::new(scoped_filesystem)),
-    )
-    .map_err(|reason| crate::RebornCompositionError::InvalidConfig { reason })?;
+    let resource_governor = FilesystemResourceGovernor::new(scoped_filesystem);
     build_filesystem_production_host_runtime_services(
         FilesystemProductionHostRuntimeServicesInput {
             filesystem,
@@ -4038,10 +3900,8 @@ where
     )
     .await
     .map_err(|reason| crate::RebornCompositionError::InvalidConfig { reason })?;
-    let resource_governor = PostgresResourceGovernor::new(pool.clone());
-    ensure_postgres_resource_governor_migrations(postgres_migration_key, resource_governor.clone())
-        .await
-        .map_err(|reason| crate::RebornCompositionError::InvalidConfig { reason })?;
+    let resource_governor =
+        FilesystemResourceGovernor::new(crate::wrap_scoped(Arc::clone(&filesystem)));
     let event_store = ironclaw_reborn_event_store::build_reborn_event_stores_from_root_filesystem(
         Arc::clone(&filesystem),
     )?;
@@ -4615,10 +4475,7 @@ async fn build_libsql_production(
             reason: format!("libSQL trigger repository migrations failed: {error}"),
         })?;
     let resource_governor =
-        apply_resource_governor_unlimited_fast_path(PersistentResourceGovernor::new(
-            FilesystemResourceGovernorStore::new(crate::wrap_scoped(Arc::clone(&filesystem))),
-        ))
-        .map_err(|reason| RebornBuildError::InvalidConfig { reason })?;
+        FilesystemResourceGovernor::new(crate::wrap_scoped(Arc::clone(&filesystem)));
     let stores = ProductionStoreBundle::new(
         filesystem,
         resource_governor,
@@ -4681,10 +4538,8 @@ async fn build_postgres_production(
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("PostgreSQL trigger repository migrations failed: {error}"),
         })?;
-    let resource_governor = PostgresResourceGovernor::new(pool.clone());
-    ensure_postgres_resource_governor_migrations(postgres_migration_key, resource_governor.clone())
-        .await
-        .map_err(|reason| RebornBuildError::InvalidConfig { reason })?;
+    let resource_governor =
+        FilesystemResourceGovernor::new(crate::wrap_scoped(Arc::clone(&filesystem)));
     let stores = ProductionStoreBundle::new(
         filesystem,
         resource_governor,
@@ -4784,48 +4639,7 @@ mod tests {
 
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     #[test]
-    fn resource_governor_fast_path_env_parser_accepts_documented_values() {
-        for value in ["true", "TRUE", "1", "yes", "on", "  true  "] {
-            assert_eq!(parse_bool_env_value(value), Some(true), "value={value}");
-        }
-        for value in ["", "false", "FALSE", "0", "no", "off", "  off  "] {
-            assert_eq!(parse_bool_env_value(value), Some(false), "value={value}");
-        }
-    }
-
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
-    #[test]
-    fn resource_governor_fast_path_env_parser_rejects_unknown_values() {
-        assert_eq!(parse_bool_env_value("maybe"), None);
-    }
-
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
-    #[test]
-    fn build_reborn_services_rejects_invalid_resource_governor_fast_path_env() {
-        let _override = set_resource_governor_unlimited_fast_path_env_override_for_test("maybe")
-            .expect("resource governor env override");
-        let dir = tempfile::tempdir().expect("tempdir");
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("tokio runtime");
-
-        let result = runtime.block_on(build_reborn_services(RebornBuildInput::local_dev(
-            "resource-governor-invalid-env-owner",
-            dir.path().join("local-dev"),
-        )));
-
-        let Err(RebornBuildError::InvalidConfig { reason }) = result else {
-            panic!("expected invalid config for resource governor fast-path env");
-        };
-        assert!(reason.contains(RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV));
-    }
-
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
-    #[test]
-    fn build_reborn_services_applies_resource_governor_fast_path_env() {
-        let _override = set_resource_governor_unlimited_fast_path_env_override_for_test("true")
-            .expect("resource governor env override");
+    fn build_reborn_services_uses_filesystem_resource_governor() {
         let dir = tempfile::tempdir().expect("tempdir");
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()

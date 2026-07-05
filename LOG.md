@@ -2119,3 +2119,68 @@ Budgets: 10 hours wall-clock / $0 spend
   per-run locks for targeted transitions next, with the global view retained
   only for `claim_next_run`/cross-run operations and journal ordering still
   centralized in the flusher.
+
+## Cycle 40 - RootFilesystem Journaled Resource Governor
+
+- Graph note: `codebase-memory-mcp` still fails with `Transport closed` for
+  `index_status`, `index_repository`, and `search_code`; this cycle falls back
+  to crate guardrails and targeted source reads.
+- Baseline: cycle 39 moved turn-state out of the top full-flow position.
+  `ironclaw_stress` mixed-user-session c100/pool-2 reported operation p95
+  467.7ms, turn-store p95 85.5ms, and resource-governor p95 271.0ms.
+- Direction change: abandon direct `postgres_governor.rs` SQL optimization.
+  Quotas are documented as process-global, so this cycle makes the in-process
+  governor authority the production path for both libSQL and Postgres,
+  persisting through the existing `RootFilesystem` abstraction instead of a
+  resource-governor-specific Postgres schema.
+- Result: added `FilesystemResourceGovernor`, rewired hosted/local/stress/
+  latency-runner construction to use it for both filesystem-backed backends,
+  and removed the direct Postgres resource governor module plus its optional
+  direct database dependencies. The `postgres` Cargo feature remains as a
+  compatibility feature but no longer exposes direct resource-governor SQL.
+- Runtime shape: hot reserve/reconcile/release updates per-account-sharded
+  in-memory tallies plus a reservation map, then enqueues one
+  `ResourceGovernorDelta`. A single delta-journal flusher batches queued
+  deltas into `ScopedFilesystem::append_batch` and acks callers only after the
+  append returns. Set-limit, reserve denial/warning, reconcile, release, period
+  rollover, and budget events still reuse the existing shared governor
+  semantics.
+- Recovery and compaction: startup reads the compacted
+  `FilesystemResourceGovernorStore` snapshot, rebuilds tallies from persisted
+  reservations, and replays `/resources/deltas/log` from `journal_seq`.
+  Compaction is best-effort background maintenance only: it rebuilds a new
+  compacted snapshot from the durable snapshot plus durable journal records,
+  then records the matching `journal_seq`. It deliberately does not snapshot
+  the hot in-memory authority because memory can include deltas that have not
+  yet received durable journal sequence numbers.
+- Correctness fix during validation: the first focused c100 reserve/reconcile
+  control stopped at 822/1000 after synchronous compaction entered the hot
+  path. Moving compaction to the durable background replay path fixed the hang
+  and kept reserve/reconcile durability gated only on the delta journal ack.
+- Full-flow gate: `ironclaw_stress` mixed-user-session with Postgres
+  filesystem-row turn state, pool size 2, c100, users 100, and zero synthetic
+  model/tool latency completed 200/200 with zero failures. Final operation p95
+  was 291.2ms, throughput 482.5 ops/sec, turn-store p95 124.7ms, and
+  resource-governor p95 31.1ms. The old c100 governor p95 was 271.0ms, so the
+  governor is no longer the top attributed group; thread-store writes are now
+  top at p95 125.7ms.
+- Resource-only control: Postgres reserve-reconcile c100/pool-2 completed
+  1000/1000 with zero failures after the compaction fix, operation p95 41.9ms,
+  and throughput 5584.5 ops/sec. A pre-fix run reached 822/1000 and stopped
+  making progress, which is now covered by the validation note above.
+- Validation: `cargo fmt -p ironclaw_resources -p ironclaw_stress -p
+  ironclaw_reborn_composition -p ironclaw_host_runtime`, `cargo check -p
+  ironclaw_resources --features postgres,libsql`, `cargo test -p
+  ironclaw_resources --features postgres,libsql --test
+  resource_governor_contract`, `cargo check -p ironclaw_host_runtime --features
+  postgres,libsql`, `cargo check -p ironclaw_stress --features
+  postgres,libsql`, `cargo check -p ironclaw_reborn_composition --features
+  postgres,libsql`, `cargo check --manifest-path
+  harness/latency/runner/Cargo.toml`, `cargo test -p ironclaw_resources
+  --features postgres,libsql
+  compaction_snapshot_cursor_does_not_double_apply_journal_on_restart`, the
+  c100 mixed-flow gate, and the c100 reserve-reconcile control passed.
+- Separate acceptance issue: the libSQL c4 `turn_lifecycle` baseline remains a
+  launch-parity concern from earlier cycles. This cycle removes the Postgres
+  resource-governor bottleneck; it does not repair the libSQL turn-state
+  baseline.

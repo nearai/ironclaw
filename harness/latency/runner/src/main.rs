@@ -31,8 +31,7 @@ use ironclaw_reborn_composition::{
 };
 use ironclaw_reborn_event_store::RebornEventStoreConfig;
 use ironclaw_resources::{
-    FilesystemResourceGovernorStore, PersistentResourceGovernor, PostgresResourceGovernor,
-    ResourceAccount, ResourceGovernor, ResourceLimits,
+    FilesystemResourceGovernor, ResourceAccount, ResourceGovernor, ResourceLimits,
 };
 use ironclaw_run_state::{ApprovalRequestStore, ApprovalStatus, FilesystemApprovalRequestStore};
 use ironclaw_secrets::{
@@ -343,13 +342,10 @@ async fn open_backend(
             fs.run_migrations().await?;
             let secret_store = PostgresSecretStore::new(pool.clone(), latency_secrets_crypto());
             secret_store.run_migrations().await?;
-            let resource_governor = PostgresResourceGovernor::new(pool.clone());
-            resource_governor.run_migrations()?;
             let trigger_repository = PostgresTriggerRepository::new(pool.clone());
             trigger_repository.run_migrations().await?;
             let mut control_plane = control_plane_stores(Arc::clone(&fs));
             control_plane.secret_store = Arc::new(secret_store);
-            control_plane.resource_governor = Arc::new(resource_governor);
             let turn_state =
                 filesystem_turn_state_store(Arc::clone(&fs), backend, postgres_pool_size)?;
             Ok(BackendContext {
@@ -411,8 +407,7 @@ where
         Arc::clone(&scoped),
         latency_secrets_crypto(),
     ));
-    let resource_store = FilesystemResourceGovernorStore::new(scoped);
-    let resource_governor = Arc::new(PersistentResourceGovernor::new(resource_store));
+    let resource_governor = Arc::new(FilesystemResourceGovernor::new(scoped));
     ControlPlaneStores {
         approval_requests,
         secret_store,

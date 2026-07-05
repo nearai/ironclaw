@@ -23,8 +23,8 @@ use rust_decimal::Decimal;
 ///
 /// The accountant gets:
 ///
-/// 1. The caller's `ResourceGovernor` (in-memory for local-dev,
-///    `PersistentResourceGovernor` for libsql / postgres production).
+/// 1. The caller's `ResourceGovernor` (in-memory for non-durable local-dev,
+///    `FilesystemResourceGovernor` for libsql / postgres production).
 /// 2. The caller's `ModelCostTable` (typically derived from
 ///    `LlmModelProfilePolicy::build_cost_table()` at startup).
 /// 3. A `BudgetGateStore` (in-memory for local-dev,

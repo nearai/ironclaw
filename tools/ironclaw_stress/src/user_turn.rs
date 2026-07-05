@@ -230,17 +230,12 @@ async fn build_postgres_user_turn_workload(
     args: &Args,
     run_id: &str,
 ) -> Result<UserTurnWorkload, String> {
-    use ironclaw_resources::PostgresResourceGovernor;
-
-    let (filesystem, pool, target) = crate::build_postgres_root_and_pool(args).await?;
-    let governor = PostgresResourceGovernor::new(pool);
-    governor
-        .run_migrations()
-        .map_err(|error| error.to_string())?;
+    let (filesystem, _pool, target) = crate::build_postgres_root_and_pool(args).await?;
+    let governor = crate::governor_from_root(Arc::clone(&filesystem), run_id)?;
     let model_latency = build_model_latency_driver(args).await?;
     Ok(UserTurnWorkload::Postgres(user_turn_services_from_root(
         filesystem,
-        Arc::new(governor),
+        governor,
         run_id,
         target,
         model_latency,

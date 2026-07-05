@@ -1012,7 +1012,7 @@ fn persistent_governor_writes_versioned_snapshot_schema() {
 
     let snapshot: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-    assert_eq!(snapshot["schema_version"], serde_json::json!(2));
+    assert_eq!(snapshot["schema_version"], serde_json::json!(3));
 }
 
 #[test]
@@ -1045,7 +1045,7 @@ fn persistent_governor_upgrades_legacy_unversioned_snapshot() {
 
     let snapshot: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-    assert_eq!(snapshot["schema_version"], serde_json::json!(2));
+    assert_eq!(snapshot["schema_version"], serde_json::json!(3));
 }
 
 #[test]
@@ -1393,6 +1393,78 @@ async fn filesystem_persistent_governor_reloads_active_holds_and_usage_from_stor
                 && denial.dimension == ResourceDimension::Usd
                 && denial.current_usage == ResourceValue::Decimal(dec!(0.95))
     ));
+}
+
+#[tokio::test]
+async fn filesystem_resource_governor_replays_journaled_holds_and_usage_after_restart() {
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/resources").expect("alias"),
+        VirtualPath::new("/tenants/tenant1/users/user1/resources").expect("target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&backend),
+        mounts,
+    ));
+
+    let scope = sample_scope("tenant1", "user1", Some("project1"));
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    let governor = FilesystemResourceGovernor::new(Arc::clone(&scoped));
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_usd: Some(dec!(1.00)),
+                max_concurrency_slots: Some(1),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+    let active = governor
+        .reserve(
+            scope.clone(),
+            ResourceEstimate {
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+
+    let reloaded = FilesystemResourceGovernor::new(Arc::clone(&scoped));
+    let concurrency_denial = reloaded
+        .reserve(
+            scope.clone(),
+            ResourceEstimate {
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(
+        concurrency_denial,
+        ResourceError::LimitExceeded { denial, .. }
+            if denial.account == account && denial.dimension == ResourceDimension::ConcurrencySlots
+    ));
+
+    reloaded
+        .reconcile(
+            active.id,
+            ResourceUsage {
+                usd: dec!(0.80),
+                ..ResourceUsage::default()
+            },
+        )
+        .unwrap();
+
+    let reloaded_again = FilesystemResourceGovernor::new(scoped);
+    let snapshot = reloaded_again.account_snapshot(&account).unwrap().unwrap();
+    assert_eq!(snapshot.ledger.spent.usd, dec!(0.80));
+    assert_eq!(snapshot.ledger.reserved.concurrency_slots, 0);
 }
 
 /// Regression: a byte-only `RootFilesystem` (one that rejects `put` when
@@ -2963,10 +3035,11 @@ fn schema_v1_snapshot_migrates_in_place_on_load() {
         )
         .unwrap();
 
-    // After the first successful mutation, the file is rewritten as v2.
+    // After the first successful mutation, the file is rewritten as the
+    // current snapshot schema.
     let snapshot: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-    assert_eq!(snapshot["schema_version"], serde_json::json!(2));
+    assert_eq!(snapshot["schema_version"], serde_json::json!(3));
 }
 
 #[test]

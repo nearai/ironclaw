@@ -57,9 +57,7 @@ use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     MountAlias, MountGrant, MountPermissions, MountView, TenantId, VirtualPath,
 };
-use ironclaw_resources::{
-    FilesystemResourceGovernorStore, PersistentResourceGovernor, ResourceAccount, ResourceGovernor,
-};
+use ironclaw_resources::{FilesystemResourceGovernor, ResourceAccount, ResourceGovernor};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Parser)]
@@ -1928,14 +1926,10 @@ async fn build_libsql_backend(_args: &Args, _run_id: &str) -> Result<BackendHand
 }
 
 #[cfg(feature = "postgres")]
-async fn build_postgres_backend(args: &Args, _run_id: &str) -> Result<BackendHandle, String> {
-    use ironclaw_resources::PostgresResourceGovernor;
-
-    let (_filesystem, pool, target) = build_postgres_root_and_pool(args).await?;
-    let governor = PostgresResourceGovernor::new(pool);
-    governor.run_migrations().map_err(display_err)?;
+async fn build_postgres_backend(args: &Args, run_id: &str) -> Result<BackendHandle, String> {
+    let (filesystem, _pool, target) = build_postgres_root_and_pool(args).await?;
     Ok(BackendHandle {
-        governor: Arc::new(governor),
+        governor: governor_from_root(filesystem, run_id)?,
         target,
     })
 }
@@ -1981,10 +1975,7 @@ where
 {
     let view = resource_mount_view(run_id)?;
     let scoped = Arc::new(ScopedFilesystem::with_fixed_view(root, view));
-    let store = FilesystemResourceGovernorStore::new(scoped);
-    Ok(Arc::new(
-        PersistentResourceGovernor::new(store).with_unlimited_fast_path(),
-    ))
+    Ok(Arc::new(FilesystemResourceGovernor::new(scoped)))
 }
 
 fn resource_mount_view(run_id: &str) -> Result<MountView, String> {
