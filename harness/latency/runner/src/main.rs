@@ -97,6 +97,7 @@ struct RunReport {
     warmup: usize,
     samples: usize,
     concurrency: Vec<usize>,
+    backends: Vec<BackendName>,
     postgres_pool_sizes: Vec<usize>,
     path_depths: Vec<usize>,
     payload_bytes: Vec<usize>,
@@ -142,6 +143,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let warmup = env_usize_allow_zero("LATENCY_WARMUP", 30);
     let samples = env_usize("LATENCY_SAMPLES", 300);
     let concurrency = env_list_usize("LATENCY_CONCURRENCY", &[1, 4, 16]);
+    let backends = env_backend_list(
+        "LATENCY_BACKENDS",
+        &[BackendName::Libsql, BackendName::Postgres],
+    );
     let postgres_pool_sizes = env_list_usize("LATENCY_POSTGRES_POOL_SIZES", &[1, 2]);
     let path_depths = env_list_usize("LATENCY_PATH_DEPTHS", &[2]);
     let payload_bytes = env_list_usize("LATENCY_PAYLOAD_BYTES", &[512]);
@@ -189,38 +194,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ]);
 
     let mut results = Vec::new();
-    let libsql_backend = open_backend(BackendName::Libsql, None).await?;
-    let libsql_run_id = uuid::Uuid::new_v4().simple().to_string();
-    for &workload in &workloads {
-        for &concurrency in &concurrency {
-            let row = run_workload(
-                libsql_backend.clone(),
-                BackendName::Libsql,
-                None,
-                &libsql_run_id,
-                workload,
-                concurrency,
-                warmup,
-                samples,
-                &path_depths,
-                &payload_bytes,
-            )
-            .await?;
-            results.push(row);
-        }
-    }
-
-    for &postgres_pool_size in &postgres_pool_sizes {
-        let postgres_backend =
-            open_backend(BackendName::Postgres, Some(postgres_pool_size)).await?;
-        let postgres_run_id = uuid::Uuid::new_v4().simple().to_string();
+    if backends.contains(&BackendName::Libsql) {
+        let libsql_backend = open_backend(BackendName::Libsql, None).await?;
+        let libsql_run_id = uuid::Uuid::new_v4().simple().to_string();
         for &workload in &workloads {
             for &concurrency in &concurrency {
                 let row = run_workload(
-                    postgres_backend.clone(),
-                    BackendName::Postgres,
-                    Some(postgres_pool_size),
-                    &postgres_run_id,
+                    libsql_backend.clone(),
+                    BackendName::Libsql,
+                    None,
+                    &libsql_run_id,
                     workload,
                     concurrency,
                     warmup,
@@ -234,6 +217,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    if backends.contains(&BackendName::Postgres) {
+        for &postgres_pool_size in &postgres_pool_sizes {
+            let postgres_backend =
+                open_backend(BackendName::Postgres, Some(postgres_pool_size)).await?;
+            let postgres_run_id = uuid::Uuid::new_v4().simple().to_string();
+            for &workload in &workloads {
+                for &concurrency in &concurrency {
+                    let row = run_workload(
+                        postgres_backend.clone(),
+                        BackendName::Postgres,
+                        Some(postgres_pool_size),
+                        &postgres_run_id,
+                        workload,
+                        concurrency,
+                        warmup,
+                        samples,
+                        &path_depths,
+                        &payload_bytes,
+                    )
+                    .await?;
+                    results.push(row);
+                }
+            }
+        }
+    }
+
     let comparisons = compare(&results);
     let report = RunReport {
         profile,
@@ -241,6 +250,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         warmup,
         samples,
         concurrency,
+        backends,
         postgres_pool_sizes,
         path_depths,
         payload_bytes,
@@ -1665,6 +1675,23 @@ fn env_list_usize(name: &str, default: &[usize]) -> Vec<usize> {
                 .split(',')
                 .filter_map(|part| part.trim().parse::<usize>().ok())
                 .filter(|value| *value > 0)
+                .collect::<Vec<_>>()
+        })
+        .filter(|values| !values.is_empty())
+        .unwrap_or_else(|| default.to_vec())
+}
+
+fn env_backend_list(name: &str, default: &[BackendName]) -> Vec<BackendName> {
+    env::var(name)
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .filter_map(|part| match part.trim() {
+                    "libsql" => Some(BackendName::Libsql),
+                    "postgres" => Some(BackendName::Postgres),
+                    _ => None,
+                })
                 .collect::<Vec<_>>()
         })
         .filter(|values| !values.is_empty())

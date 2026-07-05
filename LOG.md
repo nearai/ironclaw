@@ -1191,3 +1191,43 @@ Budgets: 10 hours wall-clock / $0 spend
   runner can reach Postgres treatment rows. A Postgres-only c100 number is
   therefore not available from the current locked runner without adding a
   diagnostic backend filter.
+
+## Cycle 24 - Diagnostic Backend Filter For c100 Treatment Rows
+
+- Graph note: `codebase-memory-mcp` remains unavailable (`Transport closed`),
+  so this cycle uses targeted harness reads.
+- Baseline: Cycle 23 found that the locked filesystem `turn_lifecycle` runner
+  can produce c32 rows, but c100 aborts before JSON because the libSQL blob
+  baseline fails before the runner reaches Postgres treatment. This blocks a
+  Postgres c100 filesystem-path treatment number from the locked runner even
+  though full-flow `ironclaw_stress` shows Postgres c100 can complete.
+- Hypothesis: Add a diagnostic-only `LATENCY_BACKENDS` filter to the latency
+  runner. The default must remain both backends so normal dev/holdout scoring
+  still compares libSQL and Postgres and cannot be used as acceptance when a
+  backend is skipped. The filter should make c100 Postgres filesystem-path
+  treatment rows observable without bypassing `ScopedFilesystem` or changing
+  workload semantics.
+- Expected failure mode: A backend filter could be misused as a fake pass by
+  omitting the failing baseline. The JSON report must expose the selected
+  backends and continue to mark `acceptance_ready=false`; docs must call this
+  diagnostic-only.
+- Diagnostic: Patch the runner, run a default both-backend smoke to confirm
+  existing behavior, then run `LATENCY_BACKENDS=postgres` at c100 for
+  `turn_lifecycle`.
+- Result: Added diagnostic-only `LATENCY_BACKENDS` support. Default output now
+  reports `backends=["libsql","postgres"]`; comparison rows still populate.
+  `harness/latency/lint.sh` passes by default, voids `LATENCY_BACKENDS=postgres`
+  without `LATENCY_ALLOW_DIAGNOSTIC_BACKENDS=1`, and passes when that
+  diagnostic opt-in is present. The README and `status.sh` document/report the
+  backend filter.
+- c100 treatment signal: With `LATENCY_BACKENDS=postgres`,
+  `LATENCY_WORKLOADS=turn_lifecycle`, `LATENCY_CONCURRENCY=100`,
+  `LATENCY_SAMPLES=100`, and `LATENCY_PAYLOAD_BYTES=512`, the locked runner now
+  reaches Postgres treatment rows through the filesystem row turn-state store.
+  Pool size 1 completes 100/100 with p50 31.20s, p95 31.34s, p99 31.35s,
+  throughput 3.19 ops/s. Pool size 2 completes 100/100 with p50 31.31s,
+  p95 31.45s, p99 31.47s, throughput 3.18 ops/s. This is much slower than the
+  full-flow `ironclaw_stress` c100 result because the locked runner drives 100
+  concurrent lifecycle samples through one mounted per-user turn-state store;
+  the next filesystem-aligned optimization target is row-store same-user
+  serialization under high concurrency.

@@ -49,4 +49,11 @@ Override the scored pool list only for diagnostics:
 LATENCY_POSTGRES_POOL_SIZES=1,2 harness/latency/score.sh --dev
 ```
 
+Run a single backend only for diagnostics, never acceptance. `score.sh` voids
+filtered-backend runs unless they are explicitly marked diagnostic:
+
+```bash
+LATENCY_BACKENDS=postgres LATENCY_ALLOW_DIAGNOSTIC_BACKENDS=1 harness/latency/score.sh --dev
+```
+
 Use `harness/latency/probe.sh` for a perturbed workload mix.
