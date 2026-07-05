@@ -59,10 +59,11 @@ if [ "${#selected_tests[@]}" -eq 0 ]; then
   exit 0
 fi
 
-cargo_args=(cargo nextest run --profile ci)
+cargo_args=(cargo test)
 for test_name in "${selected_tests[@]}"; do
   cargo_args+=(--test "${test_name}")
 done
+cargo_args+=(-- --nocapture)
 
 echo "Running Reborn root test partition ${partition_index_int} of ${partition_count_int}:"
 printf '  - %s\n' "${selected_tests[@]}"
