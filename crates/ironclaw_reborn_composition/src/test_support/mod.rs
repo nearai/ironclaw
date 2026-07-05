@@ -34,7 +34,11 @@
 //! 9. [`trace_capture`] — `trace_capture_turn_event_sink_for_test`, the
 //!    production `TraceCaptureTurnEventSink` factory for the integration-test
 //!    harness (C-TRACECAP seam).
+//! 10. [`automation`] — `local_dev_automation_product_facade_for_test`, the
+//!     production `RebornAutomationProductFacade` constructor for the
+//!     automations-cold-LIST scenario (W5-WEBUI-API-1 Enabler B.2).
 
+mod automation;
 mod budget_gateway;
 mod durable;
 mod local_dev_boot;
@@ -46,6 +50,8 @@ mod trace_capture;
 mod trigger_materializer;
 mod user_profile;
 
+#[cfg(feature = "test-support")]
+pub use automation::local_dev_automation_product_facade_for_test;
 pub use budget_gateway::{
     BudgetTestGateway, FailingTestGateway, ScriptedReply, assistant_reply_without_text_for_test,
 };

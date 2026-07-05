@@ -667,6 +667,53 @@ impl RebornServices {
         Some(policies)
     }
 
+    /// Test-support access to the SAME LIVE, shared, in-process trigger
+    /// repository this runtime's `trigger_create`/`trigger_list` capability
+    /// dispatch already uses (`RebornLocalRuntimeServices.trigger_repository`)
+    /// — not a fresh reopen. Do not confuse with
+    /// [`open_local_dev_trigger_repository_for_test`], which opens an
+    /// INDEPENDENT, freshly-reopened repository from an on-disk root for
+    /// persistence/reopen tests (`scenario_trigger_persists_after_reopen.rs`)
+    /// — opposite semantics, deliberately different, near-identical name; the
+    /// "shared" in this method's name is load-bearing. W5-WEBUI-API-1 Enabler
+    /// B.1: backs `RebornAutomationProductFacade`'s cold-LIST scenario, which
+    /// must see the SAME trigger a prior turn created through the capability
+    /// path, not an empty fresh repository. Returns `None` for
+    /// production-profile compositions without a local-dev runtime.
+    #[cfg(feature = "test-support")]
+    pub fn local_dev_shared_trigger_repository_for_test(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_triggers::TriggerRepository>> {
+        let local_runtime = self.local_runtime.as_ref()?;
+        Some(Arc::clone(&local_runtime.trigger_repository))
+    }
+
+    /// Test-support access to the WebUI-facing `InboundAttachmentReader` view
+    /// over this composition's local-dev workspace filesystem (W5-WEBUI-API-1
+    /// Enabler C). `AttachmentTestSupport.read_port` (above) is typed
+    /// `Arc<dyn LoopAttachmentReadPort>` — the model-injection trait; the
+    /// webui-facing `RebornServices::with_inbound_attachment_reader` needs the
+    /// DIFFERENT `Arc<dyn InboundAttachmentReader>` trait the SAME concrete
+    /// `ProjectScopedAttachmentReader` also implements in production
+    /// (`webui.rs`, `build_webui_services_with_connectable_channels`). Built
+    /// over `local_runtime.workspace_filesystem`, exactly like
+    /// `local_dev_attachment_test_support_for_test`'s read port above — reads
+    /// only need read access, so the read-only handle is sufficient even
+    /// though production's webui.rs wiring happens to use the read-write view.
+    /// Returns `None` for production-profile compositions without a
+    /// local-dev runtime.
+    #[cfg(feature = "test-support")]
+    pub fn local_dev_inbound_attachment_reader_for_test(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_product_workflow::InboundAttachmentReader>> {
+        let local_runtime = self.local_runtime.as_ref()?;
+        Some(
+            Arc::new(crate::support::fs::ProjectScopedAttachmentReader::new(
+                Arc::clone(&local_runtime.workspace_filesystem),
+            )) as Arc<dyn ironclaw_product_workflow::InboundAttachmentReader>,
+        )
+    }
+
     /// C-JOURNEY: publish a bundled first-party WASM extension package (e.g.
     /// github) directly into the local-dev active-extension registry + trust
     /// policy, bypassing the multi-turn `builtin.extension_install` →

@@ -229,5 +229,7 @@ fn core_builtin_tools_from_runtime(
         scope_capability_by_run_owner: false,
         product_auth: None,
         tool_permission_overrides: None,
+        persistent_approval_policies: None,
+        trigger_repository: None,
     })
 }

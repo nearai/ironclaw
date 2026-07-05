@@ -94,5 +94,7 @@ pub(crate) async fn mock_mcp_tools(
         scope_capability_by_run_owner: false,
         product_auth: None,
         tool_permission_overrides: None,
+        persistent_approval_policies: None,
+        trigger_repository: None,
     })
 }
