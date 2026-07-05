@@ -1,4 +1,6 @@
 use std::{collections::BTreeMap, error::Error, time::Duration};
+#[cfg(feature = "postgres")]
+use std::{collections::HashSet, sync::OnceLock};
 
 use async_trait::async_trait;
 use ironclaw_host_api::VirtualPath;
@@ -33,6 +35,11 @@ const POSTGRES_MIGRATION_CONNECT_DEFAULT_MAX_WAIT: Duration = Duration::from_sec
 const POSTGRES_MIGRATION_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
 #[cfg(feature = "postgres")]
 const POSTGRES_MIGRATION_CONNECT_MAX_BACKOFF: Duration = Duration::from_secs(10);
+#[cfg(feature = "postgres")]
+const POSTGRES_ROOT_FILESYSTEM_MIGRATION_ADVISORY_LOCK: i64 = 824_917_203;
+#[cfg(feature = "postgres")]
+static POSTGRES_ROOT_FILESYSTEM_MIGRATED_SCHEMAS: OnceLock<tokio::sync::Mutex<HashSet<String>>> =
+    OnceLock::new();
 
 #[cfg(feature = "postgres")]
 impl PostgresRootFilesystem {
@@ -41,11 +48,35 @@ impl PostgresRootFilesystem {
     }
 
     pub async fn run_migrations(&self) -> Result<(), FilesystemError> {
-        let client = self.migration_client_with_retry().await?;
-        client
+        let mut client = self.migration_client_with_retry().await?;
+        let migration_key = postgres_root_filesystem_migration_key(&client).await?;
+        let registry = POSTGRES_ROOT_FILESYSTEM_MIGRATED_SCHEMAS
+            .get_or_init(|| tokio::sync::Mutex::new(HashSet::new()));
+        let mut migrated_schemas = registry.lock().await;
+        if migrated_schemas.contains(&migration_key) {
+            return Ok(());
+        }
+        let transaction = client
+            .transaction()
+            .await
+            .map_err(|error| infrastructure_pg_error(FilesystemOperation::CreateDirAll, error))?;
+        transaction
+            .execute(
+                "SELECT pg_advisory_xact_lock($1)",
+                &[&POSTGRES_ROOT_FILESYSTEM_MIGRATION_ADVISORY_LOCK],
+            )
+            .await
+            .map_err(|error| infrastructure_pg_error(FilesystemOperation::CreateDirAll, error))?;
+        transaction
             .batch_execute(POSTGRES_ROOT_FILESYSTEM_SCHEMA)
             .await
-            .map_err(|error| infrastructure_pg_error(FilesystemOperation::CreateDirAll, error))
+            .map_err(|error| infrastructure_pg_error(FilesystemOperation::CreateDirAll, error))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| infrastructure_pg_error(FilesystemOperation::CreateDirAll, error))?;
+        migrated_schemas.insert(migration_key);
+        Ok(())
     }
 
     async fn migration_client_with_retry(
@@ -94,6 +125,28 @@ impl PostgresRootFilesystem {
             }
         })
     }
+}
+
+#[cfg(feature = "postgres")]
+async fn postgres_root_filesystem_migration_key(
+    client: &deadpool_postgres::Object,
+) -> Result<String, FilesystemError> {
+    let row = client
+        .query_one(
+            "SELECT \
+                current_database(), \
+                current_schema(), \
+                COALESCE(inet_server_addr()::text, 'local'), \
+                COALESCE(inet_server_port()::text, 'local')",
+            &[],
+        )
+        .await
+        .map_err(|error| infrastructure_pg_error(FilesystemOperation::Connect, error))?;
+    let database: String = row.get(0);
+    let schema: String = row.get(1);
+    let host: String = row.get(2);
+    let port: String = row.get(3);
+    Ok(format!("{host}:{port}/{database}/{schema}"))
 }
 
 #[cfg(feature = "postgres")]

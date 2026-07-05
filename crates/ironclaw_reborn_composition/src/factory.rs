@@ -3868,7 +3868,7 @@ where
     build_filesystem_production_host_runtime_services(
         FilesystemProductionHostRuntimeServicesInput {
             filesystem,
-            event_store: config.event_store,
+            event_store: FilesystemProductionEventStoresInput::Config(config.event_store),
             secret_master_key: config.secret_master_key,
             trust_policy: config.trust_policy,
             runtime_policy: config.runtime_policy,
@@ -3890,11 +3890,15 @@ where
     let filesystem = Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(
         config.pool,
     ));
+    ensure_postgres_event_store_config(&config.event_store)?;
     filesystem.run_migrations().await?;
+    let event_store = ironclaw_reborn_event_store::build_reborn_event_stores_from_root_filesystem(
+        Arc::clone(&filesystem),
+    )?;
     build_filesystem_production_host_runtime_services(
         FilesystemProductionHostRuntimeServicesInput {
             filesystem,
-            event_store: config.event_store,
+            event_store: FilesystemProductionEventStoresInput::Prebuilt(event_store),
             secret_master_key: config.secret_master_key,
             trust_policy: config.trust_policy,
             runtime_policy: config.runtime_policy,
@@ -3908,12 +3912,33 @@ where
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 struct FilesystemProductionHostRuntimeServicesInput<F, TPolicy, TWake> {
     filesystem: Arc<F>,
-    event_store: ironclaw_reborn_event_store::RebornEventStoreConfig,
+    event_store: FilesystemProductionEventStoresInput,
     secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
     trust_policy: Arc<TPolicy>,
     runtime_policy: crate::RebornProductionRuntimePolicy,
     turn_run_wake_notifier: Arc<TWake>,
     surface_version: CapabilitySurfaceVersion,
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+enum FilesystemProductionEventStoresInput {
+    #[cfg(feature = "libsql")]
+    Config(ironclaw_reborn_event_store::RebornEventStoreConfig),
+    Prebuilt(ironclaw_reborn_event_store::RebornEventStores),
+}
+
+#[cfg(feature = "postgres")]
+fn ensure_postgres_event_store_config(
+    config: &ironclaw_reborn_event_store::RebornEventStoreConfig,
+) -> Result<(), crate::RebornCompositionError> {
+    match config {
+        ironclaw_reborn_event_store::RebornEventStoreConfig::Postgres { .. } => Ok(()),
+        #[cfg(feature = "postgres")]
+        ironclaw_reborn_event_store::RebornEventStoreConfig::PostgresPool { .. } => Ok(()),
+        _ => Err(crate::RebornCompositionError::InvalidConfig {
+            reason: "PostgreSQL production substrate requires a PostgreSQL event store".to_string(),
+        }),
+    }
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -3980,12 +4005,21 @@ where
     .with_filesystem_turn_state_store(Arc::clone(&turn_state_filesystem))
     .with_run_profile_resolver(Arc::new(
         ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver()?,
-    ))
-    .with_reborn_event_store_config(
-        ironclaw_reborn_event_store::RebornProfile::Production,
-        event_store,
-    )
-    .await?;
+    ));
+    let services = match event_store {
+        #[cfg(feature = "libsql")]
+        FilesystemProductionEventStoresInput::Config(config) => {
+            services
+                .with_reborn_event_store_config(
+                    ironclaw_reborn_event_store::RebornProfile::Production,
+                    config,
+                )
+                .await?
+        }
+        FilesystemProductionEventStoresInput::Prebuilt(stores) => {
+            services.with_production_reborn_event_stores(stores)
+        }
+    };
     let services = apply_production_runtime_process_binding(services, process_binding);
 
     let services = services
