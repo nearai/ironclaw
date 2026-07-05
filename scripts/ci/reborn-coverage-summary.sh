@@ -21,10 +21,12 @@
 #     reborn-coverage-comment.sh never has to recompute it.
 #
 # Exemptions (tests/integration/coverage-exemptions.toml, schema documented
-# there): each [[exemption]] `module` path is dropped from the per-crate
-# covered/total accounting entirely (it neither helps nor hurts a crate's
-# percentage) and listed, with its reason + issue, in its own report section.
-# An exemptions file with zero entries is valid (nothing is exempted yet).
+# there): each [[exemption]] entry is either a per-file `module` path or a
+# whole-crate `crate` name (exactly one of the two, never both/neither).
+# Either form is dropped from the per-crate covered/total accounting entirely
+# (it neither helps nor hurts a crate's percentage) and listed, with its
+# reason + issue, in its own report section. An exemptions file with zero
+# entries is valid (nothing is exempted yet).
 
 set -euo pipefail
 
@@ -72,23 +74,40 @@ def round2(value: float) -> str:
 with open(exemptions_path, "rb") as fh:
     manifest = tomllib.load(fh)
 
+# Every entry is normalized to one shared shape right here, at parse time:
+# a single `label` field (the per-file path, or "crate: <name>" for the
+# whole-crate form) that every downstream consumer — the is_exempt match, the
+# sort key, and the render row — reads uniformly instead of each branching on
+# which of `module`/`crate` is present. One shape, one branch point; a future
+# call site can't reintroduce a `entry["module"]` KeyError on a crate-only
+# entry because there is no such site left to write.
 exemptions = manifest.get("exemption", [])
 exempt_modules: set[str] = set()
+exempt_crates: set[str] = set()
 for entry in exemptions:
     module = entry.get("module")
-    if not module:
-        print(f"malformed exemption entry (missing 'module'): {entry}", file=sys.stderr)
+    crate_name = entry.get("crate")
+    if module and crate_name:
+        print(f"malformed exemption entry (exactly one of 'module'/'crate' required, both present): {entry}", file=sys.stderr)
         sys.exit(1)
+    if not module and not crate_name:
+        print(f"malformed exemption entry (exactly one of 'module'/'crate' required, neither present): {entry}", file=sys.stderr)
+        sys.exit(1)
+    label = module if module else f"crate: {crate_name}"
+    entry["label"] = label
     if not entry.get("reason"):
-        print(f"exemption for '{module}' is missing 'reason'", file=sys.stderr)
+        print(f"exemption for '{label}' is missing 'reason'", file=sys.stderr)
         sys.exit(1)
     if not entry.get("issue"):
-        print(f"exemption for '{module}' is missing 'issue'", file=sys.stderr)
+        print(f"exemption for '{label}' is missing 'issue'", file=sys.stderr)
         sys.exit(1)
-    if not module.startswith("crates/"):
-        print(f"exemption module path '{module}' must be repo-relative and start with 'crates/'", file=sys.stderr)
-        sys.exit(1)
-    exempt_modules.add(module)
+    if module:
+        if not module.startswith("crates/"):
+            print(f"exemption module path '{module}' must be repo-relative and start with 'crates/'", file=sys.stderr)
+            sys.exit(1)
+        exempt_modules.add(module)
+    else:
+        exempt_crates.add(crate_name)
 
 # ---------------------------------------------------------------------------
 # Parse the lcov tracefile: per-file (covered, total) from LH:/LF:, per crate.
@@ -117,9 +136,14 @@ with open(lcov_path, "r", encoding="utf-8") as fh:
             if current_file is not None and current_covered is not None and current_count is not None:
                 # Exempted files are skipped entirely: they never enter the
                 # per-crate or aggregate accounting (neither help nor hurt).
+                # Two independent match kinds share one is_exempt outcome:
+                # per-file (module path suffix/exact match) or whole-crate
+                # (the file's crate name is in the exempt-crates set).
                 is_exempt = any(current_file.endswith("/" + m) or current_file == m for m in exempt_modules)
+                match = crate_re.search(current_file)
+                if not is_exempt and match and exempt_crates:
+                    is_exempt = match.group(1) in exempt_crates
                 if not is_exempt:
-                    match = crate_re.search(current_file)
                     if match:
                         crate = match.group(1)
                         bucket = by_crate.setdefault(crate, {"covered": 0, "count": 0})
@@ -173,13 +197,13 @@ if total > 0:
     )
 
 lines.append("")
-lines.append(f"<details><summary>Exemptions ({len(exemptions)} file(s) excluded from the accounting above)</summary>")
+lines.append(f"<details><summary>Exemptions ({len(exemptions)} entry/entries excluded from the accounting above)</summary>")
 lines.append("")
 if exemptions:
-    lines.append("| Module | Reason | Issue |")
+    lines.append("| Module / Crate | Reason | Issue |")
     lines.append("|---|---|---|")
-    for entry in sorted(exemptions, key=lambda e: e["module"]):
-        lines.append(f"| `{entry['module']}` | {entry['reason']} | {entry['issue']} |")
+    for entry in sorted(exemptions, key=lambda e: e["label"]):
+        lines.append(f"| `{entry['label']}` | {entry['reason']} | {entry['issue']} |")
 else:
     lines.append("_No exemptions configured._")
 lines.append("")
