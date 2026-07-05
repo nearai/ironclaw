@@ -1508,21 +1508,40 @@ fn apply_delta_collection<T, K>(
     key_fn: K,
 ) -> Result<(), TurnError>
 where
-    T: Clone,
     K: Fn(&T) -> Result<String, TurnError>,
 {
-    let mut map = records
-        .iter()
-        .map(|record| Ok((key_fn(record)?, record.clone())))
-        .collect::<Result<HashMap<_, _>, TurnError>>()?;
-    for key in delete {
-        map.remove(&key);
+    if !delete.is_empty() {
+        let deleted = delete.into_iter().collect::<HashSet<_>>();
+        let mut retained = Vec::with_capacity(records.len());
+        for record in records.drain(..) {
+            if !deleted.contains(&key_fn(&record)?) {
+                retained.push(record);
+            }
+        }
+        *records = retained;
     }
+
     for record in upsert {
-        map.insert(key_fn(&record)?, record);
+        let key = key_fn(&record)?;
+        if let Some(index) = record_index(records, &key, &key_fn)? {
+            records[index] = record;
+        } else {
+            records.push(record);
+        }
     }
-    *records = map.into_values().collect();
     Ok(())
+}
+
+fn record_index<T, K>(records: &[T], key: &str, key_fn: &K) -> Result<Option<usize>, TurnError>
+where
+    K: Fn(&T) -> Result<String, TurnError>,
+{
+    for (index, record) in records.iter().enumerate() {
+        if key_fn(record)? == key {
+            return Ok(Some(index));
+        }
+    }
+    Ok(None)
 }
 
 fn keyed_records<T, K>(records: &[T], key_fn: &K) -> Result<HashMap<String, T>, RowPersistError>

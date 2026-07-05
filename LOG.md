@@ -1679,3 +1679,50 @@ Budgets: 10 hours wall-clock / $0 spend
   test -p ironclaw_turns --test loop_checkpoint_store_contract`, full `cargo
   test -p ironclaw_turns --test filesystem_turn_state_contract`, final `cargo
   check -p ironclaw_turns`, and `git diff --check` passed.
+
+## Cycle 32 - In-Place Row Delta Application
+
+- Graph note: `codebase-memory-mcp` still fails with `Transport closed` for
+  `index_status`, `index_repository`, and `search_code`; the local graph
+  artifact remains stale and empty, so this cycle uses targeted source reads.
+- Baseline: current-commit `harness/latency/score.sh --dev` passed with 54
+  results, 36 comparisons, and zero failures. Dev `turn_lifecycle` state hash
+  stayed `7fc054292d2f85f0`; Postgres pool-1 c4 p95 was 578ms and pool-2 c4
+  p95 was 581ms.
+- Probe: current-commit `harness/latency/probe.sh` passed with 81 results, 54
+  comparisons, and zero failures. Perturbed Postgres `turn_lifecycle` c8
+  completed with zero errors and matching state hash `3fa07e3dc3c7e320`;
+  pool-1 p95 was 3.02s and pool-2 p95 was 2.99s. libSQL c8 still hit CAS
+  retry exhaustion and a mismatched hash.
+- Hypothesis: `apply_delta` still applies every tiny targeted lifecycle delta
+  by rebuilding a `HashMap` from the whole affected snapshot vector, cloning
+  every retained record, applying one or two upserts/deletes, then collecting a
+  replacement vector. This happens for runs, events, active locks,
+  idempotency, reservations, and checkpoints while the row-store writer mutex
+  is held. Replacing that with in-place retain/replace/push mutation should
+  remove another blob-store-shaped allocation/copy step without changing the
+  durable delta log or row schema.
+- Expected failure mode: In-place updates must preserve current upsert-wins
+  semantics when a key appears in both delete and upsert, must not retain
+  deleted records, and must not introduce duplicate keyed records. Reopen,
+  event projection, state hashes, and row-store contract tests must remain
+  stable.
+- Result: `apply_delta_collection` now mutates cached row vectors in place:
+  deletes drain only matching keys, and upserts replace an existing keyed
+  record or append a new one. This keeps durable delta-log semantics unchanged
+  while avoiding full-vector record cloning during every targeted cache update.
+- Dev score: treatment `harness/latency/score.sh --dev` passed with 54
+  results, 36 comparisons, and zero failures. The scored `turn_lifecycle`
+  state hash stayed `7fc054292d2f85f0`; Postgres pool-2 c4 p95 improved from
+  the 581ms cycle baseline to 517ms.
+- High-concurrency turn-state diagnostic: Postgres-only `turn_lifecycle` with
+  c32/c100, payload 2048, 64 samples, and pool size 2 completed with zero
+  errors and state hash `660086a8484d5400`. c32 p95 improved from 3.27s to
+  2.75s; c100 p95 improved from 12.43s to 10.56s.
+- Validation: `cargo fmt -p ironclaw_turns --check`, `cargo check -p
+  ironclaw_turns`, `cargo test -p ironclaw_turns --test
+  filesystem_turn_state_contract
+  filesystem_turn_state_row_store_persists_rows_without_state_blob`, `cargo
+  test -p ironclaw_turns --test loop_checkpoint_store_contract`, full `cargo
+  test -p ironclaw_turns --test filesystem_turn_state_contract`, final `cargo
+  check -p ironclaw_turns`, and `git diff --check` passed.
