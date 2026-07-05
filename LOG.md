@@ -1435,3 +1435,86 @@ Budgets: 10 hours wall-clock / $0 spend
   resource governor as the top operation group (p95 277.8ms), followed by
   thread-store writes (p95 99.3ms); turn state is no longer the top full-flow
   bottleneck.
+
+## Cycle 28 - Resource Governor Shared-Row Contention
+
+- Graph note: `codebase-memory-mcp` still fails with `Transport closed` for
+  both status and indexing; the local graph artifact remains stale and empty,
+  so this cycle uses crate guardrails plus targeted source reads.
+- Baseline: `harness/latency/score.sh --dev` passed with 54 results, 36
+  comparisons, and zero failures. Dev `turn_lifecycle` remains fast on
+  Postgres row store: libSQL c4 p95 7.96s, Postgres pool-1 c4 p95 630ms, and
+  Postgres pool-2 c4 p95 625ms.
+- Probe: `harness/latency/probe.sh` again fails only on `turn_lifecycle` c8
+  state-hash comparisons because libSQL hits five `turn state filesystem CAS
+  retries exhausted` errors and produces a different state hash. Postgres
+  pool-1/pool-2 complete c8 with zero errors, matching state hash
+  `3fa07e3dc3c7e320`, and p95 around 3.42-3.46s.
+- High-concurrency turn-state diagnostic: Postgres-only `turn_lifecycle` with
+  c32/c100, payload 2048, 64 samples, and pool size 2 completed with zero
+  errors and state hash `660086a8484d5400`. c32 p95 is 3.78s and c100 p95 is
+  14.72s, stable against cycle 27.
+- Full-flow baseline: `ironclaw_stress` mixed user-session with Postgres row
+  turn state and pool size 2 completed with zero errors. c32 completed 128/128
+  with operation p95 188.5ms, turn-store p95 38.6ms, and resource-governor
+  p95 79.8ms. c100 completed 200/200 with operation p95 458.2ms, turn-store
+  p95 62.8ms, and resource-governor p95 286.4ms. The top stages are
+  `resource_reserve` and `resource_reconcile` at roughly 143-149ms each.
+- Resource-only baseline: `ironclaw_stress --scenario reserve-reconcile` at
+  c100/pool-2 completed 400/400 with operation p95 198.0ms and reported
+  Postgres waiting connections. This isolates the governor as a real
+  production-shaped bottleneck, not a side effect of turn/thread stores.
+- Hypothesis: `PostgresResourceGovernor` always ensures, locks, and rewrites
+  every account row in the resource-scope cascade. With one hosted tenant,
+  every reservation/reconcile serializes on the same tenant account row even
+  when there are no finite limits installed. We need a row-store shape that
+  keeps durable reservation lifecycle and finite-limit enforcement, but avoids
+  hot shared aggregate-row writes for unlimited accounts. A safe first step is
+  to move no-finite-limit reservations onto append/row lifecycle writes while
+  leaving finite-limit accounts on the existing locked aggregate path.
+- Expected failure mode: Skipping aggregate writes blindly would break
+  `usage_for`, `reserved_for`, `account_snapshot`, and future finite-limit
+  installation after no-limit activity. The patch must either reconstruct
+  unlimited account snapshots from durable reservation rows or merge prior
+  reservation rows when a finite limit is installed. It must not return success
+  before a durable reservation lifecycle write is committed.
+- Result: `PostgresResourceGovernor` now keeps the finite-limit path on the
+  existing locked account aggregates, but moves unlimited accounts to durable
+  reservation lifecycle rows instead of rewriting hot shared account rows for
+  every reserve/reconcile/release. The reservation table now stores indexed
+  `account_keys` so `account_snapshot` and later finite-limit installation can
+  rebuild reserved/spent tallies from reservation rows without scanning every
+  reservation. `set_limit` takes an exclusive account advisory lock and
+  lifecycle operations take shared account advisory locks so a finite limit
+  cannot be installed concurrently with an unlimited-path reservation update.
+- Abstraction boundary: This cycle does not bypass the turn-state filesystem
+  abstraction. The optimization is in the native hosted-single-tenant
+  Postgres resource governor path, which was already separate from the
+  filesystem-backed resource governor. It still waits for the durable
+  reservation row write to commit before returning success; it only skips
+  aggregate account-row writes when no finite limit exists.
+- Correctness fix during review: reservation creation now uses an atomic
+  insert-and-conflict check instead of the lifecycle update upsert, so
+  concurrent callers cannot both succeed with the same reservation id on the
+  shared-lock unlimited path. This post-measurement fix was covered by
+  compile/tests; I did not rerun full c32/c100 stress after it because the
+  workspace had less than 800MiB free and the hot-path shape is unchanged.
+- Resource-only treatment: `ironclaw_stress --scenario reserve-reconcile` at
+  c100/pool-2 completed 400/400 with operation p95 158.9ms and throughput
+  859.5 ops/sec, down from the c100 baseline p95 198.0ms and throughput
+  496.8 ops/sec.
+- Full-flow stress signal: `ironclaw_stress` mixed user-session with Postgres
+  row turn state and pool size 2 completed with zero errors after the indexed
+  reservation-key patch. c32 completed 128/128 with operation p95 154.4ms,
+  turn-store p95 40.6ms, and resource-governor p95 52.2ms. c100 completed
+  200/200 with operation p95 388.1ms, turn-store p95 71.8ms, and
+  resource-governor p95 213.3ms. The top c100 resource stages dropped to
+  `resource_reserve` p95 106.5ms and `resource_reconcile` p95 114.1ms.
+- Dev score and validation: The first treatment exposed slow
+  `control_plane_snapshot` rows because unlimited snapshots scanned all
+  reservations; the indexed `account_keys` query fixed that. Final
+  `harness/latency/score.sh --dev` passed with 54 results, 36 comparisons,
+  and zero failures. `cargo fmt -p ironclaw_resources --check`,
+  `cargo check -p ironclaw_resources --features postgres`,
+  `cargo test -p ironclaw_resources`, `cargo test -p ironclaw_resources
+  --features postgres`, and `git diff --check` passed.

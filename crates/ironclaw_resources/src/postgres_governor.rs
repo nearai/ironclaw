@@ -85,12 +85,18 @@ impl PostgresResourceGovernor {
                         reservation_id TEXT PRIMARY KEY,
                         record JSONB NOT NULL,
                         status TEXT NOT NULL,
+                        account_keys TEXT[] NOT NULL DEFAULT '{}',
                         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     );
 
+                    ALTER TABLE ironclaw_resource_reservations
+                        ADD COLUMN IF NOT EXISTS account_keys TEXT[] NOT NULL DEFAULT '{}';
+
                     CREATE INDEX IF NOT EXISTS ironclaw_resource_reservations_status_idx
                         ON ironclaw_resource_reservations (status);
+                    CREATE INDEX IF NOT EXISTS ironclaw_resource_reservations_account_keys_idx
+                        ON ironclaw_resource_reservations USING GIN (account_keys);
                     "#,
                     )
                     .await
@@ -132,10 +138,18 @@ impl ResourceGovernor for PostgresResourceGovernor {
                 .transaction()
                 .await
                 .map_err(|error| storage_error(format!("begin set limit: {error}")))?;
+            lock_account_key_exclusive(&tx, &account).await?;
+            let existing_row = read_account_row_tx(&tx, &account).await?;
+            let rebuild_from_reservations = existing_row
+                .as_ref()
+                .is_none_or(|row| !account_row_has_finite_limits(row));
             ensure_account_rows(&tx, std::slice::from_ref(&account)).await?;
             let rows = lock_account_rows(&tx, std::slice::from_ref(&account)).await?;
             let mut state = state_from_rows(rows, HashMap::new());
             set_limit_in_state(&mut state, account.clone(), limits, now);
+            if rebuild_from_reservations {
+                rebuild_account_tallies_from_reservations(&tx, &account, &mut state).await?;
+            }
             write_accounts_for_state(&tx, &[account], &state).await?;
             tx.commit()
                 .await
@@ -173,6 +187,31 @@ impl ResourceGovernor for PostgresResourceGovernor {
                 .transaction()
                 .await
                 .map_err(|error| storage_error(format!("begin reserve: {error}")))?;
+            lock_account_keys_shared(&tx, &accounts).await?;
+            let existing_rows = read_account_rows_tx(&tx, &accounts).await?;
+            if !account_rows_have_finite_limits(&existing_rows) {
+                if reservation_exists(&tx, reservation_id).await? {
+                    return Err(ResourceError::ReservationAlreadyExists { id: reservation_id });
+                }
+                let mut state = state_from_rows(existing_rows, HashMap::new());
+                let outcome = reserve_with_outcome_in_state(
+                    &mut state,
+                    scope,
+                    estimate,
+                    reservation_id,
+                    now,
+                )?;
+                let record = state
+                    .reservations
+                    .get(&reservation_id)
+                    .cloned()
+                    .ok_or_else(|| storage_error("reserve did not produce reservation record"))?;
+                insert_reservation(&tx, reservation_id, &record).await?;
+                tx.commit()
+                    .await
+                    .map_err(|error| storage_error(format!("commit reserve: {error}")))?;
+                return Ok(outcome);
+            }
             ensure_account_rows(&tx, &accounts).await?;
             let rows = lock_account_rows(&tx, &accounts).await?;
             if reservation_exists(&tx, reservation_id).await? {
@@ -187,7 +226,7 @@ impl ResourceGovernor for PostgresResourceGovernor {
                 .get(&reservation_id)
                 .cloned()
                 .ok_or_else(|| storage_error("reserve did not produce reservation record"))?;
-            write_reservation(&tx, reservation_id, &record).await?;
+            insert_reservation(&tx, reservation_id, &record).await?;
             tx.commit()
                 .await
                 .map_err(|error| storage_error(format!("commit reserve: {error}")))?;
@@ -211,6 +250,24 @@ impl ResourceGovernor for PostgresResourceGovernor {
                 .map_err(|error| storage_error(format!("begin reconcile: {error}")))?;
             let record = lock_reservation(&tx, reservation_id).await?;
             let accounts = record.accounts.clone();
+            lock_account_keys_shared(&tx, &accounts).await?;
+            let existing_rows = read_account_rows_tx(&tx, &accounts).await?;
+            if !account_rows_have_finite_limits(&existing_rows) {
+                let mut reservations = HashMap::new();
+                reservations.insert(reservation_id, record);
+                let mut state = state_from_rows(existing_rows, reservations);
+                let receipt = reconcile_in_state(&mut state, reservation_id, actual, now)?;
+                let record = state
+                    .reservations
+                    .get(&reservation_id)
+                    .cloned()
+                    .ok_or_else(|| storage_error("reconcile removed reservation record"))?;
+                write_reservation(&tx, reservation_id, &record).await?;
+                tx.commit()
+                    .await
+                    .map_err(|error| storage_error(format!("commit reconcile: {error}")))?;
+                return Ok(receipt);
+            }
             ensure_account_rows(&tx, &accounts).await?;
             let rows = lock_account_rows(&tx, &accounts).await?;
             let mut reservations = HashMap::new();
@@ -252,6 +309,24 @@ impl ResourceGovernor for PostgresResourceGovernor {
                 .map_err(|error| storage_error(format!("begin release: {error}")))?;
             let record = lock_reservation(&tx, reservation_id).await?;
             let accounts = record.accounts.clone();
+            lock_account_keys_shared(&tx, &accounts).await?;
+            let existing_rows = read_account_rows_tx(&tx, &accounts).await?;
+            if !account_rows_have_finite_limits(&existing_rows) {
+                let mut reservations = HashMap::new();
+                reservations.insert(reservation_id, record);
+                let mut state = state_from_rows(existing_rows, reservations);
+                let receipt = release_in_state(&mut state, reservation_id, now)?;
+                let record = state
+                    .reservations
+                    .get(&reservation_id)
+                    .cloned()
+                    .ok_or_else(|| storage_error("release removed reservation record"))?;
+                write_reservation(&tx, reservation_id, &record).await?;
+                tx.commit()
+                    .await
+                    .map_err(|error| storage_error(format!("commit release: {error}")))?;
+                return Ok(receipt);
+            }
             ensure_account_rows(&tx, &accounts).await?;
             let rows = lock_account_rows(&tx, &accounts).await?;
             let mut reservations = HashMap::new();
@@ -289,14 +364,77 @@ impl ResourceGovernor for PostgresResourceGovernor {
         self.run(move |pool| async move {
             let client = connect(&pool).await?;
             let row = read_account_row(&client, &account).await?;
+            let reservation_tallies = if row
+                .as_ref()
+                .is_none_or(|row| !account_row_has_finite_limits(row))
+            {
+                Some(account_tallies_from_reservations_client(&client, &account).await?)
+            } else {
+                None
+            };
             let mut rows = HashMap::new();
-            if let Some(row) = row {
-                rows.insert(account_key(&account), row);
+            match (row, reservation_tallies) {
+                (Some(mut row), Some(tallies)) => {
+                    row.reserved = tallies.reserved;
+                    row.spent = tallies.spent;
+                    rows.insert(account_key(&account), row);
+                }
+                (None, Some(tallies))
+                    if tallies.reserved != ResourceTally::default()
+                        || tallies.spent != ResourceTally::default() =>
+                {
+                    rows.insert(
+                        account_key(&account),
+                        AccountRow {
+                            account: account.clone(),
+                            limits: None,
+                            reserved: tallies.reserved,
+                            spent: tallies.spent,
+                            period_end: None,
+                        },
+                    );
+                }
+                (Some(row), None) => {
+                    rows.insert(account_key(&account), row);
+                }
+                (None, _) => {}
             }
             let mut state = state_from_rows(rows, HashMap::new());
             Ok(account_snapshot_in_state(&mut state, &account, now))
         })
     }
+}
+
+async fn lock_account_keys_shared(
+    tx: &tokio_postgres::Transaction<'_>,
+    accounts: &[ResourceAccount],
+) -> Result<(), ResourceError> {
+    let mut keys = accounts.iter().map(account_key).collect::<Vec<_>>();
+    keys.sort();
+    keys.dedup();
+    for key in keys {
+        tx.query_one(
+            "SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))",
+            &[&key],
+        )
+        .await
+        .map_err(|error| storage_error(format!("lock shared account key: {error}")))?;
+    }
+    Ok(())
+}
+
+async fn lock_account_key_exclusive(
+    tx: &tokio_postgres::Transaction<'_>,
+    account: &ResourceAccount,
+) -> Result<(), ResourceError> {
+    let key = account_key(account);
+    tx.query_one(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        &[&key],
+    )
+    .await
+    .map_err(|error| storage_error(format!("lock exclusive account key: {error}")))?;
+    Ok(())
 }
 
 async fn connect(pool: &Pool) -> Result<deadpool_postgres::Object, ResourceError> {
@@ -327,6 +465,38 @@ async fn ensure_account_rows(
         .map_err(|error| storage_error(format!("ensure account row: {error}")))?;
     }
     Ok(())
+}
+
+async fn read_account_rows_tx(
+    tx: &tokio_postgres::Transaction<'_>,
+    accounts: &[ResourceAccount],
+) -> Result<HashMap<String, AccountRow>, ResourceError> {
+    let mut rows = HashMap::new();
+    for account in accounts {
+        if let Some(row) = read_account_row_tx(tx, account).await? {
+            rows.insert(account_key(account), row);
+        }
+    }
+    Ok(rows)
+}
+
+async fn read_account_row_tx(
+    tx: &tokio_postgres::Transaction<'_>,
+    account: &ResourceAccount,
+) -> Result<Option<AccountRow>, ResourceError> {
+    let key = account_key(account);
+    let row = tx
+        .query_opt(
+            &format!(
+                "SELECT account, limits, reserved, spent, period_end
+                 FROM {ACCOUNT_TABLE}
+                 WHERE account_key = $1"
+            ),
+            &[&key],
+        )
+        .await
+        .map_err(|error| storage_error(format!("read account row: {error}")))?;
+    row.map(decode_account_row).transpose()
 }
 
 async fn lock_account_rows(
@@ -370,6 +540,16 @@ async fn read_account_row(
         .await
         .map_err(|error| storage_error(format!("read account row: {error}")))?;
     row.map(decode_account_row).transpose()
+}
+
+fn account_rows_have_finite_limits(rows: &HashMap<String, AccountRow>) -> bool {
+    rows.values().any(account_row_has_finite_limits)
+}
+
+fn account_row_has_finite_limits(row: &AccountRow) -> bool {
+    row.limits
+        .as_ref()
+        .is_some_and(|limits| !limits.is_unlimited())
 }
 
 fn decode_account_row(row: tokio_postgres::Row) -> Result<AccountRow, ResourceError> {
@@ -431,6 +611,89 @@ fn state_from_rows(
         }
     }
     state
+}
+
+#[derive(Default)]
+struct AccountTallies {
+    reserved: ResourceTally,
+    spent: ResourceTally,
+}
+
+async fn rebuild_account_tallies_from_reservations(
+    tx: &tokio_postgres::Transaction<'_>,
+    account: &ResourceAccount,
+    state: &mut ResourceState,
+) -> Result<(), ResourceError> {
+    let tallies = account_tallies_from_reservations_tx(tx, account).await?;
+    if tallies.reserved == ResourceTally::default() {
+        state.reserved_by_account.remove(account);
+    } else {
+        state
+            .reserved_by_account
+            .insert(account.clone(), tallies.reserved);
+    }
+    if tallies.spent == ResourceTally::default() {
+        state.usage_by_account.remove(account);
+    } else {
+        state
+            .usage_by_account
+            .insert(account.clone(), tallies.spent);
+    }
+    Ok(())
+}
+
+async fn account_tallies_from_reservations_tx(
+    tx: &tokio_postgres::Transaction<'_>,
+    account: &ResourceAccount,
+) -> Result<AccountTallies, ResourceError> {
+    let key = account_key(account);
+    let rows = tx
+        .query(
+            &format!("SELECT record FROM {RESERVATION_TABLE} WHERE account_keys @> ARRAY[$1]"),
+            &[&key],
+        )
+        .await
+        .map_err(|error| storage_error(format!("read reservation rows: {error}")))?;
+    account_tallies_from_reservation_rows(rows, account)
+}
+
+async fn account_tallies_from_reservations_client(
+    client: &deadpool_postgres::Object,
+    account: &ResourceAccount,
+) -> Result<AccountTallies, ResourceError> {
+    let key = account_key(account);
+    let rows = client
+        .query(
+            &format!("SELECT record FROM {RESERVATION_TABLE} WHERE account_keys @> ARRAY[$1]"),
+            &[&key],
+        )
+        .await
+        .map_err(|error| storage_error(format!("read reservation rows: {error}")))?;
+    account_tallies_from_reservation_rows(rows, account)
+}
+
+fn account_tallies_from_reservation_rows(
+    rows: Vec<tokio_postgres::Row>,
+    account: &ResourceAccount,
+) -> Result<AccountTallies, ResourceError> {
+    let mut tallies = AccountTallies::default();
+    for row in rows {
+        let record: Value = row.get("record");
+        let record: ReservationRecord = serde_json::from_value(record).map_err(storage_error)?;
+        if !record.accounts.iter().any(|candidate| candidate == account) {
+            continue;
+        }
+        match record.status {
+            ReservationStatus::Active => tallies.reserved.add_assign(&record.tally),
+            ReservationStatus::Reconciled => {
+                if let Some(actual) = &record.actual {
+                    tallies.spent.add_assign(&ResourceTally::from_usage(actual));
+                }
+            }
+            ReservationStatus::Released => {}
+        }
+    }
+    Ok(tallies)
 }
 
 async fn write_accounts_for_state(
@@ -533,24 +796,57 @@ async fn write_reservation(
     record: &ReservationRecord,
 ) -> Result<(), ResourceError> {
     let record_json = serde_json::to_value(record).map_err(storage_error)?;
+    let account_keys = record.accounts.iter().map(account_key).collect::<Vec<_>>();
     tx.execute(
         &format!(
             "INSERT INTO {RESERVATION_TABLE}
-                (reservation_id, record, status)
-             VALUES ($1, $2, $3)
+                (reservation_id, record, status, account_keys)
+             VALUES ($1, $2, $3, $4)
              ON CONFLICT (reservation_id) DO UPDATE SET
                 record = EXCLUDED.record,
                 status = EXCLUDED.status,
+                account_keys = EXCLUDED.account_keys,
                 updated_at = NOW()"
         ),
         &[
             &reservation_id.to_string(),
             &record_json,
             &reservation_status_text(record.status),
+            &account_keys,
         ],
     )
     .await
     .map_err(|error| storage_error(format!("write reservation row: {error}")))?;
+    Ok(())
+}
+
+async fn insert_reservation(
+    tx: &tokio_postgres::Transaction<'_>,
+    reservation_id: ResourceReservationId,
+    record: &ReservationRecord,
+) -> Result<(), ResourceError> {
+    let record_json = serde_json::to_value(record).map_err(storage_error)?;
+    let account_keys = record.accounts.iter().map(account_key).collect::<Vec<_>>();
+    let inserted = tx
+        .execute(
+            &format!(
+                "INSERT INTO {RESERVATION_TABLE}
+                    (reservation_id, record, status, account_keys)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (reservation_id) DO NOTHING"
+            ),
+            &[
+                &reservation_id.to_string(),
+                &record_json,
+                &reservation_status_text(record.status),
+                &account_keys,
+            ],
+        )
+        .await
+        .map_err(|error| storage_error(format!("insert reservation row: {error}")))?;
+    if inserted == 0 {
+        return Err(ResourceError::ReservationAlreadyExists { id: reservation_id });
+    }
     Ok(())
 }
 
