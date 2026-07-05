@@ -12,7 +12,7 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::{ResourceScope, ScopedPath, UserId};
 use serde::{Serialize, de::DeserializeOwned};
-use tokio::sync::{Mutex as AsyncMutex, RwLock};
+use tokio::sync::{Mutex as AsyncMutex, RwLock, mpsc, oneshot};
 use tracing::{Instrument, field};
 
 use crate::{
@@ -54,6 +54,7 @@ const EVENT_ROWS: &str = "events";
 const ADMISSION_RESERVATION_ROWS: &str = "admission-reservations";
 const SPAWN_TREE_RESERVATION_ROWS: &str = "spawn-tree-reservations";
 const DELTA_LOG: &str = "deltas/log";
+const DELTA_JOURNAL_MAX_BATCH: usize = 256;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 struct RowStoreMeta {
     event_retention_floor: EventCursor,
@@ -120,6 +121,112 @@ impl SnapshotDelta {
     }
 }
 
+type DeltaAck = oneshot::Receiver<Result<(), TurnError>>;
+
+struct DeltaJournal {
+    sender: mpsc::UnboundedSender<DeltaJournalRequest>,
+}
+
+struct DeltaJournalRequest {
+    delta: SnapshotDelta,
+    ack: oneshot::Sender<Result<(), TurnError>>,
+}
+
+impl DeltaJournal {
+    fn new<F>(filesystem: Arc<ScopedFilesystem<F>>) -> Self
+    where
+        F: RootFilesystem + 'static,
+    {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        tokio::spawn(run_delta_journal_flusher(filesystem, receiver));
+        Self { sender }
+    }
+
+    fn enqueue(&self, delta: SnapshotDelta) -> Result<Option<DeltaAck>, TurnError> {
+        if delta.is_empty() {
+            return Ok(None);
+        }
+        let (ack, receiver) = oneshot::channel();
+        self.sender
+            .send(DeltaJournalRequest { delta, ack })
+            .map_err(|_| delta_journal_stopped())?;
+        Ok(Some(receiver))
+    }
+
+    async fn await_ack(ack: Option<DeltaAck>) -> Result<(), TurnError> {
+        let Some(ack) = ack else {
+            return Ok(());
+        };
+        ack.await.map_err(|_| delta_journal_stopped())?
+    }
+}
+
+async fn run_delta_journal_flusher<F>(
+    filesystem: Arc<ScopedFilesystem<F>>,
+    mut receiver: mpsc::UnboundedReceiver<DeltaJournalRequest>,
+) where
+    F: RootFilesystem,
+{
+    while let Some(first) = receiver.recv().await {
+        let mut requests = Vec::with_capacity(DELTA_JOURNAL_MAX_BATCH);
+        requests.push(first);
+        tokio::task::yield_now().await;
+        while requests.len() < DELTA_JOURNAL_MAX_BATCH {
+            match receiver.try_recv() {
+                Ok(request) => requests.push(request),
+                Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
+                    break;
+                }
+            }
+        }
+        let result = persist_delta_journal_batch(filesystem.as_ref(), &requests).await;
+        for request in requests {
+            let _ = request.ack.send(result.clone());
+        }
+    }
+}
+
+async fn persist_delta_journal_batch<F>(
+    filesystem: &ScopedFilesystem<F>,
+    requests: &[DeltaJournalRequest],
+) -> Result<(), TurnError>
+where
+    F: RootFilesystem,
+{
+    let path = delta_log_path()?;
+    let mut payloads = Vec::with_capacity(requests.len());
+    for request in requests {
+        payloads.push(serde_json::to_vec(&request.delta).map_err(|error| {
+            TurnError::Unavailable {
+                reason: format!("turn-state delta serialization failed: {error}"),
+            }
+        })?);
+    }
+    if let [payload] = payloads.as_slice() {
+        filesystem
+            .append(&ResourceScope::system(), &path, payload.clone())
+            .await
+            .map_err(fs_error)?;
+        return Ok(());
+    }
+    let seqs = filesystem
+        .append_batch(&ResourceScope::system(), &path, payloads)
+        .await
+        .map_err(fs_error)?;
+    if seqs.len() != requests.len() {
+        return Err(TurnError::Unavailable {
+            reason: "turn-state delta batch append returned an unexpected ack count".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn delta_journal_stopped() -> TurnError {
+    TurnError::Unavailable {
+        reason: "turn-state delta journal stopped".to_string(),
+    }
+}
+
 /// Filesystem-backed turn-state store using typed append-log deltas.
 ///
 /// This is intentionally separate from [`super::FilesystemTurnStateStore`].
@@ -137,6 +244,7 @@ where
     admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
     snapshot_state: AsyncMutex<Option<RowSnapshotState>>,
     runner_leases: RunnerLeaseMemory,
+    delta_journal: DeltaJournal,
     apply_timeout: Duration,
 }
 
@@ -144,13 +252,17 @@ impl<F> FilesystemTurnStateRowStore<F>
 where
     F: RootFilesystem,
 {
-    pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
+    pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self
+    where
+        F: 'static,
+    {
         Self {
-            filesystem,
+            filesystem: Arc::clone(&filesystem),
             limits: InMemoryTurnStateStoreLimits::default(),
             admission_limit_provider: Arc::new(AllowAllTurnAdmissionLimitProvider),
             snapshot_state: AsyncMutex::new(None),
             runner_leases: Arc::new(RwLock::new(HashMap::new())),
+            delta_journal: DeltaJournal::new(filesystem),
             apply_timeout: FILESYSTEM_APPLY_TIMEOUT,
         }
     }
@@ -450,7 +562,7 @@ where
         Fut: std::future::Future<Output = Result<T, TurnError>> + Send,
         T: Send,
     {
-        let operation = async {
+        let critical = async {
             let mut guard = self.snapshot_state.lock().await;
             if guard.is_none() {
                 *guard = Some(self.load_snapshot_from_rows().await?);
@@ -482,65 +594,63 @@ where
                 }
             };
             if new_snapshot == baseline {
-                return Ok(value);
+                return Ok((None, value));
             }
 
-            match self.persist_snapshot_diff(&baseline, &new_snapshot).await {
-                Ok(()) => {
-                    let latest_event_cursor = latest_event_cursor(&new_snapshot);
-                    *guard = Some(RowSnapshotState {
-                        snapshot: new_snapshot,
-                        store,
-                        latest_event_cursor,
-                    });
-                    Ok(value)
-                }
+            let delta = match snapshot_delta(&baseline, &new_snapshot) {
+                Ok(delta) => delta,
                 Err(RowPersistError::Turn(error)) => {
                     *guard = None;
-                    Err(error)
+                    return Err(error);
                 }
-            }
+            };
+            let ack = match self.enqueue_delta(delta) {
+                Ok(ack) => ack,
+                Err(RowPersistError::Turn(error)) => {
+                    *guard = None;
+                    return Err(error);
+                }
+            };
+            let latest_event_cursor = latest_event_cursor(&new_snapshot);
+            *guard = Some(RowSnapshotState {
+                snapshot: new_snapshot,
+                store,
+                latest_event_cursor,
+            });
+            Ok((ack, value))
         };
 
-        match tokio::time::timeout(self.apply_timeout, operation).await {
-            Ok(result) => result,
+        let (ack, value) = match tokio::time::timeout(self.apply_timeout, critical).await {
+            Ok(result) => result?,
             Err(_) => {
                 self.clear_snapshot_cache().await;
-                Err(TurnError::Unavailable {
+                return Err(TurnError::Unavailable {
                     reason: "turn state row-store apply timed out".to_string(),
-                })
+                });
             }
+        };
+        if let Err(error) = self.await_delta_ack(ack).await {
+            self.clear_snapshot_cache().await;
+            return Err(error.into_turn());
         }
+        Ok(value)
     }
 
-    async fn persist_snapshot_diff(
-        &self,
-        old: &TurnPersistenceSnapshot,
-        new: &TurnPersistenceSnapshot,
-    ) -> Result<(), RowPersistError> {
-        let delta = snapshot_delta(old, new)?;
-        self.persist_delta(&delta).await
+    fn enqueue_delta(&self, delta: SnapshotDelta) -> Result<Option<DeltaAck>, RowPersistError> {
+        self.delta_journal
+            .enqueue(delta)
+            .map_err(RowPersistError::Turn)
     }
 
-    async fn persist_delta(&self, delta: &SnapshotDelta) -> Result<(), RowPersistError> {
-        if delta.is_empty() {
-            return Ok(());
-        }
-        let payload = serde_json::to_vec(&delta).map_err(|error| {
-            RowPersistError::Turn(TurnError::Unavailable {
-                reason: format!("turn-state delta serialization failed: {error}"),
-            })
-        })?;
-        let path = delta_log_path().map_err(RowPersistError::Turn)?;
-        match self
-            .filesystem
-            .append(&ResourceScope::system(), &path, payload)
+    async fn await_delta_ack(&self, ack: Option<DeltaAck>) -> Result<(), RowPersistError> {
+        DeltaJournal::await_ack(ack)
             .await
-        {
-            Ok(_seq) => {}
-            Err(error) => return Err(RowPersistError::Turn(fs_error(error))),
-        }
-        Ok(())
+            .map_err(RowPersistError::Turn)
+    }
+
+    async fn persist_delta(&self, delta: SnapshotDelta) -> Result<(), RowPersistError> {
+        let ack = self.enqueue_delta(delta)?;
+        self.await_delta_ack(ack).await
     }
 
     async fn apply_cached_delta(&self, delta: SnapshotDelta) -> Result<(), TurnError> {
@@ -575,7 +685,7 @@ where
             + Send,
         T: Send,
     {
-        let operation = async {
+        let critical = async {
             let mut guard = self.snapshot_state.lock().await;
             if guard.is_none() {
                 *guard = Some(self.load_snapshot_from_rows().await?);
@@ -623,29 +733,36 @@ where
             )?;
             let latest_event_cursor =
                 latest_event_cursor_after_delta(state.latest_event_cursor, &delta);
-            match self.persist_delta(&delta).await {
-                Ok(()) => {
-                    apply_delta(&mut state.snapshot, delta)?;
-                    state.latest_event_cursor = latest_event_cursor;
-                    state.store = store;
-                    Ok(value)
-                }
+            if let Err(error) = apply_delta(&mut state.snapshot, delta.clone()) {
+                *guard = None;
+                return Err(error);
+            }
+            let ack = match self.enqueue_delta(delta) {
+                Ok(ack) => ack,
                 Err(RowPersistError::Turn(error)) => {
                     *guard = None;
-                    Err(error)
+                    return Err(error);
                 }
-            }
+            };
+            state.latest_event_cursor = latest_event_cursor;
+            state.store = store;
+            Ok((ack, value))
         };
 
-        match tokio::time::timeout(self.apply_timeout, operation).await {
-            Ok(result) => result,
+        let (ack, value) = match tokio::time::timeout(self.apply_timeout, critical).await {
+            Ok(result) => result?,
             Err(_) => {
                 self.clear_snapshot_cache().await;
-                Err(TurnError::Unavailable {
+                return Err(TurnError::Unavailable {
                     reason: "turn state row-store targeted apply timed out".to_string(),
-                })
+                });
             }
+        };
+        if let Err(error) = self.await_delta_ack(ack).await {
+            self.clear_snapshot_cache().await;
+            return Err(error.into_turn());
         }
+        Ok(value)
     }
 
     async fn apply_run_state_transition<A, Fut>(
@@ -1045,7 +1162,7 @@ where
                 loop_checkpoints_upsert: vec![record.clone()],
                 ..SnapshotDelta::default()
             };
-            self.persist_delta(&delta)
+            self.persist_delta(delta.clone())
                 .await
                 .map_err(|error| match error {
                     RowPersistError::Turn(error) => error,
@@ -1349,6 +1466,14 @@ struct SpawnTreeReservationKeyForPath<'a> {
 
 enum RowPersistError {
     Turn(TurnError),
+}
+
+impl RowPersistError {
+    fn into_turn(self) -> TurnError {
+        match self {
+            Self::Turn(error) => error,
+        }
+    }
 }
 
 impl From<TurnError> for RowPersistError {

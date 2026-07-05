@@ -1996,3 +1996,62 @@ Budgets: 10 hours wall-clock / $0 spend
   filesystem_turn_state_row_store_loop_checkpoint_roundtrip_and_snapshot`, and
   `cargo check -p ironclaw_turns` passed. The unit-test target emitted the
   pre-existing `with_apply_timeout` dead-code warning under `cfg(test)`.
+
+## Cycle 38 - Group-Commit Delta Journal
+
+- Graph note: `codebase-memory-mcp` still fails immediately with
+  `Transport closed` for `index_status`; this cycle falls back to crate
+  guardrails and targeted source reads.
+- Baseline: cycle 37 is log-only, so cycle 36 remains the current
+  implementation baseline. Full dev score rerun passed 54 results and 36
+  comparisons; dev-shaped c4 `turn_lifecycle` was libSQL p95 7310ms versus
+  Postgres pool-2 p95 430ms. The unresolved high-concurrency diagnostic is
+  Postgres-only `turn_lifecycle` c100 p95 8666ms at payload 2048, 64 samples,
+  pool size 2, with state hash `660086a8484d5400`.
+- Hypothesis: the c100 tail is a write convoy: each transition builds a small
+  row-store `SnapshotDelta`, then holds the snapshot mutex while awaiting one
+  filesystem append. A single delta-journal flusher that drains queued deltas
+  and persists a batch in one append should amortize CAS/filesystem overhead.
+  The snapshot mutex should cover only in-memory apply plus delta construction,
+  with per-delta acks awaited after the mutex is released.
+- Validation target: focused Postgres-only `turn_lifecycle` c100 sweep first.
+  The gate is p95 magnitude plus throughput. Packed p50/p99 under closed-loop
+  simultaneous arrivals and a FIFO-fair mutex is expected and is not a failure
+  signal unless the harness moves to open-loop arrivals. Replay remains
+  unchanged because the flusher uses `filesystem.append_batch` with one
+  serialized delta per record.
+- Result: Kept the yield-only group-commit flusher. `FilesystemTurnStateRowStore`
+  now enqueues each non-empty `SnapshotDelta` with a per-delta ack, a single
+  flusher drains queued deltas into one `ScopedFilesystem::append_batch` call
+  per flush, and both generic and targeted apply paths release the snapshot
+  mutex before awaiting durable persistence. Empty deltas still short-circuit,
+  single-delta flushes use `append`, and journal replay remains compatible
+  with existing single-delta records.
+- High-concurrency turn-state diagnostic: Postgres-only `turn_lifecycle` with
+  payload 2048, 64 samples, and pool size 2 completed with zero errors and
+  stable state hash `660086a8484d5400`. c32 p95 improved from the cycle-36
+  2314ms baseline to 2142ms, with p50 1773ms, p99 2230ms, and throughput
+  19.96 ops/sec. c100 p95 improved from 8666ms to 3519ms, with p50 3445ms,
+  p99 3520ms, and throughput 18.18 ops/sec.
+- Full-flow stress signal: `ironclaw_stress` mixed-user-session with Postgres
+  row turn state, pool size 2, c100, users 100, model/tool latency 0, and
+  200 total operations completed 200/200 with operation p95 400.6ms,
+  throughput 339.7 ops/sec, turn-store p95 70.6ms, and resource-governor p95
+  237.4ms. A longer sustained c100 run with 20,000 total operations also
+  completed 20,000/20,000; operation p95 was 722.1ms, throughput 217.2 ops/sec,
+  turn-store p95 22.0ms, and resource-governor p95 607.2ms, keeping the
+  governor as the top full-flow bottleneck.
+- Dev score and validation: `harness/latency/score.sh --dev` passed 54 results
+  and 36 comparisons with zero failures. Dev-shaped c4 `turn_lifecycle` stayed
+  well ahead of libSQL: libSQL p95 8415ms, Postgres pool-1 p95 447ms, and
+  Postgres pool-2 p95 423ms. Additional checks passed:
+  `harness/latency/lint.sh`, `cargo check -p ironclaw_turns`, `cargo test -p
+  ironclaw_turns --test filesystem_turn_state_contract
+  filesystem_turn_state_row_store_persists_rows_without_state_blob`, and
+  `cargo test -p ironclaw_turns --test loop_checkpoint_store_contract
+  filesystem_turn_state_row_store_loop_checkpoint_roundtrip_and_snapshot`.
+- Next lever: shard the in-memory turn state per run. Use per-run locks for
+  targeted transitions, keep the global lock only for `claim_next_run`'s
+  cross-run view, and keep journal ordering in the single flusher. While doing
+  that, audit `build_delta`/`apply_delta` for O(snapshot) vector scans or
+  rebuilds per write and consider row-keyed maps for run storage.

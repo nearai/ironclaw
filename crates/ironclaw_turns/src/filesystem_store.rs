@@ -648,7 +648,10 @@ where
         Self::Blob(FilesystemTurnStateStore::new(filesystem))
     }
 
-    pub fn row(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
+    pub fn row(filesystem: Arc<ScopedFilesystem<F>>) -> Self
+    where
+        F: 'static,
+    {
         Self::Row(FilesystemTurnStateRowStore::new(filesystem))
     }
 
