@@ -69,7 +69,7 @@ improving measured wall clock.
 | H13 | Remove the separate uninstrumented `reborn-group-tests` job and rely on the existing instrumented coverage `groups` lane for those same suites. | Reduce total Reborn jobs by one without dropping group-suite pass/fail coverage. | Retained | Accepted: total Reborn jobs dropped from `28` to `27`, and wall clock improved from `8m35s` to `8m21s`. |
 | H14 | Seed fresh shared Rust caches from deterministic broad producers: `reborn-core` for crate buckets and `groups` for coverage lanes. | Improve warm-start quality for compile-heavy jobs without adding jobs or changing coverage. | Retained | Accepted as a compile-time win: wall clock improved from H13 `8m21s` to `7m49s`; crate buckets improved materially, especially `reborn-core` `462s -> 160s`, but root tests became the long pole. |
 | H15 | Add a `cargo-hakari` workspace-hack crate to unify dependency feature sets across buckets. | Improve cross-bucket cache reuse by making shared dependency artifacts compatible across package feature combinations. | Feasibility review | Not a small config-only benchmark: no existing hakari metadata or workspace-hack crate; `cargo hakari` is not installed locally; this should be a separate dependency/lockfile-changing benchmark. |
-| H18 | Increase Reborn root-test partitions from 4 to 6. | Shave the new post-H14 root-test long pole without changing test coverage. | Benchmark running | Under test on PR #5648: adds two root-test jobs, so it only survives if wall clock improves enough to justify the extra runner slots. |
+| H18 | Increase Reborn root-test partitions from 4 to 6. | Shave the new post-H14 root-test long pole without changing test coverage. | Tested | Rejected: wall clock regressed from H14 `7m49s` to `10m41s`; the slowest root partition worsened from `450s` to `595s`. |
 
 ## H1: Narrow Crate Bucket Targets
 
@@ -872,8 +872,30 @@ Red-team notes before benchmarking:
   at `450s`, this is the first point where the root partition experiment is
   directionally plausible.
 
-Benchmark status:
+Benchmark result:
 
-- Running on PR #5648 after the H14/H15 branch state. Record the run ID,
-  success/failure, wall clock, total Reborn job count, and root partition
-  durations before deciding keep versus revert.
+- Branch/PR: [`codex/ci-compile-benchmarks`, PR #5648](https://github.com/nearai/ironclaw/pull/5648)
+- Workflow run: [`28731792679`](https://github.com/nearai/ironclaw/actions/runs/28731792679)
+- Status: success.
+- Wall clock: `10m41s`
+  (`2026-07-05T06:19:06Z` to `2026-07-05T06:29:47Z`).
+- Total Reborn jobs: `29`, up from H14's `27`.
+- Root-test jobs: `6`, up from `4`.
+
+| Metric | H14 retained state | H18 measurement | Delta |
+| --- | ---: | ---: | ---: |
+| Reborn workflow wall clock | `7m49s` | `10m41s` | `+2m52s` |
+| Total Reborn jobs | `27` | `29` | `+2` |
+| Root-test jobs | `4` | `6` | `+2` |
+| Slowest root partition | `450s` | `595s` | `+145s` |
+| `host-runtime` | `373s` | `512s` | `+139s` |
+| `composition-core` | `308s` | `481s` | `+173s` |
+| `Reborn integration coverage (groups)` | `265s` | `493s` | `+228s` |
+
+Decision:
+
+- Reject and revert the workflow change. Increasing root partitions does not
+  reduce compile time, and in this run the extra fanout appears to add runner
+  and cache contention across the same Rust jobs.
+- The result supports the red-team concern: root partitioning is not a useful
+  lever while each partition still recompiles the same root-package graph.
