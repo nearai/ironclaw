@@ -488,6 +488,39 @@ async fn filesystem_approval_request_store_discards_pending_request() {
     assert_eq!(store.records_for_scope(&scope).await.unwrap(), Vec::new());
 }
 
+/// Regression test (#5467): `InMemoryApprovalRequestStore::discard_pending`
+/// must mirror `FilesystemApprovalRequestStore`'s tombstone semantics — mutate
+/// the record to `Discarded` in place rather than removing it — specifically
+/// to block a later `save_pending` from reusing the same request id. Before
+/// the fix, `discard_pending` called `records.remove(&key)`, so a subsequent
+/// `save_pending` for the same id found no key and succeeded silently
+/// (diverging from the filesystem store's already-shipped #5234 semantics).
+/// Direct sibling of `filesystem_discard_tombstone_prevents_request_id_reuse`
+/// below, against `InMemoryApprovalRequestStore` instead.
+#[tokio::test]
+async fn in_memory_discard_tombstone_prevents_request_id_reuse() {
+    let store = InMemoryApprovalRequestStore::new();
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let approval = approval_request(invocation_id);
+    let request_id = approval.id;
+
+    store.save_pending(scope.clone(), approval).await.unwrap();
+    store.discard_pending(&scope, request_id).await.unwrap();
+
+    let mut second = approval_request(invocation_id);
+    second.id = request_id;
+
+    let err = store.save_pending(scope, second).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RunStateError::ApprovalRequestAlreadyExists { request_id: id } if id == request_id
+        ),
+        "expected ApprovalRequestAlreadyExists but got {err:?}",
+    );
+}
+
 /// Regression test (PR #5234 review): `discard_pending` writes a `Discarded`
 /// tombstone rather than deleting the record, specifically to block a later
 /// `save_pending` from reusing the same request id. The existing discard

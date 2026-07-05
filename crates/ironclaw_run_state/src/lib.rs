@@ -480,7 +480,8 @@ impl ApprovalRequestStore for InMemoryApprovalRequestStore {
         Ok(self
             .records_guard()
             .get(&ApprovalKey::new(scope, request_id))
-            .cloned())
+            .cloned()
+            .filter(|record| record.status != ApprovalStatus::Discarded))
     }
 
     async fn approve(
@@ -507,7 +508,7 @@ impl ApprovalRequestStore for InMemoryApprovalRequestStore {
         let mut records = self.records_guard();
         let key = ApprovalKey::new(scope, request_id);
         let record = records
-            .get(&key)
+            .get_mut(&key)
             .ok_or(RunStateError::UnknownApprovalRequest { request_id })?;
         if record.status != ApprovalStatus::Pending {
             return Err(RunStateError::ApprovalNotPending {
@@ -515,9 +516,15 @@ impl ApprovalRequestStore for InMemoryApprovalRequestStore {
                 status: record.status,
             });
         }
-        records
-            .remove(&key)
-            .ok_or(RunStateError::UnknownApprovalRequest { request_id })
+        // Mutate in place to a Discarded tombstone rather than removing the
+        // record outright — mirrors `FilesystemApprovalRequestStore::discard_pending`
+        // (which writes a Discarded tombstone via CAS so the file still exists,
+        // preventing a subsequent `save_pending` from reusing the same id).
+        // Return the pre-mutation clone (status `Pending`) as the caller-visible
+        // value, matching what `remove()` returned before this change.
+        let original = record.clone();
+        record.status = ApprovalStatus::Discarded;
+        Ok(original)
     }
 
     async fn records_for_scope(
@@ -527,7 +534,9 @@ impl ApprovalRequestStore for InMemoryApprovalRequestStore {
         let mut records = self
             .records_guard()
             .values()
-            .filter(|record| same_scope_owner(&record.scope, scope))
+            .filter(|record| {
+                same_scope_owner(&record.scope, scope) && record.status != ApprovalStatus::Discarded
+            })
             .cloned()
             .collect::<Vec<_>>();
         records.sort_by_key(|record| record.request.id.as_uuid());
