@@ -1,11 +1,6 @@
-//! `ProductWorkflow::submit_inbound` idempotency — real filesystem ledger.
-//!
-//! Every crate-tier idempotency test (`fake_ledger_expiration_reclaims_in_flight_fingerprint`,
-//! `in_memory_idempotency_ledger_*`, `duplicate_envelope_replays_prior_outcome`) drives replay
-//! through an in-memory fake ledger. This harness wires a REAL, filesystem-backed
-//! `FilesystemIdempotencyLedger` into `DefaultProductWorkflow` — this test proves a second
-//! real read-modify-write cycle against it short-circuits to `Duplicate` without minting a
-//! second turn/run, rather than asserting that behavior against a fake.
+//! `ProductWorkflow::submit_inbound` idempotency against a REAL, filesystem-backed
+//! `FilesystemIdempotencyLedger` (crate-tier idempotency tests use an in-memory fake) —
+//! proves a second read-modify-write cycle short-circuits to `Duplicate`, not a fresh turn/run.
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
