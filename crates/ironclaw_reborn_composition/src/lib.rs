@@ -178,6 +178,8 @@ pub use extension_lifecycle_command::{
 pub use factory::AttachmentTestSupport;
 #[cfg(feature = "test-support")]
 pub use factory::RebornLocalDevApprovalTestParts;
+#[cfg(feature = "migration-support")]
+pub use factory::extension_installation_store_for_migration;
 pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
 pub use failure_summary::reborn_failure_summary_for_category;
 pub use gsuite::{bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers};
