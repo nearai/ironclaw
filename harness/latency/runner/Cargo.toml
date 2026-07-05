@@ -8,11 +8,12 @@ publish = false
 
 [dependencies]
 async-trait = "0.1"
+axum = "0.8"
 deadpool-postgres = "0.14"
 ironclaw_filesystem = { path = "../../../crates/ironclaw_filesystem", features = ["libsql", "postgres"] }
 ironclaw_host_runtime = { path = "../../../crates/ironclaw_host_runtime", features = ["libsql", "postgres"] }
 ironclaw_host_api = { path = "../../../crates/ironclaw_host_api" }
-ironclaw_reborn_composition = { path = "../../../crates/ironclaw_reborn_composition", features = ["libsql", "postgres"] }
+ironclaw_reborn_composition = { path = "../../../crates/ironclaw_reborn_composition", features = ["libsql", "postgres", "webui-v2-beta"] }
 ironclaw_reborn_event_store = { path = "../../../crates/ironclaw_reborn_event_store", features = ["libsql", "postgres"] }
 ironclaw_resources = { path = "../../../crates/ironclaw_resources" }
 ironclaw_run_state = { path = "../../../crates/ironclaw_run_state" }
@@ -28,4 +29,5 @@ serde_json = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
+tower = { version = "0.5", features = ["util"] }
 uuid = { version = "1", features = ["v4"] }

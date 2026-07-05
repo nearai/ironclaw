@@ -3,6 +3,8 @@ use std::env;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use axum::body::{Body, to_bytes};
+use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use chrono::{DateTime, TimeZone, Utc};
 use ironclaw_filesystem::{
     CasExpectation, Entry, Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue,
@@ -20,9 +22,12 @@ use ironclaw_host_runtime::{
     ProductionWiringConfig, RuntimeProcessError, SandboxCommandTransport,
 };
 use ironclaw_reborn_composition::{
-    LibSqlProductionSubstrateConfig, PostgresProductionSubstrateConfig,
-    RebornProductionRuntimePolicy, build_libsql_production_host_runtime_services,
-    build_postgres_production_host_runtime_services,
+    LibSqlProductionSubstrateConfig, PollSettings, PostgresProductionSubstrateConfig,
+    RebornBuildInput, RebornCompositionProfile, RebornProductionRuntimePolicy, RebornRuntime,
+    RebornRuntimeIdentity, RebornRuntimeInput, WebuiAuthentication, WebuiAuthenticator,
+    WebuiServeConfig, build_libsql_production_host_runtime_services,
+    build_postgres_production_host_runtime_services, build_reborn_runtime, build_webui_services,
+    hosted_single_tenant_runtime_policy, local_runtime_build_input, webui_v2_app,
 };
 use ironclaw_reborn_event_store::RebornEventStoreConfig;
 use ironclaw_resources::{
@@ -54,7 +59,8 @@ use ironclaw_turns::{
 };
 use secrecy::ExposeSecret;
 use serde::Serialize;
-use tokio::sync::Semaphore;
+use tokio::sync::{OnceCell, Semaphore};
+use tower::ServiceExt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -87,6 +93,7 @@ enum WorkloadKind {
     TriggerSeedList,
     ControlPlaneSnapshot,
     TurnLifecycle,
+    WebuiSession,
     HostedSubstrateBuild,
 }
 
@@ -188,6 +195,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             kind: WorkloadKind::TurnLifecycle,
         },
         Workload {
+            name: "webui_session",
+            kind: WorkloadKind::WebuiSession,
+        },
+        Workload {
             name: "hosted_substrate_build",
             kind: WorkloadKind::HostedSubstrateBuild,
         },
@@ -256,8 +267,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         payload_bytes,
         acceptance_ready: false,
         notes: vec![
-            "dev scorer: storage hot paths, filesystem turn lifecycle, plus production-shaped hosted substrate build/readiness",
-            "full acceptance still requires launch-ref libSQL baseline and hosted profile/WebUI plus request-level trigger/approval/resource workloads",
+            "dev scorer: storage hot paths, filesystem turn lifecycle, WebUI session, plus production-shaped hosted substrate build/readiness",
+            "full acceptance still requires launch-ref libSQL baseline and request-level trigger/approval/resource workloads",
         ],
         results,
         comparisons,
@@ -274,6 +285,8 @@ struct BackendContext {
     approval_requests: Arc<dyn ApprovalRequestStore>,
     secret_store: Arc<dyn SecretStore>,
     resource_governor: Arc<dyn ResourceGovernor>,
+    webui_session: Arc<OnceCell<WebuiRuntimeContext>>,
+    webui_postgres_pool: Option<deadpool_postgres::Pool>,
 }
 
 trait TurnLifecycleStore: TurnStateStore + TurnRunTransitionPort + LoopCheckpointStore {}
@@ -281,6 +294,11 @@ trait TurnLifecycleStore: TurnStateStore + TurnRunTransitionPort + LoopCheckpoin
 impl<T> TurnLifecycleStore for T where
     T: TurnStateStore + TurnRunTransitionPort + LoopCheckpointStore + Send + Sync
 {
+}
+
+struct WebuiRuntimeContext {
+    router: axum::Router,
+    _runtime: RebornRuntime,
 }
 
 async fn open_backend(
@@ -305,6 +323,8 @@ async fn open_backend(
                 approval_requests: control_plane.approval_requests,
                 secret_store: control_plane.secret_store,
                 resource_governor: control_plane.resource_governor,
+                webui_session: Arc::new(OnceCell::new()),
+                webui_postgres_pool: None,
             })
         }
         BackendName::Postgres => {
@@ -325,7 +345,7 @@ async fn open_backend(
             secret_store.run_migrations().await?;
             let resource_governor = PostgresResourceGovernor::new(pool.clone());
             resource_governor.run_migrations()?;
-            let trigger_repository = PostgresTriggerRepository::new(pool);
+            let trigger_repository = PostgresTriggerRepository::new(pool.clone());
             trigger_repository.run_migrations().await?;
             let mut control_plane = control_plane_stores(Arc::clone(&fs));
             control_plane.secret_store = Arc::new(secret_store);
@@ -339,6 +359,8 @@ async fn open_backend(
                 approval_requests: control_plane.approval_requests,
                 secret_store: control_plane.secret_store,
                 resource_governor: control_plane.resource_governor,
+                webui_session: Arc::new(OnceCell::new()),
+                webui_postgres_pool: Some(pool),
             })
         }
     }
@@ -450,6 +472,7 @@ async fn run_workload(
         setup_workload(
             backend_context.clone(),
             backend,
+            postgres_pool_size,
             &workload_run_id,
             workload,
             i,
@@ -477,6 +500,7 @@ async fn run_workload(
         setup_workload(
             backend_context.clone(),
             backend,
+            postgres_pool_size,
             &workload_run_id,
             workload,
             i + warmup,
@@ -611,6 +635,9 @@ async fn run_one(
             )
             .await?
         }
+        WorkloadKind::WebuiSession => {
+            webui_session(backend_context, backend, postgres_pool_size, sample).await?
+        }
         WorkloadKind::HostedSubstrateBuild => {
             hosted_substrate_build(backend, sample, postgres_pool_size).await?
         }
@@ -624,6 +651,7 @@ async fn run_one(
 async fn setup_workload(
     backend_context: BackendContext,
     backend: BackendName,
+    postgres_pool_size: Option<usize>,
     run_id: &str,
     workload: Workload,
     sample: usize,
@@ -636,6 +664,13 @@ async fn setup_workload(
             | WorkloadKind::TurnLifecycle
             | WorkloadKind::HostedSubstrateBuild
     ) {
+        return Ok(());
+    }
+
+    if matches!(workload.kind, WorkloadKind::WebuiSession) {
+        ensure_webui_runtime_context(&backend_context, backend, postgres_pool_size)
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
         return Ok(());
     }
 
@@ -677,6 +712,7 @@ async fn setup_workload(
         WorkloadKind::TriggerSeedList
         | WorkloadKind::ControlPlaneSnapshot
         | WorkloadKind::TurnLifecycle
+        | WorkloadKind::WebuiSession
         | WorkloadKind::HostedSubstrateBuild => {}
     }
     Ok(())
@@ -1429,6 +1465,179 @@ fn status_code(status: TurnStatus) -> u64 {
 
 fn option_code(present: bool) -> u64 {
     if present { 1 } else { 0 }
+}
+
+const WEBUI_SESSION_TOKEN: &str = "latency-webui-token";
+const WEBUI_SESSION_TENANT: &str = "latency-webui-tenant";
+const WEBUI_SESSION_RUNTIME_USER: &str = "latency-webui-user-0";
+const WEBUI_SESSION_USER_PREFIX: &str = "latency-webui-user-";
+const WEBUI_SESSION_AGENT: &str = "latency-webui-agent";
+const WEBUI_SESSION_USER_BUCKETS: usize = 64;
+
+struct LatencyWebuiAuthenticator;
+
+#[async_trait::async_trait]
+impl WebuiAuthenticator for LatencyWebuiAuthenticator {
+    async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
+        let user = token.strip_prefix(WEBUI_SESSION_TOKEN)?;
+        let user = user.strip_prefix('-')?;
+        let user_id = UserId::new(format!("{WEBUI_SESSION_USER_PREFIX}{user}")).ok()?;
+        Some(WebuiAuthentication::user(user_id))
+    }
+}
+
+async fn webui_session(
+    backend_context: BackendContext,
+    backend: BackendName,
+    postgres_pool_size: Option<usize>,
+    sample: usize,
+) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+    let webui = ensure_webui_runtime_context(&backend_context, backend, postgres_pool_size).await?;
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/api/webchat/v2/session")
+        .header(
+            header::AUTHORIZATION,
+            format!(
+                "Bearer {WEBUI_SESSION_TOKEN}-{}",
+                sample % WEBUI_SESSION_USER_BUCKETS
+            ),
+        )
+        .body(Body::empty())?;
+    let response = webui
+        .router
+        .clone()
+        .oneshot(request)
+        .await
+        .map_err(|error| format!("webui session request failed: {error}"))?;
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 256 * 1024).await?;
+    if status != StatusCode::OK {
+        return Err(format!(
+            "webui session returned {status}: {}",
+            String::from_utf8_lossy(&bytes)
+        )
+        .into());
+    }
+    let response: serde_json::Value = serde_json::from_slice(&bytes)?;
+    ensure_json_field(&response, "tenant_id", WEBUI_SESSION_TENANT)?;
+    ensure_json_field(
+        &response,
+        "user_id",
+        &format!(
+            "{WEBUI_SESSION_USER_PREFIX}{}",
+            sample % WEBUI_SESSION_USER_BUCKETS
+        ),
+    )?;
+    let mut state = stable_hash_bytes(status.as_u16() as u64, &bytes);
+    state = state.wrapping_add(option_code(
+        response
+            .get("features")
+            .and_then(|features| features.get("global_auto_approve"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    ));
+    Ok(state)
+}
+
+async fn ensure_webui_runtime_context<'a>(
+    backend_context: &'a BackendContext,
+    backend: BackendName,
+    postgres_pool_size: Option<usize>,
+) -> Result<&'a WebuiRuntimeContext, Box<dyn std::error::Error + Send + Sync>> {
+    let postgres_pool = backend_context.webui_postgres_pool.clone();
+    backend_context
+        .webui_session
+        .get_or_try_init(|| async move {
+            build_webui_runtime_context(backend, postgres_pool_size, postgres_pool).await
+        })
+        .await
+}
+
+async fn build_webui_runtime_context(
+    backend: BackendName,
+    postgres_pool_size: Option<usize>,
+    postgres_pool: Option<deadpool_postgres::Pool>,
+) -> Result<WebuiRuntimeContext, Box<dyn std::error::Error + Send + Sync>> {
+    let root = tempfile::tempdir()?.keep();
+    let storage_root = root.join(format!(
+        "webui-{}-{}",
+        backend.as_str(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let workspace_root = root.join("workspace");
+    let mut build_input = match backend {
+        BackendName::Libsql => local_runtime_build_input(
+            RebornCompositionProfile::HostedSingleTenantVolume,
+            WEBUI_SESSION_RUNTIME_USER,
+            storage_root,
+        )?,
+        BackendName::Postgres => {
+            let pool = postgres_pool.ok_or_else(|| {
+                format!(
+                    "webui session postgres backend missing pool for size {:?}",
+                    postgres_pool_size
+                )
+            })?;
+            RebornBuildInput::hosted_single_tenant_postgres(
+                RebornCompositionProfile::HostedSingleTenant,
+                WEBUI_SESSION_RUNTIME_USER,
+                storage_root,
+                pool,
+                latency_secret_master_key(),
+            )?
+            .with_runtime_policy(hosted_single_tenant_runtime_policy()?)
+        }
+    }
+    .with_local_runtime_workspace_root(workspace_root);
+    let tenant_id = TenantId::new(WEBUI_SESSION_TENANT)?;
+    let agent_id = AgentId::new(WEBUI_SESSION_AGENT)?;
+    build_input = build_input.with_local_runtime_identity(tenant_id.clone(), agent_id.clone());
+    let runtime_input = RebornRuntimeInput::from_services(build_input)
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: WEBUI_SESSION_TENANT.to_string(),
+            agent_id: WEBUI_SESSION_AGENT.to_string(),
+            source_binding_id: "latency-webui-source".to_string(),
+            reply_target_binding_id: "latency-webui-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(10),
+        });
+    let runtime = build_reborn_runtime(runtime_input).await?;
+    let bundle = build_webui_services(&runtime, None)?;
+    let config = WebuiServeConfig::new(
+        tenant_id,
+        Arc::new(LatencyWebuiAuthenticator),
+        vec![HeaderValue::from_static("http://localhost:0")],
+    )
+    .with_default_agent_id(agent_id);
+    let router = webui_v2_app(bundle, config)?;
+    Ok(WebuiRuntimeContext {
+        router,
+        _runtime: runtime,
+    })
+}
+
+fn ensure_json_field(
+    value: &serde_json::Value,
+    field: &'static str,
+    expected: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let actual = value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("webui session response missing `{field}`"))?;
+    if actual == expected {
+        return Ok(());
+    }
+    Err(format!("webui session `{field}` was `{actual}`, expected `{expected}`").into())
+}
+
+fn stable_hash_bytes(seed: u64, bytes: &[u8]) -> u64 {
+    bytes.iter().fold(seed ^ 0xcbf29ce484222325, |state, byte| {
+        state.wrapping_mul(0x100000001b3) ^ u64::from(*byte)
+    })
 }
 
 async fn hosted_substrate_build(

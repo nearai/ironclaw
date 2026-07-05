@@ -301,6 +301,34 @@ impl RebornBuildInput {
     }
 
     #[cfg(feature = "postgres")]
+    pub fn hosted_single_tenant_postgres(
+        profile: RebornCompositionProfile,
+        owner_id: impl Into<String>,
+        root: PathBuf,
+        pool: deadpool_postgres::Pool,
+        secret_master_key: ironclaw_secrets::SecretMaterial,
+    ) -> Result<Self, RebornBuildError> {
+        if profile != RebornCompositionProfile::HostedSingleTenant {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "hosted single-tenant Postgres storage requires profile=hosted-single-tenant; got profile={profile}"
+                ),
+            });
+        }
+        Ok(Self::new(
+            profile,
+            owner_id,
+            RebornStorageInput::HostedSingleTenantPostgres {
+                root,
+                workspace_root: None,
+                host_home_root: None,
+                pool,
+                secret_master_key,
+            },
+        ))
+    }
+
+    #[cfg(feature = "postgres")]
     pub fn hosted_single_tenant_postgres_from_config_and_env(
         profile: RebornCompositionProfile,
         owner_id: impl Into<String>,

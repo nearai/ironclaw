@@ -1231,3 +1231,70 @@ Budgets: 10 hours wall-clock / $0 spend
   concurrent lifecycle samples through one mounted per-user turn-state store;
   the next filesystem-aligned optimization target is row-store same-user
   serialization under high concurrency.
+
+## Cycle 25 - WebUI Session Request Path
+
+- Graph note: `codebase-memory-mcp` still fails with `Transport closed`; the
+  local graph artifact is stale and contains zero indexed nodes, so this cycle
+  uses targeted source reads.
+- Baseline: The locked harness now covers filesystem hot paths, hosted
+  substrate build/readiness, and filesystem-backed turn lifecycle pressure, but
+  it still does not time a real WebUI request. The `/api/webchat/v2/session`
+  handler is useful because it crosses bearer auth middleware, descriptor
+  policy layers, `RebornServicesApi`, and the global auto-approve settings read
+  without invoking any LLM/provider/network call.
+- Hypothesis: Add a `webui_session` workload that builds one cached
+  `build_reborn_runtime -> build_webui_services -> webui_v2_app` stack per
+  backend, then measures authenticated `GET /api/webchat/v2/session` requests
+  through Axum `oneshot`. This should close a Stage 0 WebUI gap while staying
+  inside composition/runtime abstractions. It must not reach into Postgres
+  tables, thread stores, or filesystem paths directly.
+- Workload shape: The session route has a real read rate limit of 120 requests
+  per caller per minute, so the harness should use deterministic multi-user
+  session bootstrap tokens instead of measuring a guaranteed 429 after the
+  first 120 samples for one caller. The sample-to-user mapping must be identical
+  for libSQL and Postgres so visible response hashes remain comparable.
+- Expected failure mode: Building this through a stub service facade would hide
+  runtime/store latency, while building it with ad hoc DB handles would bypass
+  the abstraction the user explicitly asked about. The workload should use
+  `local_runtime_build_input` for hosted-volume libSQL and hosted
+  single-tenant Postgres build input for Postgres, with the same production-
+  relevant Postgres pool caps as the rest of the harness.
+- Diagnostic: Patch the harness only, run formatting/check/lint, then run a
+  tiny `webui_session` smoke for both backends before any larger score.
+- Result: Added `webui_session` to the locked runner and documented it in the
+  harness README. The workload builds one cached hosted-volume libSQL runtime
+  and one cached hosted-single-tenant Postgres runtime per pool size through
+  `build_reborn_runtime`, `build_webui_services`, and `webui_v2_app`; measured
+  samples are Axum `oneshot` requests to `/api/webchat/v2/session`. Added a
+  non-env `RebornBuildInput::hosted_single_tenant_postgres` constructor so the
+  harness can pass the already-capped Postgres pool into composition instead of
+  reopening storage through process env.
+- Validation: `cargo fmt --manifest-path harness/latency/runner/Cargo.toml
+  --check`, `cargo fmt -p ironclaw_reborn_composition --check`,
+  `cargo check --manifest-path harness/latency/runner/Cargo.toml`,
+  `cargo check -p ironclaw_reborn_composition --features
+  webui-v2-beta,libsql,postgres`, `harness/latency/lint.sh`, and
+  `git diff --check` passed. The first smoke run hit `No space left on device`
+  while writing debug archives; removing only the generated
+  `harness/latency/runner/target/debug/incremental` cache freed space, and the
+  rerun passed.
+- Tiny smoke: With `LATENCY_WORKLOADS=webui_session`,
+  `LATENCY_WARMUP=1`, `LATENCY_SAMPLES=4`, and `LATENCY_CONCURRENCY=1`, both
+  backends completed with zero errors and matching state hash
+  `88db09960433a88e`. libSQL p95 was 1.92ms; Postgres pool-1 p95 was 0.62ms;
+  Postgres pool-2 p95 was 0.51ms.
+- Dev score: `harness/latency/score.sh --dev` completed with all c1/c4
+  comparisons passing and zero errors. The new `webui_session` rows matched
+  state hash `d361edd7550f85f2`; at c4, libSQL p95 was 2.36ms, Postgres pool-1
+  p95 was 0.88ms, and Postgres pool-2 p95 was 0.52ms.
+- c32/c100 WebUI signal: A targeted both-backend run with
+  `LATENCY_WORKLOADS=webui_session`, `LATENCY_WARMUP=4`,
+  `LATENCY_SAMPLES=100`, and `LATENCY_CONCURRENCY=32,100` completed with zero
+  errors and matching state hash `986f2b6685239bb2`. At c32, pool-2 is close
+  enough for dev ratio (libSQL p95 5.05ms, Postgres pool-2 p95 5.74ms), while
+  pool-1 is slower (p95 7.08ms). At c100, both Postgres pool sizes hard-fail
+  ratio checks despite higher throughput: libSQL p95 4.41ms, Postgres pool-1
+  p95 16.21ms, Postgres pool-2 p95 11.67ms. Next high-concurrency work should
+  inspect the session request's `global_auto_approve_enabled` read path and
+  WebUI middleware contention before touching lower-level stores.
