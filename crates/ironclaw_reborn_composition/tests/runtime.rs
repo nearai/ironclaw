@@ -585,19 +585,9 @@ async fn multi_worker_runtime_does_not_raise_worker_stopped_while_workers_are_al
     runtime.shutdown().await.unwrap();
 }
 
-// W5-WEBUI-API-2 enabler smoke test: proves
-// `local_dev_approval_interaction_service_for_test` /
-// `local_dev_auth_interaction_service_for_test` (both `#[cfg(feature =
-// "test-support")]`, `crates/ironclaw_reborn_composition/src/runtime/test_support.rs`)
-// assemble real, working services over a live local-dev runtime's own
-// `RebornServices` — not the fail-closed `Rejecting*`/`Unavailable*`
-// fallbacks — using the exact `TurnCoordinator` instance the runtime's own
-// turns are driven by (`runtime.services().turn_coordinator`, which
-// `build_reborn_runtime` overwrites to match `composition.coordinator`; see
-// the enabler plan's §1 "coordinator-instance divergence" note). The actual
-// RESOLVE_GATE scenario coverage these accessors unblock is a separate,
-// later PR (W5-WEBUI-API-2 itself); this test only proves the composition
-// wiring compiles and constructs correctly.
+// W5-WEBUI-API-2 enabler smoke test: `local_dev_*_interaction_service_for_test`
+// build real services (not `Rejecting*`/`Unavailable*` fallbacks) using the
+// runtime's own live `TurnCoordinator`. Full RESOLVE_GATE scenario coverage is a later PR.
 #[tokio::test]
 async fn local_dev_test_support_interaction_service_accessors_build_real_services() {
     let _guard = runtime_composition_test_guard().await;
@@ -645,11 +635,8 @@ async fn local_dev_test_support_interaction_service_accessors_build_real_service
     );
     let actor = TurnActor::new(UserId::new("test-support-accessors-user").expect("user id"));
 
-    // A genuine `DefaultApprovalInteractionService` / `DefaultAuthInteractionService`
-    // answers `Ok` with an empty list for a scope with no pending gates; the
-    // fail-closed `Rejecting*`/`Unavailable*` fallbacks these accessors must
-    // NOT return always answer `Err(..)`. This is the discriminating
-    // assertion — see the mutation check in this task's verification.
+    // Discriminating assertion: a real service answers `Ok` with an empty list;
+    // the fail-closed `Rejecting*`/`Unavailable*` fallbacks always `Err`.
     let pending_approvals = approval_interaction_service
         .list_pending(ListPendingApprovalsRequest {
             scope: scope.clone(),

@@ -1,40 +1,20 @@
-// Test-support accessors mirroring the WebUI approval/auth interaction-service
-// assembly above (`build_reborn_runtime`'s `approval_interaction_service` /
-// `auth_interaction_service` locals). A harness that builds its own planned
-// runtime directly (e.g. via `build_default_planned_runtime`, bypassing
-// `build_reborn_runtime`) has no other way to get a REAL
-// `DefaultApprovalInteractionService` / auth-interaction-service pair instead
-// of the default `Rejecting*InteractionService` — these two methods close that
-// gap for RESOLVE_GATE coverage on both gate kinds (W5-WEBUI-API-2).
+// Test-support accessors mirroring `build_reborn_runtime`'s approval/auth
+// interaction-service wiring, for harnesses that build their own planned
+// runtime and bypass `build_reborn_runtime` (W5-WEBUI-API-2).
 //
-// `turn_coordinator` is a caller-supplied parameter, never `self.turn_coordinator`:
-// a `RebornServices` built by `build_reborn_services` alone carries the earlier
-// coordinator minted inside `build_local_runtime` (`factory.rs:1587`), which is
-// NOT the same instance as whatever planned-runtime coordinator the caller's own
-// turns actually run against. Pass the exact `Arc<dyn TurnCoordinator>` your
-// harness's turns are driven by.
+// `turn_coordinator` is caller-supplied, never `self.turn_coordinator`: a
+// `RebornServices` from `build_reborn_services` alone carries the coordinator
+// minted in `build_local_runtime`, not the caller's own planned-runtime one.
 //
-// This file lives inside the `crate::runtime` module tree (declared via
-// `#[path = "runtime/test_support.rs"]` in `runtime.rs`) rather than in
-// `factory.rs`, because the recipe it mirrors depends on module-private types
-// (`LocalDevApprovalTurnRunLocator`, `RegistryPersistentApprovalGranteeResolver`,
-// `approval::LocalDevApprovalLeaseTermsProvider`,
-// `local_dev::extension_surface::LocalDevExtensionSurfaceSource`,
-// `build_webui_auth_interaction_service`) that are only reachable from code
-// inside `crate::runtime` and its descendant modules — see the enabler plan's
-// §0 for the full module-privacy trace.
+// Lives under `crate::runtime` (not `factory.rs`) — the recipe needs
+// module-private types only reachable from here.
 
 use super::*;
 
 impl RebornServices {
-    /// Test-support access to a real `DefaultApprovalInteractionService` wired
-    /// exactly as `build_reborn_runtime` wires it, over this `RebornServices`'s
-    /// own local-dev parts. Returns `None` for production-profile compositions
-    /// without a local-dev runtime (mirrors every other `local_dev_..._for_test`
-    /// accessor in `factory.rs`). Does not thread an audit sink (production
-    /// wires one purely for audit-log observability, not correctness — a test
-    /// asserting resolve/deny behavior doesn't need it; add one later if a test
-    /// needs to assert on the audit trail).
+    /// Real `DefaultApprovalInteractionService` wired like `build_reborn_runtime`.
+    /// `None` without a local-dev runtime. No audit sink threaded — production wires
+    /// one for audit-log observability only, not correctness the test needs.
     #[cfg(feature = "test-support")]
     pub fn local_dev_approval_interaction_service_for_test(
         &self,
@@ -81,14 +61,9 @@ impl RebornServices {
         ))
     }
 
-    /// Test-support access to the WebUI auth-interaction service, built via the
-    /// same `build_webui_auth_interaction_service` helper `build_reborn_runtime`
-    /// uses (reused, not reimplemented). Returns `None` only when this
-    /// composition has no local-dev runtime at all; if a local-dev runtime IS
-    /// present but `product_auth` has no wired flow-record source, the returned
-    /// service is `UnavailableAuthInteractionService` (matches
-    /// `build_webui_auth_interaction_service`'s own fail-closed shape — a real,
-    /// if inert, trait object, not a sentinel the caller has to special-case).
+    /// WebUI auth-interaction service via the same `build_webui_auth_interaction_service`
+    /// helper `build_reborn_runtime` uses. `None` only without a local-dev runtime; falls
+    /// back to `UnavailableAuthInteractionService` if `product_auth` has no flow-record source.
     #[cfg(feature = "test-support")]
     pub fn local_dev_auth_interaction_service_for_test(
         &self,
