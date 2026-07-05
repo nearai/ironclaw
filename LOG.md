@@ -2055,3 +2055,67 @@ Budgets: 10 hours wall-clock / $0 spend
   cross-run view, and keep journal ordering in the single flusher. While doing
   that, audit `build_delta`/`apply_delta` for O(snapshot) vector scans or
   rebuilds per write and consider row-keyed maps for run storage.
+
+## Cycle 39 - Indexed Row Snapshot Delta Apply
+
+- Graph note: `codebase-memory-mcp` still fails immediately with
+  `Transport closed` for `index_status`; this cycle falls back to crate
+  guardrails and targeted source reads.
+- Baseline: cycle 38 is the current committed implementation. The focused
+  Postgres-only c100 `turn_lifecycle` diagnostic improved from p95 8666ms to
+  3519ms and throughput 7.39 to 18.18 ops/sec, but the remaining p95 is still
+  too high for the hosted-single-tenant target.
+- Gate update: do not use p50/p99 separation as the health gate for this closed
+  loop harness. With simultaneous arrivals and a FIFO-fair mutex, packed
+  percentiles are expected. Gate on p95 magnitude and throughput unless the
+  c100 harness moves to open-loop arrivals.
+- Hypothesis: after group commit removed durable append from the snapshot mutex,
+  the next visible cost is per-transition O(snapshot) work while holding that
+  mutex. In the common targeted paths, `apply_delta_collection` scans Vec-backed
+  rows to replace one run, active lock, reservation, or event. Maintaining
+  row-keyed indexes for the hot cached row snapshot should make common upserts
+  O(delta) while preserving the existing Vec snapshot contract, delta replay,
+  and journal ordering.
+- Expected failure mode: index maintenance must preserve record order for
+  existing snapshots, rebuild indexes after deletes, and keep restart replay
+  compatible with the unindexed `TurnPersistenceSnapshot` representation. If
+  this does not move c100 p95/throughput, the next larger lever is true per-run
+  in-memory lock sharding for targeted transitions.
+- Result: Keep the indexed hot row snapshot change. `RowSnapshotState` now
+  builds row-keyed indexes next to the cached `TurnPersistenceSnapshot`, uses
+  those indexes for targeted delta apply, and keeps the plain Vec snapshot for
+  persistence snapshots and replay. Deletes still preserve row order and
+  rebuild only the touched collection index; common upserts replace by key
+  without scanning the whole Vec. Replay remains on the unindexed
+  `apply_delta` path so existing delta logs stay compatible.
+- High-concurrency turn-state diagnostic: Postgres-only `turn_lifecycle` with
+  `LATENCY_CONCURRENCY=32,100`, `LATENCY_PAYLOAD_BYTES=2048`,
+  `LATENCY_SAMPLES=64`, pool size 2, and the default 30 warmups completed with
+  zero errors and stable state hash `660086a8484d5400`. c32 p95 improved from
+  cycle 38's 2142ms to 258ms and throughput from 19.96 to 138.85 ops/sec.
+  c100 p95 improved from 3519ms to 790ms and throughput from 18.18 to
+  80.95 ops/sec.
+- Dev score: `harness/latency/score.sh --dev` passed all 54 result rows and
+  36 comparisons with zero failures. Dev-shaped `turn_lifecycle` stayed far
+  ahead of libSQL: libSQL c4 p95 7816ms, Postgres pool-1 c4 p95 32ms, and
+  Postgres pool-2 c4 p95 35ms, with matching state hash `7fc054292d2f85f0`.
+- Full-flow stress signal: `ironclaw_stress` mixed-user-session with Postgres
+  row turn state and pool size 2 completed c32 128/128 and c100 200/200 with
+  zero failures. c32 operation p95 was 158.8ms, throughput 280.2 ops/sec, and
+  turn-store p95 30.8ms. c100 operation p95 was 467.7ms, throughput
+  287.4 ops/sec, and turn-store p95 85.5ms. The resource governor remains the
+  top full-flow bottleneck at c100 with p95 271.0ms.
+- Validation: `cargo fmt -p ironclaw_turns`, `cargo check -p
+  ironclaw_turns`, `cargo test -p ironclaw_turns --test
+  filesystem_turn_state_contract
+  filesystem_turn_state_row_store_persists_rows_without_state_blob`, `cargo
+  test -p ironclaw_turns --test loop_checkpoint_store_contract
+  filesystem_turn_state_row_store_loop_checkpoint_roundtrip_and_snapshot`,
+  focused c32/c100 lifecycle diagnostic, full dev score, and the c32/c100
+  mixed-flow stress slices passed.
+- Next lever: the current change removes the dominant O(snapshot) Vec scan in
+  hot row delta apply. It does not yet shard the in-memory transition authority
+  per run; if focused c100 p95 around 790ms is still too high, implement
+  per-run locks for targeted transitions next, with the global view retained
+  only for `claim_next_run`/cross-run operations and journal ordering still
+  centralized in the flusher.

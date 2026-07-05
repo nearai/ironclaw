@@ -72,6 +72,79 @@ struct RowSnapshotState {
     snapshot: TurnPersistenceSnapshot,
     store: Arc<InMemoryTurnStateStore>,
     latest_event_cursor: EventCursor,
+    indexes: RowSnapshotIndexes,
+}
+
+impl RowSnapshotState {
+    fn new(
+        snapshot: TurnPersistenceSnapshot,
+        store: Arc<InMemoryTurnStateStore>,
+    ) -> Result<Self, TurnError> {
+        let latest_event_cursor = latest_event_cursor(&snapshot);
+        let indexes = RowSnapshotIndexes::from_snapshot(&snapshot)?;
+        Ok(Self {
+            snapshot,
+            store,
+            latest_event_cursor,
+            indexes,
+        })
+    }
+
+    fn apply_delta(&mut self, delta: SnapshotDelta) -> Result<(), TurnError> {
+        let latest_event_cursor = latest_event_cursor_after_delta(self.latest_event_cursor, &delta);
+        apply_delta_indexed(&mut self.snapshot, &mut self.indexes, delta)?;
+        self.latest_event_cursor = latest_event_cursor;
+        Ok(())
+    }
+
+    fn run_record(&self, run_id: TurnRunId) -> Option<TurnRunRecord> {
+        self.indexes
+            .runs
+            .get(&run_id.to_string())
+            .and_then(|index| self.snapshot.runs.get(*index))
+            .cloned()
+    }
+}
+
+#[derive(Debug, Default)]
+struct RowSnapshotIndexes {
+    turns: HashMap<String, usize>,
+    runs: HashMap<String, usize>,
+    active_locks: HashMap<String, usize>,
+    checkpoints: HashMap<String, usize>,
+    loop_checkpoints: HashMap<String, usize>,
+    idempotency_records: HashMap<String, usize>,
+    events: HashMap<String, usize>,
+    admission_reservations: HashMap<String, usize>,
+    spawn_tree_reservations: HashMap<String, usize>,
+}
+
+impl RowSnapshotIndexes {
+    fn from_snapshot(snapshot: &TurnPersistenceSnapshot) -> Result<Self, TurnError> {
+        Ok(Self {
+            turns: indexed_records(&snapshot.turns, &turn_record_key)?,
+            runs: indexed_records(&snapshot.runs, &run_record_key)?,
+            active_locks: indexed_records(&snapshot.active_locks, &active_lock_record_key)?,
+            checkpoints: indexed_records(&snapshot.checkpoints, &checkpoint_record_key)?,
+            loop_checkpoints: indexed_records(
+                &snapshot.loop_checkpoints,
+                &loop_checkpoint_record_key,
+            )?,
+            idempotency_records: indexed_records(
+                &snapshot.idempotency_records,
+                &idempotency_record_key,
+            )?,
+            events: indexed_records(&snapshot.events, &event_record_key)?,
+            admission_reservations: indexed_records(
+                &snapshot.admission_reservations,
+                &admission_reservation_record_key,
+            )?,
+            spawn_tree_reservations: indexed_records(
+                &snapshot.spawn_tree_reservations,
+                &spawn_tree_reservation_record_key,
+            )?,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, serde::Deserialize)]
@@ -363,12 +436,7 @@ where
         self.replay_deltas(&mut snapshot).await?;
         let store = self.build_in_memory_store(snapshot)?;
         let snapshot = store.persistence_snapshot();
-        let latest_event_cursor = latest_event_cursor(&snapshot);
-        Ok(RowSnapshotState {
-            snapshot,
-            store: Arc::new(store),
-            latest_event_cursor,
-        })
+        RowSnapshotState::new(snapshot, Arc::new(store))
     }
 
     async fn replay_deltas(&self, snapshot: &mut TurnPersistenceSnapshot) -> Result<(), TurnError> {
@@ -611,12 +679,7 @@ where
                     return Err(error);
                 }
             };
-            let latest_event_cursor = latest_event_cursor(&new_snapshot);
-            *guard = Some(RowSnapshotState {
-                snapshot: new_snapshot,
-                store,
-                latest_event_cursor,
-            });
+            *guard = Some(RowSnapshotState::new(new_snapshot, store)?);
             Ok((ack, value))
         };
 
@@ -659,10 +722,7 @@ where
         }
         let mut guard = self.snapshot_state.lock().await;
         if let Some(state) = guard.as_mut() {
-            let latest_event_cursor =
-                latest_event_cursor_after_delta(state.latest_event_cursor, &delta);
-            apply_delta(&mut state.snapshot, delta)?;
-            state.latest_event_cursor = latest_event_cursor;
+            state.apply_delta(delta)?;
         }
         Ok(())
     }
@@ -697,13 +757,7 @@ where
                 RunnerLeaseOverlay::None => Arc::clone(&state.store),
                 RunnerLeaseOverlay::Run(run_id) => {
                     let store = Arc::clone(&state.store);
-                    if let Some(run) = state
-                        .snapshot
-                        .runs
-                        .iter()
-                        .find(|record| record.run_id == run_id)
-                        .cloned()
-                    {
+                    if let Some(run) = state.run_record(run_id) {
                         let overlaid = self.runner_lease_store().overlay_run_record(run).await?;
                         store.overlay_runner_lease_record(overlaid)?;
                     }
@@ -731,9 +785,7 @@ where
                 store.as_ref(),
                 &value,
             )?;
-            let latest_event_cursor =
-                latest_event_cursor_after_delta(state.latest_event_cursor, &delta);
-            if let Err(error) = apply_delta(&mut state.snapshot, delta.clone()) {
+            if let Err(error) = state.apply_delta(delta.clone()) {
                 *guard = None;
                 return Err(error);
             }
@@ -744,7 +796,6 @@ where
                     return Err(error);
                 }
             };
-            state.latest_event_cursor = latest_event_cursor;
             state.store = store;
             Ok((ack, value))
         };
@@ -1482,6 +1533,47 @@ impl From<TurnError> for RowPersistError {
     }
 }
 
+fn turn_record_key(record: &TurnRecord) -> Result<String, TurnError> {
+    Ok(record.turn_id.to_string())
+}
+
+fn run_record_key(record: &TurnRunRecord) -> Result<String, TurnError> {
+    Ok(record.run_id.to_string())
+}
+
+fn active_lock_record_key(record: &TurnActiveLockRecord) -> Result<String, TurnError> {
+    hash_key(&record.key)
+}
+
+fn checkpoint_record_key(record: &TurnCheckpointRecord) -> Result<String, TurnError> {
+    Ok(record.checkpoint_id.as_uuid().to_string())
+}
+
+fn loop_checkpoint_record_key(record: &LoopCheckpointRecord) -> Result<String, TurnError> {
+    Ok(record.checkpoint_id.as_uuid().to_string())
+}
+
+fn idempotency_record_key(record: &TurnIdempotencyRecord) -> Result<String, TurnError> {
+    hash_key(record)
+}
+
+fn event_record_key(record: &TurnLifecycleEvent) -> Result<String, TurnError> {
+    Ok(format!("{:020}", record.cursor.0))
+}
+
+fn admission_reservation_record_key(
+    record: &TurnAdmissionReservationRecord,
+) -> Result<String, TurnError> {
+    Ok(record.run_id.to_string())
+}
+
+fn spawn_tree_reservation_record_key(record: &SpawnTreeReservation) -> Result<String, TurnError> {
+    hash_key(&SpawnTreeReservationKeyForPath {
+        scope: &record.scope,
+        root_run_id: record.root_run_id,
+    })
+}
+
 fn snapshot_delta(
     old: &TurnPersistenceSnapshot,
     new: &TurnPersistenceSnapshot,
@@ -1639,6 +1731,102 @@ fn apply_delta(
     Ok(())
 }
 
+fn apply_delta_indexed(
+    snapshot: &mut TurnPersistenceSnapshot,
+    indexes: &mut RowSnapshotIndexes,
+    delta: SnapshotDelta,
+) -> Result<(), TurnError> {
+    if !delta.turns_upsert.is_empty() || !delta.turns_delete.is_empty() {
+        apply_delta_collection_indexed(
+            &mut snapshot.turns,
+            &mut indexes.turns,
+            delta.turns_upsert,
+            delta.turns_delete,
+            turn_record_key,
+        )?;
+    }
+    if !delta.runs_upsert.is_empty() || !delta.runs_delete.is_empty() {
+        apply_delta_collection_indexed(
+            &mut snapshot.runs,
+            &mut indexes.runs,
+            delta.runs_upsert,
+            delta.runs_delete,
+            run_record_key,
+        )?;
+    }
+    if !delta.active_locks_upsert.is_empty() || !delta.active_locks_delete.is_empty() {
+        apply_delta_collection_indexed(
+            &mut snapshot.active_locks,
+            &mut indexes.active_locks,
+            delta.active_locks_upsert,
+            delta.active_locks_delete,
+            active_lock_record_key,
+        )?;
+    }
+    if !delta.checkpoints_upsert.is_empty() || !delta.checkpoints_delete.is_empty() {
+        apply_delta_collection_indexed(
+            &mut snapshot.checkpoints,
+            &mut indexes.checkpoints,
+            delta.checkpoints_upsert,
+            delta.checkpoints_delete,
+            checkpoint_record_key,
+        )?;
+    }
+    if !delta.loop_checkpoints_upsert.is_empty() || !delta.loop_checkpoints_delete.is_empty() {
+        apply_delta_collection_indexed(
+            &mut snapshot.loop_checkpoints,
+            &mut indexes.loop_checkpoints,
+            delta.loop_checkpoints_upsert,
+            delta.loop_checkpoints_delete,
+            loop_checkpoint_record_key,
+        )?;
+    }
+    if !delta.idempotency_upsert.is_empty() || !delta.idempotency_delete.is_empty() {
+        apply_delta_collection_indexed(
+            &mut snapshot.idempotency_records,
+            &mut indexes.idempotency_records,
+            delta.idempotency_upsert,
+            delta.idempotency_delete,
+            idempotency_record_key,
+        )?;
+    }
+    if !delta.events_upsert.is_empty() || !delta.events_delete.is_empty() {
+        apply_delta_collection_indexed(
+            &mut snapshot.events,
+            &mut indexes.events,
+            delta.events_upsert,
+            delta.events_delete,
+            event_record_key,
+        )?;
+    }
+    if !delta.admission_reservations_upsert.is_empty()
+        || !delta.admission_reservations_delete.is_empty()
+    {
+        apply_delta_collection_indexed(
+            &mut snapshot.admission_reservations,
+            &mut indexes.admission_reservations,
+            delta.admission_reservations_upsert,
+            delta.admission_reservations_delete,
+            admission_reservation_record_key,
+        )?;
+    }
+    if !delta.spawn_tree_reservations_upsert.is_empty()
+        || !delta.spawn_tree_reservations_delete.is_empty()
+    {
+        apply_delta_collection_indexed(
+            &mut snapshot.spawn_tree_reservations,
+            &mut indexes.spawn_tree_reservations,
+            delta.spawn_tree_reservations_upsert,
+            delta.spawn_tree_reservations_delete,
+            spawn_tree_reservation_record_key,
+        )?;
+    }
+    if let Some(event_retention_floor) = delta.event_retention_floor {
+        snapshot.event_retention_floor = event_retention_floor;
+    }
+    Ok(())
+}
+
 fn delta_collection<T, K>(
     old: &[T],
     new: &[T],
@@ -1662,6 +1850,46 @@ where
         .cloned()
         .collect();
     Ok((upsert, delete))
+}
+
+fn apply_delta_collection_indexed<T, K>(
+    records: &mut Vec<T>,
+    index: &mut HashMap<String, usize>,
+    upsert: Vec<T>,
+    delete: Vec<String>,
+    key_fn: K,
+) -> Result<(), TurnError>
+where
+    K: Fn(&T) -> Result<String, TurnError>,
+{
+    if !delete.is_empty() {
+        let deleted = delete.into_iter().collect::<HashSet<_>>();
+        let mut retained = Vec::with_capacity(records.len());
+        for record in records.drain(..) {
+            if !deleted.contains(&key_fn(&record)?) {
+                retained.push(record);
+            }
+        }
+        *records = retained;
+        *index = indexed_records(records, &key_fn)?;
+    }
+
+    for record in upsert {
+        let key = key_fn(&record)?;
+        if let Some(record_index) = index.get(&key).copied() {
+            if record_index >= records.len() {
+                return Err(TurnError::Unavailable {
+                    reason: "row-store snapshot index is out of bounds".to_string(),
+                });
+            }
+            records[record_index] = record;
+        } else {
+            let record_index = records.len();
+            records.push(record);
+            index.insert(key, record_index);
+        }
+    }
+    Ok(())
 }
 
 fn apply_delta_collection<T, K>(
@@ -1705,6 +1933,17 @@ where
         }
     }
     Ok(None)
+}
+
+fn indexed_records<T, K>(records: &[T], key_fn: &K) -> Result<HashMap<String, usize>, TurnError>
+where
+    K: Fn(&T) -> Result<String, TurnError>,
+{
+    let mut index = HashMap::with_capacity(records.len());
+    for (record_index, record) in records.iter().enumerate() {
+        index.insert(key_fn(record)?, record_index);
+    }
+    Ok(index)
 }
 
 fn keyed_records<T, K>(records: &[T], key_fn: &K) -> Result<HashMap<String, T>, RowPersistError>
