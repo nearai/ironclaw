@@ -13,12 +13,31 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderMap, Method, Request, StatusCode};
-use ironclaw_product_workflow::{RebornServicesApi, WebUiAuthenticatedCaller};
+use ironclaw_product_workflow::{RebornServicesApi, ResolvedBinding, WebUiAuthenticatedCaller};
 use ironclaw_webui_v2::{
     DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State, webui_v2_router,
 };
 use serde_json::Value;
 use tower::ServiceExt;
+
+/// Build the `WebUiAuthenticatedCaller` that resolves to the SAME
+/// `TurnScope`/`ThreadScope` owner a harness turn actually ran under.
+/// `ResolvedBinding.subject_user_id` is the execution-scope user
+/// (`thread_scope_from_binding` stores thread history under it); this
+/// Direct-chat harness always sets it, but falls back to `actor_user_id` for
+/// parity with legacy bindings that never set an explicit subject.
+pub(crate) fn webui_caller_for(binding: &ResolvedBinding) -> WebUiAuthenticatedCaller {
+    let user_id = binding
+        .subject_user_id
+        .clone()
+        .unwrap_or_else(|| binding.actor_user_id.clone());
+    WebUiAuthenticatedCaller::new(
+        binding.tenant_id.clone(),
+        user_id,
+        binding.agent_id.clone(),
+        binding.project_id.clone(),
+    )
+}
 
 /// Mount the real WebUI v2 router over `services`, with `caller` injected as
 /// the authenticated-caller `Extension` (mirrors production's bearer

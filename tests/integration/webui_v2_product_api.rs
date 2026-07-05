@@ -26,36 +26,12 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use ironclaw_filesystem::{CompositeRootFilesystem, LibSqlRootFilesystem};
 use ironclaw_host_api::{CapabilityId, EffectKind, ExtensionId, PermissionMode};
-use ironclaw_product_workflow::{
-    RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornServices, WebUiAuthenticatedCaller,
-};
+use ironclaw_product_workflow::{RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornServices};
 use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
 use reborn_support::session_thread::RebornThreadHarness;
-use reborn_support::webui_mount::{get_json, mount_webui_v2_router, post_json};
-
-/// Build the `WebUiAuthenticatedCaller` that resolves to the SAME
-/// `TurnScope`/`ThreadScope` owner a harness turn actually ran under.
-/// `ResolvedBinding.subject_user_id` is the execution-scope user (`None` only
-/// for routes without an explicit subject, which this Direct-chat harness
-/// always has); `thread_scope_from_binding` stores thread history under
-/// `subject_user_id`, so the caller's single `user_id` must match it, falling
-/// back to `actor_user_id` for parity with legacy bindings that never set a
-/// subject.
-fn webui_caller_for(h: &RebornIntegrationHarness) -> WebUiAuthenticatedCaller {
-    let user_id = h
-        .binding
-        .subject_user_id
-        .clone()
-        .unwrap_or_else(|| h.binding.actor_user_id.clone());
-    WebUiAuthenticatedCaller::new(
-        h.binding.tenant_id.clone(),
-        user_id,
-        h.binding.agent_id.clone(),
-        h.binding.project_id.clone(),
-    )
-}
+use reborn_support::webui_mount::{get_json, mount_webui_v2_router, post_json, webui_caller_for};
 
 #[tokio::test]
 async fn thread_history_cold_get_and_libsql_reopen() {
@@ -100,7 +76,7 @@ async fn thread_history_cold_get_and_libsql_reopen() {
     .expect("fresh thread harness over reopened composite");
 
     let services = RebornServices::new(fresh_thread_harness.service.clone(), h.coordinator.clone());
-    let caller = webui_caller_for(&h);
+    let caller = webui_caller_for(&h.binding);
     let router = mount_webui_v2_router(Arc::new(services), caller);
 
     let (status, body) = get_json(
@@ -141,7 +117,7 @@ async fn thread_history_cold_get_after_in_memory_reopen() {
         .service_instance()
         .expect("fresh in-memory service instance");
     let services = RebornServices::new(Arc::new(fresh_service), h.coordinator.clone());
-    let caller = webui_caller_for(&h);
+    let caller = webui_caller_for(&h.binding);
     let router = mount_webui_v2_router(Arc::new(services), caller);
 
     let (status, body) = get_json(
@@ -216,7 +192,7 @@ async fn settings_tool_permission_put_then_cold_read() {
     let persistent_policies = capability_harness
         .persistent_approval_policies_for_test()
         .expect("local-dev persistent approval-policy store");
-    let caller = webui_caller_for(&h);
+    let caller = webui_caller_for(&h.binding);
 
     let services = RebornServices::new(h.thread_harness.service.clone(), h.coordinator.clone())
         .with_operator_approval_config(
