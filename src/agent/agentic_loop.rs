@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::io;
 
 use crate::agent::session::PendingApproval;
 use crate::error::Error;
@@ -56,6 +57,8 @@ pub struct AgenticLoopConfig {
     pub max_iterations: usize,
     pub enable_tool_intent_nudge: bool,
     pub max_tool_intent_nudges: u32,
+    pub repetition_breaker_enabled: bool,
+    pub repetition_breaker_threshold: usize,
 }
 
 impl Default for AgenticLoopConfig {
@@ -64,6 +67,8 @@ impl Default for AgenticLoopConfig {
             max_iterations: 50,
             enable_tool_intent_nudge: true,
             max_tool_intent_nudges: 2,
+            repetition_breaker_enabled: true,
+            repetition_breaker_threshold: 5,
         }
     }
 }
@@ -152,6 +157,143 @@ const DUPLICATE_WARNING_THRESHOLD: u32 = 3;
 /// Threshold: after this many consecutive duplicate failures, force text-only mode.
 const DUPLICATE_FORCE_TEXT_THRESHOLD: u32 = 5;
 
+const REPETITION_BREAKER_ARG_PREFIX_CHARS: usize = 200;
+const REPETITION_BREAKER_ARG_PREFIX_BYTES: usize = 300;
+
+/// Corrective injected when the model repeats the same tool call.
+///
+/// Inspired by the LAB Meta-Harness repetition loop-breaker technique:
+/// Lee et al., "Meta-Harness: End-to-End Optimization of Model Harnesses",
+/// arXiv:2603.28052 (MIT).
+const REPETITION_BREAKER_MESSAGE: &str = "\
+You appear to be stuck repeating the same tool call. Repeating it again with \
+the same inputs is unlikely to change the result. Change strategy: diagnose \
+the problem differently or use a different method. Reference inputs by \
+workspace-relative paths rather than absolute machine paths. If one file is \
+unreadable or blocked, proceed without that single file if possible. If you \
+already have enough information, produce the final answer or deliverable now.";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ToolCallPrefixSignature {
+    name: String,
+    arguments_prefix: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ToolCallBatchSignature {
+    calls: Vec<ToolCallPrefixSignature>,
+}
+
+struct PrefixWriter {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+
+impl PrefixWriter {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::with_capacity(limit),
+            limit,
+        }
+    }
+}
+
+impl io::Write for PrefixWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let remaining = self.limit.saturating_sub(self.bytes.len());
+        if remaining == 0 {
+            return Err(io::Error::other("json prefix budget exhausted"));
+        }
+
+        let take = remaining.min(buf.len());
+        self.bytes.extend_from_slice(&buf[..take]);
+        if take < buf.len() {
+            return Err(io::Error::other("json prefix budget exhausted"));
+        }
+
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn bounded_json_prefix(value: &serde_json::Value) -> String {
+    let mut writer = PrefixWriter::new(REPETITION_BREAKER_ARG_PREFIX_BYTES);
+    let _ = serde_json::to_writer(&mut writer, value);
+    String::from_utf8_lossy(&writer.bytes)
+        .chars()
+        .take(REPETITION_BREAKER_ARG_PREFIX_CHARS)
+        .collect()
+}
+
+fn tool_call_prefix_signature(tool_call: &ToolCall) -> ToolCallPrefixSignature {
+    ToolCallPrefixSignature {
+        name: tool_call.name.clone(),
+        arguments_prefix: bounded_json_prefix(&tool_call.arguments),
+    }
+}
+
+fn tool_call_batch_signature(tool_calls: &[ToolCall]) -> ToolCallBatchSignature {
+    ToolCallBatchSignature {
+        calls: tool_calls.iter().map(tool_call_prefix_signature).collect(),
+    }
+}
+
+fn tool_call_batch_names_match(
+    tool_calls: &[ToolCall],
+    signature: &ToolCallBatchSignature,
+) -> bool {
+    tool_calls.len() == signature.calls.len()
+        && tool_calls
+            .iter()
+            .zip(&signature.calls)
+            .all(|(tool_call, signed)| tool_call.name.as_str() == signed.name.as_str())
+}
+
+fn tool_call_batch_matches_signature(
+    tool_calls: &[ToolCall],
+    signature: &ToolCallBatchSignature,
+) -> bool {
+    tool_call_batch_names_match(tool_calls, signature)
+        && tool_call_batch_signature(tool_calls) == *signature
+}
+
+/// Return the contiguous trailing run of identical assistant tool-call batches.
+///
+/// The trailing run is measured across the conversation suffix of assistant
+/// messages that contain tool calls, skipping tool results and other non-tool
+/// messages. Each batch signature preserves the ordered list of tool-call
+/// `(name, bounded serialized-argument prefix)` pairs. Returns `None` when the
+/// context contains no assistant tool-call messages.
+fn trailing_tool_call_run(messages: &[ChatMessage]) -> Option<(usize, ToolCallBatchSignature)> {
+    let mut trailing_signature = None;
+    let mut trailing_count: usize = 0;
+
+    for tool_calls in messages
+        .iter()
+        .rev()
+        .filter(|message| message.role == ironclaw_llm::Role::Assistant)
+        .filter_map(|message| message.tool_calls.as_ref())
+        .filter(|tool_calls| !tool_calls.is_empty())
+    {
+        match &trailing_signature {
+            None => {
+                let signature = tool_call_batch_signature(tool_calls);
+                trailing_signature = Some(signature);
+                trailing_count = 1;
+            }
+            Some(existing) if tool_call_batch_matches_signature(tool_calls, existing) => {
+                trailing_count += 1;
+            }
+            Some(_) => break,
+        }
+    }
+
+    trailing_signature.map(|signature| (trailing_count, signature))
+}
+
 /// Tracks repeated identical tool calls that all fail, and escalates.
 ///
 /// Fingerprints each batch of tool calls by hashing `(tool_name, canonicalized_args)`
@@ -223,14 +365,48 @@ pub async fn run_agentic_loop(
     // non-consecutive truncations still escalate to force_text.
     let mut truncation_count: u32 = 0;
     let mut dup_tracker = DuplicateToolCallTracker::new();
+    let mut repetition_breaker_fired_for: Option<ToolCallBatchSignature> = None;
 
     for iteration in 1..=config.max_iterations {
+        let mut suppress_repetition_breaker = false;
         // Check for external signals (stop, cancellation, user messages)
         match delegate.check_signals().await {
             LoopSignal::Continue => {}
             LoopSignal::Stop => return Ok(LoopOutcome::Stopped),
             LoopSignal::InjectMessage(msg) => {
                 reason_ctx.messages.push(ChatMessage::user(&msg));
+                repetition_breaker_fired_for = None;
+                suppress_repetition_breaker = true;
+            }
+        }
+
+        if !suppress_repetition_breaker
+            && config.repetition_breaker_enabled
+            && config.repetition_breaker_threshold > 0
+        {
+            // Compute the trailing identical-tool-call run once; inject a single
+            // corrective per stuck streak (keyed on the call signature) and reset
+            // the guard once the streak breaks.
+            match trailing_tool_call_run(&reason_ctx.messages) {
+                Some((streak_len, signature))
+                    if streak_len >= config.repetition_breaker_threshold =>
+                {
+                    if repetition_breaker_fired_for.as_ref() != Some(&signature) {
+                        tracing::info!(
+                            iteration,
+                            streak_len,
+                            tool = ?signature,
+                            "Repeated tool-call loop breaker injecting corrective message"
+                        );
+                        reason_ctx
+                            .messages
+                            .push(ChatMessage::user(REPETITION_BREAKER_MESSAGE));
+                        repetition_breaker_fired_for = Some(signature);
+                    }
+                }
+                _ => {
+                    repetition_breaker_fired_for = None;
+                }
             }
         }
 
@@ -299,6 +475,7 @@ pub async fn run_agentic_loop(
 
                 // Text response breaks any duplicate tool call streak.
                 dup_tracker.reset();
+                repetition_breaker_fired_for = None;
 
                 match delegate
                     .handle_text_response(&text, output.metadata, reason_ctx)
@@ -455,9 +632,34 @@ mod tests {
         }
     }
 
+    fn test_tool_call(name: &str, arguments: serde_json::Value) -> ToolCall {
+        ToolCall {
+            id: "call_1".to_string(),
+            name: name.to_string(),
+            arguments,
+            reasoning: None,
+            signature: None,
+            arguments_parse_error: None,
+        }
+    }
+
+    fn assistant_tool_call_message(name: &str, arguments: serde_json::Value) -> ChatMessage {
+        ChatMessage::assistant_with_tool_calls(None, vec![test_tool_call(name, arguments)])
+    }
+
+    fn assistant_tool_call_batch_message(calls: Vec<ToolCall>) -> ChatMessage {
+        ChatMessage::assistant_with_tool_calls(None, calls)
+    }
+
+    fn trailing_identical_tool_calls(messages: &[ChatMessage]) -> usize {
+        trailing_tool_call_run(messages)
+            .map(|(count, _)| count)
+            .unwrap_or(0)
+    }
+
     /// Configurable mock delegate for testing run_agentic_loop.
     struct MockDelegate {
-        signal: Mutex<LoopSignal>,
+        signals: Mutex<Vec<LoopSignal>>,
         llm_responses: Mutex<Vec<RespondOutput>>,
         tool_exec_count: AtomicUsize,
         tool_exec_outcome: Mutex<Option<LoopOutcome>>,
@@ -472,7 +674,7 @@ mod tests {
     impl MockDelegate {
         fn new(responses: Vec<RespondOutput>) -> Self {
             Self {
-                signal: Mutex::new(LoopSignal::Continue),
+                signals: Mutex::new(Vec::new()),
                 llm_responses: Mutex::new(responses),
                 tool_exec_count: AtomicUsize::new(0),
                 tool_exec_outcome: Mutex::new(None),
@@ -485,7 +687,12 @@ mod tests {
         }
 
         fn with_signal(mut self, signal: LoopSignal) -> Self {
-            self.signal = Mutex::new(signal);
+            self.signals = Mutex::new(vec![signal]);
+            self
+        }
+
+        fn with_signals(mut self, signals: Vec<LoopSignal>) -> Self {
+            self.signals = Mutex::new(signals);
             self
         }
 
@@ -498,8 +705,12 @@ mod tests {
     #[async_trait]
     impl LoopDelegate for MockDelegate {
         async fn check_signals(&self) -> LoopSignal {
-            let mut sig = self.signal.lock().await;
-            std::mem::replace(&mut *sig, LoopSignal::Continue)
+            let mut signals = self.signals.lock().await;
+            if signals.is_empty() {
+                LoopSignal::Continue
+            } else {
+                signals.remove(0)
+            }
         }
 
         async fn before_llm_call(
@@ -543,13 +754,18 @@ mod tests {
 
         async fn execute_tool_calls(
             &self,
-            _tool_calls: Vec<ToolCall>,
-            _content: Option<String>,
+            tool_calls: Vec<ToolCall>,
+            content: Option<String>,
             reason_ctx: &mut ReasoningContext,
-            _reasoning: Option<String>,
-            _reasoning_details: Option<ReasoningDetails>,
+            reasoning: Option<String>,
+            reasoning_details: Option<ReasoningDetails>,
         ) -> Result<Option<LoopOutcome>, crate::error::Error> {
             self.tool_exec_count.fetch_add(1, Ordering::SeqCst);
+            reason_ctx.messages.push(
+                ChatMessage::assistant_with_tool_calls(content, tool_calls)
+                    .with_reasoning_details(reasoning_details)
+                    .with_reasoning(reasoning),
+            );
             reason_ctx
                 .messages
                 .push(ChatMessage::user("tool result stub"));
@@ -853,6 +1069,7 @@ mod tests {
             max_iterations: 10,
             enable_tool_intent_nudge: true,
             max_tool_intent_nudges: 2,
+            ..Default::default()
         };
 
         let outcome = run_agentic_loop(&delegate, &reasoning, &mut ctx, &config)
@@ -918,6 +1135,126 @@ mod tests {
     fn test_truncate_multibyte_safe() {
         let result = truncate_for_preview("café", 4);
         assert_eq!(result, "caf...");
+    }
+
+    #[test]
+    fn trailing_identical_tool_calls_returns_zero_without_tool_calls() {
+        let messages = vec![
+            ChatMessage::user("hello"),
+            ChatMessage::assistant("plain response"),
+        ];
+
+        assert_eq!(trailing_identical_tool_calls(&messages), 0);
+    }
+
+    #[test]
+    fn trailing_identical_tool_calls_counts_only_trailing_distinct_call() {
+        let messages = vec![
+            assistant_tool_call_message("read_file", serde_json::json!({"path": "a.md"})),
+            assistant_tool_call_message("read_file", serde_json::json!({"path": "b.md"})),
+        ];
+
+        assert_eq!(trailing_identical_tool_calls(&messages), 1);
+    }
+
+    #[test]
+    fn trailing_identical_tool_calls_counts_identical_run() {
+        let messages = vec![
+            assistant_tool_call_message("read_file", serde_json::json!({"path": "a.md"})),
+            assistant_tool_call_message("read_file", serde_json::json!({"path": "a.md"})),
+            assistant_tool_call_message("read_file", serde_json::json!({"path": "a.md"})),
+            assistant_tool_call_message("read_file", serde_json::json!({"path": "a.md"})),
+            assistant_tool_call_message("read_file", serde_json::json!({"path": "a.md"})),
+        ];
+
+        assert_eq!(trailing_identical_tool_calls(&messages), 5);
+    }
+
+    #[test]
+    fn trailing_tool_call_run_returns_count_and_batch_signature() {
+        let args = serde_json::json!({"path": "a.md"});
+        let messages = vec![
+            ChatMessage::user("please inspect this"),
+            assistant_tool_call_message("read_file", args.clone()),
+            ChatMessage::user("tool result"),
+            assistant_tool_call_message("read_file", args),
+        ];
+
+        let (count, signature) =
+            trailing_tool_call_run(&messages).expect("expected trailing tool-call run");
+
+        assert_eq!(count, 2);
+        assert_eq!(
+            signature,
+            ToolCallBatchSignature {
+                calls: vec![ToolCallPrefixSignature {
+                    name: "read_file".to_string(),
+                    arguments_prefix: serde_json::json!({"path": "a.md"}).to_string(),
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn trailing_identical_tool_calls_counts_repeated_multi_tool_batches() {
+        let batch = || {
+            assistant_tool_call_batch_message(vec![
+                test_tool_call("read_file", serde_json::json!({"path": "a.md"})),
+                test_tool_call("parse_file", serde_json::json!({"path": "a.md"})),
+            ])
+        };
+        let messages = vec![batch(), ChatMessage::user("tool result"), batch(), batch()];
+
+        assert_eq!(trailing_identical_tool_calls(&messages), 3);
+    }
+
+    #[test]
+    fn trailing_identical_tool_calls_respects_multi_tool_order() {
+        let messages = vec![
+            assistant_tool_call_batch_message(vec![
+                test_tool_call("read_file", serde_json::json!({"path": "a.md"})),
+                test_tool_call("parse_file", serde_json::json!({"path": "a.md"})),
+            ]),
+            assistant_tool_call_batch_message(vec![
+                test_tool_call("parse_file", serde_json::json!({"path": "a.md"})),
+                test_tool_call("read_file", serde_json::json!({"path": "a.md"})),
+            ]),
+        ];
+
+        assert_eq!(trailing_identical_tool_calls(&messages), 1);
+    }
+
+    #[test]
+    fn trailing_identical_tool_calls_ignores_argument_drift_after_prefix() {
+        let stable_prefix = "x".repeat(240);
+        let messages = vec![
+            assistant_tool_call_message(
+                "shell",
+                serde_json::json!({"cmd": format!("{stable_prefix} - 338")}),
+            ),
+            assistant_tool_call_message(
+                "shell",
+                serde_json::json!({"cmd": format!("{stable_prefix} - 340")}),
+            ),
+            assistant_tool_call_message(
+                "shell",
+                serde_json::json!({"cmd": format!("{stable_prefix} - 342")}),
+            ),
+        ];
+
+        assert_eq!(trailing_identical_tool_calls(&messages), 3);
+    }
+
+    #[test]
+    fn trailing_identical_tool_calls_resets_on_different_tool_name() {
+        let args = serde_json::json!({"path": "a.md"});
+        let messages = vec![
+            assistant_tool_call_message("read_file", args.clone()),
+            assistant_tool_call_message("read_file", args.clone()),
+            assistant_tool_call_message("parse_file", args),
+        ];
+
+        assert_eq!(trailing_identical_tool_calls(&messages), 1);
     }
 
     #[tokio::test]
@@ -1126,6 +1463,175 @@ mod tests {
         assert_eq!(
             DuplicateToolCallTracker::fingerprint(&calls_a),
             DuplicateToolCallTracker::fingerprint(&calls_b),
+        );
+    }
+
+    #[tokio::test]
+    async fn test_repetition_breaker_injects_once_until_streak_breaks() {
+        let call_a = || test_tool_call("read_file", serde_json::json!({"path": "/tmp/stuck.txt"}));
+        let call_b = || test_tool_call("parse_file", serde_json::json!({"path": "/tmp/stuck.txt"}));
+        let delegate = MockDelegate::new(vec![
+            tool_calls_output(vec![call_a()]),
+            tool_calls_output(vec![call_a()]),
+            tool_calls_output(vec![call_a()]),
+            tool_calls_output(vec![call_a()]),
+            tool_calls_output(vec![call_b()]),
+            tool_calls_output(vec![call_b()]),
+            tool_calls_output(vec![call_b()]),
+            text_output("Done."),
+        ]);
+        let reasoning = stub_reasoning();
+        let mut ctx = ReasoningContext::new();
+        let config = AgenticLoopConfig {
+            max_iterations: 8,
+            repetition_breaker_enabled: true,
+            repetition_breaker_threshold: 3,
+            ..Default::default()
+        };
+
+        let outcome = run_agentic_loop(&delegate, &reasoning, &mut ctx, &config)
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, LoopOutcome::Response(_)));
+        let corrective_count = ctx
+            .messages
+            .iter()
+            .filter(|m| {
+                m.role == ironclaw_llm::Role::User
+                    && m.content.contains("stuck repeating the same tool call")
+            })
+            .count();
+        assert_eq!(
+            corrective_count, 2,
+            "Should inject once for the first streak and again only after a different streak forms"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_repetition_breaker_disabled_is_noop() {
+        let same_call =
+            || test_tool_call("read_file", serde_json::json!({"path": "/tmp/stuck.txt"}));
+        let delegate = MockDelegate::new(vec![
+            tool_calls_output(vec![same_call()]),
+            tool_calls_output(vec![same_call()]),
+            tool_calls_output(vec![same_call()]),
+            text_output("Done."),
+        ]);
+        let reasoning = stub_reasoning();
+        let mut ctx = ReasoningContext::new();
+        let config = AgenticLoopConfig {
+            max_iterations: 4,
+            repetition_breaker_enabled: false,
+            repetition_breaker_threshold: 3,
+            ..Default::default()
+        };
+
+        let outcome = run_agentic_loop(&delegate, &reasoning, &mut ctx, &config)
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, LoopOutcome::Response(_)));
+        assert!(
+            ctx.messages
+                .iter()
+                .all(|m| !m.content.contains("stuck repeating the same tool call")),
+            "Disabled repetition breaker should not inject a corrective"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_repetition_breaker_threshold_zero_is_noop_when_enabled() {
+        let same_call =
+            || test_tool_call("read_file", serde_json::json!({"path": "/tmp/stuck.txt"}));
+        let delegate = MockDelegate::new(vec![
+            tool_calls_output(vec![same_call()]),
+            tool_calls_output(vec![same_call()]),
+            tool_calls_output(vec![same_call()]),
+            text_output("Done."),
+        ]);
+        let reasoning = stub_reasoning();
+        let mut ctx = ReasoningContext::new();
+        let config = AgenticLoopConfig {
+            max_iterations: 4,
+            repetition_breaker_enabled: true,
+            repetition_breaker_threshold: 0,
+            ..Default::default()
+        };
+
+        let outcome = run_agentic_loop(&delegate, &reasoning, &mut ctx, &config)
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, LoopOutcome::Response(_)));
+        assert!(
+            ctx.messages
+                .iter()
+                .all(|m| !m.content.contains("stuck repeating the same tool call")),
+            "Zero threshold should behave as disabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_repetition_breaker_rearms_after_injected_user_message() {
+        let same_call =
+            || test_tool_call("read_file", serde_json::json!({"path": "/tmp/stuck.txt"}));
+        let delegate = MockDelegate::new(vec![
+            tool_calls_output(vec![same_call()]),
+            tool_calls_output(vec![same_call()]),
+            tool_calls_output(vec![same_call()]),
+            tool_calls_output(vec![same_call()]),
+            tool_calls_output(vec![same_call()]),
+            text_output("Done."),
+        ])
+        .with_signals(vec![
+            LoopSignal::Continue,
+            LoopSignal::Continue,
+            LoopSignal::Continue,
+            LoopSignal::Continue,
+            LoopSignal::InjectMessage("please use my latest instruction".to_string()),
+        ]);
+        let reasoning = stub_reasoning();
+        let mut ctx = ReasoningContext::new();
+        let config = AgenticLoopConfig {
+            max_iterations: 6,
+            repetition_breaker_enabled: true,
+            repetition_breaker_threshold: 3,
+            ..Default::default()
+        };
+
+        let outcome = run_agentic_loop(&delegate, &reasoning, &mut ctx, &config)
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, LoopOutcome::Response(_)));
+        let corrective_count = ctx
+            .messages
+            .iter()
+            .filter(|m| {
+                m.role == ironclaw_llm::Role::User
+                    && m.content.contains("stuck repeating the same tool call")
+            })
+            .count();
+        assert_eq!(
+            corrective_count, 2,
+            "Breaker should fire again after a fresh user-message interruption"
+        );
+
+        let injected_index = ctx
+            .messages
+            .iter()
+            .position(|m| m.content.contains("please use my latest instruction"))
+            .expect("injected user message should be present");
+        let following = ctx
+            .messages
+            .get(injected_index + 1)
+            .expect("a later message should follow the injected user message");
+        assert!(
+            !following
+                .content
+                .contains("stuck repeating the same tool call"),
+            "Fresh user message should suppress immediate corrective injection"
         );
     }
 

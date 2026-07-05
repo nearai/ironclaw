@@ -371,6 +371,7 @@ impl Agent {
             max_iterations: max_tool_iterations + 1,
             enable_tool_intent_nudge: true,
             max_tool_intent_nudges: 2,
+            ..Default::default()
         };
 
         let outcome = crate::agent::agentic_loop::run_agentic_loop(

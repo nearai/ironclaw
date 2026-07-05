@@ -432,6 +432,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             max_iterations,
             enable_tool_intent_nudge: true,
             max_tool_intent_nudges: 2,
+            ..Default::default()
         };
 
         let outcome = run_agentic_loop(&delegate, reasoning, reason_ctx, &config).await?;

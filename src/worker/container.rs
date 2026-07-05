@@ -194,6 +194,7 @@ Work independently to complete this job. When finished, your final message MUST 
                 max_iterations: self.config.max_iterations as usize,
                 enable_tool_intent_nudge: true,
                 max_tool_intent_nudges: 2,
+                ..Default::default()
             };
 
             crate::agent::agentic_loop::run_agentic_loop(
