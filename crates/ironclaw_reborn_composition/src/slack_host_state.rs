@@ -77,7 +77,9 @@ const CHANNEL_ROUTE_REPLACE_LOCK_RENEW_INTERVAL: Duration = Duration::from_secs(
 #[cfg(test)]
 const CHANNEL_ROUTE_REPLACE_LOCK_RENEW_INTERVAL: Duration = Duration::from_millis(100);
 
-pub(crate) struct FilesystemSlackHostState<F>
+// `pub` (not `pub(crate)`) only so `test_support::slack_host_state_for_test` can name the
+// return type; the module stays private in lib.rs, so this is not a new external surface.
+pub struct FilesystemSlackHostState<F>
 where
     F: RootFilesystem + 'static,
 {
@@ -141,8 +143,10 @@ where
         }
     }
 
-    #[cfg(test)]
-    fn with_pairing_ttl(mut self, pairing_ttl: Duration) -> Self {
+    // `test-support` + `pub(crate)` so `test_support::slack_host_state_for_test_with_pairing_ttl`
+    // can reach it; still zero-cost in production builds.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn with_pairing_ttl(mut self, pairing_ttl: Duration) -> Self {
         self.pairing_ttl = pairing_ttl;
         self
     }
