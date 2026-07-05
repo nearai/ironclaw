@@ -69,6 +69,7 @@ impl Default for RowStoreMeta {
 struct RowSnapshotState {
     snapshot: TurnPersistenceSnapshot,
     store: Arc<InMemoryTurnStateStore>,
+    latest_event_cursor: EventCursor,
 }
 
 #[derive(Debug, Clone, Default, Serialize, serde::Deserialize)]
@@ -248,9 +249,12 @@ where
         };
         self.replay_deltas(&mut snapshot).await?;
         let store = self.build_in_memory_store(snapshot)?;
+        let snapshot = store.persistence_snapshot();
+        let latest_event_cursor = latest_event_cursor(&snapshot);
         Ok(RowSnapshotState {
-            snapshot: store.persistence_snapshot(),
+            snapshot,
             store: Arc::new(store),
+            latest_event_cursor,
         })
     }
 
@@ -477,9 +481,11 @@ where
 
             match self.persist_snapshot_diff(&baseline, &new_snapshot).await {
                 Ok(()) => {
+                    let latest_event_cursor = latest_event_cursor(&new_snapshot);
                     *guard = Some(RowSnapshotState {
                         snapshot: new_snapshot,
                         store,
+                        latest_event_cursor,
                     });
                     Ok(value)
                 }
@@ -542,6 +548,7 @@ where
         Fut: std::future::Future<Output = Result<T, TurnError>> + Send,
         D: FnOnce(
                 &TurnPersistenceSnapshot,
+                EventCursor,
                 &InMemoryTurnStateStore,
                 &T,
             ) -> Result<SnapshotDelta, TurnError>
@@ -574,10 +581,18 @@ where
                     return Err(error);
                 }
             };
-            let delta = build_delta(&state.snapshot, store.as_ref(), &value)?;
+            let delta = build_delta(
+                &state.snapshot,
+                state.latest_event_cursor,
+                store.as_ref(),
+                &value,
+            )?;
+            let latest_event_cursor =
+                latest_event_cursor_after_delta(state.latest_event_cursor, &delta);
             match self.persist_delta(&delta).await {
                 Ok(()) => {
                     apply_delta(&mut state.snapshot, delta)?;
+                    state.latest_event_cursor = latest_event_cursor;
                     state.store = store;
                     Ok(value)
                 }
@@ -644,6 +659,7 @@ where
         Fut: std::future::Future<Output = Result<TurnRunState, TurnError>> + Send,
         D: FnOnce(
                 &TurnPersistenceSnapshot,
+                EventCursor,
                 &InMemoryTurnStateStore,
                 &TurnRunState,
             ) -> Result<SnapshotDelta, TurnError>
@@ -727,11 +743,11 @@ where
                         .await
                 }
             },
-            move |snapshot, store, response| {
+            move |snapshot, latest_event_cursor, store, response| {
                 if snapshot.idempotency_records.len() >= max_idempotency_records {
                     return full_snapshot_delta(snapshot, store);
                 }
-                submit_turn_targeted_delta(snapshot, store, response)
+                submit_turn_targeted_delta(snapshot, latest_event_cursor, store, response)
             },
         )
         .instrument(turn_state_write_span(
@@ -755,12 +771,13 @@ where
                 let request = request.clone();
                 async move { store.resume_turn(request).await }
             },
-            move |snapshot, store, response| {
+            move |snapshot, latest_event_cursor, store, response| {
                 if snapshot.idempotency_records.len() >= max_idempotency_records {
                     return full_snapshot_delta(snapshot, store);
                 }
                 run_state_with_idempotency_targeted_delta(
                     snapshot,
+                    latest_event_cursor,
                     store,
                     response.run_id,
                     &scope,
@@ -797,7 +814,7 @@ where
                         let request = request.clone();
                         async move { store.request_cancel(request).await }
                     },
-                    move |snapshot, store, response| {
+                    move |snapshot, latest_event_cursor, store, response| {
                         if snapshot.idempotency_records.len() >= max_idempotency_records {
                             return full_snapshot_delta(snapshot, store);
                         }
@@ -812,6 +829,7 @@ where
                         }
                         run_state_with_idempotency_targeted_delta(
                             snapshot,
+                            latest_event_cursor,
                             store,
                             response.run_id,
                             &scope,
@@ -1134,7 +1152,7 @@ where
                         let request = request.clone();
                         async move { store.complete_run(request).await }
                     },
-                    move |snapshot, store, state| {
+                    move |snapshot, latest_event_cursor, store, state| {
                         let terminal_records = snapshot
                             .runs
                             .iter()
@@ -1143,7 +1161,13 @@ where
                         if terminal_records >= max_terminal_records {
                             return full_snapshot_delta(snapshot, store);
                         }
-                        run_state_targeted_delta(snapshot, store, state.run_id, &state.scope)
+                        run_state_targeted_delta(
+                            snapshot,
+                            latest_event_cursor,
+                            store,
+                            state.run_id,
+                            &state.scope,
+                        )
                     },
                 )
                 .await;
@@ -1176,7 +1200,7 @@ where
                     outcome
                 }
             },
-            move |snapshot, store, state| {
+            move |snapshot, latest_event_cursor, store, state| {
                 let terminal_records = snapshot
                     .runs
                     .iter()
@@ -1185,7 +1209,13 @@ where
                 if terminal_records >= max_terminal_records {
                     return full_snapshot_delta(snapshot, store);
                 }
-                run_state_targeted_delta(snapshot, store, state.run_id, &state.scope)
+                run_state_targeted_delta(
+                    snapshot,
+                    latest_event_cursor,
+                    store,
+                    state.run_id,
+                    &state.scope,
+                )
             },
         )
         .await
@@ -1508,6 +1538,7 @@ where
 
 fn submit_turn_targeted_delta(
     snapshot: &TurnPersistenceSnapshot,
+    latest_event_cursor: EventCursor,
     store: &InMemoryTurnStateStore,
     response: &SubmitTurnResponse,
 ) -> Result<SnapshotDelta, TurnError> {
@@ -1544,7 +1575,7 @@ fn submit_turn_targeted_delta(
                     && record.run_id == Some(*run_id)
             }),
     );
-    add_event_delta(snapshot, store, &mut delta)?;
+    add_event_delta(snapshot, latest_event_cursor, store, &mut delta)?;
     Ok(delta)
 }
 
@@ -1559,17 +1590,25 @@ fn full_snapshot_delta(
 
 fn claimed_run_targeted_delta(
     snapshot: &TurnPersistenceSnapshot,
+    latest_event_cursor: EventCursor,
     store: &InMemoryTurnStateStore,
     claimed: &Option<ClaimedTurnRun>,
 ) -> Result<SnapshotDelta, TurnError> {
     let Some(claimed) = claimed else {
         return Ok(SnapshotDelta::default());
     };
-    run_state_targeted_delta(snapshot, store, claimed.state.run_id, &claimed.state.scope)
+    run_state_targeted_delta(
+        snapshot,
+        latest_event_cursor,
+        store,
+        claimed.state.run_id,
+        &claimed.state.scope,
+    )
 }
 
 fn run_state_targeted_delta(
     snapshot: &TurnPersistenceSnapshot,
+    latest_event_cursor: EventCursor,
     store: &InMemoryTurnStateStore,
     run_id: TurnRunId,
     scope: &TurnScope,
@@ -1609,28 +1648,36 @@ fn run_state_targeted_delta(
         delta.admission_reservations_delete.push(run_id.to_string());
     }
 
-    add_event_delta(snapshot, store, &mut delta)?;
+    add_event_delta(snapshot, latest_event_cursor, store, &mut delta)?;
     Ok(delta)
 }
 
 fn run_state_with_idempotency_targeted_delta(
     snapshot: &TurnPersistenceSnapshot,
+    latest_event_cursor: EventCursor,
     store: &InMemoryTurnStateStore,
     run_id: TurnRunId,
     scope: &TurnScope,
     operation: crate::TurnIdempotencyOperationKind,
 ) -> Result<SnapshotDelta, TurnError> {
-    let mut delta = run_state_targeted_delta(snapshot, store, run_id, scope)?;
+    let mut delta = run_state_targeted_delta(snapshot, latest_event_cursor, store, run_id, scope)?;
     add_run_idempotency_delta(snapshot, store, &mut delta, run_id, operation);
     Ok(delta)
 }
 
 fn blocked_run_targeted_delta(
     snapshot: &TurnPersistenceSnapshot,
+    latest_event_cursor: EventCursor,
     store: &InMemoryTurnStateStore,
     state: &TurnRunState,
 ) -> Result<SnapshotDelta, TurnError> {
-    let mut delta = run_state_targeted_delta(snapshot, store, state.run_id, &state.scope)?;
+    let mut delta = run_state_targeted_delta(
+        snapshot,
+        latest_event_cursor,
+        store,
+        state.run_id,
+        &state.scope,
+    )?;
     if let Some(checkpoint_id) = state.checkpoint_id {
         let checkpoint =
             store
@@ -1660,6 +1707,7 @@ fn add_run_idempotency_delta(
 
 fn loop_checkpoint_targeted_delta(
     _snapshot: &TurnPersistenceSnapshot,
+    _latest_event_cursor: EventCursor,
     _store: &InMemoryTurnStateStore,
     record: &LoopCheckpointRecord,
 ) -> Result<SnapshotDelta, TurnError> {
@@ -1669,18 +1717,36 @@ fn loop_checkpoint_targeted_delta(
     })
 }
 
-fn add_event_delta(
-    snapshot: &TurnPersistenceSnapshot,
-    store: &InMemoryTurnStateStore,
-    delta: &mut SnapshotDelta,
-) -> Result<(), TurnError> {
-    let after = snapshot
+fn latest_event_cursor(snapshot: &TurnPersistenceSnapshot) -> EventCursor {
+    snapshot
         .events
         .iter()
         .map(|event| event.cursor)
         .max()
-        .unwrap_or(snapshot.event_retention_floor);
-    delta.events_upsert.extend(store.events_after(after));
+        .unwrap_or(snapshot.event_retention_floor)
+        .max(snapshot.event_retention_floor)
+}
+
+fn latest_event_cursor_after_delta(current: EventCursor, delta: &SnapshotDelta) -> EventCursor {
+    let event_cursor = delta
+        .events_upsert
+        .iter()
+        .map(|event| event.cursor)
+        .max()
+        .unwrap_or(current);
+    let retention_floor = delta.event_retention_floor.unwrap_or(current);
+    current.max(event_cursor).max(retention_floor)
+}
+
+fn add_event_delta(
+    snapshot: &TurnPersistenceSnapshot,
+    latest_event_cursor: EventCursor,
+    store: &InMemoryTurnStateStore,
+    delta: &mut SnapshotDelta,
+) -> Result<(), TurnError> {
+    delta
+        .events_upsert
+        .extend(store.events_after(latest_event_cursor));
     let event_retention_floor = store.event_retention_floor();
     if event_retention_floor != snapshot.event_retention_floor {
         delta.event_retention_floor = Some(event_retention_floor);

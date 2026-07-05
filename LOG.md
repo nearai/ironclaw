@@ -1626,3 +1626,56 @@ Budgets: 10 hours wall-clock / $0 spend
   filesystem_turn_state_row_store_loop_checkpoint_roundtrip_and_snapshot`,
   `cargo test -p ironclaw_turns --test loop_checkpoint_store_contract`,
   `cargo check -p ironclaw_turns`, and `git diff --check` passed.
+
+## Cycle 31 - Turn Event Tail Tracking
+
+- Graph note: `codebase-memory-mcp` still fails with `Transport closed` for
+  both `index_status` and a fast `index_repository`; the local graph artifact
+  remains stale and empty, so this cycle uses crate guardrails plus targeted
+  source reads.
+- Baseline: `harness/latency/score.sh --dev` passed with 54 results, 36
+  comparisons, and zero failures. Dev `turn_lifecycle` remains stable after
+  the run-state readback projection: libSQL c4 p95 8.44s, Postgres pool-1 c4
+  p95 585ms, and Postgres pool-2 c4 p95 576ms.
+- Probe: `harness/latency/probe.sh` passed with 81 results, 54 comparisons,
+  and zero failures. The perturbed `turn_lifecycle` c8 row completed on
+  Postgres with zero errors and matching state hash `3fa07e3dc3c7e320`;
+  pool-1 p95 was 2.96s and pool-2 p95 was 2.99s. libSQL c8 still hit
+  filesystem CAS retry exhaustion and produced a different hash, so high
+  concurrency work remains a treatment-side optimization exercise.
+- Hypothesis: The remaining row-store write path still does size-dependent
+  work inside the global `snapshot_state` mutex. Every targeted lifecycle
+  write that may emit an event calls `add_event_delta`, which scans all
+  retained events to find the latest cursor before asking the in-memory store
+  for newer events. The lifecycle workload emits events on submit, claim,
+  block, resume, reclaim, complete, request-cancel, and cancel, so this scan
+  grows with accumulated state and serializes unrelated turn scopes. Tracking
+  the latest retained event cursor in `RowSnapshotState` should preserve the
+  durable delta shape while removing that per-write scan.
+- Expected failure mode: The cached event cursor must stay synchronized after
+  replay, targeted deltas, full-snapshot fallbacks, and retention-floor
+  changes. If it falls behind, duplicate events can be appended; if it jumps
+  ahead, lifecycle events can be skipped. State hashes, event counts, and
+  reopen-from-delta behavior must remain stable.
+- Result: `FilesystemTurnStateRowStore` now caches the latest retained event
+  cursor alongside the cached row snapshot. Targeted lifecycle deltas pass the
+  cached cursor into `add_event_delta`, and the cache advances only after the
+  durable delta append succeeds. Full-snapshot fallbacks recompute the cursor
+  from the replacement snapshot.
+- Dev score: treatment `harness/latency/score.sh --dev` passed with 54
+  results, 36 comparisons, and zero failures. The scored `turn_lifecycle`
+  state hash stayed `7fc054292d2f85f0`; Postgres pool-2 c4 p95 was 584ms,
+  effectively flat against the 576ms cycle baseline.
+- High-concurrency turn-state diagnostic: Postgres-only `turn_lifecycle` with
+  c32/c100, payload 2048, 64 samples, and pool size 2 completed with zero
+  errors and state hash `660086a8484d5400`. c32 p95 was 3.27s and c100 p95
+  was 12.43s, essentially flat against cycle 30. Next cycle should change
+  approach rather than tune event-tail tracking further; the remaining signal
+  is still serialized write-critical-section work.
+- Validation: `cargo fmt -p ironclaw_turns --check`, `cargo check -p
+  ironclaw_turns`, `cargo test -p ironclaw_turns --test
+  filesystem_turn_state_contract
+  filesystem_turn_state_row_store_persists_rows_without_state_blob`, `cargo
+  test -p ironclaw_turns --test loop_checkpoint_store_contract`, full `cargo
+  test -p ironclaw_turns --test filesystem_turn_state_contract`, final `cargo
+  check -p ironclaw_turns`, and `git diff --check` passed.
