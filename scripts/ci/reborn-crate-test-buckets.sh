@@ -26,7 +26,6 @@ jq -c -n --argjson packages "${packages_json}" '
     "events-conversations",
     "auth-security",
     "memory-skills",
-    "migration-triggers",
     "adapters-misc"
   ];
 
@@ -100,9 +99,6 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_scripts: "memory-skills",
       ironclaw_skill_learning: "memory-skills",
       ironclaw_skills: "memory-skills",
-
-      ironclaw_reborn_migration: "migration-triggers",
-      ironclaw_triggers: "migration-triggers",
 
       ironclaw_architecture: "adapters-misc",
       ironclaw_common: "adapters-misc",
