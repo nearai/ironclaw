@@ -82,9 +82,7 @@ async fn approvals_group_e2e() {
         "approval_request_persists_after_reopen",
         scenario_approval_request_persists_after_reopen::run(&g).await,
     );
-    // #5467 lane: same rationale as C-DURABLE above -- drives the store
-    // directly, independent of `StorageMode`, so no `StorageMode::LibSql`
-    // variant is needed.
+    // #5467: store-direct, independent of `StorageMode` (same as C-DURABLE above).
     report.record(
         "discard_then_resubmit",
         scenario_discard_then_resubmit::run(&g).await,
