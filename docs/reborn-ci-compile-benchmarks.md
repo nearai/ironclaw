@@ -70,7 +70,7 @@ improving measured wall clock.
 | H14 | Seed fresh shared Rust caches from deterministic broad producers: `reborn-core` for crate buckets and `groups` for coverage lanes. | Improve warm-start quality for compile-heavy jobs without adding jobs or changing coverage. | Retained with caveat | Accepted as a targeted cache-policy cleanup: the controlled measurement improved from H13 `8m21s` to `7m49s`, but later final-state validation runs regressed to `12m07s`, `12m44s`, and `12m22s`, so this is not a stable wall-clock fix. |
 | H15 | Add a `cargo-hakari` workspace-hack crate to unify dependency feature sets across buckets. | Improve cross-bucket cache reuse by making shared dependency artifacts compatible across package feature combinations. | Tested | Rejected: the benchmark run failed architecture dependency-boundary tests and was already slower than the original baseline, with root `1` at `10m21s`, `host-runtime` at `8m24s`, and `composition-core` at `8m21s`. |
 | H16 | Build a nightly dependency-warmed CI container image in GHCR and run heavy Reborn jobs inside it. | Escape GitHub cache LRU limits by pre-baking a broad warm target/dependency layer. | Feasibility review | Not safe to add as an inline benchmark: no existing Reborn dependency image path; requires package write permissions, GHCR retention policy, container hardening, and a separate seed/build workflow before PR timing is meaningful. |
-| H17 | Skip Reborn buckets by changed-file reverse dependency scope. | Improve average PR time by running only affected buckets while merge queue still runs everything. | Feasibility review | Not a compile-time benchmark for the current full-PR target: current scope detection is all-or-nothing for Reborn, and safe bucket-level skipping needs crate ownership plus reverse-dependency mapping before it can be trusted. |
+| H17 | Skip Reborn buckets by changed-file reverse dependency scope. | Improve average PR time by running only affected buckets while merge queue still runs everything. | Retrospective benchmark | Weak near-term result: across 27 recent Reborn-scoped merged PRs, conservative dry-run scoping reduced crate buckets from `324` to `282` total (`13%`), with median PR still at `12/12` buckets because most sampled Reborn PRs touched tests, workflows, shared roots, or broad closures. |
 | H18 | Increase Reborn root-test partitions from 4 to 6. | Shave the new post-H14 root-test long pole without changing test coverage. | Tested | Rejected: wall clock regressed from H14 `7m49s` to `10m41s`; the slowest root partition worsened from `450s` to `595s`. |
 
 ## H1: Narrow Crate Bucket Targets
@@ -1007,12 +1007,56 @@ Red-team notes:
   some regressions from PR feedback to merge-queue feedback unless the mapping
   is very conservative.
 
-Benchmark status:
+Retrospective benchmark method:
 
-- Not started in this PR. Treat as a separate H17 safety-first benchmark:
-  first add a dry-run classifier that reports selected buckets without skipping
-  them, compare selected buckets against actual changed crates across recent
-  PRs, then enable skipping only after the dry-run data is convincing.
+- Sampled the latest `40` merged PRs targeting `main` using `gh pr list`.
+- Pulled each PR's changed-file list with `gh pr diff --name-only`.
+- Ran the current `scripts/ci/classify-test-scope.sh` against each changed-file
+  set to identify PRs that currently trigger Reborn tests.
+- Built the current Reborn crate-test package set from the same workflow logic:
+  `ironclaw_reborn_cli` normal/build dependency closure plus the Reborn/product
+  allowlist.
+- Used `cargo metadata --format-version 1` to compute workspace reverse
+  dependencies.
+- Estimated bucket selection with conservative rules:
+  - root manifests, lockfile, CI workflows/actions, Reborn test files,
+    integration tests, and CI scripts fall back to all `12` buckets;
+  - crate-owned source/doc changes map to owning workspace crates, then to
+    reverse-dependent Reborn test packages and their existing bucket names;
+  - merge-group would still run the full suite.
+
+Retrospective benchmark result:
+
+- PRs sampled: `38` usable PRs from the latest `40` merged PRs.
+- PRs that currently trigger Reborn crate buckets: `27`.
+- Current crate-bucket work for those PRs: `324` buckets (`27 * 12`).
+- H17 dry-run crate-bucket work: `282` buckets.
+- Saved crate buckets: `42` (`13%`).
+- Mean buckets per Reborn-scoped PR: `12.0 -> 10.44`.
+- Median buckets per Reborn-scoped PR: `12 -> 12`.
+- PRs with any bucket reduction: `6 / 27`.
+- PRs that still conservatively run all buckets: `21 / 27`.
+
+Representative wins:
+
+| PR | Reason | Current buckets | H17 buckets | Saved |
+| --- | --- | ---: | ---: | ---: |
+| `#5632` Slack live QA harness | crate-owned Reborn paths | `12` | `4` | `8` |
+| `#5625` manifest-projected host ingress | crate-owned Reborn paths | `12` | `7` | `5` |
+| `#5619` Reborn identity refactor | crate-owned Reborn paths | `12` | `5` | `7` |
+| `#5574` step-efficient tool guidance | crate-owned Reborn paths | `12` | `7` | `5` |
+| `#5573` Exa MCP SSE initialize parsing | crate-owned Reborn paths | `12` | `7` | `5` |
+
+Decision:
+
+- Do not implement bucket skipping in this PR.
+- The dry-run data does not support the advice's "biggest average-case win"
+  claim for this repo's recent PR mix. It helps narrow crate-owned PRs, but most
+  recent Reborn-scoped PRs touched tests, workflows, CI scripts, root manifests,
+  broad fixtures, or dependency closures that require full-suite fallback.
+- A future H17 PR should start as a reporting-only dry-run check committed to
+  CI for a week or two, then enable skipping only if the observed PR mix shows
+  material savings without unsafe false negatives.
 
 ## H18: Increase Root-Test Partitions
 
