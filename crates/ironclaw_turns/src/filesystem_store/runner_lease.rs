@@ -68,6 +68,17 @@ impl RunnerLeaseStore {
         }
     }
 
+    pub(super) async fn overlay_run_record(
+        &self,
+        run: TurnRunRecord,
+    ) -> Result<TurnRunRecord, TurnError> {
+        self.with_timeout(
+            self.overlay_run_record_inner(run),
+            "overlay run record lease",
+        )
+        .await
+    }
+
     pub(super) async fn seed_from_snapshot(
         &self,
         snapshot: &TurnPersistenceSnapshot,
@@ -247,6 +258,20 @@ impl RunnerLeaseStore {
         };
         apply_runner_lease_overlay(run, lease);
         Ok((snapshot, version))
+    }
+
+    async fn overlay_run_record_inner(
+        &self,
+        mut run: TurnRunRecord,
+    ) -> Result<TurnRunRecord, TurnError> {
+        if !run_can_use_external_lease(&run) {
+            return Ok(run);
+        }
+        let leases = self.leases.read().await;
+        if let Some(lease) = leases.get(&run.run_id) {
+            apply_runner_lease_overlay(&mut run, lease);
+        }
+        Ok(run)
     }
 
     async fn seed_from_snapshot_inner(

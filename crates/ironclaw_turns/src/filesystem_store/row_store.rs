@@ -840,12 +840,14 @@ where
     }
 
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        let (snapshot, _) = self
-            .read_snapshot_with_runner_lease_overlay(RunnerLeaseOverlay::Run(request.run_id))
-            .await?;
-        self.build_in_memory_store(snapshot)?
-            .get_run_state(request)
-            .await
+        let Some((run, actor)) = self
+            .with_cached_snapshot(|snapshot| projection::run_state_parts(snapshot, &request))
+            .await??
+        else {
+            return Err(TurnError::ScopeNotFound);
+        };
+        let run = self.runner_lease_store().overlay_run_record(run).await?;
+        Ok(projection::run_state_from_record(run, actor))
     }
 }
 

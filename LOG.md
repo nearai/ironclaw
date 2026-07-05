@@ -1575,3 +1575,54 @@ Budgets: 10 hours wall-clock / $0 spend
   test -p ironclaw_turns --test loop_checkpoint_store_contract`, `cargo check
   -p ironclaw_turns`, and `git diff --check` passed. I removed only generated
   incremental build caches to recover disk before rerunning the score.
+
+## Cycle 30 - Turn Run-State Readback Projection
+
+- Graph note: `codebase-memory-mcp` still fails with `Transport closed` for
+  both `index_status` and a fast `index_repository`; the local graph artifact
+  remains stale and empty, so this cycle uses crate guardrails plus targeted
+  source reads.
+- Baseline: `harness/latency/score.sh --dev` passed with 54 results, 36
+  comparisons, and zero failures. Dev `turn_lifecycle` remains stable after
+  the checkpoint projection change: libSQL c4 p95 7.51s, Postgres pool-1 c4
+  p95 601ms, and Postgres pool-2 c4 p95 601ms.
+- Probe: `harness/latency/probe.sh` passed with 81 results, 54 comparisons,
+  and zero failures. The perturbed `turn_lifecycle` c8 row completed on
+  Postgres with zero errors and matching state hash `3fa07e3dc3c7e320`;
+  pool-1 p95 was 3.11s and pool-2 p95 was 3.16s. libSQL c8 again hit
+  filesystem CAS retry exhaustion, so it is not a useful parity ceiling for
+  high-concurrency tuning.
+- Hypothesis: Cycle 29 removed full rebuilds from loop checkpoint readback,
+  but `FilesystemTurnStateRowStore::get_run_state` still clones the cached
+  row snapshot, applies runner-lease overlay to a full snapshot, and rebuilds
+  an `InMemoryTurnStateStore` to read one run. The lifecycle workload performs
+  two terminal readbacks per sample, so this keeps a size-dependent read inside
+  the global row-store mutex. Directly projecting the requested run state from
+  the cached row snapshot, then applying the per-run runner-lease overlay, should
+  reduce read amplification without changing persistence.
+- Expected failure mode: Direct run-state projection must preserve
+  `GetRunStateRequest` scope-not-found behavior, include the turn actor from
+  the matching `TurnRecord`, and preserve runner-lease overlay behavior for
+  running/cancel-requested runs. State hashes and lifecycle event counts must
+  remain unchanged.
+- Result: Row-store `get_run_state` now projects the requested run directly
+  from the cached row snapshot, fetches the matching turn actor, and applies
+  runner-lease overlay to that single run record instead of cloning and
+  rebuilding the whole in-memory store.
+- Dev score: `harness/latency/score.sh --dev` passed with 54 results, 36
+  comparisons, and zero failures. The scored `turn_lifecycle` state hash
+  stayed `7fc054292d2f85f0`; Postgres pool-2 c4 p95 improved from the
+  baseline 601ms to 575ms.
+- High-concurrency turn-state diagnostic: Postgres-only `turn_lifecycle` with
+  c32/c100, payload 2048, 64 samples, and pool size 2 completed with zero
+  errors and state hash `660086a8484d5400`. c32 p95 improved from 3.42s to
+  3.24s; c100 p95 improved from 13.23s to 12.50s. The remaining latency still
+  appears dominated by serialized writes in the row-store/in-memory critical
+  section.
+- Validation: `cargo fmt -p ironclaw_turns --check`, `cargo test -p
+  ironclaw_turns --test filesystem_turn_state_contract
+  filesystem_turn_state_row_store_persists_rows_without_state_blob`, `cargo
+  test -p ironclaw_turns --test loop_checkpoint_store_contract
+  filesystem_turn_state_row_store_loop_checkpoint_roundtrip_and_snapshot`,
+  `cargo test -p ironclaw_turns --test loop_checkpoint_store_contract`,
+  `cargo check -p ironclaw_turns`, and `git diff --check` passed.
