@@ -2184,3 +2184,153 @@ Budgets: 10 hours wall-clock / $0 spend
   launch-parity concern from earlier cycles. This cycle removes the Postgres
   resource-governor bottleneck; it does not repair the libSQL turn-state
   baseline.
+
+## Cycle 41 - Post-Governor Thread Store Write Path
+
+- Graph note: `codebase-memory-mcp` is discoverable in this session, but
+  `list_projects` fails with `Transport closed`; this cycle falls back to
+  crate guardrails, the locked latency harness, and targeted source reads.
+- Required dev score: `harness/latency/score.sh --dev` passed. All dev
+  comparisons were green for Postgres pool sizes 1 and 2. The dev profile is
+  still not acceptance-ready; it reports 5 warmups, 40 measured samples,
+  concurrencies 1/4, and notes that launch-ref libSQL plus request-level
+  trigger/approval/resource workloads are still required for acceptance.
+- Required probe: `harness/latency/probe.sh` completed the larger perturbed
+  profile with path depths 2/5, payload sizes 128/2048, concurrencies 1/3/8,
+  and pool sizes 1/2. The probe still hard-fails only where the libSQL side
+  changes state hash under c8 pressure: `control_plane_snapshot` c8 has one
+  libSQL secret-store filesystem error, and `turn_lifecycle` c8 has two libSQL
+  `turn state filesystem CAS retries exhausted` errors. Postgres remains
+  error-free in those rows and materially faster, so the probe is useful as a
+  baseline-health warning rather than a Postgres latency regression.
+- Current Postgres bottleneck from the full mixed-flow gate after Cycle 40:
+  c100/pool-2 operation p95 is 291.2ms; resource-governor p95 is down to
+  31.1ms, while `thread_store_writes` p95 is 125.7ms and `turn_store` p95 is
+  124.7ms. The next Postgres latency lever should target the filesystem-backed
+  thread/turn write path, not the governor.
+- Hypothesis: mixed-user-session still pays too many independent durable
+  filesystem writes during turn admission and assistant append/finalization.
+  The governor fix proved RootFilesystem group-commit can remove a hot
+  Postgres-attributed span without bypassing persistence. Inspect the thread
+  store and turn-store write path for serial per-message/metadata writes that
+  can be collapsed into existing batch primitives (`put_many`, `append_batch`,
+  or transaction-shaped helpers) while keeping identical visible responses,
+  event counts, and state hashes.
+- Expected failure mode: batching thread writes incorrectly could change
+  message ordering, record-kind metadata, search/query visibility, or state
+  hashes. The change must stay behind the real RootFilesystem abstraction,
+  preserve durable acks, and avoid any benchmark-path or payload-size special
+  case. If the thread-store path already uses the available batch primitive,
+  switch approach to the turn-store append/claim/submit path rather than
+  tuning the same knob.
+
+## Cycle 42 - LibSQL Turn-State Cliff Diagnostic
+
+- Supersedes the Cycle 41 implementation direction. The next gate is the
+  libSQL `turn_lifecycle` cliff on the identical RootFilesystem-backed row
+  store: libSQL c4 p95 is about 7.8s while Postgres c4 is about 35ms. A
+  200x gap is treated as one pathological cause, not general slowness.
+- Graph note: `codebase-memory-mcp` remains unavailable (`Transport closed`),
+  so this cycle uses crate guardrails and targeted source reads.
+- Pre-instrumentation observations: `LibSqlRootFilesystem` already migrates to
+  `PRAGMA journal_mode = WAL` and applies `synchronous = NORMAL` per
+  connection, so fsync-per-append is not assumed to be dominant. The backend
+  does create a fresh libSQL connection for every RootFilesystem operation and
+  applies the PRAGMA batch on each connect. The turn-state row store already
+  uses the delta-journal flusher and `append_batch` for grouped deltas, with
+  single-delta flushes falling back to `append`.
+- Diagnostic plan before any fix: add opt-in libSQL RootFilesystem timing that
+  emits per-phase timings for `connect`/PRAGMA setup, write lock/transaction
+  begin, SQL execution, row iteration, and commit for `append`,
+  `append_batch`, `put`, `get`, `tail`, and `reserve_sequence`. Attribute the
+  c4 `turn_lifecycle` time across the requested suspects: journal/synchronous
+  mode, connection-per-op cost, append shape, unprepared statement execution,
+  and write-lock serialization. Record the dominant cause with measured
+  numbers here before applying a fix.
+- Diagnostic run: `LATENCY_WORKLOADS=turn_lifecycle`, c4, 5 warmups, 40
+  measured samples, libSQL + Postgres pool-2. Output captured under
+  `target/latency-diagnostics/cycle42-c4.*` with
+  `IRONCLAW_LIBSQL_FS_DIAG=1`.
+- Measured result before fix: libSQL p50 2029.9ms, p95 4691.5ms, p99
+  5329.8ms, throughput 1.82 ops/sec; Postgres pool-2 p50 27.2ms, p95
+  37.7ms, p99 44.1ms, throughput 138.0 ops/sec. State hashes matched
+  (`7fc054292d2f85f0`) and errors were zero.
+- Dominant cause: the libSQL `turn_lifecycle` path is not actually using the
+  row store in the latency runner. `harness/latency/runner` constructs
+  libSQL with `FilesystemTurnStateStoreKind::blob(scoped)` while Postgres uses
+  `FilesystemTurnStateStoreKind::row(scoped)`. The diagnostic log confirms all
+  turn-state filesystem traffic for libSQL is `/turns/state.json` blob
+  `get`/`put`, with no turn-state `append`/`append_batch` traffic.
+- Blob-store numbers: one run produced 1,753 turn-state `get`s and 1,348
+  versioned `put` attempts against the single `/turns/state.json` blob. The
+  snapshot body was p50 732,946 bytes, p95 1,234,918 bytes, max 1,293,813
+  bytes. Only 540 of 1,348 versioned updates succeeded; 808 returned zero
+  rows and paid a `current_version` lookup, so 60.0% of write attempts were CAS
+  retries over the growing full snapshot.
+- Suspect attribution: WAL/synchronous is already `journal_mode=WAL` plus
+  `synchronous=NORMAL`, and append is not on the hot path in this libSQL run.
+  Fresh connections/PRAGMAs are measurable but secondary: 6,607 opens totaled
+  527ms and 6,606 PRAGMA batches totaled 3,764ms (PRAGMA p95 1.76ms). The
+  dominant cost is full-blob read/modify/write amplified by CAS conflicts and
+  SQLite's single-writer serialization: `put` preflight totaled 2,928ms,
+  `put` execute totaled 3,383ms, successful `put` total p95 was 10.0ms, and
+  each losing CAS attempt still rewrote the same large logical state path.
+- Fix direction after measurement: stop using the blob turn-state layout for
+  libSQL in the latency/hosted-single-tenant path; move libSQL to the existing
+  RootFilesystem row store so it uses grouped delta `append_batch` like
+  Postgres. Keep libSQL backend PRAGMA/config changes out of the first fix
+  because the measured cliff is not fsync mode or statement parse in the row
+  append path.
+- Fix applied: production libSQL hosted-single-tenant wiring and the latency
+  runner now use `FilesystemTurnStateStoreKind::row` for turn state. The
+  temporary libSQL RootFilesystem diagnostic hooks were removed after this
+  attribution so the final hot path does not retain benchmark instrumentation
+  overhead.
+- Post-fix diagnostic run with the same c4 focused profile and temporary
+  filesystem timing confirmed the path changed from `/turns/state.json`
+  `get`/`put` traffic to row-store delta journal traffic:
+  `/turns/rows/v1/deltas/log` saw 580 `append` and 545 `append_batch` phase
+  records, while the meta snapshot path saw only four `get`s and four `tail`s.
+  libSQL c4 p95 fell to 30.0ms, Postgres pool-2 c4 p95 was 31.2ms, errors were
+  zero, and state hashes matched (`7fc054292d2f85f0`).
+- Clean launch-ref-shaped baseline rerun without diagnostics:
+  `LATENCY_WORKLOADS=turn_lifecycle`, c4, 5 warmups, 40 measured samples,
+  libSQL + Postgres pool-2. libSQL p50/p95/p99 was 27.7/30.9/32.2ms with
+  throughput 143.9 ops/sec; Postgres p50/p95/p99 was 23.4/27.6/28.8ms with
+  throughput 168.2 ops/sec. Errors were zero and state hashes matched. This
+  clears the requested libSQL c4 gate (target <=100ms, within about 2x of
+  Postgres); libSQL is 1.12x Postgres p95 in this clean focused run.
+- Acceptance note: this run is recorded as the libSQL turn-lifecycle baseline
+  evidence for the acceptance-ready path, but the runner still reports
+  `acceptance_ready=false` because the full harness flag is currently hard-coded
+  and still represents missing request-level trigger/approval/resource gates,
+  not this focused turn-state baseline.
+- Full dev scorer after the fix: `harness/latency/score.sh --dev` produced 54
+  result rows and 36 comparison rows. The turn-lifecycle c4 rows passed for
+  both Postgres pool sizes with zero errors and matching hashes; libSQL c4 p95
+  was 39.8ms, Postgres pool-1 c4 p95 was 31.4ms, and Postgres pool-2 c4 p95
+  was 34.0ms. The run had two c1 p99-only hard-fail rows (`put_get` pool-1 and
+  `turn_lifecycle` pool-2) despite faster Postgres p50/p95 and matching state
+  hashes.
+- Small-sample outlier check: reran the two affected workloads at c1 with 30
+  warmups and 300 measured samples. All four comparisons passed with zero
+  failures and matching hashes. `put_get` Postgres p99 ratios were 0.29
+  (pool-1) and 0.13 (pool-2); `turn_lifecycle` Postgres p99 ratios were 0.52
+  (pool-1) and 0.92 (pool-2).
+- Postgres c100 mixed-flow regression gate: `ironclaw_stress` with
+  mixed-user-session, filesystem-row turn state, pool size 2, concurrency 100,
+  users 100, and zero synthetic model/tool latency completed 200/200 with zero
+  failures. Operation p95 was 245.8ms, throughput was 517.4 ops/sec,
+  turn-store p95 was 81.4ms, resource-governor p95 was 15.8ms, and
+  thread-store writes remain the top group at p95 148.3ms. This does not
+  regress the prior c100 gate (291.2ms op p95, 482.5 ops/sec).
+- Validation: `cargo fmt -p ironclaw_reborn_composition --check`,
+  `cargo check -p ironclaw_reborn_composition --features libsql,postgres`,
+  `cargo check --manifest-path harness/latency/runner/Cargo.toml`,
+  `cargo test -p ironclaw_turns --test filesystem_turn_state_contract`,
+  `cargo test -p ironclaw_filesystem --features libsql,postgres --test
+  db_root_filesystem_contract`, `cargo test -p ironclaw_reborn_composition
+  --features libsql,postgres --test libsql_substrate --test
+  postgres_substrate`, the focused c4 clean latency run, the focused c1
+  outlier rerun, the full dev scorer, and the c100 mixed-flow stress gate were
+  run. Contract tests passed for both backends.

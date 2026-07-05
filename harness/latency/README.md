@@ -34,8 +34,9 @@ single-blob contention path. Production hosted Postgres composition also uses
 the row-backed resource governor.
 
 `turn_lifecycle` exercises the durable turn-state path through
-`ScopedFilesystem`. libSQL uses the filesystem blob store; Postgres uses the
-filesystem row store.
+`ScopedFilesystem`. libSQL and Postgres both use the filesystem row store so
+the comparison measures backend behavior instead of the old full-snapshot blob
+CAS path.
 
 `webui_session` builds the real
 `build_reborn_runtime -> build_webui_services -> webui_v2_app` stack once per

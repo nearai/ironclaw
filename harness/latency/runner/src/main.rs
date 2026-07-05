@@ -385,7 +385,7 @@ where
     )])?;
     let scoped = Arc::new(ScopedFilesystem::with_fixed_view(fs, mounts));
     let store = match backend {
-        BackendName::Libsql => FilesystemTurnStateStoreKind::blob(scoped),
+        BackendName::Libsql => FilesystemTurnStateStoreKind::row(scoped),
         BackendName::Postgres => FilesystemTurnStateStoreKind::row(scoped),
     };
     Ok(Arc::new(store))
