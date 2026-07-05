@@ -22,8 +22,8 @@ What is worth keeping from this PR:
   pass/fail coverage through the instrumented `groups` lane.
 - H14, but only as deterministic cache-policy cleanup. It produced one
   controlled improvement (`8m21s -> 7m49s`), then later validation runs with
-  the same retained workflow shape regressed to `12m07s`, `12m44s`, and
-  `12m22s`.
+  the same retained workflow shape regressed to `12m07s`, `12m44s`,
+  `12m22s`, and `12m08s`.
 
 What is not worth pursuing further in this PR:
 
@@ -38,9 +38,9 @@ What is not worth pursuing further in this PR:
 - More root partitions while compile/cache warm-up remains dominant.
 
 The remaining plausible speed work is not another cache wiring tweak. It is
-dependency-graph and feature-fanout reduction inside the slow Rust jobs, or a
-separate, hardened H16 dependency-image benchmark with explicit image-size,
-pull-time, permission, and rollback criteria.
+dependency-graph and feature-fanout reduction inside the slow Rust jobs. A
+separate H16 dependency-image benchmark would first need repo/package
+permission changes and an intentionally hardened image lifecycle.
 
 ## Current Baseline
 
@@ -98,9 +98,9 @@ improving measured wall clock.
 | H11 | Move libSQL-heavy coverage out of broad long-pole crate buckets into the existing Reborn group job. | Reduce compile graph size for `host-runtime` and `reborn-core` without dropping persistence coverage or adding a new job. | Tested | Rejected: wall clock regressed from `8m35s` to `9m50s`; `host-runtime`, `reborn-core`, and `composition-core` were all slower. |
 | H12 | Move `ironclaw_reborn_cli` from `reborn-core` to `webui-ingress`. | Keep job count flat while grouping the WebUI-shaped CLI build with the WebUI ingress bucket instead of the core Reborn bucket. | Tested | Rejected: `reborn-core` improved from `367s` to `238s`, but `webui-ingress` grew from `334s` to `377s`; wall clock stayed flat at `8m37s` with no job-count reduction. |
 | H13 | Remove the separate uninstrumented `reborn-group-tests` job and rely on the existing instrumented coverage `groups` lane for those same suites. | Reduce total Reborn jobs by one without dropping group-suite pass/fail coverage. | Retained | Accepted: total Reborn jobs dropped from `28` to `27`, and wall clock improved from `8m35s` to `8m21s`. |
-| H14 | Seed fresh shared Rust caches from deterministic broad producers: `reborn-core` for crate buckets and `groups` for coverage lanes. | Improve warm-start quality for compile-heavy jobs without adding jobs or changing coverage. | Retained with caveat | Accepted as a targeted cache-policy cleanup: the controlled measurement improved from H13 `8m21s` to `7m49s`, but later final-state validation runs regressed to `12m07s`, `12m44s`, and `12m22s`, so this is not a stable wall-clock fix. |
+| H14 | Seed fresh shared Rust caches from deterministic broad producers: `reborn-core` for crate buckets and `groups` for coverage lanes. | Improve warm-start quality for compile-heavy jobs without adding jobs or changing coverage. | Retained with caveat | Accepted as a targeted cache-policy cleanup: the controlled measurement improved from H13 `8m21s` to `7m49s`, but later final-state validation runs regressed to `12m07s`, `12m44s`, `12m22s`, and `12m08s`, so this is not a stable wall-clock fix. |
 | H15 | Add a `cargo-hakari` workspace-hack crate to unify dependency feature sets across buckets. | Improve cross-bucket cache reuse by making shared dependency artifacts compatible across package feature combinations. | Tested | Rejected: the benchmark run failed architecture dependency-boundary tests and was already slower than the original baseline, with root `1` at `10m21s`, `host-runtime` at `8m24s`, and `composition-core` at `8m21s`. |
-| H16 | Build a nightly dependency-warmed CI container image in GHCR and run heavy Reborn jobs inside it. | Escape GitHub cache LRU limits by pre-baking a broad warm target/dependency layer. | Feasibility review | Not safe to add as an inline benchmark: no existing Reborn dependency image path; requires package write permissions, GHCR retention policy, container hardening, and a separate seed/build workflow before PR timing is meaningful. |
+| H16 | Build a nightly dependency-warmed CI container image in GHCR and run heavy Reborn jobs inside it. | Escape GitHub cache LRU limits by pre-baking a broad warm target/dependency layer. | Feasibility-tested | Not runtime-benchmarked: repo Actions default token is read-only, the existing Docker workflow only requests `packages: read` and publishes product images to Docker Hub, and the local token lacks `write:packages`; a real benchmark needs a separate package-write image lifecycle first. |
 | H17 | Skip Reborn buckets by changed-file reverse dependency scope. | Improve average PR time by running only affected buckets while merge queue still runs everything. | Retrospective benchmark | Weak near-term result: across 27 recent Reborn-scoped merged PRs, conservative dry-run scoping reduced crate buckets from `324` to `282` total (`13%`), with median PR still at `12/12` buckets because most sampled Reborn PRs touched tests, workflows, shared roots, or broad closures. |
 | H18 | Increase Reborn root-test partitions from 4 to 6. | Shave the new post-H14 root-test long pole without changing test coverage. | Tested | Rejected: wall clock regressed from H14 `7m49s` to `10m41s`; the slowest root partition worsened from `450s` to `595s`. |
 
@@ -868,6 +868,10 @@ Final-state validation caveat:
   [`28732787177`](https://github.com/nearai/ironclaw/actions/runs/28732787177),
   also passed with the same retained workflow shape and `27` Reborn jobs, but
   took `12m22s` (`2026-07-05T07:05:13Z` to `2026-07-05T07:17:35Z`).
+- A fourth validation run,
+  [`28734347955`](https://github.com/nearai/ironclaw/actions/runs/28734347955),
+  also passed with the same retained workflow shape and `27` Reborn jobs, but
+  took `12m08s` (`2026-07-05T08:10:25Z` to `2026-07-05T08:22:33Z`).
 - These validation runs still had `27` total Reborn jobs, but their long poles
   were much slower than the H14 measurement. The first validation run's slowest
   jobs were:
@@ -890,6 +894,16 @@ Final-state validation caveat:
   - `Reborn root tests (2)`: `593s`.
   - `host-runtime`: `587s`.
   - `composition-core`: `564s`.
+- The fourth validation run's slowest jobs were:
+  - `Reborn root tests (2)`: `676s`.
+  - `Reborn root tests (3)`: `663s`.
+  - `Reborn root tests (1)`: `657s`.
+  - `Reborn root tests (0)`: `569s`.
+  - `host-runtime`: `536s`.
+  - `adapters-misc`: `531s`.
+  - `wasm-sandbox`: `526s`.
+  - coverage `groups`: `512s`.
+  - `composition-core`: `509s`.
 - Log evidence points to cache quality/latency variance, not test failures:
   - root partition `3` restored `reborn-tests-root` from GitHub cache and got
     `No cache found`, then relied on OVH Redis sccache.
@@ -998,6 +1012,17 @@ Red-team notes:
   this branch. Existing Docker workflows build product/release images and use
   GitHub Actions cache, but they do not publish a Rust target-dir warm-start
   image for PR jobs.
+- The existing Docker image workflow publishes product and worker images to
+  Docker Hub (`nearaidev/ironclaw` and `nearaidev/ironclaw-worker`), not GHCR.
+  Its job permissions are `contents: read`, `packages: read`, and
+  `actions: write`; it does not exercise a `packages: write` path.
+- Repository Actions settings report `default_workflow_permissions: read`.
+  A PR-local benchmark that needs to publish `ghcr.io/nearai/ironclaw/...`
+  would therefore require an intentional repo permission change, not just a
+  workflow edit.
+- The local GitHub CLI token used for this benchmark has `repo` and `workflow`
+  scopes but no `write:packages`, so a local push/delete probe to GHCR is not
+  available either.
 - A meaningful benchmark needs two phases:
   - seed/build a GHCR image from `main` or `Cargo.lock` changes, then
   - run PR jobs inside that image and compare against the same Reborn workflow
@@ -1011,9 +1036,20 @@ Red-team notes:
 
 Benchmark status:
 
-- Not started in this PR. Treat as a separate H16 infrastructure benchmark with
-  explicit rollback criteria: image pull time, cache-hit proof, image size,
-  GHCR permissions, and before/after wall clock for the same heavy Reborn jobs.
+- Feasibility-tested, not runtime-benchmarked in this PR.
+- Permission/setup evidence:
+  - `gh api repos/nearai/ironclaw/actions/permissions/workflow` returned
+    `default_workflow_permissions: read`.
+  - `gh auth status -t` showed the local CLI token lacks `write:packages`.
+  - `.github/workflows/docker.yml` currently requests only `packages: read` and
+    publishes product images to Docker Hub, not GHCR CI warm-start images.
+- Decision: do not add H16 to this PR. A real H16 benchmark should be a
+  separate infra PR that first enables or supplies package-write credentials,
+  builds a non-production CI image, records image size and pull time, proves
+  target-dir/toolchain compatibility, then compares the same heavy jobs before
+  and after. Without that, any inline PR change would either be un-runnable or
+  would measure image build overhead instead of the proposed nightly-warmed
+  image.
 
 ## H17: Per-Bucket Change Detection Skipping
 
