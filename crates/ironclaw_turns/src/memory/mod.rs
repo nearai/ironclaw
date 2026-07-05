@@ -3052,7 +3052,16 @@ impl Inner {
                     .keys()
                     .any(|reservation| reservation.root_run_id == run_id)
             {
-                self.records.remove(&run_id);
+                if let Some(record) = self.records.remove(&run_id) {
+                    let turn_id = record.turn_id;
+                    if !self
+                        .records
+                        .values()
+                        .any(|record| record.turn_id == turn_id)
+                    {
+                        self.turns.remove(&turn_id);
+                    }
+                }
                 self.admission_reservations.remove(&run_id);
             }
         }
@@ -3340,4 +3349,115 @@ where
         order.pop_front();
     }
     removed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        AllowAllTurnAdmissionPolicy, ResolvedRunProfile, RunProfileId, RunProfileVersion,
+        TurnLeaseToken, TurnRunnerId,
+    };
+    use async_trait::async_trait;
+    use ironclaw_host_api::{AgentId, ProjectId, ThreadId};
+
+    struct TestRunProfileResolver;
+
+    #[async_trait]
+    impl RunProfileResolver for TestRunProfileResolver {
+        async fn resolve_run_profile(
+            &self,
+            _request: RunProfileResolutionRequest,
+        ) -> Result<ResolvedRunProfile, RunProfileResolutionError> {
+            Ok(ResolvedRunProfile::legacy_compatibility(
+                RunProfileId::default_profile(),
+                RunProfileVersion::new(1),
+                false,
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_pruning_removes_orphaned_turn_records() {
+        let limits = InMemoryTurnStateStoreLimits {
+            max_terminal_records: 1,
+            ..InMemoryTurnStateStoreLimits::default()
+        };
+        let store = InMemoryTurnStateStore::with_limits(limits);
+        let policy = AllowAllTurnAdmissionPolicy;
+        let resolver = TestRunProfileResolver;
+        let scope = TurnScope::new(
+            TenantId::new("tenant-turn-prune").unwrap(),
+            Some(AgentId::new("agent-turn-prune").unwrap()),
+            Some(ProjectId::new("project-turn-prune").unwrap()),
+            ThreadId::new("thread-turn-prune").unwrap(),
+        );
+
+        for index in 0..2 {
+            let response = store
+                .submit_turn(
+                    SubmitTurnRequest {
+                        scope: scope.clone(),
+                        actor: TurnActor::new(UserId::new(format!("user-{index}")).unwrap()),
+                        accepted_message_ref: AcceptedMessageRef::new(format!("accepted-{index}"))
+                            .unwrap(),
+                        source_binding_ref: SourceBindingRef::new(format!("source-{index}"))
+                            .unwrap(),
+                        reply_target_binding_ref: ReplyTargetBindingRef::new(format!(
+                            "reply-{index}"
+                        ))
+                        .unwrap(),
+                        idempotency_key: IdempotencyKey::new(format!("submit-{index}")).unwrap(),
+                        requested_run_profile: None,
+                        requested_run_id: None,
+                        received_at: Utc::now(),
+                        parent_run_id: None,
+                        subagent_depth: 0,
+                        spawn_tree_root_run_id: None,
+                        product_context: None,
+                    },
+                    &policy,
+                    &resolver,
+                )
+                .await
+                .unwrap();
+            let SubmitTurnResponse::Accepted { run_id, .. } = response;
+            let runner_id = TurnRunnerId::new();
+            let lease_token = TurnLeaseToken::new();
+            let claimed = store
+                .claim_next_run(ClaimRunRequest {
+                    runner_id,
+                    lease_token,
+                    scope_filter: Some(scope.clone()),
+                })
+                .await
+                .unwrap()
+                .expect("submitted run should be claimable");
+            assert_eq!(claimed.state.run_id, run_id);
+            store
+                .complete_run(CompleteRunRequest {
+                    run_id,
+                    runner_id,
+                    lease_token,
+                })
+                .await
+                .unwrap();
+        }
+
+        let snapshot = store.persistence_snapshot();
+        assert_eq!(
+            snapshot.runs.len(),
+            1,
+            "terminal run retention cap should prune old terminal runs"
+        );
+        assert_eq!(
+            snapshot.turns.len(),
+            1,
+            "pruning a terminal run must also prune its orphaned turn record"
+        );
+        assert_eq!(
+            snapshot.turns[0].turn_id, snapshot.runs[0].turn_id,
+            "remaining turn record should belong to the retained run"
+        );
+    }
 }

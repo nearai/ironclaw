@@ -151,6 +151,19 @@ pub(crate) struct Args {
     #[arg(long, value_enum, default_value_t = TurnStateBackend::Filesystem)]
     pub(crate) turn_state_backend: TurnStateBackend,
 
+    /// Override max retained terminal run records in the turn-state store.
+    /// Useful for measuring filesystem snapshot growth sensitivity.
+    #[arg(long)]
+    pub(crate) turn_state_max_terminal_records: Option<usize>,
+
+    /// Override max retained lifecycle events in the turn-state store.
+    #[arg(long)]
+    pub(crate) turn_state_max_events: Option<usize>,
+
+    /// Override max retained idempotency records per operation family.
+    #[arg(long)]
+    pub(crate) turn_state_max_idempotency_records: Option<usize>,
+
     /// Shared run id. Defaults to a fresh UUID.
     #[arg(long)]
     pub(crate) run_id: Option<String>,
@@ -393,6 +406,20 @@ impl Args {
             self.operations.clamp(1, 1024)
         } else {
             self.operations
+        }
+    }
+
+    pub(crate) fn turn_state_store_limits(&self) -> ironclaw_turns::InMemoryTurnStateStoreLimits {
+        let defaults = ironclaw_turns::InMemoryTurnStateStoreLimits::default();
+        ironclaw_turns::InMemoryTurnStateStoreLimits {
+            max_events: self.turn_state_max_events.unwrap_or(defaults.max_events),
+            max_terminal_records: self
+                .turn_state_max_terminal_records
+                .unwrap_or(defaults.max_terminal_records),
+            max_idempotency_records: self
+                .turn_state_max_idempotency_records
+                .unwrap_or(defaults.max_idempotency_records),
+            ..defaults
         }
     }
 
@@ -650,6 +677,9 @@ struct RunSummary {
     active_thread_count: usize,
     threads_per_owner: usize,
     turn_state_backend: TurnStateBackend,
+    turn_state_max_terminal_records: Option<usize>,
+    turn_state_max_events: Option<usize>,
+    turn_state_max_idempotency_records: Option<usize>,
     gate_blocked_every: usize,
     tenants: usize,
     prefill_threads: usize,
@@ -1226,6 +1256,8 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
             .arg(args.prefill_concurrency.to_string())
             .arg("--scenario")
             .arg(args.scenario.as_str())
+            .arg("--turn-state-backend")
+            .arg(args.turn_state_backend.as_str())
             .arg("--postgres-pool-size")
             .arg(args.postgres_pool_size.to_string())
             .arg("--progress-interval-seconds")
@@ -1283,6 +1315,21 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
         }
         if args.span_log_failures {
             command.arg("--span-log-failures");
+        }
+        if let Some(max_terminal_records) = args.turn_state_max_terminal_records {
+            command
+                .arg("--turn-state-max-terminal-records")
+                .arg(max_terminal_records.to_string());
+        }
+        if let Some(max_events) = args.turn_state_max_events {
+            command
+                .arg("--turn-state-max-events")
+                .arg(max_events.to_string());
+        }
+        if let Some(max_idempotency_records) = args.turn_state_max_idempotency_records {
+            command
+                .arg("--turn-state-max-idempotency-records")
+                .arg(max_idempotency_records.to_string());
         }
         if let Some(path) = &args.trace_jsonl {
             command
@@ -1779,6 +1826,9 @@ fn summarize(args: &Args, run_id: &str, input: SummaryInput) -> RunSummary {
         active_thread_count: args.active_thread_count,
         threads_per_owner: args.threads_per_owner,
         turn_state_backend: args.turn_state_backend,
+        turn_state_max_terminal_records: args.turn_state_max_terminal_records,
+        turn_state_max_events: args.turn_state_max_events,
+        turn_state_max_idempotency_records: args.turn_state_max_idempotency_records,
         gate_blocked_every: args.gate_blocked_every,
         tenants: args.tenants,
         prefill_threads: args.prefill_threads,

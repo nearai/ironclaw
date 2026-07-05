@@ -598,7 +598,7 @@ fn aggregate_failure_causes(summaries: &[RunSummary]) -> BTreeMap<String, Failur
     failure_causes
 }
 
-fn stage_rows(stages: &UserTurnStageLatencySummary) -> [(&'static str, &StageLatencySummary); 18] {
+fn stage_rows(stages: &UserTurnStageLatencySummary) -> [(&'static str, &StageLatencySummary); 21] {
     [
         ("ensure_thread", &stages.ensure_thread),
         ("accept_inbound", &stages.accept_inbound),
@@ -606,6 +606,9 @@ fn stage_rows(stages: &UserTurnStageLatencySummary) -> [(&'static str, &StageLat
         ("mark_submitted", &stages.mark_submitted),
         ("mark_rejected_busy", &stages.mark_rejected_busy),
         ("claim_run", &stages.claim_run),
+        ("block_run", &stages.block_run),
+        ("resume_turn", &stages.resume_turn),
+        ("reclaim_run", &stages.reclaim_run),
         ("append_assistant", &stages.append_assistant),
         ("finalize_assistant", &stages.finalize_assistant),
         ("complete_run", &stages.complete_run),

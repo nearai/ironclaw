@@ -881,3 +881,57 @@ Budgets: 10 hours wall-clock / $0 spend
   three env-determinism failures from the shell's `NEARAI_API_KEY` plus
   timeout-only failures in parallel runtime tests; the failed groups were
   rerun with `NEARAI_*` unset and `--test-threads=1`, and all reruns passed.
+
+## Cycle 19 - Turn-State Blocked-Flow Attribution
+
+- Graph note: `codebase-memory-mcp` transport closed on the first project
+  probe, so this cycle falls back to targeted local reads.
+- Stress signal: Focused `ironclaw_stress` E2E runs with Postgres pool size 2
+  show the durable filesystem turn-state backend is still a per-user
+  `/turns/state.json` blob. In no-gate `chat-turn`, `memory-persist-on-block`
+  completed 320/320 at 38.7ms p95 with `turn_store` p95 29us and +2.5MB DB
+  growth, while filesystem turn state completed 320/320 at 66.8ms p95 with
+  `turn_store` p95 23.6ms and +11.2MB DB growth. In gated
+  `mixed-user-session`, the stress report under-counts the turn-store group
+  because `block_run`, `resume_turn`, and the re-claim after resume are not
+  stage-timed.
+- Hypothesis: The next correct turn-state signal should measure every
+  turn-store operation in the full blocked user flow. Adding stage timings for
+  block, resume, and reclaim should expose whether the durable blob path is
+  paying whole-snapshot CAS cost during blocked gates, without changing the
+  workload or persistence semantics.
+- Expected failure mode: Instrumentation drift could alter the async execution
+  order or double-count unrelated stages. The change must reuse the existing
+  `time_stage` helper around only the existing turn-store futures and update
+  summaries/spans/human output consistently.
+- Diagnostic: Patch `ironclaw_stress` attribution, run targeted compile/tests,
+  then rerun the same Postgres E2E blocked and no-gate turn-state loops so the
+  reported `turn_store` group includes submit, claim, block, resume, reclaim,
+  and complete.
+- Result: Added `block_run`, `resume_turn`, and `reclaim_run` stage timings to
+  `ironclaw_stress` and included them in `turn_store` attribution. With
+  corrected attribution, Postgres pool-size-2 gated `mixed-user-session`
+  reports `memory-persist-on-block` at 134.9ms operation p95 and 7.15ms
+  `turn_store` p95, while durable filesystem turn state reports 110.3ms
+  operation p95 and 49.0ms `turn_store` p95. No-gate `chat-turn` isolates the
+  blob cost: memory-persist completes 1600/1600 at 15.6ms operation p95 with
+  `turn_store` p95 about 20us; filesystem completes 1600/1600 at 280.9ms
+  operation p95 with `turn_store` p95 101.0ms.
+- Growth diagnostic: Per-operation spans from the 1600-op filesystem `chat-turn`
+  run show turn-state p95 climbing by operation-index quartile as the same
+  per-user `/turns/state.json` grows: 32.7ms, 60.9ms, 78.8ms, then 114.4ms.
+  The memory-persist control stays flat at 17-24us. This verifies the user's
+  size-growth concern directly: blob CAS cost grows with snapshot body size.
+- Mitigation result: Added stress retention-cap flags and fixed terminal
+  pruning so old terminal runs also remove their orphaned `TurnRecord`s.
+  A tiny filesystem hot window (`terminal=4`, `events=24`, `idempotency=8`)
+  flattens the 1600-op `chat-turn` curve to 17.5ms, 15.7ms, 12.8ms, 13.2ms
+  turn-store p95 by quartile and cuts operation p95 from 280.9ms to 45.7ms.
+  The same cap on gated `mixed-user-session` cuts DB growth to +6.0MB and
+  operation p95 to 94.0ms, but `turn_store` p95 is still 40.5ms.
+- Conclusion: Retention caps are a useful guardrail and fix unbounded blob
+  growth, but they cannot hit the target by themselves. Even the tiny hot
+  window still pays several filesystem CAS round trips per turn transition.
+  The durable filesystem turn-state solution needs a typed row/append store
+  where submit/claim/block/resume/complete mutate small records/log entries
+  directly instead of rehydrating and rewriting a per-user snapshot.

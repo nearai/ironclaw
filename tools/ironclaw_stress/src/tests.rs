@@ -755,6 +755,9 @@ fn operation_attribution_groups_user_turn_stage_durations() {
             accept_inbound: Some(Duration::from_micros(2)),
             submit_turn: Some(Duration::from_micros(3)),
             claim_run: Some(Duration::from_micros(4)),
+            block_run: Some(Duration::from_micros(17)),
+            resume_turn: Some(Duration::from_micros(18)),
+            reclaim_run: Some(Duration::from_micros(19)),
             complete_run: Some(Duration::from_micros(5)),
             load_context: Some(Duration::from_micros(6)),
             resource_reserve: Some(Duration::from_micros(7)),
@@ -776,7 +779,7 @@ fn operation_attribution_groups_user_turn_stage_durations() {
 
     assert_eq!(attribution.thread_store_writes.count, 1);
     assert_eq!(attribution.thread_store_writes.latency.p95_us, 73);
-    assert_eq!(attribution.turn_store.latency.p95_us, 12);
+    assert_eq!(attribution.turn_store.latency.p95_us, 66);
     assert_eq!(attribution.context_reads.latency.p95_us, 6);
     assert_eq!(attribution.resource_governor.latency.p95_us, 24);
     assert_eq!(attribution.synthetic_wait.latency.p95_us, 21);
@@ -1062,6 +1065,9 @@ fn run_summary_with_bottlenecks() -> RunSummary {
         active_thread_count: 1,
         threads_per_owner: 1,
         turn_state_backend: TurnStateBackend::Filesystem,
+        turn_state_max_terminal_records: None,
+        turn_state_max_events: None,
+        turn_state_max_idempotency_records: None,
         gate_blocked_every: 0,
         tenants: 1,
         prefill_threads: 1,
@@ -1106,6 +1112,9 @@ fn run_summary_with_bottlenecks() -> RunSummary {
             mark_submitted: empty_stage(),
             mark_rejected_busy: empty_stage(),
             claim_run: empty_stage(),
+            block_run: empty_stage(),
+            resume_turn: empty_stage(),
+            reclaim_run: empty_stage(),
             append_assistant: empty_stage(),
             finalize_assistant: empty_stage(),
             complete_run: empty_stage(),
@@ -1138,6 +1147,9 @@ fn test_args() -> Args {
         active_thread_count: 0,
         threads_per_owner: 1,
         turn_state_backend: TurnStateBackend::Filesystem,
+        turn_state_max_terminal_records: None,
+        turn_state_max_events: None,
+        turn_state_max_idempotency_records: None,
         gate_blocked_every: 0,
         tenants: 2,
         prefill_threads: 0,

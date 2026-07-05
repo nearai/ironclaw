@@ -81,6 +81,9 @@ pub(crate) fn summarize_user_turn_stages(
         mark_submitted: summarize_stage(&stages, |stage| stage.mark_submitted),
         mark_rejected_busy: summarize_stage(&stages, |stage| stage.mark_rejected_busy),
         claim_run: summarize_stage(&stages, |stage| stage.claim_run),
+        block_run: summarize_stage(&stages, |stage| stage.block_run),
+        resume_turn: summarize_stage(&stages, |stage| stage.resume_turn),
+        reclaim_run: summarize_stage(&stages, |stage| stage.reclaim_run),
         append_assistant: summarize_stage(&stages, |stage| stage.append_assistant),
         finalize_assistant: summarize_stage(&stages, |stage| stage.finalize_assistant),
         complete_run: summarize_stage(&stages, |stage| stage.complete_run),
@@ -185,7 +188,14 @@ fn context_read_duration(stage: &UserTurnStageDurations) -> Duration {
 }
 
 fn turn_store_duration(stage: &UserTurnStageDurations) -> Duration {
-    sum_durations([stage.submit_turn, stage.claim_run, stage.complete_run])
+    sum_durations([
+        stage.submit_turn,
+        stage.claim_run,
+        stage.block_run,
+        stage.resume_turn,
+        stage.reclaim_run,
+        stage.complete_run,
+    ])
 }
 
 fn resource_governor_duration(stage: &UserTurnStageDurations) -> Duration {

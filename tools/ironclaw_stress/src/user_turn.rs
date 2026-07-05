@@ -30,9 +30,10 @@ use ironclaw_threads::{
 use ironclaw_turns::{
     AcceptedMessageRef, BlockedReason, DefaultTurnCoordinator, FilesystemTurnStateBlockPersistence,
     FilesystemTurnStateStore, GateRef, IdempotencyKey, InMemoryTurnStateStore,
-    LoopCheckpointStateRef, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId,
-    TurnCoordinator, TurnError, TurnErrorCategory, TurnLeaseToken, TurnRunnerId, TurnStateStore,
+    InMemoryTurnStateStoreLimits, LoopCheckpointStateRef, ReplyTargetBindingRef,
+    ResumeTurnPrecondition, ResumeTurnRequest, SourceBindingRef, SubmitTurnRequest,
+    SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnCoordinator, TurnError, TurnErrorCategory,
+    TurnLeaseToken, TurnRunnerId, TurnStateStore,
     runner::{
         BlockRunRequest, ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, TurnRunTransitionPort,
     },
@@ -71,6 +72,7 @@ where
     run_id: String,
     target: String,
     turn_state_backend: TurnStateBackend,
+    turn_state_limits: InMemoryTurnStateStoreLimits,
     /// Single shared in-process turn-state authority, used when
     /// `turn_state_backend == Memory`. Shared across all workers (one process)
     /// to faithfully model the production single-process design.
@@ -98,6 +100,9 @@ pub(crate) struct UserTurnStageLatencySummary {
     pub(crate) mark_submitted: StageLatencySummary,
     pub(crate) mark_rejected_busy: StageLatencySummary,
     pub(crate) claim_run: StageLatencySummary,
+    pub(crate) block_run: StageLatencySummary,
+    pub(crate) resume_turn: StageLatencySummary,
+    pub(crate) reclaim_run: StageLatencySummary,
     pub(crate) append_assistant: StageLatencySummary,
     pub(crate) finalize_assistant: StageLatencySummary,
     pub(crate) complete_run: StageLatencySummary,
@@ -147,6 +152,9 @@ pub(crate) struct UserTurnStageDurations {
     pub(crate) mark_submitted: Option<Duration>,
     pub(crate) mark_rejected_busy: Option<Duration>,
     pub(crate) claim_run: Option<Duration>,
+    pub(crate) block_run: Option<Duration>,
+    pub(crate) resume_turn: Option<Duration>,
+    pub(crate) reclaim_run: Option<Duration>,
     pub(crate) append_assistant: Option<Duration>,
     pub(crate) finalize_assistant: Option<Duration>,
     pub(crate) complete_run: Option<Duration>,
@@ -200,6 +208,7 @@ async fn build_libsql_user_turn_workload(
         target,
         model_latency,
         args.turn_state_backend,
+        args.turn_state_store_limits(),
     )?))
 }
 
@@ -231,6 +240,7 @@ async fn build_postgres_user_turn_workload(
         target,
         model_latency,
         args.turn_state_backend,
+        args.turn_state_store_limits(),
     )?))
 }
 
@@ -892,7 +902,7 @@ where
                 // `gate_blocked_every`, so parity alone would only ever pick one
                 // gate kind for even intervals.
                 let use_auth_gate = (operation_index / args.gate_blocked_every) % 2 == 1;
-                self.gate_block_and_resume(&context, &turn_store, claimed, use_auth_gate)
+                self.gate_block_and_resume(&context, &turn_store, claimed, use_auth_gate, stages)
                     .await?
             } else {
                 claimed
@@ -1211,6 +1221,7 @@ where
         turn_store: &Arc<dyn StressTurnStore>,
         claimed: ClaimedTurnRun,
         use_auth_gate: bool,
+        stages: &mut UserTurnStageDurations,
     ) -> Result<ClaimedTurnRun, OperationFailure> {
         let run_id = claimed.state.run_id;
         let is_auth = use_auth_gate;
@@ -1228,25 +1239,28 @@ where
                 gate_ref: gate_ref.clone(),
             }
         };
-        turn_store
-            .block_run(BlockRunRequest {
+        time_stage(
+            &mut stages.block_run,
+            turn_store.block_run(BlockRunRequest {
                 run_id,
                 runner_id: claimed.runner_id,
                 lease_token: claimed.lease_token,
                 checkpoint_id: TurnCheckpointId::new(),
                 state_ref,
                 reason,
-            })
-            .await
-            .map_err(|error| turn_failure("block_run", error))?;
+            }),
+        )
+        .await
+        .map_err(|error| turn_failure("block_run", error))?;
 
         let precondition = if is_auth {
             ResumeTurnPrecondition::BlockedAuthGate
         } else {
             ResumeTurnPrecondition::BlockedApprovalGate
         };
-        turn_store
-            .resume_turn(ResumeTurnRequest {
+        time_stage(
+            &mut stages.resume_turn,
+            turn_store.resume_turn(ResumeTurnRequest {
                 scope: context.turn_scope.clone(),
                 actor: TurnActor::new(context.user_id.clone()),
                 run_id,
@@ -1261,27 +1275,30 @@ where
                     .map_err(|error| OperationFailure::invalid_request("resume_turn", error))?,
                 precondition,
                 resume_disposition: None,
-            })
-            .await
-            .map_err(|error| turn_failure("resume_turn", error))?;
+            }),
+        )
+        .await
+        .map_err(|error| turn_failure("resume_turn", error))?;
 
         // Resume returns the run to Queued — re-claim it so the normal
         // completion path owns finishing it.
-        turn_store
-            .claim_next_run(ClaimRunRequest {
+        time_stage(
+            &mut stages.reclaim_run,
+            turn_store.claim_next_run(ClaimRunRequest {
                 runner_id: TurnRunnerId::new(),
                 lease_token: TurnLeaseToken::new(),
                 scope_filter: Some(context.turn_scope.clone()),
-            })
-            .await
-            .map_err(|error| turn_failure("reclaim_run", error))?
-            .ok_or_else(|| {
-                OperationFailure::new(
-                    "turn_claim_miss",
-                    "reclaim_run",
-                    "resumed run was not claimable",
-                )
-            })
+            }),
+        )
+        .await
+        .map_err(|error| turn_failure("reclaim_run", error))?
+        .ok_or_else(|| {
+            OperationFailure::new(
+                "turn_claim_miss",
+                "reclaim_run",
+                "resumed run was not claimable",
+            )
+        })
     }
 
     fn turn_store_for_context(
@@ -1308,7 +1325,9 @@ where
                     Arc::clone(&self.root),
                     view,
                 ));
-                Ok(Arc::new(FilesystemTurnStateStore::new(scoped)) as Arc<dyn StressTurnStore>)
+                Ok(Arc::new(
+                    FilesystemTurnStateStore::new(scoped).with_limits(self.turn_state_limits),
+                ) as Arc<dyn StressTurnStore>)
             }
         }
     }
@@ -1321,6 +1340,7 @@ fn user_turn_services_from_root<F>(
     target: String,
     model_latency: Arc<ModelLatencyDriver>,
     turn_state_backend: TurnStateBackend,
+    turn_state_limits: InMemoryTurnStateStoreLimits,
 ) -> Result<UserTurnServices<F>, String>
 where
     F: RootFilesystem + 'static,
@@ -1338,6 +1358,7 @@ where
         run_id,
         target,
         turn_state_backend,
+        turn_state_limits,
         // Constructed once and shared across every worker (the workload is held
         // behind one Arc), so the Memory backend exercises a single shared
         // authority exactly as the single-process runtime would. When the
@@ -1346,7 +1367,7 @@ where
         // shipped config (the sink stays idle on this never-blocking workload,
         // so what it measures is the extra probe cost per terminal transition).
         memory_turn_store: Arc::new({
-            let store = InMemoryTurnStateStore::default();
+            let store = InMemoryTurnStateStore::with_limits(turn_state_limits);
             if turn_state_backend.persists_on_block() {
                 let sink = Arc::new(FilesystemTurnStateBlockPersistence::new(Arc::clone(
                     &scoped,
@@ -1797,6 +1818,9 @@ fn stage_latencies_us(stages: &UserTurnStageDurations) -> serde_json::Value {
     insert_stage_latency(&mut output, "mark_submitted", stages.mark_submitted);
     insert_stage_latency(&mut output, "mark_rejected_busy", stages.mark_rejected_busy);
     insert_stage_latency(&mut output, "claim_run", stages.claim_run);
+    insert_stage_latency(&mut output, "block_run", stages.block_run);
+    insert_stage_latency(&mut output, "resume_turn", stages.resume_turn);
+    insert_stage_latency(&mut output, "reclaim_run", stages.reclaim_run);
     insert_stage_latency(&mut output, "append_assistant", stages.append_assistant);
     insert_stage_latency(&mut output, "finalize_assistant", stages.finalize_assistant);
     insert_stage_latency(&mut output, "complete_run", stages.complete_run);
