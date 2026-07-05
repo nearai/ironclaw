@@ -599,19 +599,8 @@ async fn capability_host_does_not_orphan_approval_when_run_block_fails() {
     assert_eq!(run.status, RunStatus::Failed);
     assert_eq!(run.error_kind.as_deref(), Some("ApprovalBlock"));
 
-    // Regression (#5467, this lane): the rollback path (`host.rs`'s
-    // `save_pending` succeeds then `block_approval` fails) must discard the
-    // approval by tombstoning it, not deleting it — otherwise a subsequent
-    // `save_pending` for the same request id succeeds instead of failing
-    // closed with `ApprovalRequestAlreadyExists`. `run_state.fail()` clears
-    // `RunRecord.approval_request_id`, so the id is read back from the spy
-    // (captured at `save_pending` time) rather than off the failed run.
-    //
-    // Confirmed RED pre-fix (temporarily reverted this lane's commit 1 diff
-    // to `InMemoryApprovalRequestStore::discard_pending` in
-    // `crates/ironclaw_run_state/src/lib.rs`, which restores the old
-    // `records.remove(&key)` behavior): `save_pending` below returned
-    // `Ok(..)` instead of `Err(ApprovalRequestAlreadyExists)`.
+    // Regression (#5467): rollback must tombstone the approval, not delete it,
+    // so a same-id save_pending fails closed. RED pre-fix: returned Ok(..).
     let discarded_id = approval_requests
         .last_saved_id()
         .expect("save_pending must have been called before the block_approval rollback");
@@ -1840,12 +1829,8 @@ impl RunStateStore for FailBlockApprovalRunStateStore {
     }
 }
 
-/// Spy decorator over `InMemoryApprovalRequestStore` that records the id
-/// passed to `save_pending` before delegating. `capability_host_does_not_orphan_approval_when_run_block_fails`
-/// needs the discarded approval's id after the rollback to prove the reuse
-/// invariant, but `run_state.fail()` clears `RunRecord.approval_request_id`
-/// to `None` — so the id must be captured here, at save time, rather than
-/// read back off the failed run record.
+/// Spy over `InMemoryApprovalRequestStore`: records the `save_pending` id,
+/// since `run_state.fail()` clears `RunRecord.approval_request_id` (#5467).
 struct RecordingApprovalStore {
     inner: InMemoryApprovalRequestStore,
     last_saved_id: Mutex<Option<ApprovalRequestId>>,
