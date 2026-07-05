@@ -17,6 +17,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::post,
 };
+use ironclaw_host_api::NetworkMethod;
 use ironclaw_host_api::ingress::IngressRouteDescriptor;
 use ironclaw_product_adapters::ProtocolAuthEvidence;
 use ironclaw_wasm_product_adapters::{
@@ -229,45 +230,76 @@ impl std::fmt::Debug for SlackEventsRouteState {
 }
 
 pub fn slack_events_route_mount(state: SlackEventsRouteState) -> PublicRouteMount {
+    let descriptor = SLACK_INGRESS_DESCRIPTORS.events.clone();
     PublicRouteMount::new(
         Router::new()
-            .route(SLACK_EVENTS_PATH, post(slack_events_handler))
+            .route(
+                descriptor.route_pattern().as_str(),
+                post(slack_events_handler),
+            )
             .with_state(state.clone()),
-        slack_events_route_descriptors(),
+        vec![descriptor],
     )
     .with_drain(Arc::new(state))
 }
 
 pub fn slack_events_route_descriptors() -> Vec<IngressRouteDescriptor> {
-    vec![SLACK_EVENTS_DESCRIPTOR.clone()]
+    vec![SLACK_INGRESS_DESCRIPTORS.events.clone()]
 }
 
-/// The Slack events route descriptor, projected from the bundled manifest
-/// exactly once on first use (the manifest is a compile-time constant, so the
-/// projection is deterministic and cached for the process lifetime).
-static SLACK_EVENTS_DESCRIPTOR: LazyLock<IngressRouteDescriptor> =
-    LazyLock::new(|| bundled_slack_ingress_descriptor(SLACK_EVENTS_ROUTE_ID));
-
-/// Project a Slack host-ingress route descriptor from the bundled Slack
-/// extension manifest.
+/// Both Slack host-ingress route descriptors, projected from the bundled Slack
+/// extension manifest in a single parse on first use (the manifest is a
+/// compile-time constant, so the projection is deterministic and cached for
+/// the process lifetime).
 ///
-/// The route's path/method/policy are declared as data in
+/// The routes' path/method/policy are declared as data in
 /// `assets/slack/manifest.toml` (`[[product_adapter.inbound.host_ingress]]`)
 /// and validated by `ironclaw_host_api` (incl. the fail-closed floor that a
 /// `public_webhook` listener must require `webhook_signature`) plus
 /// `ironclaw_product_adapter_registry` (ingress credential coherence). Only the
-/// declarative descriptor lives in the manifest — the axum handler and the HMAC
-/// verifier stay in this module. Panics if the bundled manifest does not
-/// declare the route: `SLACK_MANIFEST` is a compile-time constant, so a missing
-/// route is a build-time invariant violation, surfaced at startup.
-fn bundled_slack_ingress_descriptor(route_id: &str) -> IngressRouteDescriptor {
-    crate::host_ingress::bundled_host_ingress_descriptor(
+/// declarative descriptors live in the manifest — the axum handlers and the
+/// HMAC verifier stay in this module, and the mount functions build their
+/// routes from these descriptors so what axum mounts cannot drift from what
+/// the manifest declares. Panics if the bundled manifest does not declare a
+/// route or declares it with a non-POST method: `SLACK_MANIFEST` is a
+/// compile-time constant, so either is a build-time invariant violation,
+/// surfaced at startup.
+static SLACK_INGRESS_DESCRIPTORS: LazyLock<SlackIngressDescriptors> = LazyLock::new(|| {
+    let descriptors = crate::host_ingress::bundled_host_ingress_descriptors(
         crate::available_extensions::slack_manifest_toml(),
-        route_id,
     )
     .unwrap_or_else(|error| {
-        panic!("bundled Slack manifest must declare host-ingress route {route_id}: {error}")
-    })
+        panic!("bundled Slack manifest must project host-ingress routes: {error}")
+    });
+    SlackIngressDescriptors {
+        events: bundled_slack_post_descriptor(&descriptors, SLACK_EVENTS_ROUTE_ID),
+        commands: bundled_slack_post_descriptor(&descriptors, SLACK_COMMANDS_ROUTE_ID),
+    }
+});
+
+struct SlackIngressDescriptors {
+    events: IngressRouteDescriptor,
+    commands: IngressRouteDescriptor,
+}
+
+fn bundled_slack_post_descriptor(
+    descriptors: &[IngressRouteDescriptor],
+    route_id: &str,
+) -> IngressRouteDescriptor {
+    let descriptor = crate::host_ingress::descriptor_for_route(descriptors, route_id)
+        .unwrap_or_else(|error| {
+            panic!("bundled Slack manifest must declare host-ingress route {route_id}: {error}")
+        });
+    // The mount functions wire their handlers with `post(...)`; fail closed at
+    // projection time if the manifest ever declares another method.
+    if descriptor.method() != NetworkMethod::Post {
+        panic!(
+            "bundled Slack manifest declares host-ingress route {route_id} with method {}, \
+             but the serve layer mounts POST handlers",
+            descriptor.method()
+        );
+    }
+    descriptor
 }
 
 async fn slack_events_handler(
@@ -505,22 +537,21 @@ impl std::fmt::Debug for SlackCommandsRouteState {
 }
 
 pub fn slack_commands_route_mount(state: SlackCommandsRouteState) -> PublicRouteMount {
+    let descriptor = SLACK_INGRESS_DESCRIPTORS.commands.clone();
     PublicRouteMount::new(
         Router::new()
-            .route(SLACK_COMMANDS_PATH, post(slack_commands_handler))
+            .route(
+                descriptor.route_pattern().as_str(),
+                post(slack_commands_handler),
+            )
             .with_state(state),
-        slack_commands_route_descriptors(),
+        vec![descriptor],
     )
 }
 
 pub fn slack_commands_route_descriptors() -> Vec<IngressRouteDescriptor> {
-    vec![SLACK_COMMANDS_DESCRIPTOR.clone()]
+    vec![SLACK_INGRESS_DESCRIPTORS.commands.clone()]
 }
-
-/// The Slack commands route descriptor, projected from the bundled manifest
-/// exactly once on first use (see [`SLACK_EVENTS_DESCRIPTOR`]).
-static SLACK_COMMANDS_DESCRIPTOR: LazyLock<IngressRouteDescriptor> =
-    LazyLock::new(|| bundled_slack_ingress_descriptor(SLACK_COMMANDS_ROUTE_ID));
 
 async fn slack_commands_handler(
     State(state): State<SlackCommandsRouteState>,
