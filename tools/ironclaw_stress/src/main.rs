@@ -612,6 +612,7 @@ pub(crate) enum Scenario {
     ReserveRelease,
     ReserveReconcile,
     ChatTurn,
+    TurnLifecycleChurn,
     MixedUserSession,
     ContextGrowth,
     ToolSession,
@@ -625,6 +626,7 @@ impl Scenario {
             Self::ReserveRelease => "reserve-release",
             Self::ReserveReconcile => "reserve-reconcile",
             Self::ChatTurn => "chat-turn",
+            Self::TurnLifecycleChurn => "turn-lifecycle-churn",
             Self::MixedUserSession => "mixed-user-session",
             Self::ContextGrowth => "context-growth",
             Self::ToolSession => "tool-session",
@@ -640,7 +642,11 @@ impl Scenario {
     pub(crate) fn is_user_turn(self) -> bool {
         matches!(
             self,
-            Self::ChatTurn | Self::MixedUserSession | Self::ContextGrowth | Self::ToolSession
+            Self::ChatTurn
+                | Self::TurnLifecycleChurn
+                | Self::MixedUserSession
+                | Self::ContextGrowth
+                | Self::ToolSession
         )
     }
 
@@ -1769,7 +1775,10 @@ fn run_one_operation(
         Scenario::ReserveReconcile => governor
             .reserve(scope, estimate)
             .and_then(|reservation| governor.reconcile(reservation.id, usage).map(|_| ())),
-        Scenario::ChatTurn | Scenario::ContextGrowth | Scenario::ToolSession => {
+        Scenario::ChatTurn
+        | Scenario::TurnLifecycleChurn
+        | Scenario::ContextGrowth
+        | Scenario::ToolSession => {
             unreachable!("user-turn scenarios use the async user-turn workload")
         }
         Scenario::MixedUserSession => {

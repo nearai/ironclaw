@@ -2334,3 +2334,92 @@ Budgets: 10 hours wall-clock / $0 spend
   postgres_substrate`, the focused c4 clean latency run, the focused c1
   outlier rerun, the full dev scorer, and the c100 mixed-flow stress gate were
   run. Contract tests passed for both backends.
+
+## Cycle 43 - Two-Tier Turn-State Lifecycle
+
+- Graph note: `codebase-memory-mcp` is still unavailable (`Transport closed`),
+  so this cycle falls back to repo guardrails and targeted source reads.
+- Factual tier check before implementation: turn-state `events` rows are the
+  durable lifecycle projection source and must be Tier 2 (retention-bound), not
+  collectable Tier 1 data. Evidence:
+  - `TurnLifecycleEvent` carries the run lifecycle cursor, scope, run id,
+    status/kind, blocked gate metadata, and sanitized failure reason; it is the
+    internal event record used for public projection
+    (`crates/ironclaw_turns/src/events.rs:69`).
+  - The row store defines a distinct `/turns/rows/v1/events` collection and
+    includes `events_upsert` / `events_delete` in its journal delta shape
+    (`crates/ironclaw_turns/src/filesystem_store/row_store.rs:53` and
+    `crates/ironclaw_turns/src/filesystem_store/row_store.rs:150`).
+  - `FilesystemTurnStateRowStore` is the `TurnEventProjectionSource` for row
+    turn state; this cycle changed it to read those durable event rows directly,
+    rather than from the thread store or Reborn durable runtime event log
+    (`crates/ironclaw_turns/src/filesystem_store/row_store.rs:1299`).
+  - The in-memory turn store itself pushes lifecycle events into its `events`
+    vector as part of state transitions, and the persistence snapshot copies
+    that vector into durable state (`crates/ironclaw_turns/src/memory/mod.rs:2221`
+    and `crates/ironclaw_turns/src/memory/mod.rs:2312`).
+  - Reborn wires lifecycle publication as required observers plus best-effort
+    `TurnEventSink`s (`crates/ironclaw_reborn/src/runtime.rs:610`). The
+    production best-effort sinks are trace capture and skill learning, both of
+    which read thread history from `SessionThreadService` after a terminal
+    lifecycle event; they do not persist a second durable copy of the
+    `TurnLifecycleEvent` stream
+    (`crates/ironclaw_reborn_composition/src/runtime.rs:3277`,
+    `crates/ironclaw_reborn_composition/src/observability/trace_capture.rs:153`,
+    and `crates/ironclaw_reborn_composition/src/skill_learning.rs:597`).
+  - The Reborn durable event log is a separate `RuntimeEvent` stream under
+    `/events/<kind>/<tenant>/<user>/<agent>`, with `FilesystemDurableEventLog`
+    appending `RuntimeEvent`, not `TurnLifecycleEvent`
+    (`crates/ironclaw_reborn_event_store/src/filesystem_store.rs:82`).
+  - Thread storage persists `ThreadMessageRecord` records and a message append
+    log under `/threads`; that is the transcript store, not a duplicate of the
+    turn lifecycle event stream
+    (`crates/ironclaw_threads/src/filesystem_service.rs:192` and
+    `crates/ironclaw_threads/src/filesystem_service.rs:356`).
+- Consequence: `events`, `turns`, and `runs` must never be permanently deleted
+  from row-store durable rows by `max_events` or `max_terminal_records`.
+  Existing in-memory prune paths may remain for the blob/memory store, but the
+  row store must reinterpret those limits as hot-cache eviction thresholds and
+  provide read-through reload for old terminal runs/events from rows.
+- Implemented Tier 2 hot-cache eviction:
+  - `row_store_durable_delta` strips durable `turns_delete`, `runs_delete`,
+    `events_delete`, and `event_retention_floor` from row-store journal writes,
+    so in-memory cache pruning no longer becomes row-store data loss.
+  - `row_store_hot_cache_snapshot` applies the cache window on row-store
+    startup: all non-terminal runs stay hot; only the newest terminal run window
+    stays hot; Tier 1 rows tied only to evicted terminal runs leave the hot
+    snapshot; event and idempotency limits are cache windows.
+  - `get_run_state` now falls through to durable row/journal read-through when a
+    terminal run has been evicted from the hot snapshot. Event projection reads
+    durable event rows/journal directly.
+- Added `filesystem_turn_state_row_store_evicted_terminal_run_remains_queryable`:
+  with `max_terminal_records=1` and `max_events=2`, an old failed run leaves the
+  hot snapshot but remains queryable, keeps its sanitized failure category, and
+  its failure event remains readable both before and after reopening the store.
+- Added `ironclaw_stress --scenario turn-lifecycle-churn`: a turn-state-only
+  submit/claim/complete c100 churn path that keeps the same row-store backend,
+  synthetic identity distribution, stage attribution, and process metrics while
+  removing thread/resource/model noise.
+- Compaction/journal-skip evaluation:
+  - Row-store persistence currently has no materialized row compactor; the
+    only durable turn-state path is the grouped `/turns/rows/v1/deltas/log`
+    replay. Tier 1 compaction was implemented for the hot cache, not as a
+    destructive journal rewrite.
+  - Runner leases already stay memory-only; `filesystem_turn_state_row_store_heartbeat_does_not_rewrite_run_row`
+    continues to cover that contract. The row-store delta flusher already uses
+    `append_batch`, so no additional journal-skip change was made in this cycle.
+- Verification:
+  - `cargo check -p ironclaw_turns`
+  - `cargo test -p ironclaw_turns --test filesystem_turn_state_contract`
+  - `cargo test -p ironclaw_stress`
+- c100 churn measurement (Postgres pool 32, filesystem-row, 10s measured after
+  3s warmup, limits terminal=16/events=64/idempotency=16): 18,057/18,057
+  succeeded; op/turn-store p95 93.1ms; throughput 1,798.6 ops/sec. RSS still
+  grew from 136.6MiB to 314.4MiB in the stress process; this run is confounded
+  by the harness retaining every sample plus Postgres client allocations, while
+  the contract test verifies the actual row-store hot snapshot stays bounded.
+- c100 full mixed flow (Postgres pool 32, filesystem-row, 100 users,
+  active-thread-count 0, 1,000 operations): 1,000/1,000 succeeded; op p95
+  118.3ms, p99 120.3ms, throughput 1,587.9 ops/sec. Attribution p95:
+  thread-store writes 64.2ms, turn-store 35.9ms, resource-governor 10.7ms,
+  context reads 11.9ms. Stage p95: submit 29.3ms, claim 6.7ms, complete 4.4ms.

@@ -26,15 +26,16 @@ use ironclaw_host_api::{
 use ironclaw_turns::{
     AcceptedMessageRef, AllowAllTurnAdmissionPolicy, BlockedReason, FilesystemTurnStateRowStore,
     FilesystemTurnStateStore, GateRef, GetRunStateRequest, IdempotencyKey,
-    InMemoryRunProfileResolver, ProductTurnContext, ReplyTargetBindingRef, ResumeTurnPrecondition,
-    ResumeTurnRequest, RunOriginAdapter, RunProfileRequest, SanitizedCancelReason,
-    SourceBindingRef, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnCheckpointId, TurnError, TurnLeaseToken, TurnOriginKind, TurnOwner,
+    InMemoryRunProfileResolver, InMemoryTurnStateStoreLimits, ProductTurnContext,
+    ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest, RunOriginAdapter,
+    RunProfileRequest, SanitizedCancelReason, SanitizedFailure, SourceBindingRef,
+    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId,
+    TurnError, TurnEventKind, TurnEventProjectionSource, TurnLeaseToken, TurnOriginKind, TurnOwner,
     TurnPersistenceSnapshot, TurnRunId, TurnRunnerId, TurnScope, TurnSpawnTreeStateStore,
     TurnStateStore, TurnStatus,
     run_profile::LoopCheckpointStateRef,
     runner::{
-        BlockRunRequest, ClaimRunRequest, CompleteRunRequest, HeartbeatRequest,
+        BlockRunRequest, ClaimRunRequest, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
         RecoverExpiredLeasesRequest, TurnRunTransitionPort,
     },
 };
@@ -869,6 +870,151 @@ async fn filesystem_turn_state_row_store_persists_rows_without_state_blob() {
         .await
         .unwrap();
     assert_eq!(state.status, TurnStatus::Completed);
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_row_store_evicted_terminal_run_remains_queryable() {
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let limits = InMemoryTurnStateStoreLimits {
+        max_events: 2,
+        max_terminal_records: 1,
+        max_idempotency_records: 1,
+        ..InMemoryTurnStateStoreLimits::default()
+    };
+    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped)).with_limits(limits);
+    let resolver = InMemoryRunProfileResolver::default();
+
+    let first_scope = turn_scope("thread-fs-row-evicted-terminal-1");
+    let first_request = submit_request_for(first_scope.clone(), "idem-fs-row-evicted-1");
+    let first_response = store
+        .submit_turn(first_request, &AllowAllTurnAdmissionPolicy, &resolver)
+        .await
+        .unwrap();
+    let first_run_id = accepted_run_id(&first_response);
+    let first_runner_id = TurnRunnerId::new();
+    let first_lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: first_runner_id,
+            lease_token: first_lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .fail_run(FailRunRequest {
+            run_id: first_run_id,
+            runner_id: first_runner_id,
+            lease_token: first_lease_token,
+            failure: SanitizedFailure::new("test_failure").unwrap(),
+        })
+        .await
+        .unwrap();
+
+    let second_scope = turn_scope("thread-fs-row-evicted-terminal-2");
+    let second_request = submit_request_for(second_scope, "idem-fs-row-evicted-2");
+    let second_response = store
+        .submit_turn(second_request, &AllowAllTurnAdmissionPolicy, &resolver)
+        .await
+        .unwrap();
+    let second_run_id = accepted_run_id(&second_response);
+    let second_runner_id = TurnRunnerId::new();
+    let second_lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: second_runner_id,
+            lease_token: second_lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .complete_run(CompleteRunRequest {
+            run_id: second_run_id,
+            runner_id: second_runner_id,
+            lease_token: second_lease_token,
+        })
+        .await
+        .unwrap();
+
+    let hot_snapshot = store.persistence_snapshot().await.unwrap();
+    assert!(
+        !hot_snapshot
+            .runs
+            .iter()
+            .any(|record| record.run_id == first_run_id),
+        "terminal cache limit should evict the old failed run from the hot snapshot"
+    );
+    assert!(
+        hot_snapshot.events.len() <= limits.max_events,
+        "event cache limit should bound the hot snapshot without deleting durable events"
+    );
+
+    let failed = store
+        .get_run_state(GetRunStateRequest {
+            scope: first_scope.clone(),
+            run_id: first_run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(failed.status, TurnStatus::Failed);
+    assert_eq!(
+        failed.failure.as_ref().map(SanitizedFailure::category),
+        Some("test_failure")
+    );
+
+    let first_events = store
+        .read_turn_events_after(&first_scope, None, None, 100)
+        .await
+        .unwrap();
+    assert_eq!(first_events.rebase_required, None);
+    assert!(
+        first_events
+            .entries
+            .iter()
+            .any(|event| event.run_id == first_run_id && event.kind == TurnEventKind::Failed),
+        "events are Tier 2 run-record rows and must survive cache event eviction"
+    );
+
+    let reopened = FilesystemTurnStateRowStore::new(scoped).with_limits(limits);
+    let reopened_hot_snapshot = reopened.persistence_snapshot().await.unwrap();
+    assert!(
+        !reopened_hot_snapshot
+            .runs
+            .iter()
+            .any(|record| record.run_id == first_run_id),
+        "startup should apply the same terminal cache window instead of hydrating all history"
+    );
+    let reopened_failed = reopened
+        .get_run_state(GetRunStateRequest {
+            scope: first_scope.clone(),
+            run_id: first_run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(reopened_failed.status, TurnStatus::Failed);
+    assert_eq!(
+        reopened_failed
+            .failure
+            .as_ref()
+            .map(SanitizedFailure::category),
+        Some("test_failure")
+    );
+    let reopened_events = reopened
+        .read_turn_events_after(&first_scope, None, None, 100)
+        .await
+        .unwrap();
+    assert_eq!(reopened_events.rebase_required, None);
+    assert!(
+        reopened_events
+            .entries
+            .iter()
+            .any(|event| event.run_id == first_run_id && event.kind == TurnEventKind::Failed),
+        "durable event rows should remain queryable after restart"
+    );
 }
 
 #[tokio::test]

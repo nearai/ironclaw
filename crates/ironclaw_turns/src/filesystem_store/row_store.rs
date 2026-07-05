@@ -434,6 +434,7 @@ where
             spawn_tree_reservations,
         };
         self.replay_deltas(&mut snapshot).await?;
+        let snapshot = row_store_hot_cache_snapshot(snapshot, self.limits);
         let store = self.build_in_memory_store(snapshot)?;
         let snapshot = store.persistence_snapshot();
         RowSnapshotState::new(snapshot, Arc::new(store))
@@ -501,6 +502,126 @@ where
             records.push(deserialize_row(&versioned.entry.body, collection)?);
         }
         Ok(records)
+    }
+
+    async fn read_row_by_key<T>(
+        &self,
+        collection: &'static str,
+        key: &str,
+    ) -> Result<Option<T>, TurnError>
+    where
+        T: DeserializeOwned,
+    {
+        let path = row_path(collection, key)?;
+        let Some(versioned) = self
+            .filesystem
+            .get(&ResourceScope::system(), &path)
+            .await
+            .map_err(fs_error)?
+        else {
+            return Ok(None);
+        };
+        deserialize_row(&versioned.entry.body, collection).map(Some)
+    }
+
+    async fn read_delta_log(&self) -> Result<Vec<SnapshotDelta>, TurnError> {
+        let path = delta_log_path()?;
+        let records = match self
+            .filesystem
+            .tail(&ResourceScope::system(), &path, SeqNo::ZERO)
+            .await
+        {
+            Ok(records) => records,
+            Err(FilesystemError::NotFound { .. }) | Err(FilesystemError::Unsupported { .. }) => {
+                Vec::new()
+            }
+            Err(error) => return Err(fs_error(error)),
+        };
+        records
+            .into_iter()
+            .map(|record| deserialize_row(&record.payload, "turn-state delta"))
+            .collect()
+    }
+
+    async fn read_run_state_from_durable_rows(
+        &self,
+        request: &GetRunStateRequest,
+    ) -> Result<Option<TurnRunState>, TurnError> {
+        let mut run = self
+            .read_row_by_key::<TurnRunRecord>(RUN_ROWS, &request.run_id.to_string())
+            .await?;
+        let mut turns_by_id: HashMap<String, TurnRecord> = HashMap::new();
+
+        for delta in self.read_delta_log().await? {
+            for turn in delta.turns_upsert {
+                turns_by_id.insert(turn.turn_id.to_string(), turn);
+            }
+            for turn_id in delta.turns_delete {
+                turns_by_id.remove(&turn_id);
+            }
+            for upserted in delta.runs_upsert {
+                if upserted.run_id == request.run_id {
+                    run = Some(upserted);
+                }
+            }
+            for deleted_run_id in delta.runs_delete {
+                if deleted_run_id == request.run_id.to_string() {
+                    run = None;
+                }
+            }
+        }
+
+        let Some(run) = run.filter(|record| record.scope == request.scope) else {
+            return Ok(None);
+        };
+        let turn_key = run.turn_id.to_string();
+        let turn = match turns_by_id.remove(&turn_key) {
+            Some(turn) => turn,
+            None => self
+                .read_row_by_key::<TurnRecord>(TURN_ROWS, &turn_key)
+                .await?
+                .ok_or_else(|| TurnError::Unavailable {
+                    reason: "turn run references missing durable turn row".to_string(),
+                })?,
+        };
+        let run = self.runner_lease_store().overlay_run_record(run).await?;
+        Ok(Some(projection::run_state_from_record(run, turn.actor)))
+    }
+
+    async fn read_turn_events_from_durable_rows(
+        &self,
+        scope: &TurnScope,
+        owner_user_id: Option<&UserId>,
+        after: Option<EventCursor>,
+        limit: usize,
+    ) -> Result<TurnEventPage, TurnError> {
+        let mut events = keyed_records(
+            &self.read_row_collection(EVENT_ROWS).await?,
+            &event_record_key,
+        )
+        .map_err(RowPersistError::into_turn)?;
+        let mut retention_floor = self.read_meta().await?.event_retention_floor;
+        for delta in self.read_delta_log().await? {
+            for event in delta.events_upsert {
+                events.insert(event_record_key(&event)?, event);
+            }
+            for key in delta.events_delete {
+                events.remove(&key);
+            }
+            if let Some(floor) = delta.event_retention_floor {
+                retention_floor = retention_floor.max(floor);
+            }
+        }
+        let mut events = events.into_values().collect::<Vec<_>>();
+        events.sort_by_key(|event| event.cursor);
+        Ok(project_turn_events(
+            &events,
+            scope,
+            owner_user_id,
+            after,
+            limit,
+            retention_floor,
+        ))
     }
 
     async fn seed_runner_lease_from_cached_run(&self, run_id: TurnRunId) -> Result<(), TurnError> {
@@ -672,7 +793,8 @@ where
                     return Err(error);
                 }
             };
-            let ack = match self.enqueue_delta(delta) {
+            let persist_delta = row_store_durable_delta(delta);
+            let ack = match self.enqueue_delta(persist_delta) {
                 Ok(ack) => ack,
                 Err(RowPersistError::Turn(error)) => {
                     *guard = None;
@@ -712,7 +834,7 @@ where
     }
 
     async fn persist_delta(&self, delta: SnapshotDelta) -> Result<(), RowPersistError> {
-        let ack = self.enqueue_delta(delta)?;
+        let ack = self.enqueue_delta(row_store_durable_delta(delta))?;
         self.await_delta_ack(ack).await
     }
 
@@ -789,7 +911,8 @@ where
                 *guard = None;
                 return Err(error);
             }
-            let ack = match self.enqueue_delta(delta) {
+            let persist_delta = row_store_durable_delta(delta);
+            let ack = match self.enqueue_delta(persist_delta) {
                 Ok(ack) => ack,
                 Err(RowPersistError::Turn(error)) => {
                     *guard = None;
@@ -1064,7 +1187,10 @@ where
             .with_cached_snapshot(|snapshot| projection::run_state_parts(snapshot, &request))
             .await??
         else {
-            return Err(TurnError::ScopeNotFound);
+            return self
+                .read_run_state_from_durable_rows(&request)
+                .await?
+                .ok_or(TurnError::ScopeNotFound);
         };
         let run = self.runner_lease_store().overlay_run_record(run).await?;
         Ok(projection::run_state_from_record(run, actor))
@@ -1181,15 +1307,8 @@ where
         after: Option<EventCursor>,
         limit: usize,
     ) -> Result<TurnEventPage, TurnError> {
-        let (snapshot, _) = self.read_snapshot().await?;
-        Ok(project_turn_events(
-            &snapshot.events,
-            scope,
-            owner_user_id,
-            after,
-            limit,
-            snapshot.event_retention_floor,
-        ))
+        self.read_turn_events_from_durable_rows(scope, owner_user_id, after, limit)
+            .await
     }
 }
 
@@ -2009,6 +2128,100 @@ fn full_snapshot_delta(
     snapshot_delta(snapshot, &new_snapshot).map_err(|error| match error {
         RowPersistError::Turn(error) => error,
     })
+}
+
+fn row_store_durable_delta(mut delta: SnapshotDelta) -> SnapshotDelta {
+    // Tier-2 rows are the durable run record. Row-store cache limits may evict
+    // old terminal runs/events from memory, but persistence must not encode
+    // those cache evictions as data deletion.
+    delta.turns_delete.clear();
+    delta.runs_delete.clear();
+    delta.events_delete.clear();
+    delta.event_retention_floor = None;
+    delta
+}
+
+fn row_store_hot_cache_snapshot(
+    mut snapshot: TurnPersistenceSnapshot,
+    limits: InMemoryTurnStateStoreLimits,
+) -> TurnPersistenceSnapshot {
+    let mut terminal_runs = snapshot
+        .runs
+        .iter()
+        .filter(|record| record.status.is_terminal())
+        .map(|record| (record.event_cursor, record.run_id))
+        .collect::<Vec<_>>();
+    terminal_runs.sort_by_key(|(cursor, _)| *cursor);
+    let evicted_terminal_run_ids = terminal_runs
+        .len()
+        .saturating_sub(limits.max_terminal_records);
+    let evicted_terminal_run_ids = terminal_runs
+        .into_iter()
+        .take(evicted_terminal_run_ids)
+        .map(|(_, run_id)| run_id)
+        .collect::<HashSet<_>>();
+
+    if !evicted_terminal_run_ids.is_empty() {
+        snapshot
+            .runs
+            .retain(|record| !evicted_terminal_run_ids.contains(&record.run_id));
+        let retained_run_ids = snapshot
+            .runs
+            .iter()
+            .map(|record| record.run_id)
+            .collect::<HashSet<_>>();
+        let retained_turn_ids = snapshot
+            .runs
+            .iter()
+            .map(|record| record.turn_id)
+            .collect::<HashSet<_>>();
+        let active_spawn_roots = snapshot
+            .runs
+            .iter()
+            .filter(|record| !record.status.is_terminal())
+            .filter_map(|record| record.spawn_tree_root_run_id)
+            .collect::<HashSet<_>>();
+
+        snapshot
+            .turns
+            .retain(|record| retained_turn_ids.contains(&record.turn_id));
+        snapshot
+            .active_locks
+            .retain(|record| retained_run_ids.contains(&record.run_id));
+        snapshot
+            .checkpoints
+            .retain(|record| retained_run_ids.contains(&record.run_id));
+        snapshot
+            .loop_checkpoints
+            .retain(|record| retained_run_ids.contains(&record.run_id));
+        snapshot
+            .admission_reservations
+            .retain(|record| retained_run_ids.contains(&record.run_id));
+        snapshot.spawn_tree_reservations.retain(|record| {
+            retained_run_ids.contains(&record.root_run_id)
+                || active_spawn_roots.contains(&record.root_run_id)
+        });
+    }
+
+    snapshot.events.sort_by_key(|event| event.cursor);
+    if snapshot.events.len() > limits.max_events {
+        let excess = snapshot.events.len() - limits.max_events;
+        if let Some(last_pruned) = snapshot.events.get(excess.saturating_sub(1)) {
+            snapshot.event_retention_floor = snapshot.event_retention_floor.max(last_pruned.cursor);
+        }
+        snapshot.events.drain(0..excess);
+    }
+
+    let max_idempotency_records = limits.max_idempotency_records.saturating_mul(3);
+    snapshot
+        .idempotency_records
+        .sort_by_key(|record| record.created_at);
+    if snapshot.idempotency_records.len() > max_idempotency_records {
+        let excess = snapshot.idempotency_records.len() - max_idempotency_records;
+        snapshot.idempotency_records.drain(0..excess);
+    }
+
+    snapshot
 }
 
 fn preserve_loop_checkpoints(

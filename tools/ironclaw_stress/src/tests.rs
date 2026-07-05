@@ -149,6 +149,21 @@ fn chat_turn_rejects_multi_process_runs() {
 }
 
 #[test]
+fn turn_lifecycle_churn_is_a_user_turn_scenario() {
+    let mut args = test_args();
+    args.scenario = Scenario::TurnLifecycleChurn;
+    args.users = args.concurrency;
+    args.processes = 1;
+
+    validate_args(&args).expect("turn lifecycle churn should use user-turn validation");
+    assert_eq!(args.scenario.as_str(), "turn-lifecycle-churn");
+
+    args.processes = 2;
+    let error = validate_args(&args).expect_err("turn lifecycle churn is single-process only");
+    assert!(error.contains("--scenario turn-lifecycle-churn requires --processes 1"));
+}
+
+#[test]
 fn mixed_user_session_rejects_multi_process_runs() {
     let mut args = test_args();
     args.scenario = Scenario::MixedUserSession;

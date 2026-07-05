@@ -754,6 +754,71 @@ where
         let source_binding = "ironclaw-stress-webchat";
         let reply_target = "ironclaw-stress-reply";
 
+        if matches!(args.scenario, Scenario::TurnLifecycleChurn) {
+            let operation_ref = turn_operation_ref(args, worker_index, operation_index, 0, 1);
+            let SubmitTurnResponse::Accepted { run_id, .. } = time_stage(
+                &mut stages.submit_turn,
+                turn_coordinator.submit_turn(SubmitTurnRequest {
+                    scope: context.turn_scope.clone(),
+                    actor: TurnActor::new(context.user_id.clone()),
+                    accepted_message_ref: AcceptedMessageRef::new(format!(
+                        "message:{operation_ref}"
+                    ))
+                    .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
+                    source_binding_ref: SourceBindingRef::new(source_binding)
+                        .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
+                    reply_target_binding_ref: ReplyTargetBindingRef::new(reply_target)
+                        .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
+                    requested_run_profile: None,
+                    idempotency_key: IdempotencyKey::new(format!(
+                        "ironclaw-stress:{operation_ref}"
+                    ))
+                    .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
+                    received_at: Utc::now(),
+                    requested_run_id: None,
+                    parent_run_id: None,
+                    subagent_depth: 0,
+                    spawn_tree_root_run_id: None,
+                    product_context: None,
+                }),
+            )
+            .await
+            .map_err(|error| turn_failure("submit_turn", error))?;
+
+            let runner_id = TurnRunnerId::new();
+            let lease_token = TurnLeaseToken::new();
+            time_stage(
+                &mut stages.claim_run,
+                turn_store.claim_next_run(ClaimRunRequest {
+                    runner_id,
+                    lease_token,
+                    scope_filter: Some(context.turn_scope.clone()),
+                }),
+            )
+            .await
+            .map_err(|error| turn_failure("claim_run", error))?
+            .ok_or_else(|| {
+                OperationFailure::new(
+                    "turn_claim_miss",
+                    "claim_run",
+                    "submitted run was not claimable",
+                )
+            })?;
+
+            time_stage(
+                &mut stages.complete_run,
+                turn_store.complete_run(CompleteRunRequest {
+                    run_id,
+                    runner_id,
+                    lease_token,
+                }),
+            )
+            .await
+            .map_err(|error| turn_failure("complete_run", error))?;
+
+            return Ok(());
+        }
+
         let thread = time_stage(
             &mut stages.ensure_thread,
             self.thread_service.ensure_thread(EnsureThreadRequest {
