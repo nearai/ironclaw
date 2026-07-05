@@ -94,6 +94,8 @@ use ironclaw_product_workflow::{
     ProjectService,
 };
 use ironclaw_projects::ProjectRepository;
+#[cfg(feature = "postgres")]
+use ironclaw_resources::PostgresResourceGovernor;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_resources::{
     BroadcastBudgetEventSink, BudgetGateStore, FilesystemBudgetGateStore,
@@ -1905,6 +1907,37 @@ where
         Ok(governor.with_unlimited_fast_path())
     } else {
         Ok(governor)
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+trait ProductionResourceGovernorBudgetSink: ResourceGovernor + Sized {
+    fn with_production_budget_event_sink(
+        self,
+        sink: Arc<dyn ironclaw_resources::BudgetEventSink>,
+    ) -> Self;
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+impl<S> ProductionResourceGovernorBudgetSink for PersistentResourceGovernor<S>
+where
+    S: ResourceGovernorStore,
+{
+    fn with_production_budget_event_sink(
+        self,
+        sink: Arc<dyn ironclaw_resources::BudgetEventSink>,
+    ) -> Self {
+        self.with_event_sink(sink)
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl ProductionResourceGovernorBudgetSink for PostgresResourceGovernor {
+    fn with_production_budget_event_sink(
+        self,
+        sink: Arc<dyn ironclaw_resources::BudgetEventSink>,
+    ) -> Self {
+        self.with_event_sink(sink)
     }
 }
 
@@ -3840,9 +3873,9 @@ fn planned_run_profile_resolver() -> Result<Arc<InMemoryRunProfileResolver>, Reb
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-type FilesystemProductionHostRuntimeServices<F> = HostRuntimeServices<
+type FilesystemProductionHostRuntimeServices<F, G> = HostRuntimeServices<
     F,
-    PersistentResourceGovernor<FilesystemResourceGovernorStore<F>>,
+    G,
     ironclaw_processes::FilesystemProcessStore<F>,
     ironclaw_processes::FilesystemProcessResultStore<F>,
 >;
@@ -3865,9 +3898,15 @@ where
 {
     let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&config.database)));
     filesystem.run_migrations().await?;
+    let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
+    let resource_governor = apply_resource_governor_unlimited_fast_path(
+        PersistentResourceGovernor::new(FilesystemResourceGovernorStore::new(scoped_filesystem)),
+    )
+    .map_err(|reason| crate::RebornCompositionError::InvalidConfig { reason })?;
     build_filesystem_production_host_runtime_services(
         FilesystemProductionHostRuntimeServicesInput {
             filesystem,
+            resource_governor,
             event_store: FilesystemProductionEventStoresInput::Config(config.event_store),
             secret_master_key: config.secret_master_key,
             trust_policy: config.trust_policy,
@@ -3887,17 +3926,26 @@ where
     TPolicy: ironclaw_trust::TrustPolicy + 'static,
     TWake: ironclaw_turns::TurnRunWakeNotifier + 'static,
 {
+    let pool = config.pool;
     let filesystem = Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(
-        config.pool,
+        pool.clone(),
     ));
     ensure_postgres_event_store_config(&config.event_store)?;
     filesystem.run_migrations().await?;
+    let resource_governor = PostgresResourceGovernor::new(pool);
+    let migration_governor = resource_governor.clone();
+    tokio::task::spawn_blocking(move || migration_governor.run_migrations())
+        .await
+        .map_err(|error| crate::RebornCompositionError::InvalidConfig {
+            reason: format!("PostgreSQL resource governor migration task failed: {error}"),
+        })??;
     let event_store = ironclaw_reborn_event_store::build_reborn_event_stores_from_root_filesystem(
         Arc::clone(&filesystem),
     )?;
     build_filesystem_production_host_runtime_services(
         FilesystemProductionHostRuntimeServicesInput {
             filesystem,
+            resource_governor,
             event_store: FilesystemProductionEventStoresInput::Prebuilt(event_store),
             secret_master_key: config.secret_master_key,
             trust_policy: config.trust_policy,
@@ -3910,8 +3958,9 @@ where
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-struct FilesystemProductionHostRuntimeServicesInput<F, TPolicy, TWake> {
+struct FilesystemProductionHostRuntimeServicesInput<F, G, TPolicy, TWake> {
     filesystem: Arc<F>,
+    resource_governor: G,
     event_store: FilesystemProductionEventStoresInput,
     secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
     trust_policy: Arc<TPolicy>,
@@ -3942,16 +3991,18 @@ fn ensure_postgres_event_store_config(
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-async fn build_filesystem_production_host_runtime_services<F, TPolicy, TWake>(
-    input: FilesystemProductionHostRuntimeServicesInput<F, TPolicy, TWake>,
-) -> Result<FilesystemProductionHostRuntimeServices<F>, crate::RebornCompositionError>
+async fn build_filesystem_production_host_runtime_services<F, G, TPolicy, TWake>(
+    input: FilesystemProductionHostRuntimeServicesInput<F, G, TPolicy, TWake>,
+) -> Result<FilesystemProductionHostRuntimeServices<F, G>, crate::RebornCompositionError>
 where
     F: RootFilesystem + 'static,
+    G: ProductionResourceGovernorBudgetSink + 'static,
     TPolicy: ironclaw_trust::TrustPolicy + 'static,
     TWake: ironclaw_turns::TurnRunWakeNotifier + 'static,
 {
     let FilesystemProductionHostRuntimeServicesInput {
         filesystem,
+        resource_governor,
         event_store,
         secret_master_key,
         trust_policy,
@@ -3971,12 +4022,7 @@ where
         secret_master_key,
     )
     .await?;
-    let resource_store = FilesystemResourceGovernorStore::new(Arc::clone(&scoped_filesystem));
-    let governor = apply_resource_governor_unlimited_fast_path(PersistentResourceGovernor::new(
-        resource_store,
-    ))
-    .map_err(|reason| crate::RebornCompositionError::InvalidConfig { reason })?;
-    let governor = Arc::new(governor);
+    let governor = Arc::new(resource_governor);
     let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
         &scoped_filesystem,
     )));
@@ -4110,12 +4156,14 @@ async fn resolve_explicit_or_keychain_master_key(
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-struct ProductionStoreBundle<F>
+struct ProductionStoreBundle<F, G>
 where
     F: RootFilesystem + 'static,
+    G: ProductionResourceGovernorBudgetSink + 'static,
 {
     filesystem: Arc<F>,
     scoped_filesystem: Arc<ScopedFilesystem<F>>,
+    resource_governor: G,
     leases: Arc<FilesystemCapabilityLeaseStore<F>>,
     persistent_approval_policies: Arc<FilesystemPersistentApprovalPolicyStore<F>>,
     secret_credentials: FilesystemSecretCredentialStores<F>,
@@ -4123,12 +4171,14 @@ where
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-impl<F> ProductionStoreBundle<F>
+impl<F, G> ProductionStoreBundle<F, G>
 where
     F: RootFilesystem + 'static,
+    G: ProductionResourceGovernorBudgetSink + 'static,
 {
     fn new(
         filesystem: Arc<F>,
+        resource_governor: G,
         secret_master_key: ironclaw_secrets::SecretMaterial,
         event_store: ironclaw_reborn_event_store::RebornEventStoreConfig,
     ) -> Result<Self, RebornBuildError> {
@@ -4147,6 +4197,7 @@ where
         Ok(Self {
             filesystem,
             scoped_filesystem,
+            resource_governor,
             leases,
             persistent_approval_policies,
             secret_credentials,
@@ -4178,9 +4229,9 @@ fn production_skill_management_mount_view(
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-async fn build_backend_production<F>(
+async fn build_backend_production<F, G>(
     context: RebornProductionBuildContext,
-    stores: ProductionStoreBundle<F>,
+    stores: ProductionStoreBundle<F, G>,
     trigger_repository: Arc<dyn TriggerRepository>,
     production_runtime_services: impl FnOnce(
         Arc<RebornProductionRuntimeStoreGraph<F>>,
@@ -4192,6 +4243,7 @@ async fn build_backend_production<F>(
 ) -> Result<RebornServices, RebornBuildError>
 where
     F: RootFilesystem + 'static,
+    G: ProductionResourceGovernorBudgetSink + 'static,
 {
     let RebornProductionBuildContext {
         profile,
@@ -4245,13 +4297,11 @@ where
     let thread_service: Arc<dyn SessionThreadService> = Arc::new(
         FilesystemSessionThreadService::new(Arc::clone(&stores.scoped_filesystem)),
     );
-    let resource_governor =
-        apply_resource_governor_unlimited_fast_path(PersistentResourceGovernor::new(
-            FilesystemResourceGovernorStore::new(Arc::clone(&stores.scoped_filesystem)),
-        ))
-        .map_err(|reason| RebornBuildError::InvalidConfig { reason })?
-        .with_event_sink(Arc::clone(&budget_event_sink));
-    let resource_governor = Arc::new(resource_governor);
+    let resource_governor = Arc::new(
+        stores
+            .resource_governor
+            .with_production_budget_event_sink(Arc::clone(&budget_event_sink)),
+    );
     let production_resource_governor: Arc<dyn ResourceGovernor> = resource_governor.clone();
     let budget_gate_store: Arc<dyn BudgetGateStore> = Arc::new(FilesystemBudgetGateStore::new(
         Arc::clone(&stores.scoped_filesystem),
@@ -4451,8 +4501,14 @@ async fn build_libsql_production(
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("libSQL trigger repository migrations failed: {error}"),
         })?;
+    let resource_governor =
+        apply_resource_governor_unlimited_fast_path(PersistentResourceGovernor::new(
+            FilesystemResourceGovernorStore::new(crate::wrap_scoped(Arc::clone(&filesystem))),
+        ))
+        .map_err(|reason| RebornBuildError::InvalidConfig { reason })?;
     let stores = ProductionStoreBundle::new(
         filesystem,
+        resource_governor,
         secret_master_key,
         ironclaw_reborn_event_store::RebornEventStoreConfig::Libsql {
             path_or_url,
@@ -4505,8 +4561,19 @@ async fn build_postgres_production(
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("PostgreSQL trigger repository migrations failed: {error}"),
         })?;
+    let resource_governor = PostgresResourceGovernor::new(pool.clone());
+    let migration_governor = resource_governor.clone();
+    tokio::task::spawn_blocking(move || migration_governor.run_migrations())
+        .await
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("PostgreSQL resource governor migration task failed: {error}"),
+        })?
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("PostgreSQL resource governor migrations failed: {error}"),
+        })?;
     let stores = ProductionStoreBundle::new(
         filesystem,
+        resource_governor,
         secret_master_key,
         ironclaw_reborn_event_store::RebornEventStoreConfig::PostgresPool { pool },
     )?;

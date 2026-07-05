@@ -422,3 +422,58 @@ Budgets: 10 hours wall-clock / $0 spend
   filesystem-backed resources, and acceptance still needs launch-ref baseline
   worktree scoring plus hosted profile startup, WebUI/session, turn
   admission/queue/resume/cancel, and holdout concurrency 1/4/16 runs.
+
+## Cycle 10 - Production Resource Wiring
+
+- Graph: `codebase-memory-mcp` transport is still closed, so this cycle falls
+  back to local code reads after one probe.
+- Score (dev): Cycle 9 full score/probe have zero errors and matching hashes;
+  `control_plane_snapshot` passes for Postgres pool sizes 1 and 2, including
+  probe concurrency 8. The remaining probe/dev misses are latency ratio gaps in
+  `hosted_substrate_build` and p99 outliers in existing filesystem workloads.
+- Hypothesis: The latency harness now uses row-backed Postgres resources, but
+  production hosted Postgres still wires `PersistentResourceGovernor` over the
+  filesystem blob store. Moving production Postgres composition to
+  `PostgresResourceGovernor` should make hosted-substrate construction and real
+  host-runtime paths exercise the same lower-contention resource state as the
+  diagnostic workload.
+- Expected failure mode: The public production service type and generic
+  `build_backend_production` builder currently bake in the filesystem governor.
+  A careless change could slow or alter libSQL, lose budget event sinks,
+  bypass migrations, or break tests that depend on the concrete returned service
+  type. Keep libSQL on its existing governor, keep the budget event sink wired,
+  run Postgres resource migrations during production assembly, and adjust only
+  the hosted Postgres composition path.
+- Diagnostic: Compile the composition and CLI with `webui-v2-beta,libsql,postgres`,
+  run the Postgres substrate tests that build the public services type, then
+  rerun full dev score/probe to see whether `hosted_substrate_build` improves.
+- Change: Changed the public Postgres production services alias to use
+  `PostgresResourceGovernor`, threaded backend-specific resource governors
+  through the substrate-only and full production builders, kept libSQL on
+  `PersistentResourceGovernor<FilesystemResourceGovernorStore<_>>`, and added a
+  private adapter so both concrete governors still receive the production budget
+  event sink. Postgres resource governor migrations now run during production
+  assembly. The first attempt called the synchronous migration bridge directly
+  from async composition and hung the latency runner; sampling showed the stack
+  blocked in `PostgresResourceGovernor::run_migrations`, so production
+  composition now runs that migration on `spawn_blocking`.
+- Result: `cargo check -p ironclaw_reborn_composition --features
+  webui-v2-beta,libsql,postgres`, `cargo check -p ironclaw_reborn_cli --features
+  webui-v2-beta,libsql,postgres`, and `cargo test -p
+  ironclaw_reborn_composition --features webui-v2-beta,libsql,postgres --test
+  postgres_substrate --test libsql_substrate` passed. A one-sample focused
+  `hosted_substrate_build` run completed after the `spawn_blocking` fix and
+  passed both Postgres pool sizes. Full `harness/latency/score.sh --dev` has
+  zero errors and matching hashes; `hosted_substrate_build` passes for pool 1
+  and 2 at concurrency 1 and 4, and `control_plane_snapshot` still passes.
+  Full-score hard fails remain in filesystem `put_get`, `query_exact`, and
+  `append_tail` p95/p99 ratio outliers. `harness/latency/probe.sh` also has
+  zero errors and matching hashes; hosted-substrate passes through concurrency
+  8 for both pools, and remaining probe hard fails are `query_exact` pool 1/2
+  concurrency 1 and `put_get` pool 2 concurrency 1.
+- Reflection: The row-backed resource governor is no longer only a harness
+  diagnostic; hosted Postgres production assembly now exercises it too. This
+  removes the prior hosted-substrate latency gap in dev/probe, but the goal is
+  still incomplete because the filesystem blob-store hot paths (`query_exact`,
+  `put_get`, and occasionally `append_tail`) dominate remaining hard failures,
+  and launch-ref/WebUI/turn holdout acceptance is still missing.

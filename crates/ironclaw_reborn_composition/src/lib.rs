@@ -679,8 +679,10 @@ use ironclaw_processes::{FilesystemProcessResultStore, FilesystemProcessStore};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn_event_store::RebornEventStoreConfig;
 use ironclaw_reborn_event_store::RebornEventStoreError;
+#[cfg(feature = "postgres")]
+use ironclaw_resources::PostgresResourceGovernor;
 use ironclaw_resources::ResourceError;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
+#[cfg(feature = "libsql")]
 use ironclaw_resources::{FilesystemResourceGovernorStore, PersistentResourceGovernor};
 use ironclaw_run_state::RunStateError;
 use ironclaw_secrets::SecretError;
@@ -704,7 +706,7 @@ pub type LibSqlProductionHostRuntimeServices = HostRuntimeServices<
 #[cfg(feature = "postgres")]
 pub type PostgresProductionHostRuntimeServices = HostRuntimeServices<
     PostgresRootFilesystem,
-    PersistentResourceGovernor<FilesystemResourceGovernorStore<PostgresRootFilesystem>>,
+    PostgresResourceGovernor,
     FilesystemProcessStore<PostgresRootFilesystem>,
     FilesystemProcessResultStore<PostgresRootFilesystem>,
 >;

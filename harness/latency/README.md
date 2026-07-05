@@ -28,8 +28,8 @@ metadata/lease/consume, and resource-governor reserve/reconcile operations.
 It is currently diagnostic: Postgres uses row-backed secret and resource
 stores in this harness, while libSQL stays on the production filesystem-backed
 stores. The workload validates that the control-plane row stores remove the
-single-blob contention path before those stores are wired into production
-composition.
+single-blob contention path. Production hosted Postgres composition also uses
+the row-backed resource governor.
 
 It is a dev scorer, not the full acceptance gate yet. The spec requires future
 cycles to add launch-reference baseline scoring, hosted profile startup,
