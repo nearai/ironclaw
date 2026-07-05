@@ -19,6 +19,7 @@
 // Module-level allow matches `assertions.rs`/`test_channel.rs`/`live_mission_helpers.rs`.
 #![allow(dead_code)]
 
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1031,6 +1032,36 @@ impl RebornIntegrationHarness {
         all[self.baseline_result_count..].to_vec()
     }
 
+    /// Shared poll loop for `wait_for_status`/`wait_for_terminal`; `decide`
+    /// picks the stop condition so the deadline/interval have one home.
+    async fn poll_until_terminal_condition(
+        &self,
+        run_id: TurnRunId,
+        mut decide: impl FnMut(&TurnRunState) -> ControlFlow<HarnessResult<TurnRunState>>,
+    ) -> HarnessResult<TurnRunState> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let state = self
+                .turn_store
+                .get_run_state(GetRunStateRequest {
+                    scope: self.turn_scope.clone(),
+                    run_id,
+                })
+                .await?;
+            if let ControlFlow::Break(outcome) = decide(&state) {
+                return outcome;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "timed out waiting for terminal condition; last status={:?} failure={:?}",
+                    state.status, state.failure
+                )
+                .into());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     /// Poll the turn-state store until the run reaches `expected`, returning the
     /// matching `TurnRunState`. Fails fast if the run reaches a *different*
     /// terminal status first (terminal states are never left, so it can never
@@ -1042,38 +1073,33 @@ impl RebornIntegrationHarness {
         run_id: TurnRunId,
         expected: TurnStatus,
     ) -> HarnessResult<TurnRunState> {
-        // GitHub Actions Linux runners, and especially llvm-cov instrumented
-        // runs, can spend more than 10s in the real host-runtime/WASM path
-        // before persisting the next turn status. This helper is a state wait,
-        // not a performance assertion; terminal failures still fail fast below.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-        loop {
-            let state = self
-                .turn_store
-                .get_run_state(GetRunStateRequest {
-                    scope: self.turn_scope.clone(),
-                    run_id,
-                })
-                .await?;
+        self.poll_until_terminal_condition(run_id, |state| {
             if state.status == expected {
-                return Ok(state);
-            }
-            if state.status.is_terminal() {
-                return Err(format!(
+                ControlFlow::Break(Ok(state.clone()))
+            } else if state.status.is_terminal() {
+                ControlFlow::Break(Err(format!(
                     "expected {expected:?} but run reached terminal status {:?}; failure={:?}",
                     state.status, state.failure
                 )
-                .into());
+                .into()))
+            } else {
+                ControlFlow::Continue(())
             }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(format!(
-                    "timed out waiting for {expected:?}; last status={:?} failure={:?}",
-                    state.status, state.failure
-                )
-                .into());
+        })
+        .await
+    }
+
+    /// Poll until ANY terminal status (#5466): unlike `wait_for_status`, does
+    /// NOT fail fast on an unexpected terminal — caller branches on the result.
+    pub async fn wait_for_terminal(&self, run_id: TurnRunId) -> HarnessResult<TurnRunState> {
+        self.poll_until_terminal_condition(run_id, |state| {
+            if state.status.is_terminal() {
+                ControlFlow::Break(Ok(state.clone()))
+            } else {
+                ControlFlow::Continue(())
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        })
+        .await
     }
 
     /// Approve a blocked approval gate and resume the run (the user-approves path).

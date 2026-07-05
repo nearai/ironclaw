@@ -1,9 +1,13 @@
 //! Group integration tests for the Reborn approval flow — the real gate path.
 //!
-//! One sequential `#[tokio::test]` drives eight scenarios over a shared
+//! One sequential `#[tokio::test]` drives several scenarios over a shared
 //! [`RebornIntegrationGroup::live_approvals`] group (one approval-request store,
 //! one capability-lease store, one `(tenant, user)` auto-approve toggle, all
 //! shared across threads). See `tests/integration/CLAUDE.md` §"Group tests".
+//!
+//! `concurrent_dual_gate_resume_parallel` (#5466) is `approvals_group_e2e`
+//! only (InMemory) -- never add a `StorageMode::LibSql` variant, see its
+//! own module doc (libsql SIGABRTs the whole test binary, #5466).
 //!
 //! Every scenario drives the REAL gate path: scripted `builtin.write_file` call
 //! → real `TurnStatus::BlockedApproval` gate (auto-approve disabled for the
@@ -37,6 +41,7 @@ mod scenario_approval_request_persists_after_reopen;
 mod scenario_approve_always_persists_cross_thread;
 mod scenario_ask_each_time_resumes_once;
 mod scenario_concurrent_dual_gate_resume;
+mod scenario_concurrent_dual_gate_resume_parallel;
 mod scenario_discard_then_resubmit;
 mod scenario_failure_category_demasked;
 mod scenario_gate_ref_edge_cases;
@@ -63,6 +68,11 @@ async fn approvals_group_e2e() {
     report.record(
         "concurrent_dual_gate_resume",
         scenario_concurrent_dual_gate_resume::run(&g).await,
+    );
+    // #5466: InMemory only, see this scenario's own module doc + main.rs doc.
+    report.record(
+        "concurrent_dual_gate_resume_parallel",
+        scenario_concurrent_dual_gate_resume_parallel::run(&g).await,
     );
     report.record(
         "failure_category_demasked",
