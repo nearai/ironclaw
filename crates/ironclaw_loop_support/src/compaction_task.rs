@@ -84,6 +84,7 @@ where
     prompt_id: SystemPromptId,
     system_prompt: String,
     max_input_bytes: usize,
+    max_message_bytes: usize,
     max_input_tokens: u64,
 }
 
@@ -242,6 +243,7 @@ where
             prompt_id,
             system_prompt: system_prompt.into(),
             max_input_bytes: 256 * 1024,
+            max_message_bytes: 32 * 1024,
             max_input_tokens: 64 * 1024,
         }
     }
@@ -388,7 +390,18 @@ where
     ) -> Result<CompactionInput, CompactionError> {
         let mut text = String::new();
         for message in &range.messages {
-            let body = message.body.as_str();
+            let original_bytes = message.body.len();
+            let (body, truncated) =
+                truncate_message_body_for_compaction(&message.body, self.max_message_bytes);
+            if truncated {
+                tracing::warn!(
+                    sequence = message.sequence,
+                    original_bytes,
+                    kept_bytes = body.len(),
+                    "compaction truncated oversized message body"
+                );
+            }
+            let body = body.as_str();
             if !self.injection_scanner.scan_injection(body).is_empty() {
                 return Err(CompactionError::InjectionDetected);
             }
@@ -635,6 +648,66 @@ fn defer_compaction(reason: CompactionDeferralReason) -> CompactionRangeDecision
     }
 }
 
+fn truncate_message_body_for_compaction(body: &str, max_bytes: usize) -> (String, bool) {
+    if body.len() <= max_bytes {
+        return (body.to_string(), false);
+    }
+    let mut omitted_bytes = body.len().saturating_sub(max_bytes);
+    loop {
+        let marker =
+            format!("\n…[compaction: omitted {omitted_bytes} bytes of oversized message body]…\n");
+        if marker.len() >= max_bytes {
+            return (truncate_at_char_boundary(&marker, max_bytes), true);
+        }
+
+        let available = max_bytes - marker.len();
+        let mut head_budget = available.saturating_mul(3) / 4;
+        let mut tail_budget = available.saturating_sub(head_budget);
+        let mut head_end = floor_char_boundary(body, head_budget);
+        let mut tail_start = ceil_char_boundary(body, body.len().saturating_sub(tail_budget));
+
+        while head_end > tail_start {
+            head_budget = head_budget.saturating_sub(1);
+            tail_budget = available.saturating_sub(head_budget);
+            head_end = floor_char_boundary(body, head_budget);
+            tail_start = ceil_char_boundary(body, body.len().saturating_sub(tail_budget));
+        }
+
+        let actual_omitted_bytes = tail_start.saturating_sub(head_end);
+        if actual_omitted_bytes == omitted_bytes {
+            let mut truncated = String::with_capacity(max_bytes);
+            truncated.push_str(&body[..head_end]);
+            truncated.push_str(&marker);
+            truncated.push_str(&body[tail_start..]);
+            if truncated.len() > max_bytes {
+                truncated.truncate(floor_char_boundary(&truncated, max_bytes));
+            }
+            return (truncated, true);
+        }
+        omitted_bytes = actual_omitted_bytes;
+    }
+}
+
+fn floor_char_boundary(value: &str, index: usize) -> usize {
+    let mut boundary = index.min(value.len());
+    while boundary > 0 && !value.is_char_boundary(boundary) {
+        boundary = boundary.saturating_sub(1);
+    }
+    boundary
+}
+
+fn ceil_char_boundary(value: &str, index: usize) -> usize {
+    let mut boundary = index.min(value.len());
+    while boundary < value.len() && !value.is_char_boundary(boundary) {
+        boundary = boundary.saturating_add(1);
+    }
+    boundary
+}
+
+fn truncate_at_char_boundary(value: &str, max_bytes: usize) -> String {
+    value[..floor_char_boundary(value, max_bytes)].to_string()
+}
+
 #[cfg(test)]
 fn compaction_message_body(
     message: &ironclaw_threads::ThreadMessageRecord,
@@ -835,6 +908,41 @@ mod tests {
         let message = record_with_content(MessageKind::ToolResultReference, Some("tool summary"));
 
         assert_eq!(compaction_message_body(&message), Ok("tool summary"));
+    }
+
+    #[test]
+    fn truncate_message_body_caps_oversized_body_with_marker() {
+        let body = format!("{}{}", "a".repeat(80), "z".repeat(80));
+
+        let (truncated, was_truncated) = truncate_message_body_for_compaction(&body, 96);
+
+        assert!(was_truncated);
+        assert!(truncated.len() <= 96);
+        assert!(truncated.contains("[compaction: omitted "));
+        assert!(truncated.starts_with('a'));
+        assert!(truncated.ends_with('z'));
+    }
+
+    #[test]
+    fn truncate_message_body_preserves_small_body_byte_identically() {
+        let body = "small body";
+
+        let (truncated, was_truncated) = truncate_message_body_for_compaction(body, 32);
+
+        assert!(!was_truncated);
+        assert_eq!(truncated, body);
+    }
+
+    #[test]
+    fn truncate_message_body_preserves_utf8_boundaries() {
+        let body = "αβγδ🙂".repeat(64);
+
+        let (truncated, was_truncated) = truncate_message_body_for_compaction(&body, 128);
+
+        assert!(was_truncated);
+        assert!(truncated.len() <= 128);
+        assert!(truncated.is_char_boundary(truncated.len()));
+        assert!(truncated.contains("[compaction: omitted "));
     }
 
     #[test]

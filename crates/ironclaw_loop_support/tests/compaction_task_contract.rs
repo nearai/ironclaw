@@ -359,7 +359,7 @@ async fn compaction_rejects_drop_through_seq_pointing_at_assistant_message() {
 }
 
 #[tokio::test]
-async fn compaction_task_rejects_oversized_input_before_inference() {
+async fn compaction_task_truncates_single_oversized_message_before_inference() {
     let fixture = CompactionFixture::new().await;
     fixture.append_user(&"x".repeat(256 * 1024 + 1)).await;
     let inference = Arc::new(CapturingInference::new("summary"));
@@ -370,10 +370,33 @@ async fn compaction_task_rejects_oversized_input_before_inference() {
         fixture.scope.clone(),
     );
 
-    let error = port
-        .compact_loop_context(fixture.request(1))
+    port.compact_loop_context(fixture.request(1))
         .await
-        .expect_err("oversized input should be rejected before inference");
+        .expect("single oversized message should be truncated before inference");
+
+    let input = inference.last_input();
+    assert!(input.contains("[compaction: omitted "));
+    assert!(input.len() <= 256 * 1024);
+}
+
+#[tokio::test]
+async fn compaction_task_rejects_aggregate_oversized_input_before_inference() {
+    let fixture = CompactionFixture::new().await;
+    for _ in 0..9 {
+        fixture.append_user(&"x".repeat(40 * 1024)).await;
+    }
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(CleanLeakScanner),
+        fixture.scope.clone(),
+    );
+
+    let error = port
+        .compact_loop_context(fixture.request(9))
+        .await
+        .expect_err("aggregate oversized input should still be rejected before inference");
 
     assert!(matches!(error, LoopCompactionError::InputTooLarge));
     assert!(inference.last_input().is_empty());
