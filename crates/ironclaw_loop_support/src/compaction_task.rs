@@ -389,6 +389,12 @@ where
         range: &ValidatedCompactionRange,
     ) -> Result<CompactionInput, CompactionError> {
         let mut text = String::new();
+        // A single oversized message body (typically a large tool result) is
+        // truncated head+tail rather than aborting the whole compaction with
+        // `InputTooLarge`: aborting would fall through to the silent
+        // prompt-context hard-drop and lose the entire range instead of the
+        // middle of one message. The aggregate `max_input_bytes` guard below
+        // still fails closed if the truncated total is itself too large.
         for message in &range.messages {
             let original_bytes = message.body.len();
             let (body, truncated) =

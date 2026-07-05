@@ -9,7 +9,6 @@ pub(crate) type SelectedPromptContextMessage = (ContextMessage, u64);
 pub(crate) struct PromptContextSelection {
     pub(crate) selected: Vec<SelectedPromptContextMessage>,
     pub(crate) dropped_messages: usize,
-    pub(crate) dropped_tokens: u64,
 }
 
 pub(crate) fn select_prompt_context_messages(
@@ -17,48 +16,30 @@ pub(crate) fn select_prompt_context_messages(
     budget: PromptContextTokenBudget,
 ) -> PromptContextSelection {
     let visible_tokens = budget.visible_transcript_tokens();
-    let messages = messages
-        .into_iter()
-        .map(|message| {
-            let tokens = estimate_tokens_from_chars(&message.content).as_u64();
-            (message, tokens)
-        })
-        .collect::<Vec<_>>();
-    if visible_tokens == 0 {
-        return PromptContextSelection {
-            dropped_messages: messages.len(),
-            dropped_tokens: messages
-                .iter()
-                .map(|(_, tokens)| *tokens)
-                .fold(0_u64, u64::saturating_add),
-            selected: Vec::new(),
-        };
-    }
-    let mut selected = Vec::new();
-    let mut selected_tokens = 0_u64;
-    let mut dropped_messages = 0_usize;
-    let mut dropped_tokens = 0_u64;
+    let total_messages = messages.len();
+    let mut selected: Vec<SelectedPromptContextMessage> = Vec::new();
 
-    for (index, (message, message_tokens)) in messages.iter().enumerate().rev() {
-        let fits = selected_tokens.saturating_add(*message_tokens) <= visible_tokens;
-        if fits {
-            selected_tokens = selected_tokens.saturating_add(*message_tokens);
-            selected.push((message.clone(), *message_tokens));
-        } else {
-            dropped_messages = index.saturating_add(1);
-            dropped_tokens = messages[..=index]
-                .iter()
-                .map(|(_, tokens)| *tokens)
-                .fold(0_u64, u64::saturating_add);
-            break;
+    if visible_tokens > 0 {
+        // Walk newest-first, estimating tokens lazily and stopping at the first
+        // message that does not fit. This runs on the per-turn model path, so we
+        // move each admitted message out (never clone the body) and never scan
+        // the dropped older prefix — cost stays O(visible window), not
+        // O(whole transcript).
+        let mut selected_tokens = 0_u64;
+        for message in messages.into_iter().rev() {
+            let message_tokens = estimate_tokens_from_chars(&message.content).as_u64();
+            if selected_tokens.saturating_add(message_tokens) > visible_tokens {
+                break;
+            }
+            selected_tokens = selected_tokens.saturating_add(message_tokens);
+            selected.push((message, message_tokens));
         }
+        selected.reverse();
     }
 
-    selected.reverse();
     PromptContextSelection {
+        dropped_messages: total_messages - selected.len(),
         selected,
-        dropped_messages,
-        dropped_tokens,
     }
 }
 
@@ -146,14 +127,13 @@ mod tests {
     }
 
     #[test]
-    fn selector_reports_dropped_messages_and_tokens_when_budget_exceeded() {
+    fn selector_reports_dropped_messages_when_budget_exceeded() {
         let messages = vec![message(1, "a"), message(2, "b"), message(3, "c")];
 
         let selection =
             select_prompt_context_messages(messages, PromptContextTokenBudget::new(2, 0, 0));
 
         assert_eq!(selection.dropped_messages, 1);
-        assert_eq!(selection.dropped_tokens, 1);
     }
 
     #[test]
@@ -164,6 +144,5 @@ mod tests {
             select_prompt_context_messages(messages, PromptContextTokenBudget::new(2, 0, 0));
 
         assert_eq!(selection.dropped_messages, 0);
-        assert_eq!(selection.dropped_tokens, 0);
     }
 }

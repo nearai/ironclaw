@@ -301,6 +301,10 @@ where
         self
     }
 
+    /// Opt-in token cap for injected skill instruction snippets. Unset by
+    /// default, so instruction injection stays unbounded unless a composition
+    /// root wires a budget here; the always-on debug signal in
+    /// `select_instruction_snippets_for_context` reports the size regardless.
     pub fn with_instruction_budget(mut self, budget: PromptContextTokenBudget) -> Self {
         self.instruction_budget = Some(budget);
         self
@@ -340,7 +344,6 @@ fn warn_prompt_context_drops(
     }
     tracing::warn!(
         dropped_messages = selection.dropped_messages,
-        dropped_tokens = selection.dropped_tokens,
         visible_budget_tokens = budget.visible_transcript_tokens(),
         "prompt context exceeded visible budget; older messages dropped from model context"
     );
@@ -442,30 +445,36 @@ where
         &self,
         mut snippets: Vec<LoopContextSnippet>,
     ) -> Vec<LoopContextSnippet> {
-        let instruction_tokens = snippets
-            .iter()
-            .map(|snippet| estimate_tokens_from_chars(&snippet.model_content).as_u64())
-            .fold(0_u64, u64::saturating_add);
-        if instruction_tokens > 0 {
-            tracing::debug!(
-                snippets = snippets.len(),
-                instruction_tokens,
-                budgeted = self.instruction_budget.is_some(),
-                "skill instruction snippets estimated for prompt context"
-            );
-        }
-
         let Some(budget) = self.instruction_budget else {
+            // No cap configured: pass snippets through untouched. Estimate the
+            // total only for the debug signal, and only when debug tracing is on.
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                let instruction_tokens = snippets
+                    .iter()
+                    .map(|snippet| estimate_tokens_from_chars(&snippet.model_content).as_u64())
+                    .fold(0_u64, u64::saturating_add);
+                tracing::debug!(
+                    snippets = snippets.len(),
+                    instruction_tokens,
+                    budgeted = false,
+                    "skill instruction snippets estimated for prompt context"
+                );
+            }
             return snippets;
         };
 
+        // Lossless per-snippet admission: skill instructions are behavioural
+        // contracts, so a snippet is never truncated mid-text. Admit whole
+        // snippets in priority order until the next would exceed the budget, then
+        // drop the remaining lowest-priority snippets. Each snippet is estimated
+        // exactly once.
         sort_instruction_snippets_for_prompt(&mut snippets);
         let visible_instruction_tokens = budget.visible_transcript_tokens();
+        let total_snippets = snippets.len();
         let mut admitted_tokens = 0_u64;
         let mut admitted = Vec::new();
         let mut dropped = 0_usize;
 
-        let total_snippets = snippets.len();
         for (index, snippet) in snippets.into_iter().enumerate() {
             let snippet_tokens = estimate_tokens_from_chars(&snippet.model_content).as_u64();
             if admitted_tokens.saturating_add(snippet_tokens) <= visible_instruction_tokens {
@@ -481,7 +490,7 @@ where
             tracing::warn!(
                 admitted = admitted.len(),
                 dropped,
-                instruction_tokens,
+                admitted_tokens,
                 "skill instruction snippets exceeded budget; lowest-priority snippets dropped"
             );
         }
