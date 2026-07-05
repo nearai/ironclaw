@@ -20,14 +20,19 @@ What is worth keeping from this PR:
 
 - H13, because it removes one duplicate Reborn job while preserving group-suite
   pass/fail coverage through the instrumented `groups` lane.
-- H14, but only as deterministic cache-policy cleanup. It produced one
-  controlled improvement (`8m21s -> 7m49s`), then later validation runs with
-  the same retained workflow shape regressed to `12m07s`, `12m44s`,
-  `12m22s`, `12m08s`, and `11m10s`.
+- H14, but only as deterministic cache-policy cleanup for the remaining
+  Rust-cache users. Its crate-bucket cache seeding was superseded by H25. H14
+  produced one controlled improvement (`8m21s -> 7m49s`), then later
+  validation runs with the same retained workflow shape regressed to `12m07s`,
+  `12m44s`, `12m22s`, `12m08s`, and `11m10s`.
 - H19, because it removes repeated root-package Cargo invocations inside each
   root-test partition. It improved root partition durations in both valid
   samples, but it is a localized long-pole reduction rather than a complete
   wall-clock fix.
+- H25, because the latest `product-workflow` spike was mostly GitHub
+  rust-cache restore/setup latency, not test runtime. Removing `rust-cache`
+  from the crate-bucket matrix kept sccache active, passed, and improved the
+  latest retained wall clock from `10m27s`/`12m03s` samples to `9m38s`.
 
 What is not worth pursuing further in this PR:
 
@@ -120,7 +125,7 @@ improving measured wall clock.
 | H11 | Move libSQL-heavy coverage out of broad long-pole crate buckets into the existing Reborn group job. | Reduce compile graph size for `host-runtime` and `reborn-core` without dropping persistence coverage or adding a new job. | Tested | Rejected: wall clock regressed from `8m35s` to `9m50s`; `host-runtime`, `reborn-core`, and `composition-core` were all slower. |
 | H12 | Move `ironclaw_reborn_cli` from `reborn-core` to `webui-ingress`. | Keep job count flat while grouping the WebUI-shaped CLI build with the WebUI ingress bucket instead of the core Reborn bucket. | Tested | Rejected: `reborn-core` improved from `367s` to `238s`, but `webui-ingress` grew from `334s` to `377s`; wall clock stayed flat at `8m37s` with no job-count reduction. |
 | H13 | Remove the separate uninstrumented `reborn-group-tests` job and rely on the existing instrumented coverage `groups` lane for those same suites. | Reduce total Reborn jobs by one without dropping group-suite pass/fail coverage. | Retained | Accepted: total Reborn jobs dropped from `28` to `27`, and wall clock improved from `8m35s` to `8m21s`. |
-| H14 | Seed fresh shared Rust caches from deterministic broad producers: `reborn-core` for crate buckets and `groups` for coverage lanes. | Improve warm-start quality for compile-heavy jobs without adding jobs or changing coverage. | Retained with caveat | Accepted as a targeted cache-policy cleanup: the controlled measurement improved from H13 `8m21s` to `7m49s`, but later final-state validation runs regressed to `12m07s`, `12m44s`, `12m22s`, and `12m08s`, so this is not a stable wall-clock fix. |
+| H14 | Seed fresh shared Rust caches from deterministic broad producers: `reborn-core` for crate buckets and `groups` for coverage lanes. | Improve warm-start quality for compile-heavy jobs without adding jobs or changing coverage. | Retained with caveat | Accepted as targeted cache-policy cleanup, but H25 supersedes the crate-bucket Rust-cache path. The controlled measurement improved from H13 `8m21s` to `7m49s`, but later validation runs regressed to `12m07s`, `12m44s`, `12m22s`, and `12m08s`, so this is not a stable wall-clock fix. |
 | H15 | Add a `cargo-hakari` workspace-hack crate to unify dependency feature sets across buckets. | Improve cross-bucket cache reuse by making shared dependency artifacts compatible across package feature combinations. | Tested | Rejected: the benchmark run failed architecture dependency-boundary tests and was already slower than the original baseline, with root `1` at `10m21s`, `host-runtime` at `8m24s`, and `composition-core` at `8m21s`. |
 | H16 | Build a nightly dependency-warmed CI container image in GHCR and run heavy Reborn jobs inside it. | Escape GitHub cache LRU limits by pre-baking a broad warm target/dependency layer. | Feasibility-tested | Not runtime-benchmarked: repo Actions default token is read-only, the existing Docker workflow only requests `packages: read` and publishes product images to Docker Hub, and the local token lacks `write:packages`; a real benchmark needs a separate package-write image lifecycle first. |
 | H17 | Skip Reborn buckets by changed-file reverse dependency scope. | Improve average PR time by running only affected buckets while merge queue still runs everything. | Retrospective benchmark | Weak near-term result: across 27 recent Reborn-scoped merged PRs, conservative dry-run scoping reduced crate buckets from `324` to `282` total (`13%`), with median PR still at `12/12` buckets because most sampled Reborn PRs touched tests, workflows, shared roots, or broad closures. |
@@ -131,6 +136,7 @@ improving measured wall clock.
 | H22 | Split libSQL-heavy migration/trigger crates out of `adapters-misc`. | Let lightweight adapters finish separately from migration/trigger storage work. | Tested | Rejected and reverted: `adapters-misc` improved `543s -> 324s`, but the new `migration-triggers` bucket took `573s` and wall clock regressed `9m55s -> 10m35s`. |
 | H23 | Run root partitions with `cargo nextest run --profile ci` instead of `cargo test`. | Keep one compile per partition but improve test execution scheduling and reporting. | Tested | Rejected and reverted: the run passed, but wall clock regressed `9m55s -> 10m21s`; root max regressed `547s -> 579s`. |
 | H24 | Use default Cargo test target selection only for buckets that improved in H1. | Keep `--all-targets` where H1 regressed, while reducing compile/link work in `adapters-misc`, `product-workflow`, `webui-ingress`, `reborn-core`, `wasm-sandbox`, and `host-runtime`. | Tested | Rejected and reverted: `adapters-misc` improved `578s -> 498s`, but `host-runtime` regressed `519s -> 587s` and wall clock regressed `10m27s -> 10m39s`. |
+| H25 | Remove GitHub `rust-cache` from the Reborn crate-bucket matrix while keeping OVH Redis sccache. | Avoid repeated GitHub cache misses/timeouts in fanout-heavy crate jobs when sccache is already the effective compile cache. | Retained | Accepted: run passed and wall clock improved from latest retained `10m27s`/`12m03s` samples to `9m38s`; `product-workflow` recovered from `669s` to `357s`. |
 
 ## H1: Narrow Crate Bucket Targets
 
@@ -877,6 +883,10 @@ Decision:
   advice's optimistic `~6.3m` wall-clock estimate, but it materially improves
   the compile-heavy crate buckets and coverage lanes without changing coverage
   or adding jobs.
+- Current-state note: H25 later removes the crate-bucket GitHub Rust-cache
+  restore path. The crate-bucket part of this H14 result is therefore
+  historical evidence, not the current crate-bucket cache policy. The
+  instrumented coverage cache key remains in the workflow.
 - After H14, root tests are the measured long pole. This strengthens the advice
   that root partitioning/nextest only becomes interesting after cache quality
   improves.
@@ -1527,3 +1537,70 @@ Decision:
   the long pole and did not improve workflow wall clock. The mixed result also
   suggests the earlier H1 bucket improvements were not stable enough to justify
   changing test target coverage.
+
+## H25: Remove GitHub Rust Cache From Crate Buckets
+
+Advice under test:
+
+- The final restored run after H24 showed `product-workflow` as the last
+  Reborn crate bucket at `669s`. Before changing product-workflow features, the
+  job log needed to distinguish compile/test time from setup latency.
+
+Evidence before changing:
+
+- In restored run
+  [`28739823774`](https://github.com/nearai/ironclaw/actions/runs/28739823774),
+  `product-workflow` took `669s`.
+- Its GitHub `rust-cache` restore stalled from `11:53:02Z` to `11:55:17Z` and
+  ended with `Failed to GetCacheEntryDownloadURL ... ETIMEDOUT`, then
+  `No cache found`.
+- The job did not enter `Run crate tests` until `11:57:16Z`.
+- Once tests started, the full product bucket finished at `12:00:51Z`, about
+  `3m35s` later.
+- The `ironclaw_product_workflow --features test-support,libsql` package
+  compile/test phase itself took about `2m51s`; tests were milliseconds.
+- sccache reported `1122` cache hits, `0` misses, and `100%` hit rate. Normal
+  product-workflow samples also restored no GitHub cache but returned quickly
+  (`327s` and `335s` bucket durations).
+
+Change under test:
+
+- Remove the `Swatinem/rust-cache` restore step from the Reborn crate-bucket
+  matrix only.
+- Keep OVH Redis sccache setup for crate buckets.
+- Keep root-test, integration-coverage, and QA-fixture Rust caches unchanged.
+- No package list, feature flag, test command, root partition, or coverage
+  behavior change.
+
+Benchmark result:
+
+- Latest clean retained validation:
+  [`28739214358`](https://github.com/nearai/ironclaw/actions/runs/28739214358),
+  success, wall clock `10m27s`.
+- Latest restored validation:
+  [`28739823774`](https://github.com/nearai/ironclaw/actions/runs/28739823774),
+  success, wall clock `12m03s`.
+- H25 run:
+  [`28742241260`](https://github.com/nearai/ironclaw/actions/runs/28742241260),
+  success, wall clock `9m38s`.
+
+| Metric | Clean retained | Restored noisy | H25 no crate rust-cache | Delta vs clean | Delta vs noisy |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Workflow wall clock | `627s` | `723s` | `578s` | `-49s` | `-145s` |
+| `product-workflow` | `327s` | `669s` | `357s` | `+30s` | `-312s` |
+| `adapters-misc` | `578s` | `540s` | `522s` | `-56s` | `-18s` |
+| `host-runtime` | `519s` | `498s` | `465s` | `-54s` | `-33s` |
+| `reborn-core` | `478s` | `522s` | `362s` | `-116s` | `-160s` |
+| `webui-ingress` | `335s` | `417s` | `467s` | `+132s` | `+50s` |
+| `composition-core` | `444s` | `391s` | `409s` | `-35s` | `+18s` |
+| Root max | `581s` | `555s` | `552s` | `-29s` | `-3s` |
+
+Decision:
+
+- Retain H25.
+- The product-workflow outlier was a GitHub cache/setup-tail problem, not a
+  product-workflow test-runtime problem. Removing the crate-bucket Rust-cache
+  step avoids a repeated fanout point that was producing misses and occasional
+  timeouts, while sccache still supplies the effective compile cache.
+- This does not solve the root-test long pole, but it removes a noisy crate-job
+  setup path and materially improves the latest end-to-end Reborn wall clock.
