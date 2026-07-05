@@ -1726,3 +1726,97 @@ Budgets: 10 hours wall-clock / $0 spend
   test -p ironclaw_turns --test loop_checkpoint_store_contract`, full `cargo
   test -p ironclaw_turns --test filesystem_turn_state_contract`, final `cargo
   check -p ironclaw_turns`, and `git diff --check` passed.
+
+## Cycle 33 - Single-Run Lease Preparation / Pool Sweep
+
+- Graph note: `codebase-memory-mcp` continues to fail with `Transport closed`;
+  the local graph artifact remains stale and empty, so this cycle uses targeted
+  source reads.
+- Baseline: the current commit's treatment `harness/latency/score.sh --dev`
+  passed with 54 results, 36 comparisons, and zero failures after cycle 32.
+  Dev `turn_lifecycle` state hash stayed `7fc054292d2f85f0`; Postgres pool-2
+  c4 p95 was 517ms.
+- Probe: current-commit `harness/latency/probe.sh` passed with 81 results, 54
+  comparisons, and zero failures. Perturbed Postgres `turn_lifecycle` pool-2
+  c8 p95 is now 2.56s with matching state hash `3fa07e3dc3c7e320`; libSQL c8
+  still hits CAS retry exhaustion and a mismatched hash.
+- Hypothesis: `prepare_runner_lease_retirement` and
+  `prepare_cancel_requested_runner_lease` call `read_snapshot()`, which clones
+  the whole cached row snapshot just to find one run and seed/update the
+  in-memory runner lease. Every block/complete/cancel path pays that cost
+  before the actual targeted write, so the lifecycle workload still performs
+  extra blob-shaped snapshot copies. Preparing the lease from a single cloned
+  `TurnRunRecord` projected under the cache lock should remove that copy while
+  preserving the runner-lease validation and rollback behavior.
+- Expected failure mode: The single-run path must preserve `ScopeNotFound`
+  versus `InvalidTransition` behavior for missing/non-running records, must
+  still validate runner id and lease token, and must not weaken cancel-requested
+  or terminal transition rollback semantics.
+- Result: The single-run lease preparation experiment compiled and passed the
+  narrow row-store contract, but it did not improve the score. Dev score still
+  passed 54 results and 36 comparisons with zero failures, but Postgres pool-2
+  c4 `turn_lifecycle` regressed from the 517ms baseline to 567ms. The c32/c100
+  diagnostic was mixed: c32 p95 worsened from 2.75s to 2.78s while c100 p95
+  moved from 10.56s to 10.35s. The code was abandoned before commit.
+- Pool-size diagnostic: A clean rerun of the cycle-32 implementation swept
+  Postgres pool sizes 2, 4, 8, 16, and 32. The c32/c100 `turn_lifecycle`
+  diagnostic stayed flat: pool-2 c100 p95 10585ms, pool-4 10547ms, pool-8
+  10708ms, pool-16 10606ms, and pool-32 10593ms. The dev-shaped c4 sweep was
+  also flat around 269-276ms. Pool size is not the turn-state bottleneck.
+- Decision: Do not tune pool size or continue with single-run lease preparation.
+  The next cycle must change structure around the remaining serialized
+  row-store critical section.
+
+## Cycle 34 - Direct Loop Checkpoint Row Deltas
+
+- Graph note: `codebase-memory-mcp` is available in this turn, but
+  `index_status` still fails immediately with `Transport closed`; this cycle
+  falls back to crate guardrails and targeted source reads.
+- Baseline: cycle 32 remains the last committed implementation. Postgres-only
+  `turn_lifecycle` c32/c100 with payload 2048 and pool size 2 sits at c32 p95
+  2.75-2.80s and c100 p95 10.56-10.59s with zero errors and state hash
+  `660086a8484d5400`. Increasing the pool to 32 does not change that.
+- Hypothesis: The 2048-byte lifecycle diagnostic performs 16
+  `put_loop_checkpoint` + `get_loop_checkpoint` pairs per sample. Row-store
+  checkpoint writes currently enter `apply_with_targeted_delta`, lock the
+  global `snapshot_state`, invoke the in-memory turn-state authority, and
+  append one metadata row. Loop checkpoint writes do not emit lifecycle events
+  and are independent metadata keyed by checkpoint id/scope/run. Persisting the
+  checkpoint row directly as a durable targeted delta, then updating only the
+  cached snapshot, should remove 16 serialized in-memory transition hops per
+  sample without changing visible records or hashes.
+- Expected failure mode: Direct checkpoint writes must still create durable
+  `LoopCheckpointRecord`s, fail closed on cross-scope/cross-run reads, survive
+  row-store reopen, and appear in `persistence_snapshot()`. Because the
+  in-memory transition authority will no longer own loop checkpoints, any
+  full-snapshot fallback must preserve existing loop checkpoint rows instead
+  of treating them as deleted.
+- Result: `FilesystemTurnStateRowStore::put_loop_checkpoint` now creates the
+  `LoopCheckpointRecord` directly, appends a typed `loop_checkpoints_upsert`
+  delta, and applies that delta to the hot cached snapshot if it is already
+  loaded. The cache is not initialized just for checkpoint writes. Generic
+  full-snapshot diffs now preserve existing loop checkpoint rows so later
+  lifecycle transitions do not delete checkpoint rows that no longer live in
+  the in-memory store authority.
+- Dev score: `harness/latency/score.sh --dev` passed with 54 results, 36
+  comparisons, and zero failures. The scored `turn_lifecycle` state hash
+  stayed `7fc054292d2f85f0`; libSQL c4 p95 was 8563ms, Postgres pool-1 c4
+  p95 was 495ms, and Postgres pool-2 c4 p95 was 502ms. Postgres remains far
+  faster than libSQL at c4 in the dev-shaped score, so c4 parity is not the
+  problem.
+- High-concurrency turn-state diagnostic: Postgres-only `turn_lifecycle` with
+  c32/c100, payload 2048, 64 samples, and pool size 2 completed with zero
+  errors and state hash `660086a8484d5400`. c32 p95 moved from the cycle-32
+  2749ms baseline to 2651ms. c100 p95 moved from 10562ms to 10484ms. This is
+  a real but small improvement; it does not materially solve the c100 lifecycle
+  latency.
+- Decision: Keep this change because it removes an unnecessary serialized
+  in-memory hop from typed checkpoint metadata and preserves contracts, but
+  the next cycle must address the remaining lifecycle state transitions rather
+  than checkpoint writes or pool sizing.
+- Validation: `cargo fmt -p ironclaw_turns`, `cargo test -p ironclaw_turns
+  --test loop_checkpoint_store_contract
+  filesystem_turn_state_row_store_loop_checkpoint_roundtrip_and_snapshot`,
+  `cargo test -p ironclaw_turns --test filesystem_turn_state_contract
+  filesystem_turn_state_row_store_persists_rows_without_state_blob`, `cargo
+  check -p ironclaw_turns`, and `git diff --check` passed.

@@ -5,6 +5,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use chrono::Utc;
 use ironclaw_filesystem::{
     FILESYSTEM_APPLY_TIMEOUT, FileType, FilesystemError, RecordVersion, RootFilesystem,
     ScopedFilesystem, SeqNo,
@@ -21,10 +22,10 @@ use crate::{
     PutLoopCheckpointRequest, ResumeTurnRequest, ResumeTurnResponse, RunProfileResolver,
     SpawnTreeReservation, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse,
     TurnActiveLockRecord, TurnAdmissionLimitProvider, TurnAdmissionPolicy,
-    TurnAdmissionReservationRecord, TurnCheckpointRecord, TurnError, TurnEventPage,
-    TurnEventProjectionSource, TurnIdempotencyRecord, TurnLifecycleEvent, TurnPersistenceSnapshot,
-    TurnRecord, TurnRunId, TurnRunRecord, TurnRunState, TurnScope, TurnSpawnTreeStateStore,
-    TurnStateStore, TurnStatus,
+    TurnAdmissionReservationRecord, TurnCheckpointId, TurnCheckpointRecord, TurnError,
+    TurnEventPage, TurnEventProjectionSource, TurnIdempotencyRecord, TurnLifecycleEvent,
+    TurnPersistenceSnapshot, TurnRecord, TurnRunId, TurnRunRecord, TurnRunState, TurnScope,
+    TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
     events::project_turn_events,
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
@@ -467,7 +468,8 @@ where
                 .map(|state| state.snapshot.clone())
                 .unwrap_or_default();
             let outcome = apply(Arc::clone(&store)).await;
-            let new_snapshot = store.persistence_snapshot();
+            let mut new_snapshot = store.persistence_snapshot();
+            preserve_loop_checkpoints(&baseline, &mut new_snapshot);
             let value = match outcome {
                 Ok(value) => value,
                 Err(error) => {
@@ -533,6 +535,20 @@ where
         {
             Ok(_seq) => {}
             Err(error) => return Err(RowPersistError::Turn(fs_error(error))),
+        }
+        Ok(())
+    }
+
+    async fn apply_cached_delta(&self, delta: SnapshotDelta) -> Result<(), TurnError> {
+        if delta.is_empty() {
+            return Ok(());
+        }
+        let mut guard = self.snapshot_state.lock().await;
+        if let Some(state) = guard.as_mut() {
+            let latest_event_cursor =
+                latest_event_cursor_after_delta(state.latest_event_cursor, &delta);
+            apply_delta(&mut state.snapshot, delta)?;
+            state.latest_event_cursor = latest_event_cursor;
         }
         Ok(())
     }
@@ -1000,22 +1016,26 @@ where
         &self,
         request: PutLoopCheckpointRequest,
     ) -> Result<LoopCheckpointRecord, TurnError> {
-        self.apply_with_targeted_delta(
-            RunnerLeaseOverlay::None,
-            |store| {
-                let request = request.clone();
-                async move {
-                    let outcome = store.put_loop_checkpoint(request).await;
-                    outcome
-                }
-            },
-            loop_checkpoint_targeted_delta,
-        )
-        .instrument(turn_state_write_span(
+        let span = turn_state_write_span(
             "put_loop_checkpoint",
             Some(&request.scope),
             Some(&request.run_id),
-        ))
+        );
+        async move {
+            let record = loop_checkpoint_record_from_request(request);
+            let delta = SnapshotDelta {
+                loop_checkpoints_upsert: vec![record.clone()],
+                ..SnapshotDelta::default()
+            };
+            self.persist_delta(&delta)
+                .await
+                .map_err(|error| match error {
+                    RowPersistError::Turn(error) => error,
+                })?;
+            self.apply_cached_delta(delta).await?;
+            Ok(record)
+        }
+        .instrument(span)
         .await
     }
 
@@ -1602,9 +1622,33 @@ fn full_snapshot_delta(
     snapshot: &TurnPersistenceSnapshot,
     store: &InMemoryTurnStateStore,
 ) -> Result<SnapshotDelta, TurnError> {
-    snapshot_delta(snapshot, &store.persistence_snapshot()).map_err(|error| match error {
+    let mut new_snapshot = store.persistence_snapshot();
+    preserve_loop_checkpoints(snapshot, &mut new_snapshot);
+    snapshot_delta(snapshot, &new_snapshot).map_err(|error| match error {
         RowPersistError::Turn(error) => error,
     })
+}
+
+fn preserve_loop_checkpoints(
+    baseline: &TurnPersistenceSnapshot,
+    new_snapshot: &mut TurnPersistenceSnapshot,
+) {
+    new_snapshot.loop_checkpoints = baseline.loop_checkpoints.clone();
+}
+
+fn loop_checkpoint_record_from_request(request: PutLoopCheckpointRequest) -> LoopCheckpointRecord {
+    LoopCheckpointRecord {
+        checkpoint_id: TurnCheckpointId::new(),
+        scope: request.scope,
+        turn_id: request.turn_id,
+        run_id: request.run_id,
+        state_ref: request.state_ref,
+        schema_id: request.schema_id,
+        schema_version: request.schema_version,
+        kind: request.kind,
+        gate_ref: request.gate_ref,
+        created_at: Utc::now(),
+    }
 }
 
 fn claimed_run_targeted_delta(
@@ -1722,18 +1766,6 @@ fn add_run_idempotency_delta(
             .into_iter()
             .filter(|record| !snapshot.idempotency_records.contains(record)),
     );
-}
-
-fn loop_checkpoint_targeted_delta(
-    _snapshot: &TurnPersistenceSnapshot,
-    _latest_event_cursor: EventCursor,
-    _store: &InMemoryTurnStateStore,
-    record: &LoopCheckpointRecord,
-) -> Result<SnapshotDelta, TurnError> {
-    Ok(SnapshotDelta {
-        loop_checkpoints_upsert: vec![record.clone()],
-        ..SnapshotDelta::default()
-    })
 }
 
 fn latest_event_cursor(snapshot: &TurnPersistenceSnapshot) -> EventCursor {
