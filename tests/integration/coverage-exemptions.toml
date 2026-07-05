@@ -1,28 +1,6 @@
-# Reborn integration-tier coverage exemptions.
-#
-# Each [[exemption]] entry excludes either ONE source file (`module`) or ONE
-# WHOLE CRATE (`crate`) from the per-crate "uncovered" accounting in the
-# Reborn integration-tier coverage report:
-#   - Computed by scripts/ci/reborn-coverage-summary.sh from the merged lcov
-#     tracefile (scripts/ci/reborn-coverage-merge-lcov.sh, now merging both
-#     the integration-tier lane artifacts AND the instrumented crate-tests
-#     bucket artifacts), scoped to crates/ironclaw_* (all workspace crates
-#     the Reborn CI jobs exercise).
-#   - Rendered by the `coverage-report` job in
-#     .github/workflows/reborn-tests.yml into $GITHUB_STEP_SUMMARY and a
-#     sticky PR comment.
-#
-# An exempted entry's lines are dropped from the per-crate table's
-# covered/total line counts entirely — they neither help nor hurt a crate's
-# percentage — and the entry is listed verbatim, with its reason and tracking
-# issue, in the report's own "Exemptions" section. The exclusion must stay
-# visible, never silent.
-#
-# This coverage signal is INFORMATIONAL ONLY: no ratchet, no fail threshold,
-# on this report yet. Exemptions exist for visibility/triage today, not to
-# game a gate that doesn't exist — every entry still needs a reason and a
-# tracking issue so a future ratchet effort (or a reviewer) can tell "known,
-# tracked gap" from "nobody looked".
+# Reborn integration-tier coverage exemptions. Each [[exemption]] excludes one
+# source file (`module`) or one whole crate (`crate`, never both) from the
+# per-crate accounting in scripts/ci/reborn-coverage-summary.sh — informational only, reason + issue required per entry.
 #
 # Schema — exactly ONE of `module`/`crate` per entry (never both, never
 # neither; reborn-coverage-summary.sh rejects malformed entries at parse
@@ -40,32 +18,25 @@
 #   reason = "why this whole crate is out of scope for this report"
 #   issue  = "https://github.com/nearai/ironclaw/issues/5657"   # required: tracking issue
 
-# The following four crates are consumed exclusively by the root `ironclaw`
-# v1 package (confirmed via a Cargo.toml reverse-dependency audit, 2026-07-04
-# — no crates/*/Cargo.toml depends on any of them) and are already tracked
-# and run by a separate CI workflow (.github/workflows/test.yml, "Tests
-# (Legacy)"), not this Reborn-scoped report. They are NOT untested; they are
-# out of this report's scope by product line.
-#
-# Tracked by issue #5657 ("v1-only crates excluded from Reborn coverage
-# scope"), referenced in each entry's `issue` field below.
+# Four crates below are v1-only (consumed exclusively by root `ironclaw`, no
+# crates/*/Cargo.toml dependents); already covered by .github/workflows/test.yml ("Tests (Legacy)"). Tracked by #5657.
 
 [[exemption]]
 crate  = "ironclaw_embeddings"
-reason = "v1-only: consumed exclusively by the root `ironclaw` package (src/app.rs, src/tools/builtin/memory.rs, src/workspace/mod.rs, src/config/{mod,embeddings}.rs); no crates/*/Cargo.toml depends on it. Tracked by .github/workflows/test.yml (\"Tests (Legacy)\"), not this Reborn-scoped report. Confirmed via Cargo.toml reverse-dependency audit, 2026-07-04."
+reason = "v1-only: consumed only by root `ironclaw` (src/app.rs, src/tools/builtin/memory.rs, src/workspace/mod.rs, src/config/{mod,embeddings}.rs); no crates/* dependents. Covered by \"Tests (Legacy)\"."
 issue  = "https://github.com/nearai/ironclaw/issues/5657"
 
 [[exemption]]
 crate  = "ironclaw_gateway"
-reason = "v1-only: consumed exclusively by the root `ironclaw` package (src/channels/web/platform/static_files.rs, src/channels/web/handlers/frontend.rs); no crates/*/Cargo.toml depends on it. Tracked by .github/workflows/test.yml (\"Tests (Legacy)\"), not this Reborn-scoped report. Confirmed via Cargo.toml reverse-dependency audit, 2026-07-04."
+reason = "v1-only: consumed only by root `ironclaw` (src/channels/web/platform/static_files.rs, src/channels/web/handlers/frontend.rs); no crates/* dependents. Covered by \"Tests (Legacy)\"."
 issue  = "https://github.com/nearai/ironclaw/issues/5657"
 
 [[exemption]]
 crate  = "ironclaw_oauth"
-reason = "v1-only: consumed exclusively by the root `ironclaw` package (src/auth/oauth.rs); no crates/*/Cargo.toml depends on it. The crate's own doc comment: \"Loopback OAuth callback transport for the v1 (legacy) stack only... The Reborn stack does not use this crate.\" Tracked by .github/workflows/test.yml (\"Tests (Legacy)\"), not this Reborn-scoped report. Confirmed via Cargo.toml reverse-dependency audit, 2026-07-04."
+reason = "v1-only: consumed only by root `ironclaw` (src/auth/oauth.rs); no crates/* dependents. Crate's own doc comment confirms v1-only. Covered by \"Tests (Legacy)\"."
 issue  = "https://github.com/nearai/ironclaw/issues/5657"
 
 [[exemption]]
 crate  = "ironclaw_tui"
-reason = "v1-only: consumed exclusively by the root `ironclaw` package (src/main.rs, src/channels/tui.rs); no crates/*/Cargo.toml depends on it. The crate's own doc comment: \"intentionally decoupled from the main `ironclaw` crate: the Channel trait bridge lives in src/channels/tui.rs\" — i.e. bridged INTO v1, not Reborn. Tracked by .github/workflows/test.yml (\"Tests (Legacy)\"), not this Reborn-scoped report. Confirmed via Cargo.toml reverse-dependency audit, 2026-07-04."
+reason = "v1-only: consumed only by root `ironclaw` (src/main.rs, src/channels/tui.rs); no crates/* dependents. Crate's own doc comment confirms it bridges INTO v1, not Reborn. Covered by \"Tests (Legacy)\"."
 issue  = "https://github.com/nearai/ironclaw/issues/5657"

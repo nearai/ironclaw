@@ -21,12 +21,8 @@
 #     reborn-coverage-comment.sh never has to recompute it.
 #
 # Exemptions (tests/integration/coverage-exemptions.toml, schema documented
-# there): each [[exemption]] entry is either a per-file `module` path or a
-# whole-crate `crate` name (exactly one of the two, never both/neither).
-# Either form is dropped from the per-crate covered/total accounting entirely
-# (it neither helps nor hurts a crate's percentage) and listed, with its
-# reason + issue, in its own report section. An exemptions file with zero
-# entries is valid (nothing is exempted yet).
+# there): each [[exemption]] is a per-file `module` path or whole-crate
+# `crate` name (exactly one), dropped from the accounting and listed separately.
 
 set -euo pipefail
 
@@ -74,13 +70,7 @@ def round2(value: float) -> str:
 with open(exemptions_path, "rb") as fh:
     manifest = tomllib.load(fh)
 
-# Every entry is normalized to one shared shape right here, at parse time:
-# a single `label` field (the per-file path, or "crate: <name>" for the
-# whole-crate form) that every downstream consumer — the is_exempt match, the
-# sort key, and the render row — reads uniformly instead of each branching on
-# which of `module`/`crate` is present. One shape, one branch point; a future
-# call site can't reintroduce a `entry["module"]` KeyError on a crate-only
-# entry because there is no such site left to write.
+# Normalized to one `label` field here (path, or "crate: <name>") so is_exempt/sort/render never branch on module-vs-crate presence.
 exemptions = manifest.get("exemption", [])
 exempt_modules: set[str] = set()
 exempt_crates: set[str] = set()
@@ -134,11 +124,8 @@ with open(lcov_path, "r", encoding="utf-8") as fh:
             current_covered = int(line[len("LH:"):])
         elif line == "end_of_record":
             if current_file is not None and current_covered is not None and current_count is not None:
-                # Exempted files are skipped entirely: they never enter the
-                # per-crate or aggregate accounting (neither help nor hurt).
-                # Two independent match kinds share one is_exempt outcome:
-                # per-file (module path suffix/exact match) or whole-crate
-                # (the file's crate name is in the exempt-crates set).
+                # Exempted files are skipped entirely (neither help nor hurt accounting).
+                # Two match kinds share is_exempt: per-file (path suffix/exact) or whole-crate (crate name in exempt_crates).
                 is_exempt = any(current_file.endswith("/" + m) or current_file == m for m in exempt_modules)
                 match = crate_re.search(current_file)
                 if not is_exempt and match and exempt_crates:

@@ -179,14 +179,7 @@ jobs:
     needs: [changes, package-matrix]
     if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
     runs-on: ubuntu-latest
-    # Bumped 60 -> 90 alongside the per-package 28m -> 40m timeout below: this
-    # job now runs `cargo llvm-cov ... test` (instrumented) instead of plain
-    # `cargo test`, and LLVM source-based coverage instrumentation typically
-    # adds +20-40% compile time and +10-30% test-execution time. Watch
-    # `composition-core` first after landing — it is a single-package bucket
-    # (only ironclaw_reborn_composition, built with the most feature-loaded
-    # recipe in package-feature-flags.sh), so it has zero headroom from
-    # already being one package per bucket.
+    # 60->90 for llvm-cov instrumentation overhead; watch `composition-core` first (single-package bucket, most feature-loaded, zero headroom).
     timeout-minutes: 90
     env:
       ANTHROPIC_API_KEY: ""
@@ -266,13 +259,7 @@ jobs:
           # shared key keeps the registry + shared-dep build in one small,
           # always-resident entry, so the registry is downloaded once, not ~60x.
           #
-          # Dedicated `-cov` suffix (distinct from the plain `reborn-tests-crates`
-          # key other jobs may still read): this job now builds an instrumented
-          # (llvm-cov) binary, which is a materially different artifact from a
-          # plain build. Sharing a cache lineage between the two would corrupt
-          # whichever one restores second (same rationale as the
-          # `reborn-integration-cov` key on the reborn-integration-coverage job
-          # below).
+          # `-cov` suffix: instrumented llvm-cov build is a different artifact than plain `reborn-tests-crates`; separate lineage avoids corrupting whichever restores second (same as `reborn-integration-cov` below).
           shared-key: reborn-tests-crates-cov
           # Keep saves to protected-branch and merge_group runs so the ~10 GB
           # repo cache LRU is seeded by shared states, not arbitrary PR branches.
@@ -312,16 +299,7 @@ jobs:
               export CARGO_INCREMENTAL=0
             fi
 
-            # Same test execution as the plain `cargo test -p ...` this
-            # replaces (same binary construction modulo instrumentation
-            # flags, same test selection, same --all-targets, same feature
-            # flags), coverage captured as a byproduct — never a second run
-            # of anything. One combined test+lcov invocation (never the
-            # two-step `--no-report test` + standalone `report` shape: that
-            # subcommand has no --workspace/-p flag and only reports the root
-            # package — see reborn-coverage-lane-run.sh for the same
-            # documented landmine).
-            #
+            # One combined test+lcov invocation, not the two-step `--no-report test` + `report` shape (report has no --workspace/-p, only reports the root package).
             # shellcheck disable=SC2086 # feature_flags intentionally expands to zero or more Cargo args.
             timeout --signal=INT --kill-after=30s 40m \
               cargo llvm-cov -p "$package" ${feature_flags} --all-targets \
@@ -330,13 +308,7 @@ jobs:
             echo "::endgroup::"
           done < <(printf '%s\n' "${BUCKET_PACKAGES}" | jq -r '.[]')
 
-          # Concatenate this bucket's per-package lcov files into one artifact
-          # so the artifact count stays at the existing 12-bucket cardinality
-          # instead of ~60 tiny files. lcov's SF:/end_of_record framing is
-          # just repeatable text blocks, and the downstream merge script
-          # (reborn-coverage-merge-lcov.sh) iterates end_of_record boundaries
-          # per input file independently of which physical file they came
-          # from, so a straight `cat` is sufficient here.
+          # Concat per-package lcov into one artifact per bucket (keeps artifact count at ~12, not ~60); merge script parses end_of_record blocks per file already, so `cat` is sufficient.
           cat coverage/*.lcov > "bucket-${BUCKET_NAME}.lcov"
 
       - name: Upload bucket lcov artifact
@@ -618,12 +590,7 @@ jobs:
 
   coverage-report:
     name: Reborn integration-tier coverage report
-    # crate-tests added alongside reborn-integration-coverage: this job now
-    # merges lcov from BOTH the int-tier lanes and the instrumented crate-tier
-    # bucket matrix. Still pure lcov-text processing (download artifacts,
-    # merge, render, upsert comment) — no cargo test / cargo llvm-cov ... test
-    # invocation anywhere in this job, by construction, so the <=10 minute SLA
-    # below holds regardless of which upstream job's artifacts are largest.
+    # Also needs crate-tests now: merges lane + bucket lcov, still pure text processing (no test execution), so the 10-min SLA below still holds.
     needs: [changes, reborn-integration-coverage, crate-tests]
     if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
     runs-on: ubuntu-latest
