@@ -1,27 +1,16 @@
 version: 1
-agents:
-  - id: common-reviewer
-    role: reviewer
+reviewers:
+  - id: reviewer
     display_name: ironloop/common-reviewer
     instructions: .ironloop/agents/common-reviewer/AGENTS.md
-    aliases: ["common", "reviewer"]
-    actions: ["review"]
-    auto_review: false
 
-  - id: small-fix-implementer
-    role: developer
+developers:
+  - id: implementer
     display_name: ironloop/small-fix-implementer
     instructions: .ironloop/agents/small-fix-implementer/AGENTS.md
-    aliases: ["small-fix"]
     actions: ["implement"]
 
-  - id: small-fix-resolver
-    role: developer
+  - id: resolver
     display_name: ironloop/small-fix-resolver
     instructions: .ironloop/agents/small-fix-resolver/AGENTS.md
-    aliases: ["resolver"]
     actions: ["resolve"]
-    auto_resolve:
-      enabled: true
-      quiet_period_seconds: 300
-      max_attempts_per_head: 2
