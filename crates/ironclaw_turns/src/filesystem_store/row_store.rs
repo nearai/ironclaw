@@ -887,13 +887,17 @@ where
         &self,
         request: PutLoopCheckpointRequest,
     ) -> Result<LoopCheckpointRecord, TurnError> {
-        self.apply(RunnerLeaseOverlay::None, |store| {
-            let request = request.clone();
-            async move {
-                let outcome = store.put_loop_checkpoint(request).await;
-                outcome
-            }
-        })
+        self.apply_with_targeted_delta(
+            RunnerLeaseOverlay::None,
+            |store| {
+                let request = request.clone();
+                async move {
+                    let outcome = store.put_loop_checkpoint(request).await;
+                    outcome
+                }
+            },
+            loop_checkpoint_targeted_delta,
+        )
         .instrument(turn_state_write_span(
             "put_loop_checkpoint",
             Some(&request.scope),
@@ -1499,6 +1503,19 @@ fn run_state_targeted_delta(
         delta.admission_reservations_delete.push(run_id.to_string());
     }
 
+    add_event_delta(snapshot, store, &mut delta)?;
+    Ok(delta)
+}
+
+fn loop_checkpoint_targeted_delta(
+    snapshot: &TurnPersistenceSnapshot,
+    store: &InMemoryTurnStateStore,
+    record: &LoopCheckpointRecord,
+) -> Result<SnapshotDelta, TurnError> {
+    let mut delta = SnapshotDelta {
+        loop_checkpoints_upsert: vec![record.clone()],
+        ..SnapshotDelta::default()
+    };
     add_event_delta(snapshot, store, &mut delta)?;
     Ok(delta)
 }

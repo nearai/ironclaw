@@ -1298,3 +1298,63 @@ Budgets: 10 hours wall-clock / $0 spend
   p95 16.21ms, Postgres pool-2 p95 11.67ms. Next high-concurrency work should
   inspect the session request's `global_auto_approve_enabled` read path and
   WebUI middleware contention before touching lower-level stores.
+
+## Cycle 26 - Target Loop Checkpoint Row Deltas
+
+- Graph note: `codebase-memory-mcp` still fails with `Transport closed`; the
+  local graph artifact is stale and contains zero indexed nodes, so this cycle
+  uses the `crates/ironclaw_turns` subsystem docs plus targeted source reads.
+- Baseline: `harness/latency/score.sh --dev` still passes all c1/c4 rows with
+  zero errors. The long probe shows `turn_lifecycle` as the dominant remaining
+  pressure point: libSQL c8 hits `turn state filesystem CAS retries exhausted`
+  after multi-second p95s, while Postgres row store completes c8 but remains in
+  the seconds under same-user concurrency.
+- Abstraction check: The row-store path owns an `Arc<ScopedFilesystem<F>>` and
+  persists typed append-log deltas through the filesystem abstraction. This
+  cycle must not add direct Postgres table writes or reads from
+  `ironclaw_turns`; Postgres remains a filesystem backend selected by the
+  hosted-single-tenant runtime profile.
+- Hypothesis: `put_loop_checkpoint` still uses the generic `apply` path, which
+  asks the row store to compute a full snapshot diff after each checkpoint
+  write. The `turn_lifecycle` workload writes multiple loop checkpoints per
+  sample as payload size grows, so this keeps checkpoint cost coupled to total
+  turn-state size. Switching loop checkpoint writes to `apply_with_targeted_delta`
+  should persist only the new checkpoint row plus any new event rows, matching
+  the existing targeted submit/claim/complete paths.
+- Expected failure mode: A targeted delta that forgets side-effect rows would
+  leave the hot snapshot and reopened snapshot divergent. Contract coverage
+  should reopen the row store through the same `ScopedFilesystem` and verify
+  loop checkpoint records survive without writing `/turns/state.json`.
+- Result: `FilesystemTurnStateRowStore::put_loop_checkpoint` now uses
+  `apply_with_targeted_delta` and persists a delta containing only the returned
+  `LoopCheckpointRecord` plus any newly emitted lifecycle events. The write
+  still flows through `persist_delta` and `ScopedFilesystem::append`; there are
+  no direct Postgres reads or writes in `ironclaw_turns`.
+- Contract validation: Added a row-store loop-checkpoint contract that writes
+  two checkpoint records, verifies `/turns/state.json` is not created, and
+  reopens through the same `ScopedFilesystem` to confirm the records survive.
+  `cargo fmt -p ironclaw_turns --check` and
+  `cargo test -p ironclaw_turns --test loop_checkpoint_store_contract` passed.
+- Full-flow stress signal: `ironclaw_stress` with `--backend postgres`,
+  `--scenario mixed-user-session`, `--turn-state-backend filesystem-row`,
+  `--postgres-pool-size 2`, and `--users >= --concurrency` passed at c32 and
+  c100. c32 completed 128/128 with operation p95 161ms and turn-store p95 33ms.
+  c100 completed 200/200 with operation p95 437ms and turn-store p95 59ms. In
+  both runs the stress report identifies the resource governor, not turn state,
+  as the top operation group. Matching libSQL c32/c100 filesystem baselines are
+  currently blocked in this checkout: c32 aborts before JSON, and a memory
+  turn-state control still reports libSQL thread-store failures (`bad parameter
+  or other API misuse`) under c32.
+- Exact lifecycle diagnostic: A Postgres-only diagnostic
+  `turn_lifecycle` run with `LATENCY_CONCURRENCY=32,100`,
+  `LATENCY_PAYLOAD_BYTES=2048`, `LATENCY_SAMPLES=64`, and pool size 2 completed
+  with zero errors and stable state hash `660086a8484d5400`, but the latency is
+  still not acceptable: c32 p95 7.66s, c100 p95 29.96s. The targeted loop
+  checkpoint delta is therefore a scoped correctness/row-growth improvement,
+  not the final c32/c100 parity fix. The remaining lifecycle bottleneck is the
+  same-user row-store serialization/write path.
+- Dev score: `harness/latency/score.sh --dev` passed with 54 results and 36
+  comparisons, zero dev failures, and zero hard failures. `turn_lifecycle`
+  c4 remains much faster on Postgres row store than libSQL blob in the locked
+  dev score (libSQL p95 7.51s; Postgres pool-2 p95 1.33s), but c32/c100 still
+  needs the next fix.
