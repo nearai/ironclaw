@@ -69,6 +69,7 @@ improving measured wall clock.
 | H13 | Remove the separate uninstrumented `reborn-group-tests` job and rely on the existing instrumented coverage `groups` lane for those same suites. | Reduce total Reborn jobs by one without dropping group-suite pass/fail coverage. | Retained | Accepted: total Reborn jobs dropped from `28` to `27`, and wall clock improved from `8m35s` to `8m21s`. |
 | H14 | Seed fresh shared Rust caches from deterministic broad producers: `reborn-core` for crate buckets and `groups` for coverage lanes. | Improve warm-start quality for compile-heavy jobs without adding jobs or changing coverage. | Retained | Accepted as a compile-time win: wall clock improved from H13 `8m21s` to `7m49s`; crate buckets improved materially, especially `reborn-core` `462s -> 160s`, but root tests became the long pole. |
 | H15 | Add a `cargo-hakari` workspace-hack crate to unify dependency feature sets across buckets. | Improve cross-bucket cache reuse by making shared dependency artifacts compatible across package feature combinations. | Feasibility review | Not a small config-only benchmark: no existing hakari metadata or workspace-hack crate; `cargo hakari` is not installed locally; this should be a separate dependency/lockfile-changing benchmark. |
+| H18 | Increase Reborn root-test partitions from 4 to 6. | Shave the new post-H14 root-test long pole without changing test coverage. | Benchmark running | Under test on PR #5648: adds two root-test jobs, so it only survives if wall clock improves enough to justify the extra runner slots. |
 
 ## H1: Narrow Crate Bucket Targets
 
@@ -843,3 +844,36 @@ Benchmark status:
 - Not started in this branch state. Treat as a separate H15 benchmark PR or a
   follow-up commit only after deciding that dependency/lockfile churn is
   acceptable for the CI optimization experiment.
+
+## H18: Increase Root-Test Partitions
+
+Advice under test:
+
+- Root tests become worth partitioning only after compile cache quality
+  improves enough for root-test execution to be on the critical path.
+
+Change under test:
+
+- Increase `root-reborn-parity-tests` from `4` partitions to `6` partitions:
+  - `REBORN_ROOT_TEST_PARTITIONS: 6`
+  - matrix `partition: [0, 1, 2, 3, 4, 5]`
+- Keep `scripts/ci/run-reborn-root-partition.sh` unchanged. The script already
+  validates arbitrary positive partition counts and modulo-partitions the same
+  sorted `tests/reborn_*.rs` plus `tests/support_unit_tests.rs` set.
+
+Red-team notes before benchmarking:
+
+- This does not reduce compilation. Every root partition still compiles the
+  same root-package test graph before running its assigned test binaries.
+- It adds two jobs, which increases runner-slot pressure. It is only worth
+  retaining if the Reborn workflow wall clock improves materially enough to
+  compensate for the extra jobs.
+- Because H14's measurement made root partition `0` the slowest observed job
+  at `450s`, this is the first point where the root partition experiment is
+  directionally plausible.
+
+Benchmark status:
+
+- Running on PR #5648 after the H14/H15 branch state. Record the run ID,
+  success/failure, wall clock, total Reborn job count, and root partition
+  durations before deciding keep versus revert.

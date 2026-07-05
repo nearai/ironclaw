@@ -311,14 +311,14 @@ jobs:
       LLM_USE_CODEX_AUTH: "false"
       OLLAMA_BASE_URL: ""
       OPENAI_API_KEY: ""
-      REBORN_ROOT_TEST_PARTITIONS: 4
+      REBORN_ROOT_TEST_PARTITIONS: 6
       REBORN_ROOT_TEST_PARTITION: ${{ matrix.partition }}
       REBORN_ROOT_TEST_TIMEOUT: 28m
       CARGO_INCREMENTAL: "0"
     strategy:
       fail-fast: false
       matrix:
-        partition: [0, 1, 2, 3]
+        partition: [0, 1, 2, 3, 4, 5]
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -360,9 +360,9 @@ jobs:
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # All 4 root partitions compile the *same* root-package build (they
+          # All root partitions compile the *same* root-package build (they
           # only run different test partitions), so one shared cache is strictly
-          # better than 4 per-partition copies (~1 GB each) — the cached target
+          # better than per-partition copies (~1 GB each) — the cached target
           # is fully valid for every partition, and it stops the 4 copies from
           # crowding the shared LRU.
           shared-key: reborn-tests-root
