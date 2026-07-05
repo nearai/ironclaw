@@ -503,7 +503,8 @@ where
                     thread_id: thread_id.clone(),
                 });
             };
-            let stored = deserialize::<StoredThreadRecord>(&versioned_thread.entry.body)?;
+            let mut stored = deserialize::<StoredThreadRecord>(&versioned_thread.entry.body)?;
+            let thread_version = versioned_thread.version;
             if &stored.record.scope != scope || &stored.record.thread_id != thread_id {
                 txn.rollback().await;
                 return Err(SessionThreadError::UnknownThread {
@@ -512,7 +513,42 @@ where
             }
 
             if message.sequence == 0 {
-                message.sequence = self.reserve_sequence(scope, thread_id).await?;
+                if stored.next_sequence > 1 {
+                    let assigned = stored.next_sequence;
+                    stored.next_sequence = assigned + 1;
+                    stored.record.updated_at = Some(Utc::now());
+                    let entry = Self::thread_entry(&stored)?;
+                    if let Err(error) = txn
+                        .put(
+                            &thread_virtual_path,
+                            entry,
+                            CasExpectation::Version(thread_version),
+                        )
+                        .await
+                    {
+                        txn.rollback().await;
+                        return Err(absent_put_error(error, "thread", &thread_path));
+                    }
+                    message.sequence = assigned;
+                } else {
+                    let sequence_path = message_sequence_counter_path(scope, thread_id)?;
+                    let sequence_virtual_path =
+                        self.filesystem.resolve(&resource_scope, &sequence_path)?;
+                    match txn.reserve_sequence(&sequence_virtual_path).await {
+                        Ok(sequence) => message.sequence = sequence.get(),
+                        Err(FilesystemError::Unsupported {
+                            operation: FilesystemOperation::ReserveSeq,
+                            ..
+                        }) => {
+                            txn.rollback().await;
+                            return Ok(TransactionalMessageWrite::Unsupported);
+                        }
+                        Err(error) => {
+                            txn.rollback().await;
+                            return Err(error.into());
+                        }
+                    }
+                }
             }
             let message_entry = Self::message_entry(message)?;
             if let Err(error) = txn

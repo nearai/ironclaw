@@ -1872,18 +1872,29 @@ async fn build_libsql_backend(_args: &Args, _run_id: &str) -> Result<BackendHand
 }
 
 #[cfg(feature = "postgres")]
-async fn build_postgres_backend(args: &Args, run_id: &str) -> Result<BackendHandle, String> {
-    let (filesystem, target) = build_postgres_root(args).await?;
+async fn build_postgres_backend(args: &Args, _run_id: &str) -> Result<BackendHandle, String> {
+    use ironclaw_resources::PostgresResourceGovernor;
+
+    let (_filesystem, pool, target) = build_postgres_root_and_pool(args).await?;
+    let governor = PostgresResourceGovernor::new(pool);
+    governor.run_migrations().map_err(display_err)?;
     Ok(BackendHandle {
-        governor: governor_from_root(filesystem, run_id)?,
+        governor: Arc::new(governor),
         target,
     })
 }
 
 #[cfg(feature = "postgres")]
-pub(crate) async fn build_postgres_root(
+pub(crate) async fn build_postgres_root_and_pool(
     args: &Args,
-) -> Result<(Arc<ironclaw_filesystem::PostgresRootFilesystem>, String), String> {
+) -> Result<
+    (
+        Arc<ironclaw_filesystem::PostgresRootFilesystem>,
+        deadpool_postgres::Pool,
+        String,
+    ),
+    String,
+> {
     use ironclaw_filesystem::PostgresRootFilesystem;
 
     let url = resolve_postgres_url(args)?;
@@ -1895,9 +1906,9 @@ pub(crate) async fn build_postgres_root(
         .max_size(args.postgres_pool_size)
         .build()
         .map_err(display_err)?;
-    let filesystem = Arc::new(PostgresRootFilesystem::new(pool));
+    let filesystem = Arc::new(PostgresRootFilesystem::new(pool.clone()));
     filesystem.run_migrations().await.map_err(display_err)?;
-    Ok((filesystem, redact_postgres_url(&url)))
+    Ok((filesystem, pool, redact_postgres_url(&url)))
 }
 
 #[cfg(not(feature = "postgres"))]

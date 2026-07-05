@@ -191,9 +191,11 @@ async fn build_libsql_user_turn_workload(
     run_id: &str,
 ) -> Result<UserTurnWorkload, String> {
     let (filesystem, target) = crate::build_libsql_root(args).await?;
+    let governor = crate::governor_from_root(Arc::clone(&filesystem), run_id)?;
     let model_latency = build_model_latency_driver(args).await?;
     Ok(UserTurnWorkload::Libsql(user_turn_services_from_root(
         filesystem,
+        governor,
         run_id,
         target,
         model_latency,
@@ -214,10 +216,17 @@ async fn build_postgres_user_turn_workload(
     args: &Args,
     run_id: &str,
 ) -> Result<UserTurnWorkload, String> {
-    let (filesystem, target) = crate::build_postgres_root(args).await?;
+    use ironclaw_resources::PostgresResourceGovernor;
+
+    let (filesystem, pool, target) = crate::build_postgres_root_and_pool(args).await?;
+    let governor = PostgresResourceGovernor::new(pool);
+    governor
+        .run_migrations()
+        .map_err(|error| error.to_string())?;
     let model_latency = build_model_latency_driver(args).await?;
     Ok(UserTurnWorkload::Postgres(user_turn_services_from_root(
         filesystem,
+        Arc::new(governor),
         run_id,
         target,
         model_latency,
@@ -1307,6 +1316,7 @@ where
 
 fn user_turn_services_from_root<F>(
     root: Arc<F>,
+    governor: Arc<dyn ResourceGovernor>,
     run_id: &str,
     target: String,
     model_latency: Arc<ModelLatencyDriver>,
@@ -1316,7 +1326,6 @@ where
     F: RootFilesystem + 'static,
 {
     let run_id = run_id.to_string();
-    let governor = crate::governor_from_root(Arc::clone(&root), &run_id)?;
     let scoped = Arc::new(ScopedFilesystem::new(Arc::clone(&root), {
         let run_id = run_id.clone();
         move |scope| user_turn_mount_view(&run_id, scope)
@@ -1397,29 +1406,49 @@ async fn reserve_resources(
     governor: Arc<dyn ResourceGovernor>,
     scope: ResourceScope,
 ) -> Result<ResourceReservation, OperationFailure> {
-    governor
-        .reserve(scope, resource_ops::estimate())
-        .map_err(|error| resource_failure("resource_reserve", error))
+    run_resource_governor_blocking("resource_reserve", move || {
+        governor.reserve(scope, resource_ops::estimate())
+    })
+    .await
 }
 
 async fn reconcile_resources(
     governor: Arc<dyn ResourceGovernor>,
     reservation_id: ResourceReservationId,
 ) -> Result<(), OperationFailure> {
-    governor
-        .reconcile(reservation_id, resource_ops::usage())
-        .map(|_| ())
-        .map_err(|error| resource_failure("resource_reconcile", error))
+    run_resource_governor_blocking("resource_reconcile", move || {
+        governor.reconcile(reservation_id, resource_ops::usage())
+    })
+    .await
+    .map(|_| ())
 }
 
 async fn release_resources(
     governor: Arc<dyn ResourceGovernor>,
     reservation_id: ResourceReservationId,
 ) -> Result<(), OperationFailure> {
-    governor
-        .release(reservation_id)
+    run_resource_governor_blocking("resource_release", move || governor.release(reservation_id))
+        .await
         .map(|_| ())
-        .map_err(|error| resource_failure("resource_release", error))
+}
+
+async fn run_resource_governor_blocking<T>(
+    stage: &'static str,
+    call: impl FnOnce() -> Result<T, ResourceError> + Send + 'static,
+) -> Result<T, OperationFailure>
+where
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(call)
+        .await
+        .map_err(|error| {
+            OperationFailure::new(
+                "resource_governor_join",
+                stage,
+                format!("resource governor blocking task failed: {error}"),
+            )
+        })?
+        .map_err(|error| resource_failure(stage, error))
 }
 
 async fn synthetic_model_wait(args: &Args, worker_index: usize, operation_index: usize) {

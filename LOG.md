@@ -746,3 +746,43 @@ Budgets: 10 hours wall-clock / $0 spend
   behavior now hits the hosted-substrate timing target without increasing pool
   sizes or slowing libSQL, but the larger slash goal remains incomplete until
   launch-ref, WebUI/session, turn-path, and holdout acceptance are run cleanly.
+
+## Cycle 16 - Stress E2E Thread Transaction Pool Deadlock
+
+- Stress signal: Per user request, switched validation from the latency harness
+  to `tools/ironclaw_stress` E2E user-turn flows. A tiny libSQL
+  `mixed-user-session` smoke with `memory-persist-on-block` completed 10/10
+  operations in 148ms. The same Postgres smoke with pool size 2 wedged for more
+  than 75s.
+- Diagnosis: `pg_stat_activity` showed both Postgres pool connections idle in
+  transaction after a `root_filesystem_entries` `SELECT`, while Rust tasks were
+  waiting for more pool capacity. The thread service opens a filesystem
+  transaction in `try_write_new_message_transactionally`, then calls
+  `reserve_sequence`, which checks out a second connection. With concurrency 2
+  and pool size 2, both workers hold a transaction connection and wait forever
+  for the nested sequence checkout.
+- Hypothesis: Move sequence reservation into the active filesystem transaction
+  for backends that support it. This keeps message/idempotency/thread/index
+  writes atomic, preserves duplicate-idempotency behavior without burning
+  sequence numbers, and removes the nested Postgres pool checkout.
+- Expected failure mode: The transaction-local sequence operation must stay
+  path-local, monotonic, and rollback-safe. Backends that do not implement it
+  must continue to fall back to the existing non-transactional path or the
+  legacy thread-record CAS path.
+- Diagnostic: Add a transaction `reserve_sequence` primitive, implement it for
+  Postgres transactions and scoped transactions, use it in transactional thread
+  writes, then rerun the exact Postgres stress smoke that wedged.
+- Follow-up: The transaction-local sequence patch removed the idle-in-transaction
+  Postgres pool deadlock. A second mixed-user stress hang came from the stress
+  harness itself: synchronous resource-governor calls were made directly from
+  async user-turn tasks, while the Postgres governor bridge waited on async DB
+  work. The stress runner now offloads those calls with `spawn_blocking`, and
+  Postgres stress is wired to the existing row-based `PostgresResourceGovernor`
+  instead of the filesystem snapshot governor.
+- Result: `ironclaw_stress mixed-user-session` with
+  `memory-persist-on-block`, concurrency 2, pool size 2, model/tool latency 0
+  completed cleanly. 10-op smoke: Postgres 38.6ms p95 vs libSQL 34.9ms p95.
+  50-op E2E sample: Postgres 27.1ms p95 vs libSQL 51.4ms p95. Postgres top
+  local bottleneck is now the row resource governor
+  (`resource_governor` p95 17.5ms in the 50-op sample); libSQL remains dominated
+  by thread store writes (`thread_store_writes` p95 44.5ms).

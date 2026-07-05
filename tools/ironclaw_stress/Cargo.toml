@@ -13,7 +13,12 @@ publish = false
 [features]
 default = ["libsql", "postgres"]
 libsql = ["dep:libsql", "ironclaw_filesystem/libsql"]
-postgres = ["dep:deadpool-postgres", "dep:tokio-postgres", "ironclaw_filesystem/postgres"]
+postgres = [
+    "dep:deadpool-postgres",
+    "dep:tokio-postgres",
+    "ironclaw_filesystem/postgres",
+    "ironclaw_resources/postgres",
+]
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }

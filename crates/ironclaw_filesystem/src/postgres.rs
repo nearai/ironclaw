@@ -824,22 +824,7 @@ impl RootFilesystem for PostgresRootFilesystem {
 
     async fn reserve_sequence(&self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
         let client = self.client().await?;
-        let row = cached_query_one(
-            &client,
-            r#"
-                INSERT INTO root_filesystem_sequences (path, next_seq, updated_at)
-                VALUES ($1, 2, NOW())
-                ON CONFLICT (path) DO UPDATE SET
-                    next_seq = root_filesystem_sequences.next_seq + 1,
-                    updated_at = NOW()
-                RETURNING next_seq - 1 AS reserved
-                "#,
-            &[&path.as_str()],
-        )
-        .await
-        .map_err(|error| db_error(path.clone(), FilesystemOperation::ReserveSeq, error))?;
-        let reserved: i64 = row.get("reserved");
-        seq_no_from_i64(path, reserved, FilesystemOperation::ReserveSeq)
+        postgres_reserve_sequence_with_client(&client, path).await
     }
 
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
@@ -1126,6 +1111,11 @@ impl StorageTxn for PostgresStorageTxn {
         postgres_delete_with_client(self.client()?, path).await
     }
 
+    async fn reserve_sequence(&mut self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        self.check_path(path)?;
+        postgres_reserve_sequence_with_client(self.client()?, path).await
+    }
+
     async fn commit(mut self: Box<Self>) -> Result<(), FilesystemError> {
         let client = self.client.take().ok_or_else(|| FilesystemError::Backend {
             path: self.prefix.clone(),
@@ -1154,6 +1144,29 @@ impl StorageTxn for PostgresStorageTxn {
             self.active = false;
         }
     }
+}
+
+#[cfg(feature = "postgres")]
+async fn postgres_reserve_sequence_with_client(
+    client: &deadpool_postgres::Object,
+    path: &VirtualPath,
+) -> Result<SeqNo, FilesystemError> {
+    let row = cached_query_one(
+        client,
+        r#"
+            INSERT INTO root_filesystem_sequences (path, next_seq, updated_at)
+            VALUES ($1, 2, NOW())
+            ON CONFLICT (path) DO UPDATE SET
+                next_seq = root_filesystem_sequences.next_seq + 1,
+                updated_at = NOW()
+            RETURNING next_seq - 1 AS reserved
+            "#,
+        &[&path.as_str()],
+    )
+    .await
+    .map_err(|error| db_error(path.clone(), FilesystemOperation::ReserveSeq, error))?;
+    let reserved: i64 = row.get("reserved");
+    seq_no_from_i64(path, reserved, FilesystemOperation::ReserveSeq)
 }
 
 #[cfg(feature = "postgres")]

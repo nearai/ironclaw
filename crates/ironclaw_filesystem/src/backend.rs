@@ -18,7 +18,10 @@
 use async_trait::async_trait;
 use ironclaw_host_api::VirtualPath;
 
-use crate::{CasExpectation, Entry, FilesystemError, RecordVersion, SeqNo, VersionedEntry};
+use crate::{
+    CasExpectation, Entry, FilesystemError, FilesystemOperation, RecordVersion, SeqNo,
+    VersionedEntry,
+};
 
 /// Multi-key transactional handle returned by [`RootFilesystem::begin`].
 ///
@@ -39,6 +42,13 @@ pub trait StorageTxn: Send {
     async fn get(&mut self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError>;
 
     async fn delete(&mut self, path: &VirtualPath) -> Result<(), FilesystemError>;
+
+    async fn reserve_sequence(&mut self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        Err(FilesystemError::Unsupported {
+            path: path.clone(),
+            operation: FilesystemOperation::ReserveSeq,
+        })
+    }
 
     async fn commit(self: Box<Self>) -> Result<(), FilesystemError>;
 
