@@ -201,6 +201,21 @@ where
         self.runner_lease_store().overlay(snapshot, overlay).await
     }
 
+    async fn with_cached_snapshot<T, R>(&self, read: R) -> Result<T, TurnError>
+    where
+        R: FnOnce(&TurnPersistenceSnapshot) -> T,
+    {
+        let mut guard = self.snapshot_state.lock().await;
+        if guard.is_none() {
+            *guard = Some(self.load_snapshot_from_rows().await?);
+        }
+        let snapshot = &guard
+            .as_ref()
+            .expect("row snapshot cache is initialized above")
+            .snapshot;
+        Ok(read(snapshot))
+    }
+
     async fn clear_snapshot_cache(&self) {
         *self.snapshot_state.lock().await = None;
     }
@@ -988,9 +1003,7 @@ where
         &self,
         request: GetLoopCheckpointRequest,
     ) -> Result<Option<LoopCheckpointRecord>, TurnError> {
-        let (snapshot, _) = self.read_snapshot().await?;
-        self.build_in_memory_store(snapshot)?
-            .get_loop_checkpoint(request)
+        self.with_cached_snapshot(|snapshot| projection::loop_checkpoint(snapshot, &request))
             .await
     }
 }
@@ -1644,16 +1657,14 @@ fn add_run_idempotency_delta(
 }
 
 fn loop_checkpoint_targeted_delta(
-    snapshot: &TurnPersistenceSnapshot,
-    store: &InMemoryTurnStateStore,
+    _snapshot: &TurnPersistenceSnapshot,
+    _store: &InMemoryTurnStateStore,
     record: &LoopCheckpointRecord,
 ) -> Result<SnapshotDelta, TurnError> {
-    let mut delta = SnapshotDelta {
+    Ok(SnapshotDelta {
         loop_checkpoints_upsert: vec![record.clone()],
         ..SnapshotDelta::default()
-    };
-    add_event_delta(snapshot, store, &mut delta)?;
-    Ok(delta)
+    })
 }
 
 fn add_event_delta(

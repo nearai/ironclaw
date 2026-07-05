@@ -1,4 +1,7 @@
-use crate::{TurnPersistenceSnapshot, TurnRunId, TurnRunRecord, TurnScope};
+use crate::{
+    GetLoopCheckpointRequest, LoopCheckpointRecord, TurnPersistenceSnapshot, TurnRunId,
+    TurnRunRecord, TurnScope,
+};
 
 /// Project the children of a run directly from a snapshot without building
 /// an `InMemoryTurnStateStore`. Mirrors `InMemoryTurnStateStore::children_of`
@@ -43,5 +46,23 @@ pub(super) fn run_record(
         .runs
         .iter()
         .find(|record| record.run_id == run_id && record.scope == *scope)
+        .cloned()
+}
+
+/// Project a loop checkpoint directly from a snapshot without rebuilding an
+/// `InMemoryTurnStateStore`. Mirrors `InMemoryTurnStateStore::get_loop_checkpoint`.
+pub(super) fn loop_checkpoint(
+    snapshot: &TurnPersistenceSnapshot,
+    request: &GetLoopCheckpointRequest,
+) -> Option<LoopCheckpointRecord> {
+    snapshot
+        .loop_checkpoints
+        .iter()
+        .find(|record| {
+            record.scope == request.scope
+                && record.turn_id == request.turn_id
+                && record.run_id == request.run_id
+                && record.checkpoint_id == request.checkpoint_id
+        })
         .cloned()
 }

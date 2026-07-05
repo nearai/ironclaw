@@ -1518,3 +1518,60 @@ Budgets: 10 hours wall-clock / $0 spend
   `cargo check -p ironclaw_resources --features postgres`,
   `cargo test -p ironclaw_resources`, `cargo test -p ironclaw_resources
   --features postgres`, and `git diff --check` passed.
+
+## Cycle 29 - Turn Checkpoint Readback Size Dependence
+
+- Graph note: `codebase-memory-mcp` still fails with `Transport closed` for
+  both `index_status` and a fast `index_repository`; the local graph artifact
+  remains stale and empty, so this cycle uses crate guardrails plus targeted
+  source reads.
+- Baseline: `harness/latency/score.sh --dev` passed with 54 results, 36
+  comparisons, and zero failures. Dev `turn_lifecycle` remains the slowest
+  Postgres row-store workload even though it clears the libSQL baseline:
+  libSQL c4 p95 8.30s, Postgres pool-1 c4 p95 628ms, and Postgres pool-2
+  c4 p95 624ms.
+- Probe: `harness/latency/probe.sh` passed with 81 results, 54 comparisons,
+  and zero failures. The perturbed `turn_lifecycle` c8 row was stable on
+  Postgres with zero errors and matching state hash `3fa07e3dc3c7e320`, but
+  remained slow at p95 3.52s for pool-1 and 3.45s for pool-2. libSQL c8 hit
+  four `turn state filesystem CAS retries exhausted` errors and took p95
+  52.35s, which is useful baseline context but not a reason to stop optimizing
+  hosted Postgres.
+- Hypothesis: The row store no longer writes `/turns/state.json`, and the hot
+  lifecycle writes use targeted deltas, but `get_loop_checkpoint` still clones
+  the full row-store snapshot and rebuilds an `InMemoryTurnStateStore` on every
+  checkpoint readback. The lifecycle workload writes and reads up to 16 loop
+  checkpoints per sample for 2048-byte payloads, so this read path grows with
+  accumulated state and sits inside the same global row-store snapshot mutex.
+  `put_loop_checkpoint` also calls `add_event_delta` even though the in-memory
+  checkpoint write does not emit lifecycle events, causing repeated event scans
+  as state grows.
+- Expected failure mode: Direct checkpoint projection must exactly preserve
+  `LoopCheckpointStore::get_loop_checkpoint` scope/turn/run/checkpoint matching
+  semantics and must still observe freshly persisted targeted deltas before
+  returning. Removing the event scan from checkpoint writes is only valid if
+  checkpoint writes remain event-free; lifecycle event counts and state hashes
+  must stay identical in the score/probe.
+- Result: Row-store loop checkpoint readback now projects directly from the
+  cached row snapshot instead of cloning the full snapshot and rebuilding an
+  `InMemoryTurnStateStore` per read. Loop checkpoint targeted deltas now write
+  only the checkpoint row because the underlying in-memory checkpoint write is
+  event-free.
+- Dev score: `harness/latency/score.sh --dev` passed with 54 results, 36
+  comparisons, and zero failures. The scored `turn_lifecycle` state hash
+  stayed `7fc054292d2f85f0`; Postgres pool-2 c4 p95 was 628.7ms, effectively
+  stable against the 624.2ms baseline.
+- High-concurrency turn-state diagnostic: Postgres-only `turn_lifecycle` with
+  c32/c100, payload 2048, 64 samples, and pool size 2 completed with zero
+  errors and state hash `660086a8484d5400`. c32 p95 improved from 3.78s to
+  3.42s; c100 p95 improved from 14.72s to 13.23s. This confirms the checkpoint
+  readback path was contributing to state-size growth, but the remaining c100
+  latency still points at the global row-store/in-memory critical section.
+- Validation: `cargo fmt -p ironclaw_turns --check`, `cargo test -p
+  ironclaw_turns --test loop_checkpoint_store_contract
+  filesystem_turn_state_row_store_loop_checkpoint_roundtrip_and_snapshot`,
+  `cargo test -p ironclaw_turns --test filesystem_turn_state_contract
+  filesystem_turn_state_row_store_persists_rows_without_state_blob`, `cargo
+  test -p ironclaw_turns --test loop_checkpoint_store_contract`, `cargo check
+  -p ironclaw_turns`, and `git diff --check` passed. I removed only generated
+  incremental build caches to recover disk before rerunning the score.
