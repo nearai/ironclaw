@@ -146,8 +146,10 @@ pub(crate) struct Args {
     pub(crate) scenario: Scenario,
 
     /// Turn-state store backend for user-turn scenarios. `filesystem` = durable
-    /// per-user state.json (CAS, current production path); `memory` = one shared
-    /// in-process authority (runtime-wedge prototype). No effect on non-turn scenarios.
+    /// per-user state.json (CAS, current production path);
+    /// `filesystem-row` = durable typed append-log deltas with a hot
+    /// in-process row cache; `memory` = one shared in-process authority
+    /// (runtime-wedge prototype). No effect on non-turn scenarios.
     #[arg(long, value_enum, default_value_t = TurnStateBackend::Filesystem)]
     pub(crate) turn_state_backend: TurnStateBackend,
 
@@ -495,6 +497,9 @@ pub(crate) enum TurnStateBackend {
     /// read-modify-write). The current production path; livelocks under
     /// concurrent same-user writers.
     Filesystem,
+    /// Durable typed append-log deltas with one hot in-process store per
+    /// tenant/user. Candidate filesystem fix for the blob growth curve.
+    FilesystemRow,
     /// One shared in-process `InMemoryTurnStateStore` authority — coordination
     /// in memory, no per-step CAS. Prototype for the runtime-wedge fix.
     Memory,
@@ -510,6 +515,7 @@ impl TurnStateBackend {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Filesystem => "filesystem",
+            Self::FilesystemRow => "filesystem-row",
             Self::Memory => "memory",
             Self::MemoryPersistOnBlock => "memory-persist-on-block",
         }

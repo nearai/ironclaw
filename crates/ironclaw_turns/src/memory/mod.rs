@@ -430,6 +430,95 @@ impl InMemoryTurnStateStore {
         }
     }
 
+    pub(crate) fn events_after(&self, cursor: EventCursor) -> Vec<TurnLifecycleEvent> {
+        match self.inner.lock() {
+            Ok(inner) => inner
+                .events
+                .iter()
+                .filter(|event| event.cursor > cursor)
+                .cloned()
+                .collect(),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .events
+                .iter()
+                .filter(|event| event.cursor > cursor)
+                .cloned()
+                .collect(),
+        }
+    }
+
+    pub(crate) fn event_retention_floor(&self) -> EventCursor {
+        match self.inner.lock() {
+            Ok(inner) => inner.event_retention_floor,
+            Err(poisoned) => poisoned.into_inner().event_retention_floor,
+        }
+    }
+
+    pub(crate) fn turn_record(&self, turn_id: crate::TurnId) -> Option<TurnRecord> {
+        match self.inner.lock() {
+            Ok(inner) => inner.turns.get(&turn_id).cloned(),
+            Err(poisoned) => poisoned.into_inner().turns.get(&turn_id).cloned(),
+        }
+    }
+
+    pub(crate) fn run_record(&self, run_id: TurnRunId) -> Option<TurnRunRecord> {
+        match self.inner.lock() {
+            Ok(inner) => inner
+                .records
+                .get(&run_id)
+                .map(RunRecord::persistence_record),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .records
+                .get(&run_id)
+                .map(RunRecord::persistence_record),
+        }
+    }
+
+    pub(crate) fn active_lock_record(&self, scope: &TurnScope) -> Option<TurnActiveLockRecord> {
+        let key = TurnActiveLockKey::from(scope);
+        match self.inner.lock() {
+            Ok(inner) => inner.active_locks.get(&key).cloned(),
+            Err(poisoned) => poisoned.into_inner().active_locks.get(&key).cloned(),
+        }
+    }
+
+    pub(crate) fn admission_reservation(
+        &self,
+        run_id: TurnRunId,
+    ) -> Option<TurnAdmissionReservationRecord> {
+        match self.inner.lock() {
+            Ok(inner) => inner.admission_reservations.get(&run_id).cloned(),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .admission_reservations
+                .get(&run_id)
+                .cloned(),
+        }
+    }
+
+    pub(crate) fn idempotency_records_after(
+        &self,
+        created_at: crate::TurnTimestamp,
+    ) -> Vec<TurnIdempotencyRecord> {
+        match self.inner.lock() {
+            Ok(inner) => inner
+                .idempotency_records
+                .values()
+                .filter(|record| record.created_at >= created_at)
+                .cloned()
+                .collect(),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .idempotency_records
+                .values()
+                .filter(|record| record.created_at >= created_at)
+                .cloned()
+                .collect(),
+        }
+    }
+
     pub fn from_persistence_snapshot(
         snapshot: TurnPersistenceSnapshot,
         limits: InMemoryTurnStateStoreLimits,

@@ -1,8 +1,8 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     future::Future,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -29,11 +29,11 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, BlockedReason, DefaultTurnCoordinator, FilesystemTurnStateBlockPersistence,
-    FilesystemTurnStateStore, GateRef, IdempotencyKey, InMemoryTurnStateStore,
-    InMemoryTurnStateStoreLimits, LoopCheckpointStateRef, ReplyTargetBindingRef,
-    ResumeTurnPrecondition, ResumeTurnRequest, SourceBindingRef, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnCoordinator, TurnError, TurnErrorCategory,
-    TurnLeaseToken, TurnRunnerId, TurnStateStore,
+    FilesystemTurnStateRowStore, FilesystemTurnStateStore, GateRef, IdempotencyKey,
+    InMemoryTurnStateStore, InMemoryTurnStateStoreLimits, LoopCheckpointStateRef,
+    ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest, SourceBindingRef,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnCoordinator, TurnError,
+    TurnErrorCategory, TurnLeaseToken, TurnRunnerId, TurnStateStore,
     runner::{
         BlockRunRequest, ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, TurnRunTransitionPort,
     },
@@ -59,6 +59,7 @@ use crate::{
 /// workload submit/claim/complete against either without per-method dispatch.
 pub(crate) trait StressTurnStore: TurnStateStore + TurnRunTransitionPort {}
 impl<F: RootFilesystem + 'static> StressTurnStore for FilesystemTurnStateStore<F> {}
+impl<F: RootFilesystem + 'static> StressTurnStore for FilesystemTurnStateRowStore<F> {}
 impl StressTurnStore for InMemoryTurnStateStore {}
 
 pub(crate) struct UserTurnServices<F>
@@ -77,6 +78,10 @@ where
     /// `turn_state_backend == Memory`. Shared across all workers (one process)
     /// to faithfully model the production single-process design.
     memory_turn_store: Arc<InMemoryTurnStateStore>,
+    /// Shared row-store authorities keyed by tenant/user mount. This preserves
+    /// durable filesystem writes while avoiding a full row-set reload for every
+    /// measured operation in the same process.
+    row_turn_stores: Mutex<HashMap<String, Arc<dyn StressTurnStore>>>,
 }
 
 pub(crate) enum UserTurnWorkload {
@@ -1314,6 +1319,46 @@ where
             TurnStateBackend::Memory | TurnStateBackend::MemoryPersistOnBlock => {
                 Ok(Arc::clone(&self.memory_turn_store) as Arc<dyn StressTurnStore>)
             }
+            TurnStateBackend::FilesystemRow => {
+                let resource_scope = context.turn_scope.to_resource_scope();
+                let key = row_turn_store_key(&resource_scope);
+                if let Some(store) = self
+                    .row_turn_stores
+                    .lock()
+                    .map_err(|_| {
+                        OperationFailure::new(
+                            "turn_store_lock_poisoned",
+                            "turn_store",
+                            "row turn-store cache lock poisoned",
+                        )
+                    })?
+                    .get(&key)
+                    .cloned()
+                {
+                    return Ok(store);
+                }
+
+                let view = user_turn_mount_view(&self.run_id, &resource_scope)
+                    .map_err(|error| OperationFailure::invalid_request("turn_store", error))?;
+                let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+                    Arc::clone(&self.root),
+                    view,
+                ));
+                let store = Arc::new(
+                    FilesystemTurnStateRowStore::new(scoped).with_limits(self.turn_state_limits),
+                ) as Arc<dyn StressTurnStore>;
+                self.row_turn_stores
+                    .lock()
+                    .map_err(|_| {
+                        OperationFailure::new(
+                            "turn_store_lock_poisoned",
+                            "turn_store",
+                            "row turn-store cache lock poisoned",
+                        )
+                    })?
+                    .insert(key, Arc::clone(&store));
+                Ok(store)
+            }
             // Durable path: a per-context store whose `/turns/state.json`
             // resolves per (tenant, agent, project, user), so all of a user's
             // concurrent turns contend on one document via CAS.
@@ -1377,7 +1422,12 @@ where
                 store
             }
         }),
+        row_turn_stores: Mutex::new(HashMap::new()),
     })
+}
+
+fn row_turn_store_key(scope: &ResourceScope) -> String {
+    format!("{}:{}", scope.tenant_id.as_str(), scope.user_id.as_str())
 }
 
 fn user_turn_mount_view(run_id: &str, scope: &ResourceScope) -> Result<MountView, HostApiError> {

@@ -17,19 +17,20 @@ use ironclaw_filesystem::{
     BackendCapabilities, BackendId, BackendKind, CasExpectation, CompositeRootFilesystem,
     ContentKind, DirEntry, Entry, FileStat, FilesystemError, FilesystemOperation, InMemoryBackend,
     IndexPolicy, LocalFilesystem, MountDescriptor, RecordVersion, RootFilesystem, ScopedFilesystem,
-    StorageClass, VersionedEntry,
+    SeqNo, StorageClass, VersionedEntry,
 };
 use ironclaw_host_api::{
     AgentId, HostPath, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, ScopedPath,
     TenantId, ThreadId, UserId, VirtualPath,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, AllowAllTurnAdmissionPolicy, FilesystemTurnStateStore, GetRunStateRequest,
-    IdempotencyKey, InMemoryRunProfileResolver, ProductTurnContext, ReplyTargetBindingRef,
-    RunOriginAdapter, RunProfileRequest, SanitizedCancelReason, SourceBindingRef,
-    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnError,
-    TurnLeaseToken, TurnOriginKind, TurnOwner, TurnPersistenceSnapshot, TurnRunId, TurnRunnerId,
-    TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
+    AcceptedMessageRef, AllowAllTurnAdmissionPolicy, FilesystemTurnStateRowStore,
+    FilesystemTurnStateStore, GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver,
+    ProductTurnContext, ReplyTargetBindingRef, RunOriginAdapter, RunProfileRequest,
+    SanitizedCancelReason, SourceBindingRef, SubmitChildRunRequest, SubmitTurnRequest,
+    SubmitTurnResponse, TurnActor, TurnError, TurnLeaseToken, TurnOriginKind, TurnOwner,
+    TurnPersistenceSnapshot, TurnRunId, TurnRunnerId, TurnScope, TurnSpawnTreeStateStore,
+    TurnStateStore, TurnStatus,
     runner::{
         ClaimRunRequest, CompleteRunRequest, HeartbeatRequest, RecoverExpiredLeasesRequest,
         TurnRunTransitionPort,
@@ -173,6 +174,11 @@ fn runner_lease_virtual_path(run_id: TurnRunId) -> VirtualPath {
         "/engine/tenants/test-tenant/users/test-user/turns/runner-leases/{run_id}.json"
     ))
     .unwrap()
+}
+
+fn row_delta_log_virtual_path() -> VirtualPath {
+    VirtualPath::new("/engine/tenants/test-tenant/users/test-user/turns/rows/v1/deltas/log")
+        .unwrap()
 }
 
 async fn overwrite_snapshot_lease_expiry(
@@ -726,6 +732,137 @@ async fn filesystem_turn_state_store_does_not_write_unchanged_idle_runner_snapsh
     assert!(
         matches!(err, FilesystemError::NotFound { .. }),
         "idle no-op runner polling must not create or rewrite the snapshot: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_row_store_persists_rows_without_state_blob() {
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let resolver = InMemoryRunProfileResolver::default();
+
+    let request = submit_request_for(turn_scope("thread-fs-row-persist"), "idem-fs-row-persist");
+    let response = store
+        .submit_turn(request.clone(), &AllowAllTurnAdmissionPolicy, &resolver)
+        .await
+        .unwrap();
+    let run_id = accepted_run_id(&response);
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .complete_run(CompleteRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        backend
+            .get(&snapshot_virtual_path())
+            .await
+            .unwrap()
+            .is_none(),
+        "row store must not write the blob-shaped state.json snapshot"
+    );
+    assert!(
+        !backend
+            .tail(&row_delta_log_virtual_path(), SeqNo::ZERO)
+            .await
+            .unwrap()
+            .is_empty(),
+        "row store should persist typed transition deltas in the append log"
+    );
+
+    let reopened = FilesystemTurnStateRowStore::new(scoped);
+    let state = reopened
+        .get_run_state(GetRunStateRequest {
+            scope: request.scope,
+            run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(state.status, TurnStatus::Completed);
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_row_store_heartbeat_does_not_rewrite_run_row() {
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = FilesystemTurnStateRowStore::new(scoped);
+    let resolver = InMemoryRunProfileResolver::default();
+
+    let request = submit_request_for(
+        turn_scope("thread-fs-row-heartbeat-memory"),
+        "idem-fs-row-heartbeat-memory",
+    );
+    let response = store
+        .submit_turn(request, &AllowAllTurnAdmissionPolicy, &resolver)
+        .await
+        .unwrap();
+    let run_id = accepted_run_id(&response);
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let head_after_claim = backend
+        .head_seq(&row_delta_log_virtual_path(), SeqNo::ZERO)
+        .await
+        .unwrap();
+    let first_snapshot = store.persistence_snapshot().await.unwrap();
+    let first_heartbeat_at = first_snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .and_then(|record| record.last_heartbeat_at)
+        .expect("claimed heartbeat timestamp");
+
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    store
+        .heartbeat(HeartbeatRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .unwrap();
+
+    let head_after_heartbeat = backend
+        .head_seq(&row_delta_log_virtual_path(), SeqNo::ZERO)
+        .await
+        .unwrap();
+    assert_eq!(
+        head_after_heartbeat, head_after_claim,
+        "heartbeat must refresh the runner lease without appending a durable delta"
+    );
+    let heartbeat_snapshot = store.persistence_snapshot().await.unwrap();
+    let heartbeat_at = heartbeat_snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .and_then(|record| record.last_heartbeat_at)
+        .expect("heartbeat timestamp");
+    assert!(
+        heartbeat_at > first_heartbeat_at,
+        "row-store read model should expose the refreshed memory lease timestamp"
     );
 }
 

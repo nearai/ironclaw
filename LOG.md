@@ -935,3 +935,63 @@ Budgets: 10 hours wall-clock / $0 spend
   The durable filesystem turn-state solution needs a typed row/append store
   where submit/claim/block/resume/complete mutate small records/log entries
   directly instead of rehydrating and rewriting a per-user snapshot.
+
+## Cycle 20 - Filesystem Turn-State Row Layout
+
+- Graph note: `codebase-memory-mcp` still fails closed with a closed transport
+  and the local graph artifact is stale/empty, so this cycle continues with
+  targeted source reads.
+- Harness signal: Cycle 19 proved the filesystem turn-state blob has a
+  size-dependent curve: full-flow `chat-turn` p95 climbed from 32.7ms to
+  114.4ms by operation-index quartile as `/turns/state.json` grew. Tiny
+  retention caps flatten the growth but still leave filesystem turn-store p95
+  at 16.2ms no-gate and 40.5ms in gated `mixed-user-session`.
+- Hypothesis: A filesystem turn-state store that persists typed rows under
+  `/turns/*` and writes only changed row files can preserve the existing
+  transition semantics while removing the full-snapshot write-size term. The
+  first slice should live beside the blob store and be selected explicitly by
+  stress so we can compare it against the locked E2E flows before changing the
+  hosted-single-tenant default.
+- Expected failure mode: A naive row store that reloads every row on every
+  transition could trade large blob writes for many small round trips. The
+  initial success criterion is therefore semantic parity plus a measurable
+  reduction in DB growth/write-size pressure; if per-transition latency remains
+  dominated by row rehydration, the next iteration needs a hot in-process row
+  cache or operation-specific row mutations.
+- Diagnostic: Add the row-store implementation with targeted parity tests,
+  wire an `ironclaw_stress` turn-state backend option for it, then rerun the
+  same Postgres E2E `chat-turn` and gated `mixed-user-session` loops used in
+  Cycle 19.
+- Result: Added `FilesystemTurnStateRowStore` and `--turn-state-backend
+  filesystem-row`. The store replays typed append-log deltas from
+  `/turns/rows/v1/deltas/log`, keeps a hot per-user in-process
+  `InMemoryTurnStateStore`, and persists targeted deltas for the hot
+  `submit_turn`, `claim_next_run`, and `complete_run` path. Contract tests
+  verify it does not write `/turns/state.json`, can reopen from the append log,
+  and heartbeats do not rewrite durable run rows.
+- Row-store iteration signal: The first row-file version reduced DB growth but
+  was too slow (`chat-turn` 1600/1600 operation p95 790ms, `turn_store` p95
+  346ms, +38.2MB). A generic append-log version with a hot store still paid
+  whole-snapshot clone/diff cost (`chat-turn` p95 706ms, `turn_store` p95
+  156.8ms). Targeted deltas removed most of that turn-state growth:
+  Postgres/pool-2 `chat-turn` 1600/1600 now reports operation p95 234.2ms,
+  `turn_store` p95 48.7ms, and +23.7MB DB growth. The same row backend on
+  gated `mixed-user-session` 160/160 reports operation p95 187.2ms,
+  `turn_store` p95 49.7ms, resource governor p95 40.3ms, and +4.3MB DB
+  growth.
+- Controls and remaining gap: The same Postgres full-flow memory turn-state
+  control reports operation p95 46.7ms and `turn_store` p95 69us, so row
+  turn-state is much better than blob CAS but still not at the target. At this
+  point the full `chat-turn` flow is dominated by thread/context writes
+  (`thread_store_writes` p95 163.2ms, `append_assistant` p95 91.5ms), but row
+  `submit_turn` still costs 23.0ms p95 and should be optimized further. A
+  libSQL `filesystem-row` concurrency run aborts with exit code 134; concurrency
+  1 succeeds, and libSQL memory succeeds, so the row append path also needs a
+  libSQL concurrency fix before it can be called portable.
+- Conclusion: The solution shape is validated as typed append/row state with
+  operation-specific deltas, not a blob snapshot and not a generic snapshot
+  diff. The current slice is a measurable Postgres improvement but not yet
+  sufficient for hosted-single-tenant parity; next work should make remaining
+  hot transitions row-native, reduce `submit_turn` to one durable batch/append,
+  compact or snapshot the append log for restart cost, and address the thread
+  store blob path that now dominates the full user flow.
