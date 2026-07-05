@@ -825,3 +825,59 @@ Budgets: 10 hours wall-clock / $0 spend
   down to 10.3ms. Remaining c16 pool-size-2 bottleneck is now split across
   row-governor latency and thread/context writes rather than a single
   serialized governor queue.
+
+## Cycle 18 - Holdout LibSQL Connection Setup Flake
+
+- Harness signal: `score.sh --dev` and `probe.sh` both passed with zero
+  failures. First `score.sh --holdout` exited 0 but hard-failed three rows:
+  `query_exact` c1 pool-size-1 on p95 ratio, plus `put_get` c16 pool-size 1/2
+  state-hash mismatches. Focused reruns for `query_exact` c1 and `put_get` c16
+  passed, showing the query tail was noise and the put/get mismatch was caused
+  by one libSQL baseline error. A second full holdout eliminated those rows but
+  hard-failed `control_plane_snapshot` c16 pool-size 1/2 because libSQL again
+  had one baseline error. In both holdouts the libSQL error was:
+  `filesystem backend infrastructure error during stat: SQLite failure:
+  bad parameter or other API misuse`.
+- Diagnosis: The libSQL backend maps per-connection PRAGMA setup failures to
+  `FilesystemOperation::Stat` inside `connect_with_retry`, but the retry loop
+  only retries `db.connect()` failures. Under high-concurrency holdout, the
+  connection opens successfully and then `execute_batch(LIBSQL_CONNECTION_PRAGMAS)`
+  occasionally returns the transient misuse error, which escapes immediately and
+  poisons the deterministic state hash.
+- Hypothesis: Treat PRAGMA setup failure as a connection-setup failure and
+  retry the whole open/setup cycle with the existing short retry budget. This
+  should remove the rare libSQL baseline error without changing successful
+  connection setup, workload semantics, durability, or Postgres behavior.
+- Expected failure mode: Retrying every PRAGMA error could hide a persistent
+  configuration bug. The retry budget is still bounded at three attempts and
+  will surface the final error with context, so persistent failures stay loud.
+- Change: `connect_with_retry` now treats a failed
+  `execute_batch(LIBSQL_CONNECTION_PRAGMAS)` as a connection setup failure,
+  waits with the existing bounded backoff, and retries the full open/setup
+  cycle. Persistent failures still surface after the three-attempt budget with
+  an explicit "create or initialize" infrastructure error.
+- Result: Focused post-change `control_plane_snapshot` c16 and `put_get` c16
+  rows passed for Postgres pool sizes 1 and 2 with zero errors and matching
+  state hashes. Full locked `score.sh --holdout` passed all 42 comparison rows:
+  no hard failures, no dev failures, no error mismatches, and no state-hash
+  mismatches.
+- Stress E2E: Per the full-flow validation requirement, reran
+  `ironclaw_stress mixed-user-session` with `memory-persist-on-block`, c16,
+  16 users, 4 threads per owner, 320 attempted operations, and model/tool
+  latency 0. Postgres pool-size 2 completed 320/320 at 76.7ms p95
+  (`thread_store_writes` 39.4ms p95, `resource_governor` 21.8ms p95);
+  pool-size 1 completed 320/320 at 94.7ms p95 (`thread_store_writes` 55.1ms
+  p95, `resource_governor` 31.2ms p95). The `postgres-pool-pressure` suite
+  also passed chat/context/tool E2E cases at c16 pool-size 2 with zero
+  failures: chat p95 31.5ms, context p95 51.6ms, tool p95 195.9ms.
+- Validation: `cargo fmt -p ironclaw_filesystem --check`,
+  `cargo check -p ironclaw_filesystem --features libsql,postgres`,
+  `cargo test -p ironclaw_filesystem --features libsql,postgres connect_`,
+  full `cargo test -p ironclaw_filesystem --features libsql,postgres`,
+  `cargo check -p ironclaw_stress`, `cargo test -p ironclaw_reborn_cli
+  --features webui-v2-beta,libsql,postgres`, and `cargo test -p
+  ironclaw_architecture reborn` passed. The full
+  `ironclaw_reborn_composition` suite first produced 987/1001 passes with
+  three env-determinism failures from the shell's `NEARAI_API_KEY` plus
+  timeout-only failures in parallel runtime tests; the failed groups were
+  rerun with `NEARAI_*` unset and `--test-threads=1`, and all reruns passed.
