@@ -1034,10 +1034,13 @@ impl RebornIntegrationHarness {
 
     /// Shared poll loop for `wait_for_status`/`wait_for_terminal`; `decide`
     /// picks the stop condition so the deadline/interval have one home.
+    /// `timeout_context` keeps each caller's timeout message distinct (e.g.
+    /// `wait_for_status`'s byte-identical `"timed out waiting for {expected:?}"`).
     async fn poll_until_terminal_condition(
         &self,
         run_id: TurnRunId,
         mut decide: impl FnMut(&TurnRunState) -> ControlFlow<HarnessResult<TurnRunState>>,
+        timeout_context: &str,
     ) -> HarnessResult<TurnRunState> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         loop {
@@ -1053,7 +1056,7 @@ impl RebornIntegrationHarness {
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(format!(
-                    "timed out waiting for terminal condition; last status={:?} failure={:?}",
+                    "timed out waiting for {timeout_context}; last status={:?} failure={:?}",
                     state.status, state.failure
                 )
                 .into());
@@ -1073,32 +1076,40 @@ impl RebornIntegrationHarness {
         run_id: TurnRunId,
         expected: TurnStatus,
     ) -> HarnessResult<TurnRunState> {
-        self.poll_until_terminal_condition(run_id, |state| {
-            if state.status == expected {
-                ControlFlow::Break(Ok(state.clone()))
-            } else if state.status.is_terminal() {
-                ControlFlow::Break(Err(format!(
-                    "expected {expected:?} but run reached terminal status {:?}; failure={:?}",
-                    state.status, state.failure
-                )
-                .into()))
-            } else {
-                ControlFlow::Continue(())
-            }
-        })
+        self.poll_until_terminal_condition(
+            run_id,
+            |state| {
+                if state.status == expected {
+                    ControlFlow::Break(Ok(state.clone()))
+                } else if state.status.is_terminal() {
+                    ControlFlow::Break(Err(format!(
+                        "expected {expected:?} but run reached terminal status {:?}; failure={:?}",
+                        state.status, state.failure
+                    )
+                    .into()))
+                } else {
+                    ControlFlow::Continue(())
+                }
+            },
+            &format!("{expected:?}"),
+        )
         .await
     }
 
     /// Poll until ANY terminal status (#5466): unlike `wait_for_status`, does
     /// NOT fail fast on an unexpected terminal — caller branches on the result.
     pub async fn wait_for_terminal(&self, run_id: TurnRunId) -> HarnessResult<TurnRunState> {
-        self.poll_until_terminal_condition(run_id, |state| {
-            if state.status.is_terminal() {
-                ControlFlow::Break(Ok(state.clone()))
-            } else {
-                ControlFlow::Continue(())
-            }
-        })
+        self.poll_until_terminal_condition(
+            run_id,
+            |state| {
+                if state.status.is_terminal() {
+                    ControlFlow::Break(Ok(state.clone()))
+                } else {
+                    ControlFlow::Continue(())
+                }
+            },
+            "terminal condition",
+        )
         .await
     }
 
