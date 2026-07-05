@@ -37,6 +37,7 @@ mod scenario_approval_request_persists_after_reopen;
 mod scenario_approve_always_persists_cross_thread;
 mod scenario_ask_each_time_resumes_once;
 mod scenario_concurrent_dual_gate_resume;
+mod scenario_discard_then_resubmit;
 mod scenario_failure_category_demasked;
 mod scenario_gate_ref_edge_cases;
 mod scenario_gate_then_approve;
@@ -80,6 +81,13 @@ async fn approvals_group_e2e() {
     report.record(
         "approval_request_persists_after_reopen",
         scenario_approval_request_persists_after_reopen::run(&g).await,
+    );
+    // #5467 lane: same rationale as C-DURABLE above -- drives the store
+    // directly, independent of `StorageMode`, so no `StorageMode::LibSql`
+    // variant is needed.
+    report.record(
+        "discard_then_resubmit",
+        scenario_discard_then_resubmit::run(&g).await,
     );
     // Dependent: must run last (flips the (tenant, user) auto-approve toggle ON).
     scenario_approve_always_persists_cross_thread::run(&g)
