@@ -1,18 +1,8 @@
-//! W5-WEBUI-API-1: `ironclaw_webui_v2`'s router mounted over a REAL
-//! `ironclaw_product_workflow::RebornServices` facade, wired by hand from
-//! int-tier harness parts (thread service, turn coordinator, and per-scenario
-//! `with_*` collaborators) — not the `MinimalWebuiServices` fake
-//! `webui_v2_router_smoke.rs` uses. That file's fake rejects 24 of 25 methods
-//! and never exercises the real facade logic (thread-scope resolution,
-//! pagination, operator-config precedence); this suite exercises exactly
-//! that real logic, over the SAME router the smoke suite mounts.
-//!
-//! Each scenario builds its own `RebornServices` chain from harness parts
-//! (mirroring `crates/ironclaw_reborn_composition/src/webui.rs`'s
-//! `build_webui_services_with_connectable_channels` call sequence by hand,
-//! since the composition function itself takes a `&RebornRuntime` the
-//! int-tier harness never builds) and mounts it via
-//! `reborn_support::webui_mount::mount_webui_v2_router`.
+//! W5-WEBUI-API-1: `webui_v2` router mounted over a REAL `RebornServices`
+//! facade, hand-built from int-tier harness parts — not the
+//! `MinimalWebuiServices` fake in `webui_v2_router_smoke.rs` (rejects 24/25
+//! methods). Hand-built because `webui.rs`'s builder needs a `&RebornRuntime`
+//! the harness never constructs.
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
@@ -105,10 +95,9 @@ async fn thread_history_cold_get_and_libsql_reopen() {
     );
 }
 
-/// InMemory sibling of the LibSql reopen above, mirroring
-/// `assert_reply_persists_after_reopen`'s own two-branch convention: proves
-/// service re-instantiation over the same in-process handle (not on-disk
-/// durability — nothing is written to disk in `InMemory` mode).
+/// InMemory sibling of the LibSql reopen above: proves service
+/// re-instantiation over the same in-process handle, not on-disk durability
+/// (nothing is written to disk in `InMemory` mode).
 #[tokio::test]
 async fn thread_history_cold_get_after_in_memory_reopen() {
     let h = RebornIntegrationHarness::test_default()
@@ -145,10 +134,8 @@ async fn thread_history_cold_get_after_in_memory_reopen() {
     );
 }
 
-/// Test-local `RebornOperatorToolCatalog`: the trait is a single read-only
-/// method with no internal dependencies worth exercising through a
-/// production impl (unlike the automation facade's mapping/visibility
-/// logic), so a hand-rolled double is the correct choice here (no enabler).
+/// Hand-rolled double: single read-only method, no logic worth exercising
+/// via a production impl (no enabler needed).
 struct TestOperatorToolCatalog;
 
 impl RebornOperatorToolCatalog for TestOperatorToolCatalog {
@@ -165,18 +152,10 @@ impl RebornOperatorToolCatalog for TestOperatorToolCatalog {
 
 #[tokio::test]
 async fn settings_tool_permission_put_then_cold_read() {
-    // NOTE (plan deviation): the plan called for `builtin_tools()`, but that
-    // group's "core_builtin" profile builds its `HostRuntime` by hand
-    // (`core_builtin_tools_from_runtime`, `harness/profiles/core_builtin.rs`)
-    // rather than through `new_with_options`/`ToolsProfile::build()` — so it
-    // never captures `tool_permission_overrides`/`auto_approve_settings`/
-    // `persistent_approval_policies` (all `None` there, confirmed by running
-    // this test against it first: it failed fast on the `None` unwrap, not a
-    // false pass). `live_approvals()` flows through `ToolsProfile::build()`
-    // (`file_tools_requiring_approval_profile()` in `group_constructors.rs`)
-    // and captures all three unconditionally, matching every other
-    // `new_with_options`-built group. The capability domain is otherwise
-    // irrelevant here — this scenario never dispatches a tool call.
+    // `builtin_tools()`'s "core_builtin" profile builds its `HostRuntime` by
+    // hand and never captures tool_permission_overrides/auto_approve_settings/
+    // persistent_approval_policies (all `None` there). `live_approvals()`
+    // flows through `ToolsProfile::build()` and captures all three.
     let group = RebornIntegrationGroup::live_approvals()
         .await
         .expect("live-approvals group builds");
@@ -209,16 +188,10 @@ async fn settings_tool_permission_put_then_cold_read() {
         );
     let router = mount_webui_v2_router(Arc::new(services), caller.clone());
 
-    // `disabled` (not `always_allow`/`ask_each_time`): `builtin.http`'s
-    // `default_permission = Allow` means `effective_tool_permission`'s
-    // unset-override fallback always resolves to EITHER `always_allow` (global
-    // auto-approve on) OR `ask_each_time` (global auto-approve off,
-    // `live_approvals()`'s own precondition) — never `disabled`. Asserting
-    // either of those two after the PUT would pass even if the override store
-    // were never wired/persisted (confirmed empirically: both were tried and
-    // both false-passed against a fresh-override-store mutation). `disabled`
-    // is the one state that can only come from a real override record,
-    // making this assertion — and the mutation below — actually discriminate.
+    // `disabled` is the only override-derived state distinguishable from
+    // defaults: `builtin.http`'s default_permission=Allow means an unset
+    // override always resolves to always_allow/ask_each_time, so only
+    // `disabled` proves the override store round-trips.
     let (status, body) = post_json(
         router,
         "/api/webchat/v2/settings/tools/builtin.http",
@@ -228,10 +201,9 @@ async fn settings_tool_permission_put_then_cold_read() {
     assert_eq!(status, StatusCode::OK, "PUT response body: {body}");
     assert_eq!(body["entry"]["value"]["state"], "disabled");
 
-    // Cold read: a SECOND `RebornServices` instance over a fresh thread
-    // service, wired with the SAME `overrides`/`auto_approve`/
-    // `persistent_policies` `Arc`s — those stores are the durable state under
-    // test, not the thread history.
+    // Cold read: a SECOND `RebornServices` over a fresh thread service, same
+    // overrides/auto_approve/persistent_policies `Arc`s — those stores are
+    // the durable state under test, not the thread history.
     let fresh_thread_service = h
         .thread_harness
         .service_instance()
@@ -258,19 +230,11 @@ async fn settings_tool_permission_put_then_cold_read() {
     );
 }
 
-/// W5-WEBUI-API-1 scenario 2 (SSE activity stream + reconnect): drives the
-/// FACADE drain method directly (`RebornServicesApi::stream_events`), not
-/// the SSE handler — the handler is a polling wrapper over the same drain
-/// call (`handlers.rs::stream_events`/`build_sse_stream`), already
-/// investigated and closed by the W5-WEBUI-SPIKE. Proves the plain
-/// lifecycle-replay contract: a completed turn's lifecycle event is
-/// delivered once, and a reconnect with `after_cursor` set past it does not
-/// redeliver it.
-///
-/// Uses Enabler A's deliberately narrowed `build_webui_event_stream_for_test`
-/// (turn-lifecycle events only — see that function's doc comment for the
-/// documented divergence from production's fuller projection-assembly
-/// chain).
+/// W5-WEBUI-API-1 scenario 2: drives `RebornServicesApi::stream_events`
+/// directly (SSE handler is a polling wrapper over the same drain, per
+/// W5-WEBUI-SPIKE). Proves a lifecycle event delivers once and reconnect
+/// with `after_cursor` past it doesn't redeliver. Uses Enabler A's narrowed
+/// `build_webui_event_stream_for_test` (see its doc for the divergence).
 #[tokio::test]
 async fn sse_activity_stream_replay_and_reconnect() {
     let h = RebornIntegrationHarness::test_default()

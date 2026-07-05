@@ -1,11 +1,7 @@
-//! W5-WEBUI-API-1: `WEBUI_V2_PATTERN_LIST_AUTOMATIONS` cold LIST over a real
-//! `RebornAutomationProductFacade` wired from this group's shared, live
-//! trigger repository (Enabler B: `local_dev_shared_trigger_repository_for_test`
-//! and `local_dev_automation_product_facade_for_test`). Reuses the group's
-//! ONE shared trigger repository instead of standing up a second one — the
-//! facade's real visibility-filter/run-history-join logic
-//! (`RebornAutomationProductFacade::list_automations`) is what's under test,
-//! not a hand-rolled double.
+//! W5-WEBUI-API-1: cold LIST over a real `RebornAutomationProductFacade`
+//! wired from this group's shared, live trigger repository (Enabler B).
+//! Reuses the group's ONE repository so the facade's real visibility-filter/
+//! run-history-join logic is under test, not a hand-rolled double.
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
@@ -55,16 +51,10 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 
     let services = RebornServices::new(h.thread_harness.service.clone(), h.coordinator.clone())
         .with_automation_product_facade(facade);
-    // NOTE: unlike `live_approvals()`, the `triggers()` group's capability
-    // harness keeps its own fixed constructor user
-    // (`trigger_management_tools_profile`'s `"reborn-e2e-trigger-management-user"`)
-    // rather than aligning to the thread's canonical binding subject — so
-    // `trigger_create` records `creator_user_id` under the capability
-    // harness's `user_id`, not `h.binding.subject_user_id`. The WebUI caller
-    // must match the trigger's actual creator for `list_scoped_triggers`'s
-    // caller-scoped filter to see it (confirmed empirically: using
-    // `h.binding.subject_user_id` produced an empty LIST — a real wiring
-    // mismatch, not a product bug).
+    // `triggers()` group's capability harness uses a fixed constructor user,
+    // not the thread's binding subject — trigger creator_user_id is that
+    // user, so the WebUI caller must match it for list_scoped_triggers's
+    // caller-scoped filter to see the trigger.
     let mut caller = webui_caller_for(&h.binding);
     caller.user_id = capability_harness.user_id().clone();
     let router = mount_webui_v2_router(Arc::new(services), caller);

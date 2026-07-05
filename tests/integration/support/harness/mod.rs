@@ -192,14 +192,10 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// both over); `None` for the lower-level constructors and the Echo backend.
     /// Read back via `attachment_test_support_for_test`.
     attachment_test_support: Option<ironclaw_reborn_composition::AttachmentTestSupport>,
-    /// W5-WEBUI-API-1 (attachments cold-GET scenario): the WebUI-facing
-    /// `InboundAttachmentReader` view over the same local-dev workspace
-    /// filesystem `attachment_test_support`'s read port reads (Enabler C,
-    /// `RebornServices::local_dev_inbound_attachment_reader_for_test`). A
-    /// separate field because it is a DIFFERENT trait than
-    /// `attachment_test_support.read_port` (`LoopAttachmentReadPort`, the
-    /// model-injection view) — the same concrete `ProjectScopedAttachmentReader`
-    /// implements both. `Some` only for `new_with_options`-built harnesses.
+    /// WebUI-facing `InboundAttachmentReader` view (Enabler C) — a different
+    /// trait than `attachment_test_support`'s `LoopAttachmentReadPort`, though
+    /// the same concrete reader implements both. `Some` only for
+    /// `new_with_options`-built harnesses.
     inbound_attachment_reader: Option<Arc<dyn ironclaw_product_workflow::InboundAttachmentReader>>,
     /// Backing handles for the synthetic `outbound_delivery_*` capabilities
     /// (C-SYNTH outbound seam). `Some` only for `outbound_target_tools()`;
@@ -234,21 +230,15 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// via `set_ask_each_time_override_for_test`, independent of the
     /// `outbound_target_tools()`-only `OutboundTargetToolsParts` copy.
     tool_permission_overrides: Option<Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore>>,
-    /// W5-WEBUI-API-1 (settings PUT/cold-read scenario): local-dev persistent
-    /// approval-policy store, captured unconditionally like
-    /// `tool_permission_overrides`/`auto_approve_settings` above (not just
-    /// for `outbound_target_tools()`'s narrower `OutboundTargetToolsParts`
-    /// copy). `Some` only for `new_with_options`-built harnesses.
+    /// Local-dev persistent approval-policy store, captured unconditionally
+    /// like `tool_permission_overrides`/`auto_approve_settings` above. `Some`
+    /// only for `new_with_options`-built harnesses.
     persistent_approval_policies:
         Option<Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore>>,
-    /// W5-WEBUI-API-1 Enabler B.3: the SAME LIVE, shared, in-process trigger
-    /// repository this harness's `trigger_create`/`trigger_list` capability
-    /// dispatch already uses. `Some` only for `new_with_options`-built
-    /// harnesses (which flow through `RebornServices`); `None` for the
-    /// lower-level constructors and the Echo backend. Read back via
-    /// `trigger_repository_for_test`, for wiring
-    /// `RebornAutomationProductFacade` over the exact repository a prior turn
-    /// created a trigger through (the automations cold-LIST scenario).
+    /// SAME live trigger repository this harness's capability dispatch uses
+    /// (Enabler B.3). `Some` only for `new_with_options`-built harnesses.
+    /// Read via `trigger_repository_for_test` to wire
+    /// `RebornAutomationProductFacade` over the same repo a prior turn used.
     trigger_repository: Option<Arc<dyn ironclaw_triggers::TriggerRepository>>,
 }
 

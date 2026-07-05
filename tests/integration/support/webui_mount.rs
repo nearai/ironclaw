@@ -1,12 +1,7 @@
-//! Shared axum mounting + request helpers for exercising the real
-//! `ironclaw_webui_v2::webui_v2_router` over a real
-//! `ironclaw_product_workflow::RebornServices` facade (W5-WEBUI-API-1).
-//!
-//! Mirrors `webui_v2_router_smoke.rs::smoke_router`'s shape — real router,
-//! auth bypassed by injecting the `WebUiAuthenticatedCaller` `Extension`
-//! directly (production composition's bearer middleware constructs it) — as
-//! a `pub(crate)` support helper so all scenarios in this lane share it
-//! instead of repeating the axum plumbing.
+//! Shared axum mounting + request helpers for the real `webui_v2_router`
+//! over a real `RebornServices` facade (W5-WEBUI-API-1). Mirrors
+//! `webui_v2_router_smoke.rs::smoke_router`'s shape; auth bypassed by
+//! injecting `WebUiAuthenticatedCaller` directly instead of the bearer middleware.
 
 use std::sync::Arc;
 
@@ -20,12 +15,10 @@ use ironclaw_webui_v2::{
 use serde_json::Value;
 use tower::ServiceExt;
 
-/// Build the `WebUiAuthenticatedCaller` that resolves to the SAME
-/// `TurnScope`/`ThreadScope` owner a harness turn actually ran under.
-/// `ResolvedBinding.subject_user_id` is the execution-scope user
-/// (`thread_scope_from_binding` stores thread history under it); this
-/// Direct-chat harness always sets it, but falls back to `actor_user_id` for
-/// parity with legacy bindings that never set an explicit subject.
+/// Build the `WebUiAuthenticatedCaller` resolving to the SAME
+/// `TurnScope`/`ThreadScope` owner a harness turn ran under.
+/// `subject_user_id` is the execution-scope user; falls back to
+/// `actor_user_id` for legacy bindings without one.
 pub(crate) fn webui_caller_for(binding: &ResolvedBinding) -> WebUiAuthenticatedCaller {
     let user_id = binding
         .subject_user_id

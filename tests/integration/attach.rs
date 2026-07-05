@@ -233,14 +233,10 @@ async fn multiple_attachments_in_one_turn_all_reach_the_model() {
         .expect("second attachment rendered at index 2");
 }
 
-/// W5-WEBUI-API-1: a landed attachment's bytes are served back through the
-/// real `ironclaw_webui_v2::webui_v2_router`'s
-/// `WEBUI_V2_PATTERN_GET_ATTACHMENT` route, over a `RebornServices` wired
-/// with the production `InboundAttachmentReader` view (Enabler C,
-/// `local_dev_inbound_attachment_reader_for_test`) — not just the
-/// model-injection `LoopAttachmentReadPort` path the tests above cover. Reads
-/// the landed `(message_id, attachment_id)` back from persisted thread
-/// history rather than guessing IDs, matching production's own resolution.
+/// W5-WEBUI-API-1: attachment bytes served via the real `webui_v2_router`
+/// GET-attachment route, over `RebornServices` wired with the production
+/// `InboundAttachmentReader` (Enabler C) — not the model-injection
+/// `LoopAttachmentReadPort` path above.
 #[tokio::test]
 async fn landed_attachment_reaches_webui_get_attachment_after_refresh() {
     let group = RebornIntegrationGroup::attachment_tools()

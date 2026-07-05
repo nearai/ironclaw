@@ -667,19 +667,10 @@ impl RebornServices {
         Some(policies)
     }
 
-    /// Test-support access to the SAME LIVE, shared, in-process trigger
-    /// repository this runtime's `trigger_create`/`trigger_list` capability
-    /// dispatch already uses (`RebornLocalRuntimeServices.trigger_repository`)
-    /// — not a fresh reopen. Do not confuse with
-    /// [`open_local_dev_trigger_repository_for_test`], which opens an
-    /// INDEPENDENT, freshly-reopened repository from an on-disk root for
-    /// persistence/reopen tests (`scenario_trigger_persists_after_reopen.rs`)
-    /// — opposite semantics, deliberately different, near-identical name; the
-    /// "shared" in this method's name is load-bearing. W5-WEBUI-API-1 Enabler
-    /// B.1: backs `RebornAutomationProductFacade`'s cold-LIST scenario, which
-    /// must see the SAME trigger a prior turn created through the capability
-    /// path, not an empty fresh repository. Returns `None` for
-    /// production-profile compositions without a local-dev runtime.
+    /// SAME live trigger repository the capability dispatch uses — not a
+    /// fresh reopen. Contrast [`open_local_dev_trigger_repository_for_test`]
+    /// (independent reopened repo, for persistence/reopen tests). Backs the
+    /// cold-LIST scenario (W5-WEBUI-API-1 Enabler B.1). `None` w/o local-dev runtime.
     #[cfg(feature = "test-support")]
     pub fn local_dev_shared_trigger_repository_for_test(
         &self,
@@ -688,20 +679,9 @@ impl RebornServices {
         Some(Arc::clone(&local_runtime.trigger_repository))
     }
 
-    /// Test-support access to the WebUI-facing `InboundAttachmentReader` view
-    /// over this composition's local-dev workspace filesystem (W5-WEBUI-API-1
-    /// Enabler C). `AttachmentTestSupport.read_port` (above) is typed
-    /// `Arc<dyn LoopAttachmentReadPort>` — the model-injection trait; the
-    /// webui-facing `RebornServices::with_inbound_attachment_reader` needs the
-    /// DIFFERENT `Arc<dyn InboundAttachmentReader>` trait the SAME concrete
-    /// `ProjectScopedAttachmentReader` also implements in production
-    /// (`webui.rs`, `build_webui_services_with_connectable_channels`). Built
-    /// over `local_runtime.workspace_filesystem`, exactly like
-    /// `local_dev_attachment_test_support_for_test`'s read port above — reads
-    /// only need read access, so the read-only handle is sufficient even
-    /// though production's webui.rs wiring happens to use the read-write view.
-    /// Returns `None` for production-profile compositions without a
-    /// local-dev runtime.
+    /// WebUI-facing `InboundAttachmentReader` view over the local-dev
+    /// workspace filesystem, mirroring production's `webui.rs`
+    /// (`ProjectScopedAttachmentReader`). `None` w/o a local-dev runtime.
     #[cfg(feature = "test-support")]
     pub fn local_dev_inbound_attachment_reader_for_test(
         &self,
