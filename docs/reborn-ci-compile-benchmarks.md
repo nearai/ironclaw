@@ -49,6 +49,10 @@ What is not worth pursuing further in this PR:
 - Running root partitions through `cargo nextest run`. The run passed, but
   wall clock regressed from `9m55s` to `10m21s` and root max regressed from
   `547s` to `579s`.
+- Applying default Cargo test target selection only to buckets that improved in
+  the earlier all-bucket target-narrowing run. It shortened `adapters-misc`,
+  but `host-runtime` regressed and workflow wall clock moved from `10m27s` to
+  `10m39s`.
 - Bucket skipping as an immediate optimization. The dry-run saved only `13%`
   of crate-bucket executions across recent Reborn-scoped PRs, with the median
   PR still at all `12` buckets.
@@ -126,6 +130,7 @@ improving measured wall clock.
 | H21 | Reduce root-test partitions from 4 to 2 after H19 batching. | Compile the root graph in fewer jobs and reduce runner/cache pressure. | Tested | Rejected and reverted: workflow wall clock regressed from retained-state `10m36s` to `11m14s`; root max regressed from `522s` to `633s`. |
 | H22 | Split libSQL-heavy migration/trigger crates out of `adapters-misc`. | Let lightweight adapters finish separately from migration/trigger storage work. | Tested | Rejected and reverted: `adapters-misc` improved `543s -> 324s`, but the new `migration-triggers` bucket took `573s` and wall clock regressed `9m55s -> 10m35s`. |
 | H23 | Run root partitions with `cargo nextest run --profile ci` instead of `cargo test`. | Keep one compile per partition but improve test execution scheduling and reporting. | Tested | Rejected and reverted: the run passed, but wall clock regressed `9m55s -> 10m21s`; root max regressed `547s -> 579s`. |
+| H24 | Use default Cargo test target selection only for buckets that improved in H1. | Keep `--all-targets` where H1 regressed, while reducing compile/link work in `adapters-misc`, `product-workflow`, `webui-ingress`, `reborn-core`, `wasm-sandbox`, and `host-runtime`. | Tested | Rejected and reverted: `adapters-misc` improved `578s -> 498s`, but `host-runtime` regressed `519s -> 587s` and wall clock regressed `10m27s -> 10m39s`. |
 
 ## H1: Narrow Crate Bucket Targets
 
@@ -1473,3 +1478,52 @@ Decision:
 - Nextest did not improve the root critical path enough to offset its install
   and scheduling overhead. The root jobs remained compile dominated, and the
   workflow wall clock regressed.
+
+## H24: Target Default Cargo Test Targets by Bucket
+
+Advice under test:
+
+- H1 narrowed every crate bucket from `cargo test --all-targets` to Cargo's
+  default target set. That global change regressed wall clock, but several
+  buckets improved. H24 tested a narrower version: keep `--all-targets` for
+  buckets that regressed in H1, and use default target selection only for the
+  buckets that looked faster in H1.
+
+Change under test:
+
+- Default test target selection for:
+  `host-runtime`, `reborn-core`, `product-workflow`, `webui-ingress`,
+  `wasm-sandbox`, and `adapters-misc`.
+- Continued `--all-targets` for:
+  `composition-core`, `agent-runtime`, `llm-mcp`, `events-conversations`,
+  `auth-security`, and `memory-skills`.
+- No package list, feature flag, cache key, or root/coverage job change.
+
+Benchmark result:
+
+- Retained state:
+  [`28739214358`](https://github.com/nearai/ironclaw/actions/runs/28739214358),
+  success, wall clock `10m27s`.
+- H24 run:
+  [`28739510110`](https://github.com/nearai/ironclaw/actions/runs/28739510110),
+  success, wall clock `10m39s`.
+
+| Metric | Retained state | H24 targeted targets | Delta |
+| --- | ---: | ---: | ---: |
+| Workflow wall clock | `627s` | `639s` | `+12s` |
+| `adapters-misc` | `578s` | `498s` | `-80s` |
+| `host-runtime` | `519s` | `587s` | `+68s` |
+| Root max | `581s` | `578s` | `-3s` |
+| `reborn-core` | `478s` | `462s` | `-16s` |
+| `webui-ingress` | `335s` | `377s` | `+42s` |
+| `product-workflow` | `327s` | `335s` | `+8s` |
+| `wasm-sandbox` | `272s` | `330s` | `+58s` |
+| `composition-core` | `444s` | `392s` | `-52s` |
+
+Decision:
+
+- Reject and revert H24.
+- The targeted change did reduce `adapters-misc`, but it made `host-runtime`
+  the long pole and did not improve workflow wall clock. The mixed result also
+  suggests the earlier H1 bucket improvements were not stable enough to justify
+  changing test target coverage.
