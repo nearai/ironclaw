@@ -37,7 +37,7 @@ mod support;
 use std::time::Duration;
 
 use ironclaw_reborn_traces::contribution::{
-    StandingTraceContributionPolicy, queued_trace_envelope_paths_for_scope,
+    StandingTraceContributionPolicy, queued_trace_envelope_paths_for_scope, trace_scope_key,
     write_trace_policy_for_scope,
 };
 use reborn_support::group::RebornIntegrationGroup;
@@ -45,6 +45,10 @@ use reborn_support::reply::RebornScriptedReply;
 use tempfile::TempDir;
 
 const ONBOARD_CAPABILITY_ID: &str = "builtin.trace_commons.onboard";
+
+/// Distinct actor for the inert (never-enrolled) consent-gate control thread —
+/// see the scope-isolation note on `completed_turn_queues_trace_contribution_for_enrolled_scope`.
+const CONSENT_CONTROL_ACTOR_ID: &str = "host-user-trace-consent-control";
 
 static BASE_DIR: std::sync::OnceLock<TempDir> = std::sync::OnceLock::new();
 
@@ -54,8 +58,13 @@ static BASE_DIR: std::sync::OnceLock<TempDir> = std::sync::OnceLock::new();
 fn setup_base_dir() -> &'static TempDir {
     BASE_DIR.get_or_init(|| {
         let dir = tempfile::tempdir().expect("tempdir for IRONCLAW_BASE_DIR");
-        // SAFETY: executed exactly once inside `OnceLock::get_or_init`, before
-        // any base-dir read — no concurrent reader during this write.
+        // Serialize against every other env-mutating test in this binary (same
+        // guard `apply_hermetic_env` takes) before touching the process env.
+        let _env_guard = ironclaw_common::env_helpers::lock_env();
+        // SAFETY: the `lock_env()` guard above serializes against all other
+        // env-mutating tests in this binary; `OnceLock::get_or_init` additionally
+        // guarantees this closure body runs exactly once, before any base-dir
+        // read (this fn is called as the first action of every test here).
         unsafe {
             std::env::set_var("IRONCLAW_BASE_DIR", dir.path());
         }
@@ -113,8 +122,22 @@ async fn completed_turn_queues_trace_contribution_for_enrolled_scope() {
     // consent_required without enrolling), and doubles as the
     // inert-until-enrolled control: the sink runs (policy read per turn) but
     // must queue nothing.
+    //
+    // Scope isolation (regression guard for a prior race): this thread runs
+    // under a DISTINCT actor (`CONSENT_CONTROL_ACTOR_ID`), so its capture
+    // scope (`control_scope` below) is entirely disjoint from `scope` — the
+    // canonical scope the SECOND thread enrolls and captures under. The
+    // sink's per-event capture task is detached (`tokio::spawn`), so without
+    // this isolation a slow scheduler could delay the first turn's capture
+    // task until AFTER `write_trace_policy_for_scope(&scope, ...)` below
+    // enrolls it, making the task observe the now-enrolled policy and queue
+    // an envelope into `scope` — inflating the final count to 2. With a
+    // disjoint scope, the control's own scope is NEVER enrolled by this test,
+    // so its capture stays inert regardless of task-scheduling timing; no
+    // sleep is required to make this deterministic.
     let first = group
         .thread("conv-trace-capture-consent")
+        .with_actor_id(CONSENT_CONTROL_ACTOR_ID)
         .script([
             RebornScriptedReply::tool_call(
                 ONBOARD_CAPABILITY_ID,
@@ -128,6 +151,20 @@ async fn completed_turn_queues_trace_contribution_for_enrolled_scope() {
         .build()
         .await
         .expect("first thread builds");
+    let control_scope = trace_scope_key(
+        first.binding.tenant_id.as_str(),
+        first
+            .binding
+            .subject_user_id
+            .as_ref()
+            .expect("resolved binding has a subject user id")
+            .as_str(),
+    );
+    assert_ne!(
+        control_scope, scope,
+        "the control actor must resolve a DIFFERENT trace scope than the \
+         canonical enrolled scope, or scope isolation below proves nothing"
+    );
     first
         .submit_turn("contribute my traces?")
         .await
@@ -136,14 +173,6 @@ async fn completed_turn_queues_trace_contribution_for_enrolled_scope() {
         .assert_tool_invoked(ONBOARD_CAPABILITY_ID)
         .await
         .expect("onboard capability dispatched through the group runtime");
-    // Grace period for the (spawned) capture task: a regression that captures
-    // without enrollment would queue within this window.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(
-        queued_trace_envelope_paths_for_scope(Some(&scope)).expect("read queue"),
-        Vec::<std::path::PathBuf>::new(),
-        "capture must stay inert for a non-enrolled scope"
-    );
 
     // Enroll the scope: the same standing-policy state a completed onboard
     // handshake persists.
@@ -166,7 +195,15 @@ async fn completed_turn_queues_trace_contribution_for_enrolled_scope() {
     assert_eq!(
         queued.len(),
         1,
-        "exactly the enrolled turn's envelope is queued (a late capture from \
-         the pre-enrollment turn would make this 2): {queued:?}"
+        "exactly the enrolled turn's envelope is queued (a same-scope late \
+         capture from the pre-enrollment turn would make this 2): {queued:?}"
+    );
+    // The disjoint control scope must stay empty throughout — by now the test
+    // has already waited (up to 10s) for the enrolled envelope above, so any
+    // detached capture task the control turn spawned has long since run.
+    assert_eq!(
+        queued_trace_envelope_paths_for_scope(Some(&control_scope)).expect("read control queue"),
+        Vec::<std::path::PathBuf>::new(),
+        "the never-enrolled control scope must never accumulate a queued envelope"
     );
 }

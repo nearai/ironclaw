@@ -1,6 +1,6 @@
 //! Runtime-wiring setters for [`RebornIntegrationGroupBuilder`] — `storage`,
 //! `safety_context`, `with_turn_event_sink`, `with_trace_capture`,
-//! `with_tool_disclosure_bridged`, `budget_accounting`,
+//! `with_tool_disclosure_bridged`, `with_tool_disclosure_off`, `budget_accounting`,
 //! `communication_context_provider`, `hook_dispatcher_builder_factory`.
 //! Private child module of `group.rs` (owns the struct + `build_base`/
 //! `into_group`), so it reaches the builder's private fields at module-
@@ -74,6 +74,21 @@ impl RebornIntegrationGroupBuilder {
     /// (resolves via `from_env()`, matching today's behavior).
     pub fn with_tool_disclosure_bridged(mut self) -> Self {
         self.tool_disclosure = Some(ToolDisclosureMode::Bridged);
+        self
+    }
+
+    /// Force `ToolDisclosureMode::Off` into the group's ONE planned runtime
+    /// config, regardless of `REBORN_TOOL_DISCLOSURE`. Used by the disclosure
+    /// mode's negative-control test to pin Off-mode behavior explicitly:
+    /// leaving it on the `from_env()` default-resolution path would let an
+    /// ambient `REBORN_TOOL_DISCLOSURE=Bridged` (e.g. from a developer's
+    /// shell or a differently-configured CI runner) silently flip the control
+    /// into the very mode it's meant to disprove. `apply_hermetic_env()` also
+    /// scrubs the var for defense in depth, but this explicit opt-in is what
+    /// actually makes the control's assertion mode-specific rather than
+    /// env-dependent.
+    pub fn with_tool_disclosure_off(mut self) -> Self {
+        self.tool_disclosure = Some(ToolDisclosureMode::Off);
         self
     }
 

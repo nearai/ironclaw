@@ -100,9 +100,19 @@ async fn bridged_mode_defers_wide_catalog_to_bridge_meta_tools() {
 /// `.with_tool_disclosure_bridged()` surfaces the flat 48-tool list (today's
 /// default, `ToolDisclosureMode::Off`) — proves the bridged assertion above
 /// discriminates on the disclosure mode, not on the backend.
+///
+/// Pins Off-mode explicitly via `.with_tool_disclosure_off()` rather than
+/// leaving this on the `from_env()` default-resolution path: without an
+/// explicit pin, an ambient `REBORN_TOOL_DISCLOSURE=Bridged` in the process
+/// env would silently flip this control into Bridged mode too, and the
+/// assertions below would then be discriminating on nothing.
+/// `apply_hermetic_env()` also scrubs the var, but the explicit builder call
+/// is what makes this test's mode independent of the ambient env by
+/// construction, not just by today's harness hygiene.
 #[tokio::test]
 async fn default_mode_surfaces_the_flat_wide_tool_list() {
     let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_off()
         .with_github_issue_tools()
         .script([RebornScriptedReply::text("done")])
         .build()

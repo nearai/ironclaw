@@ -220,8 +220,12 @@ impl RebornIntegrationHarnessBuilder {
     /// Force `ToolDisclosureMode::Bridged` for this harness's underlying group
     /// (enabler (b), `REBORN_TOOL_DISCLOSURE=Bridged`), so the bridged decorator
     /// (`ToolDisclosureCapabilityDecorator`) replaces the flat per-capability
-    /// tool list with the 3 bridge meta tools in the `tools` argument shipped
-    /// to the model. Deferral is ALSO threshold-gated (`select_active_set`,
+    /// tool list with the bridge meta tools in the `tools` argument shipped
+    /// to the model. Only `tool_search` is ever ADVERTISED to the model;
+    /// `tool_describe`/`tool_call` are retained internally for describe-first
+    /// routing and never appear on the model-visible tool surface (see
+    /// `tool_disclosure.rs`'s `bridged_mode_defers_wide_catalog_to_bridge_meta_tools`).
+    /// Deferral is ALSO threshold-gated (`select_active_set`,
     /// `DisclosureCaps::default().max_tools = 32`): backends under the cap
     /// (e.g. `BuiltinHttpTools`, 13 tools) stay flat even in Bridged mode —
     /// pair with `.with_github_issue_tools()` (48 tools) to observe deferral.
@@ -231,6 +235,17 @@ impl RebornIntegrationHarnessBuilder {
     /// `ToolDisclosureMode::from_env`, `apply_hermetic_env`).
     pub fn with_tool_disclosure_bridged(mut self) -> Self {
         self.tool_disclosure = Some(ToolDisclosureMode::Bridged);
+        self
+    }
+
+    /// Force `ToolDisclosureMode::Off` for this harness's underlying group,
+    /// bypassing `REBORN_TOOL_DISCLOSURE`/`from_env()`. Use this to pin a
+    /// negative-control test's mode explicitly rather than relying on the
+    /// ambient env default — see
+    /// `RebornIntegrationGroupBuilder::with_tool_disclosure_off` for why the
+    /// env-resolution path alone is not control-safe.
+    pub fn with_tool_disclosure_off(mut self) -> Self {
+        self.tool_disclosure = Some(ToolDisclosureMode::Off);
         self
     }
 
@@ -392,8 +407,14 @@ impl RebornIntegrationHarnessBuilder {
         if self.turn_event_sink {
             group_builder = group_builder.with_turn_event_sink();
         }
-        if self.tool_disclosure == Some(ToolDisclosureMode::Bridged) {
-            group_builder = group_builder.with_tool_disclosure_bridged();
+        match self.tool_disclosure {
+            Some(ToolDisclosureMode::Bridged) => {
+                group_builder = group_builder.with_tool_disclosure_bridged();
+            }
+            Some(ToolDisclosureMode::Off) => {
+                group_builder = group_builder.with_tool_disclosure_off();
+            }
+            None => {}
         }
         if self.budget_accounting {
             group_builder = group_builder.budget_accounting();
@@ -1418,6 +1439,11 @@ pub(crate) fn apply_hermetic_env() {
             std::env::remove_var("LLM_RESPONSE_CACHE_ENABLED");
             std::env::remove_var("RESPONSE_CACHE_ENABLED");
             std::env::remove_var("NEARAI_SESSION_TOKEN");
+            // No integration test should inherit the ambient tool-disclosure
+            // knob: `ToolDisclosureMode::from_env()` resolution is opt-in per
+            // test via `.with_tool_disclosure_bridged()`/`.with_tool_disclosure_off()`,
+            // never ambient (see `tool_disclosure.rs`'s negative control).
+            std::env::remove_var(ironclaw_reborn::runtime::REBORN_TOOL_DISCLOSURE_ENV);
         }
     });
 }

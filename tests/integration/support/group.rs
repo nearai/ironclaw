@@ -656,14 +656,14 @@ impl RebornIntegrationGroupBuilder {
         // The PRODUCTION TraceCaptureTurnEventSink over the group's thread
         // service, seeded with the runtime owner's trace scope — the same
         // recipe `build_reborn_runtime` uses. Policy-gated per scope, so it
-        // is inert until the test enrolls the scope.
+        // is inert until the test enrolls the scope. The factory returns the
+        // scope it seeded the sink with directly — this is the ONE source of
+        // truth for that scope; do not recompute `trace_scope_key` here too
+        // (a second, independent computation could silently drift from what
+        // the sink actually observes if either recipe changes).
         let trace_capture = if self.trace_capture {
             let subject_user = base.canonical_subject_user()?;
-            let scope = ironclaw_reborn_traces::contribution::trace_scope_key(
-                base.canonical_binding.tenant_id.as_str(),
-                subject_user.as_str(),
-            );
-            let sink =
+            let (sink, scope) =
                 ironclaw_reborn_composition::test_support::trace_capture_turn_event_sink_for_test(
                     group_thread_harness.service.clone() as Arc<dyn SessionThreadService>,
                     base.canonical_binding.tenant_id.as_str(),
@@ -830,14 +830,24 @@ struct FanOutTurnEventSink(Vec<Arc<dyn TurnEventSink>>);
 
 #[async_trait::async_trait]
 impl TurnEventSink for FanOutTurnEventSink {
+    /// Publishes to every sink unconditionally — a failing sink must not
+    /// short-circuit the others (e.g. the in-memory recorder must still see
+    /// the event even if the trace-capture sink errors, and vice versa).
+    /// Returns the FIRST error only after every sink has been attempted.
     async fn publish(
         &self,
         event: ironclaw_turns::TurnLifecycleEvent,
     ) -> Result<(), ironclaw_turns::TurnError> {
+        let mut first_error = None;
         for sink in &self.0 {
-            sink.publish(event.clone()).await?;
+            if let Err(error) = sink.publish(event.clone()).await {
+                first_error.get_or_insert(error);
+            }
         }
-        Ok(())
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 }
 
