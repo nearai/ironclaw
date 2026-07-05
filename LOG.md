@@ -592,3 +592,60 @@ Budgets: 10 hours wall-clock / $0 spend
   still not acceptance: the libSQL filesystem/control-plane misuse remains
   unresolved under dev/holdout concurrency, and the goal still lacks
   launch-ref hosted-volume, WebUI/session, and turn-path acceptance.
+
+## Cycle 13 - Single-Query Postgres Stat
+
+- Graph: `codebase-memory-mcp` transport is still closed, so this cycle falls
+  back to local code reads after one probe.
+- Score (dev): Fresh Cycle 13 baseline `score.sh --dev` has zero error rows
+  and matching state hashes, but p95/p99 hard-fail outliers on Postgres pool 1
+  across tiny filesystem and trigger workloads (`put_get`, `query_exact`,
+  `append_tail`, `reserve_sequence`, `trigger_seed_list`). The absolute
+  failures are tail-only; p50 and throughput are generally faster than libSQL.
+- Probe gap: Fresh `probe.sh` is clean: zero failing comparisons and zero
+  error rows. In probe, Postgres pool 1 filesystem p95/p99 rows stay low
+  (usually ~0.5-2.9ms for the storage hot paths), which suggests the dev score
+  outliers are not a stable semantic or schema failure.
+- Hypothesis: `PostgresRootFilesystem::stat` still performs an exact-row
+  lookup and then a descendant lookup on misses/implicit directories. The
+  control-plane and upcoming WebUI/session paths rely on metadata probes; on
+  pool size 1 those extra round trips increase tail exposure and connection
+  hold time even though the current storage-only probe does not fail. A single
+  query that returns exact file/dir metadata or an implicit-directory marker
+  should preserve semantics while reducing one common metadata hot path.
+- Expected failure mode: The query must still prefer exact entries over
+  implicit descendants, preserve file length/updated_at handling, return
+  `NotFound` only when neither exact nor child rows exist, and avoid changing
+  libSQL baseline behavior.
+- Diagnostic: Change only Postgres `stat`, run filesystem tests with
+  `libsql,postgres`, then rerun focused control-plane/stat-adjacent latency
+  checks plus the required dev score/probe.
+- Change: `PostgresRootFilesystem::stat` now uses one cached query that
+  returns the exact entry when present, otherwise one implicit-directory
+  descendant marker. The query preserves exact entry precedence, file length,
+  directory length, `updated_at`, and `NotFound` behavior while removing the
+  second round trip on misses/implicit directories.
+- Result: `cargo fmt -p ironclaw_filesystem --check` passed.
+  `cargo test -p ironclaw_filesystem --features libsql,postgres` passed
+  (unit, catalog, DB root filesystem, filesystem contract, and doc tests).
+  Focused `control_plane_snapshot` with 10 warmups, 120 samples, and
+  concurrency 1/4 passed with zero errors and matching hashes; Postgres pool 1
+  measured p95 9.36ms at c1 and 36.22ms at c4, and pool 2 measured p95
+  9.52ms at c1 and 28.63ms at c4. Full post-change `score.sh --dev` had zero
+  errors and matching hashes, with one non-reproduced `append_tail` pool-2 c4
+  p95/p99 outlier. Post-change `probe.sh` had zero errors and matching hashes,
+  with one non-reproduced `put_get` pool-1 c1 p99 spike; a focused
+  `put_get` c1 rerun with 10 warmups and 120 samples passed all comparisons.
+  Full `cargo test` for `ironclaw_reborn_composition` and
+  `ironclaw_reborn_cli` could not complete because the local filesystem ran out
+  of disk during test linking/WebUI output generation. After removing generated
+  `target/debug` build artifacts, `cargo check -p ironclaw_reborn_composition
+  --features webui-v2-beta,libsql,postgres` and `cargo check -p
+  ironclaw_reborn_cli --features webui-v2-beta,libsql,postgres` both passed
+  with the pre-existing `OutboundDeliveryTargetEntry` unused-import warning.
+- Reflection: The stat metadata path is now one round trip on Postgres and the
+  focused control-plane path stays comfortably faster than libSQL. The broader
+  dev/probe evidence still shows intermittent tail spikes that do not
+  reproduce in focused reruns, and the full goal remains incomplete: launch-ref
+  hosted-volume, WebUI/session, turn-path, and holdout acceptance are still not
+  proven.

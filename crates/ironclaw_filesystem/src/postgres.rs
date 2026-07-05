@@ -658,27 +658,7 @@ impl RootFilesystem for PostgresRootFilesystem {
 
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         let client = self.client().await?;
-        if let Some((len, file_type, modified)) =
-            self.exact_entry_with_client(&client, path).await?
-        {
-            return Ok(FileStat {
-                path: path.clone(),
-                file_type,
-                len,
-                modified,
-                sensitive: false,
-            });
-        }
-        if self.has_child_entry_with_client(&client, path).await? {
-            return Ok(FileStat {
-                path: path.clone(),
-                file_type: FileType::Directory,
-                len: 0,
-                modified: None,
-                sensitive: false,
-            });
-        }
-        Err(not_found(path.clone(), FilesystemOperation::Stat))
+        postgres_stat_with_client(&client, path).await
     }
 
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
@@ -1508,6 +1488,74 @@ async fn postgres_get_with_client(
         entry,
         version: record_version_from_i64(path, version_raw)?,
     }))
+}
+
+#[cfg(feature = "postgres")]
+async fn postgres_stat_with_client(
+    client: &deadpool_postgres::Object,
+    path: &VirtualPath,
+) -> Result<FileStat, FilesystemError> {
+    let (prefix_lower, prefix_upper) = descendant_path_range(path);
+    let row = cached_query_opt(
+        client,
+        r#"
+            WITH exact AS (
+                SELECT OCTET_LENGTH(contents)::bigint AS len,
+                       is_dir,
+                       EXTRACT(EPOCH FROM updated_at)::bigint AS updated_at_epoch
+                FROM root_filesystem_entries
+                WHERE path = $1
+            ),
+            child AS (
+                SELECT 1
+                FROM root_filesystem_entries
+                WHERE path >= $2 AND path < $3
+                LIMIT 1
+            )
+            SELECT len, is_dir, updated_at_epoch, TRUE AS exact_match
+            FROM exact
+            UNION ALL
+            SELECT NULL::bigint AS len, TRUE AS is_dir, NULL::bigint AS updated_at_epoch,
+                   FALSE AS exact_match
+            FROM child
+            WHERE NOT EXISTS (SELECT 1 FROM exact)
+            LIMIT 1
+            "#,
+        &[&path.as_str(), &prefix_lower, &prefix_upper],
+    )
+    .await
+    .map_err(|error| db_error(path.clone(), FilesystemOperation::Stat, error))?;
+    let Some(row) = row else {
+        return Err(not_found(path.clone(), FilesystemOperation::Stat));
+    };
+    let exact_match: bool = row.get("exact_match");
+    if !exact_match {
+        return Ok(FileStat {
+            path: path.clone(),
+            file_type: FileType::Directory,
+            len: 0,
+            modified: None,
+            sensitive: false,
+        });
+    }
+    let len: Option<i64> = row.get("len");
+    let is_dir: bool = row.get("is_dir");
+    let updated_at_epoch: Option<i64> = row.get("updated_at_epoch");
+    Ok(FileStat {
+        path: path.clone(),
+        file_type: if is_dir {
+            FileType::Directory
+        } else {
+            FileType::File
+        },
+        len: if is_dir {
+            0
+        } else {
+            len.unwrap_or_default().max(0) as u64
+        },
+        modified: updated_at_epoch.and_then(system_time_from_unix_seconds),
+        sensitive: false,
+    })
 }
 
 #[cfg(feature = "postgres")]
