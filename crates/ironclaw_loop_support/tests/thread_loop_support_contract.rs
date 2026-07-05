@@ -20,7 +20,7 @@ use ironclaw_loop_support::{
     SkillBundleDescriptor, SkillBundleId, SkillBundleSource, SkillBundleSourceError, SkillFilePath,
     SkillSourceKind, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
     ThreadBackedLoopTranscriptPort, ThreadContextWindowCache, build_skill_run_snapshot,
-    identity_message_ref,
+    estimate_tokens_from_chars, identity_message_ref,
 };
 use ironclaw_skills::SkillTrust;
 use ironclaw_threads::{
@@ -628,6 +628,169 @@ async fn thread_context_port_builds_skill_instruction_snippets_from_skill_bundle
             .contains("RAW_INSTALLED_PROMPT_SENTINEL")
     );
     assert!(bundle_source.reads().is_empty());
+}
+
+#[tokio::test]
+async fn thread_context_port_instruction_budget_none_passes_all_snippets() {
+    let fixture = ThreadFixture::new().await;
+    let source = Arc::new(StaticSkillContextSource::new(vec![
+        HostSkillContextCandidate::loaded(
+            skill_md("alpha", "alpha description", "alpha prompt"),
+            Some(SkillTrust::Trusted),
+            Some(SkillVisibility::Visible),
+        ),
+        HostSkillContextCandidate::loaded(
+            skill_md("bravo", "bravo description", "bravo prompt"),
+            Some(SkillTrust::Trusted),
+            Some(SkillVisibility::Visible),
+        ),
+    ]));
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    )
+    .with_skill_context_source(source);
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: PromptMode::TextOnly,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        bundle
+            .instruction_snippets
+            .iter()
+            .map(|snippet| snippet.snippet_ref.as_str())
+            .collect::<Vec<_>>(),
+        vec!["skill:alpha", "skill:bravo"]
+    );
+}
+
+#[tokio::test]
+async fn thread_context_port_instruction_budget_keeps_whole_priority_prefix() {
+    let fixture = ThreadFixture::new().await;
+    let source = Arc::new(StaticSkillContextSource::new(vec![
+        HostSkillContextCandidate::loaded(
+            skill_md("alpha", "alpha description", "alpha prompt"),
+            Some(SkillTrust::Trusted),
+            Some(SkillVisibility::Visible),
+        ),
+        HostSkillContextCandidate::loaded(
+            skill_md("bravo", "bravo description", "bravo prompt"),
+            Some(SkillTrust::Trusted),
+            Some(SkillVisibility::Visible),
+        ),
+        HostSkillContextCandidate::loaded(
+            skill_md("charlie", "charlie description", "charlie prompt"),
+            Some(SkillTrust::Trusted),
+            Some(SkillVisibility::Visible),
+        ),
+    ]));
+    let unbudgeted = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    )
+    .with_skill_context_source(source.clone())
+    .load_loop_context(LoopContextRequest {
+        after: None,
+        limit: 16,
+        mode: PromptMode::TextOnly,
+    })
+    .await
+    .unwrap()
+    .instruction_snippets;
+    let budget_tokens = unbudgeted
+        .iter()
+        .take(2)
+        .map(|snippet| estimate_tokens_from_chars(&snippet.model_content).as_u64())
+        .fold(0_u64, u64::saturating_add);
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    )
+    .with_skill_context_source(source)
+    .with_instruction_budget(PromptContextTokenBudget::new(budget_tokens, 0, 0));
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: PromptMode::TextOnly,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(bundle.instruction_snippets.len(), 2);
+    assert_eq!(bundle.instruction_snippets[0], unbudgeted[0]);
+    assert_eq!(bundle.instruction_snippets[1], unbudgeted[1]);
+    assert!(
+        bundle
+            .instruction_snippets
+            .iter()
+            .all(|snippet| snippet.snippet_ref != "skill:charlie")
+    );
+}
+
+#[tokio::test]
+async fn thread_context_port_instruction_budget_exact_single_boundary_drops_next() {
+    let fixture = ThreadFixture::new().await;
+    let source = Arc::new(StaticSkillContextSource::new(vec![
+        HostSkillContextCandidate::loaded(
+            skill_md("alpha", "alpha description", "alpha prompt"),
+            Some(SkillTrust::Trusted),
+            Some(SkillVisibility::Visible),
+        ),
+        HostSkillContextCandidate::loaded(
+            skill_md("bravo", "bravo description", "bravo prompt"),
+            Some(SkillTrust::Trusted),
+            Some(SkillVisibility::Visible),
+        ),
+    ]));
+    let unbudgeted = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    )
+    .with_skill_context_source(source.clone())
+    .load_loop_context(LoopContextRequest {
+        after: None,
+        limit: 16,
+        mode: PromptMode::TextOnly,
+    })
+    .await
+    .unwrap()
+    .instruction_snippets;
+    let budget_tokens = estimate_tokens_from_chars(&unbudgeted[0].model_content).as_u64();
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    )
+    .with_skill_context_source(source)
+    .with_instruction_budget(PromptContextTokenBudget::new(budget_tokens, 0, 0));
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: PromptMode::TextOnly,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(bundle.instruction_snippets, vec![unbudgeted[0].clone()]);
 }
 
 #[tokio::test]

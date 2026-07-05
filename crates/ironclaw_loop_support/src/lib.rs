@@ -142,12 +142,13 @@ use ironclaw_turns::{
         CapabilityOutcome, CapabilitySurfaceVersion, FinalizeAssistantMessage,
         InstructionMaterializationStore, LoopCapabilityPort, LoopContextBundle,
         LoopContextCompactionKind, LoopContextCompactionMetadata, LoopContextMessage,
-        LoopContextPort, LoopContextRequest, LoopDriverNoteKind, LoopHostMilestoneEmitter,
-        LoopHostMilestoneSink, LoopInputCursor, LoopModelMessage, LoopModelPort, LoopModelRequest,
-        LoopModelResponse, LoopModelUsage, LoopPromptBundleAuthority, LoopRunContext,
-        LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput,
-        PromptMode, UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
-        sanitize_model_visible_text, sort_instruction_snippets_for_prompt,
+        LoopContextPort, LoopContextRequest, LoopContextSnippet, LoopDriverNoteKind,
+        LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputCursor, LoopModelMessage,
+        LoopModelPort, LoopModelRequest, LoopModelResponse, LoopModelUsage,
+        LoopPromptBundleAuthority, LoopRunContext, LoopRunInfoPort, LoopSafeSummary,
+        LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput, PromptMode, UpdateAssistantDraft,
+        VisibleCapabilityRequest, VisibleCapabilitySurface, sanitize_model_visible_text,
+        sort_instruction_snippets_for_prompt,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -206,6 +207,7 @@ where
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     identity_budget: IdentityBudget,
+    instruction_budget: Option<PromptContextTokenBudget>,
     prompt_context_budget: PromptContextTokenBudget,
     context_window_cache: Option<Arc<ThreadContextWindowCache>>,
     identity_candidates: Arc<IdentityCandidateCache>,
@@ -273,6 +275,7 @@ where
             skill_context_source: None,
             identity_context_source: None,
             identity_budget: IdentityBudget::default(),
+            instruction_budget: None,
             prompt_context_budget: PromptContextTokenBudget::default(),
             context_window_cache: None,
             identity_candidates: Arc::new(IdentityCandidateCache::new()),
@@ -295,6 +298,11 @@ where
 
     pub fn with_identity_budget(mut self, budget: IdentityBudget) -> Self {
         self.identity_budget = budget;
+        self
+    }
+
+    pub fn with_instruction_budget(mut self, budget: PromptContextTokenBudget) -> Self {
+        self.instruction_budget = Some(budget);
         self
     }
 
@@ -371,6 +379,8 @@ where
             }
             None => Vec::new(),
         };
+        let instruction_snippets =
+            self.select_instruction_snippets_for_context(instruction_snippets);
         let identity_messages = match self.identity_context_source.as_deref() {
             Some(source) => {
                 let mode = request.mode;
@@ -428,6 +438,56 @@ impl<S> ThreadBackedLoopContextPort<S>
 where
     S: SessionThreadService + ?Sized + Send + Sync,
 {
+    fn select_instruction_snippets_for_context(
+        &self,
+        mut snippets: Vec<LoopContextSnippet>,
+    ) -> Vec<LoopContextSnippet> {
+        let instruction_tokens = snippets
+            .iter()
+            .map(|snippet| estimate_tokens_from_chars(&snippet.model_content).as_u64())
+            .fold(0_u64, u64::saturating_add);
+        if instruction_tokens > 0 {
+            tracing::debug!(
+                snippets = snippets.len(),
+                instruction_tokens,
+                budgeted = self.instruction_budget.is_some(),
+                "skill instruction snippets estimated for prompt context"
+            );
+        }
+
+        let Some(budget) = self.instruction_budget else {
+            return snippets;
+        };
+
+        sort_instruction_snippets_for_prompt(&mut snippets);
+        let visible_instruction_tokens = budget.visible_transcript_tokens();
+        let mut admitted_tokens = 0_u64;
+        let mut admitted = Vec::new();
+        let mut dropped = 0_usize;
+
+        let total_snippets = snippets.len();
+        for (index, snippet) in snippets.into_iter().enumerate() {
+            let snippet_tokens = estimate_tokens_from_chars(&snippet.model_content).as_u64();
+            if admitted_tokens.saturating_add(snippet_tokens) <= visible_instruction_tokens {
+                admitted_tokens = admitted_tokens.saturating_add(snippet_tokens);
+                admitted.push(snippet);
+            } else {
+                dropped = total_snippets.saturating_sub(index);
+                break;
+            }
+        }
+
+        if dropped > 0 {
+            tracing::warn!(
+                admitted = admitted.len(),
+                dropped,
+                instruction_tokens,
+                "skill instruction snippets exceeded budget; lowest-priority snippets dropped"
+            );
+        }
+        admitted
+    }
+
     fn publish_personal_context_admitted(
         &self,
         mode: PromptMode,
