@@ -42,6 +42,10 @@ What is not worth pursuing further in this PR:
 - Reducing root partitions from `4` to `2`. It reduced runner fanout, but the
   slowest root lane regressed from `522s` to `633s` and workflow wall clock
   regressed from `10m36s` to `11m14s`.
+- Splitting `ironclaw_reborn_migration` and `ironclaw_triggers` out of
+  `adapters-misc`. It made `adapters-misc` shorter, but the new bucket became
+  the long pole and the workflow regressed from the latest retained `9m55s` to
+  `10m35s`.
 - Bucket skipping as an immediate optimization. The dry-run saved only `13%`
   of crate-bucket executions across recent Reborn-scoped PRs, with the median
   PR still at all `12` buckets.
@@ -117,6 +121,7 @@ improving measured wall clock.
 | H19 | Batch selected root test binaries into one `cargo test` invocation per partition. | Remove repeated root-package compile/link work inside each root partition. | Retained with caveat | Accepted as a localized improvement: latest PR baseline root max/avg `643s`/`603s` improved to `549s`/`518s`; a dispatch confirmation improved root max/avg to `499s`/`466s`. Overall PR wall did not improve because unrelated buckets were noisy. |
 | H20 | Batch all packages inside each Reborn crate bucket into one package-scoped `cargo test` invocation. | Remove repeated per-package Cargo invocations in the same bucket. | Tested | Rejected and reverted: the run was cancelled at `12m08s`, with `adapters-misc` still running at `677s`; several completed buckets regressed. |
 | H21 | Reduce root-test partitions from 4 to 2 after H19 batching. | Compile the root graph in fewer jobs and reduce runner/cache pressure. | Tested | Rejected and reverted: workflow wall clock regressed from retained-state `10m36s` to `11m14s`; root max regressed from `522s` to `633s`. |
+| H22 | Split libSQL-heavy migration/trigger crates out of `adapters-misc`. | Let lightweight adapters finish separately from migration/trigger storage work. | Tested | Rejected and reverted: `adapters-misc` improved `543s -> 324s`, but the new `migration-triggers` bucket took `573s` and wall clock regressed `9m55s -> 10m35s`. |
 
 ## H1: Narrow Crate Bucket Targets
 
@@ -1362,3 +1367,56 @@ Decision:
   running in this PR because `2` partitions already moved root max in the wrong
   direction; putting all root binaries behind one partition would make that
   bottleneck worse unless test runtime was negligible, which H21 disproved.
+
+## H22: Split Migration/Trigger Crates Out of `adapters-misc`
+
+Advice under test:
+
+- `adapters-misc` was repeatedly near the top of the retained-state wall-clock
+  list. Inspecting the final retained run's log showed the bucket contained
+  eight packages, not just the six explicitly mapped adapter/misc packages:
+  `ironclaw_reborn_migration` and `ironclaw_triggers` fell through the default
+  bucket mapping.
+
+Evidence before changing:
+
+- In retained run
+  [`28737960545`](https://github.com/nearai/ironclaw/actions/runs/28737960545),
+  `adapters-misc` took `543s`.
+- Inside that job, `ironclaw_reborn_migration --features default,libsql` ran
+  from about `10:41:01Z` to `10:46:33Z`, roughly `5.5m` of the bucket.
+- Hypothesis: moving `ironclaw_reborn_migration` and `ironclaw_triggers` to a
+  dedicated bucket would let lightweight adapter tests finish in parallel with
+  the storage-heavy migration/trigger tests.
+
+Change under test:
+
+- Added a `migration-triggers` bucket to `scripts/ci/reborn-crate-test-buckets.sh`.
+- Mapped `ironclaw_reborn_migration` and `ironclaw_triggers` into that bucket.
+- Left all package feature flags and test commands unchanged.
+
+Benchmark result:
+
+- Retained state:
+  [`28737960545`](https://github.com/nearai/ironclaw/actions/runs/28737960545),
+  success, wall clock `9m55s`.
+- H22 run:
+  [`28738476901`](https://github.com/nearai/ironclaw/actions/runs/28738476901),
+  success, wall clock `10m35s`.
+
+| Metric | Retained state | H22 split | Delta |
+| --- | ---: | ---: | ---: |
+| Workflow wall clock | `595s` | `635s` | `+40s` |
+| Crate bucket jobs | `12` | `13` | `+1` |
+| `adapters-misc` | `543s` | `324s` | `-219s` |
+| `migration-triggers` | included in `adapters-misc` | `573s` | new long pole |
+| Root max | `547s` | `508s` | `-39s` |
+| `host-runtime` | `457s` | `475s` | `+18s` |
+| `composition-core` | `509s` | `438s` | `-71s` |
+
+Decision:
+
+- Reject and revert H22.
+- The split correctly shortened `adapters-misc`, but it moved the heavy compile
+  work into a new job that became the overall long pole. Because the split adds
+  a runner slot and did not improve wall clock, it is not worth keeping.
