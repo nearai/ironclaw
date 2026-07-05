@@ -323,14 +323,18 @@ where
         Ok(records)
     }
 
-    async fn seed_runner_lease_from_snapshot_inner(
-        &self,
-        run_id: TurnRunId,
-    ) -> Result<(), TurnError> {
-        let (snapshot, _version) = self.read_snapshot().await?;
-        self.runner_lease_store()
-            .seed_from_snapshot(&snapshot, run_id)
-            .await
+    async fn seed_runner_lease_from_cached_run(&self, run_id: TurnRunId) -> Result<(), TurnError> {
+        let run = self
+            .with_cached_snapshot(|snapshot| {
+                snapshot
+                    .runs
+                    .iter()
+                    .find(|record| record.run_id == run_id)
+                    .cloned()
+            })
+            .await?
+            .ok_or(TurnError::ScopeNotFound)?;
+        self.runner_lease_store().seed_from_run_record(run).await
     }
 
     async fn cleanup_runner_lease_after_state(&self, result: &Result<TurnRunState, TurnError>) {
@@ -1071,7 +1075,7 @@ where
                 .await?;
             if let Some(claimed) = &claimed
                 && let Err(error) = self
-                    .seed_runner_lease_from_snapshot_inner(claimed.state.run_id)
+                    .seed_runner_lease_from_cached_run(claimed.state.run_id)
                     .await
             {
                 self.compensate_failed_claim(claimed).await;

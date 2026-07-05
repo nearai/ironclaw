@@ -1820,3 +1820,65 @@ Budgets: 10 hours wall-clock / $0 spend
   `cargo test -p ironclaw_turns --test filesystem_turn_state_contract
   filesystem_turn_state_row_store_persists_rows_without_state_blob`, `cargo
   check -p ironclaw_turns`, and `git diff --check` passed.
+
+## Cycle 35 - Claim Lease Seeding Without Snapshot Clone
+
+- Graph note: `codebase-memory-mcp` still fails immediately with
+  `Transport closed` for `index_status`; this cycle falls back to crate
+  guardrails and targeted source reads.
+- Baseline: cycle 34 is the current committed implementation. Full dev score
+  passed 54 results and 36 comparisons; dev-shaped c4 `turn_lifecycle` was
+  libSQL p95 8563ms versus Postgres pool-2 p95 502ms. The unresolved
+  high-concurrency diagnostic is Postgres-only `turn_lifecycle` c100 p95
+  10484ms at payload 2048, 64 samples, pool size 2, with state hash
+  `660086a8484d5400`.
+- Hypothesis: Each `turn_lifecycle` sample claims three runs. After the
+  row-store claim transition already persists and applies the claimed run row,
+  `claim_next_run` calls `seed_runner_lease_from_snapshot_inner`, which clones
+  the whole cached row snapshot and scans it just to seed one external runner
+  lease. Seeding the lease from the single claimed `TurnRunRecord` in the hot
+  snapshot should remove three post-claim snapshot clones per sample without
+  changing durable rows or lease validation semantics.
+- Expected failure mode: The new path must preserve the current
+  `ScopeNotFound` and `InvalidTransition` errors if the claimed run row is
+  missing or no longer lease-eligible, must keep exact lease metadata from the
+  persisted run row, and must preserve claim compensation if lease seeding
+  fails. State hashes, event counts, and runner lease overlay behavior must
+  remain unchanged.
+- Result: `FilesystemTurnStateRowStore::claim_next_run` now seeds the external
+  runner-lease cache from the single claimed `TurnRunRecord` in the hot
+  snapshot instead of cloning the whole row snapshot and scanning it after each
+  claim. `RunnerLeaseStore` gained a single-row seeding helper, covered by a
+  unit test that asserts the persisted runner id, token, lease expiry,
+  heartbeat timestamp, status, and event cursor are copied exactly.
+- Dev score: `harness/latency/score.sh --dev` passed with 54 results, 36
+  comparisons, and zero failures. The scored `turn_lifecycle` state hash
+  stayed `7fc054292d2f85f0`; libSQL c4 p95 was 7244ms, Postgres pool-1 c4
+  p95 was 509ms, and Postgres pool-2 c4 p95 was 487ms.
+- Probe: `harness/latency/probe.sh` completed with 81 results and 54
+  comparisons, but was not clean because the known high-concurrency libSQL
+  `turn_lifecycle` c8 baseline produced 3 errors and a mismatched hash
+  `22d877ede06452c0`. Postgres pool-1 and pool-2 c8 had zero errors and the
+  expected hash `3fa07e3dc3c7e320`, with p95 2622ms and 2646ms respectively.
+  This is not a treatment regression, but the probe result is recorded as
+  non-clean rather than hidden.
+- High-concurrency turn-state diagnostic: Postgres-only `turn_lifecycle` with
+  c32/c100, payload 2048, 64 samples, and pool size 2 completed with zero
+  errors and state hash `660086a8484d5400`. c32 p95 was essentially flat
+  against cycle 34, moving from 2651ms to 2666ms, while c32 p50 improved from
+  2287ms to 1923ms. c100 p95 improved from 10484ms to 10195ms and throughput
+  improved from 6.10 to 6.28 ops/sec.
+- Decision: Keep the change because it removes three post-claim whole-snapshot
+  clones per lifecycle sample and improves the c100 bottleneck without changing
+  durable rows. The gain is still marginal relative to the remaining 10s c100
+  p95, so the next meaningful cycle needs to address the global transition
+  serialization itself rather than another post-transition read copy.
+- Validation: `cargo fmt -p ironclaw_turns`, `cargo test -p ironclaw_turns
+  filesystem_store::runner_lease::tests`, `cargo test -p ironclaw_turns --test
+  filesystem_turn_state_contract
+  filesystem_turn_state_row_store_persists_rows_without_state_blob`, `cargo
+  test -p ironclaw_turns --test loop_checkpoint_store_contract
+  filesystem_turn_state_row_store_loop_checkpoint_roundtrip_and_snapshot`,
+  `cargo check -p ironclaw_turns`, and `git diff --check` passed. The
+  runner-lease unit-test target still emits the pre-existing
+  `with_apply_timeout` dead-code warning under `cfg(test)`.
