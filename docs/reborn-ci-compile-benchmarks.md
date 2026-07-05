@@ -67,6 +67,7 @@ improving measured wall clock.
 | H11 | Move libSQL-heavy coverage out of broad long-pole crate buckets into the existing Reborn group job. | Reduce compile graph size for `host-runtime` and `reborn-core` without dropping persistence coverage or adding a new job. | Tested | Rejected: wall clock regressed from `8m35s` to `9m50s`; `host-runtime`, `reborn-core`, and `composition-core` were all slower. |
 | H12 | Move `ironclaw_reborn_cli` from `reborn-core` to `webui-ingress`. | Keep job count flat while grouping the WebUI-shaped CLI build with the WebUI ingress bucket instead of the core Reborn bucket. | Tested | Rejected: `reborn-core` improved from `367s` to `238s`, but `webui-ingress` grew from `334s` to `377s`; wall clock stayed flat at `8m37s` with no job-count reduction. |
 | H13 | Remove the separate uninstrumented `reborn-group-tests` job and rely on the existing instrumented coverage `groups` lane for those same suites. | Reduce total Reborn jobs by one without dropping group-suite pass/fail coverage. | Retained | Accepted: total Reborn jobs dropped from `28` to `27`, and wall clock improved from `8m35s` to `8m21s`. |
+| H14 | Seed fresh shared Rust caches from deterministic broad producers: `reborn-core` for crate buckets and `groups` for coverage lanes. | Improve warm-start quality for compile-heavy jobs without adding jobs or changing coverage. | Running | Two-run benchmark in progress: first run seeds fresh H14 cache keys, second run measures restore benefit. |
 
 ## H1: Narrow Crate Bucket Targets
 
@@ -714,3 +715,59 @@ Decision:
   instrumented coverage `groups` lane.
 - The remaining compile-time bottlenecks are still crate/root build graphs,
   especially `reborn-core`, `composition-core`, and `host-runtime`.
+
+## H14: Deterministic Superset Rust Cache Seeding
+
+Advice under test:
+
+- The shared crate-bucket Rust cache may be seeded by whichever matrix bucket
+  first creates a new cache key. If that producer is a small bucket, long-pole
+  buckets restore a weak target-dir warm start.
+- Use a deterministic broad producer instead:
+  - `reborn-core` for crate buckets, because the bucket includes
+    `ironclaw_reborn_cli`.
+  - `groups` for instrumented integration coverage lanes.
+
+Red-team notes before benchmarking:
+
+- Current PR/manual branch runs do not save Rust caches at all. Existing
+  `save-if` allows saves only on `push` to `main` and `merge_group`, so H14
+  cannot be measured in one normal PR run.
+- GitHub cache entries are immutable. Existing full-match keys report
+  `Cache up-to-date`, so changing only `save-if` would not replace the current
+  cache contents until a new key is minted.
+- Baseline logs do show every crate bucket restoring the same full-match
+  `reborn-tests-crates` cache. In the sampled baseline run, `auth-security`,
+  `host-runtime`, and the coverage `groups` lane all restored full-match keys
+  and ended with `Cache up-to-date`; that weakens the claim that a small bucket
+  was actively overwriting the cache in that run.
+- Dependency overlap is plausible for the bucket-level producer, but not for
+  `ironclaw_reborn` alone:
+  - `ironclaw_reborn` closure: `44` workspace crates.
+  - `ironclaw_reborn_cli` closure: `57` workspace crates.
+  - `ironclaw_reborn_composition` closure: `56` workspace crates.
+  - `ironclaw_host_runtime` closure: `39` workspace crates.
+  - `ironclaw_reborn` alone does not cover several composition crates, but
+    `ironclaw_reborn_cli` covers both `ironclaw_host_runtime` and
+    `ironclaw_reborn_composition` workspace closures in this check.
+
+Benchmark method:
+
+- Use fresh benchmark keys:
+  - `reborn-tests-crates-h14-reborn-core`
+  - `reborn-integration-cov-h14-groups`
+- Allow `workflow_dispatch` cache saves only on this benchmark branch and only
+  from the intended producers:
+  - `matrix.bucket.name == 'reborn-core'`
+  - `matrix.lane == 'groups'`
+- Run the workflow twice:
+  - Seed run: expected to be cold for the fresh H14 keys; only the intended
+    producers should save.
+  - Measurement run: expected to restore the deterministic H14 keys and show
+    whether long-pole compile times improve.
+
+Benchmark result:
+
+- Branch/PR: [`codex/ci-compile-benchmarks`, PR #5648](https://github.com/nearai/ironclaw/pull/5648)
+- Seed workflow run: pending.
+- Measurement workflow run: pending.
