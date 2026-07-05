@@ -252,13 +252,13 @@ test("OnboardingPairingCard shows a spinner and disables submit while busy, not 
 
   const idle = renderWithStatus("idle");
   assert.equal(idle.props.disabled, false);
-  assert.ok(!JSON.stringify(idle.rendered).includes("animate-spin"), "idle shows no spinner");
+  assert.ok(!JSON.stringify(idle.rendered).includes("v2-spin"), "idle shows no spinner");
   assert.ok(!JSON.stringify(idle.rendered).includes("Connecting..."), "idle shows submit label");
 
   for (const status of ["submitting", "resuming"]) {
     const busy = renderWithStatus(status);
     assert.equal(busy.props.disabled, true, `${status} disables submit`);
-    assert.ok(JSON.stringify(busy.rendered).includes("animate-spin"), `${status} renders a spinner`);
+    assert.ok(JSON.stringify(busy.rendered).includes("v2-spin"), `${status} renders a spinner`);
     assert.ok(JSON.stringify(busy.rendered).includes("Connecting..."), `${status} shows connecting label`);
   }
 });
@@ -292,7 +292,7 @@ test("OnboardingPairingCard shows a spinner while OAuth configuration is waiting
   const button = findComponent(rendered, context.Button);
   const props = componentProps(button, context.Button);
   assert.equal(props.disabled, true);
-  assert.ok(JSON.stringify(rendered).includes("animate-spin"));
+  assert.ok(JSON.stringify(rendered).includes("v2-spin"));
   assert.ok(JSON.stringify(rendered).includes("Connecting..."));
 });
 

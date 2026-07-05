@@ -23,7 +23,27 @@ import { React, html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
 import { Button } from "../../../design-system/button.js";
 import { Icon } from "../../../design-system/icons.js";
+import { openAuthPopup } from "../../../lib/product-auth-oauth-events.js";
 import { AuthGateShell } from "./auth-gate-shell.js";
+
+// User-facing names for OAuth provider ids. The gate payload carries the raw
+// provider id (e.g. `slack_personal`), which must never leak into copy —
+// "Re-open Slack_personal authorization" is not a sentence.
+const PROVIDER_DISPLAY_NAMES = {
+  google: "Google",
+  slack_personal: "Slack",
+  github: "GitHub",
+  notion: "Notion",
+  nearai: "NEAR AI",
+};
+
+function providerDisplayName(providerId) {
+  if (PROVIDER_DISPLAY_NAMES[providerId]) return PROVIDER_DISPLAY_NAMES[providerId];
+  return providerId
+    .split("_")
+    .map((word) => (word ? word.charAt(0).toUpperCase() + word.slice(1) : word))
+    .join(" ");
+}
 
 export function AuthOauthCard({ gate, onCancel }) {
   const t = useT();
@@ -42,21 +62,34 @@ export function AuthOauthCard({ gate, onCancel }) {
   }, [gate.authorizationUrl, gate.gateRef, gate.runId]);
 
   const providerLabel = gate.provider
-    ? gate.provider.charAt(0).toUpperCase() + gate.provider.slice(1)
+    ? providerDisplayName(gate.provider)
     : t("authGate.oauthProviderFallback");
 
   const openAuth = React.useCallback(() => {
     // Guard: reject missing or non-HTTPS URLs before window.open so that
     // custom protocol handlers (javascript:, tel:, ms-msdt:, slack:) are
     // never opened even if a future code path writes an unexpected scheme.
+    // openAuthPopup re-checks HTTPS before navigating.
     if (!hasHttpsAuthorizationUrl) {
       setError(t("authGate.serviceUnavailable"));
       return;
     }
     // Must be called synchronously in a click handler to be treated as a
     // user-gesture popup by the browser (not blocked by popup blockers).
+    // The sized `about:blank` pre-open keeps authorization in a popup
+    // (matching the onboarding and configure flows) and reliably detects a
+    // blocked popup — the noopener fresh-open path returns null even on
+    // success. The opener is severed before navigation; gate completion
+    // travels via the localStorage/BroadcastChannel contract, which never
+    // uses window.opener.
     setError("");
-    window.open(gate.authorizationUrl, "_blank", "noopener,noreferrer");
+    const popup = window.open("about:blank", "_blank", "width=600,height=600");
+    if (!popup) {
+      setError("Authorization popup was blocked.");
+      return;
+    }
+    popup.opener = null;
+    openAuthPopup(gate.authorizationUrl, popup);
     setOpened(true);
   }, [gate.authorizationUrl, hasHttpsAuthorizationUrl]);
 

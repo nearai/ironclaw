@@ -1415,6 +1415,7 @@ impl RebornProductAuthServices {
             flow_id: completed.id,
             scope: completed.scope.clone(),
             continuation: completed.continuation.clone(),
+            provider: completed.provider.clone(),
             credential_account_id: completed.credential_account_id,
             emitted_at,
         };

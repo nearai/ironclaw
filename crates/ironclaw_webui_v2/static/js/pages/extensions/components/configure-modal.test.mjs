@@ -440,7 +440,7 @@ test("ConfigureModal keeps Slack OAuth visibly loading while waiting for authori
   });
 
   const body = JSON.stringify(rendered);
-  assert.match(body, /animate-spin/);
+  assert.match(body, /v2-spin/);
   assert.match(body, /extensions\.opening/);
   assert.doesNotMatch(body, /extensions\.authorize/);
 });
