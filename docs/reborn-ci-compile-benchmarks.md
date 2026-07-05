@@ -39,6 +39,9 @@ What is not worth pursuing further in this PR:
 - Batching every package in a crate bucket into one `cargo test` command. Cargo
   accepted the package-scoped feature syntax, but the benchmark regressed and
   was cancelled with `adapters-misc` still running at `677s`.
+- Reducing root partitions from `4` to `2`. It reduced runner fanout, but the
+  slowest root lane regressed from `522s` to `633s` and workflow wall clock
+  regressed from `10m36s` to `11m14s`.
 - Bucket skipping as an immediate optimization. The dry-run saved only `13%`
   of crate-bucket executions across recent Reborn-scoped PRs, with the median
   PR still at all `12` buckets.
@@ -113,6 +116,7 @@ improving measured wall clock.
 | H18 | Increase Reborn root-test partitions from 4 to 6. | Shave the new post-H14 root-test long pole without changing test coverage. | Tested | Rejected: wall clock regressed from H14 `7m49s` to `10m41s`; the slowest root partition worsened from `450s` to `595s`. |
 | H19 | Batch selected root test binaries into one `cargo test` invocation per partition. | Remove repeated root-package compile/link work inside each root partition. | Retained with caveat | Accepted as a localized improvement: latest PR baseline root max/avg `643s`/`603s` improved to `549s`/`518s`; a dispatch confirmation improved root max/avg to `499s`/`466s`. Overall PR wall did not improve because unrelated buckets were noisy. |
 | H20 | Batch all packages inside each Reborn crate bucket into one package-scoped `cargo test` invocation. | Remove repeated per-package Cargo invocations in the same bucket. | Tested | Rejected and reverted: the run was cancelled at `12m08s`, with `adapters-misc` still running at `677s`; several completed buckets regressed. |
+| H21 | Reduce root-test partitions from 4 to 2 after H19 batching. | Compile the root graph in fewer jobs and reduce runner/cache pressure. | Tested | Rejected and reverted: workflow wall clock regressed from retained-state `10m36s` to `11m14s`; root max regressed from `522s` to `633s`. |
 
 ## H1: Narrow Crate Bucket Targets
 
@@ -1315,3 +1319,46 @@ Decision:
   bucket to build the union of all package-scoped features and targets at once.
   In this repo that made the expensive buckets slower, and `adapters-misc`
   became a worse long pole.
+
+## H21: Reduce Root-Test Partitions From 4 to 2
+
+Advice under test:
+
+- After H19 batched all selected root test binaries into one Cargo invocation
+  per partition, try reducing root partition fanout. The goal was to compile
+  the broad root graph in fewer jobs and reduce runner/cache pressure.
+
+Change under test:
+
+- `REBORN_ROOT_TEST_PARTITIONS: 4 -> 2`.
+- Root matrix `partition: [0, 1, 2, 3] -> [0, 1]`.
+- No test selection was dropped; the same modulo partitioner assigned the same
+  root test binary list across two larger partitions.
+
+Benchmark result:
+
+- Retained H19 state:
+  [`28737093646`](https://github.com/nearai/ironclaw/actions/runs/28737093646)
+  at commit `3bb790ec`, success, wall clock `10m36s`.
+- H21 run:
+  [`28737613537`](https://github.com/nearai/ironclaw/actions/runs/28737613537)
+  at commit `05e9185c`, success, wall clock `11m14s`.
+
+| Metric | Retained H19 state | H21 two partitions | Delta |
+| --- | ---: | ---: | ---: |
+| Workflow wall clock | `636s` | `674s` | `+38s` |
+| Root job count | `4` | `2` | `-2` |
+| Root max | `522s` | `633s` | `+111s` |
+| Root average | `485s` | `579s` | `+94s` |
+| `adapters-misc` | `532s` | `623s` | `+91s` |
+| `host-runtime` | `587s` | `483s` | `-104s` |
+| `composition-core` | `407s` | `499s` | `+92s` |
+
+Decision:
+
+- Reject and revert H21.
+- Fewer root jobs did reduce root-job count, but the larger partitions made the
+  root lane itself the long pole again. A `1`-partition test is not worth
+  running in this PR because `2` partitions already moved root max in the wrong
+  direction; putting all root binaries behind one partition would make that
+  bottleneck worse unless test runtime was negligible, which H21 disproved.
