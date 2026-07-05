@@ -374,7 +374,14 @@ On a harness built from a `live_approvals` group:
 
 - `build_local_dev_secret_store_for_test(root, scoped)` — constructs the `LocalDevSecretStore` used by production local-dev composition; for store read-back in secrets tests.
 
-Both are zero-byte in production builds (gated on the `test-support` feature).
+`RebornServices` (returned by `build_reborn_services`/exposed via `RebornRuntime::services()`, methods defined in `crates/ironclaw_reborn_composition/src/runtime/test_support.rs`) exposes:
+
+- `local_dev_approval_interaction_service_for_test(turn_coordinator)` — builds a real `DefaultApprovalInteractionService` wired exactly as `build_reborn_runtime` wires it, over this `RebornServices`'s own local-dev parts. `None` for compositions without a local-dev runtime.
+- `local_dev_auth_interaction_service_for_test(turn_coordinator)` — builds the WebUI auth-interaction service via the same `build_webui_auth_interaction_service` helper production uses. `None` only when there is no local-dev runtime at all; falls back to `UnavailableAuthInteractionService` (not `None`) when `product_auth` has no wired flow-record source.
+
+Both take `turn_coordinator: Arc<dyn TurnCoordinator>` as an explicit parameter rather than reading `self.turn_coordinator` — a `RebornServices` built by `build_reborn_services` alone carries a different `TurnCoordinator` instance than a caller-built planned runtime (e.g. `RebornIntegrationGroup`'s own `build_default_planned_runtime` coordinator); pass the coordinator your harness's turns actually run against.
+
+All of the above are zero-byte in production builds (gated on the `test-support` feature).
 
 ## Group tests
 

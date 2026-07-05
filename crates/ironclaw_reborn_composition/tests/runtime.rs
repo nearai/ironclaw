@@ -4,12 +4,14 @@ use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
+use ironclaw_host_api::{TenantId, ThreadId, UserId};
+use ironclaw_product_workflow::{ListPendingApprovalsRequest, ListPendingAuthInteractionsRequest};
 use ironclaw_reborn_composition::{
     HooksActivationConfig, PollSettings, RebornBuildInput, RebornCompositionProfile,
     RebornRuntimeError, RebornRuntimeIdentity, RebornRuntimeInput, RebornSkillSourceKind,
     TurnRunnerSettings, build_reborn_runtime, local_runtime_build_input_with_options,
 };
-use ironclaw_turns::TurnStatus;
+use ironclaw_turns::{TurnActor, TurnScope, TurnStatus};
 use tokio_util::sync::CancellationToken;
 
 const SEND_USER_MESSAGE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -579,6 +581,89 @@ async fn multi_worker_runtime_does_not_raise_worker_stopped_while_workers_are_al
         !matches!(reply, Err(RebornRuntimeError::WorkerStopped)),
         "WorkerStopped must not be raised while all workers are running; got: {reply:?}"
     );
+
+    runtime.shutdown().await.unwrap();
+}
+
+// W5-WEBUI-API-2 enabler smoke test: proves
+// `local_dev_approval_interaction_service_for_test` /
+// `local_dev_auth_interaction_service_for_test` (both `#[cfg(feature =
+// "test-support")]`, `crates/ironclaw_reborn_composition/src/runtime/test_support.rs`)
+// assemble real, working services over a live local-dev runtime's own
+// `RebornServices` — not the fail-closed `Rejecting*`/`Unavailable*`
+// fallbacks — using the exact `TurnCoordinator` instance the runtime's own
+// turns are driven by (`runtime.services().turn_coordinator`, which
+// `build_reborn_runtime` overwrites to match `composition.coordinator`; see
+// the enabler plan's §1 "coordinator-instance divergence" note). The actual
+// RESOLVE_GATE scenario coverage these accessors unblock is a separate,
+// later PR (W5-WEBUI-API-2 itself); this test only proves the composition
+// wiring compiles and constructs correctly.
+#[tokio::test]
+async fn local_dev_test_support_interaction_service_accessors_build_real_services() {
+    let _guard = runtime_composition_test_guard().await;
+    let root = tempfile::tempdir().unwrap();
+    let input = RebornRuntimeInput::from_services(
+        RebornBuildInput::local_dev(
+            "test-support-accessors-owner",
+            root.path().join("local-dev"),
+        )
+        .with_runtime_policy(local_dev_runtime_policy()),
+    )
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: "test-support-accessors-tenant".to_string(),
+        agent_id: "test-support-accessors-agent".to_string(),
+        source_binding_id: "test-support-accessors-source".to_string(),
+        reply_target_binding_id: "test-support-accessors-reply".to_string(),
+    })
+    .with_runner_settings(TurnRunnerSettings {
+        heartbeat_interval: Duration::from_secs(60),
+        poll_interval: Duration::from_secs(60),
+        ..TurnRunnerSettings::default()
+    });
+
+    let runtime = build_reborn_runtime(input).await.unwrap();
+    let turn_coordinator = runtime
+        .services()
+        .turn_coordinator
+        .clone()
+        .expect("local-dev runtime should wire a turn coordinator");
+
+    let approval_interaction_service = runtime
+        .services()
+        .local_dev_approval_interaction_service_for_test(turn_coordinator.clone())
+        .expect("local-dev runtime should support the approval interaction test accessor");
+    let auth_interaction_service = runtime
+        .services()
+        .local_dev_auth_interaction_service_for_test(turn_coordinator)
+        .expect("local-dev runtime should support the auth interaction test accessor");
+
+    let scope = TurnScope::new(
+        TenantId::new("test-support-accessors-tenant").expect("tenant id"),
+        None,
+        None,
+        ThreadId::new("test-support-accessors-thread".to_string()).expect("thread id"),
+    );
+    let actor = TurnActor::new(UserId::new("test-support-accessors-user").expect("user id"));
+
+    // A genuine `DefaultApprovalInteractionService` / `DefaultAuthInteractionService`
+    // answers `Ok` with an empty list for a scope with no pending gates; the
+    // fail-closed `Rejecting*`/`Unavailable*` fallbacks these accessors must
+    // NOT return always answer `Err(..)`. This is the discriminating
+    // assertion — see the mutation check in this task's verification.
+    let pending_approvals = approval_interaction_service
+        .list_pending(ListPendingApprovalsRequest {
+            scope: scope.clone(),
+            actor: actor.clone(),
+        })
+        .await
+        .expect("real approval interaction service must answer Ok, not fail closed");
+    assert!(pending_approvals.approvals.is_empty());
+
+    let pending_auth = auth_interaction_service
+        .list_pending(ListPendingAuthInteractionsRequest { scope, actor })
+        .await
+        .expect("real auth interaction service must answer Ok, not fail closed");
+    assert!(pending_auth.auth_interactions.is_empty());
 
     runtime.shutdown().await.unwrap();
 }
