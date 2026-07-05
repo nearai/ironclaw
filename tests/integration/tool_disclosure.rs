@@ -157,3 +157,56 @@ async fn bridged_mode_below_caps_keeps_the_flat_list() {
         .await
         .expect("no bridge meta tools below the disclosure caps");
 }
+
+/// #5647: a narrowed capability allow-set (e.g. a subagent capability-surface
+/// profile) applied on top of Bridged-mode deferral strips the synthetic
+/// `ironclaw.*` bridge ids — `CapabilitySurfaceProfileFilter` runs AFTER
+/// `ToolDisclosureCapabilityDecorator` (`loop_driver_host.rs`'s
+/// `build_text_only_host_with_profiled_capabilities` wraps the capability
+/// factory's already-bridged port), and `tool_search`'s capability id
+/// (`ironclaw.tool_search`) is not in any granted allow-set, nor covered by
+/// the `capability_info`-only implicit pass-through
+/// (`capability_surface_filter.rs`'s `provider_capability_permitted`). The
+/// model ends up with ZERO tools instead of the `tool_search` bridge.
+///
+/// Uses the SAME >32-tool `GithubIssueTools` catalog (48 `github.*`
+/// capabilities) as `bridged_mode_defers_wide_catalog_to_bridge_meta_tools`,
+/// but narrows the allow-set to a single real granted capability
+/// (`github.get_repo` — the id `support/harness/profiles/github.rs` already
+/// uses for its narrow-grant scenario) instead of forcing `All`, reproducing
+/// a narrowed-profile caller.
+///
+/// `#[ignore]`d RED regression pinning #5647 — currently fails: the model
+/// sees zero tools, so `assert_model_tools_contains(TOOL_SEARCH_NAME)` panics.
+/// Un-ignore once the fix (either the bridge decorator's synthetic ids get
+/// an implicit pass through capability-surface filtering, mirroring
+/// `capability_info`, OR bridging moves to run after profile filtering)
+/// lands.
+#[ignore = "#5647: narrowed allow-set strips ironclaw.tool_search after bridged \
+            deferral, tool_definitions() returns empty (CapabilitySurfaceProfileFilter \
+            wraps outside ToolDisclosureCapabilityDecorator)"]
+#[tokio::test]
+async fn bridged_mode_survives_narrowed_capability_allow_set() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_bridged()
+        .with_github_issue_tools()
+        .with_narrowed_capability_allow_set_for_bridged_test(["github.get_repo"])
+        .script([RebornScriptedReply::text("done")])
+        .build()
+        .await
+        .expect("narrowed bridged-disclosure harness builds");
+
+    harness.submit_turn("hello").await.expect("turn completes");
+
+    harness
+        .assert_model_tools_contains(TOOL_SEARCH_NAME)
+        .await
+        .expect(
+            "bridge ids are host-owned synthesis, not real capabilities — \
+                 a narrowed allow-set must not strip them from a deferred catalog",
+        );
+    harness
+        .assert_model_tools_excludes(FLAT_GITHUB_TOOL_NAME)
+        .await
+        .expect("deferral still replaces the flat list under a narrowed profile");
+}
