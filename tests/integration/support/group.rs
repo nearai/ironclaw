@@ -723,6 +723,8 @@ impl RebornIntegrationGroupBuilder {
             // C-COMMCTX: delivery-preference / connected-channel provider (Some
             // only when `communication_context_provider()` was set).
             communication_context_provider: self.communication_context_provider,
+            // No RecordingSecurityAuditSink double exists yet (nearai/ironclaw#5640);
+            // wiring_parity.rs's ALLOWED_DIVERGENCES tracks this field by name, not line.
             hook_security_audit_sink: None,
             turn_event_sink: self
                 .turn_event_sink
