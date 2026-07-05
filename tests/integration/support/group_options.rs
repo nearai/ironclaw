@@ -14,6 +14,8 @@
 
 use std::sync::Arc;
 
+use ironclaw_host_api::CapabilityId;
+use ironclaw_loop_support::CapabilityAllowSet;
 use ironclaw_reborn::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_reborn::runtime::ToolDisclosureMode;
 use ironclaw_turns::InMemoryTurnEventSink;
@@ -89,6 +91,32 @@ impl RebornIntegrationGroupBuilder {
     /// env-dependent.
     pub fn with_tool_disclosure_off(mut self) -> Self {
         self.tool_disclosure = Some(ToolDisclosureMode::Off);
+        self
+    }
+
+    /// #5647 RED-pin seam: override the `CapabilityAllowSet` `into_group`
+    /// substitutes for a `Bridged`-mode group, in place of the forced
+    /// `CapabilityAllowSet::All` it otherwise uses to mirror production's
+    /// top-level-turn resolution (see the `into_group` doc comment above the
+    /// `capability_surface_resolver` construction). Only takes effect when
+    /// paired with `.with_tool_disclosure_bridged()` — `into_group` fails
+    /// fast (§7 harness-seam misuse guard) if this is set without Bridged
+    /// mode also selected, since the override would otherwise silently no-op.
+    ///
+    /// Lets a test express a genuinely narrowed allow-set (e.g. a subagent
+    /// capability-surface profile) while still in Bridged mode, reproducing
+    /// the #5647 scenario: a narrowed profile applied on top of bridged
+    /// deferral strips the synthetic `ironclaw.*` bridge ids because
+    /// `CapabilitySurfaceProfileFilter` runs outside (after) the bridging
+    /// decorator and doesn't know about `is_bridge_capability_id`.
+    pub fn with_narrowed_capability_allow_set_for_bridged_test(
+        mut self,
+        ids: impl IntoIterator<Item = &'static str>,
+    ) -> Self {
+        self.narrowed_bridged_allow_set =
+            Some(CapabilityAllowSet::allowlist(ids.into_iter().map(|id| {
+                CapabilityId::new(id).expect("test capability id must be valid")
+            })));
         self
     }
 

@@ -338,6 +338,7 @@ impl RebornIntegrationGroup {
             turn_event_sink: None,
             trace_capture: false,
             tool_disclosure: None,
+            narrowed_bridged_allow_set: None,
             budget: false,
             communication_context_provider: None,
             hook_dispatcher_builder_factory: None,
@@ -513,6 +514,17 @@ pub struct RebornIntegrationGroupBuilder {
     /// `.with_tool_disclosure_bridged()` has been called; `None` resolves via
     /// `ToolDisclosureMode::from_env()` in `into_group` (today's behavior).
     tool_disclosure: Option<ToolDisclosureMode>,
+    /// #5647 RED-pin seam: opt-in override of the `CapabilityAllowSet` used
+    /// in place of the forced `CapabilityAllowSet::All` that `into_group`
+    /// otherwise substitutes for any `tool_disclosure == Some(Bridged)`
+    /// group (see the `capability_surface_resolver` construction below).
+    /// `None` (default) preserves today's byte-identical forced-`All`
+    /// behavior for every existing bridged test. Only consumed when
+    /// `tool_disclosure == Some(Bridged)`; set via
+    /// `.with_narrowed_capability_allow_set_for_bridged_test()`
+    /// (`group_options.rs`). Setting this WITHOUT also selecting Bridged
+    /// mode is a harness-misuse footgun guarded fail-fast in `into_group`.
+    narrowed_bridged_allow_set: Option<CapabilityAllowSet>,
     /// C-BUDGET: when `true`, `into_group` wires the production
     /// `build_default_budget_accountant` (in-memory governor + gate store +
     /// zero-cost table + compiled-default seeding) into the group's ONE planned
@@ -603,6 +615,23 @@ impl RebornIntegrationGroupBuilder {
         base: GroupBaseData,
         capability: GroupCapability,
     ) -> HarnessResult<RebornIntegrationGroup> {
+        // Harness-seam misuse guard (§7): the narrowed allow-set override is
+        // only ever consumed inside the `tool_disclosure == Some(Bridged)`
+        // branch below. Setting it without also selecting Bridged mode would
+        // otherwise be a silent no-op — fail fast instead so a future test
+        // author gets an immediate, legible error rather than a false-negative
+        // test that never exercises the override it thinks it configured.
+        if self.narrowed_bridged_allow_set.is_some()
+            && self.tool_disclosure != Some(ToolDisclosureMode::Bridged)
+        {
+            return Err(
+                "with_narrowed_capability_allow_set_for_bridged_test() was set but \
+                 tool_disclosure is not Bridged — the override only applies to \
+                 bridged-disclosure groups; call .with_tool_disclosure_bridged() too"
+                    .into(),
+            );
+        }
+
         let scope_gateway = Arc::new(ScopeRegistryGateway::new());
 
         let turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>> =
@@ -642,7 +671,10 @@ impl RebornIntegrationGroupBuilder {
         let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
             if self.tool_disclosure == Some(ToolDisclosureMode::Bridged) {
                 Arc::new(StaticCapabilitySurfaceProfileResolver {
-                    allow_set: CapabilityAllowSet::All,
+                    allow_set: self
+                        .narrowed_bridged_allow_set
+                        .clone()
+                        .unwrap_or(CapabilityAllowSet::All),
                 })
             } else {
                 capability_surface_resolver
