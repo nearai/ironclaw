@@ -244,26 +244,6 @@ jobs:
           scripts/ci/install-ci-apt-packages.sh clang mold
           test -x /usr/bin/mold
 
-      - name: Restore Rust cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          # ONE shared cache for all ~60 crate-test jobs instead of a per-crate
-          # key. Per-crate keys produced ~60 caches (registry + target each,
-          # ~0.4-0.7 GB), which blew far past GitHub's ~10 GB repo cache LRU and
-          # evicted each other — so most jobs hit "No cache found", re-downloaded
-          # the crates.io registry from cold, and were exposed to transient
-          # download flakes (mitigated separately by .cargo/config.toml). A single
-          # shared key keeps the registry + shared-dep build in one small,
-          # always-resident entry, so the registry is downloaded once, not ~60x.
-          # Save only from the reborn-core bucket, which includes
-          # ironclaw_reborn_cli and therefore a broad Reborn binary dependency
-          # closure. GitHub caches are immutable, so the key is versioned to
-          # move off any previously seeded weak shared cache.
-          shared-key: reborn-tests-crates-h14-reborn-core
-          # Keep saves to protected-branch and merge_group runs so the ~10 GB
-          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
-          save-if: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group') && matrix.bucket.name == 'reborn-core' }}
-
       - name: Setup OVH sccache
         uses: ./.github/actions/setup-sccache-dist
         with:
