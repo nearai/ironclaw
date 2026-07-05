@@ -69,6 +69,8 @@ improving measured wall clock.
 | H13 | Remove the separate uninstrumented `reborn-group-tests` job and rely on the existing instrumented coverage `groups` lane for those same suites. | Reduce total Reborn jobs by one without dropping group-suite pass/fail coverage. | Retained | Accepted: total Reborn jobs dropped from `28` to `27`, and wall clock improved from `8m35s` to `8m21s`. |
 | H14 | Seed fresh shared Rust caches from deterministic broad producers: `reborn-core` for crate buckets and `groups` for coverage lanes. | Improve warm-start quality for compile-heavy jobs without adding jobs or changing coverage. | Retained | Accepted as a compile-time win: wall clock improved from H13 `8m21s` to `7m49s`; crate buckets improved materially, especially `reborn-core` `462s -> 160s`, but root tests became the long pole. |
 | H15 | Add a `cargo-hakari` workspace-hack crate to unify dependency feature sets across buckets. | Improve cross-bucket cache reuse by making shared dependency artifacts compatible across package feature combinations. | Feasibility review | Not a small config-only benchmark: no existing hakari metadata or workspace-hack crate; `cargo hakari` is not installed locally; this should be a separate dependency/lockfile-changing benchmark. |
+| H16 | Build a nightly dependency-warmed CI container image in GHCR and run heavy Reborn jobs inside it. | Escape GitHub cache LRU limits by pre-baking a broad warm target/dependency layer. | Feasibility review | Not safe to add as an inline benchmark: no existing Reborn dependency image path; requires package write permissions, GHCR retention policy, container hardening, and a separate seed/build workflow before PR timing is meaningful. |
+| H17 | Skip Reborn buckets by changed-file reverse dependency scope. | Improve average PR time by running only affected buckets while merge queue still runs everything. | Feasibility review | Not a compile-time benchmark for the current full-PR target: current scope detection is all-or-nothing for Reborn, and safe bucket-level skipping needs crate ownership plus reverse-dependency mapping before it can be trusted. |
 | H18 | Increase Reborn root-test partitions from 4 to 6. | Shave the new post-H14 root-test long pole without changing test coverage. | Tested | Rejected: wall clock regressed from H14 `7m49s` to `10m41s`; the slowest root partition worsened from `450s` to `595s`. |
 
 ## H1: Narrow Crate Bucket Targets
@@ -844,6 +846,68 @@ Benchmark status:
 - Not started in this branch state. Treat as a separate H15 benchmark PR or a
   follow-up commit only after deciding that dependency/lockfile churn is
   acceptable for the CI optimization experiment.
+
+## H16: Nightly Dependency-Warmed GHCR Image
+
+Advice under review:
+
+- Build a nightly container image that pre-warms the Rust dependency/target
+  layer, push it to GHCR, and run heavy Reborn jobs with `container:` so jobs
+  start from a deterministic warm build image instead of relying on the 10 GB
+  GitHub Actions cache.
+
+Red-team notes:
+
+- There is no existing Reborn dependency-image workflow or Dockerfile target in
+  this branch. Existing Docker workflows build product/release images and use
+  GitHub Actions cache, but they do not publish a Rust target-dir warm-start
+  image for PR jobs.
+- A meaningful benchmark needs two phases:
+  - seed/build a GHCR image from `main` or `Cargo.lock` changes, then
+  - run PR jobs inside that image and compare against the same Reborn workflow
+    baseline.
+- Adding this inline to PR #5648 would mix infrastructure work, package write
+  permissions, image retention policy, container hardening, and benchmark
+  measurement into one CI optimization PR.
+- A target-dir baked into an image can be brittle across absolute paths,
+  toolchain hashes, feature sets, and `RUSTFLAGS`; a bad image can turn into a
+  large pull plus a full rebuild.
+
+Benchmark status:
+
+- Not started in this PR. Treat as a separate H16 infrastructure benchmark with
+  explicit rollback criteria: image pull time, cache-hit proof, image size,
+  GHCR permissions, and before/after wall clock for the same heavy Reborn jobs.
+
+## H17: Per-Bucket Change Detection Skipping
+
+Advice under review:
+
+- Extend scope detection from all-or-nothing Reborn CI to bucket-level
+  selection based on changed files, owning crates, and reverse dependencies.
+
+Red-team notes:
+
+- The current `scripts/ci/classify-test-scope.sh` emits broad booleans:
+  `docs_only`, `has_core_code`, `has_legacy_tests`, and `has_reborn_tests`.
+  It does not emit crate ownership, reverse-dependency closures, bucket names,
+  or lane selections.
+- This is an average-case PR optimization, not a compile-time reduction for the
+  current "run everything on every PR" target. A typical small PR may improve a
+  lot, but the full Reborn suite wall clock remains unchanged when Reborn-wide
+  paths or shared crates change.
+- The safety risk is higher than H14/H18 because a bad mapping skips tests
+  instead of only changing cache quality or partition count.
+- Merge-group full-suite execution is a useful safety valve, but it would move
+  some regressions from PR feedback to merge-queue feedback unless the mapping
+  is very conservative.
+
+Benchmark status:
+
+- Not started in this PR. Treat as a separate H17 safety-first benchmark:
+  first add a dry-run classifier that reports selected buckets without skipping
+  them, compare selected buckets against actual changed crates across recent
+  PRs, then enable skipping only after the dry-run data is convincing.
 
 ## H18: Increase Root-Test Partitions
 
