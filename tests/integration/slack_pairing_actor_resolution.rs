@@ -1,31 +1,16 @@
-//! Reborn integration-test framework — W5-SLACK-PAIR scenarios 3+4 (narrowed):
-//! `SlackPairingActorResolver` actor resolution.
+//! W5-SLACK-PAIR scenarios 3+4 (narrowed): `SlackPairingActorResolver` actor
+//! resolution. Does not follow build/submit_turn/assert (see CLAUDE.md) —
+//! same rationale as `slack_pairing_redeem.rs`.
 //!
-//! Deliberately does not follow the `build → submit_turn → assert` shape
-//! (see `tests/integration/CLAUDE.md`) — same rationale as
-//! `slack_pairing_redeem.rs`, whose header comment this mirrors.
+//! A live `submit_turn` path is blocked on two harness gaps (no
+//! `ResolveActor` binding-policy double; resolver wiring lives only behind
+//! `build_reborn_runtime`). Proves `resolve_product_actor_user` resolves a
+//! paired actor and auto-issues a challenge for an unpaired one (folds in
+//! scenario 4).
 //!
-//! Per the W5-SLACK-PAIR plan, driving a paired Slack actor's message all
-//! the way through a live `submit_turn` is blocked on two independent gaps
-//! (the harness's `ConversationBindingService` double has no
-//! `ProductActorBindingPolicy::ResolveActor` concept, and the resolver-bearing
-//! wiring lives only behind `ironclaw_reborn_composition::build_reborn_runtime`,
-//! which the int-tier harness never calls). The substitute proven here is
-//! fully reachable today and honestly scoped: it proves
-//! `SlackPairingActorResolver::resolve_product_actor_user` resolves a paired
-//! actor to the right `UserId`, and that an unpaired actor resolves to `None`
-//! while auto-issuing a pairing challenge as a side effect (the "unpaired ⇒
-//! rejected" scenario 4 folds into this arm, per the plan — the caller-side
-//! `ProductWorkflowError::BindingRequired` mapping lives in a private
-//! `ironclaw_product_workflow` free function and is out of scope here).
-//!
-//! Store backend: the real `FilesystemSlackHostState` over a CAS-capable
-//! `InMemoryBackend` (a plain `LocalFilesystem` cannot back this store — the
-//! redeem/consume path's versioned-CAS write is `Unsupported` there). The
-//! sibling `slack_pairing_redeem.rs` binary owns the on-disk durability
-//! proof over libSQL; re-proving durability here would be redundant, and
-//! staying on `InMemoryBackend` keeps this binary free of the `libsql`
-//! feature requirement.
+//! Uses `InMemoryBackend`, not `LocalFilesystem`: the consume path's
+//! versioned-CAS write is `Unsupported` on `LocalFilesystem`. Durability is
+//! proven by the sibling `slack_pairing_redeem.rs` over libSQL instead.
 
 use std::sync::Arc;
 
@@ -170,9 +155,8 @@ async fn slack_pairing_actor_resolver_issues_challenge_for_unpaired_actor() {
     );
 
     // Side effect: the resolver's fallback minted a fresh pairing challenge
-    // for the unpaired actor (the "auto-issue on first unpaired message"
-    // behavior) — read the code back via the notifier and confirm the real
-    // store now has a pending challenge for it.
+    // for the unpaired actor — read it back via the notifier and confirm the
+    // real store now has a pending challenge for it.
     let code = notifier.last_code();
     let challenge = challenge_store
         .get_challenge(&code)

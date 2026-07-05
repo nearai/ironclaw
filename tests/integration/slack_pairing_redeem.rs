@@ -1,33 +1,13 @@
-//! Reborn integration-test framework — W5-SLACK-PAIR scenarios 1+2: Slack
-//! personal-binding pairing-code redeem.
+//! W5-SLACK-PAIR scenarios 1+2: Slack personal-binding pairing-code redeem.
+//! Does not follow build/submit_turn/assert (see CLAUDE.md) — drives real
+//! service logic + a real durable store, no live turn.
 //!
-//! Deliberately does not follow the `build → submit_turn → assert` shape
-//! every other `reborn_integration_*.rs` binary uses (see
-//! `tests/integration/CLAUDE.md`): this scenario drives real service logic +
-//! a real durable store, but never a live turn. Same spirit as
-//! `oauth_connect.rs` (assertion-focused, no harness), and this binary class
-//! is the one the `reborn-integration-coverage` job executes, so it is the
-//! vehicle chosen to move Slack host-beta pairing off its
-//! previously-invisible 0% (see the W5-SLACK-PAIR plan's
-//! "coverage-instrumentation scope" finding).
+//! Uses `LibSqlRootFilesystem`, not `LocalFilesystem`: the consume path's
+//! versioned-CAS write is `Unsupported` on `LocalFilesystem` (see local.rs).
 //!
-//! Wires the real `FilesystemSlackHostState` (via the test-support Enabler §1
-//! accessor — the only production-crate addition this file depends on; no
-//! behavior change) behind the real `SlackPersonalUserBindingService` /
-//! `SlackPersonalBindingPairingService`, over a real on-disk
-//! `LibSqlRootFilesystem` — the same durable-backend class production mounts
-//! this store on (`slack_host_state.rs` module docs: "backed by the selected
-//! durable root filesystem in libSQL/Postgres builds"; a plain
-//! `LocalFilesystem` cannot back it — the consume path's versioned-CAS write
-//! is `Unsupported` there). Proves the redeem happy path, that the resulting
-//! binding survives a genuinely fresh database connection to the same
-//! on-disk file (real durability, mirroring the harness's
-//! `assert_reply_persists_after_reopen` recipe), and that an unknown or
-//! expired code is rejected — the one seam nothing else in the codebase
-//! proves end-to-end with a real store (per the plan's coverage inventory:
-//! the pairing service and HTTP route are each already exhaustively covered
-//! crate-tier with fakes, and the store is covered crate-tier in isolation,
-//! but never all three wired together).
+//! Proves the redeem happy path, durability across a fresh-connection
+//! reopen, and rejection of an unknown/expired code — the one seam wiring
+//! the pairing service + store together with a real backend end-to-end.
 
 use std::{sync::Arc, time::Duration};
 
@@ -68,10 +48,9 @@ impl SlackPersonalBindingPairingNotifier for NoopPairingNotifier {
     }
 }
 
-/// The three trait facets of one real `FilesystemSlackHostState` a pairing
-/// test needs — the concrete type is deliberately not nameable outside the
-/// composition crate, so tests hold only these trait objects, exactly as
-/// production wiring does at `slack_host_beta.rs`.
+/// The three trait facets of one real `FilesystemSlackHostState` — the
+/// concrete type isn't nameable outside the composition crate, so tests hold
+/// only these trait objects, as production wiring does at `slack_host_beta.rs`.
 struct SlackPairingStore {
     challenges: Arc<dyn SlackPersonalBindingPairingChallengeStore>,
     bindings: Arc<dyn RebornUserIdentityBindingStore>,
@@ -83,11 +62,9 @@ fn slack_user_id() -> SlackUserId {
 }
 
 /// Opens (or reopens) a real libSQL database at `db_path` and mounts a real
-/// `FilesystemSlackHostState` over it. Mirrors the crate-tier `libsql_state()`
-/// helper and the harness's `assert_reply_persists_after_reopen`
-/// fresh-connection recipe: each call builds an independent
+/// `FilesystemSlackHostState` over it. Each call builds an independent
 /// `libsql::Database`, so calling it twice on one path proves on-disk
-/// durability, not shared in-process state. Migrations are idempotent.
+/// durability, not shared in-process state.
 async fn open_slack_pairing_store(
     db_path: &std::path::Path,
     pairing_ttl: Option<Duration>,
@@ -135,9 +112,8 @@ fn principal(user_id: UserId) -> SlackPersonalBindingPrincipal {
 }
 
 /// Resolves the bound user through the same public path scenario 3/4 uses
-/// (`SlackPairingActorResolver`), rather than reaching for the crate-private
-/// identity-provider string constant — this exercises the reopened store
-/// through a fully public API surface.
+/// (`SlackPairingActorResolver`), exercising the reopened store through a
+/// fully public API surface.
 async fn resolved_user_id(store: &SlackPairingStore) -> Option<UserId> {
     let resolver = SlackPairingActorResolver::new(store.lookup.clone(), pairing_service(store));
     let request = ProductActorUserResolutionRequest::new(
@@ -192,10 +168,9 @@ async fn slack_pairing_redeem_binds_and_persists_identity_across_reopen() {
         "a consumed code must not be redeemable a second time; got {second_redeem:?}"
     );
 
-    // Reopen: drop the live store/service entirely, then open a genuinely
-    // fresh `libsql::Database` connection to the same on-disk file — data not
-    // serialized to disk cannot appear, proving real durability (the same
-    // recipe as the harness's `assert_reply_persists_after_reopen`).
+    // Reopen: drop the live store/service, then open a genuinely fresh
+    // `libsql::Database` connection to the same on-disk file — data not
+    // serialized to disk cannot appear, proving real durability.
     drop(service);
     drop(store);
     let reopened = open_slack_pairing_store(&db_path, None).await;

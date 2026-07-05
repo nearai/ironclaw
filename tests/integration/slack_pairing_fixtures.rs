@@ -1,13 +1,7 @@
 //! Shared fixtures for the W5-SLACK-PAIR sibling binaries
-//! (`slack_pairing_redeem.rs`, `slack_pairing_actor_resolution.rs`).
-//!
-//! Both binaries are deliberately self-contained (no `tests/integration/support/`
-//! harness — see each file's own header comment for why), so this is a narrow
-//! `#[path]`-mounted sibling file rather than a new module registered in the
-//! large shared `support/mod.rs` tree: it exists only to avoid the two
-//! binaries drifting on the one tenant/installation/mount-view/binding-service
-//! fixture shape they both need, not to pull either one into the general
-//! harness.
+//! (`slack_pairing_redeem.rs`, `slack_pairing_actor_resolution.rs`) — a
+//! `#[path]`-mounted sibling file, not a `support/mod.rs` module, so the two
+//! self-contained binaries don't drift on their shared fixture shape.
 
 use std::sync::Arc;
 
