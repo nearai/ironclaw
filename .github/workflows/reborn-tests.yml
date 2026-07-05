@@ -618,10 +618,16 @@ jobs:
 
   coverage-report:
     name: Reborn integration-tier coverage report
-    needs: [changes, reborn-integration-coverage]
+    # crate-tests added alongside reborn-integration-coverage: this job now
+    # merges lcov from BOTH the int-tier lanes and the instrumented crate-tier
+    # bucket matrix. Still pure lcov-text processing (download artifacts,
+    # merge, render, upsert comment) — no cargo test / cargo llvm-cov ... test
+    # invocation anywhere in this job, by construction, so the <=10 minute SLA
+    # below holds regardless of which upstream job's artifacts are largest.
+    needs: [changes, reborn-integration-coverage, crate-tests]
     if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     permissions:
       contents: read
       # The sticky coverage comment upserts a PR comment via the issues API.
@@ -640,13 +646,20 @@ jobs:
           path: coverage-parts
           merge-multiple: true
 
-      - name: Merge lane lcov reports
+      - name: Download crate bucket lcov artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: reborn-crate-cov-bucket-*
+          path: coverage-parts
+          merge-multiple: true
+
+      - name: Merge lane and bucket lcov reports
         run: |
           set -euo pipefail
           shopt -s nullglob
           parts=(coverage-parts/*.lcov)
           if [ "${#parts[@]}" -eq 0 ]; then
-            echo "No Reborn integration coverage lane artifacts found" >&2
+            echo "No Reborn coverage artifacts found (neither integration-tier lanes nor crate-tier buckets)" >&2
             exit 1
           fi
           scripts/ci/reborn-coverage-merge-lcov.sh reborn-integration-merged.lcov "${parts[@]}"
@@ -826,8 +839,8 @@ jobs:
             exit 1
           fi
 
-          # coverage-report only merges lane lcov files and renders/posts the
-          # informational summary — it never re-runs tests, so a failure here
+          # coverage-report only merges lane + crate-bucket lcov files and
+          # renders/posts the informational summary — it never re-runs tests, so a failure here
           # is a reporting-pipeline bug, not a test regression. Warn instead of
           # failing the roll-up: the coverage signal has no ratchet/threshold
           # yet, and the underlying tests are already gated above.
