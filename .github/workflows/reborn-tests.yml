@@ -255,16 +255,14 @@ jobs:
           # download flakes (mitigated separately by .cargo/config.toml). A single
           # shared key keeps the registry + shared-dep build in one small,
           # always-resident entry, so the registry is downloaded once, not ~60x.
-          # H14 benchmark: use a fresh key and save only from the reborn-core
-          # bucket, which includes ironclaw_reborn_cli and therefore a broad
-          # Reborn binary dependency closure. GitHub caches are immutable, so a
-          # fresh key is required to measure whether deterministic superset
-          # seeding is better than the previous shared-key race.
+          # Save only from the reborn-core bucket, which includes
+          # ironclaw_reborn_cli and therefore a broad Reborn binary dependency
+          # closure. GitHub caches are immutable, so the key is versioned to
+          # move off any previously seeded weak shared cache.
           shared-key: reborn-tests-crates-h14-reborn-core
-          # Production saves still only happen on protected queues. The
-          # workflow_dispatch branch exception exists only so this benchmark PR
-          # can seed the fresh H14 key and then measure a second run.
-          save-if: ${{ (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group') && matrix.bucket.name == 'reborn-core') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/ci-compile-benchmarks' && matrix.bucket.name == 'reborn-core') }}
+          # Keep saves to protected-branch and merge_group runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
+          save-if: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group') && matrix.bucket.name == 'reborn-core' }}
 
       - name: Setup OVH sccache
         uses: ./.github/actions/setup-sccache-dist
@@ -444,15 +442,14 @@ jobs:
           # cache LRU. A dedicated key (never the plain `reborn-tests-*` keys
           # above) keeps an instrumented (llvm-cov) build from ever evicting
           # or being evicted by a plain one — the artifacts are incompatible.
-          # H14 benchmark: use a fresh key and save only from the groups lane.
-          # That lane exercises the broad shared-store integration graph and
-          # should be a better deterministic seed than whichever lane happens
-          # to finish first.
+          # Save only from the groups lane. That lane exercises the broad
+          # shared-store integration graph and should be a better deterministic
+          # seed than whichever lane happens to finish first. The key is
+          # versioned to move off any previously seeded weak shared cache.
           shared-key: reborn-integration-cov-h14-groups
-          # Production saves still only happen on protected queues. The
-          # workflow_dispatch branch exception exists only so this benchmark PR
-          # can seed the fresh H14 key and then measure a second run.
-          save-if: ${{ (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group') && matrix.lane == 'groups') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/ci-compile-benchmarks' && matrix.lane == 'groups') }}
+          # Keep saves to protected-branch and merge_group runs so the ~10 GB
+          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
+          save-if: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group') && matrix.lane == 'groups' }}
 
       - name: Setup OVH sccache cache
         uses: ./.github/actions/setup-sccache-dist

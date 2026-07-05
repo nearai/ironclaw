@@ -67,7 +67,7 @@ improving measured wall clock.
 | H11 | Move libSQL-heavy coverage out of broad long-pole crate buckets into the existing Reborn group job. | Reduce compile graph size for `host-runtime` and `reborn-core` without dropping persistence coverage or adding a new job. | Tested | Rejected: wall clock regressed from `8m35s` to `9m50s`; `host-runtime`, `reborn-core`, and `composition-core` were all slower. |
 | H12 | Move `ironclaw_reborn_cli` from `reborn-core` to `webui-ingress`. | Keep job count flat while grouping the WebUI-shaped CLI build with the WebUI ingress bucket instead of the core Reborn bucket. | Tested | Rejected: `reborn-core` improved from `367s` to `238s`, but `webui-ingress` grew from `334s` to `377s`; wall clock stayed flat at `8m37s` with no job-count reduction. |
 | H13 | Remove the separate uninstrumented `reborn-group-tests` job and rely on the existing instrumented coverage `groups` lane for those same suites. | Reduce total Reborn jobs by one without dropping group-suite pass/fail coverage. | Retained | Accepted: total Reborn jobs dropped from `28` to `27`, and wall clock improved from `8m35s` to `8m21s`. |
-| H14 | Seed fresh shared Rust caches from deterministic broad producers: `reborn-core` for crate buckets and `groups` for coverage lanes. | Improve warm-start quality for compile-heavy jobs without adding jobs or changing coverage. | Running | Two-run benchmark in progress: first run seeds fresh H14 cache keys, second run measures restore benefit. |
+| H14 | Seed fresh shared Rust caches from deterministic broad producers: `reborn-core` for crate buckets and `groups` for coverage lanes. | Improve warm-start quality for compile-heavy jobs without adding jobs or changing coverage. | Retained | Accepted as a compile-time win: wall clock improved from H13 `8m21s` to `7m49s`; crate buckets improved materially, especially `reborn-core` `462s -> 160s`, but root tests became the long pole. |
 
 ## H1: Narrow Crate Bucket Targets
 
@@ -769,5 +769,51 @@ Benchmark method:
 Benchmark result:
 
 - Branch/PR: [`codex/ci-compile-benchmarks`, PR #5648](https://github.com/nearai/ironclaw/pull/5648)
-- Seed workflow run: pending.
-- Measurement workflow run: pending.
+- Seed workflow run: [`28730811648`](https://github.com/nearai/ironclaw/actions/runs/28730811648)
+- Measurement workflow run: [`28731057678`](https://github.com/nearai/ironclaw/actions/runs/28731057678)
+- Measurement status: success.
+- Measurement wall clock: `7m49s`
+  (`2026-07-05T05:45:20Z` to `2026-07-05T05:53:09Z`).
+- Total Reborn jobs: `27`, unchanged from H13.
+- Reborn crate bucket jobs: `12`, unchanged.
+
+Cache evidence:
+
+- Seed run: `reborn-core` had `save-if: true` for
+  `reborn-tests-crates-h14-reborn-core` and reached `... Saving cache ...`;
+  sampled non-producer `auth-security` had `save-if: false`.
+- Seed run: coverage `groups` had `save-if: true` for
+  `reborn-integration-cov-h14-groups` and reached `... Saving cache ...`;
+  sampled non-producer coverage lane `1` had `save-if: false`.
+- Measurement run: `host-runtime` and `composition-core` restored a full-match
+  `reborn-tests-crates-h14-reborn-core` cache, size about `1138 MB`.
+- Measurement run: coverage `groups` restored a full-match
+  `reborn-integration-cov-h14-groups` cache, size about `844 MB`.
+
+| Metric | Baseline | H13 | H14 measurement | Delta vs H13 |
+| --- | ---: | ---: | ---: | ---: |
+| Reborn workflow wall clock | `8m35s` | `8m21s` | `7m49s` | `-32s` |
+| Total Reborn jobs | `28` | `27` | `27` | `0` |
+| Reborn crate bucket jobs | `12` | `12` | `12` | `0` |
+| `reborn-core` | `367s` | `462s` | `160s` | `-302s` |
+| `composition-core` | `419s` | `457s` | `308s` | `-149s` |
+| `host-runtime` | `473s` | `438s` | `373s` | `-65s` |
+| `webui-ingress` | `334s` | `304s` | `243s` | `-61s` |
+| `wasm-sandbox` | `307s` | `300s` | `255s` | `-45s` |
+| `Reborn integration coverage (groups)` | `325s` | `391s` | `265s` | `-126s` |
+| Slowest job | `host-runtime` `473s` | `reborn-core` `462s` | root `0` `450s` | root-bound |
+
+Seed-run note:
+
+- The seed run itself was slow: `10m53s`. That is expected for fresh immutable
+  cache keys and is not the H14 steady-state measurement.
+
+Decision:
+
+- Retain the deterministic producer save policy. It does not deliver the
+  advice's optimistic `~6.3m` wall-clock estimate, but it materially improves
+  the compile-heavy crate buckets and coverage lanes without changing coverage
+  or adding jobs.
+- After H14, root tests are the measured long pole. This strengthens the advice
+  that root partitioning/nextest only becomes interesting after cache quality
+  improves.
