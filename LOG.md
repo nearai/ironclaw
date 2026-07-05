@@ -217,3 +217,69 @@ Budgets: 10 hours wall-clock / $0 spend
   Postgres regressions from baseline state-hash noise. Full acceptance still
   requires launch-ref and hosted request/turn coverage before making
   `goal.md`, `spec.md`, or the harness read-only.
+
+## Cycle 6 - Stabilize Setup And Add Trigger Store Coverage
+
+- Score (dev): Current committed dev score passes every comparison for
+  Postgres pool sizes 1 and 2 with zero Postgres errors and matching state
+  hashes.
+- Probe gap: `probe.sh` can still produce libSQL baseline
+  `bad parameter or other API misuse` errors under high-concurrency
+  `put_get`/`query_exact`, causing state-hash hard failures even when
+  Postgres has zero errors and matching semantics. One probe invocation also
+  exited with `Trace/BPT trap`, but an immediate rerun completed, pointing to
+  an intermittent libSQL/runtime baseline issue rather than deterministic
+  Postgres behavior.
+- Hypothesis: The remaining probe failures are shared-prefix setup noise,
+  fixed-parent path races, and mixed query/write semantics: measured samples
+  lazily materialize the same workload directories and `query_exact` writes
+  seed records inside the timed span. Pre-creating each sample's prefix/fixed
+  parent during setup and making `query_exact` read-only after setup should
+  remove the parent-directory race and libSQL concurrent writer noise without
+  changing the measured durable leaf writes for `put_get`, `append_tail`, or
+  `reserve_sequence`.
+- Expected failure mode: Pre-creating too much of the sample path or moving the
+  wrong writes out of the timed span would remove real durable work from
+  `put_get`, `query_exact`, `append_tail`, or `reserve_sequence` and make the
+  harness easier than production. Only the workload prefix, fixed parent
+  directory, and query fixture records may be created during setup;
+  sample-specific put/get entries, append streams, and sequence rows must still
+  be written inside the measured span.
+- Diagnostic: Rerun `probe.sh` and confirm libSQL baseline errors/state-hash
+  mismatches disappear without any Postgres regression. Add a durable trigger
+  repository workload to cover the next hosted-profile row store rather than
+  continuing to tune only filesystem hot paths.
+- Change: Added bounded setup retries for workload prefix/fixed-parent
+  creation and index creation, moved `query_exact` seed records into setup so
+  the timed operation is a pure indexed query, and added `trigger_seed_list`
+  over the real libSQL and Postgres `TriggerRepository` implementations. The
+  trigger workload upserts a scheduled trigger, lists by tenant, and lists by
+  scoped tenant/user/agent/project, with state isolated by backend, pool size,
+  run ID, and sample so pool-size comparisons do not share durable rows. The
+  trigger Postgres repository now uses deadpool's per-connection
+  `prepare_cached` path for the hot fixed upsert/list/list-scoped SQL, matching
+  the existing filesystem Postgres optimization pattern and avoiding a parse
+  round trip on every trigger management operation.
+- Result: `cargo fmt -p ironclaw_triggers --check` and `cargo fmt
+  --manifest-path harness/latency/runner/Cargo.toml --check` pass after
+  formatting. `cargo check --manifest-path harness/latency/runner/Cargo.toml`
+  passes with the pre-existing `OutboundDeliveryTargetEntry` unused-import
+  warning. `cargo test -p ironclaw_triggers --features libsql,postgres` passes
+  (149 tests/doc-tests). A focused `trigger_seed_list` score at concurrency 4
+  passes with zero errors and matching state hashes; after cached statements,
+  Postgres pool 1 p50/p95 is 2.06/2.98 ms versus libSQL 2.70/5.37 ms, and
+  Postgres pool 2 p50/p95 is 1.01/1.37 ms. A focused `put_get` rerun with the
+  required default pool set 1 and 2 passes after a previous full-run pool-2 p99
+  outlier; a pool-size-2-only diagnostic run was correctly voided by lint. The
+  final full dev score passes all expanded workloads (`put_get`,
+  `query_exact`, `append_tail`, `reserve_sequence`, `trigger_seed_list`, and
+  `hosted_substrate_build`) for Postgres pool sizes 1 and 2 with zero errors,
+  matching state hashes, and no hard failures. `probe.sh` also completes with
+  zero errors, matching state hashes, and no hard failures across concurrency
+  1, 3, and 8.
+- Reflection: The libSQL baseline flake is no longer blocking dev/probe signal,
+  and the scorer now covers one real row-based hosted store beyond the root
+  filesystem and substrate construction. The next cycles should add launch-ref
+  baseline capture, WebUI/session readiness, local-runtime turn
+  admission/queue/resume/cancel, and approvals/secrets/resource snapshot paths
+  before treating the harness as acceptance-ready.

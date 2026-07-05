@@ -15,8 +15,10 @@ ironclaw_host_api = { path = "../../../crates/ironclaw_host_api" }
 ironclaw_reborn_composition = { path = "../../../crates/ironclaw_reborn_composition", features = ["libsql", "postgres"] }
 ironclaw_reborn_event_store = { path = "../../../crates/ironclaw_reborn_event_store", features = ["libsql", "postgres"] }
 ironclaw_secrets = { path = "../../../crates/ironclaw_secrets" }
+ironclaw_triggers = { path = "../../../crates/ironclaw_triggers", features = ["libsql", "postgres"] }
 ironclaw_trust = { path = "../../../crates/ironclaw_trust" }
 ironclaw_turns = { path = "../../../crates/ironclaw_turns" }
+chrono = "0.4"
 libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }

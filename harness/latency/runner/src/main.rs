@@ -3,14 +3,15 @@ use std::env;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
 use ironclaw_filesystem::{
     CasExpectation, Entry, Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue,
     LibSqlRootFilesystem, Page, PostgresRootFilesystem, RootFilesystem, SeqNo,
 };
 use ironclaw_host_api::VirtualPath;
 use ironclaw_host_api::{
-    AuditMode, DeploymentMode, FilesystemBackendKind, NetworkMode, ProcessBackendKind,
-    RuntimeProfile, SecretMode,
+    AgentId, AuditMode, DeploymentMode, FilesystemBackendKind, NetworkMode, ProcessBackendKind,
+    ProjectId, RuntimeProfile, SecretMode, TenantId, UserId,
     runtime_policy::{ApprovalPolicy, EffectiveRuntimePolicy},
 };
 use ironclaw_host_runtime::{
@@ -23,6 +24,10 @@ use ironclaw_reborn_composition::{
     build_postgres_production_host_runtime_services,
 };
 use ironclaw_reborn_event_store::RebornEventStoreConfig;
+use ironclaw_triggers::{
+    LibSqlTriggerRepository, PostgresTriggerRepository, TriggerId, TriggerRecord,
+    TriggerRepository, TriggerSchedule, TriggerSourceKind, TriggerState,
+};
 use ironclaw_turns::{TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError};
 use serde::Serialize;
 use tokio::sync::Semaphore;
@@ -55,6 +60,7 @@ enum WorkloadKind {
     QueryExact,
     AppendTail,
     ReserveSequence,
+    TriggerSeedList,
     HostedSubstrateBuild,
 }
 
@@ -139,18 +145,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             kind: WorkloadKind::ReserveSequence,
         },
         Workload {
+            name: "trigger_seed_list",
+            kind: WorkloadKind::TriggerSeedList,
+        },
+        Workload {
             name: "hosted_substrate_build",
             kind: WorkloadKind::HostedSubstrateBuild,
         },
     ]);
 
     let mut results = Vec::new();
-    let libsql_fs = open_backend(BackendName::Libsql, None).await?;
+    let libsql_backend = open_backend(BackendName::Libsql, None).await?;
     let libsql_run_id = uuid::Uuid::new_v4().simple().to_string();
     for &workload in &workloads {
         for &concurrency in &concurrency {
             let row = run_workload(
-                Arc::clone(&libsql_fs),
+                libsql_backend.clone(),
                 BackendName::Libsql,
                 None,
                 &libsql_run_id,
@@ -167,12 +177,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     for &postgres_pool_size in &postgres_pool_sizes {
-        let postgres_fs = open_backend(BackendName::Postgres, Some(postgres_pool_size)).await?;
+        let postgres_backend =
+            open_backend(BackendName::Postgres, Some(postgres_pool_size)).await?;
         let postgres_run_id = uuid::Uuid::new_v4().simple().to_string();
         for &workload in &workloads {
             for &concurrency in &concurrency {
                 let row = run_workload(
-                    Arc::clone(&postgres_fs),
+                    postgres_backend.clone(),
                     BackendName::Postgres,
                     Some(postgres_pool_size),
                     &postgres_run_id,
@@ -211,18 +222,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[derive(Clone)]
+struct BackendContext {
+    fs: Arc<dyn RootFilesystem>,
+    trigger_repository: Arc<dyn TriggerRepository>,
+}
+
 async fn open_backend(
     backend: BackendName,
     postgres_pool_size: Option<usize>,
-) -> Result<Arc<dyn RootFilesystem>, Box<dyn std::error::Error>> {
+) -> Result<BackendContext, Box<dyn std::error::Error>> {
     match backend {
         BackendName::Libsql => {
             let dir = tempfile::tempdir()?;
             let db_path = dir.keep().join("latency-libsql.db");
             let db = Arc::new(libsql::Builder::new_local(db_path).build().await?);
-            let fs = LibSqlRootFilesystem::new(db);
+            let fs = LibSqlRootFilesystem::new(Arc::clone(&db));
             fs.run_migrations().await?;
-            Ok(Arc::new(fs))
+            let trigger_repository = LibSqlTriggerRepository::new(db);
+            trigger_repository.run_migrations().await?;
+            Ok(BackendContext {
+                fs: Arc::new(fs),
+                trigger_repository: Arc::new(trigger_repository),
+            })
         }
         BackendName::Postgres => {
             let url = env::var("IRONCLAW_REBORN_POSTGRES_URL").unwrap_or_else(|_| {
@@ -236,15 +258,20 @@ async fn open_backend(
                         .unwrap_or_else(|| env_usize("IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE", 2)),
                 )
                 .build()?;
-            let fs = PostgresRootFilesystem::new(pool);
+            let fs = PostgresRootFilesystem::new(pool.clone());
             fs.run_migrations().await?;
-            Ok(Arc::new(fs))
+            let trigger_repository = PostgresTriggerRepository::new(pool);
+            trigger_repository.run_migrations().await?;
+            Ok(BackendContext {
+                fs: Arc::new(fs),
+                trigger_repository: Arc::new(trigger_repository),
+            })
         }
     }
 }
 
 async fn run_workload(
-    fs: Arc<dyn RootFilesystem>,
+    backend_context: BackendContext,
     backend: BackendName,
     postgres_pool_size: Option<usize>,
     run_id: &str,
@@ -256,9 +283,18 @@ async fn run_workload(
     payload_bytes: &[usize],
 ) -> Result<ResultRow, Box<dyn std::error::Error>> {
     for i in 0..warmup {
-        setup_workload(Arc::clone(&fs), backend, run_id, workload, i, path_depths).await?;
+        setup_workload(
+            backend_context.clone(),
+            backend,
+            run_id,
+            workload,
+            i,
+            path_depths,
+            payload_bytes,
+        )
+        .await?;
         let _ = run_one(
-            Arc::clone(&fs),
+            backend_context.clone(),
             backend,
             postgres_pool_size,
             run_id,
@@ -275,23 +311,24 @@ async fn run_workload(
     let mut tasks = Vec::with_capacity(samples);
     for i in 0..samples {
         setup_workload(
-            Arc::clone(&fs),
+            backend_context.clone(),
             backend,
             run_id,
             workload,
             i + warmup,
             path_depths,
+            payload_bytes,
         )
         .await?;
         let permit = Arc::clone(&sem).acquire_owned().await?;
-        let fs = Arc::clone(&fs);
+        let backend_context = backend_context.clone();
         let run_id = run_id.to_string();
         let path_depths = path_depths.to_vec();
         let payload_bytes = payload_bytes.to_vec();
         tasks.push(tokio::spawn(async move {
             let _permit = permit;
             run_one(
-                fs,
+                backend_context,
                 backend,
                 postgres_pool_size,
                 &run_id,
@@ -353,7 +390,7 @@ struct Sample {
 }
 
 async fn run_one(
-    fs: Arc<dyn RootFilesystem>,
+    backend_context: BackendContext,
     backend: BackendName,
     postgres_pool_size: Option<usize>,
     run_id: &str,
@@ -367,10 +404,26 @@ async fn run_one(
     let prefix = workload_prefix(backend, run_id, workload.name, depth)?;
     let started = Instant::now();
     let state = match workload.kind {
-        WorkloadKind::PutGet => put_get(fs, &prefix, sample, payload_len).await?,
-        WorkloadKind::QueryExact => query_exact(fs, &prefix, sample, payload_len).await?,
-        WorkloadKind::AppendTail => append_tail(fs, &prefix, sample, payload_len).await?,
-        WorkloadKind::ReserveSequence => reserve_sequence(fs, &prefix, sample).await?,
+        WorkloadKind::PutGet => put_get(backend_context.fs, &prefix, sample, payload_len).await?,
+        WorkloadKind::QueryExact => {
+            query_exact(backend_context.fs, &prefix, sample, payload_len).await?
+        }
+        WorkloadKind::AppendTail => {
+            append_tail(backend_context.fs, &prefix, sample, payload_len).await?
+        }
+        WorkloadKind::ReserveSequence => {
+            reserve_sequence(backend_context.fs, &prefix, sample).await?
+        }
+        WorkloadKind::TriggerSeedList => {
+            trigger_seed_list(
+                backend_context.trigger_repository,
+                backend,
+                postgres_pool_size,
+                run_id,
+                sample,
+            )
+            .await?
+        }
         WorkloadKind::HostedSubstrateBuild => {
             hosted_substrate_build(backend, sample, postgres_pool_size).await?
         }
@@ -382,27 +435,94 @@ async fn run_one(
 }
 
 async fn setup_workload(
-    fs: Arc<dyn RootFilesystem>,
+    backend_context: BackendContext,
     backend: BackendName,
     run_id: &str,
     workload: Workload,
     sample: usize,
     path_depths: &[usize],
+    payload_bytes: &[usize],
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if matches!(
+        workload.kind,
+        WorkloadKind::TriggerSeedList | WorkloadKind::HostedSubstrateBuild
+    ) {
+        return Ok(());
+    }
+
     let depth = path_depths[sample % path_depths.len()].max(1);
     let prefix = workload_prefix(backend, run_id, workload.name, depth)?;
-    if matches!(workload.kind, WorkloadKind::QueryExact) {
-        fs.ensure_index(
-            &prefix,
-            &IndexSpec::new(
-                IndexName::new("bucket_exact")?,
-                vec![IndexKey::new("bucket")?],
-                IndexKind::Exact,
-            ),
-        )
-        .await?;
+    let fs = backend_context.fs;
+    setup_create_dir_all(Arc::clone(&fs), &prefix).await?;
+    match workload.kind {
+        WorkloadKind::PutGet => {
+            let parent = child(&prefix, "entry")?;
+            setup_create_dir_all(fs, &parent).await?;
+        }
+        WorkloadKind::QueryExact => {
+            setup_ensure_index(
+                Arc::clone(&fs),
+                &prefix,
+                IndexSpec::new(
+                    IndexName::new("bucket_exact")?,
+                    vec![IndexKey::new("bucket")?],
+                    IndexKind::Exact,
+                ),
+            )
+            .await?;
+            seed_query_exact_records(fs, &prefix, sample, payload_bytes).await?;
+        }
+        WorkloadKind::AppendTail => {
+            let parent = child(&prefix, "events")?;
+            setup_create_dir_all(fs, &parent).await?;
+        }
+        WorkloadKind::ReserveSequence => {
+            let parent = child(&prefix, "sequence")?;
+            setup_create_dir_all(fs, &parent).await?;
+        }
+        WorkloadKind::TriggerSeedList | WorkloadKind::HostedSubstrateBuild => {}
     }
     Ok(())
+}
+
+async fn setup_create_dir_all(
+    fs: Arc<dyn RootFilesystem>,
+    prefix: &VirtualPath,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for attempt in 0..5 {
+        match fs.create_dir_all(prefix).await {
+            Ok(()) => return Ok(()),
+            Err(error) if is_retryable_setup_error(&error) && attempt < 4 => {
+                tokio::time::sleep(Duration::from_millis(10 * (attempt + 1))).await;
+            }
+            Err(error) => return Err(Box::new(error)),
+        }
+    }
+    unreachable!("bounded setup retry loop always returns")
+}
+
+async fn setup_ensure_index(
+    fs: Arc<dyn RootFilesystem>,
+    prefix: &VirtualPath,
+    spec: IndexSpec,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for attempt in 0..5 {
+        match fs.ensure_index(prefix, &spec).await {
+            Ok(()) => return Ok(()),
+            Err(error) if is_retryable_setup_error(&error) && attempt < 4 => {
+                tokio::time::sleep(Duration::from_millis(10 * (attempt + 1))).await;
+            }
+            Err(error) => return Err(Box::new(error)),
+        }
+    }
+    unreachable!("bounded setup retry loop always returns")
+}
+
+fn is_retryable_setup_error(error: &ironclaw_filesystem::FilesystemError) -> bool {
+    let message = error.to_string();
+    message.contains("database is locked")
+        || message.contains("database table is locked")
+        || message.contains("bad parameter or other API misuse")
 }
 
 async fn put_get(
@@ -425,11 +545,33 @@ async fn query_exact(
     fs: Arc<dyn RootFilesystem>,
     prefix: &VirtualPath,
     sample: usize,
-    payload_len: usize,
+    _payload_len: usize,
 ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+    let key = IndexKey::new("bucket")?;
+    let bucket = format!("b{}", sample % 8);
+    let rows = fs
+        .query(
+            prefix,
+            &Filter::Eq {
+                key,
+                value: IndexValue::Text(bucket),
+            },
+            Page::first(16),
+        )
+        .await?;
+    Ok(rows.len() as u64)
+}
+
+async fn seed_query_exact_records(
+    fs: Arc<dyn RootFilesystem>,
+    prefix: &VirtualPath,
+    sample: usize,
+    payload_bytes: &[usize],
+) -> Result<(), Box<dyn std::error::Error>> {
     let key = IndexKey::new("bucket")?;
     let kind = ironclaw_filesystem::RecordKind::new("latency_record")?;
     let bucket = format!("b{}", sample % 8);
+    let payload_len = payload_bytes[sample % payload_bytes.len()].max(1);
     for i in 0..8 {
         let path = child(prefix, &format!("sample-{sample}/record-{i}"))?;
         let entry = Entry::record(
@@ -447,17 +589,7 @@ async fn query_exact(
         .with_indexed(IndexKey::new("size")?, IndexValue::I64(payload_len as i64));
         fs.put(&path, entry, CasExpectation::Any).await?;
     }
-    let rows = fs
-        .query(
-            prefix,
-            &Filter::Eq {
-                key,
-                value: IndexValue::Text(bucket),
-            },
-            Page::first(16),
-        )
-        .await?;
-    Ok(rows.len() as u64)
+    Ok(())
 }
 
 async fn append_tail(
@@ -490,6 +622,77 @@ async fn reserve_sequence(
     let first = fs.reserve_sequence(&path).await?;
     let second = fs.reserve_sequence(&path).await?;
     Ok(first.get() ^ second.get())
+}
+
+async fn trigger_seed_list(
+    repository: Arc<dyn TriggerRepository>,
+    backend: BackendName,
+    postgres_pool_size: Option<usize>,
+    run_id: &str,
+    sample: usize,
+) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+    let pool_label = postgres_pool_size
+        .map(|pool_size| format!("pool-{pool_size}"))
+        .unwrap_or_else(|| "baseline".to_string());
+    let scope = format!("{}-{pool_label}-{run_id}-{sample}", backend.as_str());
+    let tenant_id = TenantId::new(format!("latency-trigger-tenant-{scope}"))?;
+    let creator_user_id = UserId::new(format!("latency-trigger-user-{scope}"))?;
+    let agent_id = AgentId::new(format!("latency-trigger-agent-{scope}"))?;
+    let project_id = ProjectId::new(format!("latency-trigger-project-{scope}"))?;
+    let record = trigger_record(
+        sample,
+        tenant_id.clone(),
+        creator_user_id.clone(),
+        agent_id.clone(),
+        project_id.clone(),
+    )?;
+    repository.upsert_trigger(record).await?;
+    let tenant_rows = repository.list_triggers(tenant_id.clone()).await?;
+    let scoped_rows = repository
+        .list_scoped_triggers(
+            tenant_id,
+            creator_user_id,
+            Some(agent_id),
+            Some(project_id),
+            16,
+            &[],
+        )
+        .await?;
+    Ok((tenant_rows.len() as u64) ^ ((scoped_rows.len() as u64) << 8))
+}
+
+fn trigger_record(
+    sample: usize,
+    tenant_id: TenantId,
+    creator_user_id: UserId,
+    agent_id: AgentId,
+    project_id: ProjectId,
+) -> Result<TriggerRecord, Box<dyn std::error::Error + Send + Sync>> {
+    let created_at = timestamp(1_704_067_000 + sample as i64)?;
+    let next_run_at = timestamp(1_704_070_600 + sample as i64)?;
+    Ok(TriggerRecord {
+        trigger_id: TriggerId::new(),
+        tenant_id,
+        creator_user_id,
+        agent_id: Some(agent_id),
+        project_id: Some(project_id),
+        name: format!("latency trigger {sample}"),
+        source: TriggerSourceKind::Schedule,
+        schedule: TriggerSchedule::cron("0 8 * * *")?,
+        prompt: "run the deterministic latency fixture".to_string(),
+        state: TriggerState::Scheduled,
+        next_run_at,
+        last_run_at: None,
+        last_fired_slot: None,
+        last_status: None,
+        active_fire_slot: None,
+        active_run_ref: None,
+        created_at,
+    })
+}
+
+fn timestamp(seconds: i64) -> Result<DateTime<Utc>, Box<dyn std::error::Error + Send + Sync>> {
+    DateTime::from_timestamp(seconds, 0).ok_or_else(|| "invalid trigger timestamp".into())
 }
 
 async fn hosted_substrate_build(

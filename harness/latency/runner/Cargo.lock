@@ -2755,6 +2755,7 @@ name = "ironclaw_latency_runner"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "deadpool-postgres",
  "ironclaw_filesystem",
  "ironclaw_host_api",
@@ -2762,6 +2763,7 @@ dependencies = [
  "ironclaw_reborn_composition",
  "ironclaw_reborn_event_store",
  "ironclaw_secrets",
+ "ironclaw_triggers",
  "ironclaw_trust",
  "ironclaw_turns",
  "libsql",
