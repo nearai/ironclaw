@@ -1941,6 +1941,45 @@ impl ProductionResourceGovernorBudgetSink for PostgresResourceGovernor {
     }
 }
 
+#[cfg(feature = "postgres")]
+static POSTGRES_RESOURCE_GOVERNOR_MIGRATED_TARGETS: std::sync::OnceLock<
+    tokio::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(feature = "postgres")]
+async fn ensure_postgres_resource_governor_migrations(
+    migration_key: String,
+    governor: PostgresResourceGovernor,
+) -> Result<(), String> {
+    let registry = POSTGRES_RESOURCE_GOVERNOR_MIGRATED_TARGETS
+        .get_or_init(|| tokio::sync::Mutex::new(std::collections::HashSet::new()));
+    let mut migrated_targets = registry.lock().await;
+    if migrated_targets.contains(&migration_key) {
+        return Ok(());
+    }
+    tokio::task::spawn_blocking(move || governor.run_migrations())
+        .await
+        .map_err(|error| format!("PostgreSQL resource governor migration task failed: {error}"))?
+        .map_err(|error| format!("PostgreSQL resource governor migrations failed: {error}"))?;
+    migrated_targets.insert(migration_key);
+    Ok(())
+}
+
+#[cfg(feature = "postgres")]
+fn postgres_resource_governor_migration_key_from_url(
+    url: &ironclaw_secrets::SecretMaterial,
+) -> String {
+    use secrecy::ExposeSecret;
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(url.expose_secret().as_bytes());
+    let digest_hex = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("postgres-url-sha256:{digest_hex}")
+}
+
 #[cfg_attr(not(any(feature = "libsql", feature = "postgres")), allow(dead_code))]
 fn resource_governor_unlimited_fast_path_enabled_from_env() -> Result<bool, String> {
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
@@ -3931,14 +3970,22 @@ where
         pool.clone(),
     ));
     ensure_postgres_event_store_config(&config.event_store)?;
+    let resource_migration_key = match &config.event_store {
+        ironclaw_reborn_event_store::RebornEventStoreConfig::Postgres { url, .. } => {
+            postgres_resource_governor_migration_key_from_url(url)
+        }
+        _ => {
+            return Err(crate::RebornCompositionError::InvalidConfig {
+                reason: "PostgreSQL production substrate requires a PostgreSQL event store"
+                    .to_string(),
+            });
+        }
+    };
     filesystem.run_migrations().await?;
-    let resource_governor = PostgresResourceGovernor::new(pool);
-    let migration_governor = resource_governor.clone();
-    tokio::task::spawn_blocking(move || migration_governor.run_migrations())
+    let resource_governor = PostgresResourceGovernor::new(pool.clone());
+    ensure_postgres_resource_governor_migrations(resource_migration_key, resource_governor.clone())
         .await
-        .map_err(|error| crate::RebornCompositionError::InvalidConfig {
-            reason: format!("PostgreSQL resource governor migration task failed: {error}"),
-        })??;
+        .map_err(|reason| crate::RebornCompositionError::InvalidConfig { reason })?;
     let event_store = ironclaw_reborn_event_store::build_reborn_event_stores_from_root_filesystem(
         Arc::clone(&filesystem),
     )?;
@@ -4539,7 +4586,7 @@ async fn build_libsql_production(
 async fn build_postgres_production(
     context: RebornProductionBuildContext,
     pool: deadpool_postgres::Pool,
-    _url: ironclaw_secrets::SecretMaterial,
+    url: ironclaw_secrets::SecretMaterial,
     _tls_options: ironclaw_reborn_event_store::PostgresPoolTlsOptions,
     secret_master_key: ironclaw_secrets::SecretMaterial,
 ) -> Result<RebornServices, RebornBuildError> {
@@ -4562,15 +4609,10 @@ async fn build_postgres_production(
             reason: format!("PostgreSQL trigger repository migrations failed: {error}"),
         })?;
     let resource_governor = PostgresResourceGovernor::new(pool.clone());
-    let migration_governor = resource_governor.clone();
-    tokio::task::spawn_blocking(move || migration_governor.run_migrations())
+    let resource_migration_key = postgres_resource_governor_migration_key_from_url(&url);
+    ensure_postgres_resource_governor_migrations(resource_migration_key, resource_governor.clone())
         .await
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("PostgreSQL resource governor migration task failed: {error}"),
-        })?
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("PostgreSQL resource governor migrations failed: {error}"),
-        })?;
+        .map_err(|reason| RebornBuildError::InvalidConfig { reason })?;
     let stores = ProductionStoreBundle::new(
         filesystem,
         resource_governor,

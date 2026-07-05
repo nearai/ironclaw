@@ -649,3 +649,56 @@ Budgets: 10 hours wall-clock / $0 spend
   reproduce in focused reruns, and the full goal remains incomplete: launch-ref
   hosted-volume, WebUI/session, turn-path, and holdout acceptance are still not
   proven.
+
+## Cycle 14 - Postgres Resource Migration Memoization
+
+- Graph: `codebase-memory-mcp` transport is still closed, so this cycle falls
+  back to local code reads after one probe.
+- Score (dev): Fresh Cycle 14 `score.sh --dev` has zero errors and matching
+  hashes. The only hard failures are `trigger_seed_list` concurrency 1 p99
+  outliers for Postgres pool 1 and 2; p50 and throughput are faster than
+  libSQL, and the probe does not reproduce the trigger outliers.
+- Probe gap: Fresh `probe.sh` has zero errors and matching hashes, but
+  `hosted_substrate_build` is consistently just over the dev thresholds:
+  Postgres pool 1 concurrency 1 is 16.60/17.59/18.08ms p50/p95/p99 versus
+  libSQL 13.70/13.99/14.09ms, pool 1 concurrency 3 throughput is 89.7% of
+  libSQL, and pool 2 concurrency 1 is 16.47/17.34/17.49ms versus the same
+  libSQL baseline.
+- Hypothesis: Postgres production/substrate builders still run
+  `PostgresResourceGovernor::run_migrations()` on every construction, while
+  `PostgresRootFilesystem::run_migrations()` is already memoized per database
+  schema. Hosted-substrate build repeatedly constructs services in one
+  process; skipping already-successful resource DDL for the same
+  database/schema should remove a few milliseconds from warm production
+  construction without changing runtime behavior or score pool sizes.
+- Expected failure mode: A process-global memoization key that is too broad
+  could skip migrations for a different Postgres database/schema in tests or
+  multi-tenant local runs. The key must distinguish the configured Postgres
+  target without retaining the raw connection secret in memory, and the
+  migration must only be marked complete after `run_migrations()` succeeds.
+- Diagnostic: Add composition-local resource-migration memoization, use it in
+  both Postgres production builders, run composition/CLI checks, and rerun
+  hosted-substrate focused score plus full dev/probe.
+- Change: Postgres production and hosted-substrate builders now route resource
+  governor DDL through a process-global success registry keyed by a SHA-256
+  digest of the configured Postgres URL. The first builder for a target still
+  runs `PostgresResourceGovernor::run_migrations()`; later builders in the same
+  process skip the already-successful resource migration.
+- Result: `cargo fmt -p ironclaw_reborn_composition --check`,
+  `cargo check -p ironclaw_reborn_composition --features
+  webui-v2-beta,libsql,postgres`, and `cargo check -p ironclaw_reborn_cli
+  --features webui-v2-beta,libsql,postgres` passed with the pre-existing
+  `OutboundDeliveryTargetEntry` unused-import warning. Focused
+  `hosted_substrate_build` score reruns had zero errors and matching hashes;
+  the hard outlier disappeared, but the path still misses dev thresholds with
+  Postgres around 1.15-1.18x libSQL p50/p95 and 0.86-0.88x libSQL throughput at
+  c1/c3. Full `score.sh --dev` had only a recurring `trigger_seed_list` c1
+  tail outlier. Full `probe.sh` exposed a libSQL control-plane filesystem
+  error at c8 and one hosted-substrate pool-1 c3 tail outlier that did not
+  reproduce in the focused hosted score.
+- Reflection: Removing repeated resource-governor DDL is a real hosted build
+  win and keeps correctness stable, but it is not enough to hit libSQL timings.
+  The remaining hosted-substrate gap now looks like steady production
+  construction overhead rather than migration DDL alone, so the next cycle
+  should profile the hosted builder around store/secret/config construction
+  before touching schema again.
