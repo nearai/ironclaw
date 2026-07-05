@@ -68,6 +68,7 @@ improving measured wall clock.
 | H12 | Move `ironclaw_reborn_cli` from `reborn-core` to `webui-ingress`. | Keep job count flat while grouping the WebUI-shaped CLI build with the WebUI ingress bucket instead of the core Reborn bucket. | Tested | Rejected: `reborn-core` improved from `367s` to `238s`, but `webui-ingress` grew from `334s` to `377s`; wall clock stayed flat at `8m37s` with no job-count reduction. |
 | H13 | Remove the separate uninstrumented `reborn-group-tests` job and rely on the existing instrumented coverage `groups` lane for those same suites. | Reduce total Reborn jobs by one without dropping group-suite pass/fail coverage. | Retained | Accepted: total Reborn jobs dropped from `28` to `27`, and wall clock improved from `8m35s` to `8m21s`. |
 | H14 | Seed fresh shared Rust caches from deterministic broad producers: `reborn-core` for crate buckets and `groups` for coverage lanes. | Improve warm-start quality for compile-heavy jobs without adding jobs or changing coverage. | Retained | Accepted as a compile-time win: wall clock improved from H13 `8m21s` to `7m49s`; crate buckets improved materially, especially `reborn-core` `462s -> 160s`, but root tests became the long pole. |
+| H15 | Add a `cargo-hakari` workspace-hack crate to unify dependency feature sets across buckets. | Improve cross-bucket cache reuse by making shared dependency artifacts compatible across package feature combinations. | Feasibility review | Not a small config-only benchmark: no existing hakari metadata or workspace-hack crate; `cargo hakari` is not installed locally; this should be a separate dependency/lockfile-changing benchmark. |
 
 ## H1: Narrow Crate Bucket Targets
 
@@ -817,3 +818,28 @@ Decision:
 - After H14, root tests are the measured long pole. This strengthens the advice
   that root partitioning/nextest only becomes interesting after cache quality
   improves.
+
+## H15: Cargo Hakari Workspace Hack
+
+Advice under review:
+
+- Use `cargo-hakari` to generate a workspace-hack crate that unifies dependency
+  feature sets across workspace packages, improving cache reuse for dependencies
+  compiled by different buckets with different package feature flags.
+
+Red-team notes:
+
+- There is no existing `hakari`, `workspace-hack`, or `workspace_hack` setup in
+  the repo.
+- `cargo hakari` is not installed in the local toolchain used for this branch.
+- The root manifest does use `[workspace.dependencies]`, but adding hakari would
+  still require a new workspace member, manifest edits across crates, and
+  `Cargo.lock` churn.
+- This is a qualitatively higher-risk benchmark than H14 because it changes the
+  Rust dependency graph rather than only cache key/save policy.
+
+Benchmark status:
+
+- Not started in this branch state. Treat as a separate H15 benchmark PR or a
+  follow-up commit only after deciding that dependency/lockfile churn is
+  acceptable for the CI optimization experiment.
