@@ -1,0 +1,94 @@
+//! Shared axum mounting + request helpers for exercising the real
+//! `ironclaw_webui_v2::webui_v2_router` over a real
+//! `ironclaw_product_workflow::RebornServices` facade (W5-WEBUI-API-1).
+//!
+//! Mirrors `webui_v2_router_smoke.rs::smoke_router`'s shape — real router,
+//! auth bypassed by injecting the `WebUiAuthenticatedCaller` `Extension`
+//! directly (production composition's bearer middleware constructs it) — as
+//! a `pub(crate)` support helper so all scenarios in this lane share it
+//! instead of repeating the axum plumbing.
+
+use std::sync::Arc;
+
+use axum::Router;
+use axum::body::{Body, to_bytes};
+use axum::http::{HeaderMap, Method, Request, StatusCode};
+use ironclaw_product_workflow::{RebornServicesApi, WebUiAuthenticatedCaller};
+use ironclaw_webui_v2::{
+    DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State, webui_v2_router,
+};
+use serde_json::Value;
+use tower::ServiceExt;
+
+/// Mount the real WebUI v2 router over `services`, with `caller` injected as
+/// the authenticated-caller `Extension` (mirrors production's bearer
+/// middleware output — bypassed here since this tier tests the
+/// facade/router contract, not HTTP auth).
+pub(crate) fn mount_webui_v2_router(
+    services: Arc<dyn RebornServicesApi>,
+    caller: WebUiAuthenticatedCaller,
+) -> Router {
+    webui_v2_router(WebUiV2State::new(
+        services,
+        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+    ))
+    .layer(axum::Extension(caller))
+    .layer(axum::Extension(WebUiV2Capabilities::default()))
+}
+
+/// `GET path` against `router`, returning the status and parsed JSON body
+/// (`Value::Null` for an empty body).
+pub(crate) async fn get_json(router: Router, path: &str) -> (StatusCode, Value) {
+    let (status, _headers, bytes) = get_raw(router, path).await;
+    (status, parse_json_or_null(&bytes))
+}
+
+/// `POST path` with a JSON `body` against `router`, returning the status and
+/// parsed JSON response body.
+pub(crate) async fn post_json(router: Router, path: &str, body: Value) -> (StatusCode, Value) {
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    (status, parse_json_or_null(&bytes))
+}
+
+/// `GET path` against `router`, returning the status, response headers, and
+/// raw body bytes — for non-JSON responses (e.g. served attachment bytes).
+pub(crate) async fn get_raw(router: Router, path: &str) -> (StatusCode, HeaderMap, Vec<u8>) {
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(path)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    (status, headers, bytes.to_vec())
+}
+
+fn parse_json_or_null(bytes: &[u8]) -> Value {
+    if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(bytes).unwrap_or(Value::Null)
+    }
+}
