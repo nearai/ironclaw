@@ -614,6 +614,45 @@ where
         .await
     }
 
+    async fn apply_run_state_transition_with_targeted_delta<A, Fut, D>(
+        &self,
+        operation: &'static str,
+        run_id: TurnRunId,
+        runner_id: crate::TurnRunnerId,
+        lease_token: crate::TurnLeaseToken,
+        retired_status: TurnStatus,
+        apply: A,
+        build_delta: D,
+    ) -> Result<TurnRunState, TurnError>
+    where
+        A: FnMut(Arc<InMemoryTurnStateStore>) -> Fut + Send,
+        Fut: std::future::Future<Output = Result<TurnRunState, TurnError>> + Send,
+        D: FnOnce(
+                &TurnPersistenceSnapshot,
+                &InMemoryTurnStateStore,
+                &TurnRunState,
+            ) -> Result<SnapshotDelta, TurnError>
+            + Send,
+    {
+        let span = turn_state_write_span(operation, None, Some(&run_id));
+        async move {
+            let previous = self
+                .prepare_runner_lease_retirement(run_id, runner_id, lease_token, retired_status)
+                .await?;
+            let result = self
+                .apply_with_targeted_delta(RunnerLeaseOverlay::Run(run_id), apply, build_delta)
+                .await;
+            if result.is_err() {
+                self.restore_runner_lease_after_failed_transition(previous, retired_status)
+                    .await;
+            }
+            self.cleanup_runner_lease_after_state(&result).await;
+            result
+        }
+        .instrument(span)
+        .await
+    }
+
     async fn compensate_failed_claim(&self, claimed: &ClaimedTurnRun) {
         let run_id = claimed.state.run_id;
         let result = self
@@ -692,17 +731,32 @@ where
         &self,
         request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError> {
-        self.apply(RunnerLeaseOverlay::None, |store| {
-            let request = request.clone();
-            async move {
-                let outcome = store.resume_turn(request).await;
-                outcome
-            }
-        })
+        let max_idempotency_records = self.limits.max_idempotency_records;
+        let scope = request.scope.clone();
+        let run_id = request.run_id;
+        self.apply_with_targeted_delta(
+            RunnerLeaseOverlay::None,
+            |store| {
+                let request = request.clone();
+                async move { store.resume_turn(request).await }
+            },
+            move |snapshot, store, response| {
+                if snapshot.idempotency_records.len() >= max_idempotency_records {
+                    return full_snapshot_delta(snapshot, store);
+                }
+                run_state_with_idempotency_targeted_delta(
+                    snapshot,
+                    store,
+                    response.run_id,
+                    &scope,
+                    crate::TurnIdempotencyOperationKind::Resume,
+                )
+            },
+        )
         .instrument(turn_state_write_span(
             "resume_turn",
             Some(&request.scope),
-            Some(&request.run_id),
+            Some(&run_id),
         ))
         .await
     }
@@ -718,14 +772,38 @@ where
         );
         async move {
             let previous = self.prepare_cancel_requested_runner_lease(&request).await?;
+            let max_idempotency_records = self.limits.max_idempotency_records;
+            let max_terminal_records = self.limits.max_terminal_records;
+            let scope = request.scope.clone();
             let result = self
-                .apply(RunnerLeaseOverlay::Run(request.run_id), |store| {
-                    let request = request.clone();
-                    async move {
-                        let outcome = store.request_cancel(request).await;
-                        outcome
-                    }
-                })
+                .apply_with_targeted_delta(
+                    RunnerLeaseOverlay::Run(request.run_id),
+                    |store| {
+                        let request = request.clone();
+                        async move { store.request_cancel(request).await }
+                    },
+                    move |snapshot, store, response| {
+                        if snapshot.idempotency_records.len() >= max_idempotency_records {
+                            return full_snapshot_delta(snapshot, store);
+                        }
+                        let terminal_records = snapshot
+                            .runs
+                            .iter()
+                            .filter(|record| record.status.is_terminal())
+                            .count();
+                        if response.status.is_terminal() && terminal_records >= max_terminal_records
+                        {
+                            return full_snapshot_delta(snapshot, store);
+                        }
+                        run_state_with_idempotency_targeted_delta(
+                            snapshot,
+                            store,
+                            response.run_id,
+                            &scope,
+                            crate::TurnIdempotencyOperationKind::Cancel,
+                        )
+                    },
+                )
                 .await;
             if result.is_err() {
                 self.restore_runner_lease_after_failed_transition(
@@ -1004,7 +1082,7 @@ where
     }
 
     async fn block_run(&self, request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
-        self.apply_run_state_transition(
+        self.apply_run_state_transition_with_targeted_delta(
             "block_run",
             request.run_id,
             request.runner_id,
@@ -1017,6 +1095,7 @@ where
                     outcome
                 }
             },
+            blocked_run_targeted_delta,
         )
         .await
     }
@@ -1068,7 +1147,8 @@ where
         &self,
         request: CancelRunCompletionRequest,
     ) -> Result<TurnRunState, TurnError> {
-        self.apply_run_state_transition(
+        let max_terminal_records = self.limits.max_terminal_records;
+        self.apply_run_state_transition_with_targeted_delta(
             "cancel_run",
             request.run_id,
             request.runner_id,
@@ -1080,6 +1160,17 @@ where
                     let outcome = store.cancel_run(request).await;
                     outcome
                 }
+            },
+            move |snapshot, store, state| {
+                let terminal_records = snapshot
+                    .runs
+                    .iter()
+                    .filter(|record| record.status.is_terminal())
+                    .count();
+                if terminal_records >= max_terminal_records {
+                    return full_snapshot_delta(snapshot, store);
+                }
+                run_state_targeted_delta(snapshot, store, state.run_id, &state.scope)
             },
         )
         .await
@@ -1505,6 +1596,51 @@ fn run_state_targeted_delta(
 
     add_event_delta(snapshot, store, &mut delta)?;
     Ok(delta)
+}
+
+fn run_state_with_idempotency_targeted_delta(
+    snapshot: &TurnPersistenceSnapshot,
+    store: &InMemoryTurnStateStore,
+    run_id: TurnRunId,
+    scope: &TurnScope,
+    operation: crate::TurnIdempotencyOperationKind,
+) -> Result<SnapshotDelta, TurnError> {
+    let mut delta = run_state_targeted_delta(snapshot, store, run_id, scope)?;
+    add_run_idempotency_delta(snapshot, store, &mut delta, run_id, operation);
+    Ok(delta)
+}
+
+fn blocked_run_targeted_delta(
+    snapshot: &TurnPersistenceSnapshot,
+    store: &InMemoryTurnStateStore,
+    state: &TurnRunState,
+) -> Result<SnapshotDelta, TurnError> {
+    let mut delta = run_state_targeted_delta(snapshot, store, state.run_id, &state.scope)?;
+    if let Some(checkpoint_id) = state.checkpoint_id {
+        let checkpoint =
+            store
+                .checkpoint_record(checkpoint_id)
+                .ok_or_else(|| TurnError::Unavailable {
+                    reason: "blocked run checkpoint missing from row-store hot state".to_string(),
+                })?;
+        delta.checkpoints_upsert.push(checkpoint);
+    }
+    Ok(delta)
+}
+
+fn add_run_idempotency_delta(
+    snapshot: &TurnPersistenceSnapshot,
+    store: &InMemoryTurnStateStore,
+    delta: &mut SnapshotDelta,
+    run_id: TurnRunId,
+    operation: crate::TurnIdempotencyOperationKind,
+) {
+    delta.idempotency_upsert.extend(
+        store
+            .idempotency_records_for_run_operation(run_id, operation)
+            .into_iter()
+            .filter(|record| !snapshot.idempotency_records.contains(record)),
+    );
 }
 
 fn loop_checkpoint_targeted_delta(

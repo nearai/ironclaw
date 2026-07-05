@@ -24,16 +24,18 @@ use ironclaw_host_api::{
     TenantId, ThreadId, UserId, VirtualPath,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, AllowAllTurnAdmissionPolicy, FilesystemTurnStateRowStore,
-    FilesystemTurnStateStore, GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver,
-    ProductTurnContext, ReplyTargetBindingRef, RunOriginAdapter, RunProfileRequest,
-    SanitizedCancelReason, SourceBindingRef, SubmitChildRunRequest, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnError, TurnLeaseToken, TurnOriginKind, TurnOwner,
+    AcceptedMessageRef, AllowAllTurnAdmissionPolicy, BlockedReason, FilesystemTurnStateRowStore,
+    FilesystemTurnStateStore, GateRef, GetRunStateRequest, IdempotencyKey,
+    InMemoryRunProfileResolver, ProductTurnContext, ReplyTargetBindingRef, ResumeTurnPrecondition,
+    ResumeTurnRequest, RunOriginAdapter, RunProfileRequest, SanitizedCancelReason,
+    SourceBindingRef, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
+    TurnCheckpointId, TurnError, TurnLeaseToken, TurnOriginKind, TurnOwner,
     TurnPersistenceSnapshot, TurnRunId, TurnRunnerId, TurnScope, TurnSpawnTreeStateStore,
     TurnStateStore, TurnStatus,
+    run_profile::LoopCheckpointStateRef,
     runner::{
-        ClaimRunRequest, CompleteRunRequest, HeartbeatRequest, RecoverExpiredLeasesRequest,
-        TurnRunTransitionPort,
+        BlockRunRequest, ClaimRunRequest, CompleteRunRequest, HeartbeatRequest,
+        RecoverExpiredLeasesRequest, TurnRunTransitionPort,
     },
 };
 
@@ -750,7 +752,7 @@ async fn filesystem_turn_state_row_store_persists_rows_without_state_blob() {
     let run_id = accepted_run_id(&response);
     let runner_id = TurnRunnerId::new();
     let lease_token = TurnLeaseToken::new();
-    store
+    let claimed = store
         .claim_next_run(ClaimRunRequest {
             runner_id,
             lease_token,
@@ -759,7 +761,80 @@ async fn filesystem_turn_state_row_store_persists_rows_without_state_blob() {
         .await
         .unwrap()
         .unwrap();
-    store
+    assert_eq!(claimed.state.status, TurnStatus::Running);
+    let checkpoint_id = TurnCheckpointId::new();
+    let gate_ref = GateRef::new("gate-fs-row-block").unwrap();
+    let blocked = store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id,
+            state_ref: LoopCheckpointStateRef::new("checkpoint:fs-row-block").unwrap(),
+            reason: BlockedReason::Approval {
+                gate_ref: gate_ref.clone(),
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(blocked.status, TurnStatus::BlockedApproval);
+    assert_eq!(blocked.checkpoint_id, Some(checkpoint_id));
+
+    let reopened_blocked = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let blocked_state = reopened_blocked
+        .get_run_state(GetRunStateRequest {
+            scope: request.scope.clone(),
+            run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(blocked_state.status, TurnStatus::BlockedApproval);
+    let blocked_snapshot = reopened_blocked.persistence_snapshot().await.unwrap();
+    assert!(
+        blocked_snapshot
+            .checkpoints
+            .iter()
+            .any(|record| record.checkpoint_id == checkpoint_id),
+        "row store must persist block-created checkpoints as row deltas"
+    );
+
+    reopened_blocked
+        .resume_turn(ResumeTurnRequest {
+            scope: request.scope.clone(),
+            actor: turn_actor(),
+            run_id,
+            gate_resolution_ref: gate_ref,
+            source_binding_ref: SourceBindingRef::new("source-resume").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-resume").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-fs-row-resume").unwrap(),
+            precondition: ResumeTurnPrecondition::BlockedApprovalGate,
+            resume_disposition: None,
+        })
+        .await
+        .unwrap();
+    let resume_snapshot = reopened_blocked.persistence_snapshot().await.unwrap();
+    assert!(
+        resume_snapshot
+            .idempotency_records
+            .iter()
+            .any(|record| record.operation == ironclaw_turns::TurnIdempotencyOperationKind::Resume),
+        "row store must persist resume idempotency as a targeted delta"
+    );
+    let (runner_id, lease_token) = {
+        let runner_id = TurnRunnerId::new();
+        let lease_token = TurnLeaseToken::new();
+        reopened_blocked
+            .claim_next_run(ClaimRunRequest {
+                runner_id,
+                lease_token,
+                scope_filter: None,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        (runner_id, lease_token)
+    };
+    reopened_blocked
         .complete_run(CompleteRunRequest {
             run_id,
             runner_id,

@@ -1358,3 +1358,80 @@ Budgets: 10 hours wall-clock / $0 spend
   c4 remains much faster on Postgres row store than libSQL blob in the locked
   dev score (libSQL p95 7.51s; Postgres pool-2 p95 1.33s), but c32/c100 still
   needs the next fix.
+
+## Cycle 27 - Target Lifecycle Row Deltas
+
+- Graph note: `codebase-memory-mcp` still fails with `Transport closed`; the
+  local graph artifact is stale and contains zero indexed nodes, so this cycle
+  uses crate guardrails plus targeted source reads.
+- Baseline: `harness/latency/score.sh --dev` passed with 54 results, 36
+  comparisons, and zero failures. The dev `turn_lifecycle` rows remain stable:
+  libSQL c4 p95 7.42s, Postgres pool-1 c4 p95 1.33s, and Postgres pool-2 c4
+  p95 1.37s.
+- Probe: `harness/latency/probe.sh` completed with only `turn_lifecycle` c8
+  hard failures. libSQL c8 hit 3 `turn state filesystem CAS retries exhausted`
+  errors and a mismatched state hash. Postgres row store completed c8 with zero
+  errors and matching state hash, but remained slow: pool-1 c8 p95 7.32s,
+  pool-2 c8 p95 7.09s.
+- Hypothesis: The row store now writes compact targeted deltas, but every
+  state transition still holds the hot-state mutex across one durable
+  `ScopedFilesystem::append` to `/turns/rows/v1/deltas/log`. The filesystem
+  backends already expose atomic `append_batch`; using a small row-store delta
+  write queue should let concurrent transitions flush multiple durable deltas
+  in one backend round trip while every caller still waits for its write to
+  commit before returning.
+- Expected failure mode: Moving the durable write outside the hot-state mutex
+  can expose in-process hot state before the append is acknowledged. The patch
+  must fail closed by clearing the row-store snapshot cache on write failure,
+  must not return success before the queued durable write is acknowledged, and
+  must preserve reopen-from-filesystem contracts.
+- Queue attempt result: A queued append experiment was rejected before commit.
+  The queue-only treatment did not improve the exact lifecycle diagnostic
+  enough (c32 p95 7.49s, c100 p95 29.19s), and the full
+  `ironclaw_stress` c100 mixed user-session flow regressed to operation p95
+  692ms with turn-store p95 85ms and resource-governor p95 491ms. A
+  250us coalescing delay made the synthetic lifecycle slightly better but
+  still left c100 near 29.03s and worsened full-flow c32. The queue patch was
+  fully reverted.
+- Revised hypothesis: The remaining `turn_lifecycle` workload still exercises
+  full snapshot diffs on `resume_turn`, `request_cancel`, `block_run`, and
+  `cancel_run`. These operations mutate one run row plus lock/reservation,
+  event, checkpoint, and idempotency rows. Persisting those as targeted row
+  deltas should keep durable writes synchronous while removing the snapshot
+  clone/diff cost from the hot lifecycle path.
+- Result: `resume_turn` and `request_cancel` now use targeted deltas that
+  include run state, active lock, admission reservation, events, and the
+  relevant idempotency row. `block_run` uses a targeted delta that also
+  persists the block-created checkpoint row. `cancel_run` uses a targeted
+  terminal run-state delta with the existing full-snapshot fallback when the
+  terminal retention cap could prune old rows. The generic full-snapshot
+  transition helper remains in place for less common paths whose side effects
+  are broader.
+- Contract validation: Extended the row-store filesystem contract to submit,
+  claim, block, reopen, verify the blocked checkpoint row, resume, verify
+  resume idempotency, reclaim, complete, and reopen without creating the
+  blob-shaped `/turns/state.json`. `cargo fmt -p ironclaw_turns --check`,
+  `cargo test -p ironclaw_turns --test filesystem_turn_state_contract
+  filesystem_turn_state_row_store_persists_rows_without_state_blob`,
+  `cargo test -p ironclaw_turns --test loop_checkpoint_store_contract
+  filesystem_turn_state_row_store_loop_checkpoint_roundtrip_and_snapshot`,
+  and `cargo check -p ironclaw_turns` passed.
+- Dev score: `harness/latency/score.sh --dev` passed with 54 results, 36
+  comparisons, and zero failures. Dev `turn_lifecycle` state hashes match
+  `7fc054292d2f85f0`; libSQL c4 p95 was 7.46s, Postgres pool-1 c4 p95 was
+  629ms, and Postgres pool-2 c4 p95 was 623ms.
+- Exact lifecycle diagnostic: Postgres-only `turn_lifecycle` with
+  `LATENCY_CONCURRENCY=32,100`, `LATENCY_PAYLOAD_BYTES=2048`,
+  `LATENCY_SAMPLES=64`, and pool size 2 completed with zero errors and stable
+  state hash `660086a8484d5400`. c32 p95 improved from 7.66s to 3.84s; c100
+  p95 improved from 29.96s to 15.04s. This is a material improvement, but not
+  final c100 parity.
+- Full-flow stress signal: `ironclaw_stress` with `--backend postgres`,
+  `--scenario mixed-user-session`, `--turn-state-backend filesystem-row`,
+  `--postgres-pool-size 2`, and per-user concurrency completed with zero
+  errors. c32 completed 128/128 with operation p95 160.5ms and turn-store
+  p95 30.8ms. c100 completed 200/200 with operation p95 456.3ms and
+  turn-store p95 68.6ms. The full-flow c100 report now identifies the
+  resource governor as the top operation group (p95 277.8ms), followed by
+  thread-store writes (p95 99.3ms); turn state is no longer the top full-flow
+  bottleneck.

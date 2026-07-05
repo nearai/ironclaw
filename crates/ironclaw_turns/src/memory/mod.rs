@@ -498,6 +498,25 @@ impl InMemoryTurnStateStore {
         }
     }
 
+    pub(crate) fn checkpoint_record(
+        &self,
+        checkpoint_id: TurnCheckpointId,
+    ) -> Option<TurnCheckpointRecord> {
+        match self.inner.lock() {
+            Ok(inner) => inner
+                .checkpoints
+                .iter()
+                .find(|record| record.checkpoint_id == checkpoint_id)
+                .cloned(),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .checkpoints
+                .iter()
+                .find(|record| record.checkpoint_id == checkpoint_id)
+                .cloned(),
+        }
+    }
+
     pub(crate) fn idempotency_records_after(
         &self,
         created_at: crate::TurnTimestamp,
@@ -514,6 +533,28 @@ impl InMemoryTurnStateStore {
                 .idempotency_records
                 .values()
                 .filter(|record| record.created_at >= created_at)
+                .cloned()
+                .collect(),
+        }
+    }
+
+    pub(crate) fn idempotency_records_for_run_operation(
+        &self,
+        run_id: TurnRunId,
+        operation: TurnIdempotencyOperationKind,
+    ) -> Vec<TurnIdempotencyRecord> {
+        match self.inner.lock() {
+            Ok(inner) => inner
+                .idempotency_records
+                .values()
+                .filter(|record| record.run_id == Some(run_id) && record.operation == operation)
+                .cloned()
+                .collect(),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .idempotency_records
+                .values()
+                .filter(|record| record.run_id == Some(run_id) && record.operation == operation)
                 .cloned()
                 .collect(),
         }
