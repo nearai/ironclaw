@@ -1131,3 +1131,63 @@ Budgets: 10 hours wall-clock / $0 spend
   the scorer-visible blob growth problem for Postgres turn lifecycle and moves
   the next latency frontier back to full-flow thread/context/resource costs and
   remaining row-native transition cleanup.
+
+## Cycle 23 - High-Concurrency Full-Flow Resource Pressure
+
+- Graph note: `codebase-memory-mcp` still fails with `Transport closed`; the
+  local graph artifact is stale and empty, so this cycle uses targeted source
+  reads after the failed graph probe.
+- Baseline: Current `harness/latency/status.sh` reports a clean worktree at
+  `988641e37` and Postgres ready on localhost. Full `harness/latency/score.sh
+  --dev` exits 0 with zero failing comparison rows and
+  `acceptance_ready=false`; the slowest dev rows are now libSQL blob
+  `turn_lifecycle`, while Postgres row turn-state is faster and hash-matched.
+  A broader `probe.sh` was stopped when the requested c32/c100 diagnostic
+  superseded it.
+- High-concurrency signal: `ironclaw_stress mixed-user-session` with
+  Postgres pool size 2, `filesystem-row` turn state, gated every operation,
+  2KiB user/assistant messages, and `context_max_messages=100` completes
+  c32 320/320 at operation p95 321.6ms, p99 328.4ms, throughput 186.6 ops/s.
+  c100 500/500 completes at operation p95 660.5ms, p99 719.0ms, throughput
+  205.5 ops/s. At c100 the dominant group is `resource_governor` p95 429.3ms
+  with `resource_reserve` p95 230.2ms and `resource_reconcile` p95 254.5ms;
+  turn-state row p95 is 109.5ms and thread writes p95 is 106.4ms.
+- Baseline caveat: The current libSQL hosted-volume stress baseline using
+  `memory-persist-on-block` crashes before JSON at c32, even with one measured
+  operation per worker, and also crashes before JSON at c100. This prevents a
+  c32/c100 ratio from this stress binary today; the Postgres treatment numbers
+  are still useful target-side saturation data.
+- Hypothesis: The next Postgres full-flow bottleneck is row resource-governor
+  transaction shape under high concurrency, not turn-state CAS. If reserve and
+  reconcile serialize more work than necessary, tightening lock scope or
+  reducing duplicated account-row work should lower c32/c100 p95 without
+  changing resource accounting semantics.
+- Expected failure mode: A resource-governor optimization can easily lose
+  ancestor budget propagation, reservation close idempotency, or deterministic
+  lock ordering. Any change must preserve existing resource-governor contract
+  tests and re-run the c32/c100 stress slice.
+- Diagnostic: Inspect `PostgresResourceGovernor` reserve/reconcile paths,
+  identify whether account locks or transaction boundaries explain the c100
+  profile, then patch only if the fix is scoped and covered by tests.
+- Boundary result: A scoped batching patch to `PostgresResourceGovernor` was
+  tested locally (`cargo check -p ironclaw_resources` and `cargo test -p
+  ironclaw_resources` passed), but it was not kept because it optimizes a
+  native Postgres domain store that bypasses `RootFilesystem` and is outside
+  this goal's stated filesystem/composition/CLI surface. The next diagnostic
+  must keep the filesystem abstraction in the measured path.
+- Filesystem-path c32 signal: Running the locked latency runner directly with
+  `LATENCY_WORKLOADS=turn_lifecycle`, `LATENCY_CONCURRENCY=32`,
+  `LATENCY_SAMPLES=32`, and `LATENCY_PAYLOAD_BYTES=512` keeps both backends on
+  the filesystem abstraction. LibSQL blob reported 13/32 errors with
+  `turn state filesystem CAS retries exhausted`, p95 9014.4ms for successful
+  samples, and mismatched state hash. Postgres row completed 32/32 with zero
+  errors: pool-1 p95 3473.6ms and pool-2 p95 3420.4ms. This proves the row
+  treatment avoids the libSQL blob CAS failure at c32, but the row store still
+  serializes enough same-user lifecycle work to produce multi-second p95 in
+  the micro-workload.
+- Filesystem-path c100 signal: The same runner at
+  `LATENCY_CONCURRENCY=100` and `LATENCY_SAMPLES=100` aborted with exit code
+  134 before JSON, consistent with the libSQL baseline failing before the
+  runner can reach Postgres treatment rows. A Postgres-only c100 number is
+  therefore not available from the current locked runner without adding a
+  diagnostic backend filter.
