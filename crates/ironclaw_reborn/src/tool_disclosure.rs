@@ -514,6 +514,12 @@ pub(crate) fn is_bridge_capability_id(capability_id: &CapabilityId) -> bool {
         .any(|(definition, _)| &definition.capability_id == capability_id)
 }
 
+/// The synthetic `ironclaw.*` bridge ids, exempted from profile allow-set
+/// narrowing at the composition root (#5647).
+pub(crate) fn bridge_capability_ids() -> impl Iterator<Item = CapabilityId> {
+    bridge_tool_definitions_with_tokens().map(|(definition, _)| definition.capability_id.clone())
+}
+
 /// Selects the active wire surface for a turn.
 ///
 /// TODO(next pass): if promoted tools are truncated by caps, start a deliberate

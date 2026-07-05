@@ -27,10 +27,10 @@
 //!    bridged mode is wired-but-inert there — pinned below as the threshold
 //!    control.
 //!
-//! Harness note: bridged groups resolve `CapabilityAllowSet::All` (see
-//! `into_group`) — production's top-level resolution — because the harness's
-//! default granted-ids allowlist would strip the synthetic `ironclaw.*`
-//! bridge ids at `CapabilitySurfaceProfileFilter` and ship ZERO tools.
+//! Harness note: bridged groups default to `CapabilityAllowSet::All` (see
+//! `into_group`) — production's top-level resolution. Narrowed allow-sets
+//! (the #5647 seam) also keep the bridge: bridge ids are host-exempt in
+//! `CapabilitySurfaceProfileFilter`, pinned below.
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
@@ -39,6 +39,7 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
+use ironclaw_turns::TurnStatus;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::reply::RebornScriptedReply;
 
@@ -158,13 +159,9 @@ async fn bridged_mode_below_caps_keeps_the_flat_list() {
         .expect("no bridge meta tools below the disclosure caps");
 }
 
-/// #5647: a narrowed capability allow-set atop Bridged-mode deferral strips
-/// the synthetic `ironclaw.*` bridge ids (`CapabilitySurfaceProfileFilter`
-/// runs after `ToolDisclosureCapabilityDecorator`) — model ends up with ZERO
-/// tools instead of the `tool_search` bridge. RED-ignored; un-ignore with zero edits once fixed.
-#[ignore = "#5647: narrowed allow-set strips ironclaw.tool_search after bridged \
-            deferral, tool_definitions() returns empty (CapabilitySurfaceProfileFilter \
-            wraps outside ToolDisclosureCapabilityDecorator)"]
+/// #5647 regression: a narrowed capability allow-set atop Bridged-mode
+/// deferral must not strip the synthetic `ironclaw.*` bridge ids — they are
+/// host-exempt in `CapabilitySurfaceProfileFilter`, not granted capabilities.
 #[tokio::test]
 async fn bridged_mode_survives_narrowed_capability_allow_set() {
     let harness = RebornIntegrationHarness::test_default()
@@ -189,4 +186,46 @@ async fn bridged_mode_survives_narrowed_capability_allow_set() {
         .assert_model_tools_excludes(FLAT_GITHUB_TOOL_NAME)
         .await
         .expect("deferral still replaces the flat list under a narrowed profile");
+}
+
+/// #5647 trust boundary: the bridge-id exemption must not widen access to
+/// UNDERLYING tools. A deferred call resolves to the real capability id
+/// (`github.list_issues`), which the narrowed allow-set still denies at the
+/// profile filter's scope check — the exempt set admits only `ironclaw.*`.
+#[tokio::test]
+async fn narrowed_allow_set_still_denies_non_allowlisted_tool_through_deferral() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_bridged()
+        .with_github_issue_tools()
+        .with_narrowed_capability_allow_set_for_bridged_test(["github.get_repo"])
+        .script([RebornScriptedReply::tool_call(
+            "github.list_issues",
+            serde_json::json!({"owner": "octo", "repo": "demo"}),
+        )])
+        .build()
+        .await
+        .expect("narrowed bridged-disclosure harness builds");
+
+    let run_id = harness
+        .submit_turn_async("list the issues")
+        .await
+        .expect("turn submits");
+    // Scope rejection at the profile filter discards the whole provider
+    // response (model_gateway validate-then-register), surfacing as a
+    // model_error-failed turn — coarse, but fails closed.
+    let state = harness
+        .wait_for_status(run_id, TurnStatus::Failed)
+        .await
+        .expect("denied out-of-profile call fails the turn");
+    let failure = state
+        .failure
+        .as_ref()
+        .expect("a Failed run must carry a failure detail");
+    assert_eq!(failure.category(), "model_error", "got {failure:?}");
+    // The load-bearing trust-boundary proof: the underlying tool NEVER
+    // dispatched (github tools egress on the network lane).
+    harness
+        .assert_network_egress_count(0)
+        .await
+        .expect("a non-allowlisted underlying tool must never reach dispatch");
 }

@@ -649,14 +649,10 @@ impl RebornIntegrationGroupBuilder {
         ) = capability.mode().into_parts(milestone_sink.clone())?;
 
         // Enabler (b): production resolves `CapabilityAllowSet::All` for a
-        // top-level user turn, making `CapabilitySurfaceProfileFilter` a no-op
-        // — so the disclosure decorator's synthetic bridge ids
-        // (`ironclaw.tool_search` etc., never in any granted set) survive to
-        // the model. The harness default (allowlist of exactly the granted
-        // capability ids) is NARROWER than production there and would strip
-        // the deferred bridge surface down to zero tools. Mirror production
-        // for bridged groups only; every non-bridged group keeps the strict
-        // allowlist.
+        // top-level user turn; mirror that for bridged groups (narrowed
+        // override = the #5647 seam). Bridge ids now survive narrowing via
+        // the filter's host-exempt set, so this is production parity, not a
+        // bug dodge.
         let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
             if self.tool_disclosure == Some(ToolDisclosureMode::Bridged) {
                 Arc::new(StaticCapabilitySurfaceProfileResolver {

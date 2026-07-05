@@ -1397,8 +1397,12 @@ where
                 .await
                 .map_err(capability_resolve_error_to_host_error)?,
         );
-        let capabilities: Arc<dyn LoopCapabilityPort> =
-            Arc::new(CapabilitySurfaceProfileFilter::new(capabilities, allow_set));
+        // #5647: bridge meta-tool ids are host-synthesized, not granted
+        // capabilities — exempt them so narrowed profiles keep bridged disclosure.
+        let capabilities: Arc<dyn LoopCapabilityPort> = Arc::new(
+            CapabilitySurfaceProfileFilter::new(capabilities, allow_set)
+                .with_host_exempt_capability_ids(crate::tool_disclosure::bridge_capability_ids()),
+        );
         self.build_text_only_host_with_capabilities(request, capabilities)
             .await
     }

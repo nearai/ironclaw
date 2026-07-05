@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::{Arc, Mutex, MutexGuard},
 };
 
@@ -20,6 +20,11 @@ use crate::{CapabilityAllowSet, LoopCapabilityPortDecorator, capability_info};
 pub struct CapabilitySurfaceProfileFilter {
     inner: Arc<dyn LoopCapabilityPort>,
     allow_set: Arc<CapabilityAllowSet>,
+    /// Host-synthesized capability ids that bypass `allow_set` narrowing
+    /// (e.g. tool-disclosure bridge meta-tools), mirroring `capability_info`'s
+    /// implicit pass-through. Empty via `new()`; composition root supplies
+    /// them via `with_host_exempt_capability_ids` (#5647).
+    host_exempt_capability_ids: Arc<BTreeSet<CapabilityId>>,
     staged_invocations: Arc<Mutex<HashMap<StagedInvocationKey, Vec<CapabilityId>>>>,
 }
 
@@ -43,8 +48,22 @@ impl CapabilitySurfaceProfileFilter {
         Self {
             inner,
             allow_set,
+            host_exempt_capability_ids: Arc::new(BTreeSet::new()),
             staged_invocations: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub fn with_host_exempt_capability_ids(
+        mut self,
+        ids: impl IntoIterator<Item = CapabilityId>,
+    ) -> Self {
+        self.host_exempt_capability_ids = Arc::new(ids.into_iter().collect());
+        self
+    }
+
+    fn permits(&self, capability_id: &CapabilityId) -> bool {
+        self.allow_set.permits(capability_id)
+            || self.host_exempt_capability_ids.contains(capability_id)
     }
 }
 
@@ -350,7 +369,7 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
         let mut definitions = self.inner.tool_definitions()?;
         definitions.retain(|definition| {
             provider_capability_permitted(&definition.capability_id, |capability_id| {
-                self.allow_set.permits(capability_id)
+                self.permits(capability_id)
             })
         });
         Ok(definitions)
@@ -360,14 +379,10 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
         &self,
         tool_call: &ProviderToolCall,
     ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
-        // An `All` allow-set permits every capability, so the scope check is a
-        // no-op and folds into the predicate (keeping the delegate-then-scope
-        // skeleton identical to the visible/deny filters).
-        let allow_all = matches!(self.allow_set.as_ref(), CapabilityAllowSet::All);
         delegate_and_scope_tool_call_capability_ids(
             &self.inner,
             tool_call,
-            |capability_id| allow_all || self.allow_set.permits(capability_id),
+            |capability_id| self.permits(capability_id),
             "provider tool call is outside the run-profile surface",
         )
     }
@@ -379,7 +394,7 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
         if !matches!(self.allow_set.as_ref(), CapabilityAllowSet::All) {
             validate_provider_tool_call_capability_scope(
                 self.inner.provider_tool_call_capability_ids(tool_call)?,
-                |capability_id| self.allow_set.permits(capability_id),
+                |capability_id| self.permits(capability_id),
                 "provider tool call is outside the run-profile surface",
             )?;
         }
@@ -394,14 +409,14 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
             validate_provider_tool_call_capability_scope(
                 self.inner
                     .provider_tool_call_capability_ids(&request.tool_call)?,
-                |capability_id| self.allow_set.permits(capability_id),
+                |capability_id| self.permits(capability_id),
                 "provider tool call is outside the run-profile surface",
             )?;
         }
         let candidate = self.inner.register_provider_tool_call(request).await?;
         validate_provider_tool_call_capability_scope(
             candidate_capability_ids(&candidate),
-            |capability_id| self.allow_set.permits(capability_id),
+            |capability_id| self.permits(capability_id),
             "provider tool call is outside the run-profile surface",
         )?;
         record_staged_invocation(&self.staged_invocations, &candidate)?;
@@ -416,7 +431,7 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
         if matches!(self.allow_set.as_ref(), CapabilityAllowSet::Allowlist(_)) {
             surface.descriptors.retain(|descriptor| {
                 provider_capability_permitted(&descriptor.capability_id, |capability_id| {
-                    self.allow_set.permits(capability_id)
+                    self.permits(capability_id)
                 })
             });
         }
@@ -428,7 +443,7 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
         request: CapabilityInvocation,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
         if !invocation_capability_permitted(&self.staged_invocations, &request, |capability_id| {
-            self.allow_set.permits(capability_id)
+            self.permits(capability_id)
         })? {
             return Ok(surface_profile_denied_outcome());
         }
@@ -450,7 +465,7 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
                 invocation_capability_permitted(
                     &self.staged_invocations,
                     invocation,
-                    |capability_id| self.allow_set.permits(capability_id),
+                    |capability_id| self.permits(capability_id),
                 )
             },
             surface_profile_denied_outcome,
@@ -1071,6 +1086,49 @@ mod tests {
                 ("demo.allowed", "demo__allowed"),
             ]
         );
+    }
+
+    /// #5647: host-exempt ids (bridge meta-tools) bypass the allowlist for
+    /// definitions AND invocation, without admitting any non-exempt id.
+    #[tokio::test]
+    async fn host_exempt_ids_bypass_allowlist_without_widening_it() {
+        let inner = Arc::new(SpyPort::default());
+        *inner
+            .tool_definitions
+            .lock()
+            .expect("tool definitions lock") = vec![
+            provider_definition("ironclaw.tool_search", "tool_search"),
+            provider_definition("demo.allowed", "demo__allowed"),
+            provider_definition("demo.denied", "demo__denied"),
+        ];
+        let filter = CapabilitySurfaceProfileFilter::new(
+            inner.clone(),
+            Arc::new(CapabilityAllowSet::allowlist([capability_id(
+                "demo.allowed",
+            )])),
+        )
+        .with_host_exempt_capability_ids([capability_id("ironclaw.tool_search")]);
+
+        let definitions = filter.tool_definitions().expect("tool definitions");
+        assert_eq!(
+            definitions
+                .iter()
+                .map(|definition| definition.capability_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ironclaw.tool_search", "demo.allowed"]
+        );
+
+        let outcome = filter
+            .invoke_capability(invocation("ironclaw.tool_search", "input:bridge"))
+            .await
+            .expect("outcome");
+        assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
+
+        let outcome = filter
+            .invoke_capability(invocation("demo.denied", "input:denied"))
+            .await
+            .expect("outcome");
+        assert_eq!(denied_reason(&outcome), Some("surface_profile_denied"));
     }
 
     #[tokio::test]
