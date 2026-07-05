@@ -24,7 +24,10 @@ if [ "${partition_index_int}" -ge "${partition_count_int}" ]; then
   exit 1
 fi
 
-mapfile -t test_names < <(
+test_names=()
+while IFS= read -r test_name; do
+  test_names+=("${test_name}")
+done < <(
   {
     find tests -maxdepth 1 -type f -name 'reborn_*.rs' -print
     if [ -f tests/support_unit_tests.rs ]; then
@@ -40,22 +43,31 @@ if [ "${#test_names[@]}" -eq 0 ]; then
   exit 1
 fi
 
-selected=false
+selected_tests=()
 for index in "${!test_names[@]}"; do
   if (( index % partition_count_int != partition_index_int )); then
     continue
   fi
 
-  selected=true
-  test_name="${test_names[$index]}"
-  echo "::group::cargo test --test ${test_name}"
-  timeout --signal=INT --kill-after=30s "${test_timeout}" \
-    cargo test --test "${test_name}" -- --nocapture
-  echo "::endgroup::"
+  selected_tests+=("${test_names[$index]}")
 done
 
-if [ "${selected}" != true ]; then
+if [ "${#selected_tests[@]}" -eq 0 ]; then
   # Empty partitions are valid when the matrix has more partitions than tests
   # or when the sorted test list leaves a sparse tail for this partition.
   echo "No Reborn root tests assigned to partition ${partition_index_int} of ${partition_count_int}; passing by design"
+  exit 0
 fi
+
+cargo_args=(cargo test)
+for test_name in "${selected_tests[@]}"; do
+  cargo_args+=(--test "${test_name}")
+done
+cargo_args+=(-- --nocapture)
+
+echo "Running Reborn root test partition ${partition_index_int} of ${partition_count_int}:"
+printf '  - %s\n' "${selected_tests[@]}"
+
+echo "::group::${cargo_args[*]}"
+timeout --signal=INT --kill-after=30s "${test_timeout}" "${cargo_args[@]}"
+echo "::endgroup::"
