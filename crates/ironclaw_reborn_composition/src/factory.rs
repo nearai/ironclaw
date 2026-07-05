@@ -131,6 +131,8 @@ use ironclaw_turns::FilesystemTurnStateBlockPersistence;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::FilesystemTurnStateStore;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_turns::FilesystemTurnStateStoreKind;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::InMemoryRunProfileResolver;
 #[cfg(any(
     feature = "inmemory-turn-state",
@@ -862,7 +864,7 @@ where
     /// Registry used by the production host runtime for extension descriptors.
     #[allow(dead_code)]
     pub(crate) extension_registry: Arc<ExtensionRegistry>,
-    pub(crate) turn_state: Arc<FilesystemTurnStateStore<F>>,
+    pub(crate) turn_state: Arc<FilesystemTurnStateStoreKind<F>>,
     pub(crate) checkpoint_state_store: Arc<dyn CheckpointStateStore>,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) trigger_repository: Arc<dyn TriggerRepository>,
@@ -1863,6 +1865,25 @@ where
     Ok(Arc::new(ScopedFilesystem::with_fixed_view(
         filesystem, view,
     )))
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn production_turn_state_store<F>(
+    layout: ProductionTurnStateLayout,
+    filesystem: Arc<ScopedFilesystem<F>>,
+    limits: ironclaw_turns::InMemoryTurnStateStoreLimits,
+) -> FilesystemTurnStateStoreKind<F>
+where
+    F: RootFilesystem + 'static,
+{
+    match layout {
+        ProductionTurnStateLayout::Blob => {
+            FilesystemTurnStateStoreKind::blob(filesystem).with_limits(limits)
+        }
+        ProductionTurnStateLayout::Row => {
+            FilesystemTurnStateStoreKind::row(filesystem).with_limits(limits)
+        }
+    }
 }
 
 fn local_dev_extension_installation_state_path(
@@ -3871,6 +3892,13 @@ struct RebornProductionWiring {
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
+#[derive(Clone, Copy)]
+enum ProductionTurnStateLayout {
+    Blob,
+    Row,
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 struct RebornProductionBuildContext {
     profile: RebornCompositionProfile,
     wiring_config: ironclaw_host_runtime::ProductionWiringConfig,
@@ -3969,6 +3997,7 @@ where
             filesystem,
             resource_governor,
             event_store: FilesystemProductionEventStoresInput::Config(config.event_store),
+            turn_state_layout: ProductionTurnStateLayout::Blob,
             secret_master_key: config.secret_master_key,
             trust_policy: config.trust_policy,
             runtime_policy: config.runtime_policy,
@@ -4021,6 +4050,7 @@ where
             filesystem,
             resource_governor,
             event_store: FilesystemProductionEventStoresInput::Prebuilt(event_store),
+            turn_state_layout: ProductionTurnStateLayout::Row,
             secret_master_key: config.secret_master_key,
             trust_policy: config.trust_policy,
             runtime_policy: config.runtime_policy,
@@ -4036,6 +4066,7 @@ struct FilesystemProductionHostRuntimeServicesInput<F, G, TPolicy, TWake> {
     filesystem: Arc<F>,
     resource_governor: G,
     event_store: FilesystemProductionEventStoresInput,
+    turn_state_layout: ProductionTurnStateLayout,
     secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
     trust_policy: Arc<TPolicy>,
     runtime_policy: crate::RebornProductionRuntimePolicy,
@@ -4078,6 +4109,7 @@ where
         filesystem,
         resource_governor,
         event_store,
+        turn_state_layout,
         secret_master_key,
         trust_policy,
         runtime_policy,
@@ -4090,6 +4122,11 @@ where
         default_runtime_owner_scope(owner_user_id).map_err(crate::RebornCompositionError::Mount)?;
     let turn_state_filesystem = owner_turn_state_filesystem(Arc::clone(&filesystem), &owner_scope)
         .map_err(crate::RebornCompositionError::Mount)?;
+    let turn_state = Arc::new(production_turn_state_store(
+        turn_state_layout,
+        Arc::clone(&turn_state_filesystem),
+        ironclaw_turns::InMemoryTurnStateStoreLimits::default(),
+    ));
     let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
     let secret_credentials = build_filesystem_secret_credential_stores(
         Arc::clone(&scoped_filesystem),
@@ -4122,7 +4159,7 @@ where
     .with_credential_broker(secret_credentials.credential_broker)
     .with_turn_run_wake_notifier(turn_run_wake_notifier)
     .with_filesystem_run_state(Arc::clone(&scoped_filesystem))
-    .with_filesystem_turn_state_store(Arc::clone(&turn_state_filesystem))
+    .with_turn_state_and_transition_port(turn_state)
     .with_run_profile_resolver(Arc::new(
         ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver()?,
     ));
@@ -4307,6 +4344,7 @@ async fn build_backend_production<F, G>(
     context: RebornProductionBuildContext,
     stores: ProductionStoreBundle<F, G>,
     trigger_repository: Arc<dyn TriggerRepository>,
+    turn_state_layout: ProductionTurnStateLayout,
     production_runtime_services: impl FnOnce(
         Arc<RebornProductionRuntimeStoreGraph<F>>,
     ) -> RebornProductionRuntimeServices,
@@ -4361,10 +4399,11 @@ where
         broadcast_budget_event_sink,
         ..
     } = build_budget_sinks();
-    let turn_state = Arc::new(
-        FilesystemTurnStateStore::new(Arc::clone(&turn_state_filesystem))
-            .with_limits(turn_state_store_limits),
-    );
+    let turn_state = Arc::new(production_turn_state_store(
+        turn_state_layout,
+        Arc::clone(&turn_state_filesystem),
+        turn_state_store_limits,
+    ));
     let checkpoint_state_store: Arc<dyn CheckpointStateStore> = Arc::new(
         FilesystemCheckpointStateStore::new(Arc::clone(&stores.scoped_filesystem)),
     );
@@ -4594,6 +4633,7 @@ async fn build_libsql_production(
         context,
         stores,
         trigger_repository,
+        ProductionTurnStateLayout::Blob,
         RebornProductionRuntimeServices::LibSql,
         {
             #[cfg(feature = "postgres")]
@@ -4656,6 +4696,7 @@ async fn build_postgres_production(
         context,
         stores,
         trigger_repository,
+        ProductionTurnStateLayout::Row,
         RebornProductionRuntimeServices::Postgres,
         crate::product_auth_refresh_lock::CredentialRefreshLeaderLock::new(Some(
             pool_for_refresh_lock,

@@ -39,12 +39,13 @@ use ironclaw_triggers::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, AllowAllTurnAdmissionPolicy, BlockedReason, CancelRunRequest,
-    FilesystemTurnStateStore, GateRef, GetRunStateRequest, IdempotencyKey,
-    InMemoryRunProfileResolver, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
-    RunProfileRequest, SanitizedCancelReason, SourceBindingRef, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnLeaseToken, TurnRunId, TurnRunWake,
-    TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnRunnerId, TurnScope, TurnStateStore,
-    TurnStatus,
+    CheckpointSchemaId, FilesystemTurnStateStoreKind, GateRef, GetLoopCheckpointRequest,
+    GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver, LoopCheckpointKind,
+    LoopCheckpointStore, PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnPrecondition,
+    ResumeTurnRequest, RunProfileRequest, RunProfileVersion, SanitizedCancelReason,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnId,
+    TurnLeaseToken, TurnRunId, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
+    TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
     run_profile::LoopCheckpointStateRef,
     runner::{
         BlockRunRequest, CancelRunCompletionRequest, ClaimRunRequest, CompleteRunRequest,
@@ -85,7 +86,7 @@ enum WorkloadKind {
     ReserveSequence,
     TriggerSeedList,
     ControlPlaneSnapshot,
-    TurnLifecycleBlob,
+    TurnLifecycle,
     HostedSubstrateBuild,
 }
 
@@ -178,8 +179,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             kind: WorkloadKind::ControlPlaneSnapshot,
         },
         Workload {
-            name: "turn_lifecycle_blob",
-            kind: WorkloadKind::TurnLifecycleBlob,
+            name: "turn_lifecycle",
+            kind: WorkloadKind::TurnLifecycle,
         },
         Workload {
             name: "hosted_substrate_build",
@@ -265,9 +266,12 @@ struct BackendContext {
     resource_governor: Arc<dyn ResourceGovernor>,
 }
 
-trait TurnLifecycleStore: TurnStateStore + TurnRunTransitionPort {}
+trait TurnLifecycleStore: TurnStateStore + TurnRunTransitionPort + LoopCheckpointStore {}
 
-impl<T> TurnLifecycleStore for T where T: TurnStateStore + TurnRunTransitionPort + Send + Sync {}
+impl<T> TurnLifecycleStore for T where
+    T: TurnStateStore + TurnRunTransitionPort + LoopCheckpointStore + Send + Sync
+{
+}
 
 async fn open_backend(
     backend: BackendName,
@@ -352,7 +356,11 @@ where
         MountPermissions::read_write_list_delete(),
     )])?;
     let scoped = Arc::new(ScopedFilesystem::with_fixed_view(fs, mounts));
-    Ok(Arc::new(FilesystemTurnStateStore::new(scoped)))
+    let store = match backend {
+        BackendName::Libsql => FilesystemTurnStateStoreKind::blob(scoped),
+        BackendName::Postgres => FilesystemTurnStateStoreKind::row(scoped),
+    };
+    Ok(Arc::new(store))
 }
 
 struct ControlPlaneStores {
@@ -582,8 +590,8 @@ async fn run_one(
             )
             .await?
         }
-        WorkloadKind::TurnLifecycleBlob => {
-            turn_lifecycle_blob(
+        WorkloadKind::TurnLifecycle => {
+            turn_lifecycle(
                 backend_context.turn_state,
                 backend,
                 postgres_pool_size,
@@ -615,7 +623,7 @@ async fn setup_workload(
     if matches!(
         workload.kind,
         WorkloadKind::TriggerSeedList
-            | WorkloadKind::TurnLifecycleBlob
+            | WorkloadKind::TurnLifecycle
             | WorkloadKind::HostedSubstrateBuild
     ) {
         return Ok(());
@@ -658,7 +666,7 @@ async fn setup_workload(
         }
         WorkloadKind::TriggerSeedList
         | WorkloadKind::ControlPlaneSnapshot
-        | WorkloadKind::TurnLifecycleBlob
+        | WorkloadKind::TurnLifecycle
         | WorkloadKind::HostedSubstrateBuild => {}
     }
     Ok(())
@@ -1045,7 +1053,7 @@ fn resource_limits() -> ResourceLimits {
     }
 }
 
-async fn turn_lifecycle_blob(
+async fn turn_lifecycle(
     store: Arc<dyn TurnLifecycleStore>,
     backend: BackendName,
     postgres_pool_size: Option<usize>,
@@ -1071,7 +1079,8 @@ async fn turn_lifecycle_blob(
             &resolver,
         )
         .await?;
-    let (complete_run_id, complete_submit_status) = accepted_run(&complete_submit);
+    let (complete_turn_id, complete_run_id, complete_submit_status) =
+        accepted_run(&complete_submit);
     let (runner_id, lease_token, claimed_state) = claim_expected_run(
         Arc::clone(&store),
         Some(complete_scope.clone()),
@@ -1081,19 +1090,31 @@ async fn turn_lifecycle_blob(
     .await?;
 
     let gate_ref = GateRef::new(format!("gate:latency-{key}-approval"))?;
+    let complete_checkpoint_id = TurnCheckpointId::new();
+    let complete_checkpoint_ref = LoopCheckpointStateRef::new(format!("checkpoint:latency-{key}"))?;
     let blocked = store
         .block_run(BlockRunRequest {
             run_id: complete_run_id,
             runner_id,
             lease_token,
-            checkpoint_id: TurnCheckpointId::new(),
-            state_ref: LoopCheckpointStateRef::new(format!("checkpoint:latency-{key}"))?,
+            checkpoint_id: complete_checkpoint_id,
+            state_ref: complete_checkpoint_ref.clone(),
             reason: BlockedReason::Approval {
                 gate_ref: gate_ref.clone(),
             },
         })
         .await?;
     ensure_status(blocked.status, TurnStatus::BlockedApproval, "block_run")?;
+    let checkpoint_code = record_turn_lifecycle_checkpoints(
+        Arc::clone(&store),
+        &complete_scope,
+        complete_turn_id,
+        complete_run_id,
+        complete_checkpoint_ref,
+        &key,
+        payload_len,
+    )
+    .await?;
 
     let resumed = store
         .resume_turn(ResumeTurnRequest {
@@ -1151,7 +1172,7 @@ async fn turn_lifecycle_blob(
             &resolver,
         )
         .await?;
-    let (cancel_run_id, cancel_submit_status) = accepted_run(&cancel_submit);
+    let (_cancel_turn_id, cancel_run_id, cancel_submit_status) = accepted_run(&cancel_submit);
     let (cancel_runner_id, cancel_lease_token, cancel_claimed_state) = claim_expected_run(
         Arc::clone(&store),
         Some(cancel_scope.clone()),
@@ -1207,7 +1228,62 @@ async fn turn_lifecycle_blob(
         ^ (option_code(cancel_claimed_state.checkpoint_id.is_some()) << 44)
         ^ (status_code(cancel_requested.status) << 48)
         ^ (status_code(cancelled.status) << 52)
-        ^ (status_code(cancelled_readback.status) << 56))
+        ^ (status_code(cancelled_readback.status) << 56)
+        ^ checkpoint_code)
+}
+
+async fn record_turn_lifecycle_checkpoints(
+    store: Arc<dyn TurnLifecycleStore>,
+    scope: &TurnScope,
+    turn_id: TurnId,
+    run_id: TurnRunId,
+    first_state_ref: LoopCheckpointStateRef,
+    key: &str,
+    payload_len: usize,
+) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+    let checkpoint_count = turn_lifecycle_checkpoint_count(payload_len);
+    let schema_id = CheckpointSchemaId::new("latency_turn_state")?;
+    let schema_version = RunProfileVersion::new(1);
+    let mut checksum = checkpoint_count as u64;
+
+    for index in 0..checkpoint_count {
+        let state_ref = if index == 0 {
+            first_state_ref.clone()
+        } else {
+            LoopCheckpointStateRef::new(format!("checkpoint:latency-{key}:{index}"))?
+        };
+        let record = store
+            .put_loop_checkpoint(PutLoopCheckpointRequest {
+                scope: scope.clone(),
+                turn_id,
+                run_id,
+                state_ref,
+                schema_id: schema_id.clone(),
+                schema_version,
+                kind: LoopCheckpointKind::BeforeBlock,
+                gate_ref: None,
+            })
+            .await?;
+        let readback = store
+            .get_loop_checkpoint(GetLoopCheckpointRequest {
+                scope: scope.clone(),
+                turn_id,
+                run_id,
+                checkpoint_id: record.checkpoint_id,
+            })
+            .await?
+            .ok_or_else(|| format!("checkpoint {index} missing after put"))?;
+        if readback != record {
+            return Err(format!("checkpoint {index} readback did not match put").into());
+        }
+        checksum ^= ((index as u64 + 1) << (index % 16)) ^ schema_version.as_u64();
+    }
+
+    Ok(checksum)
+}
+
+fn turn_lifecycle_checkpoint_count(payload_len: usize) -> usize {
+    (payload_len / 256).clamp(1, 16)
 }
 
 async fn claim_expected_run(
@@ -1303,9 +1379,14 @@ fn turn_lifecycle_submit_request(
     })
 }
 
-fn accepted_run(response: &SubmitTurnResponse) -> (TurnRunId, TurnStatus) {
-    let SubmitTurnResponse::Accepted { run_id, status, .. } = response;
-    (*run_id, *status)
+fn accepted_run(response: &SubmitTurnResponse) -> (TurnId, TurnRunId, TurnStatus) {
+    let SubmitTurnResponse::Accepted {
+        turn_id,
+        run_id,
+        status,
+        ..
+    } = response;
+    (*turn_id, *run_id, *status)
 }
 
 fn ensure_status(

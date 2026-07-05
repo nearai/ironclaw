@@ -1043,3 +1043,91 @@ Budgets: 10 hours wall-clock / $0 spend
   `harness/latency/lint.sh` passed. Full `harness/latency/score.sh --dev`
   completed and reported the intended hard-fail comparison rows for
   `turn_lifecycle_blob` c4.
+
+## Cycle 22 - Postgres Turn-State Row Wiring
+
+- Baseline: Cycle 21 added the missing local-runtime turn lifecycle workload
+  and showed the current filesystem blob store hard-fails under concurrent
+  turn-state pressure. Full `score.sh --dev` reports zero errors and matching
+  state hashes, but `turn_lifecycle_blob` c4 hard-fails: libSQL p95 5.63s,
+  Postgres pool-1 p95 15.25s (2.71x), and Postgres pool-2 p95 9.12s (1.62x).
+  A focused perturbed probe with payload sizes 128/2048 and path depths 2/5
+  also passes c1 but fails c3; Postgres pool-2 c3 p95 is 2.82s vs libSQL
+  1.87s (1.51x).
+- Code signal: Hosted production still constructs `FilesystemTurnStateStore`
+  directly. The existing `FilesystemTurnStateRowStore` already implements the
+  turn-state, spawn-tree, event projection, loop checkpoint, and runner
+  transition traits, but it is only used by tests/stress and is not selectable
+  through production composition. The host-runtime builder also only exposes a
+  helper that constructs the blob store.
+- Hypothesis: Add a concrete filesystem turn-state wrapper that can hold either
+  the blob store or the row store, then wire libSQL production to blob and
+  Postgres production to row. The latency runner should mirror that
+  production-shaped choice for the turn lifecycle workload: libSQL baseline
+  stays blob, Postgres treatment uses row. This should remove the per-user
+  `/turns/state.json` rewrite from hosted-single-tenant Postgres without adding
+  a benchmark flag, path special case, or in-memory bypass.
+- Expected failure mode: The row store currently improves the stress path but
+  still has gaps: some transitions use generic snapshot deltas, and previous
+  stress runs showed libSQL row concurrency aborting. This cycle deliberately
+  leaves libSQL production on blob and may still fail the latency scorer if the
+  row implementation's generic transitions are too expensive. If so, the next
+  fix must make `block_run`, `resume_turn`, `request_cancel`, and `cancel_run`
+  row-native instead of falling back to whole-snapshot deltas.
+- Diagnostic: Implement the wrapper and production/harness wiring, run targeted
+  compile tests, then rerun the focused turn lifecycle scorer and the full dev
+  score to see whether Postgres c4 exits the hard-fail range.
+- Result: Added `FilesystemTurnStateStoreKind`, a concrete wrapper over the
+  blob and row filesystem stores, and delegated the turn-state, spawn-tree,
+  event projection, loop checkpoint, and runner transition traits through it.
+  LibSQL production and the latency baseline stay on the existing blob store;
+  Postgres production and the latency treatment now use
+  `FilesystemTurnStateRowStore`. The shared production host-runtime substrate
+  path also takes the selected layout instead of always constructing a blob
+  store. The latency workload is renamed from `turn_lifecycle_blob` to
+  `turn_lifecycle` because it now mirrors the production backend choice.
+- Growth signal: `turn_lifecycle` now writes and verifies loop-checkpoint
+  metadata during the blocked/resumed path; the checkpoint count is derived
+  from `LATENCY_PAYLOAD_BYTES / 256` and capped at 16, so probe payload
+  perturbations grow persisted turn-state records instead of only changing
+  unrelated filesystem payloads. Focused growth score
+  (`LATENCY_PAYLOAD_BYTES=512,4096`, c1/c4, 12 samples) reports zero errors and
+  matching hashes: libSQL blob c4 p95 6100.6ms, Postgres row pool-1 c4 p95
+  1416.1ms (0.23x), and Postgres row pool-2 c4 p95 1448.0ms (0.24x).
+- Locked score signal: Full `harness/latency/score.sh --dev` reports no
+  failing comparison rows. The full-score `turn_lifecycle` rows all pass with
+  matching hashes: libSQL blob c4 p95 8293.6ms, Postgres row pool-1 c4 p95
+  1776.3ms (0.21x), and Postgres row pool-2 c4 p95 1869.6ms (0.23x). The
+  previous Cycle 21 c4 hard fail is closed without increasing pool size or
+  changing score semantics.
+- `ironclaw_stress` E2E signal: Built `ironclaw_stress` in release mode and
+  ran the same `mixed-user-session` flow with 8 prefilled threads x 10 turns,
+  c4, 32 measured operations, blocked/resumed every operation, 2KiB user and
+  assistant messages, and `context_max_messages=100`. All three runs completed
+  with 32/32 measured operations and zero failures. LibSQL filesystem blob:
+  operation p95 60.0ms, throughput 87.0 ops/s, turn_store p95 33.5ms.
+  Postgres filesystem blob: operation p95 46.7ms, throughput 95.9 ops/s,
+  turn_store p95 21.6ms. Postgres filesystem-row: operation p95 25.1ms,
+  throughput 184.4 ops/s, turn_store p95 6.3ms. The stress result validates
+  the same solution in the full user-turn path, not just the locked latency
+  micro-workload.
+- Validation: Passed `cargo fmt --manifest-path
+  harness/latency/runner/Cargo.toml`, `cargo fmt -p ironclaw_turns -p
+  ironclaw_reborn_composition`, `cargo check -p ironclaw_turns`, `cargo check
+  -p ironclaw_reborn_composition --features libsql,postgres`, `cargo check
+  --manifest-path harness/latency/runner/Cargo.toml`,
+  `harness/latency/lint.sh`, focused/full latency scores, `cargo test -p
+  ironclaw_turns filesystem_turn_state_row_store -- --nocapture`, and the
+  release `ironclaw_stress` runs above. The existing
+  `OutboundDeliveryTargetEntry` unused-import warning remains. A broader
+  `cargo test -p ironclaw_reborn_composition --features libsql,postgres
+  production_libsql_turn_state -- --nocapture` attempt was not usable: it
+  pulled in a large transitive debug test graph and failed with `No space left
+  on device` before reaching a meaningful filtered test result; generated
+  `target/debug` artifacts were removed afterward to restore disk space.
+- Conclusion: For filesystem turn state, the fix is a row/append layout for
+  Postgres hosted-single-tenant, with libSQL left on the known blob baseline
+  until the libSQL row concurrency abort from Cycle 20 is fixed. This closes
+  the scorer-visible blob growth problem for Postgres turn lifecycle and moves
+  the next latency frontier back to full-flow thread/context/resource costs and
+  remaining row-native transition cleanup.
