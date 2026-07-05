@@ -24,11 +24,15 @@ mod support;
 use std::sync::Arc;
 
 use axum::http::StatusCode;
+use ironclaw_events::InMemoryDurableEventLog;
 use ironclaw_filesystem::{CompositeRootFilesystem, LibSqlRootFilesystem};
 use ironclaw_host_api::{CapabilityId, EffectKind, ExtensionId, PermissionMode};
+use ironclaw_product_adapters::ProductOutboundPayload;
 use ironclaw_product_workflow::{
-    RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornServices,
+    RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornServices, RebornServicesApi,
+    RebornStreamEventsRequest,
 };
+use ironclaw_turns::{ReplyTargetBindingRef, TurnEventProjectionSource};
 use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
@@ -251,5 +255,93 @@ async fn settings_tool_permission_put_then_cold_read() {
     assert_eq!(
         entry["value"]["state"], "disabled",
         "PUT'd permission state must survive the cold read: {entry}"
+    );
+}
+
+/// W5-WEBUI-API-1 scenario 2 (SSE activity stream + reconnect): drives the
+/// FACADE drain method directly (`RebornServicesApi::stream_events`), not
+/// the SSE handler — the handler is a polling wrapper over the same drain
+/// call (`handlers.rs::stream_events`/`build_sse_stream`), already
+/// investigated and closed by the W5-WEBUI-SPIKE. Proves the plain
+/// lifecycle-replay contract: a completed turn's lifecycle event is
+/// delivered once, and a reconnect with `after_cursor` set past it does not
+/// redeliver it.
+///
+/// Uses Enabler A's deliberately narrowed `build_webui_event_stream_for_test`
+/// (turn-lifecycle events only — see that function's doc comment for the
+/// documented divergence from production's fuller projection-assembly
+/// chain).
+#[tokio::test]
+async fn sse_activity_stream_replay_and_reconnect() {
+    let h = RebornIntegrationHarness::test_default()
+        .script([RebornScriptedReply::text("hello")])
+        .build()
+        .await
+        .expect("harness builds");
+
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    let reply_target_binding_ref =
+        ReplyTargetBindingRef::new("webui-api-1-test").expect("valid reply target binding ref");
+    let turn_event_source: Arc<dyn TurnEventProjectionSource> = h.turn_store.clone();
+    let event_stream = ironclaw_reborn_composition::test_support::build_webui_event_stream_for_test(
+        event_log,
+        turn_event_source,
+        h.coordinator.clone(),
+        reply_target_binding_ref,
+    );
+    let services = RebornServices::new(h.thread_harness.service.clone(), h.coordinator.clone())
+        .with_event_stream(event_stream);
+
+    h.submit_turn("hello").await.expect("turn completes");
+
+    let caller = webui_caller_for(&h.binding);
+    let thread_id = h.binding.thread_id.as_str().to_string();
+
+    // Action 2 (drain): first poll sees the turn's lifecycle event(s).
+    let first = services
+        .stream_events(
+            caller.clone(),
+            RebornStreamEventsRequest {
+                thread_id: thread_id.clone(),
+                after_cursor: None,
+            },
+        )
+        .await
+        .expect("first drain succeeds");
+    assert!(
+        !first.events.is_empty(),
+        "expected at least one turn-lifecycle event on the first drain"
+    );
+    assert!(
+        first
+            .events
+            .iter()
+            .any(|envelope| !matches!(envelope.payload, ProductOutboundPayload::KeepAlive)),
+        "expected a real (non-KeepAlive) turn-lifecycle payload: {:?}",
+        first.events
+    );
+    let last_cursor = first
+        .events
+        .last()
+        .expect("non-empty first drain")
+        .projection_cursor
+        .clone();
+
+    // Action 3 (reconnect): draining again with `after_cursor` past the last
+    // delivered event must not redeliver it.
+    let second = services
+        .stream_events(
+            caller,
+            RebornStreamEventsRequest {
+                thread_id,
+                after_cursor: Some(last_cursor),
+            },
+        )
+        .await
+        .expect("reconnect drain succeeds");
+    assert!(
+        second.events.is_empty(),
+        "reconnect with after_cursor must not redeliver the same event(s): {:?}",
+        second.events
     );
 }

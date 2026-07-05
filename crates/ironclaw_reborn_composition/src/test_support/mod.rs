@@ -37,6 +37,9 @@
 //! 10. [`automation`] — `local_dev_automation_product_facade_for_test`, the
 //!     production `RebornAutomationProductFacade` constructor for the
 //!     automations-cold-LIST scenario (W5-WEBUI-API-1 Enabler B.2).
+//! 11. [`projection`] — `build_webui_event_stream_for_test`, a deliberately
+//!     narrowed `ProjectionStream` (turn-lifecycle events only) for the SSE
+//!     activity-stream scenario (W5-WEBUI-API-1 Enabler A).
 
 mod automation;
 mod budget_gateway;
@@ -45,6 +48,7 @@ mod local_dev_boot;
 mod oauth_product_auth;
 mod outbound_delivery;
 mod project_create;
+mod projection;
 mod skill_activation;
 mod trace_capture;
 mod trigger_materializer;
@@ -81,6 +85,8 @@ pub use outbound_delivery::{
 };
 #[cfg(feature = "test-support")]
 pub use project_create::{PROJECT_CREATE_CAPABILITY_ID, wrap_project_create_capability_for_test};
+#[cfg(feature = "test-support")]
+pub use projection::build_webui_event_stream_for_test;
 #[cfg(feature = "test-support")]
 pub use skill_activation::{
     SKILL_ACTIVATE_CAPABILITY_ID, SkillActivationTestSource,
