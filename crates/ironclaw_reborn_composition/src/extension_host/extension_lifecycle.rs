@@ -517,9 +517,15 @@ impl RebornLocalExtensionManagementPort {
             return Err(error);
         }
         if let Err(error) = self.persist_install_plan(plan).await {
-            let _ = self
+            if let Err(cleanup_error) = self
                 .delete_materialized_extension_files(&available.package.id)
-                .await;
+                .await
+            {
+                tracing::debug!(
+                    error = ?cleanup_error,
+                    "best-effort extension file cleanup failed"
+                );
+            }
             if let Err(rollback_error) =
                 self.rollback_lifecycle_install(&available.package.id).await
             {
@@ -1169,12 +1175,15 @@ impl RebornLocalExtensionManagementPort {
     }
 
     async fn disable_lifecycle_package(&self, extension_id: &ExtensionId) {
-        let _ = self
+        if let Err(error) = self
             .lifecycle_service
             .lock()
             .await
             .disable(extension_id)
-            .await;
+            .await
+        {
+            tracing::debug!(?error, "best-effort lifecycle package disable failed");
+        }
     }
 
     async fn remove_lifecycle_package(
@@ -1280,7 +1289,13 @@ impl RebornLocalExtensionManagementPort {
             .upsert_installation(plan.installation)
             .await
         {
-            let _ = self.installation_store.delete_manifest(&extension_id).await;
+            if let Err(cleanup_error) = self.installation_store.delete_manifest(&extension_id).await
+            {
+                tracing::debug!(
+                    error = ?cleanup_error,
+                    "best-effort manifest rollback cleanup failed"
+                );
+            }
             return Err(map_extension_installation_error(error));
         }
         Ok(())
@@ -4993,9 +5008,12 @@ mod tests {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .take()
                 {
+                    #[allow(clippy::let_underscore_must_use)]
+                    // oneshot notify; dropped receiver is expected
                     let _ = started.send(());
                 }
                 let mut release = self.release.lock().await;
+                #[allow(clippy::let_underscore_must_use)] // gate await; result intentionally unused
                 let _ = (&mut *release).await;
             }
             hosted_mcp_response_for_body(

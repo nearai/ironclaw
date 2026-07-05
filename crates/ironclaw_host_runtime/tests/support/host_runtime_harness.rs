@@ -1131,9 +1131,12 @@ where
                 };
                 let cleanup_process_store = Arc::clone(&cleanup_process_store);
                 tokio::spawn(async move {
-                    let _ = cleanup_process_store
+                    if let Err(error) = cleanup_process_store
                         .cleanup_process_obligations(&failure.scope, failure.process_id, reconcile)
-                        .await;
+                        .await
+                    {
+                        tracing::debug!(?error, "best-effort process obligation cleanup failed");
+                    }
                 });
             }),
     );

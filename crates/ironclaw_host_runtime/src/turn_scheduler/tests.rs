@@ -289,6 +289,8 @@ impl TurnRunTransitionPort for LockingTransitionPort {
     async fn heartbeat(&self, _request: HeartbeatRequest) -> Result<EventCursor, TurnError> {
         self.heartbeat_count.fetch_add(1, Ordering::SeqCst);
         if let Some(tx) = self.heartbeat_started_tx.lock().await.take() {
+            #[allow(clippy::let_underscore_must_use)]
+            // notify-only oneshot; receiver drop is expected
             let _ = tx.send(());
         }
         let _guard = self.state_lock.lock().await;
@@ -359,12 +361,17 @@ impl TurnRunExecutor for LockHoldingExecutor {
     ) -> Result<(), TurnRunExecutorError> {
         let _guard = self.state_lock.lock().await;
         if let Some(tx) = self.locked_tx.lock().await.take() {
+            #[allow(clippy::let_underscore_must_use)]
+            // notify-only oneshot; receiver drop is expected
             let _ = tx.send(());
         }
         if let Some(rx) = self.release_rx.lock().await.take() {
+            #[allow(clippy::let_underscore_must_use)] // release signal; sender drop just proceeds
             let _ = rx.await;
         }
         if let Some(tx) = self.done_tx.lock().await.take() {
+            #[allow(clippy::let_underscore_must_use)]
+            // notify-only oneshot; receiver drop is expected
             let _ = tx.send(());
         }
         Ok(())
@@ -557,6 +564,8 @@ async fn is_stopped_reflects_scheduler_lifecycle() {
         handle.shutdown().await;
         // After shutdown() the supervisor has been joined → is_finished()
         // is guaranteed true; we use `true` as a sentinel for "stopped".
+        #[allow(clippy::let_underscore_must_use)]
+        // receiver awaited by test; nothing to signal on drop
         let _ = tx.send((was_running, true));
     });
 
@@ -655,6 +664,8 @@ async fn drop_with_saturated_queue_still_cancels_token() {
     };
     use ironclaw_turns::TurnRunWakeNotifier;
     for _ in 0..4 {
+        #[allow(clippy::let_underscore_must_use)]
+        // queue-full DeliveryUnavailable is expected and intended here
         let _ = notifier.notify_queued_run(fake_wake.clone());
     }
 

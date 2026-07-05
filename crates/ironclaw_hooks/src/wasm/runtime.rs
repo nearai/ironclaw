@@ -543,6 +543,8 @@ impl Drop for EpochTickerHandle {
             // deliberately swallow it so a single stuck runtime drop
             // can't poison the process. The shutdown flag is already
             // set, so any subsequent runtime drop also no-ops cleanly.
+            #[allow(clippy::let_underscore_must_use)]
+            // ticker-thread panic deliberately swallowed on drop
             let _ = handle.join();
         }
     }

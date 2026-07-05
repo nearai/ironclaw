@@ -880,11 +880,15 @@ fn persist_profile_token(scope: &str, token: &ProfileAttributionToken) -> std::i
         file.sync_all()
     };
     if let Err(error) = write_temp() {
-        let _ = std::fs::remove_file(&temp_path);
+        if let Err(cleanup_error) = std::fs::remove_file(&temp_path) {
+            tracing::debug!(error = ?cleanup_error, "best-effort cleanup of profile token temp file failed");
+        }
         return Err(error);
     }
     if let Err(error) = std::fs::rename(&temp_path, &path) {
-        let _ = std::fs::remove_file(&temp_path);
+        if let Err(cleanup_error) = std::fs::remove_file(&temp_path) {
+            tracing::debug!(error = ?cleanup_error, "best-effort cleanup of profile token temp file failed");
+        }
         return Err(error);
     }
     Ok(path)

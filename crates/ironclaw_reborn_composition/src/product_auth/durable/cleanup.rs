@@ -81,11 +81,15 @@ where
             // without the handles.  Best-effort: the account no longer references
             // these handles so any leftover material becomes unreachable even if
             // the delete call fails (e.g. transient backend outage).
-            if let Some(h) = &purge_access {
-                let _ = self.secret_store.delete(&current.scope.resource, h).await;
+            if let Some(h) = &purge_access
+                && let Err(error) = self.secret_store.delete(&current.scope.resource, h).await
+            {
+                tracing::debug!(?error, "best-effort secret cleanup failed");
             }
-            if let Some(h) = &purge_refresh {
-                let _ = self.secret_store.delete(&current.scope.resource, h).await;
+            if let Some(h) = &purge_refresh
+                && let Err(error) = self.secret_store.delete(&current.scope.resource, h).await
+            {
+                tracing::debug!(?error, "best-effort secret cleanup failed");
             }
         }
         Ok(report)

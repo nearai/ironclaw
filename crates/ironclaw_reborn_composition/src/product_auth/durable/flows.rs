@@ -499,13 +499,17 @@ where
                             .await?;
                         if let Some(h) = &previous_access_secret
                             && previous_access_secret.as_ref() != account.access_secret.as_ref()
+                            && let Err(error) =
+                                self.secret_store.delete(&request.scope.resource, h).await
                         {
-                            let _ = self.secret_store.delete(&request.scope.resource, h).await;
+                            tracing::debug!(?error, "best-effort secret cleanup failed");
                         }
                         if let Some(h) = &previous_refresh_secret
                             && previous_refresh_secret.as_ref() != account.refresh_secret.as_ref()
+                            && let Err(error) =
+                                self.secret_store.delete(&request.scope.resource, h).await
                         {
-                            let _ = self.secret_store.delete(&request.scope.resource, h).await;
+                            tracing::debug!(?error, "best-effort secret cleanup failed");
                         }
                         Ok(account.id)
                     }
@@ -555,13 +559,15 @@ where
         // the caller.
         if let Some(h) = &previous_access_secret
             && previous_access_secret.as_ref() != account.access_secret.as_ref()
+            && let Err(error) = self.secret_store.delete(&scope.resource, h).await
         {
-            let _ = self.secret_store.delete(&scope.resource, h).await;
+            tracing::debug!(?error, "best-effort secret cleanup failed");
         }
         if let Some(h) = &previous_refresh_secret
             && previous_refresh_secret.as_ref() != account.refresh_secret.as_ref()
+            && let Err(error) = self.secret_store.delete(&scope.resource, h).await
         {
-            let _ = self.secret_store.delete(&scope.resource, h).await;
+            tracing::debug!(?error, "best-effort secret cleanup failed");
         }
         Ok(account_id)
     }

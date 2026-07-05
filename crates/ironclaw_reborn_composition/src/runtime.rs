@@ -5639,6 +5639,8 @@ output_schema_ref = "schemas/write.output.json"
 
                 if is_chat_completion {
                     if let Some(auth_tx) = auth_tx.take() {
+                        #[allow(clippy::let_underscore_must_use)]
+                        // oneshot send; dropped receiver is expected
                         let _ = auth_tx.send(auth_header);
                     }
                     break;
@@ -6472,6 +6474,8 @@ output_schema_ref = "schemas/write.output.json"
         // First model call routes through the instrumentation wrapper. The dead
         // endpoint makes the underlying call error, but the wrapper counts before
         // delegating, so the result is irrelevant — only that it was observed.
+        #[allow(clippy::let_underscore_must_use)]
+        // dead endpoint errors by design; only the wrapper's observation count matters
         let _ = bundle
             .gateway
             .stream_model(nearai_gateway_test_request())
@@ -6491,6 +6495,8 @@ output_schema_ref = "schemas/write.output.json"
             .await
             .expect("live reload rebuilds the provider chain");
 
+        #[allow(clippy::let_underscore_must_use)]
+        // dead endpoint errors by design; only the wrapper's observation count matters
         let _ = bundle
             .gateway
             .stream_model(nearai_gateway_test_request())
@@ -7392,6 +7398,7 @@ output_schema_ref = "schemas/write.output.json"
         assert_eq!(envelope["outcome"]["task_success"], "success");
 
         runtime.shutdown().await.expect("runtime shutdown");
+        #[allow(clippy::let_underscore_must_use)] // best-effort per-test scope dir cleanup
         let _ = std::fs::remove_dir_all(trace_contribution::trace_contribution_dir_for_scope(
             Some(&scope),
         ));

@@ -539,7 +539,9 @@ impl LlmConfigService for RebornLlmConfigService {
             return Err(LlmConfigServiceError::NotFound);
         }
         // Best-effort: drop any stored key for the deleted provider.
-        let _ = self.keys.delete(&id).await;
+        if let Err(error) = self.keys.delete(&id).await {
+            tracing::debug!(?error, "best-effort provider key cleanup failed");
+        }
 
         self.refresh_running_provider().await;
         self.snapshot(caller).await

@@ -112,7 +112,12 @@ async fn publish_saved_output_for_file_read(
         return Ok(None);
     };
     let Some((scoped_path, virtual_path)) = saved_output_publish_path(request, saved_output) else {
-        let _ = tokio::fs::remove_file(&saved_output.path).await;
+        if let Err(error) = tokio::fs::remove_file(&saved_output.path).await {
+            tracing::debug!(
+                ?error,
+                "best-effort cleanup of unpublished saved output failed"
+            );
+        }
         return Ok(None);
     };
     let content = tokio::fs::read(&saved_output.path)
@@ -134,7 +139,12 @@ async fn publish_saved_output_for_file_read(
         .write_file(&virtual_path, &content)
         .await
         .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed))?;
-    let _ = tokio::fs::remove_file(&saved_output.path).await;
+    if let Err(error) = tokio::fs::remove_file(&saved_output.path).await {
+        tracing::debug!(
+            ?error,
+            "best-effort cleanup of published saved output failed"
+        );
+    }
     Ok(Some(scoped_path))
 }
 

@@ -4761,6 +4761,8 @@ mod tests {
         // on a thread that owns a clone of the dispatcher Arc. `Mutex::lock`
         // returns Err(PoisonError) on subsequent locks until cleared.
         let poisoner = Arc::clone(&dispatcher);
+        #[allow(clippy::let_underscore_must_use)]
+        // thread panics intentionally to poison the mutex; join Err is expected and discarded
         let _ = std::thread::spawn(move || {
             let _guard = poisoner.registry.lock().expect("first lock ok");
             panic!("intentional poison");
@@ -4876,6 +4878,8 @@ mod tests {
         let dispatcher = Arc::new(HookDispatcher::new(registry));
 
         let poisoner = Arc::clone(&dispatcher);
+        #[allow(clippy::let_underscore_must_use)]
+        // thread panics intentionally to poison the mutex; join Err is expected and discarded
         let _ = std::thread::spawn(move || {
             let _guard = poisoner.registry.lock().expect("first lock ok");
             panic!("intentional poison");
