@@ -336,7 +336,7 @@ where
 
 type AsyncStorageJob = Box<dyn FnOnce(&tokio::runtime::Runtime) + Send + 'static>;
 
-struct AsyncStorageWorker {
+pub(crate) struct AsyncStorageWorker {
     sender: mpsc::Sender<AsyncStorageJob>,
 }
 
@@ -389,9 +389,13 @@ impl AsyncStorageWorker {
     }
 }
 
-type AsyncStorageWorkerCell = Arc<OnceLock<Result<AsyncStorageWorker, String>>>;
+pub(crate) type AsyncStorageWorkerCell = Arc<OnceLock<Result<AsyncStorageWorker, String>>>;
 
-fn run_on_worker<T, E, Fut, F>(
+pub(crate) fn new_worker_cell() -> AsyncStorageWorkerCell {
+    Arc::new(OnceLock::new())
+}
+
+pub(crate) fn run_on_worker<T, E, Fut, F>(
     worker_cell: &AsyncStorageWorkerCell,
     worker_thread_name: &'static str,
     build: F,

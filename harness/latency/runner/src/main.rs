@@ -12,7 +12,7 @@ use ironclaw_host_api::{
     Action, AgentId, ApprovalRequest, ApprovalRequestId, AuditMode, CorrelationId, DeploymentMode,
     FilesystemBackendKind, MountAlias, MountGrant, MountPermissions, MountView, NetworkMode,
     Principal, ProcessBackendKind, ProjectId, ResourceEstimate, ResourceScope, ResourceUsage,
-    RuntimeProfile, SecretHandle, SecretMode, TenantId, UserId, VirtualPath,
+    RuntimeProfile, ScopedPath, SecretHandle, SecretMode, TenantId, UserId, VirtualPath,
     runtime_policy::{ApprovalPolicy, EffectiveRuntimePolicy},
 };
 use ironclaw_host_runtime::{
@@ -26,8 +26,8 @@ use ironclaw_reborn_composition::{
 };
 use ironclaw_reborn_event_store::RebornEventStoreConfig;
 use ironclaw_resources::{
-    FilesystemResourceGovernorStore, PersistentResourceGovernor, ResourceAccount, ResourceGovernor,
-    ResourceLimits,
+    FilesystemResourceGovernorStore, PersistentResourceGovernor, PostgresResourceGovernor,
+    ResourceAccount, ResourceGovernor, ResourceLimits,
 };
 use ironclaw_run_state::{ApprovalRequestStore, ApprovalStatus, FilesystemApprovalRequestStore};
 use ironclaw_secrets::{
@@ -284,10 +284,13 @@ async fn open_backend(
             fs.run_migrations().await?;
             let secret_store = PostgresSecretStore::new(pool.clone(), latency_secrets_crypto());
             secret_store.run_migrations().await?;
+            let resource_governor = PostgresResourceGovernor::new(pool.clone());
+            resource_governor.run_migrations()?;
             let trigger_repository = PostgresTriggerRepository::new(pool);
             trigger_repository.run_migrations().await?;
             let mut control_plane = control_plane_stores(Arc::clone(&fs));
             control_plane.secret_store = Arc::new(secret_store);
+            control_plane.resource_governor = Arc::new(resource_governor);
             Ok(BackendContext {
                 fs,
                 trigger_repository: Arc::new(trigger_repository),
@@ -326,7 +329,7 @@ where
 
 fn scoped_control_plane_fs<F>(fs: Arc<F>) -> Arc<ScopedFilesystem<F>>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + ?Sized,
 {
     let mounts = MountView::new(vec![
         MountGrant::new(
@@ -546,10 +549,13 @@ async fn setup_workload(
 ) -> Result<(), Box<dyn std::error::Error>> {
     if matches!(
         workload.kind,
-        WorkloadKind::TriggerSeedList
-            | WorkloadKind::ControlPlaneSnapshot
-            | WorkloadKind::HostedSubstrateBuild
+        WorkloadKind::TriggerSeedList | WorkloadKind::HostedSubstrateBuild
     ) {
+        return Ok(());
+    }
+
+    if matches!(workload.kind, WorkloadKind::ControlPlaneSnapshot) {
+        setup_control_plane_indexes(backend_context.fs).await?;
         return Ok(());
     }
 
@@ -596,6 +602,29 @@ async fn setup_create_dir_all(
 ) -> Result<(), Box<dyn std::error::Error>> {
     for attempt in 0..5 {
         match fs.create_dir_all(prefix).await {
+            Ok(()) => return Ok(()),
+            Err(error) if is_retryable_setup_error(&error) && attempt < 4 => {
+                tokio::time::sleep(Duration::from_millis(10 * (attempt + 1))).await;
+            }
+            Err(error) => return Err(Box::new(error)),
+        }
+    }
+    unreachable!("bounded setup retry loop always returns")
+}
+
+async fn setup_control_plane_indexes(
+    fs: Arc<dyn RootFilesystem>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let scoped = scoped_control_plane_fs(fs);
+    let scope = ResourceScope::system();
+    let secrets_root = ScopedPath::new("/secrets")?;
+    let spec = IndexSpec::new(
+        IndexName::new("secrets_by_tenant")?,
+        vec![IndexKey::new("tenant_id")?],
+        IndexKind::Exact,
+    );
+    for attempt in 0..5 {
+        match scoped.ensure_index(&scope, &secrets_root, &spec).await {
             Ok(()) => return Ok(()),
             Err(error) if is_retryable_setup_error(&error) && attempt < 4 => {
                 tokio::time::sleep(Duration::from_millis(10 * (attempt + 1))).await;
@@ -854,12 +883,9 @@ async fn control_plane_snapshot(
             .clone()
             .ok_or("control-plane scope missing project id")?,
     );
-    resource_governor.set_limit(account.clone(), resource_limits())?;
-    let reservation = resource_governor.reserve(scope.clone(), resource_estimate(sample))?;
-    let receipt = resource_governor.reconcile(reservation.id, resource_usage(sample))?;
-    let account_snapshot = resource_governor
-        .account_snapshot(&account)?
-        .ok_or("missing resource account snapshot")?;
+    let (account_snapshot, receipt_has_actual) =
+        resource_governor_round_trip(resource_governor, account, scope.clone(), sample).await?;
+    let account_snapshot = account_snapshot.ok_or("missing resource account snapshot")?;
 
     let approval_state = match (pending.status, approved.status) {
         (ApprovalStatus::Pending, ApprovalStatus::Approved) => 0x11,
@@ -870,8 +896,30 @@ async fn control_plane_snapshot(
         ^ ((metadata_rows.len() as u64) << 16)
         ^ ((metadata.handle.as_str().len() as u64) << 24)
         ^ ((material.expose_secret().len() as u64) << 32)
-        ^ ((receipt.actual.is_some() as u64) << 40)
+        ^ ((receipt_has_actual as u64) << 40)
         ^ ((account_snapshot.ledger.spent.output_bytes as u64) << 48))
+}
+
+async fn resource_governor_round_trip(
+    resource_governor: Arc<dyn ResourceGovernor>,
+    account: ResourceAccount,
+    scope: ResourceScope,
+    sample: usize,
+) -> Result<
+    (Option<ironclaw_resources::AccountSnapshot>, bool),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    tokio::task::spawn_blocking(move || {
+        resource_governor.set_limit(account.clone(), resource_limits())?;
+        let reservation = resource_governor.reserve(scope, resource_estimate(sample))?;
+        let receipt = resource_governor.reconcile(reservation.id, resource_usage(sample))?;
+        let account_snapshot = resource_governor.account_snapshot(&account)?;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
+            account_snapshot,
+            receipt.actual.is_some(),
+        ))
+    })
+    .await?
 }
 
 fn control_plane_scope(

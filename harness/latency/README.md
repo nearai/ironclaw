@@ -25,9 +25,11 @@ store setup, and production wiring validation without live providers.
 
 `control_plane_snapshot` performs timed approval-request, secret
 metadata/lease/consume, and resource-governor reserve/reconcile operations.
-It is currently diagnostic: Postgres uses a row-backed secret store in this
-harness, but the combined workload still identifies the resource governor's
-single JSON snapshot as the next hard failure.
+It is currently diagnostic: Postgres uses row-backed secret and resource
+stores in this harness, while libSQL stays on the production filesystem-backed
+stores. The workload validates that the control-plane row stores remove the
+single-blob contention path before those stores are wired into production
+composition.
 
 It is a dev scorer, not the full acceptance gate yet. The spec requires future
 cycles to add launch-reference baseline scoring, hosted profile startup,

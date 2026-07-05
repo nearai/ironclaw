@@ -272,12 +272,7 @@ where
         let mut base_entry = Entry::bytes(body).with_content_type(ContentType::json());
         base_entry.kind = Some(kind);
         let entry = tag_entry_with_tenant(base_entry, &secret.scope);
-        ensure_tenant_id_index_secret(
-            &self.filesystem,
-            &secret.scope,
-            &secret_owner_root(&secret.scope)?,
-        )
-        .await?;
+        ensure_tenant_id_index_secret(&self.filesystem, &secret.scope).await?;
         self.filesystem
             .put(&secret.scope, &path, entry, CasExpectation::Any)
             .await
@@ -288,8 +283,7 @@ where
     async fn write_lease(&self, lease: &StoredLease) -> Result<(), SecretStoreError> {
         let path = lease_path(&lease.scope, lease.lease_id)?;
         let entry = serialize_lease_entry(lease)?;
-        ensure_tenant_id_index_secret(&self.filesystem, &lease.scope, &lease_root(&lease.scope)?)
-            .await?;
+        ensure_tenant_id_index_secret(&self.filesystem, &lease.scope).await?;
         self.filesystem
             .put(&lease.scope, &path, entry, CasExpectation::Any)
             .await
@@ -738,12 +732,7 @@ where
         let mut base_entry = Entry::bytes(body).with_content_type(ContentType::json());
         base_entry.kind = Some(kind);
         let entry = tag_entry_with_tenant(base_entry, &account.scope);
-        ensure_tenant_id_index_broker(
-            &self.filesystem,
-            &account.scope,
-            &credential_account_root(&account.scope)?,
-        )
-        .await?;
+        ensure_tenant_id_index_broker(&self.filesystem, &account.scope).await?;
         self.filesystem
             .put(&account.scope, &path, entry, CasExpectation::Any)
             .await
@@ -841,12 +830,7 @@ where
         };
         let path = credential_session_path(session.scope(), session.correlation_id())?;
         let entry = serialize_session_entry(&stored, session.scope())?;
-        ensure_tenant_id_index_broker(
-            &self.filesystem,
-            session.scope(),
-            &credential_session_root(session.scope())?,
-        )
-        .await?;
+        ensure_tenant_id_index_broker(&self.filesystem, session.scope()).await?;
         self.filesystem
             .put(session.scope(), &path, entry, CasExpectation::Any)
             .await
@@ -994,13 +978,6 @@ fn lease_root(scope: &ResourceScope) -> Result<ScopedPath, SecretStoreError> {
 /// declared on the same subtree the corresponding writes land in.
 fn secret_owner_root(scope: &ResourceScope) -> Result<ScopedPath, SecretStoreError> {
     scoped_path_secret(&format!("{}/secrets", secret_owner_alias(scope)))
-}
-
-fn credential_session_root(scope: &ResourceScope) -> Result<ScopedPath, CredentialBrokerError> {
-    scoped_path_broker(&format!(
-        "{}/credential-sessions",
-        secret_owner_alias(scope)
-    ))
 }
 
 fn credential_account_path(
@@ -1338,15 +1315,13 @@ fn tag_entry_with_tenant(entry: Entry, scope: &ResourceScope) -> Entry {
     )
 }
 
-/// Declare the `tenant_id` exact-equality index on `prefix`, tolerating
-/// backends that don't materialize indexes (LocalFilesystem). Idempotent
-/// across the mount lifetime; mirrors the engine/processes stores'
-/// `ensure_*_index` shape so byte-only backends degrade gracefully
-/// instead of failing closed.
+/// Declare the `tenant_id` exact-equality index on the `/secrets` mount,
+/// tolerating backends that don't materialize indexes (LocalFilesystem).
+/// Idempotent across the mount lifetime and avoids per-owner DDL churn under
+/// concurrent secret/lease writes.
 async fn ensure_tenant_id_index_secret<F>(
     filesystem: &ScopedFilesystem<F>,
     scope: &ResourceScope,
-    prefix: &ScopedPath,
 ) -> Result<(), SecretStoreError>
 where
     F: RootFilesystem,
@@ -1356,7 +1331,8 @@ where
         vec![index_key_tenant_id()],
         IndexKind::Exact,
     );
-    match filesystem.ensure_index(scope, prefix, &spec).await {
+    let root = scoped_path_secret("/secrets")?;
+    match filesystem.ensure_index(scope, &root, &spec).await {
         Ok(()) => Ok(()),
         Err(FilesystemError::Unsupported { .. }) => Ok(()),
         Err(error) => Err(fs_to_secret_store_error(error)),
@@ -1366,7 +1342,6 @@ where
 async fn ensure_tenant_id_index_broker<F>(
     filesystem: &ScopedFilesystem<F>,
     scope: &ResourceScope,
-    prefix: &ScopedPath,
 ) -> Result<(), CredentialBrokerError>
 where
     F: RootFilesystem,
@@ -1376,7 +1351,8 @@ where
         vec![index_key_tenant_id()],
         IndexKind::Exact,
     );
-    match filesystem.ensure_index(scope, prefix, &spec).await {
+    let root = scoped_path_broker("/secrets")?;
+    match filesystem.ensure_index(scope, &root, &spec).await {
         Ok(()) => Ok(()),
         Err(FilesystemError::Unsupported { .. }) => Ok(()),
         Err(error) => Err(fs_to_broker_error(error)),

@@ -366,3 +366,59 @@ Budgets: 10 hours wall-clock / $0 spend
   not more secret tuning; it is a row-based Postgres resource governor or a
   trait change that lets the resource governor persist account/reservation rows
   instead of rewriting one JSON snapshot.
+
+## Cycle 9 - Postgres Resource Rows
+
+- Score (dev): Cycle 8 focused five-sample `control_plane_snapshot` run no
+  longer reports secret-store errors, but concurrency 4 fails in `resource
+  governor storage error` and shows very large latencies. Concurrency 1 remains
+  well slower than libSQL on the combined span.
+- Probe gap: This is still dev-only focused control-plane coverage, not
+  launch-ref/WebUI/turn acceptance.
+- Hypothesis: The resource governor's filesystem store rewrites one
+  `/resources/snapshot.json` for all accounts/reservations, so concurrent
+  Postgres control-plane samples contend on one CAS blob. A Postgres
+  `ResourceGovernor` backed by row-locked account and reservation tables should
+  preserve reservation semantics while limiting contention to the affected
+  account cascade and reservation row.
+- Expected failure mode: A row governor could accidentally weaken cascade
+  limits, period rollover, reservation idempotency, or fail-closed storage
+  semantics. It must reuse the existing state transition functions, lock
+  account rows in deterministic cascade order, lock reservation rows on close,
+  and keep libSQL on the existing filesystem-backed governor.
+- Diagnostic: Wire the row governor only for the Postgres latency path first,
+  run resource crate tests, then rerun focused `control_plane_snapshot` before
+  considering production composition wiring.
+- Change: Added `PostgresResourceGovernor` behind the resources `postgres`
+  feature with row-backed account and reservation tables, deterministic
+  account-row locking, reservation-row locking on close, and the existing
+  resource state transition functions reused for cascade limits, reconciliation,
+  release, and snapshots. The latency runner now uses this governor for the
+  Postgres backend only. I also offloaded the synchronous resource operations
+  in `control_plane_snapshot` through `spawn_blocking`, predeclared the
+  `/secrets` tenant index during setup, and moved the filesystem secret-store
+  tenant index to the `/secrets` mount root to avoid per-owner index DDL churn.
+- Result: `cargo fmt -p ironclaw_secrets -p ironclaw_resources --check`,
+  `cargo fmt --manifest-path harness/latency/runner/Cargo.toml --check`,
+  `cargo check --manifest-path harness/latency/runner/Cargo.toml`,
+  `cargo test -p ironclaw_secrets --features postgres`, and
+  `cargo test -p ironclaw_resources --features postgres` passed. A focused
+  `control_plane_snapshot` run with warmup 1, 20 samples, and concurrency 1/4
+  passed for Postgres pool sizes 1 and 2 with zero errors and matching hashes.
+  Full `harness/latency/score.sh --dev` has zero errors and matching hashes;
+  `control_plane_snapshot` passes in the full run for both pool sizes
+  (pool 1 c1 p50/p95 8.91/11.36ms vs libSQL 59.71/77.60ms; pool 1 c4
+  35.96/40.55ms vs libSQL 240.68/272.85ms; pool 2 c1 10.09/17.56ms; pool 2 c4
+  25.00/30.49ms). The full score still has hard-fail flags on existing
+  `put_get` and `query_exact` concurrency-1 p99 ratios for pool 2. The perturbed
+  probe also has zero errors and matching hashes; `control_plane_snapshot`
+  passes through concurrency 8, while `hosted_substrate_build` remains above
+  dev thresholds at concurrency 1 for both pool sizes and concurrency 8 for
+  pool 2.
+- Reflection: The control-plane contention moved from a single filesystem JSON
+  snapshot to row-level Postgres state in the harness, and the measured path is
+  now faster than the libSQL baseline for this diagnostic workload. This is not
+  the goal finish line: production hosted Postgres composition still constructs
+  filesystem-backed resources, and acceptance still needs launch-ref baseline
+  worktree scoring plus hosted profile startup, WebUI/session, turn
+  admission/queue/resume/cancel, and holdout concurrency 1/4/16 runs.

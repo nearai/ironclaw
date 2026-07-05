@@ -23,6 +23,8 @@ mod event;
 mod filesystem_store;
 mod gate;
 mod period;
+#[cfg(feature = "postgres")]
+mod postgres_governor;
 
 pub use event::{
     BroadcastBudgetEventSink, BudgetEvent, BudgetEventSink, CompositeBudgetEventSink,
@@ -37,6 +39,8 @@ pub use period::{
     BudgetPeriod, BudgetThresholds, BudgetThresholdsError, PeriodUnit, period_bounds,
     period_has_rolled_over,
 };
+#[cfg(feature = "postgres")]
+pub use postgres_governor::PostgresResourceGovernor;
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
