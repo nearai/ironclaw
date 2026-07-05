@@ -323,6 +323,21 @@ where
     }
 }
 
+fn warn_prompt_context_drops(
+    selection: &prompt_context_budget::PromptContextSelection,
+    budget: PromptContextTokenBudget,
+) {
+    if selection.dropped_messages == 0 {
+        return;
+    }
+    tracing::warn!(
+        dropped_messages = selection.dropped_messages,
+        dropped_tokens = selection.dropped_tokens,
+        visible_budget_tokens = budget.visible_transcript_tokens(),
+        "prompt context exceeded visible budget; older messages dropped from model context"
+    );
+}
+
 #[async_trait]
 impl<S> LoopContextPort for ThreadBackedLoopContextPort<S>
 where
@@ -389,14 +404,16 @@ where
             .iter()
             .filter_map(context_message_to_compaction_metadata)
             .collect();
-        let messages = prompt_context_budget::select_prompt_context_messages(
+        let prompt_context_selection = prompt_context_budget::select_prompt_context_messages(
             context.messages,
             self.prompt_context_budget,
         );
+        warn_prompt_context_drops(&prompt_context_selection, self.prompt_context_budget);
 
         Ok(LoopContextBundle {
             identity_messages,
-            messages: messages
+            messages: prompt_context_selection
+                .selected
                 .into_iter()
                 .filter_map(context_message_to_loop_message)
                 .collect(),
@@ -1218,12 +1235,13 @@ where
         let context = self.load_model_context_window().await?;
 
         if requested_messages.is_empty() {
-            let context_messages = prompt_context_budget::select_prompt_context_messages(
+            let prompt_context_selection = prompt_context_budget::select_prompt_context_messages(
                 context.messages,
                 self.prompt_context_budget,
             );
-            let mut messages = Vec::with_capacity(context_messages.len());
-            for (message, _) in context_messages {
+            warn_prompt_context_drops(&prompt_context_selection, self.prompt_context_budget);
+            let mut messages = Vec::with_capacity(prompt_context_selection.selected.len());
+            for (message, _) in prompt_context_selection.selected {
                 let Some(content_ref) = message_ref_from_context(&message) else {
                     continue;
                 };
