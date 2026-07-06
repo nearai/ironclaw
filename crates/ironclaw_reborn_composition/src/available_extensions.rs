@@ -78,6 +78,14 @@ pub(crate) const SLACK_BOT_EXTENSION_ID: &str = "slack_bot";
 pub(crate) const SLACK_EXTENSION_ID: &str = "slack";
 #[cfg(feature = "slack-v2-host-beta")]
 const SLACK_PERSONAL_OAUTH_REQUIREMENT_NAME: &str = "slack_personal_oauth";
+// The slack_personal OAuth setup scopes are the union of the Slack tools'
+// per-capability scopes: the read-only tools request only read scopes, and only
+// send_message requests chat:write. Because the account is shared and
+// send_message is a default tool, a read-only user still grants chat:write;
+// reducing the grant (a write-opt-in / scope-upgrade re-consent flow) is tracked
+// in nearai/ironclaw#5669. `slack_read_only_tools_do_not_request_chat_write`
+// enforces that this list equals the union of the manifest capabilities' scopes
+// and that only send_message declares chat:write.
 #[cfg(feature = "slack-v2-host-beta")]
 const SLACK_PERSONAL_OAUTH_SETUP_SCOPES: &[&str] = &[
     "search:read",
@@ -2308,6 +2316,54 @@ mod tests {
                 "{extension_id} should declare runtime credentials"
             );
         }
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn slack_read_only_tools_do_not_request_chat_write() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").unwrap();
+        let package = catalog.resolve(&package_ref).unwrap();
+
+        let mut union_scopes = BTreeSet::new();
+        for capability in &package.package.manifest.capabilities {
+            let is_write_tool = capability.id.as_str() == "slack.send_message";
+            for credential in &capability.runtime_credentials {
+                let RuntimeCredentialRequirementSource::ProductAuthAccount { provider, setup } =
+                    &credential.source
+                else {
+                    panic!(
+                        "slack capability {} should use a slack_personal product auth account",
+                        capability.id
+                    );
+                };
+                assert_eq!(provider.as_str(), "slack_personal");
+                let RuntimeCredentialAccountSetup::OAuth { scopes } = setup else {
+                    panic!(
+                        "slack capability {} should declare OAuth setup",
+                        capability.id
+                    );
+                };
+                assert_eq!(scopes, &credential.provider_scopes);
+                let requests_write = scopes.iter().any(|scope| scope.as_str() == "chat:write");
+                assert_eq!(
+                    requests_write, is_write_tool,
+                    "only send_message may request chat:write; capability {} requests_write={requests_write}",
+                    capability.id
+                );
+                union_scopes.extend(scopes.iter().cloned());
+            }
+        }
+
+        assert_eq!(
+            union_scopes,
+            slack_personal_oauth_setup_scopes()
+                .iter()
+                .map(|scope| scope.to_string())
+                .collect::<BTreeSet<_>>(),
+            "SLACK_PERSONAL_OAUTH_SETUP_SCOPES must equal the union of the manifest capabilities' scopes"
+        );
     }
 
     #[test]

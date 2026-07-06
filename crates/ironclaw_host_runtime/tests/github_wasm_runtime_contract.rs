@@ -2077,9 +2077,9 @@ fn slack_policy() -> NetworkPolicy {
     }
 }
 
-/// The personal-token OAuth scopes the `slack_user` manifest requests. Kept in
-/// lockstep with `assets/slack/manifest.toml` so the injected credential's
-/// scope set matches production.
+/// The read-only scopes the Slack read capabilities (e.g. slack.search_messages)
+/// request. Kept in lockstep with `assets/slack/manifest.toml`, where the
+/// read-only tools request only read scopes and only send_message adds chat:write.
 fn slack_user_scopes() -> Vec<String> {
     [
         "search:read",
@@ -2092,7 +2092,6 @@ fn slack_user_scopes() -> Vec<String> {
         "im:read",
         "mpim:read",
         "users:read",
-        "chat:write",
     ]
     .into_iter()
     .map(str::to_string)
