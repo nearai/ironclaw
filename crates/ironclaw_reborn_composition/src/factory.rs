@@ -1521,7 +1521,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         extension_lifecycle_service,
         active_extensions,
     ));
-    let nearai_mcp_bootstrap_outcome = crate::nearai_mcp::bootstrap_nearai_mcp(
+    let nearai_mcp_bootstrap_outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
         nearai_mcp_bootstrap_config,
         &product_auth,
         &extension_management,
@@ -5672,7 +5672,7 @@ mod tests {
         api_key: &str,
     ) -> RebornBuildInput {
         RebornBuildInput::local_dev(owner, root).with_nearai_mcp_bootstrap_config(
-            crate::nearai_mcp::NearAiMcpBootstrapConfig::new(
+            crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
                 base_url,
                 secrecy::SecretString::from(api_key.to_string()),
             )
@@ -6216,9 +6216,9 @@ mod tests {
             .extension_management
             .as_ref()
             .expect("extension management");
-        let outcome = crate::nearai_mcp::bootstrap_nearai_mcp(
+        let outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
             Some(
-                crate::nearai_mcp::NearAiMcpBootstrapConfig::new(
+                crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
                     "https://private.near.ai",
                     secrecy::SecretString::from("nearai-second-key"),
                 )
@@ -6232,7 +6232,7 @@ mod tests {
         .expect("second NEAR AI MCP bootstrap");
         assert_eq!(
             outcome,
-            crate::nearai_mcp::NearAiMcpBootstrapOutcome::ReusedCredential
+            crate::llm_admin::nearai_mcp::NearAiMcpBootstrapOutcome::ReusedCredential
         );
         let accounts = first
             .product_auth
@@ -6286,9 +6286,9 @@ mod tests {
             .remove(nearai_ref.clone())
             .await
             .expect("disable NEAR AI MCP extension");
-        let outcome = crate::nearai_mcp::bootstrap_nearai_mcp(
+        let outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
             Some(
-                crate::nearai_mcp::NearAiMcpBootstrapConfig::new(
+                crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
                     "https://private.near.ai",
                     secrecy::SecretString::from("nearai-test-key"),
                 )
@@ -6303,7 +6303,7 @@ mod tests {
         .expect("bootstrap should reinstall discovered extension");
         assert_eq!(
             outcome,
-            crate::nearai_mcp::NearAiMcpBootstrapOutcome::Activated
+            crate::llm_admin::nearai_mcp::NearAiMcpBootstrapOutcome::Activated
         );
         let projection = extension_management
             .project(nearai_ref)
@@ -6326,7 +6326,7 @@ mod tests {
     #[tokio::test]
     async fn local_dev_nearai_mcp_invalid_base_url_fails_build() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let config = crate::nearai_mcp::NearAiMcpBootstrapConfig::new(
+        let config = crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
             "http://private.near.ai",
             secrecy::SecretString::from("nearai-test-key"),
         )

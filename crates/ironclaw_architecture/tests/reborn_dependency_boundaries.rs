@@ -734,7 +734,7 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
         "crates/ironclaw_reborn/src/tool_disclosure_port.rs",
         // Composition-local protocol surfaces that reconstruct provider-shaped
         // output or local-dev provider tools.
-        "crates/ironclaw_reborn_composition/src/openai_compat_serve.rs",
+        "crates/ironclaw_reborn_composition/src/llm_admin/openai_compat_serve.rs",
         "crates/ironclaw_reborn_composition/src/runtime/local_dev/external_tool_capability.rs",
         "crates/ironclaw_reborn_composition/src/runtime/local_dev/synthetic_capability.rs",
         "crates/ironclaw_reborn_composition/src/observability/trace_capture.rs",
@@ -935,7 +935,7 @@ fn reborn_boot_config_file_layout_is_pinned() {
     // composition without forcing `ironclaw_reborn_config` to depend
     // on `ironclaw_llm` (which would violate _config's standalone
     // boundary). The composition crate is the legitimate consumer.
-    let llm_catalog = root.join("crates/ironclaw_reborn_composition/src/llm_catalog.rs");
+    let llm_catalog = root.join("crates/ironclaw_reborn_composition/src/llm_admin/llm_catalog.rs");
     assert!(
         llm_catalog.exists(),
         "composition must expose a catalog resolver at {} so the CLI can stitch \
