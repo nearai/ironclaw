@@ -55,10 +55,8 @@ pub(crate) struct ToolDisclosureCapabilityDecorator {
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     promoted_by_scope: Arc<Mutex<HashMap<PromotionScopeKey, PromotedSet>>>,
     caps: DisclosureCaps,
-    /// #5712: same resolver the composition root uses for
-    /// `CapabilitySurfaceProfileFilter`'s allow-set — re-resolved lazily by
-    /// `invoke_tool_search`/`invoke_tool_describe` to narrow disclosed
-    /// metadata, since this decorator sits *inside* the profile filter.
+    /// #5712: same resolver the profile filter uses, re-resolved lazily to
+    /// narrow disclosed tool_search/tool_describe metadata.
     surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver>,
 }
 
