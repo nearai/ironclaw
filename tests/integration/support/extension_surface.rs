@@ -1,4 +1,20 @@
 //! Static Reborn extension capability surface used by binary-E2E tests.
+//!
+//! **Not production truth.** `EXTENSION_LIFECYCLE_CAPABILITY_IDS` and
+//! `BUNDLED_EXTENSION_CAPABILITY_IDS` below are hand-transcribed test-support
+//! literals — they duplicate (fully or partially) values that live in a
+//! production crate, but are not themselves parsed or imported from one.
+//! `tests/integration/wiring_parity.rs`'s capability-id subset check no
+//! longer unions either constant into its production-surface RHS; see that
+//! file's module doc for why (W5-WIRING-PARITY finding 1). They remain here
+//! for the unrelated QA-smoke scripted-scenario assertions
+//! (`tests/reborn_qa_smoke_scenarios_e2e.rs`) that still use them as fixed
+//! literals to script a harness's own declared surface, not to verify it
+//! against production.
+//!
+//! `bundled_extension_manifest_capability_ids` below IS production truth —
+//! it parses the real `manifest.toml` assets bundled extensions ship with,
+//! the same way `github::capability_ids()` parses github's.
 
 pub const EXTENSION_SEARCH_CAPABILITY_ID: &str = "builtin.extension_search";
 pub const EXTENSION_INSTALL_CAPABILITY_ID: &str = "builtin.extension_install";
@@ -159,3 +175,61 @@ pub const BUNDLED_EXTENSION_CAPABILITY_IDS: &[&str] = &[
     "notion.notion-get-user",
     "notion.notion-get-self",
 ];
+
+/// Bundled first-party extension asset directories under
+/// `crates/ironclaw_first_party_extensions/assets/`, parsed by
+/// [`bundled_extension_manifest_capability_ids`]. Excludes `github` (parsed
+/// separately by `github::capability_ids()`, which this list intentionally
+/// does not duplicate) and `slack` (not yet a modeled bundled extension in
+/// this harness).
+const BUNDLED_EXTENSION_MANIFEST_ASSET_DIRS: &[&str] = &[
+    "web-access",
+    "gmail",
+    "google-calendar",
+    "google-docs",
+    "google-sheets",
+    "google-drive",
+    "google-slides",
+    "nearai-mcp",
+    "notion-mcp",
+];
+
+/// Real capability ids declared by every non-github bundled first-party
+/// extension's production `manifest.toml` asset — parsed the same way
+/// `github::capability_ids()` parses github's
+/// (`ExtensionManifest::parse_with_host_api_contracts` over the actual
+/// shipped asset file), so this is production truth, not a second
+/// hand-transcribed test-only id list like `BUNDLED_EXTENSION_CAPABILITY_IDS`
+/// above.
+pub fn bundled_extension_manifest_capability_ids()
+-> Result<Vec<ironclaw_host_api::CapabilityId>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut registry = ironclaw_extensions::ExtensionRegistry::new();
+    for dir_name in BUNDLED_EXTENSION_MANIFEST_ASSET_DIRS {
+        let asset_root = repo_root()
+            .join("crates/ironclaw_first_party_extensions/assets")
+            .join(dir_name);
+        let manifest = ironclaw_extensions::ExtensionManifest::parse_with_host_api_contracts(
+            &std::fs::read_to_string(asset_root.join("manifest.toml"))?,
+            ironclaw_extensions::ManifestSource::HostBundled,
+            &ironclaw_host_runtime::default_host_port_catalog()?,
+            &ironclaw_host_runtime::default_host_api_contract_registry()?,
+        )?;
+        // The manifest's OWN `id` (not the asset directory name) must match
+        // the `ExtensionPackage` root's last segment — they differ for
+        // `nearai-mcp`/`notion-mcp` (manifest id `nearai`/`notion`).
+        let extension_id = manifest.id.as_str().to_string();
+        let package = ironclaw_extensions::ExtensionPackage::from_manifest(
+            manifest,
+            ironclaw_host_api::VirtualPath::new(format!("/system/extensions/{extension_id}"))?,
+        )?;
+        registry.insert(package)?;
+    }
+    Ok(registry
+        .capabilities()
+        .map(|descriptor| descriptor.id.clone())
+        .collect())
+}
+
+fn repo_root() -> &'static std::path::Path {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+}

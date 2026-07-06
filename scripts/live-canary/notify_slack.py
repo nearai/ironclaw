@@ -110,6 +110,15 @@ class LaneReport:
     reborn_qa_cases: list[RebornQaCaseReport] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class CanaryRunContext:
+    repository: str = ""
+    trigger_context: str = ""
+    target_pr: str = ""
+    target_branch: str = ""
+    target_ref: str = ""
+
+
 def read_tail(path: Path, n_bytes: int) -> str:
     if not path.exists():
         return ""
@@ -706,12 +715,34 @@ def _format_reborn_qa_groups(
     return blocks
 
 
+def _format_run_context(context: CanaryRunContext | None) -> str:
+    if context is None:
+        return ""
+    parts: list[str] = []
+    if context.target_pr:
+        if context.repository:
+            parts.append(
+                f"PR <https://github.com/{context.repository}/pull/"
+                f"{context.target_pr}|#{context.target_pr}>"
+            )
+        else:
+            parts.append(f"PR #{context.target_pr}")
+    if context.target_branch:
+        parts.append(f"branch `{_trim_slack_text(context.target_branch, 120)}`")
+    if context.target_ref:
+        parts.append(f"target `{_trim_slack_text(context.target_ref, 40)[:10]}`")
+    if context.trigger_context:
+        parts.append(_trim_slack_text(context.trigger_context, 160))
+    return " • ".join(parts)
+
+
 def slack_payload(
     reports: list[LaneReport],
     run_url: str | None,
     commit: str | None,
     *,
     category_summary: str = "",
+    run_context: CanaryRunContext | None = None,
 ) -> dict:
     emoji = {"pass": ":white_check_mark:", "fail": ":x:", "skip": ":heavy_minus_sign:"}
     red = sum(1 for r in reports if r.status == "fail")
@@ -720,6 +751,11 @@ def slack_payload(
     blocks: list[dict] = [
         {"type": "header", "text": {"type": "plain_text", "text": header}},
     ]
+    context_text = _format_run_context(run_context)
+    if context_text:
+        blocks.append(
+            {"type": "context", "elements": [{"type": "mrkdwn", "text": context_text}]}
+        )
     for r in reports:
         renders_reborn_qa_groups = bool(r.reborn_qa_cases)
         header_line = (
@@ -771,7 +807,9 @@ def slack_payload(
             }
         )
     ctx: list[str] = []
-    if commit:
+    if run_context and run_context.target_ref:
+        ctx.append(f"commit `{run_context.target_ref[:7]}`")
+    elif commit:
         ctx.append(f"commit `{commit[:7]}`")
     if run_url:
         ctx.append(f"<{run_url}|GitHub run>")
@@ -1077,8 +1115,19 @@ def main() -> int:
                 file=sys.stderr,
             )
 
+    run_context = CanaryRunContext(
+        repository=args.repo,
+        trigger_context=os.environ.get("CANARY_TRIGGER_CONTEXT", ""),
+        target_pr=os.environ.get("CANARY_TARGET_PR", ""),
+        target_branch=os.environ.get("CANARY_TARGET_BRANCH", ""),
+        target_ref=os.environ.get("CANARY_TARGET_REF", ""),
+    )
     payload = slack_payload(
-        reports, args.run_url, args.commit, category_summary=category_summary
+        reports,
+        args.run_url,
+        args.commit,
+        category_summary=category_summary,
+        run_context=run_context,
     )
 
     if args.dry_run or not args.slack_webhook:

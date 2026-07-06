@@ -179,7 +179,7 @@ async fn reborn_trace_process_first_party_tools_parity() {
 }
 
 #[tokio::test]
-#[ignore = "TEMP(disable-spawn-subagents): spawn_subagent temporarily disabled via capability deny filter; re-enable by emptying DISABLED_CAPABILITY_IDS"]
+#[ignore = "TEMP(disable-spawn-subagents): spawn_subagent temporarily disabled via capability deny filter; re-enable by clearing runtime disabled_capability_ids"]
 async fn reborn_trace_spawn_subagent_is_surface_text_and_structured_tool() {
     let spawn_subagent =
         CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID).expect("valid capability id");

@@ -577,6 +577,14 @@ pub(crate) fn slack_manifest_digest() -> String {
     sha256_digest_token(SLACK_MANIFEST.as_bytes())
 }
 
+/// The bundled Slack extension manifest TOML. The serve layer projects the
+/// Slack host-ingress route descriptors from this manifest rather than from
+/// Rust literals (see `slack_serve::slack_events_route_descriptors`).
+#[cfg(feature = "slack-v2-host-beta")]
+pub(crate) fn slack_manifest_toml() -> &'static str {
+    SLACK_MANIFEST
+}
+
 pub(crate) fn nearai_mcp_manifest_toml_for_config(
     config: Option<&NearAiMcpBootstrapConfig>,
 ) -> Result<String, ProductWorkflowError> {

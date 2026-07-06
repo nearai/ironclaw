@@ -382,6 +382,7 @@ test("normalizeAutomations presents bounded recent run history", () => {
   );
   assert.equal(automations[0].has_running_run, true);
   assert.equal(automations[0].has_failed_runs, true);
+  assert.equal(automations[0].latest_unattached_run_thread_timestamp, null);
   assert.equal(automations[0].latest_run.run_id, "run-running");
   assert.equal(automations[0].current_run.run_id, "run-running");
   assert.match(automations[0].last_run_label, /Jun 4/);
@@ -491,6 +492,11 @@ test("normalizeAutomations does not emit chat_path when thread_id is absent/null
     automations[0].recent_runs[1].chat_path,
     null,
     "running run with null thread_id must not produce a chat_path",
+  );
+  assert.equal(
+    automations[0].latest_unattached_run_thread_timestamp,
+    Date.parse("2026-06-05T17:00:00Z"),
+    "runs with run_id but no thread_id should expose their latest timestamp for synchronization refreshes",
   );
 });
 
