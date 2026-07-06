@@ -768,12 +768,18 @@ impl AgentLoopHostErrorKind {
 #[serde(rename_all = "snake_case")]
 pub enum AgentLoopHostErrorReasonKind {
     ModelCreditsExhausted,
+    /// A transient network failure reaching the model provider (dropped
+    /// connection, undecodable response body, timeout, upstream 5xx). Distinct
+    /// from a terminal "unavailable" so consumers can tell a retryable blip
+    /// from a hard outage instead of seeing an anonymous empty turn.
+    ModelTransientNetwork,
 }
 
 impl AgentLoopHostErrorReasonKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ModelCreditsExhausted => "model_credits_exhausted",
+            Self::ModelTransientNetwork => "model_transient_network",
         }
     }
 }

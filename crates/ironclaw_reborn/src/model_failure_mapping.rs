@@ -2,7 +2,8 @@ use ironclaw_turns::run_profile::{AgentLoopHostErrorKind, AgentLoopHostErrorReas
 
 use crate::failure_categories::{
     MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
-    MODEL_CREDITS_EXHAUSTED_REASON_KIND,
+    MODEL_CREDITS_EXHAUSTED_REASON_KIND, MODEL_TRANSIENT_NETWORK_CATEGORY,
+    MODEL_TRANSIENT_NETWORK_REASON_KIND,
 };
 
 pub(crate) fn model_stage_failure_category(
@@ -16,6 +17,10 @@ pub(crate) fn model_stage_failure_category(
 
     if reason_kind == Some(MODEL_CREDITS_EXHAUSTED_REASON_KIND) {
         return Some(MODEL_CREDITS_EXHAUSTED_CATEGORY);
+    }
+
+    if reason_kind == Some(MODEL_TRANSIENT_NETWORK_REASON_KIND) {
+        return Some(MODEL_TRANSIENT_NETWORK_CATEGORY);
     }
 
     (kind == AgentLoopHostErrorKind::CredentialUnavailable)

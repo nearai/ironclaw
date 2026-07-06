@@ -51,7 +51,7 @@ use ironclaw_turns::{
 use tracing::debug;
 
 use crate::{
-    failure_categories::MODEL_CREDITS_EXHAUSTED_REASON_KIND,
+    failure_categories::{MODEL_CREDITS_EXHAUSTED_REASON_KIND, MODEL_TRANSIENT_NETWORK_REASON_KIND},
     model_routes::{
         ModelRoute, ModelRouteError, ModelRouteErrorKind, ModelRouteProviderKey,
         ModelRouteResolver, ModelSelectionMode, ModelSlot, ResolvedModelRouteSnapshot,
@@ -1976,6 +1976,17 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
         )
         .with_reason_kind(MODEL_CREDITS_EXHAUSTED_REASON_KIND);
     }
+    if is_transient_network_error(&error) {
+        // A dropped connection / undecodable body / timeout / upstream 5xx after
+        // retries exhaust. Still a safe "unavailable" turn, but tagged with a
+        // distinct reason_kind so a retryable blip is distinguishable from a hard
+        // outage in model_failed events (instead of an anonymous empty turn).
+        return HostManagedModelError::safe(
+            HostManagedModelErrorKind::Unavailable,
+            "transient network error reaching the model provider",
+        )
+        .with_reason_kind(MODEL_TRANSIENT_NETWORK_REASON_KIND);
+    }
     match error {
         LlmError::ContextLengthExceeded { .. } => HostManagedModelError::safe(
             HostManagedModelErrorKind::BudgetExceeded,
@@ -2014,6 +2025,30 @@ fn is_credit_exhaustion_error(error: &LlmError) -> bool {
         || lower.contains("out of credits")
 }
 
+/// Whether `error` is a transient network/transport failure reaching the
+/// provider (dropped connection, undecodable body, timeout, upstream 5xx), as
+/// opposed to a terminal config/policy error. Mirrors `is_credit_exhaustion_error`:
+/// used to tag the mapped host error with a distinct `reason_kind` so a
+/// retryable blip is distinguishable from a hard outage downstream.
+fn is_transient_network_error(error: &LlmError) -> bool {
+    match error {
+        // reqwest transport error: dropped connection, TLS/DNS, body decode.
+        LlmError::Http(_) => true,
+        // Upstream gateway 5xx — transient by definition.
+        LlmError::BadGateway { .. } => true,
+        LlmError::RequestFailed { reason, .. } => {
+            let lower = reason.to_ascii_lowercase();
+            lower.contains("error sending request")
+                || lower.contains("error decoding response body")
+                || lower.contains("connection")
+                || lower.contains("timed out")
+                || lower.contains("timeout")
+                || lower.contains("reset by peer")
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2023,6 +2058,34 @@ mod tests {
             provider: "test_provider".to_string(),
             reason: reason.to_string(),
         }
+    }
+
+    #[test]
+    fn is_transient_network_error_matches_transport_failures() {
+        for phrase in [
+            "HttpError: error sending request for url (https://openrouter.ai/api/v1/chat/completions)",
+            "HttpError: error decoding response body for url (https://openrouter.ai/...)",
+            "connection reset by peer",
+            "request timed out after 60s",
+        ] {
+            assert!(
+                is_transient_network_error(&request_failed(phrase)),
+                "should be transient: {phrase}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_transient_network_error_ignores_terminal_errors() {
+        // Credit exhaustion (handled earlier) and hard config errors are not
+        // transient, so they keep their own mapping.
+        assert!(!is_transient_network_error(&request_failed(
+            "HTTP 402 payment required"
+        )));
+        assert!(!is_transient_network_error(&LlmError::ModelNotAvailable {
+            provider: "p".to_string(),
+            model: "m".to_string(),
+        }));
     }
 
     #[test]
