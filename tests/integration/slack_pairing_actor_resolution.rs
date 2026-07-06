@@ -20,15 +20,15 @@ use ironclaw_host_api::UserId;
 use ironclaw_product_adapters::{ExternalActorRef, ProductAdapterId};
 use ironclaw_product_workflow::{ProductActorUserResolutionRequest, ProductActorUserResolver};
 use ironclaw_reborn_composition::{
-    RebornUserIdentityBindingStore, RebornUserIdentityLookup, SlackPairingActorResolver,
-    SlackPersonalBindingPairingChallengeStore, SlackPersonalBindingPairingError,
+    SlackPairingActorResolver, SlackPersonalBindingPairingError,
     SlackPersonalBindingPairingNotification, SlackPersonalBindingPairingNotifier,
-    SlackPersonalBindingPairingService, SlackPersonalBindingPrincipal, slack_serve::SlackUserId,
-    test_support::slack_host_state_for_test,
+    SlackPersonalBindingPairingService, SlackPersonalBindingPrincipal,
+    slack_serve::SlackUserId,
+    test_support::{SlackHostStateTestParts, slack_host_state_for_test},
 };
 use ironclaw_slack_v2_adapter::{SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID};
 
-#[path = "slack_pairing_fixtures.rs"]
+#[path = "support/slack_pairing.rs"]
 mod slack_pairing_fixtures;
 use slack_pairing_fixtures::{
     binding_service, host_ids, installation_id, tenant_id, tenant_shared_mount_view,
@@ -67,19 +67,13 @@ impl SlackPersonalBindingPairingNotifier for CapturingPairingNotifier {
     }
 }
 
-#[allow(clippy::type_complexity)]
-fn slack_pairing_store_for_test() -> (
-    Arc<dyn SlackPersonalBindingPairingChallengeStore>,
-    Arc<dyn RebornUserIdentityBindingStore>,
-    Arc<dyn RebornUserIdentityLookup>,
-) {
+fn slack_pairing_store_for_test() -> SlackHostStateTestParts {
     let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
         Arc::new(InMemoryBackend::default()),
         tenant_shared_mount_view(),
     ));
     let (user, agent, project) = host_ids();
-    let store = slack_host_state_for_test(scoped, tenant_id(), user, agent, project);
-    (store.clone(), store.clone(), store)
+    slack_host_state_for_test(scoped, tenant_id(), user, agent, project)
 }
 
 fn actor_resolution_request(slack_user_id: &SlackUserId) -> ProductActorUserResolutionRequest {
@@ -93,7 +87,11 @@ fn actor_resolution_request(slack_user_id: &SlackUserId) -> ProductActorUserReso
 
 #[tokio::test]
 async fn slack_pairing_actor_resolver_resolves_paired_actor() {
-    let (challenge_store, binding_store, lookup) = slack_pairing_store_for_test();
+    let SlackHostStateTestParts {
+        challenges: challenge_store,
+        bindings: binding_store,
+        lookup,
+    } = slack_pairing_store_for_test();
     let slack_user_id = SlackUserId::new("U-PAIRED");
     let bound_user_id = UserId::new("user:paired").expect("valid user id");
 
@@ -134,7 +132,11 @@ async fn slack_pairing_actor_resolver_resolves_paired_actor() {
 
 #[tokio::test]
 async fn slack_pairing_actor_resolver_issues_challenge_for_unpaired_actor() {
-    let (challenge_store, binding_store, lookup) = slack_pairing_store_for_test();
+    let SlackHostStateTestParts {
+        challenges: challenge_store,
+        bindings: binding_store,
+        lookup,
+    } = slack_pairing_store_for_test();
     let slack_user_id = SlackUserId::new("U-UNPAIRED");
     let notifier = Arc::new(CapturingPairingNotifier::default());
     let pairing = SlackPersonalBindingPairingService::new(

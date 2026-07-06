@@ -1,7 +1,11 @@
 //! Shared fixtures for the W5-SLACK-PAIR sibling binaries
-//! (`slack_pairing_redeem.rs`, `slack_pairing_actor_resolution.rs`) — a
-//! `#[path]`-mounted sibling file, not a `support/mod.rs` module, so the two
-//! self-contained binaries don't drift on their shared fixture shape.
+//! (`slack_pairing_redeem.rs`, `slack_pairing_actor_resolution.rs`) — lives
+//! under `support/` so `scripts/ci/reborn-coverage-int-tier-tests.sh`'s flat
+//! `tests/integration/*.rs` scan (every top-level file there is a Cargo
+//! `[[test]]` binary) doesn't mistake it for one. Still a bare `#[path]`-
+//! mounted sibling, NOT a `support/mod.rs` module: registering it there would
+//! pull both self-contained binaries into the general
+//! `RebornIntegrationHarness` support tree they deliberately skip.
 
 use std::sync::Arc;
 

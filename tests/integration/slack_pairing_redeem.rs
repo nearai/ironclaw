@@ -17,17 +17,18 @@ use ironclaw_host_api::UserId;
 use ironclaw_product_adapters::{ExternalActorRef, ProductAdapterId};
 use ironclaw_product_workflow::{ProductActorUserResolutionRequest, ProductActorUserResolver};
 use ironclaw_reborn_composition::{
-    RebornUserIdentityBindingStore, RebornUserIdentityLookup, SlackPairingActorResolver,
-    SlackPersonalBindingPairingChallengeStore, SlackPersonalBindingPairingCode,
-    SlackPersonalBindingPairingError, SlackPersonalBindingPairingNotification,
-    SlackPersonalBindingPairingNotifier, SlackPersonalBindingPairingService,
-    SlackPersonalBindingPrincipal,
+    SlackPairingActorResolver, SlackPersonalBindingPairingCode, SlackPersonalBindingPairingError,
+    SlackPersonalBindingPairingNotification, SlackPersonalBindingPairingNotifier,
+    SlackPersonalBindingPairingService, SlackPersonalBindingPrincipal,
     slack_serve::SlackUserId,
-    test_support::{slack_host_state_for_test, slack_host_state_for_test_with_pairing_ttl},
+    test_support::{
+        SlackHostStateTestParts, slack_host_state_for_test,
+        slack_host_state_for_test_with_pairing_ttl,
+    },
 };
 use ironclaw_slack_v2_adapter::{SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID};
 
-#[path = "slack_pairing_fixtures.rs"]
+#[path = "support/slack_pairing.rs"]
 mod slack_pairing_fixtures;
 use slack_pairing_fixtures::{
     binding_service, host_ids, installation_id, tenant_id, tenant_shared_mount_view,
@@ -48,15 +49,6 @@ impl SlackPersonalBindingPairingNotifier for NoopPairingNotifier {
     }
 }
 
-/// The three trait facets of one real `FilesystemSlackHostState` — the
-/// concrete type isn't nameable outside the composition crate, so tests hold
-/// only these trait objects, as production wiring does at `slack_host_beta.rs`.
-struct SlackPairingStore {
-    challenges: Arc<dyn SlackPersonalBindingPairingChallengeStore>,
-    bindings: Arc<dyn RebornUserIdentityBindingStore>,
-    lookup: Arc<dyn RebornUserIdentityLookup>,
-}
-
 fn slack_user_id() -> SlackUserId {
     SlackUserId::new("U123")
 }
@@ -68,7 +60,7 @@ fn slack_user_id() -> SlackUserId {
 async fn open_slack_pairing_store(
     db_path: &std::path::Path,
     pairing_ttl: Option<Duration>,
-) -> SlackPairingStore {
+) -> SlackHostStateTestParts {
     let db = Arc::new(
         libsql::Builder::new_local(db_path)
             .build()
@@ -83,20 +75,15 @@ async fn open_slack_pairing_store(
     ));
     let tenant = tenant_id();
     let (user, agent, project) = host_ids();
-    let store = match pairing_ttl {
+    match pairing_ttl {
         Some(ttl) => {
             slack_host_state_for_test_with_pairing_ttl(scoped, tenant, user, agent, project, ttl)
         }
         None => slack_host_state_for_test(scoped, tenant, user, agent, project),
-    };
-    SlackPairingStore {
-        challenges: store.clone(),
-        bindings: store.clone(),
-        lookup: store,
     }
 }
 
-fn pairing_service(store: &SlackPairingStore) -> SlackPersonalBindingPairingService {
+fn pairing_service(store: &SlackHostStateTestParts) -> SlackPersonalBindingPairingService {
     SlackPersonalBindingPairingService::new(
         binding_service(store.bindings.clone()),
         store.challenges.clone(),
@@ -114,7 +101,7 @@ fn principal(user_id: UserId) -> SlackPersonalBindingPrincipal {
 /// Resolves the bound user through the same public path scenario 3/4 uses
 /// (`SlackPairingActorResolver`), exercising the reopened store through a
 /// fully public API surface.
-async fn resolved_user_id(store: &SlackPairingStore) -> Option<UserId> {
+async fn resolved_user_id(store: &SlackHostStateTestParts) -> Option<UserId> {
     let resolver = SlackPairingActorResolver::new(store.lookup.clone(), pairing_service(store));
     let request = ProductActorUserResolutionRequest::new(
         ProductAdapterId::new(SLACK_V2_ADAPTER_ID).expect("valid adapter id"),
@@ -205,7 +192,7 @@ async fn slack_pairing_redeem_rejects_unknown_code() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn slack_pairing_redeem_rejects_expired_code() {
     let root = tempfile::tempdir().expect("tempdir");
     let db_path = root.path().join("slack-host-state.db");

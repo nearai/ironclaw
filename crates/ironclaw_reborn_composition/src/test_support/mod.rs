@@ -35,11 +35,11 @@
 //!    production `TraceCaptureTurnEventSink` factory for the integration-test
 //!    harness (C-TRACECAP seam).
 //! 10. [`slack_host_state`] — `slack_host_state_for_test`,
-//!     `slack_host_state_for_test_with_pairing_ttl` — the real
-//!     `FilesystemSlackHostState` (Slack host-beta pairing/binding store),
-//!     for driving the real Slack pairing/actor-resolution services instead
-//!     of a fake (W5-SLACK-PAIR seam). Only compiled under
-//!     `slack-v2-host-beta`.
+//!     `slack_host_state_for_test_with_pairing_ttl`, [`SlackHostStateTestParts`]
+//!     — the real `FilesystemSlackHostState` (Slack host-beta pairing/binding
+//!     store) split into its trait facets, for driving the real Slack
+//!     pairing/actor-resolution services instead of a fake (W5-SLACK-PAIR
+//!     seam). Only compiled under `slack-v2-host-beta`.
 
 mod budget_gateway;
 mod durable;
@@ -89,7 +89,9 @@ pub use skill_activation::{
     build_local_dev_skill_context_source_for_test, wrap_skill_activation_capability_for_test,
 };
 #[cfg(all(feature = "test-support", feature = "slack-v2-host-beta"))]
-pub use slack_host_state::{slack_host_state_for_test, slack_host_state_for_test_with_pairing_ttl};
+pub use slack_host_state::{
+    SlackHostStateTestParts, slack_host_state_for_test, slack_host_state_for_test_with_pairing_ttl,
+};
 #[cfg(feature = "test-support")]
 pub use trace_capture::trace_capture_turn_event_sink_for_test;
 #[cfg(feature = "test-support")]

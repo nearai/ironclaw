@@ -77,9 +77,7 @@ const CHANNEL_ROUTE_REPLACE_LOCK_RENEW_INTERVAL: Duration = Duration::from_secs(
 #[cfg(test)]
 const CHANNEL_ROUTE_REPLACE_LOCK_RENEW_INTERVAL: Duration = Duration::from_millis(100);
 
-// `pub` (not `pub(crate)`) only so `test_support::slack_host_state_for_test` can name the
-// return type; the module stays private in lib.rs, so this is not a new external surface.
-pub struct FilesystemSlackHostState<F>
+pub(crate) struct FilesystemSlackHostState<F>
 where
     F: RootFilesystem + 'static,
 {
