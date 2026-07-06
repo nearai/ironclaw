@@ -1,5 +1,8 @@
 #[allow(dead_code)]
-#[path = "support/reborn/mod.rs"]
+#[path = "support/reborn_parity_qa/mod.rs"]
+mod parity_qa_support;
+#[allow(dead_code)]
+#[path = "integration/support/mod.rs"]
 mod reborn_support;
 mod support;
 
@@ -19,8 +22,9 @@ use ironclaw_turns::{
     LoopMessageRef, TurnStatus,
     run_profile::{LoopRunContext, PromptMode},
 };
-use reborn_support::harness::{RebornBinaryE2EHarness, RecordingTestCapabilityPort};
-use reborn_support::model_replay::RebornTraceReplayModelGateway;
+use parity_qa_support::binary_e2e::RebornBinaryE2EHarness;
+use parity_qa_support::model_replay::RebornTraceReplayModelGateway;
+use reborn_support::harness::RecordingTestCapabilityPort;
 
 const ALICE_IDENTITY: &str = "Alice is a software engineer who lives in Seattle.";
 const BOB_IDENTITY: &str = "Bob is a marine biologist who lives in Miami.";

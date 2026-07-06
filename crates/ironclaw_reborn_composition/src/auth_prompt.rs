@@ -34,6 +34,9 @@ impl AuthChallengeView {
         view.account_label = self.account_label.map(|label| label.as_str().to_string());
         view.authorization_url = self.authorization_url.map(|url| url.as_str().to_string());
         view.expires_at = self.expires_at;
+        // OAuth relay / stored-secret challenges carry no channel-connection
+        // context; that rides only on the credential-requirement fallback path.
+        view.connection = None;
         view
     }
 }
@@ -152,6 +155,7 @@ pub(crate) async fn auth_prompt_view_for_blocked_auth(
         account_label: None,
         authorization_url: None,
         expires_at: None,
+        connection: None,
     };
     Ok(match challenge {
         Some(c) => c.enrich(base_view),
@@ -175,7 +179,41 @@ fn auth_prompt_from_credential_requirement(
         RuntimeCredentialAccountSetup::OAuth { .. } => {
             view.challenge_kind = Some(AuthPromptChallengeKind::OAuthUrl);
         }
+        RuntimeCredentialAccountSetup::ChannelPairing { channel } => {
+            // A pairing code is pasted like any other secret, so it reuses the
+            // `manual_token` (ManualToken) modality; what differs is the resolve
+            // route, which rides in `connection` context. Render copy comes from
+            // the single backend-authored connect builder (the same one the
+            // connectable descriptor uses), so any inbound channel gets correct
+            // instructions — including Slack's "/pair" recovery — with no
+            // per-channel frontend code.
+            let requirement =
+                crate::extension_lifecycle::channel_connection_requirement(channel, channel);
+            let strategy = serde_json::to_value(requirement.strategy)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned));
+            view.challenge_kind = Some(AuthPromptChallengeKind::ManualToken);
+            view.headline = format!("Connect {}", capitalize_channel(channel));
+            view.body = requirement.instructions.clone();
+            view.account_label = None;
+            view.connection = Some(ironclaw_product_adapters::ConnectionPromptContext {
+                channel: requirement.channel,
+                strategy,
+                instructions: Some(requirement.instructions),
+                input_placeholder: Some(requirement.input_placeholder),
+                submit_label: Some(requirement.submit_label),
+                error_message: Some(requirement.error_message),
+            });
+        }
     }
     view.provider = Some(provider);
     view
+}
+
+fn capitalize_channel(channel: &str) -> String {
+    let mut chars = channel.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => channel.to_string(),
+    }
 }

@@ -61,6 +61,17 @@ Then Playwright drives a headless Chromium browser against the gateway, making D
 | `test_emulate_reborn_provider_contracts.py` | Emulate provider contracts for Reborn-backed Google Gmail/Calendar/Drive reads and writes, Slack channel/thread/DM delivery plus reactions/user lookup, and GitHub repo/issue/PR/search/branch/git-object/release/fork/action-route surfaces |
 | `test_reborn_emulate_full_path.py` | Full-path Reborn + Emulate coverage: install/auth a first-party extension, drive a scripted model tool call, and assert provider-side Emulate state |
 
+## Reborn coverage gate
+
+The GitHub Actions Code Coverage workflow uses
+`tests/e2e/reborn_coverage_tests.txt` instead of running every scenario in this
+directory. That manifest is intentionally limited to tests that boot
+`ironclaw-reborn serve` and cover the Reborn WebChat v2 or OpenAI-compatible
+API surface. Legacy gateway tests and `ENGINE_V2=true` compatibility tests stay
+in the E2E suite, but they are not part of the Reborn coverage gate. Manifest
+entries may be pytest node IDs when only part of a broader scenario file belongs
+in this gate.
+
 ## Adding new scenarios
 
 1. Create `tests/e2e/scenarios/test_<name>.py`

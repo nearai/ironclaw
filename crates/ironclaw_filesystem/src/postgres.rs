@@ -774,37 +774,52 @@ impl RootFilesystem for PostgresRootFilesystem {
             .transaction()
             .await
             .map_err(|error| db_error(path.clone(), FilesystemOperation::CreateDirAll, error))?;
-        for prefix in virtual_path_prefixes(path)? {
-            let row = transaction
-                .query_opt(
-                    "SELECT is_dir FROM root_filesystem_entries WHERE path = $1",
-                    &[&prefix.as_str()],
-                )
-                .await
-                .map_err(|error| {
-                    db_error(prefix.clone(), FilesystemOperation::CreateDirAll, error)
+        let prefixes = virtual_path_prefixes(path)?;
+        let prefix_paths: Vec<&str> = prefixes.iter().map(VirtualPath::as_str).collect();
+
+        // Keep conflict detection inside the insert statement. `ON CONFLICT`
+        // waits for concurrent writers on the unique path key; if a file wins,
+        // the conditional no-op update returns that row as `is_dir = false`
+        // and the surrounding transaction rolls back.
+        let rows = transaction
+            .query(
+                r#"
+                INSERT INTO root_filesystem_entries (path, contents, is_dir)
+                SELECT prefix.path, ''::bytea, TRUE
+                FROM UNNEST($1::text[]) AS prefix(path)
+                ON CONFLICT (path) DO UPDATE
+                    SET is_dir = root_filesystem_entries.is_dir
+                    WHERE root_filesystem_entries.is_dir = FALSE
+                RETURNING path, is_dir
+                "#,
+                &[&prefix_paths],
+            )
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::CreateDirAll, error))?;
+
+        for row in rows {
+            let is_dir = row.try_get::<_, bool>("is_dir").map_err(|error| {
+                db_error(path.clone(), FilesystemOperation::CreateDirAll, error)
+            })?;
+            if !is_dir {
+                let raw_path = row.try_get::<_, String>("path").map_err(|error| {
+                    db_error(path.clone(), FilesystemOperation::CreateDirAll, error)
                 })?;
-            if row.is_some_and(|row| !row.get::<_, bool>("is_dir")) {
+                let conflict_path = VirtualPath::new(raw_path.clone()).map_err(|error| {
+                    FilesystemError::Backend {
+                        path: path.clone(),
+                        operation: FilesystemOperation::CreateDirAll,
+                        reason: format!("invalid backend conflict path {raw_path:?}: {error}"),
+                    }
+                })?;
                 return Err(FilesystemError::Backend {
-                    path: prefix,
+                    path: conflict_path,
                     operation: FilesystemOperation::CreateDirAll,
                     reason: "file exists where directory is required".to_string(),
                 });
             }
-            transaction
-                .execute(
-                    r#"
-                    INSERT INTO root_filesystem_entries (path, contents, is_dir)
-                    VALUES ($1, ''::bytea, TRUE)
-                    ON CONFLICT (path) DO NOTHING
-                    "#,
-                    &[&prefix.as_str()],
-                )
-                .await
-                .map_err(|error| {
-                    db_error(path.clone(), FilesystemOperation::CreateDirAll, error)
-                })?;
         }
+
         transaction
             .commit()
             .await

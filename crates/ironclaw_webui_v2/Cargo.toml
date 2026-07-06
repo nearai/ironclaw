@@ -22,6 +22,9 @@ webui-v2-beta = [
     "dep:async-stream",
     "dep:futures",
     "dep:tokio",
+    # Static SPA asset bundle (`static_assets`), folded in from the former
+    # `ironclaw_webui_v2_static` crate. `rand` supplies the per-request CSP nonce.
+    "dep:rand",
 ]
 
 [dependencies]
@@ -38,6 +41,10 @@ ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_product_workflow = { path = "../ironclaw_product_workflow", version = "0.1.0" }
 
 # Optional — only used when `webui-v2-beta` is enabled.
+# Tiny RNG for per-request CSP nonces in the static asset router
+# (`default-features = false` keeps the surface minimal; `thread_rng` supplies
+# the process-local CSPRNG used by `rand::rng()`).
+rand = { version = "0.10", default-features = false, features = ["thread_rng"], optional = true }
 async-trait = { version = "0.1", optional = true }
 async-stream = { version = "0.3", optional = true }
 axum = { version = "0.8", optional = true, features = ["ws"] }

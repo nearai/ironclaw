@@ -32,7 +32,14 @@ pub const PLANNED_DRIVER_CHECKPOINT_SCHEMA_VERSION: u64 = CHECKPOINT_SCHEMA_VERS
 pub const PLANNED_DEFAULT_PROFILE_ID: &str = "reborn-planned-default";
 pub const SUBAGENT_PLANNED_DRIVER_ID: &str = "reborn:planned-subagent";
 pub const SUBAGENT_PLANNED_PROFILE_ID: &str = "reborn-planned-subagent";
+/// Capability-surface profile id for the default interactive planned driver.
+const INTERACTIVE_CAPABILITY_SURFACE_PROFILE_ID: &str = "interactive_tools";
 pub const SUBAGENT_CAPABILITY_SURFACE_PROFILE_ID: &str = "subagent_tools";
+/// Capability-surface profile id for scheduled-trigger fires (issue #5505).
+/// Shared with `runtime.rs`, which keys its per-profile deny-map on this
+/// string to strip the trigger mutator capabilities from a fire's
+/// model-visible surface.
+pub const SCHEDULED_TRIGGER_CAPABILITY_SURFACE_PROFILE_ID: &str = "scheduled_trigger";
 
 pub struct DefaultPlannedDriverBuild {
     pub driver: Arc<dyn AgentLoopDriver>,
@@ -214,16 +221,22 @@ pub fn register_default_text_only_driver(
     )
 }
 
-pub fn planned_default_profile_definition() -> Result<RunProfileDefinition, RunProfileRegistryError>
-{
-    let descriptor = planned_driver_descriptor()
-        .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
-    let profile_id = planned_default_profile_id()
-        .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
+/// Shared scaffold behind `planned_default_profile_definition()`,
+/// `subagent_planned_profile_definition()`, and
+/// `scheduled_trigger_planned_profile_definition()`: wraps
+/// `RunProfileDefinition::interactive_like` with the checkpoint schema id/
+/// version that every planned profile shares, plus the common
+/// `InvalidProfile` error mapping.
+fn planned_like_profile_definition(
+    profile_id: RunProfileId,
+    descriptor: AgentLoopDriverDescriptor,
+    capability_surface_profile_id: &str,
+) -> Result<RunProfileDefinition, RunProfileRegistryError> {
     let checkpoint_schema_id = planned_driver_checkpoint_schema_id()
         .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
-    let capability_surface_profile_id = CapabilitySurfaceProfileId::new("interactive_tools")
-        .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
+    let capability_surface_profile_id =
+        CapabilitySurfaceProfileId::new(capability_surface_profile_id)
+            .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
     Ok(RunProfileDefinition::interactive_like(
         profile_id,
         descriptor,
@@ -233,24 +246,45 @@ pub fn planned_default_profile_definition() -> Result<RunProfileDefinition, RunP
     ))
 }
 
+pub fn planned_default_profile_definition() -> Result<RunProfileDefinition, RunProfileRegistryError>
+{
+    let descriptor = planned_driver_descriptor()
+        .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
+    let profile_id = planned_default_profile_id()
+        .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
+    planned_like_profile_definition(
+        profile_id,
+        descriptor,
+        INTERACTIVE_CAPABILITY_SURFACE_PROFILE_ID,
+    )
+}
+
 pub fn subagent_planned_profile_definition() -> Result<RunProfileDefinition, RunProfileRegistryError>
 {
     let descriptor = subagent_planned_driver_descriptor()
         .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
     let profile_id = subagent_planned_profile_id()
         .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
-    let checkpoint_schema_id = planned_driver_checkpoint_schema_id()
-        .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
-    let capability_surface_profile_id =
-        CapabilitySurfaceProfileId::new(SUBAGENT_CAPABILITY_SURFACE_PROFILE_ID)
-            .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
-    Ok(RunProfileDefinition::interactive_like(
+    planned_like_profile_definition(
         profile_id,
         descriptor,
-        checkpoint_schema_id,
-        planned_driver_checkpoint_schema_version(),
-        capability_surface_profile_id,
-    ))
+        SUBAGENT_CAPABILITY_SURFACE_PROFILE_ID,
+    )
+}
+
+/// Dedicated run profile for scheduled-trigger fires (issue #5505). Reuses
+/// the default planned driver/family unchanged — only the capability
+/// surface differs — so `runtime.rs`'s host deny-map can strip the trigger
+/// mutator capabilities keyed on `capability_surface_profile_id`.
+pub fn scheduled_trigger_planned_profile_definition()
+-> Result<RunProfileDefinition, RunProfileRegistryError> {
+    let descriptor = planned_driver_descriptor()
+        .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
+    planned_like_profile_definition(
+        RunProfileId::scheduled_trigger(),
+        descriptor,
+        SCHEDULED_TRIGGER_CAPABILITY_SURFACE_PROFILE_ID,
+    )
 }
 
 pub fn register_default_planned_profile(
@@ -265,11 +299,18 @@ pub fn register_subagent_planned_profile(
     registry.register(subagent_planned_profile_definition()?)
 }
 
+pub fn register_scheduled_trigger_planned_profile(
+    registry: &mut InMemoryRunProfileRegistry,
+) -> Result<(), RunProfileRegistryError> {
+    registry.register(scheduled_trigger_planned_profile_definition()?)
+}
+
 pub fn default_planned_run_profile_resolver()
 -> Result<InMemoryRunProfileResolver, RunProfileRegistryError> {
     let mut registry = InMemoryRunProfileRegistry::with_builtin_profiles();
     register_default_planned_profile(&mut registry)?;
     register_subagent_planned_profile(&mut registry)?;
+    register_scheduled_trigger_planned_profile(&mut registry)?;
     let implicit_default = planned_default_profile_id()
         .map_err(|reason| RunProfileRegistryError::InvalidProfile { reason })?;
     Ok(InMemoryRunProfileResolver::new_with_implicit_default(
@@ -427,6 +468,34 @@ mod tests {
         assert_eq!(
             snapshot.capability_surface_profile_id.as_str(),
             SUBAGENT_CAPABILITY_SURFACE_PROFILE_ID
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduled_trigger_profile_resolves_with_denied_surface_id() {
+        // Issue #5505: a scheduled-trigger fire must resolve a dedicated
+        // profile (not ProfileUnavailable) that reuses the default planned
+        // driver but carries a distinct capability_surface_profile_id so the
+        // host deny-map (runtime.rs) can strip the trigger mutators.
+        let resolver =
+            default_planned_run_profile_resolver().expect("planned resolver should build");
+        let snapshot = resolver
+            .resolve_run_profile(
+                RunProfileResolutionRequest::interactive_default().with_requested_run_profile(
+                    RunProfileRequest::new(RunProfileId::scheduled_trigger().as_str()).unwrap(),
+                ),
+            )
+            .await
+            .expect("scheduled_trigger profile should resolve");
+
+        assert_eq!(
+            snapshot.profile_id.as_str(),
+            RunProfileId::scheduled_trigger().as_str()
+        );
+        assert_eq!(snapshot.loop_driver.id.as_str(), PLANNED_DRIVER_DEFAULT_ID);
+        assert_eq!(
+            snapshot.capability_surface_profile_id.as_str(),
+            SCHEDULED_TRIGGER_CAPABILITY_SURFACE_PROFILE_ID
         );
     }
 

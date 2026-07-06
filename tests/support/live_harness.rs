@@ -464,7 +464,6 @@ impl LiveTestHarness {
 pub struct LiveTestHarnessBuilder {
     test_name: String,
     max_tool_iterations: usize,
-    engine_v2: Option<bool>,
     auto_approve_tools: Option<bool>,
     skills_dir: Option<PathBuf>,
     channel_name: Option<String>,
@@ -491,7 +490,6 @@ impl LiveTestHarnessBuilder {
         Self {
             test_name: test_name.into(),
             max_tool_iterations: 30,
-            engine_v2: None,
             auto_approve_tools: None,
             skills_dir: None,
             channel_name: None,
@@ -548,12 +546,6 @@ impl LiveTestHarnessBuilder {
     /// Set the maximum number of tool iterations per agentic loop invocation.
     pub fn with_max_tool_iterations(mut self, n: usize) -> Self {
         self.max_tool_iterations = n;
-        self
-    }
-
-    /// Force engine v2 on or off, overriding the env-resolved value.
-    pub fn with_engine_v2(mut self, enabled: bool) -> Self {
-        self.engine_v2 = Some(enabled);
         self
     }
 
@@ -635,9 +627,6 @@ impl LiveTestHarnessBuilder {
         );
 
         // Apply builder overrides.
-        if let Some(v2) = self.engine_v2 {
-            config.agent.engine_v2 = v2;
-        }
         if let Some(aa) = self.auto_approve_tools {
             config.agent.auto_approve_tools = aa;
         }
@@ -647,8 +636,7 @@ impl LiveTestHarnessBuilder {
         }
 
         eprintln!(
-            "[LiveTest] Config: engine_v2={}, allow_local_tools={}, auto_approve={}, skills_dir={}",
-            config.agent.engine_v2,
+            "[LiveTest] Config: allow_local_tools={}, auto_approve={}, skills_dir={}",
             config.agent.allow_local_tools,
             config.agent.auto_approve_tools,
             config.skills.local_dir.display(),
@@ -725,7 +713,6 @@ impl LiveTestHarnessBuilder {
 
         // Pass the real config so TestRig mirrors real binary behavior:
         // - allow_local_tools controls shell/file tool availability
-        // - engine_v2 controls which agentic loop path is used
         // - auto_approve_tools comes from the env/config (tests can override
         //   via LiveTestHarnessBuilder if needed)
         let skills_dir_for_rig = self.skills_dir.clone();
@@ -790,13 +777,6 @@ impl LiveTestHarnessBuilder {
             .with_auto_approve_tools(true);
         if let Some(dir) = self.skills_dir.clone() {
             rig_builder = rig_builder.with_skills_dir(dir);
-        }
-        // Propagate engine_v2 so replay mirrors live recording. Without this,
-        // tests that recorded against engine v2 (mission_create, mission_fire,
-        // CodeAct orchestration, etc.) replay against v1 and the v2-only tools
-        // come back as "tool not found".
-        if self.engine_v2.unwrap_or(false) {
-            rig_builder = rig_builder.with_engine_v2();
         }
         if let Some(ref name) = self.channel_name {
             rig_builder = rig_builder.with_channel_name(name.clone());

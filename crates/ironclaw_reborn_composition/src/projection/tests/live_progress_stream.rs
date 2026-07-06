@@ -284,6 +284,95 @@ async fn skill_learned_bubble_delivers_when_sse_resumes_from_advanced_durable_cu
     );
 }
 
+// Regression: multiple `LiveProjectionPublisher` instances created from the
+// same `RebornProjectionServices` over a run's lifetime (e.g. the milestone
+// sink's publisher plus the post-run skill-learning publisher, created seconds
+// later) must SHARE one monotonic live sequence counter. If each publisher
+// owned its own counter, two live items published by different publishers would
+// collide on the same projection cursor (both starting at sequence 1), and an
+// SSE client resuming from the first item's cursor would silently skip the
+// second. Guards the shared `Arc<AtomicU64>` wiring across
+// `build_reborn_projection_services` and `live_projection_publisher` — a
+// revert to a per-publisher `AtomicU64::new(0)` passes every other live-progress
+// test but fails this one.
+#[tokio::test]
+async fn live_publishers_from_same_services_share_monotonic_sequence() {
+    let fixture = live_projection_fixture("webui-shared-sequence");
+    let user_id = fixture.user_id.clone();
+    let scope = fixture.scope.clone();
+    let run_id = TurnRunId::new();
+
+    let reasoning = |body: &str| LoopHostMilestone {
+        scope: scope.clone(),
+        actor: None,
+        turn_id: TurnId::new(),
+        run_id,
+        loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+        kind: LoopHostMilestoneKind::ModelReasoningDelta {
+            safe_delta: body.to_string(),
+        },
+    };
+
+    // Publisher A (the fixture's) emits one live reasoning item.
+    fixture
+        .sink
+        .publish_loop_milestone(reasoning("from publisher A"))
+        .await
+        .unwrap();
+
+    // A second, independently created publisher emits another. In production
+    // this is a fresh publisher minted later in the run's lifetime.
+    let sink_b = fixture
+        .services
+        .with_live_progress_milestone_sink_for_publisher(
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            fixture.services.live_projection_publisher(user_id.clone()),
+        );
+    sink_b
+        .publish_loop_milestone(reasoning("from publisher B"))
+        .await
+        .unwrap();
+
+    let events = fixture
+        .services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    let thinking_cursors = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.payload(),
+                ProductOutboundPayload::ProjectionUpdate { state }
+                    if state.items.iter().any(|item| matches!(
+                        item,
+                        ProductProjectionItem::Thinking { body, .. }
+                            if body == "from publisher A" || body == "from publisher B"
+                    ))
+            )
+        })
+        .map(|event| event.projection_cursor().clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        thinking_cursors.len(),
+        2,
+        "both publishers' live reasoning items must reach the stream on their \
+         own cursor: {events:#?}"
+    );
+    assert_ne!(
+        thinking_cursors[0], thinking_cursors[1],
+        "independently created publishers must share one monotonic sequence, so \
+         their live items land on distinct projection cursors"
+    );
+}
+
 #[tokio::test]
 async fn webui_event_stream_preserves_live_reasoning_and_tool_start_order() {
     let fixture = live_projection_fixture("webui-live-order");

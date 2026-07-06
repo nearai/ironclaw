@@ -401,6 +401,7 @@ fn is_allowed_param_root(segment: &str) -> bool {
             | "previous_response_id"
             | "response_id"
             | "stream"
+            | "temperature"
             | "tool_choice"
             | "tools"
     ) && index.is_none_or(is_ascii_digits)
