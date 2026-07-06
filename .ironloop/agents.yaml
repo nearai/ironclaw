@@ -14,3 +14,7 @@ developers:
     display_name: ironloop/small-fix-resolver
     instructions: .ironloop/agents/small-fix-resolver/AGENTS.md
     actions: ["resolve"]
+    auto_resolve:
+      enabled: true
+      quiet_period_seconds: 300
+      max_attempts: 5
