@@ -67,18 +67,19 @@ fn reject_legacy_slack_setup_fields(
         ("signing_secret_env", section.signing_secret_env.as_ref()),
         ("bot_token_env", section.bot_token_env.as_ref()),
     ];
-    if let Some((field, _)) = deprecated_fields
+    let mut violated: Vec<&str> = deprecated_fields
         .into_iter()
-        .find(|(_, value)| value.is_some())
-    {
-        anyhow::bail!(
-            "[slack].{field} is no longer supported in {}; configure Slack from the WebUI and connect the user through Slack OAuth",
-            config_path.display()
-        );
-    }
+        .filter(|(_, value)| value.is_some())
+        .map(|(field, _)| field)
+        .collect();
     if !section.channel_routes.is_empty() {
+        violated.push("channel_routes");
+    }
+    if !violated.is_empty() {
         anyhow::bail!(
-            "[slack].channel_routes is no longer supported in {}; configure Slack routing from the WebUI",
+            "[slack].{} {} no longer supported in {}; configure Slack from the WebUI and connect the user through Slack OAuth",
+            violated.join(", "),
+            if violated.len() == 1 { "is" } else { "are" },
             config_path.display()
         );
     }
@@ -236,6 +237,34 @@ mod tests {
 
         assert!(
             error.to_string().contains("slack_user_id"),
+            "error should name the rejected field: {error}"
+        );
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn slack_host_beta_runtime_config_rejects_legacy_channel_routes() {
+        let section = ironclaw_reborn_config::SlackSection {
+            enabled: Some(true),
+            channel_routes: vec![ironclaw_reborn_config::SlackChannelRouteSection {
+                channel_id: Some("CENG".to_string()),
+                subject_user_id: Some("U123".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let error = resolve_slack_config_for_serve(
+            Some(&section),
+            &tenant_id("tenant"),
+            &agent_id("agent"),
+            None,
+            &user_id("web-user"),
+            std::path::Path::new("/tmp/reborn-config.toml"),
+        )
+        .expect_err("legacy channel_routes must be rejected");
+
+        assert!(
+            error.to_string().contains("channel_routes"),
             "error should name the rejected field: {error}"
         );
     }
