@@ -1,7 +1,9 @@
-//! Turn-run persistence-snapshot abstraction shared by the local-dev
-//! approval/auth interaction locators (`LocalDevApprovalTurnRunLocator` in
-//! `runtime.rs`, `LocalDevAuthInteractionReadModel` in
-//! `runtime/auth_interaction.rs`).
+//! Turn-run persistence-snapshot abstraction shared by every reader of live
+//! turn-run state in this crate: the local-dev approval/auth interaction
+//! locators (`LocalDevApprovalTurnRunLocator` in `runtime.rs`,
+//! `LocalDevAuthInteractionReadModel` in `runtime/auth_interaction.rs`) and
+//! the trigger poller's active-run lookup (`SnapshotActiveRunLookup` in
+//! `trigger_poller/active_run_lookup.rs`).
 //!
 //! Exists so a `test-support` caller can substitute the turn-state store a
 //! locator reads from without those locators depending on the specific
@@ -15,6 +17,11 @@
 //! as the source, which implements this trait via the blanket impls below, so
 //! its snapshot behavior is byte-identical to before this seam existed — this
 //! module only replaces a hardcoded field type with a trait-object one.
+//!
+//! Returns the raw `ironclaw_turns::TurnError`; each consumer maps it into
+//! its own domain error at its own boundary (`ProductWorkflowError` for the
+//! approval/auth locators, `TriggerError` for the trigger poller) rather than
+//! this shared substrate trait picking a consumer's error type.
 
 use async_trait::async_trait;
 use ironclaw_turns::{TurnError, TurnPersistenceSnapshot};
@@ -30,8 +37,9 @@ pub(crate) trait TurnRunSnapshotSource: Send + Sync {
 // and a caller's own store (e.g. `RebornIntegrationGroup`'s
 // `FilesystemTurnStateStore<HarnessTurnBackend>`) implement this identically.
 // Unconditional (not cfg-gated on which backend `LocalDevTurnStateStore`
-// happens to alias to in this build): `FilesystemTurnStateStore::persistence_snapshot`
-// is always defined, and this impl targets a different concrete type per `F`
+// happens to alias to in this build, nor on this crate's `libsql`/`postgres`
+// features): `FilesystemTurnStateStore` is defined unconditionally in
+// `ironclaw_turns`, and this impl targets a different concrete type per `F`
 // than the `InMemoryTurnStateStore` impl below, so the two never conflict.
 #[async_trait]
 impl<F> TurnRunSnapshotSource for ironclaw_turns::FilesystemTurnStateStore<F>

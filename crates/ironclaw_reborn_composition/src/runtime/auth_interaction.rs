@@ -13,7 +13,7 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_turns::{GateRef, TurnPersistenceSnapshot, TurnRunId, TurnScope, TurnStatus};
 
-use super::turn_run_snapshot::TurnRunSnapshotSource;
+use crate::turn_run_snapshot::TurnRunSnapshotSource;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BlockedAuthRun {

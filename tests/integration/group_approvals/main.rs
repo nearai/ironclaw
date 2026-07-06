@@ -1,16 +1,23 @@
 //! Group integration tests for the Reborn approval flow — the real gate path.
 //!
-//! One sequential `#[tokio::test]` drives eight scenarios over a shared
-//! [`RebornIntegrationGroup::live_approvals`] group (one approval-request store,
-//! one capability-lease store, one `(tenant, user)` auto-approve toggle, all
-//! shared across threads). See `tests/integration/CLAUDE.md` §"Group tests".
+//! `approvals_group_e2e` is one sequential `#[tokio::test]` that drives eight
+//! scenarios over a shared [`RebornIntegrationGroup::live_approvals`] group
+//! (one approval-request store, one capability-lease store, one
+//! `(tenant, user)` auto-approve toggle, all shared across threads). See
+//! `tests/integration/CLAUDE.md` §"Group tests".
 //!
-//! Every scenario drives the REAL gate path: scripted `builtin.write_file` call
-//! → real `TurnStatus::BlockedApproval` gate (auto-approve disabled for the
-//! group at construction) → real `ApprovalResolver` (`approve_gate`/`deny_gate`)
-//! → `coordinator.resume_turn`. Only the model is faked. Exception:
-//! `failure_category_demasked` drives a genuinely-FAILED run (no gate) to prove
-//! the loop-exit de-mask wiring.
+//! Every scenario in that test drives the REAL gate path: scripted
+//! `builtin.write_file` call → real `TurnStatus::BlockedApproval` gate
+//! (auto-approve disabled for the group at construction) → real
+//! `ApprovalResolver` (`approve_gate`/`deny_gate`) → `coordinator.resume_turn`.
+//! Only the model is faked. Exception: `failure_category_demasked` drives a
+//! genuinely-FAILED run (no gate) to prove the loop-exit de-mask wiring.
+//!
+//! `approvals_group_real_gate_dispatch_e2e` is a separate group/test proving
+//! the `submit_inbound(ApprovalResolution)` dispatch arm instead: it wires the
+//! real interaction services over the group's own shared turn-state store so
+//! resolution reaches the literal dispatch arm a real adapter's "approve"/
+//! "deny" reply hits, rather than resuming the turn directly.
 //!
 //! ## Ordering (state machine over the shared auto-approve store)
 //!
