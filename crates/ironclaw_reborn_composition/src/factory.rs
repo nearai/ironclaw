@@ -2707,6 +2707,37 @@ pub(crate) async fn open_local_dev_extension_installation_store_for_test(
     Ok(Arc::new(store))
 }
 
+/// Migration seam: open the extension installation store over a caller-supplied
+/// [`RootFilesystem`] at the default installation state path, returning the
+/// boxed trait object so the migration tool never touches the concrete
+/// `pub(crate)` `FilesystemExtensionInstallationStore`. Mirrors the production
+/// binding in [`build_reborn_services`] (the `extension_installation_store`
+/// construction via `FilesystemExtensionInstallationStore::load_at`); gated
+/// behind `migration-support` so it ships zero bytes in a default production
+/// binary, exactly like the `test-support` seams above.
+///
+/// The migration tool owns the cross-stack bridge (it depends on the legacy
+/// `ironclaw` crate); keeping this narrow accessor here lets composition retain
+/// sole ownership of the installation store's construction without composition
+/// itself taking any legacy dependency.
+#[cfg(feature = "migration-support")]
+pub async fn extension_installation_store_for_migration(
+    filesystem: Arc<dyn RootFilesystem>,
+) -> Result<Arc<dyn ExtensionInstallationStore>, RebornBuildError> {
+    let state_path =
+        FilesystemExtensionInstallationStore::default_state_path().map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: format!("extension installation state path invalid: {error}"),
+            }
+        })?;
+    let store = FilesystemExtensionInstallationStore::load_at(filesystem, state_path)
+        .await
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("extension installation state could not be loaded: {error}"),
+        })?;
+    Ok(Arc::new(store))
+}
+
 /// Test-only (C-DURABLE seam): open a FRESH, independent
 /// [`ironclaw_run_state::ApprovalRequestStore`] at an existing local-dev
 /// `storage_root`, paralleling [`open_local_dev_extension_installation_store_for_test`]
