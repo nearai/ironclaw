@@ -1,5 +1,8 @@
 #[allow(dead_code)]
-#[path = "support/reborn/mod.rs"]
+#[path = "support/reborn_parity_qa/mod.rs"]
+mod parity_qa_support;
+#[allow(dead_code)]
+#[path = "integration/support/mod.rs"]
 mod reborn_support;
 mod support;
 
@@ -16,6 +19,10 @@ use ironclaw_loop_support::{
     DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, HostManagedModelMessageRole, HostManagedModelResponse,
 };
 use ironclaw_turns::TurnStatus;
+use parity_qa_support::binary_e2e::RebornBinaryE2EHarness;
+use parity_qa_support::model_replay::{
+    RebornModelReplayStep, RebornScriptedProviderToolCall, RebornTraceReplayModelGateway,
+};
 use reborn_support::{
     config::WaitConfig,
     extension_surface::{
@@ -24,10 +31,7 @@ use reborn_support::{
         EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
     },
     github as github_support,
-    harness::{RebornBinaryE2EHarness, RecordingTestCapabilityPort},
-    model_replay::{
-        RebornModelReplayStep, RebornScriptedProviderToolCall, RebornTraceReplayModelGateway,
-    },
+    harness::RecordingTestCapabilityPort,
 };
 
 const COVERED_QA_SCENARIOS: &[&str] = &[
@@ -57,7 +61,7 @@ const COVERED_QA_SCENARIOS: &[&str] = &[
 
 #[test]
 fn every_pasted_qa_scenario_has_reborn_e2e_coverage() {
-    reborn_support::qa_scenarios::assert_all_covered(COVERED_QA_SCENARIOS);
+    parity_qa_support::qa_scenarios::assert_all_covered(COVERED_QA_SCENARIOS);
 }
 
 #[tokio::test]
@@ -305,11 +309,12 @@ async fn qa_trigger_automation_smokes_create_view_and_cleanup() {
 }
 
 #[tokio::test]
-#[ignore = "TEMP(disable-spawn-subagents): spawn_subagent temporarily disabled via capability deny filter; re-enable by emptying DISABLED_CAPABILITY_IDS"]
+#[ignore = "TEMP(disable-spawn-subagents): spawn_subagent temporarily disabled via capability deny filter; re-enable by clearing runtime disabled_capability_ids"]
 async fn qa_subagent_capability_smoke_uses_child_run() {
     let spawn_subagent = cap(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID);
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
-        RebornModelReplayStep::ProviderToolCalls {
+        RebornModelReplayStep::ProviderToolCallsForRequest {
+            request_contains: "split repo testing docs and security docs checks".to_string(),
             calls: vec![call(
                 &spawn_subagent,
                 "qa_spawn_docs_checks",
@@ -320,13 +325,16 @@ async fn qa_subagent_capability_smoke_uses_child_run() {
             )],
             expected_tool_results: Vec::new(),
         },
-        RebornModelReplayStep::Response {
+        RebornModelReplayStep::DelayedResponseForRequest {
+            request_contains: "check repo testing docs and security docs independently".to_string(),
             response: HostManagedModelResponse::assistant_reply(
                 "child found testing docs and security docs",
             ),
+            delay: Duration::from_secs(1),
             expected_tool_results: Vec::new(),
         },
-        RebornModelReplayStep::Response {
+        RebornModelReplayStep::ResponseForRequest {
+            request_contains: "child found testing docs and security docs".to_string(),
             response: HostManagedModelResponse::assistant_reply("qa subagent smoke complete"),
             expected_tool_results: Vec::new(),
         },
@@ -350,7 +358,15 @@ async fn qa_subagent_capability_smoke_uses_child_run() {
     harness
         .wait_for_status_with_config(submitted.run_id, TurnStatus::BlockedDependentRun, qa_wait())
         .await
-        .expect("parent should block on child");
+        .unwrap_or_else(|error| {
+            let model_requests = harness.model_requests();
+            panic!(
+                "parent should block on child: {error}; model_request_count={}; model_request_shapes={}; remaining_model_responses={}",
+                model_requests.len(),
+                model_request_shape_summary(&model_requests),
+                harness.remaining_model_responses()
+            )
+        });
     let children = harness
         .children_of(&submitted.scope, submitted.run_id)
         .await
@@ -1001,6 +1017,32 @@ where
     if let Err(panic) = handle.join() {
         std::panic::resume_unwind(panic);
     }
+}
+
+fn model_request_shape_summary(
+    requests: &[ironclaw_loop_support::HostManagedModelRequest],
+) -> String {
+    if requests.is_empty() {
+        return "none".to_string();
+    }
+    requests
+        .iter()
+        .enumerate()
+        .map(|(index, request)| {
+            let roles = request
+                .messages
+                .iter()
+                .map(|message| format!("{:?}", message.role))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "#{index}:messages={},roles=[{}]",
+                request.messages.len(),
+                roles
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn call(

@@ -84,7 +84,6 @@ mod live_mission_tests {
         init_tracing();
 
         let harness = LiveTestHarnessBuilder::new("mission_daily_news_digest")
-            .with_engine_v2(true)
             .with_max_tool_iterations(40)
             .with_auto_approve_tools(true)
             .with_channel_name(CHANNEL)

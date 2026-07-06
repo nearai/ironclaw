@@ -463,13 +463,15 @@ async fn approve_dispatch(
             approval_id,
             LeaseApproval {
                 issued_by: Principal::HostRuntime,
-                allowed_effects: vec![EffectKind::DispatchCapability],
-                mounts: MountView::default(),
-                network: NetworkPolicy::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await

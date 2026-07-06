@@ -129,7 +129,7 @@ pub async fn build_openai_compat_route_mount(
     // attached to an OpenAI-compatible chat completion reaches the model.
     if let Some(workspace_filesystem) = runtime.webui_workspace_filesystem() {
         let lander: Arc<dyn InboundAttachmentLander> = Arc::new(
-            crate::attachment_landing::ProjectScopedAttachmentLander::new(workspace_filesystem),
+            crate::support::fs::ProjectScopedAttachmentLander::new(workspace_filesystem),
         );
         inbound_turn_service = inbound_turn_service.with_inbound_attachments(lander);
     }

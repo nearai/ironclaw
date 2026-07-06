@@ -138,11 +138,7 @@ function makeContext() {
       return "configure";
     }
 
-    if (ext?.kind === "wasm_channel") {
-      return null;
-    }
-
-    return "activate";
+    return isChannelExtensionKind(ext?.kind) ? null : "activate";
   }
 
   return {
@@ -219,6 +215,18 @@ function extractOverflowActions(rendered, OverflowMenuRef) {
   return nodes[0].values[1];
 }
 
+function renderedContainsValue(rendered, expected) {
+  if (rendered === expected) return true;
+  if (!rendered || typeof rendered !== "object") return false;
+  if (Array.isArray(rendered)) {
+    return rendered.some((value) => renderedContainsValue(value, expected));
+  }
+  if (Array.isArray(rendered.values)) {
+    return rendered.values.some((value) => renderedContainsValue(value, expected));
+  }
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // Locate the OverflowMenu function reference in a fresh context so we can
 // compare against it inside rendered trees.  We need it from the same source
@@ -268,6 +276,62 @@ test("card class keeps grid siblings at natural height", () => {
     "CARD should align itself to the top of its grid area",
   );
   assert.ok(!cardClass.includes("h-full"), "CARD must not stretch to grid row height");
+});
+
+test("installed channel card omits generic Activate while installed MCP card keeps it", () => {
+  const channel = renderExtensionCard({
+    package_ref: { id: "slack" },
+    kind: "channel",
+    activation_status: "installed",
+    display_name: "Slack",
+  });
+  assert.equal(
+    renderedContainsValue(channel, "Activate"),
+    false,
+    "Slack-style channels should use setup/pairing panels instead of generic activation",
+  );
+
+  const mcp = renderExtensionCard({
+    package_ref: { id: "github" },
+    kind: "mcp_server",
+    activation_status: "installed",
+    display_name: "GitHub",
+  });
+  assert.equal(
+    renderedContainsValue(mcp, "activate"),
+    true,
+    "non-channel extensions should still expose their normal activation action",
+  );
+});
+
+test("setup-required primary action reads Connect for a channel and Configure for a credential extension", () => {
+  // A freshly-installed channel connects (pairs); a credential extension like
+  // GitHub configures a token. The primary action label must diverge by kind.
+  const channel = renderExtensionCard({
+    package_ref: { id: "slack" },
+    kind: "channel",
+    onboarding_state: "setup_required",
+    display_name: "Slack",
+  });
+  assert.equal(
+    renderedContainsValue(channel, "connect"),
+    true,
+    "unconnected channel should offer Connect, not Configure",
+  );
+  assert.equal(renderedContainsValue(channel, "configure"), false);
+
+  const credential = renderExtensionCard({
+    package_ref: { id: "github" },
+    kind: "mcp_server",
+    onboarding_state: "setup_required",
+    display_name: "GitHub",
+  });
+  assert.equal(
+    renderedContainsValue(credential, "configure"),
+    true,
+    "credential extension should keep Configure",
+  );
+  assert.equal(renderedContainsValue(credential, "connect"), false);
 });
 
 test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async (t) => {
@@ -485,6 +549,7 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
         package_ref: { id: "telegram" },
         kind: "channel",
         activation_status: "active",
+        authenticated: true,
         display_name: "Telegram",
       };
       const rendered = ExtensionCard({
@@ -499,7 +564,8 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
       assert.notEqual(actions, null, "OverflowMenu should be present");
       const reconfigureAction = actions.find((a) => a.id === "reconfigure");
       assert.notEqual(reconfigureAction, undefined, "Reconfigure action must exist");
-      assert.equal(reconfigureAction.label, "reconfigure");
+      // A connected channel re-pairs via "Reconnect", not "Reconfigure".
+      assert.equal(reconfigureAction.label, "reconnect");
       reconfigureAction.run();
       assert.deepEqual(configurePayload.packageRef, { id: "telegram" });
       assert.equal(configurePayload.displayName, "Telegram");

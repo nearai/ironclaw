@@ -120,6 +120,144 @@ async fn local_dev_extension_activate_accepts_manual_token_from_webui_gate_scope
     assert!(active.iter().any(|id| id == "github.search_issues"));
 }
 
+/// W4-MCP-SSO-WIRING (#5439 class): the NEAR AI MCP host-managed credential
+/// fallback (`HostManagedCredentialFallbackRule`) must actually reach the
+/// runtime-credential-selection path `build_reborn_services` wires up — not
+/// just the private rule/selector types the crate's other unit tests exercise
+/// directly. Before #5439, the bootstrapped NEAR AI MCP API key was resolvable
+/// only under the boot-owner's own scope; a Google-SSO user in the SAME
+/// tenant/agent/project with no NEAR AI token of their own was prompted for
+/// one instead of transparently sharing the host-managed key.
+///
+/// Drives ONLY the composition's public surface: `build_reborn_services` (the
+/// local-dev path always derives `nearai_mcp_host_managed_scope` from the
+/// boot owner — see `local_dev_nearai_mcp_owner_scope` in `factory.rs` — so no
+/// live NEAR AI config injection is needed to prove the wiring) and
+/// `RebornProductAuthServices`'s existing `pub(crate)`
+/// `runtime_credential_account_selection_service()` accessor (this test file
+/// is already inside the crate, same seam the sibling github test above
+/// drives). Two arms on the SAME composed `services`, discriminating the
+/// fallback's scope match rather than asserting vacuous success:
+/// - an SSO user in the SAME tenant/agent as the boot owner (a different
+///   project — local-dev's host scope is project-*unscoped*, so it is
+///   reusable across projects under that agent by design, see
+///   `HostManagedCredentialFallbackRule::scope_matches`'s doc) resolves the
+///   owner's NEAR AI account via fallback (the #5439 fix);
+/// - an SSO user under a DIFFERENT tenant/agent does NOT
+///   (`HostManagedCredentialFallbackRule` requires an exact tenant+agent
+///   match; it is not a global bypass) -- proves the positive arm is a real
+///   scope match, not the selector silently always succeeding.
+#[tokio::test]
+async fn local_dev_nearai_runtime_selection_falls_back_to_host_managed_account_for_sso_user() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let owner_id = "3eee560a-7fe5-474c-965a-67cb69df3d04";
+    let services = build_reborn_services(RebornBuildInput::local_dev(
+        owner_id,
+        dir.path().join("local-dev"),
+    ))
+    .await
+    .expect("local-dev services build");
+    let product_auth = services.product_auth.as_ref().expect("product auth");
+    let nearai_provider = AuthProviderId::new("nearai").expect("provider"); // safety: static test provider id is valid.
+    let nearai_extension = ExtensionId::new("nearai").expect("extension"); // safety: static test extension id is valid.
+
+    // The boot owner submits their own NEAR AI manual token (mirrors the
+    // production bootstrap's ProductAuthExtensionCredentialSetup submission,
+    // through the same public manual-token flow the github test above uses --
+    // the selection service does not care which entry point created the
+    // account).
+    let owner_scope = webui_gate_resource_scope();
+    let owner_auth_scope = AuthProductScope::new(owner_scope.clone(), AuthSurface::Callback);
+    let challenge = product_auth
+        .request_manual_token_setup(RebornManualTokenSetupRequest {
+            scope: owner_auth_scope.clone(),
+            provider: nearai_provider.clone(),
+            label: CredentialAccountLabel::new("host nearai key").expect("label"),
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+        })
+        .await
+        .expect("owner nearai manual token setup");
+    product_auth
+        .submit_manual_token(RebornManualTokenSubmitRequest::new(
+            owner_auth_scope,
+            challenge.interaction_id,
+            secrecy::SecretString::from("nearai-host-key".to_string()),
+        ))
+        .await
+        .expect("owner nearai manual token submit");
+
+    // Arm 1: an SSO user in the SAME tenant/agent as the boot owner but a
+    // DIFFERENT project, with NO NEAR AI account of their own, resolves via
+    // the host-managed fallback -- the local-dev host scope is
+    // project-unscoped, so it is reusable across projects under the same
+    // agent by design (the #5439 fix).
+    let sso_other_project_scope = ResourceScope {
+        user_id: UserId::new("sso-user-other-project").expect("user"), // safety: static test user id is valid.
+        project_id: Some(ironclaw_host_api::ProjectId::new("other-project").expect("project")), // safety: static test project id is valid.
+        thread_id: None,
+        ..owner_scope.clone()
+    };
+    let sso_selected = product_auth
+        .runtime_credential_account_selection_service()
+        .select_unique_configured_runtime_account(RuntimeCredentialAccountSelectionRequest::new(
+            CredentialAccountSelectionRequest::new(
+                AuthProductScope::credential_owner(&sso_other_project_scope, AuthSurface::Api),
+                nearai_provider.clone(),
+            )
+            .for_extension(nearai_extension.clone()),
+            AuthProductScope::new(sso_other_project_scope, AuthSurface::Api),
+            RuntimeCredentialAccountSetup::ManualToken,
+            Vec::new(),
+        ))
+        .await
+        .expect(
+            "SSO user in the boot owner's tenant/agent (different project) must resolve the \
+             host-managed NEAR AI account via the fallback rule (#5439)",
+        );
+    assert!(
+        sso_selected.access_secret.is_some(),
+        "fallback-resolved account must carry the owner's configured access secret"
+    );
+
+    // Arm 2 (negative control): an SSO user under a DIFFERENT tenant must NOT
+    // fall back -- `HostManagedCredentialFallbackRule::scope_matches` requires
+    // an exact tenant+agent match. Proves arm 1 is a real scope match, not the
+    // selector silently always succeeding.
+    let sso_other_tenant_scope = ResourceScope {
+        tenant_id: TenantId::new("other-tenant").expect("tenant"), // safety: static test tenant id is valid.
+        user_id: UserId::new("sso-user-other-tenant").expect("user"), // safety: static test user id is valid.
+        project_id: None,
+        thread_id: None,
+        ..owner_scope
+    };
+    let sso_other_tenant_error = product_auth
+        .runtime_credential_account_selection_service()
+        .select_unique_configured_runtime_account(RuntimeCredentialAccountSelectionRequest::new(
+            CredentialAccountSelectionRequest::new(
+                AuthProductScope::credential_owner(&sso_other_tenant_scope, AuthSurface::Api),
+                nearai_provider,
+            )
+            .for_extension(nearai_extension),
+            AuthProductScope::new(sso_other_tenant_scope, AuthSurface::Api),
+            RuntimeCredentialAccountSetup::ManualToken,
+            Vec::new(),
+        ))
+        .await
+        .expect_err(
+            "an SSO user under a different tenant must NOT resolve the host-managed account -- \
+             the fallback rule is scoped, not a global bypass",
+        );
+    assert!(
+        matches!(
+            sso_other_tenant_error,
+            ironclaw_auth::AuthProductError::CredentialMissing
+        ),
+        "expected CredentialMissing for the out-of-scope SSO user, got {sso_other_tenant_error:?}"
+    );
+}
+
 async fn invoke_json_with_context(
     services: &RebornServices,
     capability_id: &str,

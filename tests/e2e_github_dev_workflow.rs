@@ -116,7 +116,6 @@ mod github_dev_workflow_test {
 
     async fn build_workflow_harness(test_name: &str) -> LiveTestHarness {
         LiveTestHarnessBuilder::new(test_name)
-            .with_engine_v2(true)
             .with_auto_approve_tools(true)
             // Workflow setup involves many sequential mission_create calls
             // plus per-event reasoning, so we need a generous iteration cap.

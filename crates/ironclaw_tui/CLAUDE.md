@@ -1,5 +1,7 @@
 # ironclaw_tui — Module Spec
 
+> **v1-only today.** Sole consumer is the root `ironclaw` crate; there is no Reborn TUI surface yet. Maintain existing behavior only — don't build new Reborn UX here without an explicit decision.
+
 ## Overview
 
 Ratatui-based terminal UI for IronClaw. Self-contained crate that provides:

@@ -149,7 +149,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         "schemas/builtin/shell.input.v1.json" => json!({
             "type": "object",
             "properties": {
-                "command": { "type": "string", "description": "Shell command to execute" },
+                "command": { "type": "string", "description": "Shell command to execute. Prefer ONE command that does the whole job: combine steps with '&&' or pipes, or write and run a single script (awk/python) — do NOT issue one command per metric/day/line, and don't re-read files you already have." },
                 "workdir": { "type": "string", "description": "Optional scoped working directory" },
                 "timeout": { "type": "integer", "minimum": 1, "description": "Timeout in seconds" }
             },

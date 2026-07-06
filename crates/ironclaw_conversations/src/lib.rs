@@ -33,8 +33,7 @@ pub use ids::{
 pub use inbound::{InboundTurnService, trusted_trigger_fire_submitter};
 pub use memory::InMemoryConversationServices;
 pub use traits::{
-    ConversationActorPairingService, ConversationBindingService, ConversationBindingServiceExt,
-    SessionThreadService,
+    ConversationActorPairingService, ConversationBindingService, SessionThreadService,
 };
 pub use types::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageLookup,
