@@ -24,6 +24,15 @@ pub(super) struct AuthorizationServerMetadata {
     pub(super) registration_endpoint: Option<String>,
 }
 
+impl AuthorizationServerMetadata {
+    /// Registration endpoint, treating a blank string the same as absent.
+    pub(super) fn registration_endpoint(&self) -> Option<&str> {
+        self.registration_endpoint
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub(super) struct DcrRegistrationRequest<'a> {
     pub(super) client_name: &'a str,

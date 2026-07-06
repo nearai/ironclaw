@@ -36,23 +36,13 @@ use crate::oauth_dcr_protocol::{
     validate_endpoint_origin, validate_issuer_related_to_resource,
 };
 use crate::oauth_provider_client::{
-    HostOAuthProviderSpec, OAuthClientMaterial, OAuthClientMaterialSource, authorize_oauth_egress,
-    oauth_endpoint_host, oauth_network_policy,
+    HostOAuthProviderSpec, OAuthClientMaterial, OAuthClientMaterialSource, OAuthErrorResponseBody,
+    authorize_oauth_egress, oauth_endpoint_host, oauth_network_policy,
 };
 
 const DCR_RESPONSE_BODY_LIMIT: u64 = 32 * 1024;
 const DCR_TIMEOUT_MS: u32 = 30_000;
 const DCR_FLOW_TTL_SECONDS: i64 = 600;
-
-/// Minimal RFC 7591 §3.2.2 DCR/metadata error response — we extract only
-/// the `error` code field. The full body (including `error_description`)
-/// is never logged or returned to callers. Mirrors
-/// `oauth_provider_client::OAuthErrorResponseBody` for the token leg.
-#[derive(Debug, Deserialize)]
-struct DcrErrorResponseBody {
-    #[serde(default)]
-    error: Option<String>,
-}
 
 #[derive(Debug, Clone)]
 pub(crate) struct OAuthDcrProviderConfig {
@@ -357,9 +347,7 @@ impl OAuthDcrProvider {
         // discover_authorization_server already rejects None/empty
         // registration_endpoint, so this is defensive rather than reachable.
         let registration_endpoint = metadata
-            .registration_endpoint
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
+            .registration_endpoint()
             .ok_or(AuthProductError::BackendUnavailable)?;
         let registration = self
             .register_client(&scope.resource, registration_endpoint, &redirect_uri)
@@ -462,11 +450,7 @@ impl OAuthDcrProvider {
                 DCR_RESPONSE_BODY_LIMIT,
             )
             .await?;
-        let registration_endpoint = metadata
-            .registration_endpoint
-            .as_deref()
-            .filter(|value| !value.trim().is_empty());
-        let Some(registration_endpoint) = registration_endpoint else {
+        let Some(registration_endpoint) = metadata.registration_endpoint() else {
             return Err(AuthProductError::BackendUnavailable);
         };
         validate_endpoint_origin(
@@ -753,7 +737,7 @@ impl OAuthDcrProvider {
             // RFC 7591 §3.2.2: DCR (and metadata) 4xx error bodies carry an
             // `error` code. REDACTION: extract only that code — never log,
             // serialize, or return the raw body or `error_description`.
-            let error_code = serde_json::from_slice::<DcrErrorResponseBody>(&response.body)
+            let error_code = serde_json::from_slice::<OAuthErrorResponseBody>(&response.body)
                 .ok()
                 .and_then(|body| body.error);
             if let Some(error_code) = error_code {

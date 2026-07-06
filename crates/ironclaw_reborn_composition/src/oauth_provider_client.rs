@@ -589,11 +589,13 @@ struct StoredOAuthTokens {
 }
 
 /// Minimal OAuth error response — we extract only the `error` code field.
-/// The full body is never logged or returned to callers.
+/// The full body is never logged or returned to callers. Shared by the
+/// token endpoint (RFC 6749 §5.2) and DCR/metadata endpoints (RFC 7591
+/// §3.2.2): both error bodies carry `error` as the only field we read.
 #[derive(Debug, Deserialize)]
-struct OAuthErrorResponseBody {
+pub(crate) struct OAuthErrorResponseBody {
     #[serde(default)]
-    error: Option<String>,
+    pub(crate) error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -628,10 +630,9 @@ where
     match Option::<U64OrString>::deserialize(deserializer)? {
         None => Ok(None),
         Some(U64OrString::Number(value)) => Ok(Some(value)),
-        Some(U64OrString::Text(text)) => text
-            .parse::<u64>()
-            .map(Some)
-            .map_err(|_| serde::de::Error::custom("expires_in string is not a valid u64")),
+        Some(U64OrString::Text(text)) => text.parse::<u64>().map(Some).map_err(|e| {
+            serde::de::Error::custom(format!("expires_in string is not a valid u64: {e}"))
+        }),
     }
 }
 
