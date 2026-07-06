@@ -1,11 +1,7 @@
-use std::{
-    sync::{Arc, OnceLock},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, EventRecord, FilesystemError, RootFilesystem,
-    ScopedFilesystem, SeqNo,
+    CasExpectation, ContentType, Entry, FilesystemError, RootFilesystem, ScopedFilesystem, SeqNo,
 };
 use ironclaw_host_api::ResourceScope;
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
@@ -21,12 +17,15 @@ use super::{
         loop_checkpoint_record_key, run_record_key, spawn_tree_reservation_record_key,
         turn_record_key,
     },
-    io::{delta_log_path, deserialize_row, fs_error, meta_path, row_path},
+    io::{
+        delta_log_path, deserialize_row, fs_error, materialized_row_seq, meta_path, row_path,
+        serialize_materialized_row,
+    },
 };
 
 const DELTA_JOURNAL_MAX_BATCH: usize = 256;
 const DELTA_JOURNAL_MATERIALIZE_IDLE_DELAY: Duration = Duration::from_millis(25);
-static MATERIALIZE_GATE: OnceLock<Arc<AsyncMutex<()>>> = OnceLock::new();
+const MATERIALIZED_ROW_CAS_RETRIES: usize = 16;
 
 pub(super) type DeltaAck = oneshot::Receiver<Result<(), TurnError>>;
 
@@ -40,7 +39,10 @@ struct DeltaJournalRequest {
 }
 
 impl DeltaJournal {
-    pub(super) fn new<F>(filesystem: Arc<ScopedFilesystem<F>>) -> Self
+    pub(super) fn new<F>(
+        filesystem: Arc<ScopedFilesystem<F>>,
+        materialize_gate: Arc<AsyncMutex<()>>,
+    ) -> Self
     where
         F: RootFilesystem + 'static,
     {
@@ -48,6 +50,7 @@ impl DeltaJournal {
         let (materialize_sender, materialize_receiver) = mpsc::unbounded_channel();
         tokio::spawn(run_delta_journal_materializer(
             Arc::clone(&filesystem),
+            materialize_gate,
             materialize_receiver,
         ));
         tokio::spawn(run_delta_journal_flusher(
@@ -118,6 +121,7 @@ async fn run_delta_journal_flusher<F>(
 
 async fn run_delta_journal_materializer<F>(
     filesystem: Arc<ScopedFilesystem<F>>,
+    materialize_gate: Arc<AsyncMutex<()>>,
     mut receiver: mpsc::UnboundedReceiver<SeqNo>,
 ) where
     F: RootFilesystem,
@@ -134,7 +138,9 @@ async fn run_delta_journal_materializer<F>(
                 break;
             }
         }
-        if let Err(error) = materialize_delta_batch(filesystem.as_ref(), &target_seq).await {
+        if let Err(error) =
+            materialize_delta_batch(filesystem.as_ref(), &materialize_gate, &target_seq).await
+        {
             tracing::warn!(
                 error = %error,
                 target_seq = target_seq.get(),
@@ -183,23 +189,24 @@ where
 
 async fn materialize_delta_batch<F>(
     filesystem: &ScopedFilesystem<F>,
+    materialize_gate: &Arc<AsyncMutex<()>>,
     target_seq: &SeqNo,
 ) -> Result<(), TurnError>
 where
     F: RootFilesystem,
 {
-    materialize_delta_log(filesystem, Some(*target_seq)).await
+    materialize_delta_log(filesystem, materialize_gate, Some(*target_seq)).await
 }
 
 pub(super) async fn materialize_delta_log<F>(
     filesystem: &ScopedFilesystem<F>,
+    materialize_gate: &Arc<AsyncMutex<()>>,
     target_seq: Option<SeqNo>,
 ) -> Result<(), TurnError>
 where
     F: RootFilesystem,
 {
-    let gate = materialize_gate();
-    let _guard = gate.lock().await;
+    let _guard = materialize_gate.lock().await;
     materialize_delta_log_unlocked(filesystem, target_seq).await
 }
 
@@ -235,135 +242,152 @@ where
         }
         Err(error) => return Err(fs_error(error)),
     };
+    let mut updated = false;
     for record in records {
         if target_seq.is_some_and(|target_seq| record.seq > target_seq) {
             break;
         }
-        materialize_delta_record(filesystem, &mut meta, record).await?;
+        let delta: SnapshotDelta =
+            serde_json::from_slice(&record.payload).map_err(|error| TurnError::Unavailable {
+                reason: format!("turn-state delta deserialization failed: {error}"),
+            })?;
+        materialize_delta(filesystem, record.seq, &delta).await?;
+        if let Some(floor) = delta.event_retention_floor {
+            meta.event_retention_floor = meta.event_retention_floor.max(floor);
+        }
+        meta.journal_seq = record.seq;
+        updated = true;
+    }
+    if updated {
+        write_meta(filesystem, &meta).await?;
     }
     Ok(())
 }
 
-fn materialize_gate() -> Arc<AsyncMutex<()>> {
-    Arc::clone(MATERIALIZE_GATE.get_or_init(|| Arc::new(AsyncMutex::new(()))))
-}
-
-async fn materialize_delta_record<F>(
-    filesystem: &ScopedFilesystem<F>,
-    meta: &mut RowStoreMeta,
-    record: EventRecord,
-) -> Result<(), TurnError>
-where
-    F: RootFilesystem,
-{
-    let delta: SnapshotDelta =
-        serde_json::from_slice(&record.payload).map_err(|error| TurnError::Unavailable {
-            reason: format!("turn-state delta deserialization failed: {error}"),
-        })?;
-    materialize_delta(filesystem, &delta).await?;
-    if let Some(floor) = delta.event_retention_floor {
-        meta.event_retention_floor = meta.event_retention_floor.max(floor);
-    }
-    meta.journal_seq = record.seq;
-    write_meta(filesystem, meta).await
-}
-
 async fn materialize_delta<F>(
     filesystem: &ScopedFilesystem<F>,
+    journal_seq: SeqNo,
     delta: &SnapshotDelta,
 ) -> Result<(), TurnError>
 where
     F: RootFilesystem,
 {
     for record in &delta.turns_upsert {
-        put_row(filesystem, TURN_ROWS, &turn_record_key(record)?, record).await?;
+        put_row(
+            filesystem,
+            TURN_ROWS,
+            &turn_record_key(record)?,
+            journal_seq,
+            record,
+        )
+        .await?;
     }
     for key in &delta.turns_delete {
-        delete_row(filesystem, TURN_ROWS, key).await?;
+        delete_row(filesystem, TURN_ROWS, key, journal_seq).await?;
     }
     for record in &delta.runs_upsert {
-        put_row(filesystem, RUN_ROWS, &run_record_key(record)?, record).await?;
+        put_row(
+            filesystem,
+            RUN_ROWS,
+            &run_record_key(record)?,
+            journal_seq,
+            record,
+        )
+        .await?;
     }
     for key in &delta.runs_delete {
-        delete_row(filesystem, RUN_ROWS, key).await?;
+        delete_row(filesystem, RUN_ROWS, key, journal_seq).await?;
     }
     for record in &delta.active_locks_upsert {
         put_row(
             filesystem,
             ACTIVE_LOCK_ROWS,
             &active_lock_record_key(record)?,
+            journal_seq,
             record,
         )
         .await?;
     }
     for key in &delta.active_locks_delete {
-        delete_row(filesystem, ACTIVE_LOCK_ROWS, key).await?;
+        delete_row(filesystem, ACTIVE_LOCK_ROWS, key, journal_seq).await?;
     }
     for record in &delta.checkpoints_upsert {
         put_row(
             filesystem,
             CHECKPOINT_ROWS,
             &checkpoint_record_key(record)?,
+            journal_seq,
             record,
         )
         .await?;
     }
     for key in &delta.checkpoints_delete {
-        delete_row(filesystem, CHECKPOINT_ROWS, key).await?;
+        delete_row(filesystem, CHECKPOINT_ROWS, key, journal_seq).await?;
     }
     for record in &delta.loop_checkpoints_upsert {
         put_row(
             filesystem,
             LOOP_CHECKPOINT_ROWS,
             &loop_checkpoint_record_key(record)?,
+            journal_seq,
             record,
         )
         .await?;
     }
     for key in &delta.loop_checkpoints_delete {
-        delete_row(filesystem, LOOP_CHECKPOINT_ROWS, key).await?;
+        delete_row(filesystem, LOOP_CHECKPOINT_ROWS, key, journal_seq).await?;
     }
     for record in &delta.idempotency_upsert {
         put_row(
             filesystem,
             IDEMPOTENCY_ROWS,
             &idempotency_record_key(record)?,
+            journal_seq,
             record,
         )
         .await?;
     }
     for key in &delta.idempotency_delete {
-        delete_row(filesystem, IDEMPOTENCY_ROWS, key).await?;
+        delete_row(filesystem, IDEMPOTENCY_ROWS, key, journal_seq).await?;
     }
     for record in &delta.events_upsert {
-        put_row(filesystem, EVENT_ROWS, &event_record_key(record)?, record).await?;
+        put_row(
+            filesystem,
+            EVENT_ROWS,
+            &event_record_key(record)?,
+            journal_seq,
+            record,
+        )
+        .await?;
     }
     for key in &delta.events_delete {
-        delete_row(filesystem, EVENT_ROWS, key).await?;
+        delete_row(filesystem, EVENT_ROWS, key, journal_seq).await?;
     }
     for record in &delta.admission_reservations_upsert {
         put_row(
             filesystem,
             ADMISSION_RESERVATION_ROWS,
             &admission_reservation_record_key(record)?,
+            journal_seq,
             record,
         )
         .await?;
     }
     for key in &delta.admission_reservations_delete {
-        delete_row(filesystem, ADMISSION_RESERVATION_ROWS, key).await?;
+        delete_row(filesystem, ADMISSION_RESERVATION_ROWS, key, journal_seq).await?;
     }
     for record in &delta.spawn_tree_reservations_upsert {
         put_row(
             filesystem,
             SPAWN_TREE_RESERVATION_ROWS,
             &spawn_tree_reservation_record_key(record)?,
+            journal_seq,
             record,
         )
         .await?;
     }
     for key in &delta.spawn_tree_reservations_delete {
-        delete_row(filesystem, SPAWN_TREE_RESERVATION_ROWS, key).await?;
+        delete_row(filesystem, SPAWN_TREE_RESERVATION_ROWS, key, journal_seq).await?;
     }
     Ok(())
 }
@@ -372,43 +396,74 @@ async fn put_row<F, T>(
     filesystem: &ScopedFilesystem<F>,
     collection: &'static str,
     key: &str,
+    journal_seq: SeqNo,
     record: &T,
 ) -> Result<(), TurnError>
 where
     F: RootFilesystem,
     T: serde::Serialize,
 {
-    let body = serde_json::to_vec(record).map_err(|error| TurnError::Unavailable {
-        reason: format!("turn-state {collection} row serialization failed: {error}"),
-    })?;
-    let entry = Entry::bytes(body).with_content_type(ContentType::json());
-    filesystem
-        .put(
-            &ResourceScope::system(),
-            &row_path(collection, key)?,
-            entry,
-            CasExpectation::Any,
-        )
-        .await
-        .map_err(fs_error)?;
-    Ok(())
+    let body = serialize_materialized_row(journal_seq, Some(record), collection)?;
+    write_materialized_row(filesystem, collection, key, journal_seq, body).await
 }
 
 async fn delete_row<F>(
     filesystem: &ScopedFilesystem<F>,
     collection: &'static str,
     key: &str,
+    journal_seq: SeqNo,
 ) -> Result<(), TurnError>
 where
     F: RootFilesystem,
 {
-    match filesystem
-        .delete(&ResourceScope::system(), &row_path(collection, key)?)
-        .await
-    {
-        Ok(()) | Err(FilesystemError::NotFound { .. }) => Ok(()),
-        Err(error) => Err(fs_error(error)),
+    let body = serialize_materialized_row::<serde_json::Value>(journal_seq, None, collection)?;
+    write_materialized_row(filesystem, collection, key, journal_seq, body).await
+}
+
+async fn write_materialized_row<F>(
+    filesystem: &ScopedFilesystem<F>,
+    collection: &'static str,
+    key: &str,
+    journal_seq: SeqNo,
+    body: Vec<u8>,
+) -> Result<(), TurnError>
+where
+    F: RootFilesystem,
+{
+    let path = row_path(collection, key)?;
+    for attempt in 0..MATERIALIZED_ROW_CAS_RETRIES {
+        let current = match filesystem.get(&ResourceScope::system(), &path).await {
+            Ok(current) => current,
+            Err(FilesystemError::NotFound { .. }) => None,
+            Err(error) => return Err(fs_error(error)),
+        };
+        let cas = match current {
+            Some(versioned) => {
+                let current_seq = materialized_row_seq(&versioned.entry.body, collection)?;
+                if current_seq > journal_seq {
+                    return Ok(());
+                }
+                CasExpectation::Version(versioned.version)
+            }
+            None => CasExpectation::Absent,
+        };
+        let entry = Entry::bytes(body.clone()).with_content_type(ContentType::json());
+        match filesystem
+            .put(&ResourceScope::system(), &path, entry, cas)
+            .await
+        {
+            Ok(_version) => return Ok(()),
+            Err(FilesystemError::VersionMismatch { .. })
+                if attempt + 1 < MATERIALIZED_ROW_CAS_RETRIES =>
+            {
+                tokio::task::yield_now().await;
+            }
+            Err(error) => return Err(fs_error(error)),
+        }
     }
+    Err(TurnError::Unavailable {
+        reason: format!("turn-state {collection} row CAS retry budget exhausted"),
+    })
 }
 
 async fn read_meta<F>(filesystem: &ScopedFilesystem<F>) -> Result<RowStoreMeta, TurnError>
@@ -432,24 +487,162 @@ async fn write_meta<F>(
 where
     F: RootFilesystem,
 {
-    let body = serde_json::to_vec(meta).map_err(|error| TurnError::Unavailable {
-        reason: format!("turn-state row meta serialization failed: {error}"),
-    })?;
-    let entry = Entry::bytes(body).with_content_type(ContentType::json());
-    filesystem
-        .put(
-            &ResourceScope::system(),
-            &meta_path()?,
-            entry,
-            CasExpectation::Any,
-        )
-        .await
-        .map_err(fs_error)?;
-    Ok(())
+    let path = meta_path()?;
+    for attempt in 0..MATERIALIZED_ROW_CAS_RETRIES {
+        let current = match filesystem.get(&ResourceScope::system(), &path).await {
+            Ok(current) => current,
+            Err(FilesystemError::NotFound { .. }) => None,
+            Err(error) => return Err(fs_error(error)),
+        };
+        let (next, cas) = match current {
+            Some(versioned) => {
+                let current_meta: RowStoreMeta =
+                    deserialize_row(&versioned.entry.body, "turn-state row meta")?;
+                if current_meta.journal_seq >= meta.journal_seq
+                    && current_meta.event_retention_floor >= meta.event_retention_floor
+                {
+                    return Ok(());
+                }
+                let mut next = meta.clone();
+                next.journal_seq = next.journal_seq.max(current_meta.journal_seq);
+                next.event_retention_floor = next
+                    .event_retention_floor
+                    .max(current_meta.event_retention_floor);
+                (next, CasExpectation::Version(versioned.version))
+            }
+            None => (meta.clone(), CasExpectation::Absent),
+        };
+        let body = serde_json::to_vec(&next).map_err(|error| TurnError::Unavailable {
+            reason: format!("turn-state row meta serialization failed: {error}"),
+        })?;
+        let entry = Entry::bytes(body).with_content_type(ContentType::json());
+        match filesystem
+            .put(&ResourceScope::system(), &path, entry, cas)
+            .await
+        {
+            Ok(_version) => return Ok(()),
+            Err(FilesystemError::VersionMismatch { .. })
+                if attempt + 1 < MATERIALIZED_ROW_CAS_RETRIES =>
+            {
+                tokio::task::yield_now().await;
+            }
+            Err(error) => return Err(fs_error(error)),
+        }
+    }
+    Err(TurnError::Unavailable {
+        reason: "turn-state row meta CAS retry budget exhausted".to_string(),
+    })
 }
 
 fn delta_journal_stopped() -> TurnError {
     TurnError::Unavailable {
         reason: "turn-state delta journal stopped".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    use serde::{Deserialize, Serialize};
+
+    use super::super::io::{deserialize_materialized_row, row_path};
+    use super::*;
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    struct TestRow {
+        value: String,
+    }
+
+    fn scoped_filesystem() -> ScopedFilesystem<InMemoryBackend> {
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/turns").expect("create turns mount alias"),
+            VirtualPath::new("/turns").expect("create turns virtual path"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("create turns mount view");
+        ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), mounts)
+    }
+
+    async fn read_test_row(
+        filesystem: &ScopedFilesystem<InMemoryBackend>,
+        key: &str,
+    ) -> Option<TestRow> {
+        let path = row_path("test-rows", key).expect("create row path");
+        let versioned = filesystem
+            .get(&ResourceScope::system(), &path)
+            .await
+            .expect("read test row")?;
+        deserialize_materialized_row(&versioned.entry.body, "test-rows")
+            .expect("deserialize test row")
+    }
+
+    #[tokio::test]
+    async fn materialized_row_write_skips_older_journal_sequence() {
+        let filesystem = scoped_filesystem();
+        put_row(
+            &filesystem,
+            "test-rows",
+            "row",
+            SeqNo::from_backend(2),
+            &TestRow {
+                value: "newer".to_string(),
+            },
+        )
+        .await
+        .expect("write newer row");
+
+        put_row(
+            &filesystem,
+            "test-rows",
+            "row",
+            SeqNo::from_backend(1),
+            &TestRow {
+                value: "older".to_string(),
+            },
+        )
+        .await
+        .expect("skip older row");
+
+        assert_eq!(
+            read_test_row(&filesystem, "row").await,
+            Some(TestRow {
+                value: "newer".to_string(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn materialized_row_delete_skips_older_journal_sequence() {
+        let filesystem = scoped_filesystem();
+        put_row(
+            &filesystem,
+            "test-rows",
+            "row",
+            SeqNo::from_backend(2),
+            &TestRow {
+                value: "newer".to_string(),
+            },
+        )
+        .await
+        .expect("write newer row");
+
+        delete_row(&filesystem, "test-rows", "row", SeqNo::from_backend(1))
+            .await
+            .expect("skip older tombstone");
+
+        assert_eq!(
+            read_test_row(&filesystem, "row").await,
+            Some(TestRow {
+                value: "newer".to_string(),
+            })
+        );
+
+        delete_row(&filesystem, "test-rows", "row", SeqNo::from_backend(3))
+            .await
+            .expect("write newer tombstone");
+        assert_eq!(read_test_row(&filesystem, "row").await, None);
     }
 }

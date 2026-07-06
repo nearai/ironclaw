@@ -1,6 +1,5 @@
 use crate::{
-    GetLoopCheckpointRequest, GetRunStateRequest, LoopCheckpointRecord, TurnActor, TurnError,
-    TurnPersistenceSnapshot, TurnRunId, TurnRunRecord, TurnRunState, TurnScope,
+    TurnActor, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord, TurnRunState, TurnScope,
 };
 
 /// Project the children of a run directly from a snapshot without building
@@ -49,29 +48,6 @@ pub(super) fn run_record(
         .cloned()
 }
 
-pub(super) fn run_state_parts(
-    snapshot: &TurnPersistenceSnapshot,
-    request: &GetRunStateRequest,
-) -> Result<Option<(TurnRunRecord, TurnActor)>, TurnError> {
-    let Some(run) = snapshot
-        .runs
-        .iter()
-        .find(|record| record.run_id == request.run_id && record.scope == request.scope)
-        .cloned()
-    else {
-        return Ok(None);
-    };
-    let actor = snapshot
-        .turns
-        .iter()
-        .find(|record| record.turn_id == run.turn_id)
-        .map(|record| record.actor.clone())
-        .ok_or_else(|| TurnError::Unavailable {
-            reason: "turn run references missing turn record".to_string(),
-        })?;
-    Ok(Some((run, actor)))
-}
-
 pub(super) fn run_state_from_record(run: TurnRunRecord, actor: TurnActor) -> TurnRunState {
     TurnRunState {
         scope: run.scope,
@@ -95,22 +71,4 @@ pub(super) fn run_state_from_record(run: TurnRunRecord, actor: TurnActor) -> Tur
         product_context: run.product_context,
         resume_disposition: run.resume_disposition,
     }
-}
-
-/// Project a loop checkpoint directly from a snapshot without rebuilding an
-/// `InMemoryTurnStateStore`. Mirrors `InMemoryTurnStateStore::get_loop_checkpoint`.
-pub(super) fn loop_checkpoint(
-    snapshot: &TurnPersistenceSnapshot,
-    request: &GetLoopCheckpointRequest,
-) -> Option<LoopCheckpointRecord> {
-    snapshot
-        .loop_checkpoints
-        .iter()
-        .find(|record| {
-            record.scope == request.scope
-                && record.turn_id == request.turn_id
-                && record.run_id == request.run_id
-                && record.checkpoint_id == request.checkpoint_id
-        })
-        .cloned()
 }

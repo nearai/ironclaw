@@ -1,6 +1,6 @@
-use ironclaw_filesystem::FilesystemError;
+use ironclaw_filesystem::{FilesystemError, SeqNo};
 use ironclaw_host_api::ScopedPath;
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::TurnError;
 
@@ -38,6 +38,69 @@ where
     serde_json::from_slice(bytes).map_err(|error| TurnError::Unavailable {
         reason: format!("turn-state {collection} row deserialization failed: {error}"),
     })
+}
+
+#[derive(Serialize)]
+struct MaterializedRowRef<'a, T> {
+    journal_seq: SeqNo,
+    value: Option<&'a T>,
+}
+
+#[derive(Deserialize)]
+struct MaterializedRow<T> {
+    journal_seq: SeqNo,
+    value: Option<T>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredRow<T> {
+    Materialized(MaterializedRow<T>),
+    Raw(T),
+}
+
+pub(super) fn serialize_materialized_row<T>(
+    journal_seq: SeqNo,
+    value: Option<&T>,
+    collection: &'static str,
+) -> Result<Vec<u8>, TurnError>
+where
+    T: Serialize,
+{
+    serde_json::to_vec(&MaterializedRowRef { journal_seq, value }).map_err(|error| {
+        TurnError::Unavailable {
+            reason: format!("turn-state {collection} row serialization failed: {error}"),
+        }
+    })
+}
+
+pub(super) fn deserialize_materialized_row<T>(
+    bytes: &[u8],
+    collection: &'static str,
+) -> Result<Option<T>, TurnError>
+where
+    T: DeserializeOwned,
+{
+    match serde_json::from_slice::<StoredRow<T>>(bytes).map_err(|error| TurnError::Unavailable {
+        reason: format!("turn-state {collection} row deserialization failed: {error}"),
+    })? {
+        StoredRow::Materialized(row) => Ok(row.value),
+        StoredRow::Raw(row) => Ok(Some(row)),
+    }
+}
+
+pub(super) fn materialized_row_seq(
+    bytes: &[u8],
+    collection: &'static str,
+) -> Result<SeqNo, TurnError> {
+    match serde_json::from_slice::<StoredRow<serde_json::Value>>(bytes).map_err(|error| {
+        TurnError::Unavailable {
+            reason: format!("turn-state {collection} row deserialization failed: {error}"),
+        }
+    })? {
+        StoredRow::Materialized(row) => Ok(row.journal_seq),
+        StoredRow::Raw(_) => Ok(SeqNo::ZERO),
+    }
 }
 
 pub(super) fn fs_error(error: FilesystemError) -> TurnError {

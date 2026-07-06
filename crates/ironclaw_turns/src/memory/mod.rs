@@ -2015,6 +2015,10 @@ impl Inner {
         let mut records = HashMap::new();
         let mut queued_runs = VecDeque::new();
         let mut terminal_runs = VecDeque::new();
+        let mut active_locks = HashMap::new();
+        for lock in snapshot.active_locks {
+            active_locks.insert(lock.key.clone(), lock);
+        }
         for run in snapshot.runs {
             cursor = cursor.max(run.event_cursor.0);
             let actor = turns
@@ -2023,7 +2027,10 @@ impl Inner {
                 .ok_or_else(|| TurnError::Unavailable {
                     reason: "turn run references missing turn record".to_string(),
                 })?;
-            if run.status == TurnStatus::Queued {
+            let has_non_queued_active_lock = active_locks
+                .values()
+                .any(|lock| lock.run_id == run.run_id && lock.status != TurnStatus::Queued);
+            if run.status == TurnStatus::Queued && !has_non_queued_active_lock {
                 queued_runs.push_back(run.run_id);
             }
             if run.status.is_terminal() {
@@ -2061,11 +2068,6 @@ impl Inner {
                     resume_disposition: run.resume_disposition,
                 },
             );
-        }
-
-        let mut active_locks = HashMap::new();
-        for lock in snapshot.active_locks {
-            active_locks.insert(lock.key.clone(), lock);
         }
 
         let mut submit_idempotency = HashMap::new();

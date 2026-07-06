@@ -1,23 +1,21 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, OnceLock},
-    time::Duration,
-};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use futures_util::stream::{self, StreamExt, TryStreamExt};
 use ironclaw_filesystem::{
-    FILESYSTEM_APPLY_TIMEOUT, FileType, FilesystemError, RecordVersion, RootFilesystem,
-    ScopedFilesystem,
+    CasExpectation, ContentType, Entry, FILESYSTEM_APPLY_TIMEOUT, FileType, FilesystemError,
+    RecordVersion, RootFilesystem, ScopedFilesystem, SeqNo,
 };
-use ironclaw_host_api::{ResourceScope, UserId};
+use ironclaw_host_api::{ResourceScope, ScopedPath, UserId};
 use serde::de::DeserializeOwned;
 use tokio::sync::{Mutex as AsyncMutex, RwLock};
 use tracing::{Instrument, field};
 
 use crate::{
-    AllowAllTurnAdmissionLimitProvider, CancelRunRequest, EventCursor, GetRunStateRequest,
-    InMemoryTurnStateStore, InMemoryTurnStateStoreLimits, TurnAdmissionLimitProvider, TurnError,
-    TurnEventPage, TurnPersistenceSnapshot, TurnRecord, TurnRunId, TurnRunRecord, TurnRunState,
-    TurnScope, TurnStatus,
+    AllowAllTurnAdmissionLimitProvider, CancelRunRequest, EventCursor, GetLoopCheckpointRequest,
+    GetRunStateRequest, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits, LoopCheckpointRecord,
+    TurnActiveLockRecord, TurnAdmissionLimitProvider, TurnError, TurnEventPage,
+    TurnPersistenceSnapshot, TurnRecord, TurnRunId, TurnRunRecord, TurnRunState, TurnScope,
+    TurnStatus,
     events::project_turn_events,
     runner::{ClaimedTurnRun, HeartbeatRequest, RelinquishRunRequest, TurnRunTransitionPort},
 };
@@ -33,11 +31,14 @@ mod journal;
 mod traits;
 
 use delta::{
-    RowPersistError, RowSnapshotState, RowStoreMeta, SnapshotDelta, event_record_key,
-    keyed_records, preserve_loop_checkpoints, row_store_durable_delta,
-    row_store_hot_cache_snapshot, snapshot_delta,
+    RowPersistError, RowSnapshotState, RowStoreMeta, SnapshotDelta, active_lock_record_key,
+    event_record_key, keyed_records, preserve_loop_checkpoints, row_store_durable_delta,
+    row_store_hot_cache_snapshot, run_record_key, snapshot_delta,
 };
-use io::{deserialize_row, fs_error, meta_path, row_dir, row_path};
+use io::{
+    delta_log_path, deserialize_materialized_row, deserialize_row, fs_error, materialized_row_seq,
+    meta_path, row_dir, row_path, serialize_materialized_row,
+};
 use journal::{DeltaAck, DeltaJournal, materialize_delta_log};
 
 const TURN_ROWS: &str = "turns";
@@ -49,7 +50,7 @@ const IDEMPOTENCY_ROWS: &str = "idempotency";
 const EVENT_ROWS: &str = "events";
 const ADMISSION_RESERVATION_ROWS: &str = "admission-reservations";
 const SPAWN_TREE_RESERVATION_ROWS: &str = "spawn-tree-reservations";
-static LEGACY_MIGRATION_GATE: OnceLock<Arc<AsyncMutex<()>>> = OnceLock::new();
+const ROW_COLLECTION_READ_CONCURRENCY: usize = 32;
 
 /// Filesystem-backed turn-state store using typed append-log deltas.
 ///
@@ -70,9 +71,57 @@ where
     admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
     snapshot_state: AsyncMutex<Option<RowSnapshotState>>,
     commit_gate: AsyncMutex<()>,
+    legacy_migration_gate: Arc<AsyncMutex<()>>,
+    materialize_gate: Arc<AsyncMutex<()>>,
     runner_leases: RunnerLeaseMemory,
     delta_journal: DeltaJournal,
     apply_timeout: Duration,
+}
+
+enum ActiveLockReservation {
+    Created {
+        key: String,
+        run: Option<RunRowReservation>,
+    },
+    Updated {
+        key: String,
+        previous: Box<TurnActiveLockRecord>,
+        previous_seq: SeqNo,
+        version: RecordVersion,
+    },
+}
+
+enum RunRowReservation {
+    Created {
+        turn_key: Option<String>,
+        run_key: Option<String>,
+    },
+    UpdatedRun {
+        key: String,
+        previous: Box<TurnRunRecord>,
+        previous_seq: SeqNo,
+        version: RecordVersion,
+    },
+}
+
+impl ActiveLockReservation {
+    fn key(&self) -> &str {
+        match self {
+            Self::Created { key, .. } | Self::Updated { key, .. } => key,
+        }
+    }
+}
+
+struct PendingRowCommit<T> {
+    value: T,
+    ack: Option<DeltaAck>,
+    active_lock_reservations: Vec<ActiveLockReservation>,
+    run_row_reservations: Vec<RunRowReservation>,
+}
+
+enum RowApplyOutcome<T> {
+    Ready(T),
+    Pending(PendingRowCommit<T>),
 }
 
 struct RunStateTransitionTarget {
@@ -90,14 +139,17 @@ where
     where
         F: 'static,
     {
+        let materialize_gate = Arc::new(AsyncMutex::new(()));
         Self {
             filesystem: Arc::clone(&filesystem),
             limits: InMemoryTurnStateStoreLimits::default(),
             admission_limit_provider: Arc::new(AllowAllTurnAdmissionLimitProvider),
             snapshot_state: AsyncMutex::new(None),
             commit_gate: AsyncMutex::new(()),
+            legacy_migration_gate: Arc::new(AsyncMutex::new(())),
+            materialize_gate: Arc::clone(&materialize_gate),
             runner_leases: Arc::new(RwLock::new(HashMap::new())),
-            delta_journal: DeltaJournal::new(filesystem),
+            delta_journal: DeltaJournal::new(filesystem, materialize_gate),
             apply_timeout: FILESYSTEM_APPLY_TIMEOUT,
         }
     }
@@ -112,6 +164,11 @@ where
         admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
     ) -> Self {
         self.admission_limit_provider = admission_limit_provider;
+        self
+    }
+
+    pub fn with_apply_timeout(mut self, apply_timeout: Duration) -> Self {
+        self.apply_timeout = apply_timeout;
         self
     }
 
@@ -154,7 +211,9 @@ where
         }
         let snapshot = &guard
             .as_ref()
-            .expect("row snapshot cache is initialized above")
+            .ok_or_else(|| TurnError::Unavailable {
+                reason: "row snapshot cache was not initialized".to_string(),
+            })?
             .snapshot;
         Ok(read(snapshot))
     }
@@ -163,14 +222,45 @@ where
         *self.snapshot_state.lock().await = None;
     }
 
+    async fn ensure_snapshot_cache_for_mutation(
+        &self,
+        guard: &mut Option<RowSnapshotState>,
+    ) -> Result<(), TurnError> {
+        if guard.is_none() {
+            *guard = Some(self.load_snapshot_from_rows().await?);
+        }
+        Ok(())
+    }
+
+    async fn refresh_snapshot_cache_after_stale_mutation_error(
+        &self,
+        guard: &mut Option<RowSnapshotState>,
+        error: &TurnError,
+    ) -> Result<bool, TurnError> {
+        if !matches!(error, TurnError::ThreadBusy(_)) {
+            return Ok(false);
+        }
+        let head_seq = self.delta_log_head_seq().await?;
+        if guard
+            .as_ref()
+            .is_none_or(|state| state.journal_seq < head_seq)
+        {
+            *guard = Some(self.load_snapshot_from_rows().await?);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     async fn load_snapshot_from_rows(&self) -> Result<RowSnapshotState, TurnError> {
-        materialize_delta_log(self.filesystem.as_ref(), None).await?;
+        materialize_delta_log(self.filesystem.as_ref(), &self.materialize_gate, None).await?;
         let snapshot = self.read_materialized_row_snapshot().await?;
+        let snapshot = self.remove_orphan_active_locks(snapshot).await?;
         let snapshot = self.migrate_legacy_blob_if_needed(snapshot).await?;
         let snapshot = row_store_hot_cache_snapshot(snapshot, self.limits);
         let store = self.build_in_memory_store(snapshot)?;
         let snapshot = store.persistence_snapshot();
-        RowSnapshotState::new(snapshot, Arc::new(store))
+        let journal_seq = self.read_meta().await?.journal_seq;
+        RowSnapshotState::new(snapshot, Arc::new(store), journal_seq)
     }
 
     async fn read_materialized_row_snapshot(&self) -> Result<TurnPersistenceSnapshot, TurnError> {
@@ -201,6 +291,32 @@ where
         })
     }
 
+    async fn remove_orphan_active_locks(
+        &self,
+        mut snapshot: TurnPersistenceSnapshot,
+    ) -> Result<TurnPersistenceSnapshot, TurnError> {
+        let mut retained = Vec::with_capacity(snapshot.active_locks.len());
+        for lock in snapshot.active_locks {
+            if snapshot.runs.iter().any(|run| run.run_id == lock.run_id) {
+                retained.push(lock);
+                continue;
+            }
+            let key = active_lock_record_key(&lock)?;
+            let path = row_path(ACTIVE_LOCK_ROWS, &key)?;
+            self.filesystem
+                .delete(&ResourceScope::system(), &path)
+                .await
+                .map_err(fs_error)?;
+            tracing::warn!(
+                active_lock_key = %key,
+                run_id = %lock.run_id,
+                "removed orphan turn-state active-lock row without a durable run row",
+            );
+        }
+        snapshot.active_locks = retained;
+        Ok(snapshot)
+    }
+
     async fn migrate_legacy_blob_if_needed(
         &self,
         materialized: TurnPersistenceSnapshot,
@@ -208,12 +324,17 @@ where
         if materialized != TurnPersistenceSnapshot::default() {
             return Ok(materialized);
         }
+        if self.read_meta().await?.journal_seq > SeqNo::ZERO {
+            return Ok(materialized);
+        }
 
-        let gate = legacy_migration_gate();
-        let _migration_guard = gate.lock().await;
-        materialize_delta_log(self.filesystem.as_ref(), None).await?;
+        let _migration_guard = self.legacy_migration_gate.lock().await;
+        materialize_delta_log(self.filesystem.as_ref(), &self.materialize_gate, None).await?;
         let current = self.read_materialized_row_snapshot().await?;
         if current != TurnPersistenceSnapshot::default() {
+            return Ok(current);
+        }
+        if self.read_meta().await?.journal_seq > SeqNo::ZERO {
             return Ok(current);
         }
 
@@ -246,7 +367,7 @@ where
         self.await_delta_ack(ack)
             .await
             .map_err(RowPersistError::into_turn)?;
-        materialize_delta_log(self.filesystem.as_ref(), None).await?;
+        materialize_delta_log(self.filesystem.as_ref(), &self.materialize_gate, None).await?;
         let migrated = self.read_materialized_row_snapshot().await?;
         tracing::info!(
             turns = migrated.turns.len(),
@@ -284,6 +405,20 @@ where
         }
     }
 
+    async fn delta_log_head_seq(&self) -> Result<SeqNo, TurnError> {
+        let path = delta_log_path()?;
+        let head = self
+            .filesystem
+            .head_seq(&ResourceScope::system(), &path, SeqNo::ZERO)
+            .await
+            .map_err(fs_error)?;
+        Ok(head.unwrap_or(SeqNo::ZERO))
+    }
+
+    async fn next_delta_log_seq(&self) -> Result<SeqNo, TurnError> {
+        Ok(self.delta_log_head_seq().await?.next())
+    }
+
     async fn read_row_collection<T>(&self, collection: &'static str) -> Result<Vec<T>, TurnError>
     where
         T: DeserializeOwned,
@@ -298,25 +433,31 @@ where
             Err(FilesystemError::NotFound { .. }) => Vec::new(),
             Err(error) => return Err(fs_error(error)),
         };
-        let mut records = Vec::with_capacity(entries.len());
-        for entry in entries
+        let paths = entries
             .into_iter()
             .filter(|entry| entry.file_type == FileType::File)
             .filter(|entry| entry.name.ends_with(".json"))
-        {
-            let key = entry.name.trim_end_matches(".json").to_string();
-            let path = row_path(collection, &key)?;
-            let Some(versioned) = self
-                .filesystem
-                .get(&ResourceScope::system(), &path)
-                .await
-                .map_err(fs_error)?
-            else {
-                continue;
-            };
-            records.push(deserialize_row(&versioned.entry.body, collection)?);
-        }
-        Ok(records)
+            .map(|entry| {
+                let key = entry.name.trim_end_matches(".json").to_string();
+                row_path(collection, &key)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let records = stream::iter(paths)
+            .map(|path| async move {
+                let Some(versioned) = self
+                    .filesystem
+                    .get(&ResourceScope::system(), &path)
+                    .await
+                    .map_err(fs_error)?
+                else {
+                    return Ok(None);
+                };
+                deserialize_materialized_row(&versioned.entry.body, collection)
+            })
+            .buffer_unordered(ROW_COLLECTION_READ_CONCURRENCY)
+            .try_collect::<Vec<_>>()
+            .await?;
+        Ok(records.into_iter().flatten().collect())
     }
 
     async fn read_row_by_key<T>(
@@ -336,14 +477,16 @@ where
         else {
             return Ok(None);
         };
-        deserialize_row(&versioned.entry.body, collection).map(Some)
+        deserialize_materialized_row(&versioned.entry.body, collection)
     }
 
     async fn read_run_state_from_durable_rows(
         &self,
         request: &GetRunStateRequest,
     ) -> Result<Option<TurnRunState>, TurnError> {
-        materialize_delta_log(self.filesystem.as_ref(), None).await?;
+        materialize_delta_log(self.filesystem.as_ref(), &self.materialize_gate, None).await?;
+        self.ensure_legacy_blob_migrated_for_direct_row_read()
+            .await?;
         let run = self
             .read_row_by_key::<TurnRunRecord>(RUN_ROWS, &request.run_id.to_string())
             .await?;
@@ -369,7 +512,9 @@ where
         after: Option<EventCursor>,
         limit: usize,
     ) -> Result<TurnEventPage, TurnError> {
-        materialize_delta_log(self.filesystem.as_ref(), None).await?;
+        materialize_delta_log(self.filesystem.as_ref(), &self.materialize_gate, None).await?;
+        self.ensure_legacy_blob_migrated_for_direct_row_read()
+            .await?;
         let events = keyed_records(
             &self.read_row_collection(EVENT_ROWS).await?,
             &event_record_key,
@@ -386,6 +531,39 @@ where
             limit,
             retention_floor,
         ))
+    }
+
+    async fn read_loop_checkpoint_from_durable_rows(
+        &self,
+        request: &GetLoopCheckpointRequest,
+    ) -> Result<Option<LoopCheckpointRecord>, TurnError> {
+        materialize_delta_log(self.filesystem.as_ref(), &self.materialize_gate, None).await?;
+        self.ensure_legacy_blob_migrated_for_direct_row_read()
+            .await?;
+        let key = request.checkpoint_id.as_uuid().to_string();
+        let checkpoint = self
+            .read_row_by_key::<LoopCheckpointRecord>(LOOP_CHECKPOINT_ROWS, &key)
+            .await?;
+        Ok(checkpoint.filter(|record| {
+            record.scope == request.scope
+                && record.turn_id == request.turn_id
+                && record.run_id == request.run_id
+                && record.checkpoint_id == request.checkpoint_id
+        }))
+    }
+
+    async fn ensure_legacy_blob_migrated_for_direct_row_read(&self) -> Result<(), TurnError> {
+        if self.read_meta().await?.journal_seq > SeqNo::ZERO {
+            return Ok(());
+        }
+        if self.read_legacy_blob_snapshot().await?.is_none() {
+            return Ok(());
+        }
+        let mut guard = self.snapshot_state.lock().await;
+        if guard.is_none() {
+            *guard = Some(self.load_snapshot_from_rows().await?);
+        }
+        Ok(())
     }
 
     async fn seed_runner_lease_from_cached_run(&self, run_id: TurnRunId) -> Result<(), TurnError> {
@@ -518,52 +696,97 @@ where
         let critical = async {
             let _commit_guard = self.commit_gate.lock().await;
             let mut guard = self.snapshot_state.lock().await;
-            if guard.is_none() {
-                *guard = Some(self.load_snapshot_from_rows().await?);
-            }
-            let baseline = guard
-                .as_ref()
-                .map(|state| state.snapshot.clone())
-                .unwrap_or_default();
-            let (overlaid_snapshot, _) = self
-                .runner_lease_store()
-                .overlay((baseline.clone(), None), overlay)
-                .await?;
-            let store = Arc::new(self.build_in_memory_store(overlaid_snapshot)?);
-            let outcome = apply(Arc::clone(&store)).await;
-            let mut new_snapshot = store.persistence_snapshot();
-            preserve_loop_checkpoints(&baseline, &mut new_snapshot);
-            let value = match outcome {
-                Ok(value) => value,
-                Err(error) => {
-                    *guard = None;
-                    return Err(error);
+            let mut refreshed_after_stale_error = false;
+            loop {
+                self.ensure_snapshot_cache_for_mutation(&mut guard).await?;
+                let baseline = guard
+                    .as_ref()
+                    .map(|state| state.snapshot.clone())
+                    .unwrap_or_default();
+                let (overlaid_snapshot, _) = self
+                    .runner_lease_store()
+                    .overlay((baseline.clone(), None), overlay)
+                    .await?;
+                let store = Arc::new(self.build_in_memory_store(overlaid_snapshot)?);
+                let outcome = apply(Arc::clone(&store)).await;
+                let mut new_snapshot = store.persistence_snapshot();
+                preserve_loop_checkpoints(&baseline, &mut new_snapshot);
+                let value = match outcome {
+                    Ok(value) => value,
+                    Err(error) => {
+                        if !refreshed_after_stale_error
+                            && self
+                                .refresh_snapshot_cache_after_stale_mutation_error(
+                                    &mut guard, &error,
+                                )
+                                .await?
+                        {
+                            refreshed_after_stale_error = true;
+                            continue;
+                        }
+                        *guard = None;
+                        return Err(error);
+                    }
+                };
+                if new_snapshot == baseline {
+                    return Ok(RowApplyOutcome::Ready(value));
                 }
-            };
-            if new_snapshot == baseline {
-                return Ok((None, value));
-            }
 
-            let delta = match snapshot_delta(&baseline, &new_snapshot) {
-                Ok(delta) => delta,
-                Err(RowPersistError::Turn(error)) => {
-                    *guard = None;
-                    return Err(error);
-                }
-            };
-            let persist_delta = row_store_durable_delta(delta.clone());
-            let ack = match self.enqueue_delta(persist_delta) {
-                Ok(ack) => ack,
-                Err(RowPersistError::Turn(error)) => {
-                    *guard = None;
-                    return Err(error);
-                }
-            };
-            *guard = Some(RowSnapshotState::new(new_snapshot, store)?);
-            Ok((ack, value))
+                let delta = match snapshot_delta(&baseline, &new_snapshot) {
+                    Ok(delta) => delta,
+                    Err(RowPersistError::Turn(error)) => {
+                        *guard = None;
+                        return Err(error);
+                    }
+                };
+                let persist_delta = row_store_durable_delta(delta.clone());
+                let reservation_seq = self.next_delta_log_seq().await?;
+                let next_state = RowSnapshotState::new(new_snapshot, store, reservation_seq)?;
+                let run_row_reservations = match self
+                    .reserve_run_row_updates(&baseline, &persist_delta, reservation_seq)
+                    .await
+                {
+                    Ok(reservations) => reservations,
+                    Err(error) => {
+                        *guard = None;
+                        return Err(error.into_turn());
+                    }
+                };
+                let active_lock_reservations = match self
+                    .reserve_active_lock_writes(&baseline, &persist_delta, reservation_seq)
+                    .await
+                {
+                    Ok(reservations) => reservations,
+                    Err(error) => {
+                        self.rollback_run_row_reservations(run_row_reservations)
+                            .await;
+                        *guard = None;
+                        return Err(error.into_turn());
+                    }
+                };
+                let ack = match self.enqueue_delta(persist_delta) {
+                    Ok(ack) => ack,
+                    Err(RowPersistError::Turn(error)) => {
+                        self.rollback_row_reservations(
+                            active_lock_reservations,
+                            run_row_reservations,
+                        )
+                        .await;
+                        *guard = None;
+                        return Err(error);
+                    }
+                };
+                *guard = Some(next_state);
+                return Ok(RowApplyOutcome::Pending(PendingRowCommit {
+                    value,
+                    ack,
+                    active_lock_reservations,
+                    run_row_reservations,
+                }));
+            }
         };
 
-        let (ack, value) = match tokio::time::timeout(self.apply_timeout, critical).await {
+        let outcome = match tokio::time::timeout(self.apply_timeout, critical).await {
             Ok(result) => result?,
             Err(_) => {
                 self.clear_snapshot_cache().await;
@@ -572,11 +795,13 @@ where
                 });
             }
         };
-        if let Err(error) = self.await_delta_ack(ack).await {
-            self.clear_snapshot_cache().await;
-            return Err(error.into_turn());
+        match outcome {
+            RowApplyOutcome::Ready(value) => Ok(value),
+            RowApplyOutcome::Pending(pending) => {
+                self.await_pending_commit(pending, "turn state row-store append ack timed out")
+                    .await
+            }
         }
-        Ok(value)
     }
 
     fn enqueue_delta(&self, delta: SnapshotDelta) -> Result<Option<DeltaAck>, RowPersistError> {
@@ -591,13 +816,687 @@ where
             .map_err(RowPersistError::Turn)
     }
 
+    async fn await_pending_commit<T>(
+        &self,
+        pending: PendingRowCommit<T>,
+        timeout_reason: &'static str,
+    ) -> Result<T, TurnError> {
+        match tokio::time::timeout(self.apply_timeout, self.await_delta_ack(pending.ack)).await {
+            Ok(Ok(())) => Ok(pending.value),
+            Ok(Err(error)) => {
+                self.rollback_row_reservations(
+                    pending.active_lock_reservations,
+                    pending.run_row_reservations,
+                )
+                .await;
+                self.clear_snapshot_cache().await;
+                Err(error.into_turn())
+            }
+            Err(_) => {
+                self.clear_snapshot_cache().await;
+                Err(TurnError::Unavailable {
+                    reason: timeout_reason.to_string(),
+                })
+            }
+        }
+    }
+
+    async fn reserve_active_lock_writes(
+        &self,
+        baseline: &TurnPersistenceSnapshot,
+        delta: &SnapshotDelta,
+        reservation_seq: SeqNo,
+    ) -> Result<Vec<ActiveLockReservation>, RowPersistError> {
+        let mut reservations = Vec::new();
+        for record in &delta.active_locks_upsert {
+            let key = active_lock_record_key(record)?;
+            let path = row_path(ACTIVE_LOCK_ROWS, &key)?;
+
+            let Some(previous) = baseline_committed_active_lock(baseline, record) else {
+                let mut run_reservation = self
+                    .reserve_run_row_for_active_lock(record, delta, reservation_seq)
+                    .await?;
+                let mut reserved = false;
+                for attempt in 0..3 {
+                    let entry = active_lock_entry(record, reservation_seq)?;
+                    match self
+                        .filesystem
+                        .put(
+                            &ResourceScope::system(),
+                            &path,
+                            entry,
+                            CasExpectation::Absent,
+                        )
+                        .await
+                    {
+                        Ok(_version) => {
+                            reservations.push(ActiveLockReservation::Created {
+                                key,
+                                run: run_reservation.take(),
+                            });
+                            reserved = true;
+                            break;
+                        }
+                        Err(FilesystemError::VersionMismatch { .. }) => {
+                            let current =
+                                match self.filesystem.get(&ResourceScope::system(), &path).await {
+                                    Ok(current) => current,
+                                    Err(error) => {
+                                        self.rollback_run_row_reservation(run_reservation.take())
+                                            .await;
+                                        self.rollback_active_lock_reservations(reservations).await;
+                                        return Err(RowPersistError::Turn(fs_error(error)));
+                                    }
+                                };
+                            if let Some(current) = current {
+                                let current_record: Option<TurnActiveLockRecord> =
+                                    deserialize_materialized_row(
+                                        &current.entry.body,
+                                        ACTIVE_LOCK_ROWS,
+                                    )?;
+                                if current_record.is_none() {
+                                    let current_seq = materialized_row_seq(
+                                        &current.entry.body,
+                                        ACTIVE_LOCK_ROWS,
+                                    )?;
+                                    let entry = active_lock_entry(
+                                        record,
+                                        current_seq.max(reservation_seq),
+                                    )?;
+                                    match self
+                                        .filesystem
+                                        .put(
+                                            &ResourceScope::system(),
+                                            &path,
+                                            entry,
+                                            CasExpectation::Version(current.version),
+                                        )
+                                        .await
+                                    {
+                                        Ok(_version) => {
+                                            reservations.push(ActiveLockReservation::Created {
+                                                key,
+                                                run: run_reservation.take(),
+                                            });
+                                            reserved = true;
+                                            break;
+                                        }
+                                        Err(FilesystemError::VersionMismatch { .. }) => continue,
+                                        Err(error) => {
+                                            self.rollback_run_row_reservation(
+                                                run_reservation.take(),
+                                            )
+                                            .await;
+                                            self.rollback_active_lock_reservations(reservations)
+                                                .await;
+                                            return Err(RowPersistError::Turn(fs_error(error)));
+                                        }
+                                    }
+                                }
+                            }
+                            if self
+                                .delete_orphan_active_lock_if_present(&key, &path)
+                                .await?
+                            {
+                                continue;
+                            }
+                            if attempt == 0 {
+                                materialize_delta_log(
+                                    self.filesystem.as_ref(),
+                                    &self.materialize_gate,
+                                    None,
+                                )
+                                .await?;
+                                continue;
+                            }
+                            self.rollback_run_row_reservation(run_reservation.take())
+                                .await;
+                            self.rollback_active_lock_reservations(reservations).await;
+                            return Err(RowPersistError::Turn(TurnError::Conflict {
+                                reason: "turn scope already has a durable active lock".to_string(),
+                            }));
+                        }
+                        Err(error) => {
+                            self.rollback_run_row_reservation(run_reservation.take())
+                                .await;
+                            self.rollback_active_lock_reservations(reservations).await;
+                            return Err(RowPersistError::Turn(fs_error(error)));
+                        }
+                    }
+                }
+                if !reserved {
+                    self.rollback_run_row_reservation(run_reservation.take())
+                        .await;
+                    self.rollback_active_lock_reservations(reservations).await;
+                    return Err(RowPersistError::Turn(TurnError::Conflict {
+                        reason: "turn scope already has a durable active lock".to_string(),
+                    }));
+                }
+                continue;
+            };
+
+            if previous == record {
+                continue;
+            }
+
+            for attempt in 0..2 {
+                let current = match self.filesystem.get(&ResourceScope::system(), &path).await {
+                    Ok(Some(current)) => current,
+                    Ok(None) if attempt == 0 => {
+                        materialize_delta_log(
+                            self.filesystem.as_ref(),
+                            &self.materialize_gate,
+                            None,
+                        )
+                        .await?;
+                        continue;
+                    }
+                    Ok(None) => {
+                        self.rollback_active_lock_reservations(reservations).await;
+                        return Err(RowPersistError::Turn(TurnError::Conflict {
+                            reason: "durable active lock disappeared before update".to_string(),
+                        }));
+                    }
+                    Err(error) => {
+                        self.rollback_active_lock_reservations(reservations).await;
+                        return Err(RowPersistError::Turn(fs_error(error)));
+                    }
+                };
+                let current_record: TurnActiveLockRecord =
+                    deserialize_materialized_row(&current.entry.body, ACTIVE_LOCK_ROWS)?
+                        .ok_or_else(|| {
+                            RowPersistError::Turn(TurnError::Conflict {
+                                reason: "durable active lock row was deleted before update"
+                                    .to_string(),
+                            })
+                        })?;
+                let previous_seq = materialized_row_seq(&current.entry.body, ACTIVE_LOCK_ROWS)?;
+                if &current_record != previous {
+                    if attempt == 0 {
+                        materialize_delta_log(
+                            self.filesystem.as_ref(),
+                            &self.materialize_gate,
+                            None,
+                        )
+                        .await?;
+                        continue;
+                    }
+                    self.rollback_active_lock_reservations(reservations).await;
+                    return Err(RowPersistError::Turn(TurnError::Conflict {
+                        reason: "durable active lock changed before update".to_string(),
+                    }));
+                }
+                let entry = active_lock_entry(record, reservation_seq)?;
+                match self
+                    .filesystem
+                    .put(
+                        &ResourceScope::system(),
+                        &path,
+                        entry,
+                        CasExpectation::Version(current.version),
+                    )
+                    .await
+                {
+                    Ok(version) => {
+                        reservations.push(ActiveLockReservation::Updated {
+                            key,
+                            previous: Box::new(previous.clone()),
+                            previous_seq,
+                            version,
+                        });
+                        break;
+                    }
+                    Err(FilesystemError::VersionMismatch { .. }) if attempt == 0 => {
+                        materialize_delta_log(
+                            self.filesystem.as_ref(),
+                            &self.materialize_gate,
+                            None,
+                        )
+                        .await?;
+                    }
+                    Err(FilesystemError::VersionMismatch { .. }) => {
+                        self.rollback_active_lock_reservations(reservations).await;
+                        return Err(RowPersistError::Turn(TurnError::Conflict {
+                            reason: "durable active lock changed before update".to_string(),
+                        }));
+                    }
+                    Err(error) => {
+                        self.rollback_active_lock_reservations(reservations).await;
+                        return Err(RowPersistError::Turn(fs_error(error)));
+                    }
+                }
+            }
+        }
+        Ok(reservations)
+    }
+
+    async fn reserve_run_row_for_active_lock(
+        &self,
+        record: &TurnActiveLockRecord,
+        delta: &SnapshotDelta,
+        reservation_seq: SeqNo,
+    ) -> Result<Option<RunRowReservation>, RowPersistError> {
+        let run = delta
+            .runs_upsert
+            .iter()
+            .find(|run| run.run_id == record.run_id)
+            .ok_or_else(|| {
+                RowPersistError::Turn(TurnError::Unavailable {
+                    reason: "turn-state active-lock create missing matching run row".to_string(),
+                })
+            })?;
+        let turn = delta
+            .turns_upsert
+            .iter()
+            .find(|turn| turn.turn_id == run.turn_id)
+            .ok_or_else(|| {
+                RowPersistError::Turn(TurnError::Unavailable {
+                    reason: "turn-state active-lock create missing matching turn row".to_string(),
+                })
+            })?;
+        let turn_key = match self
+            .reserve_json_row(TURN_ROWS, &turn.turn_id.to_string(), turn, reservation_seq)
+            .await
+        {
+            Ok(key) => key,
+            Err(error) => return Err(error),
+        };
+        let run_key = match self
+            .reserve_json_row(RUN_ROWS, &run_record_key(run)?, run, reservation_seq)
+            .await
+        {
+            Ok(key) => key,
+            Err(error) => {
+                self.rollback_run_row_reservation(Some(RunRowReservation::Created {
+                    turn_key,
+                    run_key: None,
+                }))
+                .await;
+                return Err(error);
+            }
+        };
+        if turn_key.is_none() && run_key.is_none() {
+            Ok(None)
+        } else {
+            Ok(Some(RunRowReservation::Created { turn_key, run_key }))
+        }
+    }
+
+    async fn reserve_run_row_updates(
+        &self,
+        baseline: &TurnPersistenceSnapshot,
+        delta: &SnapshotDelta,
+        reservation_seq: SeqNo,
+    ) -> Result<Vec<RunRowReservation>, RowPersistError> {
+        let mut reservations = Vec::new();
+        for run in &delta.runs_upsert {
+            if baseline
+                .runs
+                .iter()
+                .any(|previous| previous.run_id == run.run_id)
+                && let Some(reservation) = self
+                    .reserve_run_row_update(run, baseline, reservation_seq)
+                    .await?
+            {
+                reservations.push(reservation);
+            }
+        }
+        Ok(reservations)
+    }
+
+    async fn reserve_run_row_update(
+        &self,
+        run: &TurnRunRecord,
+        baseline: &TurnPersistenceSnapshot,
+        reservation_seq: SeqNo,
+    ) -> Result<Option<RunRowReservation>, RowPersistError> {
+        let previous = baseline
+            .runs
+            .iter()
+            .find(|previous| previous.run_id == run.run_id)
+            .ok_or_else(|| {
+                RowPersistError::Turn(TurnError::Unavailable {
+                    reason: "turn-state run-row update missing baseline run row".to_string(),
+                })
+            })?;
+        if previous == run {
+            return Ok(None);
+        }
+
+        let key = run_record_key(run)?;
+        let path = row_path(RUN_ROWS, &key)?;
+        for attempt in 0..2 {
+            let current = match self.filesystem.get(&ResourceScope::system(), &path).await {
+                Ok(Some(current)) => current,
+                Ok(None) if attempt == 0 => {
+                    materialize_delta_log(self.filesystem.as_ref(), &self.materialize_gate, None)
+                        .await?;
+                    continue;
+                }
+                Ok(None) => {
+                    return Err(RowPersistError::Turn(TurnError::Conflict {
+                        reason: "durable run row disappeared before reservation".to_string(),
+                    }));
+                }
+                Err(error) => return Err(RowPersistError::Turn(fs_error(error))),
+            };
+            let current_record: TurnRunRecord =
+                deserialize_materialized_row(&current.entry.body, RUN_ROWS)?.ok_or_else(|| {
+                    RowPersistError::Turn(TurnError::Conflict {
+                        reason: "durable run row was deleted before reservation".to_string(),
+                    })
+                })?;
+            let previous_seq = materialized_row_seq(&current.entry.body, RUN_ROWS)?;
+            if &current_record != previous {
+                if attempt == 0 {
+                    materialize_delta_log(self.filesystem.as_ref(), &self.materialize_gate, None)
+                        .await?;
+                    continue;
+                }
+                return Err(RowPersistError::Turn(TurnError::Conflict {
+                    reason: "durable run row changed before reservation".to_string(),
+                }));
+            }
+            let entry = row_entry(RUN_ROWS, run, reservation_seq)?;
+            match self
+                .filesystem
+                .put(
+                    &ResourceScope::system(),
+                    &path,
+                    entry,
+                    CasExpectation::Version(current.version),
+                )
+                .await
+            {
+                Ok(version) => {
+                    return Ok(Some(RunRowReservation::UpdatedRun {
+                        key,
+                        previous: Box::new(previous.clone()),
+                        previous_seq,
+                        version,
+                    }));
+                }
+                Err(FilesystemError::VersionMismatch { .. }) if attempt == 0 => {
+                    materialize_delta_log(self.filesystem.as_ref(), &self.materialize_gate, None)
+                        .await?;
+                }
+                Err(FilesystemError::VersionMismatch { .. }) => {
+                    return Err(RowPersistError::Turn(TurnError::Conflict {
+                        reason: "durable run row changed before reservation".to_string(),
+                    }));
+                }
+                Err(error) => return Err(RowPersistError::Turn(fs_error(error))),
+            }
+        }
+        Err(RowPersistError::Turn(TurnError::Conflict {
+            reason: "durable run row changed before active-lock update".to_string(),
+        }))
+    }
+
+    async fn reserve_json_row<T>(
+        &self,
+        collection: &'static str,
+        key: &str,
+        record: &T,
+        reservation_seq: SeqNo,
+    ) -> Result<Option<String>, RowPersistError>
+    where
+        T: serde::Serialize + DeserializeOwned + PartialEq,
+    {
+        let path = row_path(collection, key)?;
+        let entry = row_entry(collection, record, reservation_seq)?;
+        match self
+            .filesystem
+            .put(
+                &ResourceScope::system(),
+                &path,
+                entry,
+                CasExpectation::Absent,
+            )
+            .await
+        {
+            Ok(_version) => Ok(Some(key.to_string())),
+            Err(FilesystemError::VersionMismatch { .. }) => {
+                let current = self
+                    .filesystem
+                    .get(&ResourceScope::system(), &path)
+                    .await
+                    .map_err(fs_error)?
+                    .ok_or_else(|| {
+                        RowPersistError::Turn(TurnError::Conflict {
+                            reason: format!(
+                                "durable {collection} row changed before active-lock reservation"
+                            ),
+                        })
+                    })?;
+                let current_record: Option<T> =
+                    deserialize_materialized_row(&current.entry.body, collection)?;
+                match current_record {
+                    Some(current_record) if current_record == *record => Ok(None),
+                    None => {
+                        let current_seq = materialized_row_seq(&current.entry.body, collection)?;
+                        let entry =
+                            row_entry(collection, record, current_seq.max(reservation_seq))?;
+                        match self
+                            .filesystem
+                            .put(
+                                &ResourceScope::system(),
+                                &path,
+                                entry,
+                                CasExpectation::Version(current.version),
+                            )
+                            .await
+                        {
+                            Ok(_version) => Ok(Some(key.to_string())),
+                            Err(FilesystemError::VersionMismatch { .. }) => {
+                                Err(RowPersistError::Turn(TurnError::Conflict {
+                                    reason: format!(
+                                        "durable {collection} row changed before active-lock reservation"
+                                    ),
+                                }))
+                            }
+                            Err(error) => Err(RowPersistError::Turn(fs_error(error))),
+                        }
+                    }
+                    Some(_) => Err(RowPersistError::Turn(TurnError::Conflict {
+                        reason: format!(
+                            "durable {collection} row changed before active-lock reservation"
+                        ),
+                    })),
+                }
+            }
+            Err(error) => Err(RowPersistError::Turn(fs_error(error))),
+        }
+    }
+
+    async fn delete_orphan_active_lock_if_present(
+        &self,
+        key: &str,
+        path: &ScopedPath,
+    ) -> Result<bool, RowPersistError> {
+        let current = match self.filesystem.get(&ResourceScope::system(), path).await {
+            Ok(Some(current)) => current,
+            Ok(None) => return Ok(false),
+            Err(error) => return Err(RowPersistError::Turn(fs_error(error))),
+        };
+        let current_record: TurnActiveLockRecord = deserialize_materialized_row(
+            &current.entry.body,
+            ACTIVE_LOCK_ROWS,
+        )?
+        .ok_or_else(|| {
+            RowPersistError::Turn(TurnError::Conflict {
+                reason: "durable active lock row was deleted before reservation".to_string(),
+            })
+        })?;
+        let run_path = row_path(RUN_ROWS, &current_record.run_id.to_string())?;
+        match self
+            .filesystem
+            .get(&ResourceScope::system(), &run_path)
+            .await
+        {
+            Ok(Some(_)) => Ok(false),
+            Ok(None) => {
+                self.filesystem
+                    .delete(&ResourceScope::system(), path)
+                    .await
+                    .map_err(fs_error)?;
+                tracing::warn!(
+                    active_lock_key = %key,
+                    run_id = %current_record.run_id,
+                    "removed orphan turn-state active-lock row while reserving a new lock",
+                );
+                Ok(true)
+            }
+            Err(error) => Err(RowPersistError::Turn(fs_error(error))),
+        }
+    }
+
+    async fn rollback_run_row_reservation(&self, reservation: Option<RunRowReservation>) {
+        let Some(reservation) = reservation else {
+            return;
+        };
+        match reservation {
+            RunRowReservation::Created { turn_key, run_key } => {
+                for (collection, key) in [(RUN_ROWS, run_key), (TURN_ROWS, turn_key)] {
+                    let Some(key) = key else {
+                        continue;
+                    };
+                    let Ok(path) = row_path(collection, &key) else {
+                        continue;
+                    };
+                    if let Err(error) = self
+                        .filesystem
+                        .delete(&ResourceScope::system(), &path)
+                        .await
+                    {
+                        tracing::warn!(
+                            error = %error,
+                            collection,
+                            row_key = %key,
+                            "failed to roll back row reservation after active-lock reservation failure",
+                        );
+                    }
+                }
+            }
+            RunRowReservation::UpdatedRun {
+                key,
+                previous,
+                previous_seq,
+                version,
+            } => {
+                let Ok(path) = row_path(RUN_ROWS, &key) else {
+                    return;
+                };
+                let entry = match row_entry(RUN_ROWS, previous.as_ref(), previous_seq) {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        let error = error.into_turn();
+                        tracing::warn!(
+                            error = %error,
+                            row_key = %key,
+                            "failed to serialize run-row rollback after active-lock reservation failure",
+                        );
+                        return;
+                    }
+                };
+                if let Err(error) = self
+                    .filesystem
+                    .put(
+                        &ResourceScope::system(),
+                        &path,
+                        entry,
+                        CasExpectation::Version(version),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        error = %error,
+                        row_key = %key,
+                        "failed to roll back run-row reservation after active-lock reservation failure",
+                    );
+                }
+            }
+        }
+    }
+
+    async fn rollback_run_row_reservations(&self, reservations: Vec<RunRowReservation>) {
+        for reservation in reservations {
+            self.rollback_run_row_reservation(Some(reservation)).await;
+        }
+    }
+
+    async fn rollback_row_reservations(
+        &self,
+        active_lock_reservations: Vec<ActiveLockReservation>,
+        run_row_reservations: Vec<RunRowReservation>,
+    ) {
+        self.rollback_active_lock_reservations(active_lock_reservations)
+            .await;
+        self.rollback_run_row_reservations(run_row_reservations)
+            .await;
+    }
+
+    async fn rollback_active_lock_reservations(&self, reservations: Vec<ActiveLockReservation>) {
+        for reservation in reservations {
+            let key = reservation.key().to_string();
+            let Ok(path) = row_path(ACTIVE_LOCK_ROWS, &key) else {
+                continue;
+            };
+            let result = match reservation {
+                ActiveLockReservation::Created { run, .. } => {
+                    let result = self
+                        .filesystem
+                        .delete(&ResourceScope::system(), &path)
+                        .await;
+                    self.rollback_run_row_reservation(run).await;
+                    result
+                }
+                ActiveLockReservation::Updated {
+                    previous,
+                    previous_seq,
+                    version,
+                    ..
+                } => {
+                    let entry = match active_lock_entry(previous.as_ref(), previous_seq) {
+                        Ok(entry) => entry,
+                        Err(error) => {
+                            let error = error.into_turn();
+                            tracing::warn!(
+                                error = %error,
+                                active_lock_key = %key,
+                                "failed to serialize active-lock rollback after turn-state append failure",
+                            );
+                            continue;
+                        }
+                    };
+                    self.filesystem
+                        .put(
+                            &ResourceScope::system(),
+                            &path,
+                            entry,
+                            CasExpectation::Version(version),
+                        )
+                        .await
+                        .map(|_| ())
+                }
+            };
+            if let Err(error) = result {
+                tracing::warn!(
+                    error = %error,
+                    active_lock_key = %key,
+                    "failed to roll back active-lock reservation after turn-state append failure",
+                );
+            }
+        }
+    }
+
     async fn apply_cached_delta(&self, delta: SnapshotDelta) -> Result<(), TurnError> {
         if delta.is_empty() {
             return Ok(());
         }
         let mut guard = self.snapshot_state.lock().await;
         if let Some(state) = guard.as_mut() {
-            state.apply_delta(delta)?;
+            state.apply_delta(delta, state.journal_seq)?;
         }
         Ok(())
     }
@@ -623,51 +1522,116 @@ where
         let critical = async {
             let _commit_guard = self.commit_gate.lock().await;
             let mut guard = self.snapshot_state.lock().await;
-            if guard.is_none() {
-                *guard = Some(self.load_snapshot_from_rows().await?);
+            let mut build_delta = Some(build_delta);
+            let mut refreshed_after_stale_error = false;
+            loop {
+                self.ensure_snapshot_cache_for_mutation(&mut guard).await?;
+                let state = guard.as_ref().ok_or_else(|| TurnError::Unavailable {
+                    reason: "row snapshot cache was not initialized".to_string(),
+                })?;
+                let baseline = state.snapshot.clone();
+                let latest_event_cursor = state.latest_event_cursor();
+                let (overlaid_snapshot, _) = self
+                    .runner_lease_store()
+                    .overlay((baseline.clone(), None), overlay)
+                    .await?;
+                let store = Arc::new(self.build_in_memory_store(overlaid_snapshot)?);
+                let outcome = apply(Arc::clone(&store)).await;
+                let value = match outcome {
+                    Ok(value) => value,
+                    Err(error) => {
+                        if !refreshed_after_stale_error
+                            && self
+                                .refresh_snapshot_cache_after_stale_mutation_error(
+                                    &mut guard, &error,
+                                )
+                                .await?
+                        {
+                            refreshed_after_stale_error = true;
+                            continue;
+                        }
+                        *guard = None;
+                        return Err(error);
+                    }
+                };
+                let build_delta = build_delta.take().ok_or_else(|| TurnError::Unavailable {
+                    reason: "turn state row-store targeted delta builder was reused".to_string(),
+                })?;
+                let delta = build_delta(&baseline, latest_event_cursor, store.as_ref(), &value)?;
+                let persist_delta = row_store_durable_delta(delta.clone());
+                let reservation_seq = self.next_delta_log_seq().await?;
+                let run_row_reservations = match self
+                    .reserve_run_row_updates(&baseline, &persist_delta, reservation_seq)
+                    .await
+                {
+                    Ok(reservations) => reservations,
+                    Err(error) => {
+                        *guard = None;
+                        return Err(error.into_turn());
+                    }
+                };
+                let active_lock_reservations = match self
+                    .reserve_active_lock_writes(&baseline, &persist_delta, reservation_seq)
+                    .await
+                {
+                    Ok(reservations) => reservations,
+                    Err(error) => {
+                        self.rollback_run_row_reservations(run_row_reservations)
+                            .await;
+                        *guard = None;
+                        return Err(error.into_turn());
+                    }
+                };
+                if let Some(state) = guard.as_mut() {
+                    if let Err(error) = state.apply_delta(delta, reservation_seq) {
+                        self.rollback_row_reservations(
+                            active_lock_reservations,
+                            run_row_reservations,
+                        )
+                        .await;
+                        *guard = None;
+                        return Err(error);
+                    }
+                    state.store = store;
+                } else {
+                    let mut snapshot = store.persistence_snapshot();
+                    snapshot = row_store_hot_cache_snapshot(snapshot, self.limits);
+                    let next_state = match RowSnapshotState::new(snapshot, store, reservation_seq) {
+                        Ok(state) => state,
+                        Err(error) => {
+                            self.rollback_row_reservations(
+                                active_lock_reservations,
+                                run_row_reservations,
+                            )
+                            .await;
+                            *guard = None;
+                            return Err(error);
+                        }
+                    };
+                    *guard = Some(next_state);
+                }
+                let ack = match self.enqueue_delta(persist_delta) {
+                    Ok(ack) => ack,
+                    Err(RowPersistError::Turn(error)) => {
+                        self.rollback_row_reservations(
+                            active_lock_reservations,
+                            run_row_reservations,
+                        )
+                        .await;
+                        *guard = None;
+                        return Err(error);
+                    }
+                };
+                return Ok(PendingRowCommit {
+                    value,
+                    ack,
+                    active_lock_reservations,
+                    run_row_reservations,
+                });
             }
-            let state = guard
-                .as_ref()
-                .expect("row snapshot cache is initialized above");
-            let baseline = state.snapshot.clone();
-            let latest_event_cursor = state.latest_event_cursor();
-            let (overlaid_snapshot, _) = self
-                .runner_lease_store()
-                .overlay((baseline.clone(), None), overlay)
-                .await?;
-            let store = Arc::new(self.build_in_memory_store(overlaid_snapshot)?);
-            let outcome = apply(Arc::clone(&store)).await;
-            let value = match outcome {
-                Ok(value) => value,
-                Err(error) => {
-                    *guard = None;
-                    return Err(error);
-                }
-            };
-            let delta = build_delta(&baseline, latest_event_cursor, store.as_ref(), &value)?;
-            let persist_delta = row_store_durable_delta(delta.clone());
-            let ack = match self.enqueue_delta(persist_delta) {
-                Ok(ack) => ack,
-                Err(RowPersistError::Turn(error)) => {
-                    *guard = None;
-                    return Err(error);
-                }
-            };
-            if let Some(state) = guard.as_mut() {
-                if let Err(error) = state.apply_delta(delta) {
-                    *guard = None;
-                    return Err(error);
-                }
-                state.store = store;
-            } else {
-                let mut snapshot = store.persistence_snapshot();
-                snapshot = row_store_hot_cache_snapshot(snapshot, self.limits);
-                *guard = Some(RowSnapshotState::new(snapshot, store)?);
-            }
-            Ok((ack, value))
         };
 
-        let (ack, value) = match tokio::time::timeout(self.apply_timeout, critical).await {
+        let pending = match tokio::time::timeout(self.apply_timeout, critical).await {
             Ok(result) => result?,
             Err(_) => {
                 self.clear_snapshot_cache().await;
@@ -676,11 +1640,11 @@ where
                 });
             }
         };
-        if let Err(error) = self.await_delta_ack(ack).await {
-            self.clear_snapshot_cache().await;
-            return Err(error.into_turn());
-        }
-        Ok(value)
+        self.await_pending_commit(
+            pending,
+            "turn state row-store targeted append ack timed out",
+        )
+        .await
     }
 
     async fn apply_run_state_transition<A, Fut>(
@@ -815,6 +1779,36 @@ fn turn_state_write_span(
     span
 }
 
-fn legacy_migration_gate() -> Arc<AsyncMutex<()>> {
-    Arc::clone(LEGACY_MIGRATION_GATE.get_or_init(|| Arc::new(AsyncMutex::new(()))))
+fn active_lock_entry(
+    record: &TurnActiveLockRecord,
+    journal_seq: SeqNo,
+) -> Result<Entry, RowPersistError> {
+    row_entry(ACTIVE_LOCK_ROWS, record, journal_seq)
+}
+
+fn row_entry<T>(
+    collection: &'static str,
+    record: &T,
+    journal_seq: SeqNo,
+) -> Result<Entry, RowPersistError>
+where
+    T: serde::Serialize,
+{
+    let body = serialize_materialized_row(journal_seq, Some(record), collection)?;
+    Ok(Entry::bytes(body).with_content_type(ContentType::json()))
+}
+
+fn baseline_committed_active_lock<'a>(
+    baseline: &'a TurnPersistenceSnapshot,
+    record: &TurnActiveLockRecord,
+) -> Option<&'a TurnActiveLockRecord> {
+    let existing = baseline
+        .active_locks
+        .iter()
+        .find(|existing| existing.key == record.key && existing.run_id == record.run_id)?;
+    baseline
+        .runs
+        .iter()
+        .any(|run| run.run_id == record.run_id)
+        .then_some(existing)
 }

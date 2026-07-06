@@ -38,6 +38,7 @@ fn zero_seq_no() -> SeqNo {
 pub(super) struct RowSnapshotState {
     pub(super) snapshot: TurnPersistenceSnapshot,
     pub(super) store: Arc<InMemoryTurnStateStore>,
+    pub(super) journal_seq: SeqNo,
     latest_event_cursor: EventCursor,
     indexes: RowSnapshotIndexes,
 }
@@ -46,12 +47,14 @@ impl RowSnapshotState {
     pub(super) fn new(
         snapshot: TurnPersistenceSnapshot,
         store: Arc<InMemoryTurnStateStore>,
+        journal_seq: SeqNo,
     ) -> Result<Self, TurnError> {
         let latest_event_cursor = latest_event_cursor(&snapshot);
         let indexes = RowSnapshotIndexes::from_snapshot(&snapshot)?;
         Ok(Self {
             snapshot,
             store,
+            journal_seq,
             latest_event_cursor,
             indexes,
         })
@@ -61,9 +64,14 @@ impl RowSnapshotState {
         self.latest_event_cursor
     }
 
-    pub(super) fn apply_delta(&mut self, delta: SnapshotDelta) -> Result<(), TurnError> {
+    pub(super) fn apply_delta(
+        &mut self,
+        delta: SnapshotDelta,
+        journal_seq: SeqNo,
+    ) -> Result<(), TurnError> {
         let latest_event_cursor = latest_event_cursor_after_delta(self.latest_event_cursor, &delta);
         apply_delta_indexed(&mut self.snapshot, &mut self.indexes, delta)?;
+        self.journal_seq = self.journal_seq.max(journal_seq);
         self.latest_event_cursor = latest_event_cursor;
         Ok(())
     }

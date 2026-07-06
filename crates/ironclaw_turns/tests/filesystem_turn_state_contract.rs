@@ -768,7 +768,9 @@ where
         entry: Entry,
         cas: CasExpectation,
     ) -> Result<RecordVersion, FilesystemError> {
-        if self.fail_next_put.swap(false, Ordering::SeqCst) {
+        if path.as_str().ends_with("/turns/rows/v1/meta/state.json")
+            && self.fail_next_put.swap(false, Ordering::SeqCst)
+        {
             return Err(FilesystemError::PermissionDenied {
                 path: ScopedPath::new(path.as_str().to_string()).expect("scoped path"),
                 operation: FilesystemOperation::WriteFile,
@@ -1368,6 +1370,353 @@ async fn filesystem_turn_state_row_store_persists_rows_without_state_blob() {
 }
 
 #[tokio::test]
+async fn filesystem_turn_state_row_store_rejects_stale_cross_store_active_lock_create() {
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let first_store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let second_store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let resolver = InMemoryRunProfileResolver::default();
+    let policy = AllowAllTurnAdmissionPolicy;
+    let scope = turn_scope("thread-fs-row-stale-active-lock");
+
+    first_store.persistence_snapshot().await.unwrap();
+    second_store.persistence_snapshot().await.unwrap();
+
+    let first = first_store.submit_turn(
+        submit_request_for(scope.clone(), "idem-row-stale-active-lock-a"),
+        &policy,
+        &resolver,
+    );
+    let second = second_store.submit_turn(
+        submit_request_for(scope, "idem-row-stale-active-lock-b"),
+        &policy,
+        &resolver,
+    );
+    let (first, second) = tokio::join!(first, second);
+    let successes = [first.as_ref(), second.as_ref()]
+        .into_iter()
+        .filter(|result| result.is_ok())
+        .count();
+    let conflicts = [first, second]
+        .into_iter()
+        .filter(|result| matches!(result, Err(TurnError::Conflict { .. })))
+        .count();
+
+    assert_eq!(successes, 1);
+    assert_eq!(conflicts, 1);
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_row_store_rejects_stale_cross_store_claim() {
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let first_store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let second_store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let resolver = InMemoryRunProfileResolver::default();
+    let policy = AllowAllTurnAdmissionPolicy;
+    let scope = turn_scope("thread-fs-row-stale-claim");
+
+    let submitted = first_store
+        .submit_turn(
+            submit_request_for(scope, "idem-row-stale-claim"),
+            &policy,
+            &resolver,
+        )
+        .await
+        .unwrap();
+    let run_id = accepted_run_id(&submitted);
+
+    first_store.persistence_snapshot().await.unwrap();
+    second_store.persistence_snapshot().await.unwrap();
+
+    let first = first_store.claim_next_run(ClaimRunRequest {
+        runner_id: TurnRunnerId::new(),
+        lease_token: TurnLeaseToken::new(),
+        scope_filter: None,
+    });
+    let second = second_store.claim_next_run(ClaimRunRequest {
+        runner_id: TurnRunnerId::new(),
+        lease_token: TurnLeaseToken::new(),
+        scope_filter: None,
+    });
+    let (first, second) = tokio::join!(first, second);
+    let successes = [&first, &second]
+        .into_iter()
+        .filter(|result| matches!(result, Ok(Some(claimed)) if claimed.state.run_id == run_id))
+        .count();
+    let conflicts = [first, second]
+        .into_iter()
+        .filter(|result| matches!(result, Err(TurnError::Conflict { .. })))
+        .count();
+
+    assert_eq!(successes, 1);
+    assert_eq!(conflicts, 1);
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_row_store_rejects_preappend_cross_store_claim() {
+    let backend = Arc::new(BlockingAppendFilesystem::new(engine_filesystem()));
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let first_store = Arc::new(FilesystemTurnStateRowStore::new(Arc::clone(&scoped)));
+    let resolver = InMemoryRunProfileResolver::default();
+    let policy = AllowAllTurnAdmissionPolicy;
+    let scope = turn_scope("thread-fs-row-preappend-claim");
+
+    let submitted = first_store
+        .submit_turn(
+            submit_request_for(scope.clone(), "idem-row-preappend-claim"),
+            &policy,
+            &resolver,
+        )
+        .await
+        .unwrap();
+    let run_id = accepted_run_id(&submitted);
+
+    backend.block_next_append();
+    let first_claim = {
+        let first_store = Arc::clone(&first_store);
+        tokio::spawn(async move {
+            first_store
+                .claim_next_run(ClaimRunRequest {
+                    runner_id: TurnRunnerId::new(),
+                    lease_token: TurnLeaseToken::new(),
+                    scope_filter: None,
+                })
+                .await
+        })
+    };
+    backend.wait_for_blocked_append().await;
+
+    let second_store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let preappend_snapshot = second_store.persistence_snapshot().await.unwrap();
+    assert!(
+        preappend_snapshot
+            .runs
+            .iter()
+            .any(|record| record.run_id == run_id && record.status == TurnStatus::Running)
+    );
+    assert!(
+        preappend_snapshot
+            .active_locks
+            .iter()
+            .any(|record| record.run_id == run_id && record.status == TurnStatus::Running)
+    );
+    let second = second_store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: None,
+        })
+        .await;
+    assert!(
+        matches!(second, Ok(None) | Err(TurnError::Conflict { .. })),
+        "fresh store must not double-claim a run while another claim's append is blocked"
+    );
+
+    backend.release_blocked_append();
+    let first = first_claim
+        .await
+        .expect("first claim task joins")
+        .unwrap()
+        .expect("first claim succeeds");
+    assert_eq!(first.state.run_id, run_id);
+    assert_eq!(first.state.status, TurnStatus::Running);
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_row_store_refreshes_stale_active_lock_cache_before_submit() {
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let first_store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let second_store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let resolver = InMemoryRunProfileResolver::default();
+    let policy = AllowAllTurnAdmissionPolicy;
+    let scope = turn_scope("thread-fs-row-stale-active-lock-cache");
+    let first_run_id = TurnRunId::new();
+    let second_run_id = TurnRunId::new();
+    let mut first_request = submit_request_for(scope.clone(), "idem-row-stale-cache-a");
+    first_request.requested_run_id = Some(first_run_id);
+
+    first_store
+        .submit_turn(first_request, &policy, &resolver)
+        .await
+        .unwrap();
+    second_store.persistence_snapshot().await.unwrap();
+
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    first_store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    first_store
+        .complete_run(CompleteRunRequest {
+            run_id: first_run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .unwrap();
+
+    let mut second_request = submit_request_for(scope, "idem-row-stale-cache-b");
+    second_request.requested_run_id = Some(second_run_id);
+    let submitted = second_store
+        .submit_turn(second_request, &policy, &resolver)
+        .await
+        .unwrap();
+
+    assert_eq!(accepted_run_id(&submitted), second_run_id);
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_row_store_get_run_state_refreshes_stale_cached_run() {
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let first_store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let second_store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let resolver = InMemoryRunProfileResolver::default();
+    let policy = AllowAllTurnAdmissionPolicy;
+    let scope = turn_scope("thread-fs-row-stale-get-run-state");
+
+    let submitted = first_store
+        .submit_turn(
+            submit_request_for(scope.clone(), "idem-row-stale-get-run-state"),
+            &policy,
+            &resolver,
+        )
+        .await
+        .unwrap();
+    let run_id = accepted_run_id(&submitted);
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+
+    let cached = second_store
+        .get_run_state(GetRunStateRequest {
+            scope: scope.clone(),
+            run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(cached.status, TurnStatus::Queued);
+
+    first_store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .expect("run claimed");
+
+    let refreshed = second_store
+        .get_run_state(GetRunStateRequest { scope, run_id })
+        .await
+        .unwrap();
+    assert_eq!(refreshed.status, TurnStatus::Running);
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_row_store_rejects_uncommitted_active_lock_reservation() {
+    let backend = Arc::new(BlockingAppendFilesystem::new(engine_filesystem()));
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let first_store = Arc::new(FilesystemTurnStateRowStore::new(Arc::clone(&scoped)));
+    let second_store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let resolver = InMemoryRunProfileResolver::default();
+    let policy = AllowAllTurnAdmissionPolicy;
+    let scope = turn_scope("thread-fs-row-uncommitted-active-lock");
+    let first_run_id = TurnRunId::new();
+    let second_run_id = TurnRunId::new();
+    let mut first_request = submit_request_for(scope.clone(), "idem-row-uncommitted-active-lock-a");
+    first_request.requested_run_id = Some(first_run_id);
+
+    backend.block_next_append();
+    let first_submit = {
+        let first_store = Arc::clone(&first_store);
+        tokio::spawn(async move {
+            let resolver = InMemoryRunProfileResolver::default();
+            let policy = AllowAllTurnAdmissionPolicy;
+            first_store
+                .submit_turn(first_request, &policy, &resolver)
+                .await
+        })
+    };
+    backend.wait_for_blocked_append().await;
+
+    let snapshot = second_store.persistence_snapshot().await.unwrap();
+    assert_eq!(snapshot.turns.len(), 1);
+    assert_eq!(snapshot.runs.len(), 1);
+    assert_eq!(snapshot.active_locks.len(), 1);
+
+    let mut second_request =
+        submit_request_for(scope.clone(), "idem-row-uncommitted-active-lock-b");
+    second_request.requested_run_id = Some(second_run_id);
+    let second = second_store
+        .submit_turn(second_request, &policy, &resolver)
+        .await;
+    assert!(
+        matches!(
+            second,
+            Err(TurnError::Conflict { .. }) | Err(TurnError::ThreadBusy(_))
+        ),
+        "fresh store must not accept a same-thread run when it only sees another writer's pre-append active-lock reservation"
+    );
+
+    backend.release_blocked_append();
+    let first = first_submit
+        .await
+        .expect("first submit task joins")
+        .unwrap();
+    assert_eq!(accepted_run_id(&first), first_run_id);
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_row_store_recovers_preappend_active_lock_reservation() {
+    let backend = Arc::new(BlockingAppendFilesystem::new(engine_filesystem()));
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let first_store = Arc::new(FilesystemTurnStateRowStore::new(Arc::clone(&scoped)));
+    let scope = turn_scope("thread-fs-row-recover-preappend-active-lock");
+    let run_id = TurnRunId::new();
+    let mut request = submit_request_for(scope, "idem-row-recover-preappend-active-lock");
+    request.requested_run_id = Some(run_id);
+
+    backend.block_next_append();
+    let first_submit = {
+        let first_store = Arc::clone(&first_store);
+        tokio::spawn(async move {
+            let resolver = InMemoryRunProfileResolver::default();
+            let policy = AllowAllTurnAdmissionPolicy;
+            first_store.submit_turn(request, &policy, &resolver).await
+        })
+    };
+    backend.wait_for_blocked_append().await;
+    first_submit.abort();
+
+    let recovered_store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let snapshot = recovered_store.persistence_snapshot().await.unwrap();
+    assert_eq!(snapshot.turns.len(), 1);
+    assert_eq!(snapshot.runs.len(), 1);
+    assert_eq!(snapshot.active_locks.len(), 1);
+
+    let claimed = recovered_store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .expect("pre-append reservation recovers as queued run");
+    assert_eq!(claimed.state.run_id, run_id);
+    assert_eq!(claimed.state.status, TurnStatus::Running);
+}
+
+#[tokio::test]
 async fn filesystem_turn_state_row_store_migrates_legacy_state_blob() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
@@ -1730,6 +2079,119 @@ async fn filesystem_turn_state_row_store_loop_checkpoint_releases_gate_before_ap
             scope: parent_scope,
             turn_id: parent_turn_id,
             run_id: parent_run_id,
+            checkpoint_id: checkpoint.checkpoint_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        loaded.as_ref().map(|record| record.checkpoint_id),
+        Some(checkpoint.checkpoint_id)
+    );
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_row_store_loop_checkpoint_times_out_without_losing_unknown_commit() {
+    let backend = Arc::new(BlockingAppendFilesystem::new(engine_filesystem()));
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = Arc::new(
+        FilesystemTurnStateRowStore::new(Arc::clone(&scoped))
+            .with_apply_timeout(Duration::from_millis(100)),
+    );
+    let resolver = InMemoryRunProfileResolver::default();
+    let parent_scope = turn_scope("thread-fs-row-checkpoint-timeout");
+    let parent_response = store
+        .submit_turn(
+            submit_request_for(parent_scope.clone(), "idem-fs-row-checkpoint-timeout"),
+            &AllowAllTurnAdmissionPolicy,
+            &resolver,
+        )
+        .await
+        .unwrap();
+    let parent_run_id = accepted_run_id(&parent_response);
+    let parent_turn_id = accepted_turn_id(&parent_response);
+
+    backend.block_next_append();
+    let checkpoint_store = Arc::clone(&store);
+    let checkpoint_scope = parent_scope.clone();
+    let checkpoint = tokio::spawn(async move {
+        checkpoint_store
+            .put_loop_checkpoint(PutLoopCheckpointRequest {
+                scope: checkpoint_scope,
+                turn_id: parent_turn_id,
+                run_id: parent_run_id,
+                state_ref: LoopCheckpointStateRef::new("checkpoint:timeout").unwrap(),
+                schema_id: CheckpointSchemaId::new("interactive_checkpoint_v1").unwrap(),
+                schema_version: RunProfileVersion::new(1),
+                kind: LoopCheckpointKind::BeforeModel,
+                gate_ref: None,
+            })
+            .await
+    });
+    backend.wait_for_blocked_append().await;
+
+    let result = tokio::time::timeout(Duration::from_secs(1), checkpoint)
+        .await
+        .expect("checkpoint write must hit the bounded row-store append timeout")
+        .expect("checkpoint task joins");
+    assert!(
+        matches!(result, Err(TurnError::Unavailable { reason }) if reason == "timed out waiting for loop checkpoint row-store append")
+    );
+
+    backend.release_blocked_append();
+    for _ in 0..8 {
+        let reopened = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+        let snapshot = reopened.persistence_snapshot().await.unwrap();
+        if snapshot
+            .loop_checkpoints
+            .iter()
+            .any(|record| record.run_id == parent_run_id)
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("timed-out checkpoint append should still materialize after the blocked append commits");
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_row_store_get_loop_checkpoint_refreshes_stale_cached_rows() {
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let writer = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let reader = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let resolver = InMemoryRunProfileResolver::default();
+    let scope = turn_scope("thread-fs-row-checkpoint-stale-cache");
+    let response = writer
+        .submit_turn(
+            submit_request_for(scope.clone(), "idem-fs-row-checkpoint-stale-cache"),
+            &AllowAllTurnAdmissionPolicy,
+            &resolver,
+        )
+        .await
+        .unwrap();
+    let run_id = accepted_run_id(&response);
+    let turn_id = accepted_turn_id(&response);
+
+    let _stale_snapshot = reader.persistence_snapshot().await.unwrap();
+    let checkpoint = writer
+        .put_loop_checkpoint(PutLoopCheckpointRequest {
+            scope: scope.clone(),
+            turn_id,
+            run_id,
+            state_ref: LoopCheckpointStateRef::new("checkpoint:stale-cache").unwrap(),
+            schema_id: CheckpointSchemaId::new("interactive_checkpoint_v1").unwrap(),
+            schema_version: RunProfileVersion::new(1),
+            kind: LoopCheckpointKind::BeforeModel,
+            gate_ref: None,
+        })
+        .await
+        .unwrap();
+
+    let loaded = reader
+        .get_loop_checkpoint(GetLoopCheckpointRequest {
+            scope,
+            turn_id,
+            run_id,
             checkpoint_id: checkpoint.checkpoint_id,
         })
         .await

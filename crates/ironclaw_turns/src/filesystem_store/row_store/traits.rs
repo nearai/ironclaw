@@ -23,7 +23,7 @@ use super::super::{
     profile_resolver::PreResolvedRunProfileResolver, projection, runner_lease::RunnerLeaseOverlay,
 };
 use super::{
-    FilesystemTurnStateRowStore, RunStateTransitionTarget,
+    FilesystemTurnStateRowStore, PendingRowCommit, RunStateTransitionTarget,
     delta::{
         RowPersistError, SnapshotDelta, blocked_run_targeted_delta, claimed_run_targeted_delta,
         full_snapshot_delta, loop_checkpoint_record_from_request, row_store_durable_delta,
@@ -178,17 +178,9 @@ where
     }
 
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        let Some((run, actor)) = self
-            .with_cached_snapshot(|snapshot| projection::run_state_parts(snapshot, &request))
-            .await??
-        else {
-            return self
-                .read_run_state_from_durable_rows(&request)
-                .await?
-                .ok_or(TurnError::ScopeNotFound);
-        };
-        let run = self.runner_lease_store().overlay_run_record(run).await?;
-        Ok(projection::run_state_from_record(run, actor))
+        self.read_run_state_from_durable_rows(&request)
+            .await?
+            .ok_or(TurnError::ScopeNotFound)
     }
 }
 
@@ -334,11 +326,16 @@ where
                 self.apply_cached_delta(delta).await?;
                 ack
             };
-            if let Err(error) = self.await_delta_ack(ack).await {
-                self.clear_snapshot_cache().await;
-                return Err(error.into_turn());
-            }
-            Ok(record)
+            self.await_pending_commit(
+                PendingRowCommit {
+                    value: record,
+                    ack,
+                    active_lock_reservations: Vec::new(),
+                    run_row_reservations: Vec::new(),
+                },
+                "timed out waiting for loop checkpoint row-store append",
+            )
+            .await
         }
         .instrument(span)
         .await
@@ -348,8 +345,7 @@ where
         &self,
         request: GetLoopCheckpointRequest,
     ) -> Result<Option<LoopCheckpointRecord>, TurnError> {
-        self.with_cached_snapshot(|snapshot| projection::loop_checkpoint(snapshot, &request))
-            .await
+        self.read_loop_checkpoint_from_durable_rows(&request).await
     }
 }
 
