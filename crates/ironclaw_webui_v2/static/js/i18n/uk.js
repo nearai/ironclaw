@@ -368,18 +368,6 @@ registerPack("uk", {
   "llm.missingBaseUrl": "Відсутня базова URL-адреса",
   "llm.addApiKey": "Додати ключ API",
 
-  // Settings — inference groups
-  "settings.group.embeddings": "Ембедінги",
-  "settings.group.sampling": "Семплінг",
-  "settings.field.embeddingsEnabled": "Увімкнути ембедінги",
-  "settings.field.embeddingsEnabledDesc": "Семантичний пошук по пам’яті робочого простору",
-  "settings.field.embeddingsProvider": "Провайдер",
-  "settings.field.embeddingsProviderDesc": "Провайдер моделі ембедінгів",
-  "settings.field.embeddingsModel": "Модель",
-  "settings.field.embeddingsModelDesc": "Ідентифікатор моделі ембедінгів",
-  "settings.field.temperature": "Температура",
-  "settings.field.temperatureDesc": "Температура семплінгу за замовчуванням (0.0–2.0)",
-
   // Settings — agent groups
   "settings.group.core": "Основне",
   "settings.group.heartbeat": "Heartbeat",

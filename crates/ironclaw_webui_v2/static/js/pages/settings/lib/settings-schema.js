@@ -101,7 +101,6 @@ export const NETWORKING_FIELDS = [
 ];
 
 export const RESTART_REQUIRED_KEYS = new Set([
-  "embeddings.enabled", "embeddings.provider", "embeddings.model",
   "tunnel.provider", "tunnel.public_url",
   "gateway.rate_limit", "gateway.max_connections",
 ]);

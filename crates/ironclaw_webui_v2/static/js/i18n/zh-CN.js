@@ -368,18 +368,6 @@ registerPack("zh-CN", {
   "llm.missingBaseUrl": "缺少基础 URL",
   "llm.addApiKey": "添加 API 密钥",
 
-  // Settings — inference groups
-  "settings.group.embeddings": "向量嵌入",
-  "settings.group.sampling": "采样",
-  "settings.field.embeddingsEnabled": "启用嵌入",
-  "settings.field.embeddingsEnabledDesc": "工作区记忆的语义搜索",
-  "settings.field.embeddingsProvider": "提供商",
-  "settings.field.embeddingsProviderDesc": "嵌入模型提供商",
-  "settings.field.embeddingsModel": "模型",
-  "settings.field.embeddingsModelDesc": "嵌入模型标识",
-  "settings.field.temperature": "温度",
-  "settings.field.temperatureDesc": "默认采样温度 (0.0–2.0)",
-
   // Settings — agent groups
   "settings.group.core": "核心",
   "settings.group.heartbeat": "心跳",
