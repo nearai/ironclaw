@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "Slack (personal) search_messages",
+  "title": "Slack search_messages",
   "description": "Search across all messages you can see.",
   "type": "object",
   "required": ["query"],

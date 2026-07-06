@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "Slack (personal) list_conversations",
+  "title": "Slack list_conversations",
   "description": "List channels, private channels, DMs, and group DMs you belong to.",
   "type": "object",
   "properties": {
