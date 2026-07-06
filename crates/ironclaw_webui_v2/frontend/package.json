@@ -2,7 +2,7 @@
   "name": "ironclaw-webui-v2-frontend",
   "version": "0.0.0",
   "private": true,
-  "description": "Build tooling for the WebUI v2 SPA. Bundles the local ES modules and the React ecosystem via esbuild. Cargo invokes build.mjs into OUT_DIR for webui-v2-beta builds; ./build.sh writes a local ignored static/dist preview and refreshes committed static/vendor assets.",
+  "description": "Build tooling for the WebUI v2 SPA. Vite builds the TypeScript source and public assets into ignored dist/ output that Rust embeds when webui-v2-beta is enabled.",
   "packageManager": "pnpm@11.7.0",
   "type": "module",
   "engines": {
@@ -11,9 +11,7 @@
   },
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "build": "node build.mjs",
-    "build:legacy": "node build.mjs",
-    "build:vite": "vite build",
+    "build": "vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "vendor": "bash vendor.sh",
@@ -31,7 +29,6 @@
     "@tailwindcss/vite": "4.3.2",
     "@types/node": "26.1.0",
     "@vitejs/plugin-react": "6.0.3",
-    "esbuild": "0.28.0",
     "tailwindcss": "4.3.2",
     "typescript": "6.0.3",
     "vite": "8.1.3",

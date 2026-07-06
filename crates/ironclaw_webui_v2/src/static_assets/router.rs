@@ -200,12 +200,11 @@ fn render_index_with_nonce() -> Response {
     // `SetResponseHeaderLayer::if_not_present`, which honors the
     // header we set here instead of overwriting it.
     //
-    // Every sub-resource the shell loads is now same-origin: the
-    // esbuild app bundle (`/v2/dist/app.js`) folds in React + router +
-    // query + htm + react-hook-form, and Tailwind / dompurify / marked /
-    // highlight.js / the web fonts are vendored under `/v2/vendor/`
-    // (see `frontend/`). So `script-src` / `style-src` / `font-src`
-    // collapse to `'self'` — no CDN origins, no third-party fetches.
+    // Every sub-resource the shell loads is same-origin: Vite emits the app
+    // bundle and CSS under `/v2/assets/`, and Tailwind / dompurify / marked /
+    // highlight.js / the web fonts are vendored under `/v2/vendor/` (see
+    // `frontend/public`). So `script-src` / `style-src` / `font-src` collapse
+    // to `'self'` — no CDN origins, no third-party fetches.
     // `'unsafe-inline'` stays on `style-src` only: the Tailwind browser
     // runtime injects a generated `<style>` and the shell carries an
     // inline `text/tailwindcss` theme block; scripts still rely on the
@@ -278,6 +277,14 @@ mod tests {
         String::from_utf8_lossy(&bytes).into_owned()
     }
 
+    fn asset_path_with(prefix: &str, suffix: &str) -> &'static str {
+        assets::ASSETS
+            .iter()
+            .map(|(path, _)| *path)
+            .find(|path| path.starts_with(prefix) && path.ends_with(suffix))
+            .unwrap_or_else(|| panic!("asset path matching {prefix:?} and {suffix:?} exists"))
+    }
+
     #[tokio::test]
     async fn standalone_root_returns_spa_shell() {
         let app = static_router();
@@ -300,11 +307,12 @@ mod tests {
     #[tokio::test]
     async fn standalone_known_asset_returns_bytes() {
         let app = static_router();
+        let css_path = asset_path_with("assets/app-", ".css");
         let response = app
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri("/dist/app.css")
+                    .uri(format!("/{css_path}"))
                     .body(Body::empty())
                     .expect("request"),
             )
@@ -361,8 +369,8 @@ mod tests {
 
     #[tokio::test]
     async fn spa_document_csp_allowlist_is_locked() {
-        // Every sub-resource the SPA loads is now same-origin (the esbuild
-        // bundle under `/v2/dist/` plus vendored Tailwind / dompurify /
+        // Every sub-resource the SPA loads is now same-origin (the Vite
+        // bundle under `/v2/assets/` plus vendored Tailwind / dompurify /
         // marked / highlight.js / fonts under `/v2/vendor/`). Lock that in:
         // a regression that re-introduced a third-party CDN origin, added
         // `unsafe-eval`, or allowed `'unsafe-inline'` scripts must fail
@@ -697,10 +705,19 @@ mod tests {
     fn asset_table_includes_known_files() {
         // Spot-check the generated SPA bundle plus committed public assets so
         // a build.rs regression that drops either class breaks loudly.
+        assert!(
+            assets::ASSETS
+                .iter()
+                .any(|(path, _)| path.starts_with("assets/app-") && path.ends_with(".js"))
+        );
+        assert!(
+            assets::ASSETS
+                .iter()
+                .any(|(path, _)| path.starts_with("assets/app-") && path.ends_with(".css"))
+        );
         for required in [
-            "dist/app.js",
-            "dist/app.css",
-            "dist/wallet-connect.js",
+            "wallet-connect.js",
+            "wallet-connect.html",
             "assets/favicon.svg",
             "vendor/purify.min.js",
         ] {

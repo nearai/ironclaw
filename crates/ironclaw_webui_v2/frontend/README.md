@@ -11,29 +11,31 @@ corepack pnpm install --frozen-lockfile
 corepack pnpm dev
 corepack pnpm typecheck
 corepack pnpm test
-corepack pnpm build:vite
+corepack pnpm build
 ```
 
-At this point in the stack, Cargo still embeds the legacy esbuild bundle from
-`build.mjs`, so `corepack pnpm build` and `corepack pnpm build:legacy` both run
-that legacy bundle path. `corepack pnpm build:vite` is the Vite production build
-for the new scaffold and writes ignored output to `frontend/dist/`.
+`corepack pnpm build` runs Vite and writes ignored preview output to
+`frontend/dist/`. Cargo does not embed that local preview directory. When
+`webui-v2-beta` is enabled, `crates/ironclaw_webui_v2/build.rs` runs
+`corepack pnpm install --frozen-lockfile` and a Vite production build into
+Cargo's `OUT_DIR`, then embeds that generated output into the Rust binary.
 
 `./build.sh` is the one-shot local refresh helper. It vendors pinned browser
-assets, installs with `corepack pnpm install --frozen-lockfile`, and builds the
-legacy bundle used by this branch.
+assets, installs dependencies with Corepack, and runs the Vite production build.
+Use `./build.sh --no-vendor` when you only want to rebuild the SPA.
 
 ## Outputs
 
 | Output | Made by | Commit? |
 |---|---|---|
-| `frontend/dist/` | `corepack pnpm build:vite` | No |
-| `../static/dist/` | `build.mjs` / `./build.sh` | No |
-| `../static/vendor/` | `vendor.sh` / `./build.sh` | Yes, only when intentionally refreshing vendor assets |
+| `frontend/dist/` | `corepack pnpm build` / `./build.sh` | No |
+| Cargo `OUT_DIR/webui-v2-frontend-dist/` | `build.rs` during Rust builds | No |
+| `frontend/public/vendor/` | `vendor.sh` / `./build.sh` | Yes, only when intentionally refreshing vendor assets |
 
 ## Runtime Assets
 
-The vendored browser globals remain separate same-origin files:
+Vite owns the SPA entrypoint, CSS, hashed assets, and the NEAR wallet connect
+entrypoint. The vendored browser globals remain separate same-origin files:
 
 - DOMPurify
 - marked

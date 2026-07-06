@@ -1238,11 +1238,25 @@ async fn served_static_text(path: &str) -> String {
 }
 
 async fn served_app_javascript() -> String {
-    served_static_text("/v2/dist/app.js").await
+    served_app_vite_asset(".js").await
 }
 
 async fn served_app_stylesheet() -> String {
-    served_static_text("/v2/dist/app.css").await
+    served_app_vite_asset(".css").await
+}
+
+async fn served_app_vite_asset(suffix: &str) -> String {
+    let shell = served_static_text("/v2/").await;
+    let asset_path = shell_vite_asset_path(&shell, suffix);
+    served_static_text(&asset_path).await
+}
+
+fn shell_vite_asset_path(shell: &str, suffix: &str) -> String {
+    shell
+        .split(['"', '\''])
+        .find(|part| part.starts_with("/v2/assets/app-") && part.ends_with(suffix))
+        .expect("shell should reference requested Vite asset")
+        .to_string()
 }
 
 // ─── tests ────────────────────────────────────────────────────────────
@@ -2387,11 +2401,25 @@ async fn static_root_does_not_require_bearer_auth() {
 #[tokio::test]
 async fn static_js_asset_returns_javascript_content_type() {
     let (app, _) = build_app();
+    let shell = read_body_string(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v2/")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot"),
+    )
+    .await;
+    let app_js_path = shell_vite_asset_path(&shell, ".js");
     let response = app
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/v2/dist/app.js")
+                .uri(app_js_path)
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -2492,11 +2520,25 @@ async fn static_chat_events_clear_gate_when_run_resumes() {
 #[tokio::test]
 async fn static_css_asset_returns_text_css_content_type() {
     let (app, _) = build_app();
+    let shell = read_body_string(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v2/")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot"),
+    )
+    .await;
+    let app_css_path = shell_vite_asset_path(&shell, ".css");
     let response = app
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/v2/dist/app.css")
+                .uri(app_css_path)
                 .body(Body::empty())
                 .expect("request"),
         )

@@ -155,6 +155,11 @@ jobs:
       - name: Enable pnpm
         run: corepack enable pnpm
 
+      - name: Install WebUI frontend dependencies
+        run: |
+          cd crates/ironclaw_webui_v2/frontend
+          pnpm install --frozen-lockfile
+
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:

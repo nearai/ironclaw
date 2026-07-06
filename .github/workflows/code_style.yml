@@ -191,6 +191,11 @@ jobs:
       - name: Enable pnpm
         if: contains(matrix.flags, '--all-features')
         run: corepack enable pnpm
+      - name: Install WebUI frontend dependencies
+        if: contains(matrix.flags, '--all-features')
+        run: |
+          cd crates/ironclaw_webui_v2/frontend
+          pnpm install --frozen-lockfile
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: clippy
@@ -242,6 +247,11 @@ jobs:
       - name: Enable pnpm
         if: contains(matrix.flags, '--all-features')
         run: corepack enable pnpm
+      - name: Install WebUI frontend dependencies
+        if: contains(matrix.flags, '--all-features')
+        run: |
+          cd crates/ironclaw_webui_v2/frontend
+          pnpm install --frozen-lockfile
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: windows-${{ matrix.name }}
