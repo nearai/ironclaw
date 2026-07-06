@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   attachmentUrl,
+  clientActionId,
   deleteAutomation,
   deleteThread,
   fetchAttachmentBlob,
@@ -12,6 +13,24 @@ import {
   pauseAutomation,
   resumeAutomation,
 } from "./api.js";
+
+function withCryptoGlobal(replacement, run) {
+  const prior = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+  Object.defineProperty(globalThis, "crypto", {
+    value: replacement,
+    configurable: true,
+    writable: true,
+  });
+  try {
+    return run();
+  } finally {
+    if (prior) {
+      Object.defineProperty(globalThis, "crypto", prior);
+    } else {
+      delete globalThis.crypto;
+    }
+  }
+}
 
 test("listAutomations reads through the v2 automations route", async () => {
   const calls = [];
@@ -268,4 +287,41 @@ test("fetchAttachmentBlob rejects an off-origin URL before sending the bearer", 
     (error) => error.name === "ApiError" && error.status === 400,
   );
   assert.equal(fetchCalled, false);
+});
+
+// Regression: on insecure origins (plain-HTTP self-hosting) `crypto.randomUUID`
+// is absent while `crypto.getRandomValues` is present but must be called with
+// `this === crypto` — an unbound call throws `TypeError: Illegal invocation`
+// and every mutating request died before fetch.
+test("clientActionId works when only getRandomValues is available (insecure context)", () => {
+  const fakeCrypto = {
+    getRandomValues(bytes) {
+      if (this !== fakeCrypto) {
+        throw new TypeError("Illegal invocation");
+      }
+      for (let i = 0; i < bytes.length; i += 1) {
+        bytes[i] = (i * 37 + 11) % 256;
+      }
+      return bytes;
+    },
+  };
+
+  withCryptoGlobal(fakeCrypto, () => {
+    const id = clientActionId();
+    assert.match(id, /^[0-9a-f]{32}$/);
+    assert.notEqual(id, "0".repeat(32));
+  });
+});
+
+test("clientActionId yields distinct non-zero ids without Web Crypto", () => {
+  withCryptoGlobal(undefined, () => {
+    const first = clientActionId();
+    const second = clientActionId();
+    assert.match(first, /^[0-9a-f]{32}$/);
+    assert.match(second, /^[0-9a-f]{32}$/);
+    // The old fallback returned the unfilled zero array: a constant id that
+    // made the server dedupe distinct sends as replays of one action.
+    assert.notEqual(first, "0".repeat(32));
+    assert.notEqual(first, second);
+  });
 });

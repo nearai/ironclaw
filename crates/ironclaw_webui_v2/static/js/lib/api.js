@@ -50,7 +50,16 @@ export function clientActionId() {
     return crypto.randomUUID();
   }
   const bytes = new Uint8Array(16);
-  (crypto?.getRandomValues || ((b) => b))(bytes);
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    // Must be invoked on `crypto` — an unbound call throws `Illegal invocation`.
+    crypto.getRandomValues(bytes);
+  } else {
+    // No Web Crypto at all. Math.random suffices: the id only needs to be
+    // unique per action, never constant (a constant id dedupes distinct sends).
+    for (let i = 0; i < bytes.length; i += 1) {
+      bytes[i] = Math.floor(Math.random() * 256);
+    }
+  }
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
