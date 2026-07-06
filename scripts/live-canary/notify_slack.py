@@ -1130,7 +1130,7 @@ def main() -> int:
         run_context=run_context,
     )
 
-    if args.dry_run or not args.slack_webhook:
+    if args.dry_run:
         print(json.dumps(payload, indent=2))
         # Dry-run still surfaces what the issue creator WOULD do so a
         # local invocation can sanity-check title/body shapes.
@@ -1143,19 +1143,22 @@ def main() -> int:
             )
         return 0
 
-    try:
-        post_json(args.slack_webhook, payload, {}, timeout=10)
-        print(
-            f"[notify_slack] posted Slack message for {len(reports)} lane(s)",
-            file=sys.stderr,
-        )
-    except Exception as e:
-        print(f"[notify_slack] slack post failed: {e} — sending fallback", file=sys.stderr)
+    if args.slack_webhook:
         try:
-            post_json(args.slack_webhook, fallback_payload(reports, args.run_url), {}, timeout=10)
-            print("[notify_slack] fallback posted", file=sys.stderr)
-        except Exception as e2:
-            print(f"[notify_slack] fallback also failed: {e2}", file=sys.stderr)
+            post_json(args.slack_webhook, payload, {}, timeout=10)
+            print(
+                f"[notify_slack] posted Slack message for {len(reports)} lane(s)",
+                file=sys.stderr,
+            )
+        except Exception as e:
+            print(f"[notify_slack] slack post failed: {e} — sending fallback", file=sys.stderr)
+            try:
+                post_json(args.slack_webhook, fallback_payload(reports, args.run_url), {}, timeout=10)
+                print("[notify_slack] fallback posted", file=sys.stderr)
+            except Exception as e2:
+                print(f"[notify_slack] fallback also failed: {e2}", file=sys.stderr)
+    else:
+        print("[notify_slack] no SLACK_WEBHOOK_URL — skipping Slack post", file=sys.stderr)
 
     # Issue creation runs AFTER Slack so a Slack-side failure doesn't
     # block the GitHub-side bookkeeping (and vice versa).
