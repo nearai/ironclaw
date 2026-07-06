@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use ironclaw_filesystem::{
     FILESYSTEM_APPLY_TIMEOUT, FileType, FilesystemError, RecordVersion, RootFilesystem,
@@ -19,7 +23,7 @@ use crate::{
 };
 
 use super::{
-    projection,
+    io as legacy_blob_io, projection,
     runner_lease::{RunnerLeaseMemory, RunnerLeaseOverlay, RunnerLeaseRecord, RunnerLeaseStore},
 };
 
@@ -45,15 +49,18 @@ const IDEMPOTENCY_ROWS: &str = "idempotency";
 const EVENT_ROWS: &str = "events";
 const ADMISSION_RESERVATION_ROWS: &str = "admission-reservations";
 const SPAWN_TREE_RESERVATION_ROWS: &str = "spawn-tree-reservations";
+static LEGACY_MIGRATION_GATE: OnceLock<Arc<AsyncMutex<()>>> = OnceLock::new();
 
 /// Filesystem-backed turn-state store using typed append-log deltas.
 ///
 /// This is intentionally separate from [`super::FilesystemTurnStateStore`].
-/// The blob store preserves the current `/turns/state.json` contract while this
-/// store lets stress compare a narrower persistence layout before production
-/// wiring changes. Transitions still delegate to [`InMemoryTurnStateStore`];
-/// only the durable representation changes from whole-snapshot CAS to a typed
-/// append log plus a process-local hot snapshot cache.
+/// When the row projection is empty, first load imports a legacy
+/// `/turns/state.json` blob by appending a full-snapshot row delta and then
+/// replaying the normal delta journal. Once any row data exists, rows are
+/// authoritative and the legacy blob is left untouched as rollback evidence.
+/// Transitions still delegate to [`InMemoryTurnStateStore`]; only the durable
+/// representation changes from whole-snapshot CAS to a typed append log plus a
+/// process-local hot snapshot cache.
 pub struct FilesystemTurnStateRowStore<F>
 where
     F: RootFilesystem,
@@ -158,6 +165,15 @@ where
 
     async fn load_snapshot_from_rows(&self) -> Result<RowSnapshotState, TurnError> {
         materialize_delta_log(self.filesystem.as_ref(), None).await?;
+        let snapshot = self.read_materialized_row_snapshot().await?;
+        let snapshot = self.migrate_legacy_blob_if_needed(snapshot).await?;
+        let snapshot = row_store_hot_cache_snapshot(snapshot, self.limits);
+        let store = self.build_in_memory_store(snapshot)?;
+        let snapshot = store.persistence_snapshot();
+        RowSnapshotState::new(snapshot, Arc::new(store))
+    }
+
+    async fn read_materialized_row_snapshot(&self) -> Result<TurnPersistenceSnapshot, TurnError> {
         let meta = self.read_meta().await?;
         let turns = self.read_row_collection(TURN_ROWS).await?;
         let runs = self.read_row_collection(RUN_ROWS).await?;
@@ -171,7 +187,7 @@ where
             .read_row_collection(SPAWN_TREE_RESERVATION_ROWS)
             .await?;
 
-        let snapshot = TurnPersistenceSnapshot {
+        Ok(TurnPersistenceSnapshot {
             turns,
             runs,
             active_locks,
@@ -182,11 +198,81 @@ where
             event_retention_floor: meta.event_retention_floor,
             admission_reservations,
             spawn_tree_reservations,
+        })
+    }
+
+    async fn migrate_legacy_blob_if_needed(
+        &self,
+        materialized: TurnPersistenceSnapshot,
+    ) -> Result<TurnPersistenceSnapshot, TurnError> {
+        if materialized != TurnPersistenceSnapshot::default() {
+            return Ok(materialized);
+        }
+
+        let gate = legacy_migration_gate();
+        let _migration_guard = gate.lock().await;
+        materialize_delta_log(self.filesystem.as_ref(), None).await?;
+        let current = self.read_materialized_row_snapshot().await?;
+        if current != TurnPersistenceSnapshot::default() {
+            return Ok(current);
+        }
+
+        let Some(legacy) = self.read_legacy_blob_snapshot().await? else {
+            return Ok(current);
         };
-        let snapshot = row_store_hot_cache_snapshot(snapshot, self.limits);
-        let store = self.build_in_memory_store(snapshot)?;
-        let snapshot = store.persistence_snapshot();
-        RowSnapshotState::new(snapshot, Arc::new(store))
+        if legacy == TurnPersistenceSnapshot::default() {
+            return Ok(current);
+        }
+
+        let delta = snapshot_delta(&TurnPersistenceSnapshot::default(), &legacy)
+            .map_err(RowPersistError::into_turn)?;
+        if delta.is_empty() {
+            return Ok(current);
+        }
+
+        tracing::info!(
+            turns = legacy.turns.len(),
+            runs = legacy.runs.len(),
+            events = legacy.events.len(),
+            active_locks = legacy.active_locks.len(),
+            checkpoints = legacy.checkpoints.len(),
+            loop_checkpoints = legacy.loop_checkpoints.len(),
+            idempotency_records = legacy.idempotency_records.len(),
+            "migrating legacy turn-state blob into row store"
+        );
+        let ack = self
+            .enqueue_delta(delta)
+            .map_err(RowPersistError::into_turn)?;
+        self.await_delta_ack(ack)
+            .await
+            .map_err(RowPersistError::into_turn)?;
+        materialize_delta_log(self.filesystem.as_ref(), None).await?;
+        let migrated = self.read_materialized_row_snapshot().await?;
+        tracing::info!(
+            turns = migrated.turns.len(),
+            runs = migrated.runs.len(),
+            events = migrated.events.len(),
+            active_locks = migrated.active_locks.len(),
+            checkpoints = migrated.checkpoints.len(),
+            loop_checkpoints = migrated.loop_checkpoints.len(),
+            idempotency_records = migrated.idempotency_records.len(),
+            "legacy turn-state blob migration completed"
+        );
+        Ok(migrated)
+    }
+
+    async fn read_legacy_blob_snapshot(
+        &self,
+    ) -> Result<Option<TurnPersistenceSnapshot>, TurnError> {
+        let path = legacy_blob_io::snapshot_path()?;
+        match self.filesystem.get(&ResourceScope::system(), &path).await {
+            Ok(Some(versioned)) => {
+                legacy_blob_io::deserialize_snapshot(&versioned.entry.body).map(Some)
+            }
+            Ok(None) => Ok(None),
+            Err(FilesystemError::NotFound { .. }) => Ok(None),
+            Err(error) => Err(fs_error(error)),
+        }
     }
 
     async fn read_meta(&self) -> Result<RowStoreMeta, TurnError> {
@@ -727,4 +813,8 @@ fn turn_state_write_span(
     }
 
     span
+}
+
+fn legacy_migration_gate() -> Arc<AsyncMutex<()>> {
+    Arc::clone(LEGACY_MIGRATION_GATE.get_or_init(|| Arc::new(AsyncMutex::new(()))))
 }

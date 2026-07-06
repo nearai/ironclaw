@@ -2803,3 +2803,38 @@ Budgets: 10 hours wall-clock / $0 spend
   154.4ms comparison point and 282.4ms better than the cited c100 388.1ms
   comparison point, with the governor reduced to 6.2ms p95 and the top group
   back at thread-store writes rather than governor or turn store.
+
+## Cycle 49 - Turn State Blob-to-Row Migration Gate
+
+- User direction: do not let the stacked hosted-single-tenant Postgres work go
+  live until the current persisted shape can migrate into the new row-backed
+  shape as the last stack step.
+- Graph note: `codebase-memory-mcp` was exposed but still unusable in this
+  session (`Transport closed`), so code discovery fell back to targeted
+  live-source reads.
+- Migration design: `FilesystemTurnStateRowStore` now imports a legacy
+  `/turns/state.json` blob only when replayed row/journal state is still empty.
+  The import appends one full-snapshot `SnapshotDelta` through the existing
+  delta journal, waits for the durable append ack, then materializes rows via
+  the normal replay path. This keeps crash recovery journal-first and leaves the
+  old blob intact as rollback evidence.
+- Idempotency/safety boundary: once any row state exists, rows are authoritative
+  and later stale legacy blobs are ignored. A process-local migration gate
+  prevents duplicate imports within one runtime. Hosted rollout still requires
+  running this as the final pre-live step with no live turn writers, because
+  cross-process blob import races are an operator/deployment concern rather than
+  a turn-store concurrency contract.
+- Stack note: updated the turn-persistence and migration-compatibility contracts
+  to state that `/turns/state.json` -> `/turns/rows/v1` is a final-stack
+  promotion gate and the stack must not go live until row readback is verified.
+- Validation:
+  - `CARGO_INCREMENTAL=0 cargo test -p ironclaw_turns --test filesystem_turn_state_contract filesystem_turn_state_row_store_migrates_legacy_state_blob -- --nocapture`
+    passed.
+  - `CARGO_INCREMENTAL=0 cargo test -p ironclaw_turns --test filesystem_turn_state_contract filesystem_turn_state_row_store_does_not_remigrate_stale_blob_after_rows_exist -- --nocapture`
+    passed.
+  - `CARGO_INCREMENTAL=0 cargo test -p ironclaw_turns --test filesystem_turn_state_contract`
+    passed (37 tests).
+  - `CARGO_INCREMENTAL=0 cargo check -p ironclaw_turns` passed.
+  - `CARGO_INCREMENTAL=0 cargo clippy -p ironclaw_turns -- -D warnings`
+    passed.
+  - `git diff --check` passed.

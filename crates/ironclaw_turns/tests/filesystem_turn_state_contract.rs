@@ -263,6 +263,13 @@ fn row_delta_log_virtual_path() -> VirtualPath {
         .unwrap()
 }
 
+fn row_run_virtual_path(run_id: TurnRunId) -> VirtualPath {
+    VirtualPath::new(format!(
+        "/engine/tenants/test-tenant/users/test-user/turns/rows/v1/runs/{run_id}.json"
+    ))
+    .unwrap()
+}
+
 async fn overwrite_snapshot_lease_expiry(
     backend: &InMemoryBackend,
     run_id: TurnRunId,
@@ -1358,6 +1365,161 @@ async fn filesystem_turn_state_row_store_persists_rows_without_state_blob() {
         .await
         .unwrap();
     assert_eq!(state.status, TurnStatus::Completed);
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_row_store_migrates_legacy_state_blob() {
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let legacy_store = FilesystemTurnStateStore::new(Arc::clone(&scoped));
+    let resolver = InMemoryRunProfileResolver::default();
+    let scope = turn_scope("thread-fs-row-migrate-legacy");
+    let run_id = TurnRunId::new();
+    let mut request = submit_request_for(scope.clone(), "idem-fs-row-migrate-legacy");
+    request.requested_run_id = Some(run_id);
+
+    legacy_store
+        .submit_turn(request, &AllowAllTurnAdmissionPolicy, &resolver)
+        .await
+        .unwrap();
+    let legacy_snapshot = legacy_store.persistence_snapshot().await.unwrap();
+    assert!(
+        legacy_snapshot
+            .runs
+            .iter()
+            .any(|record| record.run_id == run_id),
+        "legacy blob fixture must contain the submitted run"
+    );
+    assert!(
+        backend
+            .get(&snapshot_virtual_path())
+            .await
+            .unwrap()
+            .is_some(),
+        "legacy store must write the blob-shaped state snapshot"
+    );
+
+    let row_store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let state = row_store
+        .get_run_state(GetRunStateRequest {
+            scope: scope.clone(),
+            run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(state.status, TurnStatus::Queued);
+    assert!(
+        backend
+            .get(&row_run_virtual_path(run_id))
+            .await
+            .unwrap()
+            .is_some(),
+        "legacy snapshot migration must materialize a durable run row"
+    );
+    assert!(
+        !backend
+            .tail(&row_delta_log_virtual_path(), SeqNo::ZERO)
+            .await
+            .unwrap()
+            .is_empty(),
+        "legacy snapshot migration must enter through the delta journal"
+    );
+    assert!(
+        backend
+            .get(&snapshot_virtual_path())
+            .await
+            .unwrap()
+            .is_some(),
+        "migration keeps the legacy blob as rollback evidence"
+    );
+
+    let reopened = FilesystemTurnStateRowStore::new(scoped);
+    let reopened_state = reopened
+        .get_run_state(GetRunStateRequest {
+            scope: scope.clone(),
+            run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(reopened_state.status, TurnStatus::Queued);
+    let events = reopened
+        .read_turn_events_after(&scope, None, None, 100)
+        .await
+        .unwrap();
+    assert!(
+        events
+            .entries
+            .iter()
+            .any(|event| event.run_id == run_id && event.kind == TurnEventKind::Submitted),
+        "migrated event rows must remain queryable after reopening the row store"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_row_store_does_not_remigrate_stale_blob_after_rows_exist() {
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let row_store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let resolver = InMemoryRunProfileResolver::default();
+    let row_scope = turn_scope("thread-fs-row-existing-wins");
+    let row_run_id = TurnRunId::new();
+    let mut row_request = submit_request_for(row_scope.clone(), "idem-fs-row-existing-wins");
+    row_request.requested_run_id = Some(row_run_id);
+
+    row_store
+        .submit_turn(row_request, &AllowAllTurnAdmissionPolicy, &resolver)
+        .await
+        .unwrap();
+    let head_after_row_write = backend
+        .head_seq(&row_delta_log_virtual_path(), SeqNo::ZERO)
+        .await
+        .unwrap();
+
+    let stale_scope = turn_scope("thread-fs-row-stale-legacy");
+    let stale_run_id = TurnRunId::new();
+    let mut stale_request = submit_request_for(stale_scope.clone(), "idem-fs-row-stale-legacy");
+    stale_request.requested_run_id = Some(stale_run_id);
+    let legacy_store = FilesystemTurnStateStore::new(Arc::clone(&scoped));
+    legacy_store
+        .submit_turn(stale_request, &AllowAllTurnAdmissionPolicy, &resolver)
+        .await
+        .unwrap();
+    assert!(
+        backend
+            .get(&snapshot_virtual_path())
+            .await
+            .unwrap()
+            .is_some(),
+        "stale legacy fixture must write a blob next to existing rows"
+    );
+
+    let reopened = FilesystemTurnStateRowStore::new(scoped);
+    let state = reopened
+        .get_run_state(GetRunStateRequest {
+            scope: row_scope,
+            run_id: row_run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(state.status, TurnStatus::Queued);
+    let stale = reopened
+        .get_run_state(GetRunStateRequest {
+            scope: stale_scope,
+            run_id: stale_run_id,
+        })
+        .await;
+    assert!(
+        matches!(stale, Err(TurnError::ScopeNotFound)),
+        "row data must remain authoritative once the row store has materialized rows"
+    );
+    let head_after_reopen = backend
+        .head_seq(&row_delta_log_virtual_path(), SeqNo::ZERO)
+        .await
+        .unwrap();
+    assert_eq!(
+        head_after_reopen, head_after_row_write,
+        "opening a row store with existing rows must not append a stale blob migration"
+    );
 }
 
 #[tokio::test]

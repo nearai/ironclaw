@@ -56,6 +56,15 @@ avoiding full-snapshot rewrites on hot writes. Tier-2 run-record rows (`turns`,
 evicted from hot in-memory indexes; cache limits are eviction thresholds, not
 deletion thresholds for the durable run record.
 
+Legacy `/turns/state.json` blobs migrate into `/turns/rows/v1` through the same
+delta journal. On first row-store load, if materialized rows and replayed
+journal state are still empty, the store reads the legacy blob, appends one
+full-snapshot `SnapshotDelta`, waits for the durable append ack, and then
+materializes rows. The legacy blob is not deleted. Once any row data exists,
+rows are authoritative and later stale blobs are ignored. Hosted rollout must
+run this migration as the final stack step with no live turn writers, then
+verify the row projection before enabling row-store-only production traffic.
+
 ---
 
 ## 3. Active-lock rules
