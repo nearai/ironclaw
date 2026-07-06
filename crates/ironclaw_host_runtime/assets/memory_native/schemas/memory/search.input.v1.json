@@ -1,10 +1,11 @@
 {
   "type": "object",
+  "description": "Search only Reborn internal persistent memory documents in the current tenant/user/agent/project scope; this does not search connected app or extension data.",
   "properties": {
     "query": {
       "type": "string",
       "minLength": 1,
-      "description": "Preferred natural language search query for persistent memory"
+      "description": "Preferred natural language search query for Reborn internal persistent memory"
     },
     "q": {
       "type": "string",

@@ -47,7 +47,7 @@ prompt_doc_ref = "prompts/memory-native/write.md"
 [[capabilities]]
 id = "ironclaw.memory.search"
 implements = []
-description = "Search Reborn persistent memory documents in the current tenant/user/agent/project scope."
+description = "Search only Reborn internal persistent memory documents in the current tenant/user/agent/project scope; this does not search connected app or extension data."
 effects = ["read_filesystem"]
 default_permission = "allow"
 visibility = "model"

@@ -328,7 +328,7 @@ async fn builtin_first_party_surface_lists_allowed_tools_in_registry_order() {
 async fn builtin_memory_search_surface_declares_internal_scope_boundary() {
     let runtime = runtime();
     let request = VisibleCapabilityRequest::new(
-        execution_context(all_builtin_capability_ids()),
+        execution_context(all_always_on_first_party_capability_ids()),
         SurfaceKind::new("agent_loop").unwrap(),
     )
     .with_policy(CapabilitySurfacePolicy::allow_all())
@@ -8785,6 +8785,17 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
     ]
 }
 
+fn all_always_on_first_party_capability_ids() -> Vec<&'static str> {
+    let mut ids = all_builtin_capability_ids();
+    ids.extend([
+        MEMORY_SEARCH_CAPABILITY_ID,
+        MEMORY_WRITE_CAPABILITY_ID,
+        MEMORY_READ_CAPABILITY_ID,
+        MEMORY_TREE_CAPABILITY_ID,
+    ]);
+    ids
+}
+
 fn mounted_filesystem(path: &Path, permissions: MountPermissions) -> (LocalFilesystem, MountView) {
     let mut filesystem = LocalFilesystem::new();
     filesystem
@@ -9425,7 +9436,13 @@ fn trust_policy() -> HostTrustPolicy {
 }
 
 fn provider_trust() -> BTreeMap<ExtensionId, TrustDecision> {
-    BTreeMap::from([(provider_id(), trust_decision())])
+    BTreeMap::from([
+        (provider_id(), trust_decision()),
+        (
+            ExtensionId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER).unwrap(),
+            trust_decision(),
+        ),
+    ])
 }
 
 fn trust_decision() -> TrustDecision {
