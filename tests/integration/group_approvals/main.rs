@@ -12,11 +12,11 @@
 //! Every scenario drives the REAL gate path: scripted `builtin.write_file` call
 //! → real `TurnStatus::BlockedApproval` gate (auto-approve disabled for the
 //! group at construction) → real `ApprovalResolver` (`approve_gate`/`deny_gate`)
-//! → `coordinator.resume_turn`. Only the model is faked. Exceptions:
+//! → `coordinator.resume_turn`. Only the model is faked. Exception:
 //! `failure_category_demasked` drives a genuinely-FAILED run (no gate) to prove
-//! the loop-exit de-mask wiring; `discard_then_resubmit` (#5467) drives the
-//! approval-request store directly (no `submit_turn`/gate at all) since no
-//! harness fault-injection seam exists for the mid-turn discard race it covers.
+//! the loop-exit de-mask wiring. The discard-tombstone invariant is pinned at
+//! the store contract tier and through the real `CapabilityHost` rollback
+//! caller instead of here, to keep this suite's execution model turn-driven.
 //!
 //! ## Ordering (state machine over the shared auto-approve store)
 //!
@@ -44,7 +44,6 @@ mod scenario_approve_always_persists_cross_thread;
 mod scenario_ask_each_time_resumes_once;
 mod scenario_concurrent_dual_gate_resume;
 mod scenario_concurrent_dual_gate_resume_parallel;
-mod scenario_discard_then_resubmit;
 mod scenario_failure_category_demasked;
 mod scenario_gate_ref_edge_cases;
 mod scenario_gate_then_approve;
@@ -93,11 +92,6 @@ async fn approvals_group_e2e() {
     report.record(
         "approval_request_persists_after_reopen",
         scenario_approval_request_persists_after_reopen::run(&g).await,
-    );
-    // #5467: store-direct, independent of `StorageMode` (same as C-DURABLE above).
-    report.record(
-        "discard_then_resubmit",
-        scenario_discard_then_resubmit::run(&g).await,
     );
     // Dependent: must run last (flips the (tenant, user) auto-approve toggle ON).
     scenario_approve_always_persists_cross_thread::run(&g)

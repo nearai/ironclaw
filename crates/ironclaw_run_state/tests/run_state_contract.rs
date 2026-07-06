@@ -489,7 +489,9 @@ async fn filesystem_approval_request_store_discards_pending_request() {
 }
 
 /// Regression (#5467): discard must tombstone, not delete, so id reuse fails
-/// closed. Sibling of `filesystem_discard_tombstone_prevents_request_id_reuse`.
+/// closed. Also covers the resolution path: `approve()`/`deny()` on an
+/// already-discarded id must reject with `ApprovalNotPending`, not resurrect
+/// the tombstone. Sibling of `filesystem_discard_tombstone_prevents_request_id_reuse`.
 #[tokio::test]
 async fn in_memory_discard_tombstone_prevents_request_id_reuse() {
     let store = InMemoryApprovalRequestStore::new();
@@ -500,6 +502,25 @@ async fn in_memory_discard_tombstone_prevents_request_id_reuse() {
 
     store.save_pending(scope.clone(), approval).await.unwrap();
     store.discard_pending(&scope, request_id).await.unwrap();
+
+    let approve_err = store.approve(&scope, request_id).await.unwrap_err();
+    assert!(
+        matches!(
+            approve_err,
+            RunStateError::ApprovalNotPending { request_id: id, status }
+                if id == request_id && status == ApprovalStatus::Discarded
+        ),
+        "expected ApprovalNotPending(Discarded) but got {approve_err:?}",
+    );
+    let deny_err = store.deny(&scope, request_id).await.unwrap_err();
+    assert!(
+        matches!(
+            deny_err,
+            RunStateError::ApprovalNotPending { request_id: id, status }
+                if id == request_id && status == ApprovalStatus::Discarded
+        ),
+        "expected ApprovalNotPending(Discarded) but got {deny_err:?}",
+    );
 
     let mut second = approval_request(invocation_id);
     second.id = request_id;
@@ -521,7 +542,9 @@ async fn in_memory_discard_tombstone_prevents_request_id_reuse() {
 /// record — that would pass equally well if `discard_pending` deleted the
 /// file outright. This test pins the actual reuse-blocking invariant: a
 /// `save_pending` for an id that was previously discarded must fail with
-/// `ApprovalRequestAlreadyExists`, not silently succeed.
+/// `ApprovalRequestAlreadyExists`, not silently succeed. It also covers the
+/// resolution path: `deny()`/`approve()` on the discarded id must reject with
+/// `ApprovalNotPending`, not clobber the tombstone.
 #[tokio::test]
 async fn filesystem_discard_tombstone_prevents_request_id_reuse() {
     let fs = Arc::new(engine_filesystem());
@@ -533,6 +556,25 @@ async fn filesystem_discard_tombstone_prevents_request_id_reuse() {
 
     store.save_pending(scope.clone(), approval).await.unwrap();
     store.discard_pending(&scope, request_id).await.unwrap();
+
+    let deny_err = store.deny(&scope, request_id).await.unwrap_err();
+    assert!(
+        matches!(
+            deny_err,
+            RunStateError::ApprovalNotPending { request_id: id, status }
+                if id == request_id && status == ApprovalStatus::Discarded
+        ),
+        "expected ApprovalNotPending(Discarded) but got {deny_err:?}",
+    );
+    let approve_err = store.approve(&scope, request_id).await.unwrap_err();
+    assert!(
+        matches!(
+            approve_err,
+            RunStateError::ApprovalNotPending { request_id: id, status }
+                if id == request_id && status == ApprovalStatus::Discarded
+        ),
+        "expected ApprovalNotPending(Discarded) but got {approve_err:?}",
+    );
 
     let mut second = approval_request(invocation_id);
     second.id = request_id;
