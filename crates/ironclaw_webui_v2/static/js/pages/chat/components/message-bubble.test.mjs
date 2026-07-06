@@ -35,6 +35,39 @@ test("markdown body and code blocks inherit readable message sizing", () => {
     /\.markdown-body\s+pre\s+code\s*\{[^}]*font-size:\s*0\.9em;\s*line-height:\s*1\.65;/,
     "fenced code should stay close to body size instead of shrinking below readability",
   );
+  assert.match(
+    appCssSource,
+    /\.markdown-body\s*\{[^}]*overflow-wrap:\s*anywhere;[^}]*word-break:\s*break-word;/,
+    "markdown prose should wrap long inline tokens on narrow screens",
+  );
+  assert.match(
+    appCssSource,
+    /\.markdown-body\s+pre\s*\{[^}]*overflow-wrap:\s*normal;[^}]*word-break:\s*normal;/,
+    "fenced code should keep its own horizontal scroll instead of forcing global page overflow",
+  );
+  assert.match(
+    appCssSource,
+    /\.markdown-body\s+table\s*\{[^}]*table-layout:\s*fixed;/,
+    "markdown tables should fit the message column instead of expanding the viewport",
+  );
+});
+
+test("conversation bubbles use mobile-safe widths and wrap long user tokens", () => {
+  assert.match(
+    messageBubbleSource,
+    /\? "max-w-full sm:max-w-\[85%\]"/,
+    "user bubbles should use full mobile width and restore narrower desktop width",
+  );
+  assert.match(
+    messageBubbleSource,
+    /: "w-full max-w-full sm:max-w-\[85%\]";/,
+    "assistant bubbles should not exceed the mobile message column",
+  );
+  assert.match(
+    messageBubbleSource,
+    /className="v2-wrap-anywhere whitespace-pre-wrap break-words"/,
+    "plain user text should break long unbroken strings",
+  );
 });
 
 test("message timestamp and actions share a hover-only meta row", () => {
@@ -50,7 +83,7 @@ test("message timestamp and actions share a hover-only meta row", () => {
   );
   assert.match(
     messageBubbleSource,
-    /mt-1 flex min-h-7 w-max max-w-\[85%\] flex-nowrap items-center gap-3 px-1 text-iron-400 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100/,
+    /mt-1 flex min-h-7 w-max max-w-full flex-nowrap items-center gap-3 px-1 text-iron-400 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 sm:max-w-\[85%\]/,
     "timestamp and controls should stay hidden until message hover or focus without being constrained to the bubble width",
   );
   assert.match(

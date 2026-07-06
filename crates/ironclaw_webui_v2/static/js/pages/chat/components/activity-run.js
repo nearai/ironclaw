@@ -16,21 +16,21 @@ export function ActivityRun({ activity }) {
   }, [shouldAutoExpand]);
 
   return html`
-    <div className="mr-auto flex w-full max-w-[85%] flex-col" data-testid="activity-run">
+    <div className="mr-auto flex w-full min-w-0 max-w-full flex-col sm:max-w-[85%]" data-testid="activity-run">
       <button
         type="button"
         onClick=${() => setExpanded((value) => !value)}
         aria-expanded=${expanded ? "true" : "false"}
         data-testid="activity-run-toggle"
         className=${[
-          "v2-button flex w-full items-center gap-2 border-0 bg-transparent px-1 py-1.5 text-left text-sm",
+          "v2-button flex w-full min-w-0 items-center gap-2 border-0 bg-transparent px-1 py-1.5 text-left text-sm",
           summary.hasError
             ? "text-[var(--v2-danger-text)]"
             : "text-iron-400 hover:text-iron-200",
         ].join(" ")}
       >
         <${Icon} name="layers" className="h-4 w-4 shrink-0" />
-        <span className="truncate">${summary.label}</span>
+        <span className="min-w-0 truncate">${summary.label}</span>
         <${Icon}
           name="chevron"
           className=${["ml-auto h-3.5 w-3.5 shrink-0", expanded ? "rotate-180" : ""].join(" ")}
@@ -39,7 +39,7 @@ export function ActivityRun({ activity }) {
 
       ${expanded &&
       html`
-        <div className="mt-2 flex flex-col gap-3" data-testid="activity-run-items">
+        <div className="mt-2 flex min-w-0 flex-col gap-3" data-testid="activity-run-items">
           ${activity.map((item, index) => html`
             <${ActivityItem}
               key=${item.id || `${item.role || "activity"}-${index}`}
@@ -70,13 +70,13 @@ function ActivityItem({ item }) {
 function ReasoningItem({ content }) {
   if (!content) return null;
   return html`
-    <div className="flex gap-3">
+    <div className="flex min-w-0 gap-3">
       <div
         className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/10 bg-iron-800 text-iron-100"
       >
         <${Icon} name="spark" className="h-4 w-4" />
       </div>
-      <div className="min-w-0 max-w-[85%] flex-1 border-l-2 border-white/10 pl-3 text-iron-300">
+      <div className="min-w-0 max-w-full flex-1 border-l-2 border-white/10 pl-3 text-iron-300 sm:max-w-[85%]">
         <${MarkdownRenderer} content=${content} className="text-[13px]" />
       </div>
     </div>

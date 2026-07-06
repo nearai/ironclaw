@@ -9,7 +9,7 @@ import { groupMessages } from "../lib/message-groups.js";
 export const BOTTOM_FOLLOW_THRESHOLD_PX = 100;
 const TOP_LOAD_THRESHOLD_PX = 100;
 const FLOATING_LOGS_BUTTON_CLASS =
-  "group absolute bottom-5 right-5 inline-flex size-9 items-center justify-center gap-0 overflow-hidden rounded-full border border-[color-mix(in_srgb,var(--v2-accent)_28%,var(--v2-panel-border))] bg-[color-mix(in_srgb,var(--v2-surface)_88%,var(--v2-accent)_12%)] text-xs font-semibold text-[var(--v2-text-base)] shadow-[0_14px_34px_-18px_rgba(0,0,0,0.95),0_0_0_1px_rgba(255,255,255,0.04)] backdrop-blur-md transition-all hover:border-[color-mix(in_srgb,var(--v2-accent)_50%,var(--v2-panel-border))] hover:bg-[color-mix(in_srgb,var(--v2-surface-muted)_82%,var(--v2-accent)_18%)] hover:text-[var(--v2-text-strong)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--v2-accent)_42%,transparent)]";
+  "group absolute bottom-5 right-5 z-10 hidden size-9 items-center justify-center gap-0 overflow-hidden rounded-full border border-[color-mix(in_srgb,var(--v2-accent)_28%,var(--v2-panel-border))] bg-[color-mix(in_srgb,var(--v2-surface)_88%,var(--v2-accent)_12%)] text-xs font-semibold text-[var(--v2-text-base)] shadow-[0_14px_34px_-18px_rgba(0,0,0,0.95),0_0_0_1px_rgba(255,255,255,0.04)] backdrop-blur-md transition-all hover:border-[color-mix(in_srgb,var(--v2-accent)_50%,var(--v2-panel-border))] hover:bg-[color-mix(in_srgb,var(--v2-surface-muted)_82%,var(--v2-accent)_18%)] hover:text-[var(--v2-text-strong)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--v2-accent)_42%,transparent)] sm:inline-flex";
 
 export function distanceFromBottom(el) {
   if (!el) return Number.POSITIVE_INFINITY;
@@ -214,7 +214,7 @@ export function MessageList({
   const grouped = React.useMemo(() => groupMessages(messages), [messages]);
 
   return html`
-    <div className="relative flex min-h-0 min-w-0 flex-1">
+    <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
     <div
       ref=${containerRef}
       onScroll=${onScroll}
@@ -223,12 +223,12 @@ export function MessageList({
       onPointerDown=${markScrollbarDragIntent}
       onCopy=${onCopy}
       data-testid="message-list-scroll"
-      className="flex min-w-0 flex-1 overflow-y-auto px-4 pt-6 pb-14 sm:px-5 lg:px-8"
+      className="flex min-w-0 flex-1 overflow-y-auto overflow-x-hidden px-3 pt-5 pb-14 sm:px-5 sm:pt-6 lg:px-8"
     >
       <div
         ref=${contentRef}
         data-testid="message-list-content"
-        className="mx-auto flex w-full min-w-0 max-w-5xl flex-col gap-5"
+        className="mx-auto flex w-full min-w-0 max-w-5xl flex-col gap-4 sm:gap-5"
       >
         ${hasMore &&
         html`
@@ -276,7 +276,7 @@ export function MessageList({
         type="button"
         onClick=${jumpToBottom}
         aria-label=${t("chat.jumpToLatest")}
-        className="absolute bottom-4 left-1/2 inline-flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] px-3 py-1.5 text-xs font-medium text-[var(--v2-text-strong)] shadow-[0_10px_30px_-12px_rgba(0,0,0,0.7)] hover:border-[color-mix(in_srgb,var(--v2-accent)_40%,var(--v2-panel-border))]"
+        className="absolute bottom-4 left-1/2 z-10 inline-flex max-w-[calc(100%-2rem)] -translate-x-1/2 items-center gap-1.5 whitespace-nowrap rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] px-3 py-1.5 text-xs font-medium text-[var(--v2-text-strong)] shadow-[0_10px_30px_-12px_rgba(0,0,0,0.7)] hover:border-[color-mix(in_srgb,var(--v2-accent)_40%,var(--v2-panel-border))]"
       >
         <${Icon} name="arrowDown" className="h-3.5 w-3.5" />
         ${t("chat.jumpToLatest")}
