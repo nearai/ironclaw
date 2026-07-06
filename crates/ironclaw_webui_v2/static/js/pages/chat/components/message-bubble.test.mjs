@@ -37,8 +37,13 @@ test("markdown body and code blocks inherit readable message sizing", () => {
   );
   assert.match(
     appCssSource,
-    /\.markdown-body\s*\{[^}]*overflow-wrap:\s*anywhere;[^}]*word-break:\s*break-word;/,
+    /\.markdown-body\s*\{[^}]*overflow-wrap:\s*anywhere;/,
     "markdown prose should wrap long inline tokens on narrow screens",
+  );
+  assert.doesNotMatch(
+    appCssSource,
+    /word-break:\s*break-word;/,
+    "overflow-wrap:anywhere should not be paired with deprecated word-break:break-word",
   );
   assert.match(
     appCssSource,

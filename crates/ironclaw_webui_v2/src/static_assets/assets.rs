@@ -241,7 +241,7 @@ mod tests {
 
         let styles = asset_text("styles/app.css");
         assert!(styles.contains(".markdown-body {\n  max-width: 100%;\n  min-width: 0;"));
-        assert!(styles.contains("overflow-wrap: anywhere;\n  word-break: break-word;"));
+        assert!(styles.contains("overflow-wrap: anywhere;"));
         assert!(styles.contains(".markdown-code-frame {\n  position: relative;"));
         assert!(styles.contains("width: 100%;\n  max-width: 100%;\n  min-width: 0;"));
         assert!(styles.contains("overflow: hidden;"));
@@ -250,6 +250,7 @@ mod tests {
         assert!(styles.contains("overflow-wrap: normal;\n  word-break: normal;"));
         assert!(styles.contains("display: inline; background: transparent; padding: 0;"));
         assert!(styles.contains("font-size: 0.9em; line-height: 1.65; white-space: inherit;"));
+        assert!(!styles.contains("word-break: break-word"));
         assert!(!styles.contains("white-space: pre-wrap"));
         assert!(!styles.contains("word-break: break-all"));
         assert!(!styles.contains("width: max-content"));

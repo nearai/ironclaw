@@ -28,12 +28,31 @@ test("tool activity cards keep long tool output inside the mobile viewport", () 
   );
   assert.match(
     toolActivitySource,
-    /className="v2-wrap-anywhere max-w-full overflow-x-auto whitespace-pre-wrap rounded bg-iron-900 p-2 font-mono text-iron-100"/,
+    /const PRE_WRAP_CLASS =\s*\n\s*"v2-wrap-anywhere max-w-full overflow-x-auto whitespace-pre-wrap rounded bg-iron-900 p-2 font-mono";/,
+    "tool preformatted previews should share the mobile-safe wrapping class",
+  );
+  assert.equal(
+    (
+      toolActivitySource.match(
+        /"v2-wrap-anywhere max-w-full overflow-x-auto whitespace-pre-wrap rounded bg-iron-900 p-2 font-mono"/g,
+      ) || []
+    ).length,
+    1,
+    "tool preformatted preview class should be defined once",
+  );
+  assert.match(
+    toolActivitySource,
+    /<pre className=\$\{\[PRE_WRAP_CLASS, "text-iron-100"\]\.join\(" "\)\}>/,
     "tool parameters should wrap long lines within the detail panel",
   );
   assert.match(
     toolActivitySource,
-    /className="v2-wrap-anywhere max-w-full overflow-x-auto whitespace-pre-wrap rounded bg-iron-900 p-2 font-mono text-\[var\(--v2-positive-text\)\]"/,
+    /PRE_WRAP_CLASS,[\s\S]*active === "declined" \? "text-iron-300" : "text-\[var\(--v2-danger-text\)\]"/,
+    "tool errors should reuse the shared preformatted preview class",
+  );
+  assert.match(
+    toolActivitySource,
+    /className=\$\{\[PRE_WRAP_CLASS, "text-\[var\(--v2-positive-text\)\]"\]\.join\(" "\)\}/,
     "tool result previews should wrap long lines within the detail panel",
   );
   assert.match(

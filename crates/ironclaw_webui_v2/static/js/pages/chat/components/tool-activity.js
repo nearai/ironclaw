@@ -17,6 +17,8 @@ const STATUS_LABEL_KEY = {
   error: "tool.statusError",
   running: "tool.statusRunning",
 };
+const PRE_WRAP_CLASS =
+  "v2-wrap-anywhere max-w-full overflow-x-auto whitespace-pre-wrap rounded bg-iron-900 p-2 font-mono";
 
 function statusLabelKey(status) {
   return STATUS_LABEL_KEY[status] || STATUS_LABEL_KEY.running;
@@ -289,12 +291,12 @@ function ToolDetailPanel({
         ${active === "details" &&
         html`<div className="v2-wrap-anywhere whitespace-pre-wrap text-iron-200">${toolDetail}</div>`}
         ${active === "params" &&
-        html`<pre className="v2-wrap-anywhere max-w-full overflow-x-auto whitespace-pre-wrap rounded bg-iron-900 p-2 font-mono text-iron-100">${toolParameters}</pre>`}
+        html`<pre className=${[PRE_WRAP_CLASS, "text-iron-100"].join(" ")}>${toolParameters}</pre>`}
         ${active === "result" && html`<${ToolResult} text=${toolResultPreview} />`}
         ${(active === "error" || active === "declined") &&
         html`<pre
           className=${[
-            "v2-wrap-anywhere max-w-full overflow-x-auto whitespace-pre-wrap rounded bg-iron-900 p-2 font-mono",
+            PRE_WRAP_CLASS,
             active === "declined" ? "text-iron-300" : "text-[var(--v2-danger-text)]",
           ].join(" ")}
         >${toolError}</pre>`}
@@ -365,12 +367,12 @@ function ToolResult({ text }) {
 
   if (parsed !== undefined && typeof parsed === "object") {
     return html`<pre
-      className="v2-wrap-anywhere max-w-full overflow-x-auto whitespace-pre-wrap rounded bg-iron-900 p-2 font-mono text-[var(--v2-positive-text)]"
+      className=${[PRE_WRAP_CLASS, "text-[var(--v2-positive-text)]"].join(" ")}
     >${JSON.stringify(parsed, null, 2)}</pre>`;
   }
 
   return html`<pre
-    className="v2-wrap-anywhere max-w-full overflow-x-auto whitespace-pre-wrap rounded bg-iron-900 p-2 font-mono text-[var(--v2-positive-text)]"
+    className=${[PRE_WRAP_CLASS, "text-[var(--v2-positive-text)]"].join(" ")}
   >${text}</pre>`;
 }
 
