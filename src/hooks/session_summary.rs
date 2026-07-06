@@ -136,9 +136,7 @@ impl Hook for SessionSummaryHook {
         };
 
         let llm_messages = vec![
-            ChatMessage::system(include_str!(
-                "../../crates/ironclaw_engine/prompts/session_summary.md"
-            )),
+            ChatMessage::system(include_str!("../../prompts/session_summary.md")),
             ChatMessage::user(truncated.to_string()),
         ];
 

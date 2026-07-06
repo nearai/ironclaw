@@ -1760,14 +1760,6 @@ pub enum TraceContributionError {
 }
 
 #[async_trait]
-pub trait TraceRedactor: Send + Sync {
-    async fn redact_trace(
-        &self,
-        trace: RawTraceContribution,
-    ) -> Result<TraceContributionEnvelope, TraceContributionError>;
-}
-
-#[async_trait]
 pub trait PrivacyFilterAdapter: Send + Sync {
     async fn redact_text(
         &self,
@@ -2210,9 +2202,8 @@ impl PlaceholderMap {
     }
 }
 
-#[async_trait]
-impl TraceRedactor for DeterministicTraceRedactor {
-    async fn redact_trace(
+impl DeterministicTraceRedactor {
+    pub async fn redact_trace(
         &self,
         trace: RawTraceContribution,
     ) -> Result<TraceContributionEnvelope, TraceContributionError> {

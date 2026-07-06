@@ -125,6 +125,14 @@ pub enum RuntimeCredentialAccountSetup {
     ManualToken,
     #[serde(rename = "oauth")]
     OAuth { scopes: Vec<String> },
+    /// Per-user connection to an inbound channel established out-of-band (e.g.
+    /// Slack pairing-code redemption), not a stored secret. The requirement is
+    /// satisfied by the caller's channel identity binding rather than a
+    /// credential account, and it blocks activation through the same auth-gate
+    /// rail as OAuth/manual-token — the browser resolves it by redeeming the
+    /// pairing code and then resolving the gate. `channel` is the connectable
+    /// channel id (e.g. `slack`); the render copy is re-derived from it.
+    ChannelPairing { channel: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

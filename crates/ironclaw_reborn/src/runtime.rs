@@ -42,7 +42,9 @@ use crate::{
     loop_driver_host::{
         HookDispatcherBuilderFactory, RebornLoopDriverHostFactory, TextOnlyLoopHostConfig,
     },
-    loop_exit_applier::{LoopExitApplier, ThreadCheckpointLoopExitEvidencePort},
+    loop_exit_applier::{
+        AwaitDependentRunEvidenceStore, LoopExitApplier, ThreadCheckpointLoopExitEvidencePort,
+    },
     model_routes::ModelRouteResolver,
     planned_driver_factory::{
         DefaultPlannedDriverRegistrationError, default_planned_run_profile_resolver,
@@ -157,6 +159,9 @@ pub struct DefaultPlannedRuntimeConfig {
     /// count). `None` = unlimited — the semaphore is sized to
     /// [`tokio::sync::Semaphore::MAX_PERMITS`]. See [`scheduler_permit_count`].
     pub worker_count: Option<std::num::NonZeroUsize>,
+    /// Capability IDs removed from every model-facing capability surface,
+    /// regardless of the resolved profile allow-set.
+    pub disabled_capability_ids: Vec<CapabilityId>,
     pub text_only_driver: TextOnlyModelReplyDriverConfig,
     pub host: TextOnlyLoopHostConfig,
     pub tool_disclosure: ToolDisclosureMode,
@@ -169,6 +174,7 @@ impl Default for DefaultPlannedRuntimeConfig {
             heartbeat_interval: std::time::Duration::from_secs(10),
             poll_interval: std::time::Duration::from_secs(5),
             worker_count: Some(DEFAULT_TURN_RUNNER_WORKER_COUNT),
+            disabled_capability_ids: default_disabled_capability_ids(),
             text_only_driver: TextOnlyModelReplyDriverConfig::default(),
             host: TextOnlyLoopHostConfig::default(),
             tool_disclosure: ToolDisclosureMode::from_env(),
@@ -198,6 +204,13 @@ fn scheduler_permit_count(worker_count: Option<std::num::NonZeroUsize>) -> usize
         // oversized operator config loudly before it ever reaches here.
         .unwrap_or(tokio::sync::Semaphore::MAX_PERMITS)
         .min(tokio::sync::Semaphore::MAX_PERMITS)
+}
+
+fn default_disabled_capability_ids() -> Vec<CapabilityId> {
+    vec![
+        CapabilityId::new(ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
+            .expect("static spawn_subagent capability id must be valid"), // safety: crate-owned static dotted id.
+    ]
 }
 
 pub trait RuntimeTurnStateStore:
@@ -507,11 +520,14 @@ where
         ));
     }
     let turn_state_store: Arc<dyn TurnStateStore> = parts.turn_state.clone();
+    let await_dependent_run_evidence: Arc<dyn AwaitDependentRunEvidenceStore> =
+        parts.subagent_gate_store.clone();
     parts.loop_exit_evidence = Arc::new(
         ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
             Arc::clone(&parts.thread_service),
             turn_state_store,
             Arc::clone(&parts.loop_checkpoint_store),
+            await_dependent_run_evidence,
             parts.thread_scope.clone(),
         )
         .with_checkpoint_state_store(Arc::clone(&parts.checkpoint_state_store))
@@ -677,12 +693,9 @@ where
     // or by the host-runtime first-party manifest (the bare authorization stub).
     // This is a deny list — it takes effect regardless of the resolved profile
     // allow-set (which is `All` for top-level runs, making a profile allow-set
-    // narrowing a no-op). Empty `DISABLED_CAPABILITY_IDS` to re-enable.
-    let global_denied = DISABLED_CAPABILITY_IDS
-        .iter()
-        .map(|id| CapabilityId::new(*id))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?;
+    // narrowing a no-op). Override `disabled_capability_ids` to re-enable in
+    // targeted regression harnesses.
+    let global_denied = parts.config.disabled_capability_ids.clone();
     // Issue #5505: a scheduled-trigger fire must not be able to create,
     // remove, pause, or resume triggers (read-only trigger_list stays
     // available). Kept as a *second* named set — not folded into
@@ -695,8 +708,8 @@ where
         .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?;
     // Construction-guard fix: always add this decorator, even when both deny
     // sets happen to be empty. A prior version only added it `if
-    // !disabled.is_empty()`, which meant emptying `DISABLED_CAPABILITY_IDS`
-    // (the documented spawn_subagent re-enable toggle) would silently also
+    // !disabled.is_empty()`, which meant emptying the global disabled-capability
+    // list (the documented spawn_subagent re-enable toggle) would silently also
     // drop the scheduled-trigger deny — an unrelated toggle must never
     // re-enable `trigger_create` for scheduled fires. Kept as the OUTERMOST
     // decorator (added last, after the tool-disclosure decorator above) so
@@ -798,14 +811,6 @@ where
         },
     )
 }
-
-/// Capabilities removed from the model-facing surface, globally, as an
-/// explicit composition decision — currently just `spawn_subagent`. Applied
-/// via [`ironclaw_loop_support::PerSurfaceCapabilityDenyDecorator`]'s global
-/// deny list, which takes effect regardless of the resolved profile
-/// allow-set. Empty this slice to re-enable everything.
-const DISABLED_CAPABILITY_IDS: &[&str] =
-    &[ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID];
 
 /// Issue #5505: a scheduled-trigger fire runs through the same agent loop as
 /// an interactive turn, but must not be able to create/remove/pause/resume
@@ -1357,9 +1362,9 @@ mod tests {
     #[tokio::test]
     async fn scheduled_trigger_mutators_stay_denied_when_global_deny_list_is_emptied() {
         // Regression for the footgun described in the plan: emptying
-        // DISABLED_CAPABILITY_IDS (the documented spawn_subagent re-enable
-        // toggle) must never silently re-enable the trigger mutators for a
-        // scheduled fire.
+        // the global disabled-capability list (the documented spawn_subagent
+        // re-enable toggle) must never silently re-enable the trigger mutators
+        // for a scheduled fire.
         let inner: Arc<dyn LoopCapabilityPort> = Arc::new(FixedSurfacePort {
             surface: full_trigger_and_spawn_surface(),
         });

@@ -594,6 +594,7 @@ mod tests {
                 account_label: None,
                 authorization_url: None,
                 expires_at: None,
+                connection: None,
             });
 
         let outcome = adapter

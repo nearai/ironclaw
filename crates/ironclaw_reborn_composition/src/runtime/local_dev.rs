@@ -22,6 +22,7 @@ use ironclaw_loop_support::{
     LoopCapabilityPortFactory, LoopCapabilityResultWriter, loop_driver_execution_extension_id,
 };
 use ironclaw_product_workflow::{OutboundPreferencesProductFacade, ProjectService};
+use ironclaw_reborn::thread_scope::ThreadScopeResolver;
 
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_threads::{
@@ -62,7 +63,7 @@ mod surface_disclosure;
 mod synthetic_capability;
 
 #[cfg(test)]
-pub(crate) use crate::outbound_delivery_capability_surface::{
+pub(crate) use crate::outbound::{
     OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
 };
 use extension_surface::{LocalDevExtensionSurface, LocalDevExtensionSurfaceSource};
@@ -76,6 +77,8 @@ pub(crate) use skill_activation::SKILL_ACTIVATE_CAPABILITY_ID;
 
 /// Test-only bridges (E-PROJ / E-SKILL seams), co-located with the capability
 /// each wraps and re-exported here for the `runtime` caller.
+#[cfg(feature = "test-support")]
+pub(super) use outbound_delivery::wrap_outbound_delivery_capabilities_for_test;
 #[cfg(feature = "test-support")]
 pub(super) use project_create::wrap_project_create_capability_for_test;
 #[cfg(feature = "test-support")]
@@ -371,14 +374,15 @@ impl LocalDevCapabilityIo {
                     return None;
                 }
             };
+        let thread_scope = ThreadScopeResolver::resolve_for_turn(
+            &durable_previews.thread_scope,
+            &run_context.scope,
+            run_context.actor(),
+        );
         let message = match durable_previews
             .thread_service
             .append_capability_display_preview(AppendCapabilityDisplayPreviewRequest {
-                scope: ironclaw_reborn::thread_scope::ThreadScopeResolver::resolve_for_turn(
-                    &durable_previews.thread_scope,
-                    &run_context.scope,
-                    run_context.actor(),
-                ),
+                scope: thread_scope,
                 thread_id: run_context.thread_id.clone(),
                 turn_run_id: run_context.run_id.to_string(),
                 preview,

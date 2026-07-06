@@ -23,11 +23,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 if __package__:
+    from . import google_api_helpers
     from . import run_live_qa
     from . import semantic_judge
     from . import text_match
 else:
     import run_live_qa
+    from scripts.reborn_webui_v2_live_qa import google_api_helpers
     import semantic_judge
     import text_match
 
@@ -178,7 +180,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                         "strategy": "inbound_proof_code",
                         "action": {
                             "title": "Slack account connection",
-                            "instructions": "Message the Slack app, then enter the code here.",
+                            "instructions": (
+                                "Message the IronClaw Reborn app in Slack to get a "
+                                "pairing code, then paste it here."
+                            ),
                         },
                     },
                 ]
@@ -257,7 +262,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         observed_expectations = [text for _selector, text, _timeout in expected_texts]
         self.assertIn("Channels", observed_expectations)
         self.assertIn("Slack account connection", observed_expectations)
-        self.assertIn("Message the Slack app", observed_expectations)
+        self.assertIn("pairing code", observed_expectations)
         self.assertNotIn("Connect Slack", observed_expectations)
         self.assertFalse(any("/v2/chat" in url for url, _wait in fake_page.gotos))
         self.assertEqual(
@@ -267,6 +272,24 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(
             result.details["slack_connect_title"],
             "Slack account connection",
+        )
+
+    def test_slack_connect_instruction_validation_accepts_pairing_copy(self):
+        self.assertTrue(
+            run_live_qa._slack_connect_instructions_look_valid(
+                "Message the Slack app, then enter the code here."
+            )
+        )
+        self.assertTrue(
+            run_live_qa._slack_connect_instructions_look_valid(
+                "Message the IronClaw Reborn app in Slack to get a pairing code, "
+                "then paste it here."
+            )
+        )
+        self.assertFalse(
+            run_live_qa._slack_connect_instructions_look_valid(
+                "Connect the channel from settings."
+            )
         )
 
     def test_product_connect_cases_start_from_chat_then_verify_registry(self):
@@ -444,9 +467,13 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
     def test_routine_creation_case_fails_when_no_trigger_is_created(self):
         captured_prompts: list[str] = []
+        captured_follow_up_flags: list[bool] = []
 
         async def fake_live_chat_case(_ctx, **kwargs):
             captured_prompts.append(kwargs["prompt"])
+            captured_follow_up_flags.append(
+                kwargs.get("routine_confirmation_follow_up", False)
+            )
             extra_details = kwargs.get("extra_details") or {}
             return run_live_qa.ProbeResult(
                 provider="test",
@@ -480,8 +507,29 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertEqual(captured_prompts, ["original sheet prompt"])
+        self.assertEqual(captured_follow_up_flags, [True])
         self.assertEqual(result.details["trigger_records_after"], 0)
         self.assertIn("did not add a trigger_record", result.details["error"])
+
+    def test_routine_confirmation_follow_up_answers_timezone_confirmation(self):
+        text = (
+            "I'll set up a trigger every 5 minutes and send a Slack DM. "
+            "I need a timezone for scheduling. Shall I go ahead and create this?"
+        )
+
+        self.assertEqual(
+            run_live_qa._routine_confirmation_follow_up_for_text(text),
+            "Yes, go ahead and create it. Use Europe/London (London time) "
+            "for the schedule.",
+        )
+
+    def test_routine_confirmation_follow_up_ignores_slack_pairing_gate(self):
+        text = (
+            "Connect Slack. Message the IronClaw Reborn app in Slack to get a "
+            "pairing code, then paste it here."
+        )
+
+        self.assertIsNone(run_live_qa._routine_confirmation_follow_up_for_text(text))
 
     def test_routine_creation_case_can_preinstall_extensions(self):
         captured: dict[str, object] = {}
@@ -609,6 +657,26 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             text_match.required_text_matches(
                 'Discussion thread "vibe coded eh" (id=47005839) mentions NEAR AI.',
                 ["news.ycombinator.com|hacker news|hn|discussion|id="],
+            )
+        )
+
+    def test_forbidden_auth_phrase_ignores_positive_no_auth_required_copy(self):
+        self.assertFalse(
+            run_live_qa._forbidden_phrase_matches(
+                "activation succeeded with no additional authentication required.",
+                "authentication required",
+            )
+        )
+        self.assertFalse(
+            run_live_qa._forbidden_phrase_matches(
+                "google sheets connected; no authentication required.",
+                "authentication required",
+            )
+        )
+        self.assertTrue(
+            run_live_qa._forbidden_phrase_matches(
+                "google sheets cannot connect because authentication required.",
+                "authentication required",
             )
         )
 
@@ -784,6 +852,22 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertFalse(run_live_qa._slack_delivery_target_is_dm("C12345"))
         self.assertFalse(run_live_qa._slack_delivery_target_is_dm(None))
 
+    def test_browser_diagnostic_redaction_handles_empty_auth_token_and_llm_keys(self):
+        value = (
+            "prefix abc "
+            "sk-test1234567890abcdefghijklmnop "
+            "sk-ant-test1234567890"
+        )
+
+        with patch.object(run_live_qa, "AUTH_TOKEN", ""):
+            redacted = run_live_qa._redact_browser_diagnostic_value(value)
+
+        self.assertIn("prefix abc", redacted)
+        self.assertIn("<REDACTED_OPENAI_KEY>", redacted)
+        self.assertIn("<REDACTED_ANTHROPIC_KEY>", redacted)
+        self.assertNotIn("sk-test1234567890abcdefghijklmnop", redacted)
+        self.assertNotIn("sk-ant-test1234567890", redacted)
+
     def test_slack_dm_route_discovery_prefers_configured_user(self):
         captured: dict[str, object] = {}
 
@@ -820,7 +904,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(result["dm_user_source"], "env")
         self.assertEqual(captured["data"]["users"], "UQAUSER")
 
-    def test_slack_dm_route_discovery_ignores_synthetic_inbound_user(self):
+    def test_slack_dm_route_discovery_reads_path_materialized_user(self):
         captured: dict[str, object] = {}
 
         class FakeResponse:
@@ -828,7 +912,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 return {
                     "ok": True,
                     "channel": {
-                        "id": "DSLACKBOT",
+                        "id": "DQAUSER",
                         "is_im": True,
                     },
                 }
@@ -838,6 +922,34 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             return FakeResponse()
 
         fake_httpx = types.SimpleNamespace(post=fake_post)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            user_id_path = Path(tmpdir) / "route-user-id"
+            user_id_path.write_text("UQAUSER\n", encoding="utf-8")
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID_PATH": str(
+                            user_id_path
+                        )
+                    },
+                    clear=True,
+                ),
+                patch.dict(sys.modules, {"httpx": fake_httpx}),
+            ):
+                result = run_live_qa._discover_slack_dm_route_channel(
+                    "[slack]\nbot_token_env = \"SLACK_BOT_TOKEN\"\n",
+                    {"SLACK_BOT_TOKEN": "xoxb-test"},
+                )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["dm_user_id"], "UQAUSER")
+        self.assertEqual(captured["data"]["users"], "UQAUSER")
+
+    def test_slack_dm_route_discovery_rejects_missing_real_route_user(self):
+        fake_httpx = types.SimpleNamespace(
+            post=lambda *_args, **_kwargs: self.fail("Slack API should not be called")
+        )
         with (
             patch.dict(
                 os.environ,
@@ -851,10 +963,52 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 {"SLACK_BOT_TOKEN": "xoxb-test"},
             )
 
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["dm_user_id"], "USLACKBOT")
-        self.assertEqual(result["dm_user_source"], "fallback_slackbot")
-        self.assertEqual(captured["data"]["users"], "USLACKBOT")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "missing_slack_route_user_id")
+        self.assertIn("REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID", result["required_env"])
+
+    def test_live_github_latest_release_uses_configured_token(self):
+        captured: dict[str, object] = {}
+
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"tag_name": "ironclaw-v0.test", "name": "Test release"}
+
+        class FakeAsyncClient:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, _exc_type, _exc, _tb):
+                return None
+
+            async def get(self, url):
+                captured["url"] = url
+                return FakeResponse()
+
+        fake_httpx = types.SimpleNamespace(AsyncClient=FakeAsyncClient)
+        with (
+            patch.dict(os.environ, {"AUTH_LIVE_GITHUB_TOKEN": "ghs_live"}, clear=True),
+            patch.dict(sys.modules, {"httpx": fake_httpx}),
+        ):
+            release = asyncio.run(
+                run_live_qa._live_github_latest_release("nearai", "ironclaw")
+            )
+
+        self.assertEqual(release["tag_name"], "ironclaw-v0.test")
+        self.assertEqual(
+            captured["url"],
+            "https://api.github.com/repos/nearai/ironclaw/releases/latest",
+        )
+        self.assertEqual(
+            captured["headers"]["Authorization"],
+            "Bearer ghs_live",
+        )
 
     def test_qa_7a_requires_dm_delivery_target(self):
         with (
@@ -876,74 +1030,28 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIn("must be a DM", str(result.details["error"]))
         self.assertEqual(result.details["slack_delivery_target_kind"], "non_dm")
 
-    def test_qa_7a_connect_capabilities_match_chat_connect_flow(self):
-        self.assertEqual(
-            run_live_qa.QA_7A_CHAT_CONNECT_CAPABILITY_IDS,
-            [
-                run_live_qa.EXTENSION_SEARCH_CAPABILITY_ID,
-                run_live_qa.EXTENSION_INSTALL_CAPABILITY_ID,
-                run_live_qa.EXTENSION_ACTIVATE_CAPABILITY_ID,
-            ],
-        )
-        self.assertNotIn(
-            run_live_qa.OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
-            run_live_qa.QA_7A_CHAT_CONNECT_CAPABILITY_IDS,
-        )
-
-    def test_qa_7a_requires_new_connect_capability_completions(self):
-        class FakeLocator:
-            @property
-            def last(self):
-                return self
-
-            async def fill(self, _text):
-                return None
-
-            async def press(self, _key):
-                return None
-
-        class FakePage:
-            async def goto(self, _url, **_kwargs):
-                return None
-
-            def locator(self, _selector):
-                return FakeLocator()
-
-        class FakeExpectation:
-            async def to_be_visible(self, **_kwargs):
-                return None
-
-            async def to_contain_text(self, _text, **_kwargs):
-                return None
-
-        capability_ids = run_live_qa.QA_7A_CHAT_CONNECT_CAPABILITY_IDS
-        baseline = {capability_id: ["completed"] for capability_id in capability_ids}
-        stale = {capability_id: ["completed"] for capability_id in capability_ids}
-        fresh = {
-            capability_id: ["completed", "completed"]
-            for capability_id in capability_ids
-        }
-        status_sequence = [baseline, stale, fresh]
-
-        async def fake_with_page(_output_dir, _case_name, action):
-            await action(FakePage())
-
-        async def fake_wait_for_assistant_reply(_page, **_kwargs):
-            return run_live_qa.AssistantReplyWaitResult(
-                text_excerpt="Slack is connected",
-                semantic_judge_used=False,
-                semantic_judge_reason="literal_required_text_matched",
+    def test_slack_delivery_channel_ignores_failed_route_discovery_channel_id(self):
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+            run_live_qa,
+            "_slack_preflight",
+            return_value={
+                "route_discovery": {
+                    "checked": True,
+                    "ok": False,
+                    "channel_id": "D0STALE",
+                }
+            },
+        ):
+            ctx = run_live_qa.LiveQaContext(
+                base_url="http://127.0.0.1:3000",
+                output_dir=Path(tmpdir),
+                reborn_home=Path(tmpdir) / "reborn-home",
+                env={},
             )
 
-        async def fake_approve_visible_tool_gate(_page):
-            return None
+            self.assertIsNone(run_live_qa._slack_delivery_channel_id(ctx))
 
-        async def fake_sleep(_seconds):
-            return None
-
-        def fake_capability_run_statuses(_reborn_home, _capability_ids):
-            return status_sequence.pop(0) if status_sequence else fresh
-
+    def test_qa_7a_accepts_existing_dm_delivery_target_without_chat_connect(self):
         with (
             patch.object(
                 run_live_qa,
@@ -954,33 +1062,20 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 },
             ),
             patch.object(run_live_qa, "_slack_delivery_channel_id", return_value="D12345"),
-            patch.object(run_live_qa, "_with_page", side_effect=fake_with_page),
             patch.object(
                 run_live_qa,
-                "_wait_for_assistant_reply",
-                side_effect=fake_wait_for_assistant_reply,
+                "_with_page",
+                side_effect=AssertionError("QA 7A should not open WebUI chat"),
             ),
-            patch.object(
-                run_live_qa,
-                "_approve_visible_tool_gate",
-                side_effect=fake_approve_visible_tool_gate,
-            ),
-            patch.object(
-                run_live_qa,
-                "_capability_run_statuses",
-                side_effect=fake_capability_run_statuses,
-            ),
-            patch.object(run_live_qa.asyncio, "sleep", side_effect=fake_sleep),
-            patch("playwright.async_api.expect", return_value=FakeExpectation()),
         ):
             result = asyncio.run(
                 run_live_qa.case_qa_7a_slack_product_channel_connect(self._dummy_ctx())
             )
 
         self.assertTrue(result.success)
-        self.assertEqual(result.details["baseline_capability_statuses"], baseline)
-        self.assertEqual(result.details["capability_statuses"], fresh)
-        self.assertEqual(result.details["text_excerpt"], "Slack is connected")
+        self.assertEqual(result.details["slack_delivery_target_kind"], "dm")
+        self.assertEqual(result.details["delivery_target_present"], True)
+        self.assertIn("preflight", result.details)
 
     def test_completed_capability_counts_ignore_stale_completed_runs(self):
         counts = run_live_qa._completed_capability_counts(
@@ -1097,7 +1192,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         package_ids = [
             extension["package_id"] for extension in captured_routine["extensions"]
         ]
-        self.assertEqual(package_ids, ["slack", "google-drive", "google-sheets"])
+        self.assertEqual(package_ids, ["google-drive", "google-sheets"])
         self.assertEqual(
             captured_routine["extra_details"]["bug_log_sheet_fixture"]["spreadsheet_id"],
             "sheet-123",
@@ -1208,6 +1303,38 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             ["news.ycombinator.com|hacker news|hn|discussion|id="],
         )
 
+    def test_hn_routine_accepts_schedule_monitor_confirmation(self):
+        captured: dict[str, object] = {}
+
+        async def fake_live_chat_case(_ctx, **kwargs):
+            captured.update(kwargs)
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=True,
+                latency_ms=1,
+                details={
+                    "text_excerpt": (
+                        "Done! Here's what was created: HN Monitor. "
+                        "Schedule: Every hour at :00."
+                    )
+                },
+            )
+
+        with (
+            patch.object(run_live_qa, "_live_chat_case", side_effect=fake_live_chat_case),
+            patch.object(run_live_qa, "_trigger_record_count", side_effect=[0, 1]),
+        ):
+            result = asyncio.run(
+                run_live_qa.case_qa_8c_hn_keyword_slack_routine(self._dummy_ctx())
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(
+            captured["required_text"],
+            ["routine|trigger|automation|cron|schedule|created|monitor"],
+        )
+
     def test_live_google_side_effect_cases_install_required_extensions(self):
         captured: dict[str, dict[str, object]] = {}
         spreadsheet_id = "1AbCdEfGhIjKlMnOpQrStUvWxYz_1234567890"
@@ -1246,6 +1373,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         async def fake_google_sheet_contains_marker(**_kwargs):
             return {"found": True}
 
+        async def fake_wait_for_google_sheet_marker(**_kwargs):
+            return {"found": True}
+
         with (
             patch.object(
                 run_live_qa,
@@ -1281,6 +1411,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 run_live_qa,
                 "_google_sheet_contains_marker",
                 side_effect=fake_google_sheet_contains_marker,
+            ),
+            patch.object(
+                run_live_qa,
+                "_wait_for_google_sheet_marker",
+                side_effect=fake_wait_for_google_sheet_marker,
             ),
         ):
             ctx = self._dummy_ctx()
@@ -1374,9 +1509,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             captured_lookup.update(kwargs)
             return spreadsheet_id
 
-        async def fake_google_sheet_contains_marker(**kwargs):
+        async def fake_wait_for_google_sheet_marker(**kwargs):
             self.assertEqual(kwargs["spreadsheet_id"], spreadsheet_id)
             self.assertEqual(kwargs["marker"], captured_lookup["name"])
+            self.assertEqual(kwargs["timeout"], 90.0)
             return {"found": True}
 
         with (
@@ -1397,8 +1533,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             ),
             patch.object(
                 run_live_qa,
-                "_google_sheet_contains_marker",
-                side_effect=fake_google_sheet_contains_marker,
+                "_wait_for_google_sheet_marker",
+                side_effect=fake_wait_for_google_sheet_marker,
             ),
         ):
             result = asyncio.run(
@@ -1412,6 +1548,167 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             captured_lookup["mime_type"],
             "application/vnd.google-apps.spreadsheet",
         )
+
+    def test_gmail_to_sheet_delivery_records_empty_verifier_exception_type(self):
+        async def fake_live_chat_with_extensions_case(_ctx, **kwargs):
+            marker = kwargs["marker"]
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode="live:qa_6e_gmail_to_sheet_delivery",
+                success=True,
+                latency_ms=1,
+                details={
+                    "marker": marker,
+                    "text_excerpt": (
+                        "Google Sheet "
+                        "https://docs.google.com/spreadsheets/d/"
+                        "1AbCdEfGhIjKlMnOpQrStUvWxYz_1234567890/edit"
+                    ),
+                },
+            )
+
+        async def fake_wait_for_google_sheet_marker(**_kwargs):
+            raise TimeoutError()
+
+        with (
+            patch.object(
+                run_live_qa,
+                "_live_chat_with_extensions_case",
+                side_effect=fake_live_chat_with_extensions_case,
+            ),
+            patch.object(
+                run_live_qa,
+                "_google_runtime_access_token",
+                return_value=("fresh-access-token", {"source": "test"}),
+            ),
+            patch.object(
+                run_live_qa,
+                "_wait_for_google_sheet_marker",
+                side_effect=fake_wait_for_google_sheet_marker,
+            ),
+        ):
+            result = asyncio.run(
+                run_live_qa.case_qa_6e_gmail_to_sheet_delivery(self._dummy_ctx())
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.details["error"], "TimeoutError")
+
+    def test_wait_for_google_sheet_marker_retries_transient_read_errors(self):
+        class FakeHttpxReadError(Exception):
+            pass
+
+        attempts = 0
+
+        async def fake_google_sheet_contains_marker(**_kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise FakeHttpxReadError("read timed out")
+            return {"found": True, "row_count": 2}
+
+        with (
+            patch.object(google_api_helpers, "_HTTPX_HTTP_ERROR", FakeHttpxReadError),
+            patch.object(
+                google_api_helpers,
+                "_google_sheet_contains_marker",
+                side_effect=fake_google_sheet_contains_marker,
+            ),
+            patch.object(google_api_helpers.asyncio, "sleep", return_value=None),
+        ):
+            result = asyncio.run(
+                google_api_helpers._wait_for_google_sheet_marker(
+                    access_token="access-token",
+                    spreadsheet_id="spreadsheet-id",
+                    marker="marker",
+                    timeout=1.0,
+                )
+            )
+
+        self.assertEqual(result, {"found": True, "row_count": 2})
+        self.assertEqual(attempts, 2)
+
+    def test_wait_for_google_sheet_marker_reports_empty_exception_type(self):
+        class FakeHttpxReadError(Exception):
+            pass
+
+        async def fake_google_sheet_contains_marker(**_kwargs):
+            raise FakeHttpxReadError("")
+
+        with (
+            patch.object(google_api_helpers, "_HTTPX_HTTP_ERROR", FakeHttpxReadError),
+            patch.object(
+                google_api_helpers,
+                "_google_sheet_contains_marker",
+                side_effect=fake_google_sheet_contains_marker,
+            ),
+            patch.object(google_api_helpers.asyncio, "sleep", return_value=None),
+        ):
+            with self.assertRaisesRegex(AssertionError, "last_error=FakeHttpxReadError"):
+                asyncio.run(
+                    google_api_helpers._wait_for_google_sheet_marker(
+                        access_token="access-token",
+                        spreadsheet_id="spreadsheet-id",
+                        marker="marker",
+                        timeout=0.001,
+                    )
+                )
+
+    def test_wait_for_google_sheet_marker_does_not_retry_explicit_api_failures(self):
+        attempts = 0
+
+        async def fake_google_sheet_contains_marker(**_kwargs):
+            nonlocal attempts
+            attempts += 1
+            raise AssertionError("Google Sheets read returned HTTP 403: forbidden")
+
+        with (
+            patch.object(
+                google_api_helpers,
+                "_google_sheet_contains_marker",
+                side_effect=fake_google_sheet_contains_marker,
+            ),
+            patch.object(google_api_helpers.asyncio, "sleep", return_value=None),
+        ):
+            with self.assertRaisesRegex(AssertionError, "HTTP 403"):
+                asyncio.run(
+                    google_api_helpers._wait_for_google_sheet_marker(
+                        access_token="access-token",
+                        spreadsheet_id="spreadsheet-id",
+                        marker="marker",
+                        timeout=1.0,
+                    )
+                )
+
+        self.assertEqual(attempts, 1)
+
+    def test_wait_for_google_sheet_marker_propagates_unexpected_errors(self):
+        attempts = 0
+
+        async def fake_google_sheet_contains_marker(**_kwargs):
+            nonlocal attempts
+            attempts += 1
+            raise ValueError("bad sheet payload")
+
+        with (
+            patch.object(
+                google_api_helpers,
+                "_google_sheet_contains_marker",
+                side_effect=fake_google_sheet_contains_marker,
+            ),
+            patch.object(google_api_helpers.asyncio, "sleep", return_value=None),
+        ):
+            with self.assertRaisesRegex(ValueError, "bad sheet payload"):
+                asyncio.run(
+                    google_api_helpers._wait_for_google_sheet_marker(
+                        access_token="access-token",
+                        spreadsheet_id="spreadsheet-id",
+                        marker="marker",
+                        timeout=1.0,
+                    )
+                )
+
+        self.assertEqual(attempts, 1)
 
     def test_slack_side_effect_setup_prompts_avoid_connect_action_trigger(self):
         captured_prompts: dict[str, str] = {}
@@ -1533,27 +1830,316 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     config_path.read_text(encoding="utf-8"),
                 )
 
-    def test_slack_route_append_matches_exact_user_channel_pair(self):
+    def test_signed_slack_event_cases_prefer_real_route_user_actor(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "config.toml"
-            config_path.write_text(
-                '[slack]\n\n[[slack.channel_routes]]\nchannel_id = "D0QA"\n'
-                'subject_user_id = "U0FIRST"\n',
-                encoding="utf-8",
+            config_path.write_text("[slack]\n", encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                {
+                    "REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID": "UQAUSER",
+                    "REBORN_WEBUI_V2_LIVE_QA_SLACK_INBOUND_USER_ID": "U0REBORNQA",
+                },
+                clear=True,
+            ):
+                changed, user_id = run_live_qa._configure_slack_legacy_actor_if_needed(
+                    config_path,
+                    ["qa_5d_slack_strategy_doc_answer"],
+                )
+
+            self.assertTrue(changed)
+            self.assertEqual(user_id, "UQAUSER")
+            self.assertIn(
+                'slack_user_id = "UQAUSER"',
+                config_path.read_text(encoding="utf-8"),
+            )
+
+    def test_slack_personal_dm_seed_satisfies_delivery_target(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            result = run_live_qa._seed_slack_personal_dm_target(
+                home,
+                '[slack]\ninstallation_id = "install-alpha"\nteam_id = "T123"\n',
+                auth_user_id="user:web",
+                slack_user_id="UQAUSER",
+                dm_channel_id="D0QA",
             )
 
             self.assertTrue(
-                run_live_qa._append_slack_channel_route(
-                    config_path,
-                    subject_user_id="U0SECOND",
-                    channel_id="D0QA",
-                )
+                run_live_qa._has_slack_delivery_target("", home, "user:web"),
+                result,
+            )
+            self.assertEqual(
+                run_live_qa._persisted_slack_personal_dm_channel_id(home, "user:web"),
+                "D0QA",
+            )
+            db_path = home / "local-dev" / "reborn-local-dev.db"
+            with sqlite3.connect(db_path) as db:
+                dm_row = db.execute(
+                    """
+                    SELECT path, contents FROM root_filesystem_entries
+                    WHERE path LIKE '%/slack-personal-binding/dm-targets/%'
+                    """
+                ).fetchone()
+                row = db.execute(
+                    """
+                    SELECT path, contents FROM root_filesystem_entries
+                    WHERE path LIKE '%/outbound/communication-preferences/%'
+                    """
+                ).fetchone()
+            self.assertIsNotNone(dm_row)
+            self.assertEqual(
+                dm_row[0],
+                "/tenants/reborn-cli/shared/slack-personal-binding/dm-targets/"
+                "aW5zdGFsbC1hbHBoYQ/VDEyMw/dXNlcjp3ZWI.json",
+            )
+            self.assertIsNotNone(row)
+            preference = json.loads(row[1])
+            self.assertTrue(row[0].endswith(".json"))
+            self.assertEqual(
+                preference["scope"],
+                {
+                    "kind": "personal",
+                    "tenant_id": "reborn-cli",
+                    "user_id": "user:web",
+                },
+            )
+            self.assertIn("adapter:8:slack_v2;", preference["final_reply_target"])
+            self.assertIn("installation:13:install-alpha;", preference["final_reply_target"])
+            self.assertIn("space:4:T123;", preference["final_reply_target"])
+            self.assertIn("conversation:4:D0QA;", preference["final_reply_target"])
+            self.assertIn("actor_kind:10:slack_user;", preference["final_reply_target"])
+            self.assertIn("actor:7:UQAUSER;", preference["final_reply_target"])
+            self.assertEqual(preference["updated_by"], "user:web")
+
+    def test_slack_personal_dm_lookup_requires_exact_user_id(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            result = run_live_qa._seed_slack_personal_dm_target(
+                home,
+                '[slack]\ninstallation_id = "install-alpha"\nteam_id = "T123"\n',
+                auth_user_id="user:web-extra",
+                slack_user_id="UQAUSER",
+                dm_channel_id="D0QA",
             )
 
+            self.assertTrue(result["seeded"], result)
+            self.assertFalse(
+                run_live_qa._has_slack_delivery_target("", home, "user:web")
+            )
+            self.assertIsNone(
+                run_live_qa._persisted_slack_personal_dm_channel_id(home, "user:web")
+            )
+            self.assertEqual(
+                run_live_qa._persisted_slack_personal_dm_channel_id(
+                    home,
+                    "user:web-extra",
+                ),
+                "D0QA",
+            )
+
+    def test_slack_channel_route_no_longer_satisfies_delivery_target(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            config = (
+                '[slack]\n\n[[slack.channel_routes]]\nchannel_id = "D0QA"\n'
+                'subject_user_id = "user:web"\n'
+            )
+
+            self.assertFalse(
+                run_live_qa._has_slack_delivery_target(config, home, "user:web")
+            )
+
+    def test_remove_dm_slack_channel_routes_preserves_shared_routes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.toml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "[slack]",
+                        'enabled = true',
+                        "",
+                        "[[slack.channel_routes]]",
+                        'channel_id = "D0STALE"',
+                        'subject_user_id = "user:web"',
+                        "",
+                        "[[slack.channel_routes]]",
+                        'channel_id = "C0SHARED"',
+                        'subject_user_id = "user:web"',
+                        "",
+                        "[telegram]",
+                        'enabled = false',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            cleanup = run_live_qa._remove_dm_slack_channel_routes(config_path)
             config = config_path.read_text(encoding="utf-8")
-            self.assertEqual(config.count('channel_id = "D0QA"'), 2)
-            self.assertIn('subject_user_id = "U0FIRST"', config)
-            self.assertIn('subject_user_id = "U0SECOND"', config)
+
+            self.assertEqual(cleanup, {"changed": True, "removed": 1})
+            self.assertNotIn("D0STALE", config)
+            self.assertIn("C0SHARED", config)
+            self.assertIn("[telegram]", config)
+
+    def test_prepare_reborn_home_removes_copied_stale_dm_channel_route(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            source_home = tmp / "source"
+            source_home.mkdir()
+            (source_home / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[llm]",
+                        'provider_id = "nearai"',
+                        'model = "deepseek-ai/DeepSeek-V4-Flash"',
+                        'api_key_env = "NEARAI_API_KEY"',
+                        "",
+                        "[slack]",
+                        'enabled = true',
+                        'signing_secret_env = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET"',
+                        'bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"',
+                        "",
+                        "[[slack.channel_routes]]",
+                        'channel_id = "D0STALE"',
+                        'subject_user_id = "user:web"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                output_dir=tmp / "out",
+                require_slack_live=False,
+                reborn_home=source_home,
+            )
+            env = {
+                "LIVE_OPENAI_COMPATIBLE_API_KEY": "fake-live-llm-key",
+                "REBORN_WEBUI_V2_LIVE_QA_LLM_API_KEY_ENV": "LIVE_OPENAI_COMPATIBLE_API_KEY",
+            }
+
+            with patch.dict(os.environ, env, clear=False):
+                prepared = run_live_qa.prepare_reborn_home(
+                    args,
+                    ["qa_3a_slack_connect"],
+                )
+            config = (prepared.path / "config.toml").read_text(encoding="utf-8")
+
+            self.assertNotIn("D0STALE", config)
+            self.assertEqual(
+                prepared.preflight["slack"]["stale_dm_route_cleanup"],
+                {"changed": True, "removed": 1},
+            )
+
+    def test_with_page_writes_browser_diagnostics_on_failure(self):
+        class FakeTracing:
+            async def start(self, **_kwargs):
+                return None
+
+            async def stop(self, *, path=None):
+                if path:
+                    Path(path).write_text("trace", encoding="utf-8")
+
+        class FakeRequest:
+            def url(self):
+                return "https://example.test/callback?token=secret-token"
+
+            def method(self):
+                return "GET"
+
+            def failure(self):
+                return {"errorText": "net::ERR_FAILED"}
+
+        class FakeMessage:
+            def type(self):
+                return "error"
+
+            def text(self):
+                return "bearer super-secret-token"
+
+            def location(self):
+                return {"url": "https://example.test/app.js"}
+
+        class FakePage:
+            def on(self, event, callback):
+                if event == "console":
+                    callback(FakeMessage())
+                if event == "pageerror":
+                    callback(RuntimeError("page exploded"))
+
+            async def screenshot(self, *, path, full_page):
+                Path(path).write_text(f"screenshot full_page={full_page}", encoding="utf-8")
+
+        class FakeContext:
+            def __init__(self):
+                self.tracing = FakeTracing()
+                self.page = FakePage()
+
+            def on(self, event, callback):
+                if event == "requestfailed":
+                    callback(FakeRequest())
+                if event == "page":
+                    callback(self.page)
+
+            async def new_page(self):
+                return self.page
+
+            async def close(self):
+                return None
+
+        class FakeBrowser:
+            def __init__(self):
+                self.context = FakeContext()
+
+            async def new_context(self):
+                return self.context
+
+            async def close(self):
+                return None
+
+        class FakeChromium:
+            async def launch(self, **_kwargs):
+                return FakeBrowser()
+
+        class FakePlaywright:
+            def __init__(self):
+                self.chromium = FakeChromium()
+
+        class FakeAsyncPlaywright:
+            async def __aenter__(self):
+                return FakePlaywright()
+
+            async def __aexit__(self, *_args):
+                return None
+
+        async def failing_action(_page):
+            raise AssertionError("boom")
+
+        fake_async_api = types.SimpleNamespace(
+            async_playwright=lambda: FakeAsyncPlaywright()
+        )
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(
+            sys.modules,
+            {
+                "playwright": types.SimpleNamespace(),
+                "playwright.async_api": fake_async_api,
+            },
+        ):
+            output_dir = Path(tmpdir)
+            with self.assertRaises(AssertionError):
+                asyncio.run(
+                    run_live_qa._with_page(output_dir, "case_a", failing_action)
+                )
+
+            diagnostics_dir = output_dir / "browser-diagnostics" / "case_a"
+            events = (diagnostics_dir / "browser-events.jsonl").read_text(encoding="utf-8")
+            self.assertIn("requestfailed", events)
+            self.assertIn("console", events)
+            self.assertIn("<REDACTED>", events)
+            self.assertTrue((diagnostics_dir / "browser-summary.json").exists())
+            self.assertTrue((diagnostics_dir / "playwright-trace.zip").exists())
+            self.assertTrue((output_dir / "case_a.failure.png").exists())
 
     def test_slack_config_values_are_toml_escaped(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2085,6 +2671,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             cases["qa_5d_slack_strategy_doc_answer"]["status"],
             "gated:requires_live_google_product_auth",
         )
+        self.assertTrue(cases["qa_7c_slack_bug_logger_routine"]["implemented"])
+        self.assertTrue(cases["qa_7c_slack_bug_logger_routine"]["requires_slack_target"])
         self.assertTrue(cases["qa_6e_gmail_to_sheet_delivery"]["implemented"])
         self.assertEqual(
             cases["qa_6e_gmail_to_sheet_delivery"]["status"],

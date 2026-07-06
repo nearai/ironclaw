@@ -67,13 +67,13 @@ If a topic is not covered there yet, use the crate-local `CLAUDE.md` files, publ
 | Local per-worktree environment | `docs/reborn/harness/local-dev.md` |
 | Replay and compatibility fixtures | `docs/reborn/harness/replay.md` |
 | Logs, events, traces, debug bundles | `docs/reborn/harness/observability.md` |
+| Change-category landing policy for review | `docs/reborn/harness/landing-policy.md` |
 
 ## Existing harness assets
 
 Reborn should reuse the existing IronClaw harness where possible:
 
 - `scripts/replay-snap.sh`
-- `scripts/trace-coverage.sh`
 - `tests/fixtures/llm_traces/README.md`
 - `tests/support/LIVE_TESTING.md`
 - `.github/workflows/replay-gate.yml`

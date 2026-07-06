@@ -50,7 +50,6 @@ case "${1:-}" in
       --check \
       --no-default-features \
       --features "libsql,replay" \
-      --test e2e_engine_v2 \
       --test e2e_recorded_trace \
       --test e2e_live
     ;;

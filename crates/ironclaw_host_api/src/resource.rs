@@ -262,6 +262,19 @@ pub enum ReservationStatus {
     Released,
 }
 
+/// Parsed capability-host execution result shared by runtime lanes.
+///
+/// Runtime lanes (MCP, scripts, …) all return the same resource-governed
+/// capability output shape; this is the single owner. Non-serde by design —
+/// it is an in-process host-call value, not a wire/persistence type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityHostResult {
+    pub output: serde_json::Value,
+    pub reservation_id: crate::ResourceReservationId,
+    pub usage: ResourceUsage,
+    pub output_bytes: u64,
+}
+
 /// Receipt returned when a reservation is reconciled or released.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceReceipt {

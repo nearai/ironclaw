@@ -16,9 +16,9 @@ use std::{
 use futures_util::FutureExt as _;
 use ironclaw_extensions::{ExtensionPackage, ExtensionRuntime};
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, MountView, ResourceEstimate, ResourceReservation,
-    ResourceReservationId, ResourceScope, ResourceUsage, RuntimeHttpEgress, RuntimeHttpEgressError,
-    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind,
+    CapabilityHostHttpRequest, CapabilityHostResult, CapabilityId, ExtensionId, MountView,
+    ResourceEstimate, ResourceReservation, ResourceReservationId, ResourceScope, ResourceUsage,
+    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressResponse, RuntimeKind,
 };
 use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt};
 use serde_json::Value;
@@ -138,34 +138,11 @@ impl ScriptBackend for DockerScriptBackend {
     }
 }
 
-/// Parsed script capability result.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScriptCapabilityResult {
-    pub output: Value,
-    pub reservation_id: ResourceReservationId,
-    pub usage: ResourceUsage,
-    pub output_bytes: u64,
-}
-
 /// Full resource-governed script execution result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScriptExecutionResult {
-    pub result: ScriptCapabilityResult,
+    pub result: CapabilityHostResult,
     pub receipt: ResourceReceipt,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScriptHostHttpRequest {
-    pub scope: ResourceScope,
-    pub capability_id: CapabilityId,
-    pub method: ironclaw_host_api::NetworkMethod,
-    pub url: String,
-    pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
-    pub network_policy: ironclaw_host_api::NetworkPolicy,
-    pub credential_injections: Vec<ironclaw_host_api::RuntimeCredentialInjection>,
-    pub response_body_limit: Option<u64>,
-    pub timeout_ms: Option<u32>,
 }
 
 pub type ScriptHostHttpResponse = RuntimeHttpEgressResponse;
@@ -191,22 +168,12 @@ where
 
     pub async fn request(
         &self,
-        request: ScriptHostHttpRequest,
+        request: CapabilityHostHttpRequest,
     ) -> Result<ScriptHostHttpResponse, ScriptHostHttpError> {
-        AssertUnwindSafe(self.egress.execute(RuntimeHttpEgressRequest {
-            runtime: RuntimeKind::Script,
-            scope: request.scope,
-            capability_id: request.capability_id,
-            method: request.method,
-            url: request.url,
-            headers: request.headers,
-            body: request.body,
-            network_policy: request.network_policy,
-            credential_injections: request.credential_injections,
-            response_body_limit: request.response_body_limit,
-            save_body_to: None,
-            timeout_ms: request.timeout_ms,
-        }))
+        AssertUnwindSafe(
+            self.egress
+                .execute(request.into_runtime_request(RuntimeKind::Script)),
+        )
         .catch_unwind()
         .await
         .map_err(|_| ScriptHostHttpError::Egress {
@@ -348,7 +315,7 @@ where
         };
         let receipt = governor.reconcile(reservation.id, usage.clone())?;
         Ok(ScriptExecutionResult {
-            result: ScriptCapabilityResult {
+            result: CapabilityHostResult {
                 output: parsed,
                 reservation_id: reservation.id,
                 usage,

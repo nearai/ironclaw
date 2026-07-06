@@ -34,7 +34,7 @@ function NotificationRow({ message, unread, onOpen }) {
           ${unread &&
           html`<span
             aria-label=${t("notifications.unread")}
-            className="h-2 w-2 shrink-0 rounded-full bg-[var(--v2-accent)]"
+            className="h-2 w-2 shrink-0 rounded-full bg-[var(--v2-danger-text)]"
           />`}
         </span>
         <span className="mt-0.5 block truncate text-sm text-[var(--v2-text)]">

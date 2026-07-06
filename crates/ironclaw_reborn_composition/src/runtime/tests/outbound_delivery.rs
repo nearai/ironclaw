@@ -19,7 +19,7 @@ use ironclaw_turns::{
 
 use crate::RebornCompositionProfile;
 use crate::input::RebornBuildInput;
-use crate::outbound_preferences::{
+use crate::outbound::{
     OutboundDeliveryTargetEntry, OutboundDeliveryTargetProvider,
     OutboundDeliveryTargetRegistrationOutcome,
 };

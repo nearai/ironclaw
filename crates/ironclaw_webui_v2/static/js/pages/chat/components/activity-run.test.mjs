@@ -29,12 +29,14 @@ test("ActivityRun auto-expands running tool activity", () => {
     MarkdownRenderer() {},
     React: {
       useEffect: () => {},
+      useMemo: (factory) => factory(),
       useState: (initial) => [typeof initial === "function" ? initial() : initial, () => {}],
     },
     summarizeActivity: () => ({
       label: "Activity - 1 tool, running",
       hasError: false,
     }),
+    useT: () => (key) => key,
     ToolActivity() {},
   };
 
@@ -62,6 +64,7 @@ test("ActivityRun auto-expands declined tool activity", () => {
     MarkdownRenderer() {},
     React: {
       useEffect: () => {},
+      useMemo: (factory) => factory(),
       useState: (initial) => [typeof initial === "function" ? initial() : initial, () => {}],
     },
     summarizeActivity: () => ({
@@ -69,6 +72,7 @@ test("ActivityRun auto-expands declined tool activity", () => {
       hasError: false,
       hasDeclined: true,
     }),
+    useT: () => (key) => key,
     ToolActivity() {},
   };
 

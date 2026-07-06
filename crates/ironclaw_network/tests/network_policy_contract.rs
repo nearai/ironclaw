@@ -3,8 +3,7 @@ use ironclaw_host_api::{
     ProjectId, ResourceScope, TenantId, ThreadId, UserId,
 };
 use ironclaw_network::{
-    NetworkPolicyEnforcer, NetworkRequest, StaticNetworkPolicyEnforcer, network_target_for_url,
-    target_matches_pattern,
+    NetworkRequest, StaticNetworkPolicyEnforcer, network_target_for_url, target_matches_pattern,
 };
 
 #[tokio::test]

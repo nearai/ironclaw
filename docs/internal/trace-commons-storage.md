@@ -93,9 +93,7 @@ Current guidance after the server split:
   storage migrations.
 - Before creating any future Ironclaw migration, refresh refs with
   `git fetch origin` and re-check:
-  - `git ls-tree --name-only origin/staging:migrations`
   - `git ls-tree --name-only origin/main:migrations`
-  - `git show origin/staging:src/db/libsql_migrations.rs | rg '"[a-z_]+",|\\([[:space:]]*[0-9]+,'`
   - `git show origin/main:src/db/libsql_migrations.rs | rg '"[a-z_]+",|\\([[:space:]]*[0-9]+,'`
 - Do not add `IF NOT EXISTS` to Ironclaw PostgreSQL migration DDL unless the
   repo's refinery policy changes. PostgreSQL migrations should be one-shot and

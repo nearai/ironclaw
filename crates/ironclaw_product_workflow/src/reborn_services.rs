@@ -230,6 +230,40 @@ impl ConnectableChannelsProductFacade for StaticConnectableChannelsProductFacade
     }
 }
 
+/// Per-user channel connection state. Returns, for the calling user, which
+/// channel extensions they have personally connected (e.g. Slack pairing).
+/// Keyed by channel package id (e.g. `"slack"`) -> `true` when connected.
+/// Only channels that have a per-user connection concept appear in the map;
+/// absence means "no per-user connection concept for this channel".
+#[async_trait]
+pub trait ChannelConnectionFacade: Send + Sync {
+    async fn caller_channel_connections(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<std::collections::HashMap<String, bool>, RebornServicesError>;
+
+    async fn disconnect_channel_for_caller(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _channel: &str,
+    ) -> Result<(), RebornServicesError> {
+        Err(RebornServicesError::service_unavailable(false))
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StaticChannelConnectionFacade;
+
+#[async_trait]
+impl ChannelConnectionFacade for StaticChannelConnectionFacade {
+    async fn caller_channel_connections(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<std::collections::HashMap<String, bool>, RebornServicesError> {
+        Ok(std::collections::HashMap::new())
+    }
+}
+
 #[async_trait]
 pub trait OperatorStatusService: Send + Sync {
     async fn status(
@@ -1226,6 +1260,24 @@ fn tool_permission_state_wire(state: ToolPermissionState) -> &'static str {
         ToolPermissionState::AskEachTime => "ask_each_time",
         ToolPermissionState::Disabled => "disabled",
     }
+}
+
+/// Wire enum for the WebUI settings/tools permission request body.
+///
+/// Request-side vocabulary on the RebornServicesApi contract surface: the
+/// three resolved [`ToolPermissionState`] values plus `default`, which clears
+/// the stored per-capability override. The serialized strings must stay
+/// byte-identical to what [`parse_tool_permission_state`] accepts and
+/// [`tool_permission_state_wire`] emits — the
+/// `settings_tool_permission_state_wire_strings_stay_linked` test pins that
+/// link so the request enum cannot drift from the storage vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsToolPermissionState {
+    Default,
+    AlwaysAllow,
+    AskEachTime,
+    Disabled,
 }
 
 enum ToolPermissionUpdate {
@@ -2431,6 +2483,7 @@ pub struct RebornServices {
     automation_facade: Arc<dyn AutomationProductFacade>,
     skills_facade: Arc<dyn SkillsProductFacade>,
     connectable_channels_facade: Arc<dyn ConnectableChannelsProductFacade>,
+    channel_connection_facade: Arc<dyn ChannelConnectionFacade>,
     outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade>,
     operator_status: Arc<dyn OperatorStatusService>,
     operator_logs: Arc<dyn OperatorLogsService>,
@@ -2465,6 +2518,7 @@ impl RebornServices {
             automation_facade: Arc::new(UnsupportedAutomationProductFacade::new_static()),
             skills_facade: Arc::new(UnsupportedSkillsProductFacade::new_static()),
             connectable_channels_facade: Arc::new(StaticConnectableChannelsProductFacade::default()),
+            channel_connection_facade: Arc::new(StaticChannelConnectionFacade),
             outbound_preferences_facade: Arc::new(
                 UnsupportedOutboundPreferencesProductFacade::new_static(),
             ),
@@ -2590,6 +2644,14 @@ impl RebornServices {
         connectable_channels_facade: Arc<dyn ConnectableChannelsProductFacade>,
     ) -> Self {
         self.connectable_channels_facade = connectable_channels_facade;
+        self
+    }
+
+    pub fn with_channel_connection_facade(
+        mut self,
+        channel_connection_facade: Arc<dyn ChannelConnectionFacade>,
+    ) -> Self {
+        self.channel_connection_facade = channel_connection_facade;
         self
     }
 
@@ -3882,6 +3944,7 @@ impl RebornServicesApi for RebornServices {
         extensions::list_extensions(
             Arc::clone(&self.lifecycle_facade),
             self.extension_credentials.clone(),
+            Arc::clone(&self.channel_connection_facade),
             caller,
         )
         .await
@@ -3987,7 +4050,13 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
         package_ref: LifecyclePackageRef,
     ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        extensions::remove_extension(self.lifecycle_facade.as_ref(), caller, package_ref).await
+        extensions::remove_extension(
+            self.lifecycle_facade.as_ref(),
+            self.channel_connection_facade.clone(),
+            caller,
+            package_ref,
+        )
+        .await
     }
 
     async fn setup_extension(
@@ -6320,6 +6389,53 @@ fn generated_thread_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The WebUI settings/tools request enum must use the exact wire strings
+    /// the operator-config storage parser accepts and the entry writer emits.
+    /// This pins the type link so the request vocabulary cannot drift from
+    /// the approvals-owned resolved-state vocabulary (audit 2026-07, 6a).
+    #[test]
+    fn settings_tool_permission_state_wire_strings_stay_linked() {
+        let cases = [
+            (SettingsToolPermissionState::Default, "default", None),
+            (
+                SettingsToolPermissionState::AlwaysAllow,
+                "always_allow",
+                Some(ToolPermissionState::AlwaysAllow),
+            ),
+            (
+                SettingsToolPermissionState::AskEachTime,
+                "ask_each_time",
+                Some(ToolPermissionState::AskEachTime),
+            ),
+            (
+                SettingsToolPermissionState::Disabled,
+                "disabled",
+                Some(ToolPermissionState::Disabled),
+            ),
+        ];
+        for (state, wire, resolved) in cases {
+            let serialized = serde_json::to_value(state).unwrap();
+            assert_eq!(serialized, serde_json::Value::String(wire.to_string()));
+            assert_eq!(
+                serde_json::from_value::<SettingsToolPermissionState>(serialized).unwrap(),
+                state
+            );
+            // Round-trips through the storage parser the facade applies on set.
+            let update =
+                parse_tool_permission_state(&serde_json::json!({ "state": wire })).unwrap();
+            match (update, resolved) {
+                (ToolPermissionUpdate::Default, None) => {}
+                (ToolPermissionUpdate::State(parsed), Some(expected)) => {
+                    assert_eq!(parsed, expected);
+                    // The resolved states serialize to the same strings the
+                    // config entry writer emits.
+                    assert_eq!(tool_permission_state_wire(expected), wire);
+                }
+                _ => panic!("wire string {wire} no longer parses to the expected update"),
+            }
+        }
+    }
 
     /// Every `ProjectServiceError` variant projects to a sanitized facade error
     /// with the expected coarse code/status, and `InvalidInput`'s field name is

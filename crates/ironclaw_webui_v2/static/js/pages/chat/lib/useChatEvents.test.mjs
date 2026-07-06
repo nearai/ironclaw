@@ -359,6 +359,42 @@ test("useChatEvents: approval gate creates activity from stable invocation id be
   assert.equal(harness.messages[0].gateActivity, false);
 });
 
+test("useChatEvents: an extension activation preview becomes a tool card (pairing rides the gate rail)", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "capability_display_preview",
+    frame: {
+      preview: {
+        invocation_id: "invocation-extension-activate",
+        turn_run_id: "run-1",
+        thread_id: "thread-1",
+        capability_id: "builtin.extension_activate",
+        status: "completed",
+        title: "extension_activate",
+        output_preview: JSON.stringify({
+          package_ref: { kind: "extension", id: "telegram" },
+          phase: "active",
+          message:
+            "Telegram is installed as an external channel, but the user's account still needs channel-specific connection or pairing. Tell the user to open the extension's app or bot, get the pairing code or connection challenge, and paste it into the WebChat connection panel rather than normal chat.",
+          payload: {
+            kind: "extension_activate",
+            activated: true,
+            visible_capability_ids: [],
+          },
+        }),
+      },
+    },
+  });
+
+  // The event stream only materializes the activation tool card. A connectable
+  // channel that needs pairing now blocks the turn as a standard auth gate
+  // (manual_token + connection), so the pairing card is driven by pendingGate —
+  // there is no timeline-derived panel for this preview to open.
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].toolName, "extension_activate");
+});
+
 test("useChatEvents: cleared non-auth gates are not restored by later projections", () => {
   const runId = "run-resource-1";
   const harness = createUseChatEventsHarness();
@@ -601,6 +637,7 @@ test("useChatEvents: gate-only projection rebuilds pending gate from gate identi
     accountLabel: "",
     authorizationUrl: null,
     expiresAt: null,
+    connection: null,
   });
   assert.deepEqual(plain(harness.activeRun), {
     runId,

@@ -1,3 +1,4 @@
+use ironclaw_host_api::DispatchInputIssueCode;
 use serde::{Deserialize, Serialize};
 
 use super::host::CapabilityFailureKind;
@@ -214,7 +215,7 @@ pub enum ObservationTrust {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityInputIssue {
     pub path: String,
-    pub code: CapabilityInputIssueCode,
+    pub code: DispatchInputIssueCode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -238,15 +239,6 @@ impl CapabilityInputIssue {
             "model observation issue schema path",
         )
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CapabilityInputIssueCode {
-    MissingRequired,
-    UnexpectedField,
-    TypeMismatch,
-    InvalidValue,
 }
 
 fn validate_len(len: usize, max: usize, label: &'static str) -> Result<(), String> {
@@ -297,7 +289,7 @@ mod tests {
             detail: ToolObservationDetail::InvalidInput {
                 issues: vec![CapabilityInputIssue {
                     path: "file_path".to_string(),
-                    code: CapabilityInputIssueCode::MissingRequired,
+                    code: DispatchInputIssueCode::MissingRequired,
                     expected: Some("required field".to_string()),
                     received: None,
                     schema_path: Some("required".to_string()),
