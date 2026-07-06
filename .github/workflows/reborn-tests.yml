@@ -643,11 +643,28 @@ jobs:
             tests/integration/coverage-exemptions.toml \
             | tee -a "$GITHUB_STEP_SUMMARY"
 
+      # Coverage ratchet gate: compares the merged lcov above against the
+      # committed floor (tests/integration/coverage-floor.toml). Still pure
+      # post-processing, no test execution — stays inside this job's 10-min
+      # budget. While [global].enforce = false in the floor file this always
+      # exits 0 (dry-run soak period); it prints every violation regardless,
+      # prefixed "[dry-run, would FAIL]", plus an unconditional mode banner.
+      - name: Render Reborn coverage ratchet
+        run: |
+          set -euo pipefail
+          scripts/ci/reborn-coverage-ratchet.sh \
+            reborn-integration-merged.lcov \
+            tests/integration/coverage-exemptions.toml \
+            tests/integration/coverage-floor.toml \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
       # Surface the same %/hole-list as a sticky PR comment so it lives in the
       # conversation, not just the job summary. PR-only, and non-fatal by
       # design: fork PRs get a read-only GITHUB_TOKEN and the comment API
-      # 403s, which must never red the check. This is visibility, never a gate
-      # (mirrors the retired reborn-coverage.yml workflow's comment step).
+      # 403s, which must never red the check. The comment itself never gates
+      # regardless of the ratchet's enforce bit (mirrors the retired
+      # reborn-coverage.yml workflow's comment step) — enforcement happens in
+      # the "Render Reborn coverage ratchet" step above, not here.
       - name: Post sticky coverage comment
         if: github.event_name == 'pull_request'
         continue-on-error: true
@@ -658,6 +675,7 @@ jobs:
           scripts/ci/reborn-coverage-comment.sh
           reborn-integration-merged.lcov
           tests/integration/coverage-exemptions.toml
+          tests/integration/coverage-floor.toml
 
       # The merged lcov is the full per-file detail behind the summary table —
       # the "real hole list" — kept as an artifact for offline inspection.
@@ -803,20 +821,23 @@ jobs:
 
           # This is the ONLY execution of the 27 flat reborn_integration_*
           # suites (see the reborn-integration-coverage job), so it gates like
-          # every other test job above — unlike coverage-report below, this is
-          # real pass/fail, not the coverage percentage.
+          # every other test job above — real pass/fail, not the coverage
+          # percentage (that's coverage-report below).
           if [[ "${{ needs.reborn-integration-coverage.result }}" != "success" ]]; then
             echo "One or more Reborn integration-tier coverage lanes failed: ${{ needs.reborn-integration-coverage.result }}"
             exit 1
           fi
 
-          # coverage-report only merges lane + crate-bucket lcov files and
-          # renders/posts the informational summary — it never re-runs tests, so a failure here
-          # is a reporting-pipeline bug, not a test regression. Warn instead of
-          # failing the roll-up: the coverage signal has no ratchet/threshold
-          # yet, and the underlying tests are already gated above.
+          # coverage-report merges lane + crate-bucket lcov, renders/posts the
+          # summary, AND runs the coverage ratchet (committed floor file,
+          # tests/integration/coverage-floor.toml) — a ratchet violation is a
+          # real regression, not a reporting-pipeline bug, so this now gates
+          # like every other job above. (While [global].enforce = false in the
+          # floor file, the ratchet step always exits 0, so this stays green
+          # during the dry-run soak period — see the floor file's own header.)
           if [[ "${{ needs.coverage-report.result }}" != "success" ]]; then
-            echo "::warning::Reborn integration-tier coverage report job did not succeed: ${{ needs.coverage-report.result }} (informational only, not gating)"
+            echo "Reborn coverage-report job failed (merge/summary error, or a coverage ratchet violation): ${{ needs.coverage-report.result }}"
+            exit 1
           fi
 
           if [[ "${{ needs.webui-v2-js-tests.result }}" != "success" ]]; then
