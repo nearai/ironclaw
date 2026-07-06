@@ -652,11 +652,13 @@ impl RebornIntegrationGroupBuilder {
         // `.with_checkpoint_state_store` is the de-mask fix: without it a
         // genuinely-`Failed` run is reported as the masking
         // `driver_protocol_violation` instead of its true failure category.
+        let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
         let turn_state_for_evidence: Arc<dyn TurnStateStore> = turn_store.clone();
         let mut evidence = ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
             group_thread_harness.service.clone(),
             turn_state_for_evidence,
             Arc::clone(&loop_checkpoint_store),
+            subagent_gate_store.clone(),
             group_thread_scope.clone(),
         )
         .with_checkpoint_state_store(checkpoint_state_store.clone());
@@ -760,7 +762,7 @@ impl RebornIntegrationGroupBuilder {
             capability_surface_resolver,
             capability_result_writer,
             subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
-            subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
+            subagent_gate_store,
             subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
             subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
                 capability_input_resolver,
