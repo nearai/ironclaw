@@ -1991,11 +1991,12 @@ mod tests {
             .expect("approved missing-target set call returns a capability outcome");
         match missing_set_outcome {
             CapabilityOutcome::Failed(failure) => {
+                // Missing target routes through `outbound_delivery_outcome`
+                // (recoverable, model-visible InvalidInput) rather than the
+                // former host-error special-case; the disposition function
+                // gives a fixed, host-authored summary.
                 assert_eq!(failure.error_kind, CapabilityFailureKind::InvalidInput);
-                assert_eq!(
-                    failure.safe_summary,
-                    "outbound delivery target is not available"
-                );
+                assert_eq!(failure.safe_summary, "invalid outbound delivery request");
             }
             outcome => {
                 panic!("approved missing target should fail non-terminally, got {outcome:?}")
@@ -2343,11 +2344,11 @@ mod tests {
             .expect("missing-target set call returns a capability outcome");
         match missing_set_outcome {
             CapabilityOutcome::Failed(failure) => {
+                // Missing target routes through `outbound_delivery_outcome`
+                // (recoverable, model-visible InvalidInput); the disposition
+                // function gives a fixed, host-authored summary.
                 assert_eq!(failure.error_kind, CapabilityFailureKind::InvalidInput);
-                assert_eq!(
-                    failure.safe_summary,
-                    "outbound delivery target is not available"
-                );
+                assert_eq!(failure.safe_summary, "invalid outbound delivery request");
             }
             outcome => panic!("missing target should fail non-terminally, got {outcome:?}"),
         }

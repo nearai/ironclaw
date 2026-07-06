@@ -97,9 +97,9 @@ use ironclaw_turns::{
     CancelRunResponse, DefaultTurnCoordinator, EventCursor, GateRef, GetRunStateRequest,
     InMemoryTurnStateStore, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
     ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, RunProfileId, RunProfileVersion,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCapacityResource,
-    TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId, TurnRunState, TurnScope,
-    TurnStatus,
+    SanitizedFailure, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
+    TurnCapacityResource, TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId,
+    TurnRunState, TurnScope, TurnStatus,
 };
 use secrecy::SecretString;
 use serde_json::json;
@@ -257,6 +257,7 @@ struct FakeTurnCoordinator {
     parked_gate_ref: Mutex<Option<GateRef>>,
     parked_auth_gate: Mutex<bool>,
     parked_approval_gate: Mutex<bool>,
+    run_state_failure: Mutex<Option<SanitizedFailure>>,
 }
 
 impl Default for FakeTurnCoordinator {
@@ -276,6 +277,7 @@ impl Default for FakeTurnCoordinator {
             parked_gate_ref: Mutex::default(),
             parked_auth_gate: Mutex::default(),
             parked_approval_gate: Mutex::default(),
+            run_state_failure: Mutex::default(),
         }
     }
 }
@@ -330,6 +332,10 @@ impl FakeTurnCoordinator {
 
     fn set_run_state_status(&self, status: TurnStatus) {
         *self.explicit_run_status.lock().expect("lock") = Some(status);
+    }
+
+    fn set_run_state_failure(&self, failure: SanitizedFailure) {
+        *self.run_state_failure.lock().expect("lock") = Some(failure);
     }
 
     fn submission_count(&self) -> usize {
@@ -527,7 +533,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
             gate_ref,
             blocked_activity_id: None,
             credential_requirements: Vec::new(),
-            failure: None,
+            failure: self.run_state_failure.lock().expect("lock").clone(),
             event_cursor: EventCursor(17),
             product_context: None,
             resume_disposition: None,
@@ -9803,6 +9809,16 @@ fn assert_setup_validation(
 #[tokio::test]
 async fn get_run_state_returns_stable_dto_without_m3_internal_fields() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
+    // A failed run carries a model-visible `detail` (free-form backend cause
+    // text, scrubbed only for secret VALUES). The public run-state DTO must
+    // keep the user-facing `category` but strip `detail` so internal
+    // diagnostics never reach the browser (see
+    // `SanitizedFailure::public_projection`).
+    coordinator.set_run_state_failure(
+        SanitizedFailure::new("model_unavailable")
+            .expect("valid category")
+            .with_detail("HTTP 500 from provider at /internal/models/route-xyz"),
+    );
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
@@ -9830,12 +9846,19 @@ async fn get_run_state_returns_stable_dto_without_m3_internal_fields() {
         RunProfileId::default_profile().as_str()
     );
     assert!(response.gate_ref.is_none());
-    assert!(response.failure.is_none());
+    // The user-facing category survives; the model-visible detail is stripped.
+    let failure = response.failure.as_ref().expect("failure present");
+    assert_eq!(failure.category(), "model_unavailable");
+    assert_eq!(
+        failure.detail(),
+        None,
+        "public run-state DTO must not expose the model-visible failure detail"
+    );
     assert!(response.checkpoint_id.is_none());
     assert_eq!(coordinator.run_state_request_count(), 1);
 
-    // Stable DTO must not surface M3-internal binding refs, model route, or
-    // raw turn scope to WebUI consumers.
+    // Stable DTO must not surface M3-internal binding refs, model route, raw
+    // turn scope, or the internal failure detail to WebUI consumers.
     let rendered = serde_json::to_string(&response).expect("json");
     assert!(!rendered.contains("source_binding_ref"));
     assert!(!rendered.contains("reply_target_binding_ref"));
@@ -9843,6 +9866,8 @@ async fn get_run_state_returns_stable_dto_without_m3_internal_fields() {
     assert!(!rendered.contains("webui-src:replayed"));
     assert!(!rendered.contains("webui-reply:replayed"));
     assert!(!rendered.contains("\"scope\""));
+    assert!(!rendered.contains("\"detail\""));
+    assert!(!rendered.contains("/internal/models/route-xyz"));
 }
 
 #[tokio::test]

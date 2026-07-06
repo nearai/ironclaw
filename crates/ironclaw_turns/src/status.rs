@@ -236,6 +236,21 @@ impl SanitizedFailure {
     pub fn into_category(self) -> String {
         self.category
     }
+
+    /// A copy of this failure with the model-visible `detail` stripped.
+    ///
+    /// `detail` is free-form, model-visible raw cause text intended only for
+    /// the failure-explainer prompt — it can carry backend diagnostics (paths,
+    /// provider errors, internal context) and is scrubbed for secret VALUES,
+    /// not for public exposure. Public/WebUI surfaces must serialize this
+    /// projection instead of the raw failure so that internal detail never
+    /// reaches the browser; `category` (the user-facing signal) is retained.
+    pub fn public_projection(&self) -> Self {
+        Self {
+            category: self.category.clone(),
+            detail: None,
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for SanitizedFailure {
@@ -625,5 +640,29 @@ mod tests {
         let restored: SanitizedFailure = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(restored, failure);
         assert_eq!(restored.detail(), Some("HTTP 404 model not found"));
+    }
+
+    #[test]
+    fn public_projection_strips_detail_and_keeps_category() {
+        let failure = SanitizedFailure::new("model_unavailable")
+            .expect("category")
+            .with_detail("HTTP 500 from provider at /internal/models/route-xyz");
+
+        let public = failure.public_projection();
+        assert_eq!(public.category(), "model_unavailable");
+        assert_eq!(
+            public.detail(),
+            None,
+            "public projection must not carry the model-visible detail"
+        );
+
+        // Serialized public shape omits the detail key entirely, and the
+        // original is left untouched (projection is a copy).
+        let rendered = serde_json::to_string(&public).expect("serialize");
+        assert_eq!(rendered, r#"{"category":"model_unavailable"}"#);
+        assert_eq!(
+            failure.detail(),
+            Some("HTTP 500 from provider at /internal/models/route-xyz")
+        );
     }
 }

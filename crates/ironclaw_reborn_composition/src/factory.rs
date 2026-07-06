@@ -5662,7 +5662,12 @@ mod tests {
             panic!("expected fail-closed handler outcome, got {outcome:?}");
         };
         assert_eq!(failure.capability_id.as_str(), "web-access.search");
-        assert_eq!(failure.kind, RuntimeFailureKind::Backend);
+        // A capability the model named with no registered first-party handler
+        // is a model-fixable, model-visible failure (#5389 reclassified the
+        // missing-handler dispatch failure from Backend to InvalidInput so it
+        // does not burn the retry budget on a call that can never resolve). The
+        // capability still fails closed — only the disposition changed.
+        assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
     }
 
     fn nearai_bootstrap_input_with_base(

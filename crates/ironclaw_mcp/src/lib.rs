@@ -1920,10 +1920,15 @@ mod tests {
     #[test]
     fn parse_mcp_response_rejects_empty_bodies_in_both_framings() {
         let id = Some(9u64);
-        assert_eq!(
-            parse_mcp_response(&mcp_response("application/json", b""), id).unwrap_err(),
-            "response_error",
-            "empty plain-JSON body must not parse as a success"
+        // Per-cause diagnostic tokens replaced the flat "response_error": an
+        // unparseable JSON body reports `mcp_parse_failed` (with a bounded
+        // serde detail), and an SSE stream with no id-matching data reports
+        // `mcp_no_payload`. Both remain hard errors, not silent successes.
+        let empty_json_err = parse_mcp_response(&mcp_response("application/json", b""), id)
+            .expect_err("empty plain-JSON body must not parse as a success");
+        assert!(
+            empty_json_err.starts_with("mcp_parse_failed"),
+            "empty plain-JSON body must report a parse failure, got {empty_json_err:?}"
         );
         assert_eq!(
             parse_mcp_response(
@@ -1931,7 +1936,7 @@ mod tests {
                 id,
             )
             .unwrap_err(),
-            "response_error",
+            "mcp_no_payload",
             "SSE body with only keepalives (no id-matching data) must not parse"
         );
     }

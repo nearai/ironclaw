@@ -421,7 +421,14 @@ impl From<TurnRunState> for RebornGetRunStateResponse {
             received_at: value.received_at,
             checkpoint_id: value.checkpoint_id,
             gate_ref: value.gate_ref,
-            failure: value.failure,
+            // Public WebUI shape: strip the model-visible `detail` so free-form
+            // backend cause text never reaches the browser. `category` (the
+            // user-facing signal) is retained. See
+            // `SanitizedFailure::public_projection`.
+            failure: value
+                .failure
+                .as_ref()
+                .map(SanitizedFailure::public_projection),
         }
     }
 }
