@@ -332,5 +332,7 @@ test("Tools tab surfaces permission save failures", () => {
   const rendered = exports.ToolsTab({});
 
   assert.match(collectTemplateText(rendered), /role="alert"/);
+  assert.match(collectTemplateText(rendered), /var\(--v2-danger-text\)/);
+  assert.doesNotMatch(collectTemplateText(rendered), /text-red-|bg-red-|border-red-/);
   assert.ok(collectScalars(rendered).includes("Save failed: permission denied"));
 });

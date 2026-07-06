@@ -256,7 +256,7 @@ export function ToolsTab({
       ${permissionError &&
       html`
         <div
-          className="rounded-md border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
+          className="rounded-md border border-[color-mix(in_srgb,var(--v2-danger-text)_30%,transparent)] bg-[var(--v2-danger-soft)] px-4 py-3 text-sm text-[var(--v2-danger-text)]"
           role="alert"
         >
           ${t("error.saveFailed", { message: permissionError.message })}
