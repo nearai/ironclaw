@@ -89,10 +89,10 @@ fn document_write_input_schema_accepts_valid_and_rejects_invalid() {
     );
 
     // Scoped-target tightening (mirrors document-read/tree.input): the `target`
-    // accepts reserved names and relative document paths, but rejects absolute
-    // paths, `..` traversal, and backslash separators at the schema — ahead of
-    // the provider, since a swapped provider (e.g. mem0) may use the target
-    // verbatim.
+    // accepts reserved names and relative document paths, but rejects blank
+    // targets, absolute paths, `..` traversal, and backslash separators at the
+    // schema — ahead of the provider, since a swapped provider (e.g. mem0) may
+    // use the target verbatim.
     assert!(
         validator.is_valid(&json!({"target": "daily_log", "content": "x"})),
         "a reserved target name is accepted"
@@ -104,6 +104,10 @@ fn document_write_input_schema_accepts_valid_and_rejects_invalid() {
     assert!(
         !validator.is_valid(&json!({"target": "/abs", "content": "x"})),
         "absolute target paths are rejected"
+    );
+    assert!(
+        !validator.is_valid(&json!({"target": "   ", "content": "x"})),
+        "blank target paths are rejected"
     );
     assert!(
         !validator.is_valid(&json!({"target": "../escape", "content": "x"})),
