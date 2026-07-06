@@ -190,6 +190,11 @@ pub(crate) struct GroupSharedStorage {
     /// `FilesystemTurnStateStore` (isolation is by `run_id`, not by path —
     /// see `turns_scope_path`, which has no `thread_id` component).
     pub(crate) turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>>,
+    /// S2 seam: the SAME canonical binding `turn_store`'s `/turns` mount is
+    /// scoped to (`scoped_turns_fs_composite`). Retained so a reopen can
+    /// rebuild the identical scoped path independently, instead of
+    /// re-deriving it from a second binding resolution.
+    pub(crate) canonical_binding: ResolvedBinding,
     /// The group's single capability recorder, shared by `Arc` with the real
     /// capability factory wired into the one planned runtime. Every thread
     /// clones this (cheap — `HarnessCapabilityRecorder` is `Clone` over
@@ -837,6 +842,7 @@ impl RebornIntegrationGroupBuilder {
                 scheduler_handle: composition.scheduler_handle,
                 scope_gateway,
                 turn_store,
+                canonical_binding: base.canonical_binding,
                 capability_recorder,
                 user_profile_source,
                 turn_event_sink: self.turn_event_sink,

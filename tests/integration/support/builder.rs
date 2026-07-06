@@ -807,6 +807,66 @@ impl RebornIntegrationHarness {
         }
     }
 
+    /// S2 seam: assert `run_id` is parked on `expected_gate_ref` in a
+    /// **genuinely fresh** turn-state store connection to the on-disk LibSql
+    /// file (mirrors [`assert_reply_persists_after_reopen`]'s reopen idiom,
+    /// but reads run/gate state instead of thread history). Requires
+    /// `StorageMode::LibSql` — errors otherwise, since there is no on-disk
+    /// file for an `InMemory` group to independently reopen.
+    pub async fn assert_gate_survives_reopen(
+        &self,
+        run_id: TurnRunId,
+        expected_gate_ref: &GateRef,
+    ) -> HarnessResult<()> {
+        let db_path = self
+            ._shared
+            .libsql_db_path
+            .as_ref()
+            .ok_or("assert_gate_survives_reopen requires StorageMode::LibSql")?;
+        let db = Arc::new(
+            libsql::Builder::new_local(db_path)
+                .build()
+                .await
+                .map_err(|e| format!("failed to open fresh libsql for gate reopen: {e}"))?,
+        );
+        let fresh_fs = Arc::new(LibSqlRootFilesystem::new(db));
+        // Migrations are idempotent — the schema already exists from `build()`.
+        fresh_fs
+            .run_migrations()
+            .await
+            .map_err(|e| format!("migrations on fresh libsql gate reopen: {e}"))?;
+        let mut fresh_composite = CompositeRootFilesystem::new();
+        ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
+            &mut fresh_composite,
+            fresh_fs,
+        )?;
+        let fresh_turn_store = FilesystemTurnStateStore::new(scoped_turns_fs_composite(
+            Arc::new(fresh_composite),
+            &self._shared.canonical_binding,
+        )?);
+        let state = fresh_turn_store
+            .get_run_state(GetRunStateRequest {
+                scope: self.turn_scope.clone(),
+                run_id,
+            })
+            .await?;
+        if state.status != TurnStatus::BlockedApproval {
+            return Err(format!(
+                "expected BlockedApproval after reopen, got {:?}",
+                state.status
+            )
+            .into());
+        }
+        match state.gate_ref.as_ref().map(GateRef::as_str) {
+            Some(seen) if seen == expected_gate_ref.as_str() => Ok(()),
+            other => Err(format!(
+                "gate ref after reopen was {other:?}, expected {:?}",
+                expected_gate_ref.as_str()
+            )
+            .into()),
+        }
+    }
+
     /// E-DURABLE: assert an installed extension survives an independent reopen
     /// of the capability composite. Opens a FRESH `ExtensionInstallationStore`
     /// at the capability harness's on-disk `storage_root` (a handle independent
@@ -864,6 +924,33 @@ impl RebornIntegrationHarness {
             .map(|invocation| invocation.capability_id.as_str())
             .collect();
         Err(format!("capability {capability_id:?} was not invoked; saw {seen:?}").into())
+    }
+
+    /// S2 seam: assert the named capability produced EXACTLY `expected`
+    /// recorded RESULTS (`captured_capability_results`) — the proof that a
+    /// gate resume dispatched the gated capability's real execution once,
+    /// not zero (lost gate) or twice (double-execution on resume). Reads the
+    /// result-write recorder, NOT `invocations()`: a gated call is recorded
+    /// as an invocation attempt before the gate parks the run (no result is
+    /// written yet), so `invocations()` legitimately counts 2 for any
+    /// gate-then-resume flow — that is not a double-execution signal.
+    pub async fn assert_capability_result_count(
+        &self,
+        capability_id: &str,
+        expected: usize,
+    ) -> HarnessResult<()> {
+        let results = self.captured_capability_results();
+        let actual = results
+            .iter()
+            .filter(|result| result.capability_id.as_str() == capability_id)
+            .count();
+        if actual == expected {
+            return Ok(());
+        }
+        Err(format!(
+            "expected capability {capability_id:?} to produce {expected} recorded result(s), saw {actual}"
+        )
+        .into())
     }
 
     /// Assert a tool HTTP egress request was captured (Tier-2) whose URL contains
