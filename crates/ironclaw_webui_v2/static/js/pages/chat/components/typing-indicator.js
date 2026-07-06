@@ -3,7 +3,7 @@ import { html } from "../../../lib/html.js";
 export function TypingIndicator() {
   return html`
     <div className="flex flex-col items-start">
-      <div className="flex min-w-0 max-w-full flex-col gap-2 sm:max-w-[85%]">
+      <div className="flex min-w-0 flex-col gap-2 v2-chat-readable-width">
         <div
           data-testid="typing-indicator"
           className="w-fit rounded-[18px] border border-white/10 bg-iron-800/60 px-4 py-3"

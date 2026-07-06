@@ -188,7 +188,7 @@ function ToolActivityCard({ activity, nested = false }) {
           <${Icon} name="tool" className="h-4 w-4" />
         </div>
       `}
-      <div className=${nested ? "min-w-0 flex-1" : "min-w-0 max-w-full flex-1 sm:max-w-[85%]"}>
+      <div className=${nested ? "min-w-0 flex-1" : "min-w-0 flex-1 v2-chat-readable-width"}>
         ${row}
         ${expanded &&
         html`<${ToolDetailPanel}

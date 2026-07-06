@@ -16,7 +16,7 @@ export function ActivityRun({ activity }) {
   }, [shouldAutoExpand]);
 
   return html`
-    <div className="mr-auto flex w-full min-w-0 max-w-full flex-col sm:max-w-[85%]" data-testid="activity-run">
+    <div className="mr-auto flex w-full min-w-0 flex-col v2-chat-readable-width" data-testid="activity-run">
       <button
         type="button"
         onClick=${() => setExpanded((value) => !value)}
@@ -76,7 +76,7 @@ function ReasoningItem({ content }) {
       >
         <${Icon} name="spark" className="h-4 w-4" />
       </div>
-      <div className="min-w-0 max-w-full flex-1 border-l-2 border-white/10 pl-3 text-iron-300 sm:max-w-[85%]">
+      <div className="min-w-0 flex-1 border-l-2 border-white/10 pl-3 text-iron-300 v2-chat-readable-width">
         <${MarkdownRenderer} content=${content} className="text-[13px]" />
       </div>
     </div>

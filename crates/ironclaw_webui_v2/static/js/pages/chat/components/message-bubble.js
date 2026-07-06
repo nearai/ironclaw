@@ -116,10 +116,10 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
   const showActions = role === "user" || (role === "assistant" && !isOptimistic);
   const isNotice = role === "system" || role === "error";
   const bubbleWidthClass = isUser
-    ? "max-w-full sm:max-w-[85%]"
+    ? "v2-chat-readable-width"
     : isNotice
-    ? "mx-auto max-w-full sm:max-w-[85%]"
-    : "w-full max-w-full sm:max-w-[85%]";
+    ? "mx-auto v2-chat-readable-width"
+    : "w-full v2-chat-readable-width";
   const contentWidthClass = isUser ? "min-w-0 max-w-full" : "w-full min-w-0 max-w-full";
   const showRetryAction = status === "error" && onRetry;
   const showMetaRow = showActions || showRetryAction || timeLabel;
@@ -179,7 +179,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
       ${showMetaRow && html`
         <div
           className=${[
-            "mt-1 flex min-h-7 w-max max-w-full flex-nowrap items-center gap-3 px-1 text-iron-400 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 sm:max-w-[85%]",
+            "mt-1 flex min-h-7 w-max v2-chat-readable-width flex-nowrap items-center gap-3 px-1 text-iron-400 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100",
             isUser ? "self-end justify-end" : isNotice ? "self-center justify-center" : "self-start justify-start",
           ].join(" ")}
         >

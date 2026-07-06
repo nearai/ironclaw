@@ -253,6 +253,12 @@ mod tests {
         assert!(!styles.contains("white-space: pre-wrap"));
         assert!(!styles.contains("word-break: break-all"));
         assert!(!styles.contains("width: max-content"));
+        assert!(styles.contains("--v2-chat-readable-max-width:"));
+        assert!(styles.contains(".v2-chat-readable-width {\n  max-width: 100%;\n}"));
+        assert!(styles.contains("@media (min-width: 640px) {"));
+        assert!(styles.contains("max-width: var(--v2-chat-readable-max-width);"));
+        assert!(styles.contains("@media (max-width: 639.98px) {"));
+        assert!(!styles.contains("@media (max-width: 768px)"));
 
         let message_list = asset_text("js/pages/chat/components/message-list.js");
         assert!(message_list.contains("relative flex min-h-0 min-w-0 flex-1"));
@@ -262,9 +268,10 @@ mod tests {
         let message_bubble = asset_text("js/pages/chat/components/message-bubble.js");
         assert!(message_bubble.contains("group flex w-full min-w-0 flex-col"));
         assert!(message_bubble.contains("const bubbleWidthClass = isUser"));
-        assert!(message_bubble.contains("\"max-w-full sm:max-w-[85%]\""));
-        assert!(message_bubble.contains("\"mx-auto max-w-full sm:max-w-[85%]\""));
-        assert!(message_bubble.contains("\"w-full max-w-full sm:max-w-[85%]\""));
+        assert!(message_bubble.contains("\"v2-chat-readable-width\""));
+        assert!(message_bubble.contains("\"mx-auto v2-chat-readable-width\""));
+        assert!(message_bubble.contains("\"w-full v2-chat-readable-width\""));
+        assert!(!message_bubble.contains("sm:max-w-["));
         assert!(
             message_bubble.contains(
                 "const contentWidthClass = isUser ? \"min-w-0 max-w-full\" : \"w-full min-w-0 max-w-full\";"

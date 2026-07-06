@@ -10,11 +10,15 @@ const activityRunSource = readFileSync(
   new URL("./activity-run.js", import.meta.url),
   "utf8",
 );
+const typingIndicatorSource = readFileSync(
+  new URL("./typing-indicator.js", import.meta.url),
+  "utf8",
+);
 
 test("tool activity cards keep long tool output inside the mobile viewport", () => {
   assert.match(
     toolActivitySource,
-    /className=\$\{nested \? "min-w-0 flex-1" : "min-w-0 max-w-full flex-1 sm:max-w-\[85%\]"\}/,
+    /className=\$\{nested \? "min-w-0 flex-1" : "min-w-0 flex-1 v2-chat-readable-width"\}/,
     "tool activity body should use full mobile width and constrain on larger screens",
   );
   assert.match(
@@ -47,12 +51,22 @@ test("tool activity cards keep long tool output inside the mobile viewport", () 
 test("activity run wrappers use mobile-safe width constraints", () => {
   assert.match(
     activityRunSource,
-    /className="mr-auto flex w-full min-w-0 max-w-full flex-col sm:max-w-\[85%\]"/,
-    "activity run summary should not exceed the mobile message column",
+    /className="mr-auto flex w-full min-w-0 flex-col v2-chat-readable-width"/,
+    "activity run summary should use the shared readable width utility",
   );
   assert.match(
     activityRunSource,
-    /className="min-w-0 max-w-full flex-1 border-l-2 border-white\/10 pl-3 text-iron-300 sm:max-w-\[85%\]"/,
-    "reasoning inside activity runs should keep the same mobile-safe width",
+    /className="min-w-0 flex-1 border-l-2 border-white\/10 pl-3 text-iron-300 v2-chat-readable-width"/,
+    "reasoning inside activity runs should keep the same shared width",
+  );
+  assert.match(
+    typingIndicatorSource,
+    /className="flex min-w-0 flex-col gap-2 v2-chat-readable-width"/,
+    "typing indicator should use the same shared readable width utility",
+  );
+  assert.doesNotMatch(
+    [toolActivitySource, activityRunSource, typingIndicatorSource].join("\n"),
+    /sm:max-w-\[[^\]]+\]/,
+    "activity components should not scatter desktop width constants in component strings",
   );
 });
