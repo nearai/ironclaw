@@ -477,7 +477,6 @@ impl InMemoryTurnStateStore {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn overlay_runner_lease_record(
         &self,
         overlaid: TurnRunRecord,
@@ -545,27 +544,6 @@ impl InMemoryTurnStateStore {
                 .iter()
                 .find(|record| record.checkpoint_id == checkpoint_id)
                 .cloned(),
-        }
-    }
-
-    pub(crate) fn idempotency_records_after(
-        &self,
-        created_at: crate::TurnTimestamp,
-    ) -> Vec<TurnIdempotencyRecord> {
-        match self.inner.lock() {
-            Ok(inner) => inner
-                .idempotency_records
-                .values()
-                .filter(|record| record.created_at >= created_at)
-                .cloned()
-                .collect(),
-            Err(poisoned) => poisoned
-                .into_inner()
-                .idempotency_records
-                .values()
-                .filter(|record| record.created_at >= created_at)
-                .cloned()
-                .collect(),
         }
     }
 

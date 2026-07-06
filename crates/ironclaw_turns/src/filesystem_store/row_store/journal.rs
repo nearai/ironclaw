@@ -24,6 +24,7 @@ use super::{
 };
 
 const DELTA_JOURNAL_MAX_BATCH: usize = 256;
+const DELTA_JOURNAL_FLUSH_COALESCE_DELAY: Duration = Duration::from_micros(500);
 const DELTA_JOURNAL_MATERIALIZE_IDLE_DELAY: Duration = Duration::from_millis(25);
 const MATERIALIZED_ROW_CAS_RETRIES: usize = 16;
 
@@ -90,7 +91,7 @@ async fn run_delta_journal_flusher<F>(
     while let Some(first) = receiver.recv().await {
         let mut requests = Vec::with_capacity(DELTA_JOURNAL_MAX_BATCH);
         requests.push(first);
-        tokio::task::yield_now().await;
+        tokio::time::sleep(DELTA_JOURNAL_FLUSH_COALESCE_DELAY).await;
         while requests.len() < DELTA_JOURNAL_MAX_BATCH {
             match receiver.try_recv() {
                 Ok(request) => requests.push(request),

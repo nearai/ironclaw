@@ -8,10 +8,11 @@ use ironclaw_filesystem::SeqNo;
 use serde::Serialize;
 
 use crate::{
-    EventCursor, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits, LoopCheckpointRecord,
-    PutLoopCheckpointRequest, SpawnTreeReservation, SubmitTurnResponse, TurnActiveLockRecord,
-    TurnAdmissionReservationRecord, TurnCheckpointId, TurnCheckpointRecord, TurnError,
-    TurnIdempotencyRecord, TurnLifecycleEvent, TurnPersistenceSnapshot, TurnRecord, TurnRunId,
+    EventCursor, IdempotencyKey, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits,
+    LoopCheckpointRecord, PutLoopCheckpointRequest, SpawnTreeReservation, SubmitTurnResponse,
+    TurnActiveLockRecord, TurnAdmissionReservationRecord, TurnCheckpointId, TurnCheckpointRecord,
+    TurnError, TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnIdempotencyRecord,
+    TurnIdempotencyReplay, TurnLifecycleEvent, TurnPersistenceSnapshot, TurnRecord, TurnRunId,
     TurnRunRecord, TurnRunState, TurnScope, runner::ClaimedTurnRun,
 };
 
@@ -491,6 +492,7 @@ pub(super) fn submit_turn_targeted_delta(
     latest_event_cursor: EventCursor,
     store: &InMemoryTurnStateStore,
     response: &SubmitTurnResponse,
+    idempotency_key: &IdempotencyKey,
 ) -> Result<SnapshotDelta, TurnError> {
     let SubmitTurnResponse::Accepted {
         turn_id, run_id, ..
@@ -516,15 +518,23 @@ pub(super) fn submit_turn_targeted_delta(
     if let Some(reservation) = store.admission_reservation(*run_id) {
         delta.admission_reservations_upsert.push(reservation);
     }
-    delta.idempotency_upsert.extend(
-        store
-            .idempotency_records_after(turn.created_at)
-            .into_iter()
-            .filter(|record| {
-                record.operation == crate::TurnIdempotencyOperationKind::Submit
-                    && record.run_id == Some(*run_id)
-            }),
-    );
+    if !snapshot.idempotency_records.iter().any(|record| {
+        record.operation == TurnIdempotencyOperationKind::Submit
+            && record.scope == turn.scope
+            && record.key == *idempotency_key
+    }) {
+        delta.idempotency_upsert.push(TurnIdempotencyRecord {
+            scope: turn.scope.clone(),
+            operation: TurnIdempotencyOperationKind::Submit,
+            key: idempotency_key.clone(),
+            turn_id: Some(*turn_id),
+            run_id: Some(*run_id),
+            outcome: TurnIdempotencyOutcomeKind::Accepted,
+            replay: TurnIdempotencyReplay::SubmitAccepted(response.clone()),
+            created_at: turn.created_at,
+            expires_at: None,
+        });
+    }
     add_event_delta(snapshot, latest_event_cursor, store, &mut delta)?;
     Ok(delta)
 }
@@ -548,6 +558,12 @@ pub(super) fn row_store_durable_delta(mut delta: SnapshotDelta) -> SnapshotDelta
     delta.runs_delete.clear();
     delta.events_delete.clear();
     delta.event_retention_floor = None;
+    // Admission reservations are coordination scaffolding. The in-memory store
+    // rebuilds them from non-terminal run records during snapshot load, so
+    // keeping them in every submit/complete journal entry only adds write
+    // amplification without improving recovery.
+    delta.admission_reservations_upsert.clear();
+    delta.admission_reservations_delete.clear();
     delta
 }
 

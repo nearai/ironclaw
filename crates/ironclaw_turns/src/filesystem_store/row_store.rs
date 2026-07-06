@@ -76,6 +76,7 @@ where
     runner_leases: RunnerLeaseMemory,
     delta_journal: DeltaJournal,
     apply_timeout: Duration,
+    preappend_row_reservations: bool,
 }
 
 enum ActiveLockReservation {
@@ -151,6 +152,7 @@ where
             runner_leases: Arc::new(RwLock::new(HashMap::new())),
             delta_journal: DeltaJournal::new(filesystem, materialize_gate),
             apply_timeout: FILESYSTEM_APPLY_TIMEOUT,
+            preappend_row_reservations: false,
         }
     }
 
@@ -169,6 +171,15 @@ where
 
     pub fn with_apply_timeout(mut self, apply_timeout: Duration) -> Self {
         self.apply_timeout = apply_timeout;
+        self
+    }
+
+    /// Enable the strict cross-store reservation mode used by crash/recovery
+    /// contract tests. Hosted single-tenant production keeps a process-local
+    /// authority and persists through the delta journal; pre-append row writes
+    /// would put materialized rows back on the hot path.
+    pub fn with_preappend_row_reservations(mut self) -> Self {
+        self.preappend_row_reservations = true;
         self
     }
 
@@ -742,26 +753,14 @@ where
                 let persist_delta = row_store_durable_delta(delta.clone());
                 let reservation_seq = self.next_delta_log_seq().await?;
                 let next_state = RowSnapshotState::new(new_snapshot, store, reservation_seq)?;
-                let run_row_reservations = match self
-                    .reserve_run_row_updates(&baseline, &persist_delta, reservation_seq)
+                let (run_row_reservations, active_lock_reservations) = match self
+                    .reserve_preappend_rows(&baseline, &persist_delta, reservation_seq)
                     .await
                 {
                     Ok(reservations) => reservations,
                     Err(error) => {
                         *guard = None;
-                        return Err(error.into_turn());
-                    }
-                };
-                let active_lock_reservations = match self
-                    .reserve_active_lock_writes(&baseline, &persist_delta, reservation_seq)
-                    .await
-                {
-                    Ok(reservations) => reservations,
-                    Err(error) => {
-                        self.rollback_run_row_reservations(run_row_reservations)
-                            .await;
-                        *guard = None;
-                        return Err(error.into_turn());
+                        return Err(error);
                     }
                 };
                 let ack = match self.enqueue_delta(persist_delta) {
@@ -1070,6 +1069,36 @@ where
         Ok(reservations)
     }
 
+    async fn reserve_preappend_rows(
+        &self,
+        baseline: &TurnPersistenceSnapshot,
+        delta: &SnapshotDelta,
+        reservation_seq: SeqNo,
+    ) -> Result<(Vec<RunRowReservation>, Vec<ActiveLockReservation>), TurnError> {
+        if !self.preappend_row_reservations {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let run_row_reservations = match self
+            .reserve_run_row_updates(baseline, delta, reservation_seq)
+            .await
+        {
+            Ok(reservations) => reservations,
+            Err(error) => return Err(error.into_turn()),
+        };
+        let active_lock_reservations = match self
+            .reserve_active_lock_writes(baseline, delta, reservation_seq)
+            .await
+        {
+            Ok(reservations) => reservations,
+            Err(error) => {
+                self.rollback_run_row_reservations(run_row_reservations)
+                    .await;
+                return Err(error.into_turn());
+            }
+        };
+        Ok((run_row_reservations, active_lock_reservations))
+    }
+
     async fn reserve_run_row_for_active_lock(
         &self,
         record: &TurnActiveLockRecord,
@@ -1319,15 +1348,11 @@ where
             Ok(None) => return Ok(false),
             Err(error) => return Err(RowPersistError::Turn(fs_error(error))),
         };
-        let current_record: TurnActiveLockRecord = deserialize_materialized_row(
-            &current.entry.body,
-            ACTIVE_LOCK_ROWS,
-        )?
-        .ok_or_else(|| {
-            RowPersistError::Turn(TurnError::Conflict {
-                reason: "durable active lock row was deleted before reservation".to_string(),
-            })
-        })?;
+        let current_record: Option<TurnActiveLockRecord> =
+            deserialize_materialized_row(&current.entry.body, ACTIVE_LOCK_ROWS)?;
+        let Some(current_record) = current_record else {
+            return Ok(true);
+        };
         let run_path = row_path(RUN_ROWS, &current_record.run_id.to_string())?;
         match self
             .filesystem
@@ -1526,16 +1551,41 @@ where
             let mut refreshed_after_stale_error = false;
             loop {
                 self.ensure_snapshot_cache_for_mutation(&mut guard).await?;
-                let state = guard.as_ref().ok_or_else(|| TurnError::Unavailable {
-                    reason: "row snapshot cache was not initialized".to_string(),
-                })?;
-                let baseline = state.snapshot.clone();
-                let latest_event_cursor = state.latest_event_cursor();
-                let (overlaid_snapshot, _) = self
-                    .runner_lease_store()
-                    .overlay((baseline.clone(), None), overlay)
-                    .await?;
-                let store = Arc::new(self.build_in_memory_store(overlaid_snapshot)?);
+                let (latest_event_cursor, cached_store, overlay_baseline, overlay_run) = {
+                    let state = guard.as_ref().ok_or_else(|| TurnError::Unavailable {
+                        reason: "row snapshot cache was not initialized".to_string(),
+                    })?;
+                    let overlay_baseline =
+                        matches!(overlay, RunnerLeaseOverlay::All).then(|| state.snapshot.clone());
+                    let overlay_run = match overlay {
+                        RunnerLeaseOverlay::Run(run_id) => state
+                            .snapshot
+                            .runs
+                            .iter()
+                            .find(|record| record.run_id == run_id)
+                            .cloned(),
+                        RunnerLeaseOverlay::None | RunnerLeaseOverlay::All => None,
+                    };
+                    (
+                        state.latest_event_cursor(),
+                        Arc::clone(&state.store),
+                        overlay_baseline,
+                        overlay_run,
+                    )
+                };
+                let store = if let Some(baseline) = overlay_baseline {
+                    let (overlaid_snapshot, _) = self
+                        .runner_lease_store()
+                        .overlay((baseline, None), overlay)
+                        .await?;
+                    Arc::new(self.build_in_memory_store(overlaid_snapshot)?)
+                } else {
+                    if let Some(run) = overlay_run {
+                        let overlaid = self.runner_lease_store().overlay_run_record(run).await?;
+                        cached_store.overlay_runner_lease_record(overlaid)?;
+                    }
+                    cached_store
+                };
                 let outcome = apply(Arc::clone(&store)).await;
                 let value = match outcome {
                     Ok(value) => value,
@@ -1557,31 +1607,34 @@ where
                 let build_delta = build_delta.take().ok_or_else(|| TurnError::Unavailable {
                     reason: "turn state row-store targeted delta builder was reused".to_string(),
                 })?;
-                let delta = build_delta(&baseline, latest_event_cursor, store.as_ref(), &value)?;
-                let persist_delta = row_store_durable_delta(delta.clone());
+                let (delta, persist_delta, reservation_baseline) = {
+                    let state = guard.as_ref().ok_or_else(|| TurnError::Unavailable {
+                        reason: "row snapshot cache was not initialized".to_string(),
+                    })?;
+                    let delta =
+                        build_delta(&state.snapshot, latest_event_cursor, store.as_ref(), &value)?;
+                    let persist_delta = row_store_durable_delta(delta.clone());
+                    let reservation_baseline = self
+                        .preappend_row_reservations
+                        .then(|| state.snapshot.clone());
+                    (delta, persist_delta, reservation_baseline)
+                };
                 let reservation_seq = self.next_delta_log_seq().await?;
-                let run_row_reservations = match self
-                    .reserve_run_row_updates(&baseline, &persist_delta, reservation_seq)
-                    .await
-                {
-                    Ok(reservations) => reservations,
-                    Err(error) => {
-                        *guard = None;
-                        return Err(error.into_turn());
-                    }
-                };
-                let active_lock_reservations = match self
-                    .reserve_active_lock_writes(&baseline, &persist_delta, reservation_seq)
-                    .await
-                {
-                    Ok(reservations) => reservations,
-                    Err(error) => {
-                        self.rollback_run_row_reservations(run_row_reservations)
-                            .await;
-                        *guard = None;
-                        return Err(error.into_turn());
-                    }
-                };
+                let (run_row_reservations, active_lock_reservations) =
+                    if let Some(baseline) = reservation_baseline.as_ref() {
+                        match self
+                            .reserve_preappend_rows(baseline, &persist_delta, reservation_seq)
+                            .await
+                        {
+                            Ok(reservations) => reservations,
+                            Err(error) => {
+                                *guard = None;
+                                return Err(error);
+                            }
+                        }
+                    } else {
+                        (Vec::new(), Vec::new())
+                    };
                 if let Some(state) = guard.as_mut() {
                     if let Err(error) = state.apply_delta(delta, reservation_seq) {
                         self.rollback_row_reservations(

@@ -53,6 +53,7 @@ use ironclaw_filesystem::{
 use ironclaw_host_api::{HostApiError, InvocationId, ResourceScope, ScopedPath, ThreadId};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 use crate::identifiers::SummaryArtifactId;
@@ -176,7 +177,13 @@ where
 {
     filesystem: Arc<ScopedFilesystem<F>>,
     thread_index_cache: Mutex<HashMap<String, Arc<Vec<ThreadIndexRecord>>>>,
+    thread_index_cursor_positions: Mutex<HashMap<String, Arc<HashMap<String, usize>>>>,
+    thread_index_cache_epochs: Mutex<HashMap<String, u64>>,
+    thread_index_manual_clear_epochs: Mutex<HashMap<String, u64>>,
+    thread_index_load_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     known_thread_index_rows: Mutex<HashSet<String>>,
+    known_thread_source_rows: Mutex<HashMap<String, HashSet<ThreadId>>>,
+    thread_index_force_validate_scopes: Mutex<HashSet<String>>,
     complete_thread_index_scopes: Mutex<HashSet<String>>,
 }
 
@@ -188,13 +195,19 @@ where
         Self {
             filesystem,
             thread_index_cache: Mutex::new(HashMap::new()),
+            thread_index_cursor_positions: Mutex::new(HashMap::new()),
+            thread_index_cache_epochs: Mutex::new(HashMap::new()),
+            thread_index_manual_clear_epochs: Mutex::new(HashMap::new()),
+            thread_index_load_locks: Mutex::new(HashMap::new()),
             known_thread_index_rows: Mutex::new(HashSet::new()),
+            known_thread_source_rows: Mutex::new(HashMap::new()),
+            thread_index_force_validate_scopes: Mutex::new(HashSet::new()),
             complete_thread_index_scopes: Mutex::new(HashSet::new()),
         }
     }
 
     pub fn clear_thread_index_cache_for_scope(&self, scope: &ThreadScope) {
-        self.invalidate_thread_index_cache(scope);
+        self.clear_thread_index_cache_for_scope_once(scope);
     }
 
     fn thread_entry(record: &StoredThreadRecord) -> Result<Entry, SessionThreadError> {
@@ -2389,11 +2402,13 @@ where
         // that no longer resolves (thread deleted between pages) ends the
         // stream rather than restarting from the top.
         let start_index = match request.cursor.as_deref() {
-            Some(cursor) => listed
-                .iter()
-                .position(|index| index.record.thread_id.as_str() == cursor)
-                .map(|index| index + 1)
-                .unwrap_or(listed.len()),
+            Some(cursor) => self.thread_index_start_after_cursor(&request.scope, cursor, || {
+                listed
+                    .iter()
+                    .position(|index| index.record.thread_id.as_str() == cursor)
+                    .map(|index| index + 1)
+                    .unwrap_or(listed.len())
+            }),
             None => 0,
         };
         let end_index = start_index.saturating_add(limit).min(listed.len());
@@ -2479,11 +2494,9 @@ where
 
 const LIST_THREADS_DEFAULT_PAGE_SIZE: usize = 50;
 const LIST_THREADS_MAX_PAGE_SIZE: usize = 200;
-/// Bounded fan-out for reading every thread record during an
-/// activity-sorted list. Caps concurrent filesystem reads so a large
-/// scope can't burst an unbounded number of `get`s.
-const LIST_THREADS_RECORD_READ_CONCURRENCY: usize = 16;
-
+/// Bounded fan-out used only when a scope has legacy source threads without
+/// derived index rows. Normal indexed listing should not read source bodies.
+const LIST_THREADS_MISSING_INDEX_READ_CONCURRENCY: usize = 16;
 // ── Idempotency key shape ──────────────────────────────────────
 //
 // Mirrors the legacy `DurableState` key shape so on-disk hashes are

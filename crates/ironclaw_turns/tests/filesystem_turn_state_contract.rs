@@ -200,6 +200,13 @@ where
     scoped_turns_fs_at(backend, "test-tenant", "test-user")
 }
 
+fn strict_row_store<F>(scoped: Arc<ScopedFilesystem<F>>) -> FilesystemTurnStateRowStore<F>
+where
+    F: RootFilesystem + 'static,
+{
+    FilesystemTurnStateRowStore::new(scoped).with_preappend_row_reservations()
+}
+
 async fn retry_get_run_state<F>(
     store: &FilesystemTurnStateRowStore<F>,
     scope: TurnScope,
@@ -1373,8 +1380,8 @@ async fn filesystem_turn_state_row_store_persists_rows_without_state_blob() {
 async fn filesystem_turn_state_row_store_rejects_stale_cross_store_active_lock_create() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let first_store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
-    let second_store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let first_store = strict_row_store(Arc::clone(&scoped));
+    let second_store = strict_row_store(Arc::clone(&scoped));
     let resolver = InMemoryRunProfileResolver::default();
     let policy = AllowAllTurnAdmissionPolicy;
     let scope = turn_scope("thread-fs-row-stale-active-lock");
@@ -1410,8 +1417,8 @@ async fn filesystem_turn_state_row_store_rejects_stale_cross_store_active_lock_c
 async fn filesystem_turn_state_row_store_rejects_stale_cross_store_claim() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let first_store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
-    let second_store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let first_store = strict_row_store(Arc::clone(&scoped));
+    let second_store = strict_row_store(Arc::clone(&scoped));
     let resolver = InMemoryRunProfileResolver::default();
     let policy = AllowAllTurnAdmissionPolicy;
     let scope = turn_scope("thread-fs-row-stale-claim");
@@ -1457,7 +1464,7 @@ async fn filesystem_turn_state_row_store_rejects_stale_cross_store_claim() {
 async fn filesystem_turn_state_row_store_rejects_preappend_cross_store_claim() {
     let backend = Arc::new(BlockingAppendFilesystem::new(engine_filesystem()));
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let first_store = Arc::new(FilesystemTurnStateRowStore::new(Arc::clone(&scoped)));
+    let first_store = Arc::new(strict_row_store(Arc::clone(&scoped)));
     let resolver = InMemoryRunProfileResolver::default();
     let policy = AllowAllTurnAdmissionPolicy;
     let scope = turn_scope("thread-fs-row-preappend-claim");
@@ -1487,7 +1494,7 @@ async fn filesystem_turn_state_row_store_rejects_preappend_cross_store_claim() {
     };
     backend.wait_for_blocked_append().await;
 
-    let second_store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let second_store = strict_row_store(Arc::clone(&scoped));
     let preappend_snapshot = second_store.persistence_snapshot().await.unwrap();
     assert!(
         preappend_snapshot
@@ -1527,8 +1534,8 @@ async fn filesystem_turn_state_row_store_rejects_preappend_cross_store_claim() {
 async fn filesystem_turn_state_row_store_refreshes_stale_active_lock_cache_before_submit() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let first_store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
-    let second_store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let first_store = strict_row_store(Arc::clone(&scoped));
+    let second_store = strict_row_store(Arc::clone(&scoped));
     let resolver = InMemoryRunProfileResolver::default();
     let policy = AllowAllTurnAdmissionPolicy;
     let scope = turn_scope("thread-fs-row-stale-active-lock-cache");
@@ -1625,8 +1632,8 @@ async fn filesystem_turn_state_row_store_get_run_state_refreshes_stale_cached_ru
 async fn filesystem_turn_state_row_store_rejects_uncommitted_active_lock_reservation() {
     let backend = Arc::new(BlockingAppendFilesystem::new(engine_filesystem()));
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let first_store = Arc::new(FilesystemTurnStateRowStore::new(Arc::clone(&scoped)));
-    let second_store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let first_store = Arc::new(strict_row_store(Arc::clone(&scoped)));
+    let second_store = strict_row_store(Arc::clone(&scoped));
     let resolver = InMemoryRunProfileResolver::default();
     let policy = AllowAllTurnAdmissionPolicy;
     let scope = turn_scope("thread-fs-row-uncommitted-active-lock");
@@ -1679,7 +1686,7 @@ async fn filesystem_turn_state_row_store_rejects_uncommitted_active_lock_reserva
 async fn filesystem_turn_state_row_store_recovers_preappend_active_lock_reservation() {
     let backend = Arc::new(BlockingAppendFilesystem::new(engine_filesystem()));
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let first_store = Arc::new(FilesystemTurnStateRowStore::new(Arc::clone(&scoped)));
+    let first_store = Arc::new(strict_row_store(Arc::clone(&scoped)));
     let scope = turn_scope("thread-fs-row-recover-preappend-active-lock");
     let run_id = TurnRunId::new();
     let mut request = submit_request_for(scope, "idem-row-recover-preappend-active-lock");
@@ -1697,7 +1704,7 @@ async fn filesystem_turn_state_row_store_recovers_preappend_active_lock_reservat
     backend.wait_for_blocked_append().await;
     first_submit.abort();
 
-    let recovered_store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let recovered_store = strict_row_store(Arc::clone(&scoped));
     let snapshot = recovered_store.persistence_snapshot().await.unwrap();
     assert_eq!(snapshot.turns.len(), 1);
     assert_eq!(snapshot.runs.len(), 1);
@@ -1875,7 +1882,7 @@ async fn filesystem_turn_state_row_store_does_not_remigrate_stale_blob_after_row
 async fn filesystem_turn_state_row_store_concurrent_submits_preserve_all_runs() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = Arc::new(FilesystemTurnStateRowStore::new(Arc::clone(&scoped)));
+    let store = Arc::new(strict_row_store(Arc::clone(&scoped)));
     let resolver = Arc::new(InMemoryRunProfileResolver::default());
     let workers = 32;
     let barrier = Arc::new(tokio::sync::Barrier::new(workers));
@@ -1919,7 +1926,7 @@ async fn filesystem_turn_state_row_store_concurrent_submits_preserve_all_runs() 
 async fn filesystem_turn_state_row_store_publish_is_optimistic_but_waits_for_append_ack() {
     let backend = Arc::new(BlockingAppendFilesystem::new(engine_filesystem()));
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = Arc::new(FilesystemTurnStateRowStore::new(Arc::clone(&scoped)));
+    let store = Arc::new(strict_row_store(Arc::clone(&scoped)));
     let scope = turn_scope("thread-fs-row-blocked-materialize");
     let run_id = TurnRunId::new();
     let mut request = submit_request_for(scope.clone(), "idem-fs-row-blocked-materialize");
@@ -1996,7 +2003,7 @@ async fn filesystem_turn_state_row_store_publish_is_optimistic_but_waits_for_app
 async fn filesystem_turn_state_row_store_loop_checkpoint_releases_gate_before_append_ack() {
     let backend = Arc::new(BlockingAppendFilesystem::new(engine_filesystem()));
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = Arc::new(FilesystemTurnStateRowStore::new(Arc::clone(&scoped)));
+    let store = Arc::new(strict_row_store(Arc::clone(&scoped)));
     let resolver = InMemoryRunProfileResolver::default();
     let parent_scope = turn_scope("thread-fs-row-checkpoint-blocked-append");
     let parent_response = store

@@ -52,6 +52,7 @@ where
             .await;
         let pre_resolved = PreResolvedRunProfileResolver::new(profile_resolution);
         let max_idempotency_records = self.limits.max_idempotency_records;
+        let idempotency_key = request.idempotency_key.clone();
         self.apply_with_targeted_delta(
             RunnerLeaseOverlay::None,
             |store| {
@@ -67,7 +68,13 @@ where
                 if snapshot.idempotency_records.len() >= max_idempotency_records {
                     return full_snapshot_delta(snapshot, store);
                 }
-                submit_turn_targeted_delta(snapshot, latest_event_cursor, store, response)
+                submit_turn_targeted_delta(
+                    snapshot,
+                    latest_event_cursor,
+                    store,
+                    response,
+                    &idempotency_key,
+                )
             },
         )
         .instrument(turn_state_write_span(
