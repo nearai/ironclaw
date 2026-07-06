@@ -235,6 +235,20 @@ async fn native_context_retrieve_scopes_short_term_to_active_thread() {
             search_result(
                 "tenant-native-memory",
                 "user-native-memory",
+                "Threads/thread-a/case-note.md",
+                0.95,
+                "active thread mixed-case planning note",
+            ),
+            search_result(
+                "tenant-native-memory",
+                "user-native-memory",
+                "Threads/Thread-A/case-note.md",
+                0.9,
+                "different thread with a mixed-case id",
+            ),
+            search_result(
+                "tenant-native-memory",
+                "user-native-memory",
                 "threads/thread-b/note.md",
                 0.9,
                 "other thread planning note",
@@ -260,11 +274,13 @@ async fn native_context_retrieve_scopes_short_term_to_active_thread() {
 
     assert_eq!(
         snippets.len(),
-        1,
+        2,
         "short-term retrieval must scope to the active thread"
     );
     assert_eq!(snippets[0].relative_path, "threads/thread-a/note.md");
     assert_eq!(snippets[0].text, "active thread planning note");
+    assert_eq!(snippets[1].relative_path, "Threads/thread-a/case-note.md");
+    assert_eq!(snippets[1].text, "active thread mixed-case planning note");
 }
 
 #[tokio::test]
@@ -351,22 +367,27 @@ async fn native_write_rejects_reserved_thread_namespace() {
     // succeeds via the reserved-namespace bypass.
     let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
 
-    service
-        .write(
-            invocation(),
-            MemoryServiceWriteRequest {
-                target: "threads/sneaky/note.md".to_string(),
-                content: "smuggled into the reserved namespace".to_string(),
-                append: false,
-                old_string: None,
-                new_string: None,
-                replace_all: false,
-                metadata: None,
-                timezone: None,
-            },
-        )
-        .await
-        .expect_err("write to the reserved threads/ namespace must fail loud");
+    for target in ["threads/sneaky/note.md", "Threads/sneaky/case-note.md"] {
+        let result = service
+            .write(
+                invocation(),
+                MemoryServiceWriteRequest {
+                    target: target.to_string(),
+                    content: "smuggled into the reserved namespace".to_string(),
+                    append: false,
+                    old_string: None,
+                    new_string: None,
+                    replace_all: false,
+                    metadata: None,
+                    timezone: None,
+                },
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "write to reserved namespace target {target:?} must fail loud"
+        );
+    }
 
     // The rejected write must not have persisted: a thread-scoped retrieve on that
     // thread finds nothing.
@@ -502,6 +523,13 @@ async fn native_context_retrieve_excludes_thread_scratch_from_long_term() {
                 "threads/thread-a/note.md",
                 0.9,
                 "ephemeral thread planning note",
+            ),
+            search_result(
+                "tenant-native-memory",
+                "user-native-memory",
+                "Threads/thread-a/case-note.md",
+                0.8,
+                "mixed-case ephemeral thread planning note",
             ),
         ],
         fail: false,

@@ -1691,40 +1691,9 @@ async fn turn_runner_worker_records_after_turn_memory_on_completed_run() {
     )
     .await;
 
-    // The recorder runs inside the worker's `apply_exit`, just after the run
-    // flips to Completed. Poll the memory store (same scope the recorder writes
-    // under: actor user + turn agent/project) until the thread log appears.
-    let read_invocation = MemoryInvocation {
-        scope: ResourceScope {
-            tenant_id: TenantId::new("tenant-text-host").unwrap(),
-            user_id: UserId::new("user-text-host").unwrap(),
-            agent_id: Some(AgentId::new("agent-text-host").unwrap()),
-            project_id: Some(ProjectId::new("project-text-host").unwrap()),
-            mission_id: None,
-            thread_id: Some(fixture.thread_id.clone()),
-            invocation_id: InvocationId::new(),
-        },
-        correlation_id: CorrelationId::new(),
-    };
-    let log_path = format!("threads/{}/{run_id}.md", fixture.thread_id);
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-    let content = loop {
-        match memory_writer
-            .read(
-                read_invocation.clone(),
-                MemoryServiceReadRequest {
-                    path: log_path.clone(),
-                },
-            )
-            .await
-        {
-            Ok(read) => break read.content,
-            Err(_) if tokio::time::Instant::now() < deadline => {
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-            Err(error) => panic!("after-turn memory thread log was never written: {error:?}"),
-        }
-    };
+    let content =
+        wait_for_after_turn_memory_doc(&memory_writer, &fixture.thread_id, run_id, "thread log")
+            .await;
 
     assert!(
         content.contains("remember the launch is on friday"),
@@ -1874,44 +1843,13 @@ async fn build_default_planned_runtime_wires_after_turn_memory_writer() {
     .await
     .expect("composition scheduler should drive the submitted run to Completed");
 
-    // The recorder fires inside the executor's `apply_exit` after the run flips to
-    // Completed. Poll the memory store (same scope the recorder writes under) for
-    // the per-run thread doc — its presence proves `after_turn_memory_writer` was
-    // plumbed into the executor by `build_default_planned_runtime`.
-    let read_invocation = MemoryInvocation {
-        scope: ResourceScope {
-            tenant_id: TenantId::new("tenant-text-host").unwrap(),
-            user_id: UserId::new("user-text-host").unwrap(),
-            agent_id: Some(AgentId::new("agent-text-host").unwrap()),
-            project_id: Some(ProjectId::new("project-text-host").unwrap()),
-            mission_id: None,
-            thread_id: Some(fixture.thread_id.clone()),
-            invocation_id: InvocationId::new(),
-        },
-        correlation_id: CorrelationId::new(),
-    };
-    let log_path = format!("threads/{}/{run_id}.md", fixture.thread_id);
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-    let content = loop {
-        match memory_writer
-            .read(
-                read_invocation.clone(),
-                MemoryServiceReadRequest {
-                    path: log_path.clone(),
-                },
-            )
-            .await
-        {
-            Ok(read) => break read.content,
-            Err(_) if tokio::time::Instant::now() < deadline => {
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-            Err(error) => panic!(
-                "after-turn memory doc was never written — after_turn_memory_writer was not \
-                 plumbed into the executor by build_default_planned_runtime: {error:?}"
-            ),
-        }
-    };
+    let content = wait_for_after_turn_memory_doc(
+        &memory_writer,
+        &fixture.thread_id,
+        run_id,
+        "composition wiring doc",
+    )
+    .await;
 
     // The recorded assistant reply proves the after-turn recorder fired via the
     // composition's `after_turn_memory_writer` wiring (the run produced it from the
@@ -8284,6 +8222,45 @@ async fn wait_for_run_status(
             state.failure
         );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+async fn wait_for_after_turn_memory_doc(
+    memory_writer: &Arc<dyn MemoryService>,
+    thread_id: &ThreadId,
+    run_id: TurnRunId,
+    label: &'static str,
+) -> String {
+    let read_invocation = MemoryInvocation {
+        scope: ResourceScope {
+            tenant_id: TenantId::new("tenant-text-host").unwrap(),
+            user_id: UserId::new("user-text-host").unwrap(),
+            agent_id: Some(AgentId::new("agent-text-host").unwrap()),
+            project_id: Some(ProjectId::new("project-text-host").unwrap()),
+            mission_id: None,
+            thread_id: Some(thread_id.clone()),
+            invocation_id: InvocationId::new(),
+        },
+        correlation_id: CorrelationId::new(),
+    };
+    let log_path = format!("threads/{thread_id}/{run_id}.md");
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match memory_writer
+            .read(
+                read_invocation.clone(),
+                MemoryServiceReadRequest {
+                    path: log_path.clone(),
+                },
+            )
+            .await
+        {
+            Ok(read) => break read.content,
+            Err(_) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Err(error) => panic!("after-turn memory {label} was never written: {error:?}"),
+        }
     }
 }
 

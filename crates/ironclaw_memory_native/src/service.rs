@@ -389,7 +389,8 @@ impl MemoryService for NativeMemoryService {
             // memory subtree.
             Some(thread_id) => {
                 let prefix = thread_memory_prefix(thread_id);
-                results.retain(|result| result.path.relative_path().starts_with(&prefix));
+                results
+                    .retain(|result| path_has_thread_prefix(result.path.relative_path(), &prefix));
             }
             // Long-term lane: the user's general/durable memory — exclude every
             // per-thread short-term scratch subtree so the two lanes stay disjoint
@@ -725,7 +726,24 @@ fn thread_memory_prefix(thread_id: &ThreadId) -> String {
 /// Whether a relative memory path is per-thread short-term scratch (and so is
 /// excluded from the long-term lane).
 fn is_thread_scoped_path(relative_path: &str) -> bool {
-    relative_path.starts_with(THREAD_MEMORY_ROOT)
+    strip_thread_memory_root(relative_path).is_some()
+}
+
+fn path_has_thread_prefix(relative_path: &str, prefix: &str) -> bool {
+    let Some(relative_tail) = strip_thread_memory_root(relative_path) else {
+        return false;
+    };
+    let Some(prefix_tail) = prefix.strip_prefix(THREAD_MEMORY_ROOT) else {
+        return false;
+    };
+    relative_tail.starts_with(prefix_tail)
+}
+
+fn strip_thread_memory_root(relative_path: &str) -> Option<&str> {
+    let root = relative_path.get(..THREAD_MEMORY_ROOT.len())?;
+    root.eq_ignore_ascii_case(THREAD_MEMORY_ROOT)
+        .then(|| relative_path.get(THREAD_MEMORY_ROOT.len()..))
+        .flatten()
 }
 
 fn compare_memory_search_results(

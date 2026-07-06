@@ -83,12 +83,13 @@ impl MemoryPromptContextService for ProductionMemoryPromptContextService {
             ),
         );
 
-        // Concatenate long-term then short-term (this conversation nearest the
-        // current message), map each safe snippet onto a loop context snippet, and
-        // cap the COMBINED block to the per-turn count + aggregate byte budget.
+        // Concatenate short-term before long-term so active-thread memory keeps
+        // priority under the shared count + aggregate byte budget. The prompt
+        // renderer preserves host order for memory snippets, so this is the lane
+        // priority boundary.
         let mut admitted = Vec::new();
         let mut total_bytes = 0usize;
-        for snippet in long_term.into_iter().chain(short_term) {
+        for snippet in short_term.into_iter().chain(long_term) {
             if admitted.len() >= request.max_snippets {
                 break;
             }
