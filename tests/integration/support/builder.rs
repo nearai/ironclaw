@@ -49,7 +49,9 @@ use ironclaw_turns::{
     TurnRunId, TurnRunState, TurnScope, TurnStateStore, TurnStatus,
 };
 
-use super::capability_backend::{MOCK_MCP_PROVIDER_ID, RebornCapabilityBackend, ShellMode};
+use super::capability_backend::{
+    CapabilityScriptingInputs, MOCK_MCP_PROVIDER_ID, RebornCapabilityBackend, ShellMode,
+};
 use super::group::{GroupCapability, GroupSharedStorage, RebornIntegrationGroup};
 use super::harness::{HarnessCapabilityRecorder, HarnessTurnBackend, RecordedCapabilityResult};
 use super::http_matcher::ScriptedHttpResponse;
@@ -419,10 +421,12 @@ impl RebornIntegrationHarnessBuilder {
             .capability
             .install(
                 self.shell_mode,
-                self.keyed_http_responses,
-                self.web_access_response_bodies,
-                self.github_network_statuses,
-                self.real_egress_response_bodies,
+                CapabilityScriptingInputs {
+                    keyed_http_responses: self.keyed_http_responses,
+                    web_access_response_bodies: self.web_access_response_bodies,
+                    github_network_statuses: self.github_network_statuses,
+                    real_egress_response_bodies: self.real_egress_response_bodies,
+                },
             )
             .await?;
 
@@ -765,29 +769,12 @@ impl RebornIntegrationHarness {
     /// re-instantiation only, not durability (nothing on disk to read back).
     pub async fn assert_reply_persists_after_reopen(&self, text: &str) -> HarnessResult<()> {
         if let Some(db_path) = &self._shared.libsql_db_path {
-            // Open a fresh libsql connection — independent of the live composite.
+            // Open a fresh composite — independent of the live one.
             // `libsql::Builder::new_local` opens (or creates) the file at `db_path`;
             // under the M1 mutation (LibSql → InMemory) the file does not exist and
             // the fresh db is empty, so `list_thread_history` returns no messages and
             // `assert_final_reply` returns `Err(MissingFinalReply)`.
-            let db = Arc::new(
-                libsql::Builder::new_local(db_path)
-                    .build()
-                    .await
-                    .map_err(|e| format!("failed to open fresh libsql for reopen: {e}"))?,
-            );
-            let fresh_fs = Arc::new(LibSqlRootFilesystem::new(db));
-            // Migrations are idempotent — the schema already exists from `build()`.
-            fresh_fs
-                .run_migrations()
-                .await
-                .map_err(|e| format!("migrations on fresh libsql reopen: {e}"))?;
-            let mut fresh_composite = CompositeRootFilesystem::new();
-            ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
-                &mut fresh_composite,
-                fresh_fs,
-            )?;
-            let fresh_composite = Arc::new(fresh_composite);
+            let fresh_composite = reopen_fresh_libsql_composite(db_path).await?;
             let fresh_harness = RebornThreadHarness::filesystem_shared_composite(
                 self.thread_harness.scope.clone(),
                 fresh_composite,
@@ -823,25 +810,9 @@ impl RebornIntegrationHarness {
             .libsql_db_path
             .as_ref()
             .ok_or("assert_gate_survives_reopen requires StorageMode::LibSql")?;
-        let db = Arc::new(
-            libsql::Builder::new_local(db_path)
-                .build()
-                .await
-                .map_err(|e| format!("failed to open fresh libsql for gate reopen: {e}"))?,
-        );
-        let fresh_fs = Arc::new(LibSqlRootFilesystem::new(db));
-        // Migrations are idempotent — the schema already exists from `build()`.
-        fresh_fs
-            .run_migrations()
-            .await
-            .map_err(|e| format!("migrations on fresh libsql gate reopen: {e}"))?;
-        let mut fresh_composite = CompositeRootFilesystem::new();
-        ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
-            &mut fresh_composite,
-            fresh_fs,
-        )?;
+        let fresh_composite = reopen_fresh_libsql_composite(db_path).await?;
         let fresh_turn_store = FilesystemTurnStateStore::new(scoped_turns_fs_composite(
-            Arc::new(fresh_composite),
+            fresh_composite,
             &self._shared.canonical_binding,
         )?);
         let state = fresh_turn_store
@@ -1483,6 +1454,35 @@ impl RebornIntegrationHarness {
 // ---------------------------------------------------------------------------
 // Storage helpers
 // ---------------------------------------------------------------------------
+
+/// Open a **genuinely fresh** `CompositeRootFilesystem` connection to the
+/// on-disk LibSql file at `db_path`, independent of any live composite over
+/// the same file. Shared by every "survives an independent reopen" assertion
+/// (`assert_reply_persists_after_reopen`, `assert_gate_survives_reopen`) —
+/// each builds its own higher-level store (thread service, turn-state store)
+/// over the fresh composite this returns.
+async fn reopen_fresh_libsql_composite(
+    db_path: &Path,
+) -> HarnessResult<Arc<CompositeRootFilesystem>> {
+    let db = Arc::new(
+        libsql::Builder::new_local(db_path)
+            .build()
+            .await
+            .map_err(|e| format!("failed to open fresh libsql for reopen: {e}"))?,
+    );
+    let fresh_fs = Arc::new(LibSqlRootFilesystem::new(db));
+    // Migrations are idempotent — the schema already exists from `build()`.
+    fresh_fs
+        .run_migrations()
+        .await
+        .map_err(|e| format!("migrations on fresh libsql reopen: {e}"))?;
+    let mut fresh_composite = CompositeRootFilesystem::new();
+    ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
+        &mut fresh_composite,
+        fresh_fs,
+    )?;
+    Ok(Arc::new(fresh_composite))
+}
 
 /// Build the one `CompositeRootFilesystem` for a harness, selecting the durable
 /// backend by `mode`. `dir` is used only for `LibSql` (the SQLite file is

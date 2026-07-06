@@ -65,6 +65,19 @@ pub(super) enum ShellMode {
     Scripted(ScriptedProcessResult),
 }
 
+/// Per-backend scripted inputs threaded into [`RebornCapabilityBackend::install`],
+/// grouped by name instead of position. `web_access_response_bodies` and
+/// `real_egress_response_bodies` are both `Vec<Vec<u8>>` — as positional
+/// arguments, a swap between them would compile silently; naming the fields
+/// makes each call site self-describing and removes that risk.
+#[derive(Default)]
+pub(super) struct CapabilityScriptingInputs {
+    pub(super) keyed_http_responses: Vec<ScriptedHttpResponse>,
+    pub(super) web_access_response_bodies: Vec<Vec<u8>>,
+    pub(super) github_network_statuses: Vec<u16>,
+    pub(super) real_egress_response_bodies: Vec<Vec<u8>>,
+}
+
 impl RebornCapabilityBackend {
     /// Install this capability backend, producing the `GroupCapability` the
     /// harness's group/thread builder wires. Echo by default (records, executes
@@ -74,11 +87,14 @@ impl RebornCapabilityBackend {
     pub(super) async fn install(
         self,
         shell_mode: ShellMode,
-        keyed_http_responses: Vec<ScriptedHttpResponse>,
-        web_access_response_bodies: Vec<Vec<u8>>,
-        github_network_statuses: Vec<u16>,
-        real_egress_response_bodies: Vec<Vec<u8>>,
+        scripting: CapabilityScriptingInputs,
     ) -> HarnessResult<GroupCapability> {
+        let CapabilityScriptingInputs {
+            keyed_http_responses,
+            web_access_response_bodies,
+            github_network_statuses,
+            real_egress_response_bodies,
+        } = scripting;
         Ok(match self {
             RebornCapabilityBackend::Echo => GroupCapability::Recording,
             RebornCapabilityBackend::BuiltinHttpTools => {
