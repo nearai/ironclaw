@@ -147,7 +147,7 @@ where
 {
     // Match the legacy libSQL backend's connection policy: every
     // operation gets its own connection, concurrent writers wait on
-    // SQLite locks, and transient file-open races get a short retry
+    // SQLite locks, and transient file-open/setup races get a short retry
     // budget before surfacing as infrastructure errors.
     let mut last_error = None;
     for attempt in 0..LIBSQL_CONNECT_ATTEMPTS {
@@ -157,12 +157,15 @@ where
                 // `execute_batch` runs each statement and discards the rows
                 // PRAGMAs like `busy_timeout` return, which is exactly what
                 // we want — we only care about the side effect.
-                conn.execute_batch(LIBSQL_CONNECTION_PRAGMAS)
-                    .await
-                    .map_err(|error| {
-                        infrastructure_libsql_error(FilesystemOperation::Stat, error)
-                    })?;
-                return Ok(conn);
+                match conn.execute_batch(LIBSQL_CONNECTION_PRAGMAS).await {
+                    Ok(_) => return Ok(conn),
+                    Err(error) => {
+                        last_error = Some(error);
+                        if attempt + 1 < LIBSQL_CONNECT_ATTEMPTS {
+                            tokio::time::sleep(connect_backoff(attempt)).await;
+                        }
+                    }
+                }
             }
             Err(error) => {
                 last_error = Some(error);
@@ -176,11 +179,13 @@ where
     let reason = match last_error {
         Some(error) => {
             format!(
-                "failed to create libSQL connection after {LIBSQL_CONNECT_ATTEMPTS} attempts: {error}"
+                "failed to create or initialize libSQL connection after {LIBSQL_CONNECT_ATTEMPTS} attempts: {error}"
             )
         }
         None => {
-            format!("failed to create libSQL connection after {LIBSQL_CONNECT_ATTEMPTS} attempts")
+            format!(
+                "failed to create or initialize libSQL connection after {LIBSQL_CONNECT_ATTEMPTS} attempts"
+            )
         }
     };
     Err(crate::db::infrastructure_error(
