@@ -4468,6 +4468,15 @@ output_schema_ref = "schemas/write.output.json"
                     "no local-dev runtime: neither accessor should reach the coordinator"
                 )
             }
+
+            async fn retry_turn(
+                &self,
+                _request: ironclaw_turns::RetryTurnRequest,
+            ) -> Result<ironclaw_turns::RetryTurnResponse, ironclaw_turns::TurnError> {
+                unimplemented!(
+                    "no local-dev runtime: neither accessor should reach the coordinator"
+                )
+            }
         }
 
         let services = super::RebornServices::disabled();
