@@ -11,6 +11,7 @@ mod ramp;
 mod redaction;
 mod report;
 mod resource_ops;
+mod secret_ops;
 mod suite;
 mod summary;
 mod sweep;
@@ -41,6 +42,7 @@ use crate::{
     process_metrics::{ProcessMetrics, ProcessMetricsSampler},
     progress::{ProgressCounters, spawn_progress_reporter, stop_progress_reporter},
     redaction::redact_libsql_path,
+    secret_ops::{build_secret_consume_workload, run_secret_consume_tasks},
     summary::{
         FailureCause, FailureCauseSummary, LatencySummary, latency_summary,
         summarize_failure_causes, summarize_user_turn_operation_attribution,
@@ -57,9 +59,7 @@ use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     MountAlias, MountGrant, MountPermissions, MountView, TenantId, VirtualPath,
 };
-use ironclaw_resources::{
-    FilesystemResourceGovernorStore, PersistentResourceGovernor, ResourceAccount, ResourceGovernor,
-};
+use ironclaw_resources::{FilesystemResourceGovernor, ResourceAccount, ResourceGovernor};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Parser)]
@@ -146,10 +146,25 @@ pub(crate) struct Args {
     pub(crate) scenario: Scenario,
 
     /// Turn-state store backend for user-turn scenarios. `filesystem` = durable
-    /// per-user state.json (CAS, current production path); `memory` = one shared
-    /// in-process authority (runtime-wedge prototype). No effect on non-turn scenarios.
+    /// per-user state.json (CAS, current production path);
+    /// `filesystem-row` = durable typed append-log deltas with a hot
+    /// in-process row cache; `memory` = one shared in-process authority
+    /// (runtime-wedge prototype). No effect on non-turn scenarios.
     #[arg(long, value_enum, default_value_t = TurnStateBackend::Filesystem)]
     pub(crate) turn_state_backend: TurnStateBackend,
+
+    /// Override max retained terminal run records in the turn-state store.
+    /// Useful for measuring filesystem snapshot growth sensitivity.
+    #[arg(long)]
+    pub(crate) turn_state_max_terminal_records: Option<usize>,
+
+    /// Override max retained lifecycle events in the turn-state store.
+    #[arg(long)]
+    pub(crate) turn_state_max_events: Option<usize>,
+
+    /// Override max retained idempotency records per operation family.
+    #[arg(long)]
+    pub(crate) turn_state_max_idempotency_records: Option<usize>,
 
     /// Shared run id. Defaults to a fresh UUID.
     #[arg(long)]
@@ -315,6 +330,14 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = 20)]
     pub(crate) context_max_messages: usize,
 
+    /// Threads to seed under one scope for the thread-list read workload.
+    #[arg(long, default_value_t = 1000)]
+    pub(crate) thread_list_threads: usize,
+
+    /// Page size used while walking the thread-list workload.
+    #[arg(long, default_value_t = 50)]
+    pub(crate) thread_list_page_size: usize,
+
     /// Sequential chat turns written per context-growth operation.
     #[arg(long, default_value_t = 4)]
     pub(crate) context_growth_turns_per_operation: usize,
@@ -396,6 +419,20 @@ impl Args {
         }
     }
 
+    pub(crate) fn turn_state_store_limits(&self) -> ironclaw_turns::InMemoryTurnStateStoreLimits {
+        let defaults = ironclaw_turns::InMemoryTurnStateStoreLimits::default();
+        ironclaw_turns::InMemoryTurnStateStoreLimits {
+            max_events: self.turn_state_max_events.unwrap_or(defaults.max_events),
+            max_terminal_records: self
+                .turn_state_max_terminal_records
+                .unwrap_or(defaults.max_terminal_records),
+            max_idempotency_records: self
+                .turn_state_max_idempotency_records
+                .unwrap_or(defaults.max_idempotency_records),
+            ..defaults
+        }
+    }
+
     pub(crate) fn warmup_args(&self) -> Option<Self> {
         if self.warmup_seconds == 0 {
             return None;
@@ -468,6 +505,9 @@ pub(crate) enum TurnStateBackend {
     /// read-modify-write). The current production path; livelocks under
     /// concurrent same-user writers.
     Filesystem,
+    /// Durable typed append-log deltas with one hot in-process store per
+    /// tenant/user. Candidate filesystem fix for the blob growth curve.
+    FilesystemRow,
     /// One shared in-process `InMemoryTurnStateStore` authority — coordination
     /// in memory, no per-step CAS. Prototype for the runtime-wedge fix.
     Memory,
@@ -483,6 +523,7 @@ impl TurnStateBackend {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Filesystem => "filesystem",
+            Self::FilesystemRow => "filesystem-row",
             Self::Memory => "memory",
             Self::MemoryPersistOnBlock => "memory-persist-on-block",
         }
@@ -581,9 +622,12 @@ pub(crate) enum Scenario {
     ReserveRelease,
     ReserveReconcile,
     ChatTurn,
+    TurnLifecycleChurn,
+    ThreadList,
     MixedUserSession,
     ContextGrowth,
     ToolSession,
+    SecretConsume,
     CpuBurn,
     MemoryChurn,
 }
@@ -594,9 +638,12 @@ impl Scenario {
             Self::ReserveRelease => "reserve-release",
             Self::ReserveReconcile => "reserve-reconcile",
             Self::ChatTurn => "chat-turn",
+            Self::TurnLifecycleChurn => "turn-lifecycle-churn",
+            Self::ThreadList => "thread-list",
             Self::MixedUserSession => "mixed-user-session",
             Self::ContextGrowth => "context-growth",
             Self::ToolSession => "tool-session",
+            Self::SecretConsume => "secret-consume",
             Self::CpuBurn => "cpu-burn",
             Self::MemoryChurn => "memory-churn",
         }
@@ -609,8 +656,17 @@ impl Scenario {
     pub(crate) fn is_user_turn(self) -> bool {
         matches!(
             self,
-            Self::ChatTurn | Self::MixedUserSession | Self::ContextGrowth | Self::ToolSession
+            Self::ChatTurn
+                | Self::TurnLifecycleChurn
+                | Self::ThreadList
+                | Self::MixedUserSession
+                | Self::ContextGrowth
+                | Self::ToolSession
         )
+    }
+
+    pub(crate) fn is_secret_control_plane(self) -> bool {
+        matches!(self, Self::SecretConsume)
     }
 
     pub(crate) fn is_process_local(self) -> bool {
@@ -650,6 +706,9 @@ struct RunSummary {
     active_thread_count: usize,
     threads_per_owner: usize,
     turn_state_backend: TurnStateBackend,
+    turn_state_max_terminal_records: Option<usize>,
+    turn_state_max_events: Option<usize>,
+    turn_state_max_idempotency_records: Option<usize>,
     gate_blocked_every: usize,
     tenants: usize,
     prefill_threads: usize,
@@ -666,6 +725,8 @@ struct RunSummary {
     user_message_bytes: usize,
     assistant_message_bytes: usize,
     context_max_messages: usize,
+    thread_list_threads: usize,
+    thread_list_page_size: usize,
     context_growth_turns_per_operation: usize,
     tool_calls_per_turn: usize,
     tool_latency_ms: u64,
@@ -1098,6 +1159,12 @@ fn validate_args(args: &Args) -> Result<(), String> {
     if args.context_max_messages == 0 {
         return Err("--context-max-messages must be greater than 0".to_string());
     }
+    if args.thread_list_threads == 0 {
+        return Err("--thread-list-threads must be greater than 0".to_string());
+    }
+    if args.thread_list_page_size == 0 || args.thread_list_page_size > 200 {
+        return Err("--thread-list-page-size must be between 1 and 200".to_string());
+    }
     if args.context_growth_turns_per_operation == 0 {
         return Err("--context-growth-turns-per-operation must be greater than 0".to_string());
     }
@@ -1226,6 +1293,8 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
             .arg(args.prefill_concurrency.to_string())
             .arg("--scenario")
             .arg(args.scenario.as_str())
+            .arg("--turn-state-backend")
+            .arg(args.turn_state_backend.as_str())
             .arg("--postgres-pool-size")
             .arg(args.postgres_pool_size.to_string())
             .arg("--progress-interval-seconds")
@@ -1252,6 +1321,10 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
             .arg(args.assistant_message_bytes.to_string())
             .arg("--context-max-messages")
             .arg(args.context_max_messages.to_string())
+            .arg("--thread-list-threads")
+            .arg(args.thread_list_threads.to_string())
+            .arg("--thread-list-page-size")
+            .arg(args.thread_list_page_size.to_string())
             .arg("--context-growth-turns-per-operation")
             .arg(args.context_growth_turns_per_operation.to_string())
             .arg("--tool-calls-per-turn")
@@ -1283,6 +1356,21 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
         }
         if args.span_log_failures {
             command.arg("--span-log-failures");
+        }
+        if let Some(max_terminal_records) = args.turn_state_max_terminal_records {
+            command
+                .arg("--turn-state-max-terminal-records")
+                .arg(max_terminal_records.to_string());
+        }
+        if let Some(max_events) = args.turn_state_max_events {
+            command
+                .arg("--turn-state-max-events")
+                .arg(max_events.to_string());
+        }
+        if let Some(max_idempotency_records) = args.turn_state_max_idempotency_records {
+            command
+                .arg("--turn-state-max-idempotency-records")
+                .arg(max_idempotency_records.to_string());
         }
         if let Some(path) = &args.trace_jsonl {
             command
@@ -1369,6 +1457,9 @@ async fn run_in_process(args: &Args, run_id: &str) -> Result<RunSummary, String>
 
     if args.scenario.is_resource_governor() {
         return run_resource_governor_in_process(args, run_id, operation_target, identities).await;
+    }
+    if args.scenario.is_secret_control_plane() {
+        return run_secret_consume_in_process(args, run_id, operation_target, identities).await;
     }
 
     run_user_turn_in_process(args, run_id, operation_target, identities).await
@@ -1554,9 +1645,12 @@ async fn run_user_turn_in_process(
         args.tenants,
         args.progress_interval_seconds
     );
-    let prefill =
+    let prefill = if matches!(args.scenario, Scenario::ThreadList) {
+        user_turn::prefill_thread_list(Arc::clone(&workload), args, Arc::clone(&identities)).await?
+    } else {
         user_turn::prefill_user_turn_history(Arc::clone(&workload), args, Arc::clone(&identities))
-            .await?;
+            .await?
+    };
     if let Some(warmup_args) = args.warmup_args() {
         eprintln!(
             "{} warming up target={} duration_seconds={}",
@@ -1585,6 +1679,69 @@ async fn run_user_turn_in_process(
             process,
             db_probe: Some(db_probe),
             prefill,
+        },
+    );
+    eprintln!(
+        "{} finished attempted={} succeeded={} failed={} duration_ms={} throughput_ops_sec={:.1}",
+        log_prefix(args),
+        summary.attempted,
+        summary.succeeded,
+        summary.failed,
+        summary.duration_ms,
+        summary.throughput_ops_sec
+    );
+    Ok(summary)
+}
+
+async fn run_secret_consume_in_process(
+    args: &Args,
+    run_id: &str,
+    operation_target: OperationTarget,
+    identities: Arc<SyntheticIds>,
+) -> Result<RunSummary, String> {
+    let workload = Arc::new(build_secret_consume_workload(args, run_id).await?);
+    eprintln!(
+        "{} running target={} concurrency={} operations_per_task={} {} warmup_seconds={} users={} tenants={} progress_interval_seconds={}",
+        log_prefix(args),
+        workload.target(),
+        args.concurrency,
+        args.operations,
+        operation_target.label(),
+        args.warmup_seconds,
+        args.users,
+        args.tenants,
+        args.progress_interval_seconds
+    );
+    secret_ops::prefill_secrets(Arc::clone(&workload), args, Arc::clone(&identities)).await?;
+    if let Some(warmup_args) = args.warmup_args() {
+        eprintln!(
+            "{} warming up target={} duration_seconds={}",
+            log_prefix(args),
+            workload.target(),
+            warmup_args.duration_seconds
+        );
+        let _ =
+            run_secret_consume_tasks(Arc::clone(&workload), &warmup_args, Arc::clone(&identities))
+                .await?;
+    }
+    let metrics = ProcessMetricsSampler::start(Duration::from_millis(100));
+    let db_probe_before = db_probe::capture(args).await;
+    let started = Instant::now();
+    let target = workload.target().to_string();
+    let samples = run_secret_consume_tasks(workload, args, identities).await?;
+    let elapsed = started.elapsed();
+    let process = metrics.finish();
+    let db_probe = db_probe::summarize(db_probe_before, db_probe::capture(args).await);
+    let summary = summarize(
+        args,
+        run_id,
+        SummaryInput {
+            target,
+            elapsed,
+            samples,
+            process,
+            db_probe: Some(db_probe),
+            prefill: None,
         },
     );
     eprintln!(
@@ -1718,7 +1875,12 @@ fn run_one_operation(
         Scenario::ReserveReconcile => governor
             .reserve(scope, estimate)
             .and_then(|reservation| governor.reconcile(reservation.id, usage).map(|_| ())),
-        Scenario::ChatTurn | Scenario::ContextGrowth | Scenario::ToolSession => {
+        Scenario::ChatTurn
+        | Scenario::TurnLifecycleChurn
+        | Scenario::ThreadList
+        | Scenario::ContextGrowth
+        | Scenario::ToolSession
+        | Scenario::SecretConsume => {
             unreachable!("user-turn scenarios use the async user-turn workload")
         }
         Scenario::MixedUserSession => {
@@ -1779,6 +1941,9 @@ fn summarize(args: &Args, run_id: &str, input: SummaryInput) -> RunSummary {
         active_thread_count: args.active_thread_count,
         threads_per_owner: args.threads_per_owner,
         turn_state_backend: args.turn_state_backend,
+        turn_state_max_terminal_records: args.turn_state_max_terminal_records,
+        turn_state_max_events: args.turn_state_max_events,
+        turn_state_max_idempotency_records: args.turn_state_max_idempotency_records,
         gate_blocked_every: args.gate_blocked_every,
         tenants: args.tenants,
         prefill_threads: args.prefill_threads,
@@ -1795,6 +1960,8 @@ fn summarize(args: &Args, run_id: &str, input: SummaryInput) -> RunSummary {
         user_message_bytes: args.user_message_bytes,
         assistant_message_bytes: args.assistant_message_bytes,
         context_max_messages: args.context_max_messages,
+        thread_list_threads: args.thread_list_threads,
+        thread_list_page_size: args.thread_list_page_size,
         context_growth_turns_per_operation: args.context_growth_turns_per_operation,
         tool_calls_per_turn: args.tool_calls_per_turn,
         tool_latency_ms: args.tool_latency_ms,
@@ -1873,7 +2040,7 @@ async fn build_libsql_backend(_args: &Args, _run_id: &str) -> Result<BackendHand
 
 #[cfg(feature = "postgres")]
 async fn build_postgres_backend(args: &Args, run_id: &str) -> Result<BackendHandle, String> {
-    let (filesystem, target) = build_postgres_root(args).await?;
+    let (filesystem, _pool, target) = build_postgres_root_and_pool(args).await?;
     Ok(BackendHandle {
         governor: governor_from_root(filesystem, run_id)?,
         target,
@@ -1881,9 +2048,16 @@ async fn build_postgres_backend(args: &Args, run_id: &str) -> Result<BackendHand
 }
 
 #[cfg(feature = "postgres")]
-pub(crate) async fn build_postgres_root(
+pub(crate) async fn build_postgres_root_and_pool(
     args: &Args,
-) -> Result<(Arc<ironclaw_filesystem::PostgresRootFilesystem>, String), String> {
+) -> Result<
+    (
+        Arc<ironclaw_filesystem::PostgresRootFilesystem>,
+        deadpool_postgres::Pool,
+        String,
+    ),
+    String,
+> {
     use ironclaw_filesystem::PostgresRootFilesystem;
 
     let url = resolve_postgres_url(args)?;
@@ -1895,9 +2069,9 @@ pub(crate) async fn build_postgres_root(
         .max_size(args.postgres_pool_size)
         .build()
         .map_err(display_err)?;
-    let filesystem = Arc::new(PostgresRootFilesystem::new(pool));
+    let filesystem = Arc::new(PostgresRootFilesystem::new(pool.clone()));
     filesystem.run_migrations().await.map_err(display_err)?;
-    Ok((filesystem, redact_postgres_url(&url)))
+    Ok((filesystem, pool, redact_postgres_url(&url)))
 }
 
 #[cfg(not(feature = "postgres"))]
@@ -1914,10 +2088,7 @@ where
 {
     let view = resource_mount_view(run_id)?;
     let scoped = Arc::new(ScopedFilesystem::with_fixed_view(root, view));
-    let store = FilesystemResourceGovernorStore::new(scoped);
-    Ok(Arc::new(
-        PersistentResourceGovernor::new(store).with_unlimited_fast_path(),
-    ))
+    Ok(Arc::new(FilesystemResourceGovernor::new(scoped)))
 }
 
 fn resource_mount_view(run_id: &str) -> Result<MountView, String> {
