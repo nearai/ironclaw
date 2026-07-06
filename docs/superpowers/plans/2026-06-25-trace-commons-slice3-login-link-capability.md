@@ -52,10 +52,10 @@ bearer credential).
   pub struct AccountLoginLink { pub account_id: String, pub url: String }
 
   pub async fn mint_account_login_link_via_sink(
-      tenant_id: &str,
-      user_id: &str,
+      tenant_id: &TenantId,
+      user_id: &UserId,
       sink: &dyn ContributionHttpSink,
-  ) -> anyhow::Result<AccountLoginLink>;
+  ) -> Result<AccountLoginLink, AccountLoginLinkError>;
   ```
   POSTs `{ "subject": <resolution.subject> }` (subject omitted when `None`) to
   `<issuer-origin>/v1/account/login-links` with the per-user bearer, parses

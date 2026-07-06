@@ -4024,6 +4024,78 @@ pub fn local_pseudonymous_contributor_id(scope: &str) -> String {
     format!("sha256:{}", scope_hash(scope))
 }
 
+/// Read (or create on first use) the per-instance random salt used to derive
+/// per-user pseudonymous subjects under instance enrollment. Persisted at the
+/// instance trace dir (`0600` on Unix). Concurrent first-use races are settled
+/// with `create_new`: exactly one writer wins and the loser re-reads.
+fn instance_subject_salt_at(base: &std::path::Path) -> anyhow::Result<String> {
+    use std::io::Write as _;
+
+    let dir = trace_contribution_dir_for_scope_at(base, None);
+    let path = dir.join("subject_salt");
+    let read_existing = |path: &std::path::Path| -> anyhow::Result<Option<String>> {
+        match std::fs::read_to_string(path) {
+            Ok(salt) => {
+                let salt = salt.trim().to_string();
+                anyhow::ensure!(!salt.is_empty(), "instance subject salt file is empty");
+                Ok(Some(salt))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(anyhow::anyhow!("failed to read instance subject salt: {e}")),
+        }
+    };
+    if let Some(salt) = read_existing(&path)? {
+        return Ok(salt);
+    }
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| anyhow::anyhow!("failed to create instance trace dir: {e}"))?;
+    // 32 random bytes, hex-encoded.
+    let salt = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    let open_new = || {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        options.open(&path)
+    };
+    match open_new() {
+        Ok(mut file) => {
+            file.write_all(salt.as_bytes())
+                .and_then(|()| file.sync_all())
+                .map_err(|e| anyhow::anyhow!("failed to write instance subject salt: {e}"))?;
+            Ok(salt)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => read_existing(&path)?
+            .ok_or_else(|| anyhow::anyhow!("instance subject salt disappeared during creation")),
+        Err(e) => Err(anyhow::anyhow!(
+            "failed to create instance subject salt: {e}"
+        )),
+    }
+}
+
+/// Per-user pseudonymous subject for instance enrollment, salted with the
+/// per-instance random salt. Unlike [`local_pseudonymous_contributor_id`]
+/// (an unsalted scope hash used for local state keying and log refs), this
+/// value is sent to the Trace Commons server as the claim subject — salting
+/// prevents the server (or anyone with ledger access) from dictionary-matching
+/// guessable tenant/user identifiers to de-pseudonymize contributors.
+fn salted_pseudonymous_contributor_id_at(
+    base: &std::path::Path,
+    scope: &str,
+) -> anyhow::Result<String> {
+    let salt = instance_subject_salt_at(base)?;
+    let digest = Sha256::digest(format!("{salt}:{scope}").as_bytes());
+    // safety: slicing the fixed-size SHA-256 byte array.
+    Ok(format!("sha256:{}", hex::encode(&digest[..16])))
+}
+
 pub fn local_pseudonymous_tenant_scope_ref(scope: &str) -> String {
     format!("tenant_sha256:{}", scope_hash(scope))
 }
@@ -4065,25 +4137,38 @@ fn lock_trace_scope_for_mutation_blocking(scope: Option<&str>) -> OwnedMutexGuar
     }
 }
 
-fn read_trace_policy_for_scope_at(
+/// Read the scoped policy only if its file exists: `Ok(None)` when absent.
+/// The presence distinction matters for the instance-enrollment fallback —
+/// a scoped policy file that EXISTS with `enabled = false` is an explicit
+/// user opt-out (written by `traces opt-out`) and must not be treated like
+/// "never configured".
+fn read_trace_policy_for_scope_if_present_at(
     base: &std::path::Path,
     scope: Option<&str>,
-) -> anyhow::Result<StandingTraceContributionPolicy> {
+) -> anyhow::Result<Option<StandingTraceContributionPolicy>> {
     let path = trace_policy_path_at(base, scope);
     // Fail loud on stat/permission errors: `Path::exists()` maps them to
     // `false`, which would silently treat an unreadable policy as
     // missing/default-disabled and flip enrollment/flush behavior. Only a
-    // confirmed non-existent path returns the not-enrolled default.
+    // confirmed non-existent path reports absence.
     if !path
         .try_exists()
         .map_err(|e| anyhow::anyhow!("failed to stat trace policy {}: {}", path.display(), e))?
     {
-        return Ok(StandingTraceContributionPolicy::default());
+        return Ok(None);
     }
     let body = std::fs::read_to_string(&path)
         .map_err(|e| anyhow::anyhow!("failed to read trace policy {}: {}", path.display(), e))?;
     serde_json::from_str(&body)
+        .map(Some)
         .map_err(|e| anyhow::anyhow!("failed to parse trace policy {}: {}", path.display(), e))
+}
+
+fn read_trace_policy_for_scope_at(
+    base: &std::path::Path,
+    scope: Option<&str>,
+) -> anyhow::Result<StandingTraceContributionPolicy> {
+    Ok(read_trace_policy_for_scope_if_present_at(base, scope)?.unwrap_or_default())
 }
 
 pub fn read_trace_policy_for_scope(
@@ -4107,11 +4192,26 @@ pub fn write_trace_policy_for_scope(
     write_trace_policy_for_scope_at(&ironclaw_common::paths::ironclaw_base_dir(), scope, policy)
 }
 
+// ── Trace credential resolution (instance enrollment) ────────────────────────
+//
+// File-size justification (.claude/rules/architecture.md §5): this PR adds the
+// instance-enrollment resolver, account login-link, and account-traces sections
+// to an already-oversized module because they are tightly coupled to the
+// policy-read/scope-dir/claim-mint machinery that lives here (every helper
+// below calls into read_trace_policy_for_scope_at / trace_contribution_dir_* /
+// DefaultTraceUploadCredentialProvider); splitting them out first would have
+// meant exporting a wide private surface mid-feature. Decomposition of
+// contribution.rs is tracked in issue #4088.
+
 /// Resolved Trace Commons credentials for a (tenant, user): which local-state
 /// scope to use and the per-user subject (if any) to send to the server.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraceCredentialResolution {
-    /// The scope string whose local state (policy, device key, credits) to use.
+    /// The scope string keying the user's local state (queued envelopes,
+    /// records, credits). NOTE: it is NOT always where the device key and
+    /// enrollment policy live — under instance enrollment (`subject` is
+    /// `Some`) those come from the instance scope (`None`); callers select
+    /// the device-key dir based on `subject.is_some()`.
     pub state_scope: String,
     /// Per-user subject to send in upload-claim / login-link requests.
     /// `None` for the personal-invite model (device key already 1:1 with user).
@@ -4130,21 +4230,28 @@ fn resolve_trace_credentials_at(
 ) -> anyhow::Result<Option<TraceCredentialResolution>> {
     let scope = trace_scope_key(tenant_id, user_id);
 
-    let personal = read_trace_policy_for_scope_at(base_dir, Some(scope.as_str()))
-        .map_err(|e| anyhow::anyhow!("failed to read personal trace policy: {e}"))?;
-    if personal.enabled {
-        return Ok(Some(TraceCredentialResolution {
-            state_scope: scope,
-            subject: None,
-            policy: personal,
-        }));
+    match read_trace_policy_for_scope_if_present_at(base_dir, Some(scope.as_str()))
+        .map_err(|e| anyhow::anyhow!("failed to read personal trace policy: {e}"))?
+    {
+        Some(personal) if personal.enabled => {
+            return Ok(Some(TraceCredentialResolution {
+                state_scope: scope,
+                subject: None,
+                policy: personal,
+            }));
+        }
+        // A PRESENT scoped policy with enabled=false is an explicit user
+        // opt-out (`traces opt-out`); it must win over the instance fallback.
+        Some(_) => return Ok(None),
+        // No scoped policy was ever written — the instance fallback applies.
+        None => {}
     }
 
     let instance = read_trace_policy_for_scope_at(base_dir, None)
         .map_err(|e| anyhow::anyhow!("failed to read instance trace policy: {e}"))?;
     if instance.enabled {
         return Ok(Some(TraceCredentialResolution {
-            subject: Some(local_pseudonymous_contributor_id(&scope)),
+            subject: Some(salted_pseudonymous_contributor_id_at(base_dir, &scope)?),
             state_scope: scope,
             policy: instance,
         }));
@@ -4155,7 +4262,10 @@ fn resolve_trace_credentials_at(
 
 /// Pick the user's own (personal-invite) enrollment when present and enabled,
 /// else fall back to the admin-provisioned instance enrollment (scope `None`)
-/// with a per-user pseudonymous subject. Returns `None` when neither is enabled.
+/// with a per-user pseudonymous subject. Returns `None` when neither is
+/// enabled — and, importantly, when the user's scoped policy exists with
+/// `enabled = false` (an explicit `traces opt-out`), which blocks the
+/// instance fallback entirely.
 pub fn resolve_trace_credentials(
     tenant_id: &TenantId,
     user_id: &UserId,
@@ -4190,14 +4300,22 @@ fn resolve_effective_flush_target_at(
 ) -> anyhow::Result<Option<EffectiveFlushTarget>> {
     // Personal-invite enrollment: the per-scope policy is enabled and its device
     // key is already 1:1 with the user, so no explicit subject is needed.
-    let personal = read_trace_policy_for_scope_at(base, scope)
-        .map_err(|e| anyhow::anyhow!("failed to read personal trace policy: {e}"))?;
-    if personal.enabled {
-        return Ok(Some(EffectiveFlushTarget {
-            policy: personal,
-            device_key_dir: trace_contribution_dir_for_scope_at(base, scope),
-            subject: None,
-        }));
+    match read_trace_policy_for_scope_if_present_at(base, scope)
+        .map_err(|e| anyhow::anyhow!("failed to read personal trace policy: {e}"))?
+    {
+        Some(personal) if personal.enabled => {
+            return Ok(Some(EffectiveFlushTarget {
+                policy: personal,
+                device_key_dir: trace_contribution_dir_for_scope_at(base, scope),
+                subject: None,
+            }));
+        }
+        // A PRESENT scoped policy with enabled=false is an explicit user
+        // opt-out (`traces opt-out`); capture/flush must NOT fall back to the
+        // instance enrollment for this scope.
+        Some(_) => return Ok(None),
+        // No scoped policy was ever written — the instance fallback applies.
+        None => {}
     }
 
     // Instance enrollment: no enabled per-scope policy, but the admin-provisioned
@@ -4209,7 +4327,9 @@ fn resolve_effective_flush_target_at(
         return Ok(Some(EffectiveFlushTarget {
             policy: instance,
             device_key_dir: trace_contribution_dir_for_scope_at(base, None),
-            subject: scope.map(local_pseudonymous_contributor_id),
+            subject: scope
+                .map(|s| salted_pseudonymous_contributor_id_at(base, s))
+                .transpose()?,
         }));
     }
 
@@ -15670,11 +15790,39 @@ mod tests {
             .unwrap()
             .unwrap();
         let expected_scope = trace_scope_key("tenant-a", "alice");
-        assert_eq!(
-            r.subject,
-            Some(local_pseudonymous_contributor_id(&expected_scope))
-        );
+        let subject = r
+            .subject
+            .clone()
+            .expect("instance fallback carries a subject");
         assert!(r.policy.enabled);
+
+        // The subject must be SALTED with per-instance random state: an
+        // unsalted hash of the raw scope lets the server dictionary-match
+        // guessable tenant/user ids and de-pseudonymize contributors.
+        assert_ne!(
+            subject,
+            local_pseudonymous_contributor_id(&expected_scope),
+            "instance subject must not be the unsalted scope hash"
+        );
+
+        // Stable within an instance: same (base, scope) → same subject.
+        let again = resolve_trace_credentials_at(dir.path(), "tenant-a", "alice")
+            .unwrap()
+            .unwrap();
+        assert_eq!(again.subject.as_deref(), Some(subject.as_str()));
+
+        // Distinct across instances: a different base dir has a different salt.
+        let other = tempfile::tempdir().unwrap();
+        write_policy_at(other.path(), None, &instance);
+        let other_subject = resolve_trace_credentials_at(other.path(), "tenant-a", "alice")
+            .unwrap()
+            .unwrap()
+            .subject
+            .expect("other instance resolves a subject");
+        assert_ne!(
+            other_subject, subject,
+            "different instances must derive different subjects for the same scope"
+        );
     }
 
     #[test]
@@ -15736,6 +15884,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resolver_explicit_user_opt_out_blocks_instance_fallback() {
+        // `traces opt-out` writes the user's scoped policy with enabled=false.
+        // That explicit opt-out must win over an enabled instance policy on
+        // EVERY resolution surface (credentials, flush, capture) — a disabled
+        // scoped policy file is not the same as "never configured".
+        let dir = tempfile::tempdir().unwrap();
+        let scope = trace_scope_key("tenant-a", "alice");
+        write_policy_at(
+            dir.path(),
+            None,
+            &StandingTraceContributionPolicy {
+                enabled: true,
+                ..Default::default()
+            },
+        );
+        write_policy_at(
+            dir.path(),
+            Some(scope.as_str()),
+            &StandingTraceContributionPolicy {
+                enabled: false,
+                ..Default::default()
+            },
+        );
+
+        assert!(
+            resolve_trace_credentials_at(dir.path(), "tenant-a", "alice")
+                .unwrap()
+                .is_none(),
+            "explicit per-user opt-out must not resolve to instance credentials"
+        );
+        assert!(
+            resolve_effective_flush_target_at(dir.path(), Some(scope.as_str()))
+                .unwrap()
+                .is_none(),
+            "explicit per-user opt-out must not flush under instance enrollment"
+        );
+        assert!(
+            resolve_effective_capture_policy_at(dir.path(), Some(scope.as_str()))
+                .unwrap()
+                .is_none(),
+            "explicit per-user opt-out must not capture under the instance policy"
+        );
+    }
+
     // --- resolve_effective_flush_target tests ---
     // Same isolation contract as the resolver tests: each uses its own tempdir
     // passed to the private `_at` core, so they never touch the global
@@ -15783,8 +15976,8 @@ mod tests {
         assert!(target.policy.enabled);
         assert_eq!(
             target.subject,
-            Some(local_pseudonymous_contributor_id(&scope)),
-            "instance enrollment attributes the user via a per-user pseudonymous subject"
+            Some(salted_pseudonymous_contributor_id_at(dir.path(), &scope).unwrap()),
+            "instance enrollment attributes the user via a salted per-user pseudonymous subject"
         );
         assert_eq!(
             target.device_key_dir,
@@ -16062,8 +16255,11 @@ mod tests {
 
         let bodies = captured.lock().unwrap();
         assert_eq!(bodies.len(), 1, "exactly one POST to login-links");
-        let expected_subject =
-            local_pseudonymous_contributor_id(&trace_scope_key("tenant-dev", "alice"));
+        let expected_subject = salted_pseudonymous_contributor_id_at(
+            base.path(),
+            &trace_scope_key("tenant-dev", "alice"),
+        )
+        .unwrap();
         assert_eq!(
             bodies[0]["subject"],
             serde_json::Value::String(expected_subject),
@@ -16147,8 +16343,11 @@ mod tests {
 
         let bodies = claim_bodies.lock().unwrap();
         assert_eq!(bodies.len(), 1, "exactly one claim request");
-        let expected_subject =
-            local_pseudonymous_contributor_id(&trace_scope_key("tenant-dev", "alice"));
+        let expected_subject = salted_pseudonymous_contributor_id_at(
+            base.path(),
+            &trace_scope_key("tenant-dev", "alice"),
+        )
+        .unwrap();
         assert_eq!(
             bodies[0]["subject"],
             serde_json::Value::String(expected_subject),
@@ -16218,8 +16417,11 @@ mod tests {
         .await
         .expect("instance-enrolled user publishes a community profile");
 
-        let expected_subject =
-            local_pseudonymous_contributor_id(&trace_scope_key("tenant-dev", "alice"));
+        let expected_subject = salted_pseudonymous_contributor_id_at(
+            base.path(),
+            &trace_scope_key("tenant-dev", "alice"),
+        )
+        .unwrap();
         let claims = claim_bodies.lock().unwrap();
         assert_eq!(claims.len(), 1, "exactly one claim request");
         assert_eq!(

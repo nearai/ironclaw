@@ -6,7 +6,7 @@ import { useAccountTraces } from "../hooks/useAccountTraces.js";
 import { matchesSearch } from "../lib/settings-search.js";
 import { SettingsSearchEmpty } from "./settings-search-empty.js";
 
-function formatCredit(value) {
+export function formatCredit(value) {
   return (Number(value) || 0).toFixed(2);
 }
 
@@ -15,10 +15,20 @@ function formatSignedCredit(value) {
   return `${numeric >= 0 ? "+" : ""}${numeric.toFixed(2)}`;
 }
 
-function formatTimestamp(value, t) {
+export function formatTimestamp(value, t) {
   if (!value) return t("traceCommons.never");
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? t("traceCommons.never") : parsed.toLocaleString();
+}
+
+// Decide how the submitted-traces section renders. Pure so the branch logic is
+// unit-testable: "error" wins over everything (a tracesQuery failure must
+// surface, never silently hide behind an empty state), "list" needs an
+// enrolled contributor with at least one trace, anything else renders nothing.
+export function tracesSectionMode({ isError, enrolled, traces }) {
+  if (isError) return "error";
+  if (enrolled && Array.isArray(traces) && traces.length > 0) return "list";
+  return "hidden";
 }
 
 function StatRow({ label, value, description }) {
@@ -189,8 +199,13 @@ export function TraceCommonsTab({ searchQuery = "" }) {
   // contributor with no personal credits hits the credits empty-state branch, so
   // gating this on that branch would silently hide their traces and any
   // tracesQuery errors. Render it after `body` regardless of the credits state.
+  const tracesMode = tracesSectionMode({
+    isError: tracesQuery.isError,
+    enrolled: tracesEnrolled,
+    traces,
+  });
   const tracesSection =
-    (tracesQuery.isError || (tracesEnrolled && traces.length > 0)) &&
+    tracesMode !== "hidden" &&
     html`
       <div className="mt-5">
         <h4
@@ -198,7 +213,7 @@ export function TraceCommonsTab({ searchQuery = "" }) {
         >
           ${t("traceCommons.submittedTracesTitle")}
         </h4>
-        ${tracesQuery.isError
+        ${tracesMode === "error"
           ? html`
               <div
                 className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"

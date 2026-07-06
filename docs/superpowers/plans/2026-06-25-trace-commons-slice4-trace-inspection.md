@@ -315,12 +315,12 @@ git commit -m "feat(reborn): GET /api/webchat/v2/traces/account handler + contra
 ### Task 4: Frontend — fetch + render submitted traces
 
 **Files:**
-- Modify: `crates/ironclaw_webui_v2_static/static/js/pages/settings/lib/settings-api.js`
+- Modify: `crates/ironclaw_webui_v2/static/js/pages/settings/lib/settings-api.js`
   (add `fetchAccountTraces`, mirror `fetchTraceCredits` at 120-133)
-- Create: `crates/ironclaw_webui_v2_static/static/js/pages/settings/hooks/useAccountTraces.js`
+- Create: `crates/ironclaw_webui_v2/static/js/pages/settings/hooks/useAccountTraces.js`
   (mirror `useTraceCredits.js`)
 - Modify: the Trace Commons settings tab component to render the list (find via
-  `grep -rln "useTraceCredits" crates/ironclaw_webui_v2_static/static/js`)
+  `grep -rln "useTraceCredits" crates/ironclaw_webui_v2/static/js`)
 - No `assets.rs` edit needed for modified files; **new** JS files are picked up by
   `build.rs` automatically (assets are generated from the `static/` tree at
   compile time — see `assets.rs` header).
@@ -370,14 +370,14 @@ that file. Show nothing extra when `!enrolled`.
 
 - [ ] **Step 4: Verify build embeds the assets**
 
-Run: `cargo build -p ironclaw_webui_v2_static`
+Run: `cargo build -p ironclaw_webui_v2`
 Expected: compiles (new JS files embedded by `build.rs`). Optionally run the app
 (`/run` skill) and open Settings → Traces to confirm the list renders.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/ironclaw_webui_v2_static/static/js/
+git add crates/ironclaw_webui_v2/static/js/
 git commit -m "feat(reborn-ui): render submitted Trace Commons traces in settings"
 ```
 
