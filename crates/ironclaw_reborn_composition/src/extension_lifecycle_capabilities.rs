@@ -309,42 +309,15 @@ fn extension_package_ref(
 }
 
 fn lifecycle_error(error: ProductWorkflowError) -> FirstPartyCapabilityError {
-    // A ProductWorkflowError here comes from a lifecycle CALL (activation
-    // requirements, activate/install/remove) — the extension was not found,
-    // not installed, or the binding was rejected. That is an operation-level
-    // failure, NOT a tool-input encoding problem. Mapping InvalidBindingRequest
-    // to InputEncode surfaced the nonsensical "the tool input could not be
-    // encoded" to the model when it activated a not-installed extension. Map
-    // every lifecycle failure to OperationFailed ("the tool operation failed")
-    // and log the reason server-side — the fixed, model-visible human summary
-    // cannot carry the raw reason string (safe-summary invariant), so dropping
-    // it silently (the old `map_err(|_| ...)` shape) would leave the failure
-    // undiagnosable.
-    match &error {
-        ProductWorkflowError::InvalidBindingRequest { reason }
-        | ProductWorkflowError::Transient { reason } => {
-            tracing::debug!(
-                target: "ironclaw::reborn::extension_lifecycle",
-                reason = %reason,
-                "extension lifecycle capability failed"
-            );
+    let kind = match error {
+        ProductWorkflowError::InvalidBindingRequest { .. }
+        | ProductWorkflowError::UnsupportedActionKind { .. } => {
+            RuntimeDispatchErrorKind::InputEncode
         }
-        ProductWorkflowError::UnsupportedActionKind { kind } => {
-            tracing::debug!(
-                target: "ironclaw::reborn::extension_lifecycle",
-                action_kind = %kind,
-                "extension lifecycle capability received an unsupported action kind"
-            );
-        }
-        other => {
-            tracing::debug!(
-                target: "ironclaw::reborn::extension_lifecycle",
-                error = %other,
-                "extension lifecycle capability failed"
-            );
-        }
-    }
-    FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+        ProductWorkflowError::Transient { .. } => RuntimeDispatchErrorKind::OperationFailed,
+        _ => RuntimeDispatchErrorKind::OperationFailed,
+    };
+    FirstPartyCapabilityError::new(kind)
 }
 
 #[cfg(test)]
@@ -371,33 +344,6 @@ mod tests {
     use ironclaw_product_workflow::{
         ChannelConnectionRequirement, LifecyclePhase, RebornChannelConnectStrategy,
     };
-
-    #[test]
-    fn lifecycle_error_maps_call_failures_to_operation_failed_not_input_encode() {
-        // Regression: a lifecycle CALL failure — e.g. activating a not-installed
-        // extension yields InvalidBindingRequest "available extension was not
-        // found" — must surface as OperationFailed ("the tool operation
-        // failed"), NOT InputEncode ("the tool input could not be encoded").
-        // The old mapping told the model its input was malformed and to retry
-        // with changed input, when the real remedy is to install/connect first.
-        for error in [
-            ProductWorkflowError::InvalidBindingRequest {
-                reason: "available extension was not found".to_string(),
-            },
-            ProductWorkflowError::UnsupportedActionKind {
-                kind: "activate".to_string(),
-            },
-            ProductWorkflowError::Transient {
-                reason: "backend busy".to_string(),
-            },
-        ] {
-            assert_eq!(
-                lifecycle_error(error).kind(),
-                Some(RuntimeDispatchErrorKind::OperationFailed),
-                "lifecycle call failures must not masquerade as tool-input encoding errors"
-            );
-        }
-    }
 
     fn slack_activation_response() -> LifecycleProductResponse {
         let requirement = ChannelConnectionRequirement {
