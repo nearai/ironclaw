@@ -1683,13 +1683,16 @@ fn postgres_shared_projection_index_name(spec: &IndexSpec) -> String {
         IndexKind::Fts => "fts",
         IndexKind::Vector { .. } => "vector",
     };
-    let keys = spec
-        .keys
-        .iter()
-        .map(|key| key.as_str())
-        .collect::<Vec<_>>()
-        .join("_");
+    let mut keys = postgres_projection_index_component(kind);
+    for key in &spec.keys {
+        keys.push_str(&postgres_projection_index_component(key.as_str()));
+    }
     sql_index_name(&format!("/shared/{kind}/{keys}"), spec.name.as_str())
+}
+
+#[cfg(feature = "postgres")]
+fn postgres_projection_index_component(value: &str) -> String {
+    format!("{}:{value}", value.len())
 }
 
 /// Translate a [`Filter`] tree into a postgres WHERE-clause fragment.
@@ -2093,6 +2096,28 @@ mod tests {
         assert_ne!(
             postgres_shared_projection_index_name(&exact_bucket),
             postgres_shared_projection_index_name(&exact_tenant)
+        );
+    }
+
+    #[test]
+    fn shared_projection_index_name_uses_injective_key_encoding() {
+        let split_keys = IndexSpec::new(
+            crate::IndexName::new("bucket_exact").unwrap(),
+            vec![
+                crate::IndexKey::new("a").unwrap(),
+                crate::IndexKey::new("b").unwrap(),
+            ],
+            IndexKind::Exact,
+        );
+        let joined_key = IndexSpec::new(
+            crate::IndexName::new("bucket_exact").unwrap(),
+            vec![crate::IndexKey::new("a_b").unwrap()],
+            IndexKind::Exact,
+        );
+
+        assert_ne!(
+            postgres_shared_projection_index_name(&split_keys),
+            postgres_shared_projection_index_name(&joined_key)
         );
     }
 

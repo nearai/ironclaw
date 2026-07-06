@@ -141,9 +141,21 @@ impl LibSqlRootFilesystem {
 }
 
 #[cfg(feature = "libsql")]
-async fn connect_with_retry<F>(mut open: F) -> Result<libsql::Connection, FilesystemError>
+async fn connect_with_retry<F>(open: F) -> Result<libsql::Connection, FilesystemError>
 where
     F: FnMut() -> Result<libsql::Connection, libsql::Error>,
+{
+    connect_with_retry_and_pragmas(open, |_| LIBSQL_CONNECTION_PRAGMAS).await
+}
+
+#[cfg(feature = "libsql")]
+async fn connect_with_retry_and_pragmas<F, P>(
+    mut open: F,
+    mut pragmas_for_attempt: P,
+) -> Result<libsql::Connection, FilesystemError>
+where
+    F: FnMut() -> Result<libsql::Connection, libsql::Error>,
+    P: FnMut(u32) -> &'static str,
 {
     // Match the legacy libSQL backend's connection policy: every
     // operation gets its own connection, concurrent writers wait on
@@ -157,7 +169,7 @@ where
                 // `execute_batch` runs each statement and discards the rows
                 // PRAGMAs like `busy_timeout` return, which is exactly what
                 // we want — we only care about the side effect.
-                match conn.execute_batch(LIBSQL_CONNECTION_PRAGMAS).await {
+                match conn.execute_batch(pragmas_for_attempt(attempt)).await {
                     Ok(_) => return Ok(conn),
                     Err(error) => {
                         last_error = Some(error);
@@ -2136,6 +2148,39 @@ mod tests {
         .unwrap();
 
         assert_eq!(attempts, LIBSQL_CONNECT_ATTEMPTS);
+        let mut rows = conn.query("PRAGMA busy_timeout", ()).await.unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let timeout: i64 = row.get(0).unwrap();
+        assert_eq!(timeout, 5000);
+    }
+
+    #[tokio::test]
+    async fn connect_retries_transient_pragma_failures_before_succeeding() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("connect-retry-pragma-test.db");
+        let db = libsql::Builder::new_local(db_path).build().await.unwrap();
+        let mut opens = 0;
+        let mut initializers = 0;
+
+        let conn = connect_with_retry_and_pragmas(
+            || {
+                opens += 1;
+                db.connect()
+            },
+            |_| {
+                initializers += 1;
+                if initializers == 1 {
+                    "THIS IS NOT SQL"
+                } else {
+                    LIBSQL_CONNECTION_PRAGMAS
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(opens, 2);
+        assert_eq!(initializers, 2);
         let mut rows = conn.query("PRAGMA busy_timeout", ()).await.unwrap();
         let row = rows.next().await.unwrap().unwrap();
         let timeout: i64 = row.get(0).unwrap();
