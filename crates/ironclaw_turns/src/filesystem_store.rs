@@ -630,8 +630,8 @@ where
 ///
 /// Keeping this as a concrete enum, rather than a bundle of trait objects,
 /// lets production wiring retain component type checks while allowing
-/// Postgres-backed deployments to use the row/append layout and libSQL-backed
-/// deployments to keep the existing blob layout.
+/// filesystem-backed deployments to choose the row/append layout explicitly
+/// while retaining the blob layout for compatibility tests and rollback seams.
 pub enum FilesystemTurnStateStoreKind<F>
 where
     F: RootFilesystem,

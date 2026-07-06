@@ -124,15 +124,15 @@ impl<S> LocalTriggerTurnSnapshotSource<S> {
     }
 }
 
-// Durable filesystem store (libSQL/Postgres, without `inmemory-turn-state`):
-// async `Result`.
+// Durable filesystem row/blob store wrapper (libSQL/Postgres, without
+// `inmemory-turn-state`): async `Result`.
 #[cfg(all(
     any(feature = "libsql", feature = "postgres"),
     not(feature = "inmemory-turn-state")
 ))]
 #[async_trait]
 impl<F> TriggerTurnSnapshotSource
-    for LocalTriggerTurnSnapshotSource<ironclaw_turns::FilesystemTurnStateStore<F>>
+    for LocalTriggerTurnSnapshotSource<ironclaw_turns::FilesystemTurnStateStoreKind<F>>
 where
     F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
 {

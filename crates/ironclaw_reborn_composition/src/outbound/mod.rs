@@ -11,8 +11,10 @@ pub(crate) use outbound_delivery_capability_surface::{
     parse_outbound_delivery_target_set_input, parse_outbound_delivery_targets_list_input,
     set_outbound_delivery_target_for_model,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use outbound_preferences::OutboundDeliveryTargetEntry;
 pub(crate) use outbound_preferences::{
-    MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetEntry,
-    OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome,
-    OutboundDeliveryTargetRegistry, RebornOutboundPreferencesFacade,
+    MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetProvider,
+    OutboundDeliveryTargetRegistrationOutcome, OutboundDeliveryTargetRegistry,
+    RebornOutboundPreferencesFacade,
 };
