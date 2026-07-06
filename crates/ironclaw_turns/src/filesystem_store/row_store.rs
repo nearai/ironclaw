@@ -1,49 +1,41 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use async_trait::async_trait;
-use chrono::Utc;
 use ironclaw_filesystem::{
     FILESYSTEM_APPLY_TIMEOUT, FileType, FilesystemError, RecordVersion, RootFilesystem,
-    ScopedFilesystem, SeqNo,
+    ScopedFilesystem,
 };
-use ironclaw_host_api::{ResourceScope, ScopedPath, UserId};
-use serde::{Serialize, de::DeserializeOwned};
-use tokio::sync::{Mutex as AsyncMutex, RwLock, mpsc, oneshot};
+use ironclaw_host_api::{ResourceScope, UserId};
+use serde::de::DeserializeOwned;
+use tokio::sync::{Mutex as AsyncMutex, RwLock};
 use tracing::{Instrument, field};
 
 use crate::{
-    AllowAllTurnAdmissionLimitProvider, CancelRunRequest, CancelRunResponse, EventCursor,
-    GetLoopCheckpointRequest, GetRunStateRequest, InMemoryTurnStateStore,
-    InMemoryTurnStateStoreLimits, LoopCheckpointRecord, LoopCheckpointStore,
-    PutLoopCheckpointRequest, ResumeTurnRequest, ResumeTurnResponse, RunProfileResolver,
-    SpawnTreeReservation, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse,
-    TurnActiveLockRecord, TurnAdmissionLimitProvider, TurnAdmissionPolicy,
-    TurnAdmissionReservationRecord, TurnCheckpointId, TurnCheckpointRecord, TurnError,
-    TurnEventPage, TurnEventProjectionSource, TurnIdempotencyRecord, TurnLifecycleEvent,
-    TurnPersistenceSnapshot, TurnRecord, TurnRunId, TurnRunRecord, TurnRunState, TurnScope,
-    TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
+    AllowAllTurnAdmissionLimitProvider, CancelRunRequest, EventCursor, GetRunStateRequest,
+    InMemoryTurnStateStore, InMemoryTurnStateStoreLimits, TurnAdmissionLimitProvider, TurnError,
+    TurnEventPage, TurnPersistenceSnapshot, TurnRecord, TurnRunId, TurnRunRecord, TurnRunState,
+    TurnScope, TurnStatus,
     events::project_turn_events,
-    runner::{
-        ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
-        ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RecoverExpiredLeasesRequest,
-        RecoverExpiredLeasesResponse, RelinquishRunRequest, TurnRunTransitionPort,
-        TurnRunnerOutcome,
-    },
+    runner::{ClaimedTurnRun, HeartbeatRequest, RelinquishRunRequest, TurnRunTransitionPort},
 };
 
 use super::{
-    profile_resolver::PreResolvedRunProfileResolver,
     projection,
     runner_lease::{RunnerLeaseMemory, RunnerLeaseOverlay, RunnerLeaseRecord, RunnerLeaseStore},
 };
-const ROW_ROOT: &str = "/turns/rows/v1";
-const META_DIR: &str = "meta";
-const META_FILE: &str = "state.json";
+
+mod delta;
+mod io;
+mod journal;
+mod traits;
+
+use delta::{
+    RowPersistError, RowSnapshotState, RowStoreMeta, SnapshotDelta, event_record_key,
+    keyed_records, preserve_loop_checkpoints, row_store_durable_delta,
+    row_store_hot_cache_snapshot, snapshot_delta,
+};
+use io::{deserialize_row, fs_error, meta_path, row_dir, row_path};
+use journal::{DeltaAck, DeltaJournal, materialize_delta_log};
+
 const TURN_ROWS: &str = "turns";
 const RUN_ROWS: &str = "runs";
 const ACTIVE_LOCK_ROWS: &str = "active-locks";
@@ -53,252 +45,6 @@ const IDEMPOTENCY_ROWS: &str = "idempotency";
 const EVENT_ROWS: &str = "events";
 const ADMISSION_RESERVATION_ROWS: &str = "admission-reservations";
 const SPAWN_TREE_RESERVATION_ROWS: &str = "spawn-tree-reservations";
-const DELTA_LOG: &str = "deltas/log";
-const DELTA_JOURNAL_MAX_BATCH: usize = 256;
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
-struct RowStoreMeta {
-    event_retention_floor: EventCursor,
-}
-
-impl Default for RowStoreMeta {
-    fn default() -> Self {
-        Self {
-            event_retention_floor: EventCursor::default(),
-        }
-    }
-}
-
-struct RowSnapshotState {
-    snapshot: TurnPersistenceSnapshot,
-    store: Arc<InMemoryTurnStateStore>,
-    latest_event_cursor: EventCursor,
-    indexes: RowSnapshotIndexes,
-}
-
-impl RowSnapshotState {
-    fn new(
-        snapshot: TurnPersistenceSnapshot,
-        store: Arc<InMemoryTurnStateStore>,
-    ) -> Result<Self, TurnError> {
-        let latest_event_cursor = latest_event_cursor(&snapshot);
-        let indexes = RowSnapshotIndexes::from_snapshot(&snapshot)?;
-        Ok(Self {
-            snapshot,
-            store,
-            latest_event_cursor,
-            indexes,
-        })
-    }
-
-    fn apply_delta(&mut self, delta: SnapshotDelta) -> Result<(), TurnError> {
-        let latest_event_cursor = latest_event_cursor_after_delta(self.latest_event_cursor, &delta);
-        apply_delta_indexed(&mut self.snapshot, &mut self.indexes, delta)?;
-        self.latest_event_cursor = latest_event_cursor;
-        Ok(())
-    }
-
-    fn run_record(&self, run_id: TurnRunId) -> Option<TurnRunRecord> {
-        self.indexes
-            .runs
-            .get(&run_id.to_string())
-            .and_then(|index| self.snapshot.runs.get(*index))
-            .cloned()
-    }
-}
-
-#[derive(Debug, Default)]
-struct RowSnapshotIndexes {
-    turns: HashMap<String, usize>,
-    runs: HashMap<String, usize>,
-    active_locks: HashMap<String, usize>,
-    checkpoints: HashMap<String, usize>,
-    loop_checkpoints: HashMap<String, usize>,
-    idempotency_records: HashMap<String, usize>,
-    events: HashMap<String, usize>,
-    admission_reservations: HashMap<String, usize>,
-    spawn_tree_reservations: HashMap<String, usize>,
-}
-
-impl RowSnapshotIndexes {
-    fn from_snapshot(snapshot: &TurnPersistenceSnapshot) -> Result<Self, TurnError> {
-        Ok(Self {
-            turns: indexed_records(&snapshot.turns, &turn_record_key)?,
-            runs: indexed_records(&snapshot.runs, &run_record_key)?,
-            active_locks: indexed_records(&snapshot.active_locks, &active_lock_record_key)?,
-            checkpoints: indexed_records(&snapshot.checkpoints, &checkpoint_record_key)?,
-            loop_checkpoints: indexed_records(
-                &snapshot.loop_checkpoints,
-                &loop_checkpoint_record_key,
-            )?,
-            idempotency_records: indexed_records(
-                &snapshot.idempotency_records,
-                &idempotency_record_key,
-            )?,
-            events: indexed_records(&snapshot.events, &event_record_key)?,
-            admission_reservations: indexed_records(
-                &snapshot.admission_reservations,
-                &admission_reservation_record_key,
-            )?,
-            spawn_tree_reservations: indexed_records(
-                &snapshot.spawn_tree_reservations,
-                &spawn_tree_reservation_record_key,
-            )?,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Default, Serialize, serde::Deserialize)]
-struct SnapshotDelta {
-    turns_upsert: Vec<TurnRecord>,
-    turns_delete: Vec<String>,
-    runs_upsert: Vec<TurnRunRecord>,
-    runs_delete: Vec<String>,
-    active_locks_upsert: Vec<TurnActiveLockRecord>,
-    active_locks_delete: Vec<String>,
-    checkpoints_upsert: Vec<TurnCheckpointRecord>,
-    checkpoints_delete: Vec<String>,
-    loop_checkpoints_upsert: Vec<LoopCheckpointRecord>,
-    loop_checkpoints_delete: Vec<String>,
-    idempotency_upsert: Vec<TurnIdempotencyRecord>,
-    idempotency_delete: Vec<String>,
-    events_upsert: Vec<TurnLifecycleEvent>,
-    events_delete: Vec<String>,
-    admission_reservations_upsert: Vec<TurnAdmissionReservationRecord>,
-    admission_reservations_delete: Vec<String>,
-    spawn_tree_reservations_upsert: Vec<SpawnTreeReservation>,
-    spawn_tree_reservations_delete: Vec<String>,
-    event_retention_floor: Option<EventCursor>,
-}
-
-impl SnapshotDelta {
-    fn is_empty(&self) -> bool {
-        self.turns_upsert.is_empty()
-            && self.turns_delete.is_empty()
-            && self.runs_upsert.is_empty()
-            && self.runs_delete.is_empty()
-            && self.active_locks_upsert.is_empty()
-            && self.active_locks_delete.is_empty()
-            && self.checkpoints_upsert.is_empty()
-            && self.checkpoints_delete.is_empty()
-            && self.loop_checkpoints_upsert.is_empty()
-            && self.loop_checkpoints_delete.is_empty()
-            && self.idempotency_upsert.is_empty()
-            && self.idempotency_delete.is_empty()
-            && self.events_upsert.is_empty()
-            && self.events_delete.is_empty()
-            && self.admission_reservations_upsert.is_empty()
-            && self.admission_reservations_delete.is_empty()
-            && self.spawn_tree_reservations_upsert.is_empty()
-            && self.spawn_tree_reservations_delete.is_empty()
-            && self.event_retention_floor.is_none()
-    }
-}
-
-type DeltaAck = oneshot::Receiver<Result<(), TurnError>>;
-
-struct DeltaJournal {
-    sender: mpsc::UnboundedSender<DeltaJournalRequest>,
-}
-
-struct DeltaJournalRequest {
-    delta: SnapshotDelta,
-    ack: oneshot::Sender<Result<(), TurnError>>,
-}
-
-impl DeltaJournal {
-    fn new<F>(filesystem: Arc<ScopedFilesystem<F>>) -> Self
-    where
-        F: RootFilesystem + 'static,
-    {
-        let (sender, receiver) = mpsc::unbounded_channel();
-        tokio::spawn(run_delta_journal_flusher(filesystem, receiver));
-        Self { sender }
-    }
-
-    fn enqueue(&self, delta: SnapshotDelta) -> Result<Option<DeltaAck>, TurnError> {
-        if delta.is_empty() {
-            return Ok(None);
-        }
-        let (ack, receiver) = oneshot::channel();
-        self.sender
-            .send(DeltaJournalRequest { delta, ack })
-            .map_err(|_| delta_journal_stopped())?;
-        Ok(Some(receiver))
-    }
-
-    async fn await_ack(ack: Option<DeltaAck>) -> Result<(), TurnError> {
-        let Some(ack) = ack else {
-            return Ok(());
-        };
-        ack.await.map_err(|_| delta_journal_stopped())?
-    }
-}
-
-async fn run_delta_journal_flusher<F>(
-    filesystem: Arc<ScopedFilesystem<F>>,
-    mut receiver: mpsc::UnboundedReceiver<DeltaJournalRequest>,
-) where
-    F: RootFilesystem,
-{
-    while let Some(first) = receiver.recv().await {
-        let mut requests = Vec::with_capacity(DELTA_JOURNAL_MAX_BATCH);
-        requests.push(first);
-        tokio::task::yield_now().await;
-        while requests.len() < DELTA_JOURNAL_MAX_BATCH {
-            match receiver.try_recv() {
-                Ok(request) => requests.push(request),
-                Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
-                    break;
-                }
-            }
-        }
-        let result = persist_delta_journal_batch(filesystem.as_ref(), &requests).await;
-        for request in requests {
-            let _ = request.ack.send(result.clone());
-        }
-    }
-}
-
-async fn persist_delta_journal_batch<F>(
-    filesystem: &ScopedFilesystem<F>,
-    requests: &[DeltaJournalRequest],
-) -> Result<(), TurnError>
-where
-    F: RootFilesystem,
-{
-    let path = delta_log_path()?;
-    let mut payloads = Vec::with_capacity(requests.len());
-    for request in requests {
-        payloads.push(serde_json::to_vec(&request.delta).map_err(|error| {
-            TurnError::Unavailable {
-                reason: format!("turn-state delta serialization failed: {error}"),
-            }
-        })?);
-    }
-    if let [payload] = payloads.as_slice() {
-        filesystem
-            .append(&ResourceScope::system(), &path, payload.clone())
-            .await
-            .map_err(fs_error)?;
-        return Ok(());
-    }
-    let seqs = filesystem
-        .append_batch(&ResourceScope::system(), &path, payloads)
-        .await
-        .map_err(fs_error)?;
-    if seqs.len() != requests.len() {
-        return Err(TurnError::Unavailable {
-            reason: "turn-state delta batch append returned an unexpected ack count".to_string(),
-        });
-    }
-    Ok(())
-}
-
-fn delta_journal_stopped() -> TurnError {
-    TurnError::Unavailable {
-        reason: "turn-state delta journal stopped".to_string(),
-    }
-}
 
 /// Filesystem-backed turn-state store using typed append-log deltas.
 ///
@@ -316,9 +62,17 @@ where
     limits: InMemoryTurnStateStoreLimits,
     admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
     snapshot_state: AsyncMutex<Option<RowSnapshotState>>,
+    commit_gate: AsyncMutex<()>,
     runner_leases: RunnerLeaseMemory,
     delta_journal: DeltaJournal,
     apply_timeout: Duration,
+}
+
+struct RunStateTransitionTarget {
+    run_id: TurnRunId,
+    runner_id: crate::TurnRunnerId,
+    lease_token: crate::TurnLeaseToken,
+    retired_status: TurnStatus,
 }
 
 impl<F> FilesystemTurnStateRowStore<F>
@@ -334,6 +88,7 @@ where
             limits: InMemoryTurnStateStoreLimits::default(),
             admission_limit_provider: Arc::new(AllowAllTurnAdmissionLimitProvider),
             snapshot_state: AsyncMutex::new(None),
+            commit_gate: AsyncMutex::new(()),
             runner_leases: Arc::new(RwLock::new(HashMap::new())),
             delta_journal: DeltaJournal::new(filesystem),
             apply_timeout: FILESYSTEM_APPLY_TIMEOUT,
@@ -350,12 +105,6 @@ where
         admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
     ) -> Self {
         self.admission_limit_provider = admission_limit_provider;
-        self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_apply_timeout(mut self, apply_timeout: Duration) -> Self {
-        self.apply_timeout = apply_timeout;
         self
     }
 
@@ -408,6 +157,7 @@ where
     }
 
     async fn load_snapshot_from_rows(&self) -> Result<RowSnapshotState, TurnError> {
+        materialize_delta_log(self.filesystem.as_ref(), None).await?;
         let meta = self.read_meta().await?;
         let turns = self.read_row_collection(TURN_ROWS).await?;
         let runs = self.read_row_collection(RUN_ROWS).await?;
@@ -421,7 +171,7 @@ where
             .read_row_collection(SPAWN_TREE_RESERVATION_ROWS)
             .await?;
 
-        let mut snapshot = TurnPersistenceSnapshot {
+        let snapshot = TurnPersistenceSnapshot {
             turns,
             runs,
             active_locks,
@@ -433,31 +183,10 @@ where
             admission_reservations,
             spawn_tree_reservations,
         };
-        self.replay_deltas(&mut snapshot).await?;
         let snapshot = row_store_hot_cache_snapshot(snapshot, self.limits);
         let store = self.build_in_memory_store(snapshot)?;
         let snapshot = store.persistence_snapshot();
         RowSnapshotState::new(snapshot, Arc::new(store))
-    }
-
-    async fn replay_deltas(&self, snapshot: &mut TurnPersistenceSnapshot) -> Result<(), TurnError> {
-        let path = delta_log_path()?;
-        let records = match self
-            .filesystem
-            .tail(&ResourceScope::system(), &path, SeqNo::ZERO)
-            .await
-        {
-            Ok(records) => records,
-            Err(FilesystemError::NotFound { .. }) | Err(FilesystemError::Unsupported { .. }) => {
-                Vec::new()
-            }
-            Err(error) => return Err(fs_error(error)),
-        };
-        for record in records {
-            let delta: SnapshotDelta = deserialize_row(&record.payload, "turn-state delta")?;
-            apply_delta(snapshot, delta)?;
-        }
-        Ok(())
     }
 
     async fn read_meta(&self) -> Result<RowStoreMeta, TurnError> {
@@ -524,66 +253,25 @@ where
         deserialize_row(&versioned.entry.body, collection).map(Some)
     }
 
-    async fn read_delta_log(&self) -> Result<Vec<SnapshotDelta>, TurnError> {
-        let path = delta_log_path()?;
-        let records = match self
-            .filesystem
-            .tail(&ResourceScope::system(), &path, SeqNo::ZERO)
-            .await
-        {
-            Ok(records) => records,
-            Err(FilesystemError::NotFound { .. }) | Err(FilesystemError::Unsupported { .. }) => {
-                Vec::new()
-            }
-            Err(error) => return Err(fs_error(error)),
-        };
-        records
-            .into_iter()
-            .map(|record| deserialize_row(&record.payload, "turn-state delta"))
-            .collect()
-    }
-
     async fn read_run_state_from_durable_rows(
         &self,
         request: &GetRunStateRequest,
     ) -> Result<Option<TurnRunState>, TurnError> {
-        let mut run = self
+        materialize_delta_log(self.filesystem.as_ref(), None).await?;
+        let run = self
             .read_row_by_key::<TurnRunRecord>(RUN_ROWS, &request.run_id.to_string())
             .await?;
-        let mut turns_by_id: HashMap<String, TurnRecord> = HashMap::new();
-
-        for delta in self.read_delta_log().await? {
-            for turn in delta.turns_upsert {
-                turns_by_id.insert(turn.turn_id.to_string(), turn);
-            }
-            for turn_id in delta.turns_delete {
-                turns_by_id.remove(&turn_id);
-            }
-            for upserted in delta.runs_upsert {
-                if upserted.run_id == request.run_id {
-                    run = Some(upserted);
-                }
-            }
-            for deleted_run_id in delta.runs_delete {
-                if deleted_run_id == request.run_id.to_string() {
-                    run = None;
-                }
-            }
-        }
 
         let Some(run) = run.filter(|record| record.scope == request.scope) else {
             return Ok(None);
         };
         let turn_key = run.turn_id.to_string();
-        let turn = match turns_by_id.remove(&turn_key) {
-            Some(turn) => turn,
-            None => self
-                .read_row_by_key::<TurnRecord>(TURN_ROWS, &turn_key)
-                .await?
-                .ok_or_else(|| TurnError::Unavailable {
-                    reason: "turn run references missing durable turn row".to_string(),
-                })?,
-        };
+        let turn = self
+            .read_row_by_key::<TurnRecord>(TURN_ROWS, &turn_key)
+            .await?
+            .ok_or_else(|| TurnError::Unavailable {
+                reason: "turn run references missing durable turn row".to_string(),
+            })?;
         let run = self.runner_lease_store().overlay_run_record(run).await?;
         Ok(Some(projection::run_state_from_record(run, turn.actor)))
     }
@@ -595,23 +283,13 @@ where
         after: Option<EventCursor>,
         limit: usize,
     ) -> Result<TurnEventPage, TurnError> {
-        let mut events = keyed_records(
+        materialize_delta_log(self.filesystem.as_ref(), None).await?;
+        let events = keyed_records(
             &self.read_row_collection(EVENT_ROWS).await?,
             &event_record_key,
         )
         .map_err(RowPersistError::into_turn)?;
-        let mut retention_floor = self.read_meta().await?.event_retention_floor;
-        for delta in self.read_delta_log().await? {
-            for event in delta.events_upsert {
-                events.insert(event_record_key(&event)?, event);
-            }
-            for key in delta.events_delete {
-                events.remove(&key);
-            }
-            if let Some(floor) = delta.event_retention_floor {
-                retention_floor = retention_floor.max(floor);
-            }
-        }
+        let retention_floor = self.read_meta().await?.event_retention_floor;
         let mut events = events.into_values().collect::<Vec<_>>();
         events.sort_by_key(|event| event.cursor);
         Ok(project_turn_events(
@@ -752,26 +430,20 @@ where
         T: Send,
     {
         let critical = async {
+            let _commit_guard = self.commit_gate.lock().await;
             let mut guard = self.snapshot_state.lock().await;
             if guard.is_none() {
                 *guard = Some(self.load_snapshot_from_rows().await?);
             }
-            let store = match (overlay, guard.as_ref()) {
-                (RunnerLeaseOverlay::None, Some(state)) => Arc::clone(&state.store),
-                (_, Some(state)) => {
-                    let snapshot = state.snapshot.clone();
-                    let (overlaid_snapshot, _) = self
-                        .runner_lease_store()
-                        .overlay((snapshot, None), overlay)
-                        .await?;
-                    Arc::new(self.build_in_memory_store(overlaid_snapshot)?)
-                }
-                (_, None) => unreachable!("row snapshot cache is initialized above"),
-            };
             let baseline = guard
                 .as_ref()
                 .map(|state| state.snapshot.clone())
                 .unwrap_or_default();
+            let (overlaid_snapshot, _) = self
+                .runner_lease_store()
+                .overlay((baseline.clone(), None), overlay)
+                .await?;
+            let store = Arc::new(self.build_in_memory_store(overlaid_snapshot)?);
             let outcome = apply(Arc::clone(&store)).await;
             let mut new_snapshot = store.persistence_snapshot();
             preserve_loop_checkpoints(&baseline, &mut new_snapshot);
@@ -793,7 +465,7 @@ where
                     return Err(error);
                 }
             };
-            let persist_delta = row_store_durable_delta(delta);
+            let persist_delta = row_store_durable_delta(delta.clone());
             let ack = match self.enqueue_delta(persist_delta) {
                 Ok(ack) => ack,
                 Err(RowPersistError::Turn(error)) => {
@@ -833,11 +505,6 @@ where
             .map_err(RowPersistError::Turn)
     }
 
-    async fn persist_delta(&self, delta: SnapshotDelta) -> Result<(), RowPersistError> {
-        let ack = self.enqueue_delta(row_store_durable_delta(delta))?;
-        self.await_delta_ack(ack).await
-    }
-
     async fn apply_cached_delta(&self, delta: SnapshotDelta) -> Result<(), TurnError> {
         if delta.is_empty() {
             return Ok(());
@@ -868,31 +535,21 @@ where
         T: Send,
     {
         let critical = async {
+            let _commit_guard = self.commit_gate.lock().await;
             let mut guard = self.snapshot_state.lock().await;
             if guard.is_none() {
                 *guard = Some(self.load_snapshot_from_rows().await?);
             }
             let state = guard
-                .as_mut()
+                .as_ref()
                 .expect("row snapshot cache is initialized above");
-            let store = match overlay {
-                RunnerLeaseOverlay::None => Arc::clone(&state.store),
-                RunnerLeaseOverlay::Run(run_id) => {
-                    let store = Arc::clone(&state.store);
-                    if let Some(run) = state.run_record(run_id) {
-                        let overlaid = self.runner_lease_store().overlay_run_record(run).await?;
-                        store.overlay_runner_lease_record(overlaid)?;
-                    }
-                    store
-                }
-                _ => {
-                    let (overlaid_snapshot, _) = self
-                        .runner_lease_store()
-                        .overlay((state.snapshot.clone(), None), overlay)
-                        .await?;
-                    Arc::new(self.build_in_memory_store(overlaid_snapshot)?)
-                }
-            };
+            let baseline = state.snapshot.clone();
+            let latest_event_cursor = state.latest_event_cursor();
+            let (overlaid_snapshot, _) = self
+                .runner_lease_store()
+                .overlay((baseline.clone(), None), overlay)
+                .await?;
+            let store = Arc::new(self.build_in_memory_store(overlaid_snapshot)?);
             let outcome = apply(Arc::clone(&store)).await;
             let value = match outcome {
                 Ok(value) => value,
@@ -901,17 +558,8 @@ where
                     return Err(error);
                 }
             };
-            let delta = build_delta(
-                &state.snapshot,
-                state.latest_event_cursor,
-                store.as_ref(),
-                &value,
-            )?;
-            if let Err(error) = state.apply_delta(delta.clone()) {
-                *guard = None;
-                return Err(error);
-            }
-            let persist_delta = row_store_durable_delta(delta);
+            let delta = build_delta(&baseline, latest_event_cursor, store.as_ref(), &value)?;
+            let persist_delta = row_store_durable_delta(delta.clone());
             let ack = match self.enqueue_delta(persist_delta) {
                 Ok(ack) => ack,
                 Err(RowPersistError::Turn(error)) => {
@@ -919,7 +567,17 @@ where
                     return Err(error);
                 }
             };
-            state.store = store;
+            if let Some(state) = guard.as_mut() {
+                if let Err(error) = state.apply_delta(delta) {
+                    *guard = None;
+                    return Err(error);
+                }
+                state.store = store;
+            } else {
+                let mut snapshot = store.persistence_snapshot();
+                snapshot = row_store_hot_cache_snapshot(snapshot, self.limits);
+                *guard = Some(RowSnapshotState::new(snapshot, store)?);
+            }
             Ok((ack, value))
         };
 
@@ -972,10 +630,7 @@ where
     async fn apply_run_state_transition_with_targeted_delta<A, Fut, D>(
         &self,
         operation: &'static str,
-        run_id: TurnRunId,
-        runner_id: crate::TurnRunnerId,
-        lease_token: crate::TurnLeaseToken,
-        retired_status: TurnStatus,
+        target: RunStateTransitionTarget,
         apply: A,
         build_delta: D,
     ) -> Result<TurnRunState, TurnError>
@@ -990,6 +645,12 @@ where
             ) -> Result<SnapshotDelta, TurnError>
             + Send,
     {
+        let RunStateTransitionTarget {
+            run_id,
+            runner_id,
+            lease_token,
+            retired_status,
+        } = target;
         let span = turn_state_write_span(operation, None, Some(&run_id));
         async move {
             let previous = self
@@ -1038,1375 +699,6 @@ where
     }
 }
 
-#[async_trait]
-impl<F> TurnStateStore for FilesystemTurnStateRowStore<F>
-where
-    F: RootFilesystem,
-{
-    async fn submit_turn(
-        &self,
-        request: SubmitTurnRequest,
-        admission_policy: &dyn TurnAdmissionPolicy,
-        run_profile_resolver: &dyn RunProfileResolver,
-    ) -> Result<SubmitTurnResponse, TurnError> {
-        let profile_resolution = run_profile_resolver
-            .resolve_run_profile(crate::RunProfileResolutionRequest {
-                requested_run_profile: request.requested_run_profile.clone(),
-                ..crate::RunProfileResolutionRequest::interactive_default()
-            })
-            .await;
-        let pre_resolved = PreResolvedRunProfileResolver::new(profile_resolution);
-        let max_idempotency_records = self.limits.max_idempotency_records;
-        self.apply_with_targeted_delta(
-            RunnerLeaseOverlay::None,
-            |store| {
-                let request = request.clone();
-                let pre_resolved = pre_resolved.clone();
-                async move {
-                    store
-                        .submit_turn(request, admission_policy, &pre_resolved)
-                        .await
-                }
-            },
-            move |snapshot, latest_event_cursor, store, response| {
-                if snapshot.idempotency_records.len() >= max_idempotency_records {
-                    return full_snapshot_delta(snapshot, store);
-                }
-                submit_turn_targeted_delta(snapshot, latest_event_cursor, store, response)
-            },
-        )
-        .instrument(turn_state_write_span(
-            "submit_turn",
-            Some(&request.scope),
-            request.requested_run_id.as_ref(),
-        ))
-        .await
-    }
-
-    async fn resume_turn(
-        &self,
-        request: ResumeTurnRequest,
-    ) -> Result<ResumeTurnResponse, TurnError> {
-        let max_idempotency_records = self.limits.max_idempotency_records;
-        let scope = request.scope.clone();
-        let run_id = request.run_id;
-        self.apply_with_targeted_delta(
-            RunnerLeaseOverlay::None,
-            |store| {
-                let request = request.clone();
-                async move { store.resume_turn(request).await }
-            },
-            move |snapshot, latest_event_cursor, store, response| {
-                if snapshot.idempotency_records.len() >= max_idempotency_records {
-                    return full_snapshot_delta(snapshot, store);
-                }
-                run_state_with_idempotency_targeted_delta(
-                    snapshot,
-                    latest_event_cursor,
-                    store,
-                    response.run_id,
-                    &scope,
-                    crate::TurnIdempotencyOperationKind::Resume,
-                )
-            },
-        )
-        .instrument(turn_state_write_span(
-            "resume_turn",
-            Some(&request.scope),
-            Some(&run_id),
-        ))
-        .await
-    }
-
-    async fn request_cancel(
-        &self,
-        request: CancelRunRequest,
-    ) -> Result<CancelRunResponse, TurnError> {
-        let span = turn_state_write_span(
-            "request_cancel",
-            Some(&request.scope),
-            Some(&request.run_id),
-        );
-        async move {
-            let previous = self.prepare_cancel_requested_runner_lease(&request).await?;
-            let max_idempotency_records = self.limits.max_idempotency_records;
-            let max_terminal_records = self.limits.max_terminal_records;
-            let scope = request.scope.clone();
-            let result = self
-                .apply_with_targeted_delta(
-                    RunnerLeaseOverlay::Run(request.run_id),
-                    |store| {
-                        let request = request.clone();
-                        async move { store.request_cancel(request).await }
-                    },
-                    move |snapshot, latest_event_cursor, store, response| {
-                        if snapshot.idempotency_records.len() >= max_idempotency_records {
-                            return full_snapshot_delta(snapshot, store);
-                        }
-                        let terminal_records = snapshot
-                            .runs
-                            .iter()
-                            .filter(|record| record.status.is_terminal())
-                            .count();
-                        if response.status.is_terminal() && terminal_records >= max_terminal_records
-                        {
-                            return full_snapshot_delta(snapshot, store);
-                        }
-                        run_state_with_idempotency_targeted_delta(
-                            snapshot,
-                            latest_event_cursor,
-                            store,
-                            response.run_id,
-                            &scope,
-                            crate::TurnIdempotencyOperationKind::Cancel,
-                        )
-                    },
-                )
-                .await;
-            if result.is_err() {
-                self.restore_runner_lease_after_failed_transition(
-                    previous,
-                    TurnStatus::CancelRequested,
-                )
-                .await;
-            }
-            let response = result?;
-            if response.status.is_terminal() {
-                self.runner_lease_store()
-                    .delete_best_effort(response.run_id)
-                    .await;
-            }
-            Ok(response)
-        }
-        .instrument(span)
-        .await
-    }
-
-    async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        let Some((run, actor)) = self
-            .with_cached_snapshot(|snapshot| projection::run_state_parts(snapshot, &request))
-            .await??
-        else {
-            return self
-                .read_run_state_from_durable_rows(&request)
-                .await?
-                .ok_or(TurnError::ScopeNotFound);
-        };
-        let run = self.runner_lease_store().overlay_run_record(run).await?;
-        Ok(projection::run_state_from_record(run, actor))
-    }
-}
-
-#[async_trait]
-impl<F> TurnSpawnTreeStateStore for FilesystemTurnStateRowStore<F>
-where
-    F: RootFilesystem,
-{
-    async fn submit_child_turn(
-        &self,
-        request: SubmitChildRunRequest,
-        admission_policy: &dyn TurnAdmissionPolicy,
-        run_profile_resolver: &dyn RunProfileResolver,
-    ) -> Result<SubmitTurnResponse, TurnError> {
-        let profile_resolution = run_profile_resolver
-            .resolve_run_profile(crate::RunProfileResolutionRequest {
-                requested_run_profile: request.requested_run_profile.clone(),
-                ..crate::RunProfileResolutionRequest::interactive_default()
-            })
-            .await;
-        let pre_resolved = PreResolvedRunProfileResolver::new(profile_resolution);
-        self.apply(RunnerLeaseOverlay::None, |store| {
-            let request = request.clone();
-            let pre_resolved = pre_resolved.clone();
-            async move {
-                let outcome = store
-                    .submit_child_turn(request, admission_policy, &pre_resolved)
-                    .await;
-                outcome
-            }
-        })
-        .instrument(turn_state_write_span(
-            "submit_child_turn",
-            Some(&request.child_scope),
-            request.requested_run_id.as_ref(),
-        ))
-        .await
-    }
-
-    async fn children_of(
-        &self,
-        scope: &TurnScope,
-        run_id: TurnRunId,
-    ) -> Result<Vec<TurnRunRecord>, TurnError> {
-        let (snapshot, _) = self.read_snapshot().await?;
-        Ok(projection::children_of(&snapshot, scope, run_id))
-    }
-
-    async fn get_run_record(
-        &self,
-        scope: &TurnScope,
-        run_id: TurnRunId,
-    ) -> Result<Option<TurnRunRecord>, TurnError> {
-        let (snapshot, _) = self
-            .read_snapshot_with_runner_lease_overlay(RunnerLeaseOverlay::Run(run_id))
-            .await?;
-        Ok(projection::run_record(&snapshot, scope, run_id))
-    }
-
-    async fn reserve_tree_descendants(
-        &self,
-        scope: &TurnScope,
-        root_run_id: TurnRunId,
-        delta: u32,
-        cap: u32,
-    ) -> Result<SpawnTreeReservation, TurnError> {
-        self.apply(RunnerLeaseOverlay::None, |store| async move {
-            let outcome = store
-                .reserve_tree_descendants(scope, root_run_id, delta, cap)
-                .await;
-            outcome
-        })
-        .instrument(turn_state_write_span(
-            "reserve_tree_descendants",
-            Some(scope),
-            Some(&root_run_id),
-        ))
-        .await
-    }
-
-    async fn release_tree_descendants(
-        &self,
-        scope: &TurnScope,
-        root_run_id: TurnRunId,
-        delta: u32,
-    ) -> Result<(), TurnError> {
-        self.apply(RunnerLeaseOverlay::None, |store| async move {
-            let outcome = store
-                .release_tree_descendants(scope, root_run_id, delta)
-                .await;
-            outcome
-        })
-        .instrument(turn_state_write_span(
-            "release_tree_descendants",
-            Some(scope),
-            Some(&root_run_id),
-        ))
-        .await
-    }
-}
-
-#[async_trait]
-impl<F> TurnEventProjectionSource for FilesystemTurnStateRowStore<F>
-where
-    F: RootFilesystem,
-{
-    async fn read_turn_events_after(
-        &self,
-        scope: &TurnScope,
-        owner_user_id: Option<&UserId>,
-        after: Option<EventCursor>,
-        limit: usize,
-    ) -> Result<TurnEventPage, TurnError> {
-        self.read_turn_events_from_durable_rows(scope, owner_user_id, after, limit)
-            .await
-    }
-}
-
-#[async_trait]
-impl<F> LoopCheckpointStore for FilesystemTurnStateRowStore<F>
-where
-    F: RootFilesystem,
-{
-    async fn put_loop_checkpoint(
-        &self,
-        request: PutLoopCheckpointRequest,
-    ) -> Result<LoopCheckpointRecord, TurnError> {
-        let span = turn_state_write_span(
-            "put_loop_checkpoint",
-            Some(&request.scope),
-            Some(&request.run_id),
-        );
-        async move {
-            let record = loop_checkpoint_record_from_request(request);
-            let delta = SnapshotDelta {
-                loop_checkpoints_upsert: vec![record.clone()],
-                ..SnapshotDelta::default()
-            };
-            self.persist_delta(delta.clone())
-                .await
-                .map_err(|error| match error {
-                    RowPersistError::Turn(error) => error,
-                })?;
-            self.apply_cached_delta(delta).await?;
-            Ok(record)
-        }
-        .instrument(span)
-        .await
-    }
-
-    async fn get_loop_checkpoint(
-        &self,
-        request: GetLoopCheckpointRequest,
-    ) -> Result<Option<LoopCheckpointRecord>, TurnError> {
-        self.with_cached_snapshot(|snapshot| projection::loop_checkpoint(snapshot, &request))
-            .await
-    }
-}
-
-#[async_trait]
-impl<F> TurnRunTransitionPort for FilesystemTurnStateRowStore<F>
-where
-    F: RootFilesystem,
-{
-    async fn claim_next_run(
-        &self,
-        request: ClaimRunRequest,
-    ) -> Result<Option<ClaimedTurnRun>, TurnError> {
-        let span = turn_state_write_span("claim_next_run", request.scope_filter.as_ref(), None);
-        async move {
-            let claimed = self
-                .apply_with_targeted_delta(
-                    RunnerLeaseOverlay::None,
-                    |store| {
-                        let request = request.clone();
-                        async move { store.claim_next_run(request).await }
-                    },
-                    claimed_run_targeted_delta,
-                )
-                .await?;
-            if let Some(claimed) = &claimed
-                && let Err(error) = self
-                    .seed_runner_lease_from_cached_run(claimed.state.run_id)
-                    .await
-            {
-                self.compensate_failed_claim(claimed).await;
-                return Err(error);
-            }
-            Ok(claimed)
-        }
-        .instrument(span)
-        .await
-    }
-
-    async fn heartbeat(&self, request: HeartbeatRequest) -> Result<EventCursor, TurnError> {
-        self.heartbeat_runner_lease(request).await
-    }
-
-    async fn recover_expired_leases(
-        &self,
-        request: RecoverExpiredLeasesRequest,
-    ) -> Result<RecoverExpiredLeasesResponse, TurnError> {
-        let result = self
-            .apply(RunnerLeaseOverlay::All, |store| {
-                let request = request.clone();
-                async move {
-                    let outcome = store.recover_expired_leases(request).await;
-                    outcome
-                }
-            })
-            .instrument(turn_state_write_span(
-                "recover_expired_leases",
-                request.scope_filter.as_ref(),
-                None,
-            ))
-            .await;
-        if let Ok(response) = &result {
-            for state in &response.recovered {
-                self.runner_lease_store()
-                    .delete_best_effort(state.run_id)
-                    .await;
-            }
-        }
-        result
-    }
-
-    async fn record_model_route_snapshot(
-        &self,
-        request: RecordModelRouteSnapshotRequest,
-    ) -> Result<TurnRunState, TurnError> {
-        self.apply(RunnerLeaseOverlay::Run(request.run_id), |store| {
-            let request = request.clone();
-            async move {
-                let outcome = store.record_model_route_snapshot(request).await;
-                outcome
-            }
-        })
-        .instrument(turn_state_write_span(
-            "record_model_route_snapshot",
-            None,
-            Some(&request.run_id),
-        ))
-        .await
-    }
-
-    async fn block_run(&self, request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
-        self.apply_run_state_transition_with_targeted_delta(
-            "block_run",
-            request.run_id,
-            request.runner_id,
-            request.lease_token,
-            request.reason.status(),
-            |store| {
-                let request = request.clone();
-                async move {
-                    let outcome = store.block_run(request).await;
-                    outcome
-                }
-            },
-            blocked_run_targeted_delta,
-        )
-        .await
-    }
-
-    async fn complete_run(&self, request: CompleteRunRequest) -> Result<TurnRunState, TurnError> {
-        let span = turn_state_write_span("complete_run", None, Some(&request.run_id));
-        async move {
-            let previous = self
-                .prepare_runner_lease_retirement(
-                    request.run_id,
-                    request.runner_id,
-                    request.lease_token,
-                    TurnStatus::Completed,
-                )
-                .await?;
-            let max_terminal_records = self.limits.max_terminal_records;
-            let result = self
-                .apply_with_targeted_delta(
-                    RunnerLeaseOverlay::Run(request.run_id),
-                    |store| {
-                        let request = request.clone();
-                        async move { store.complete_run(request).await }
-                    },
-                    move |snapshot, latest_event_cursor, store, state| {
-                        let terminal_records = snapshot
-                            .runs
-                            .iter()
-                            .filter(|record| record.status.is_terminal())
-                            .count();
-                        if terminal_records >= max_terminal_records {
-                            return full_snapshot_delta(snapshot, store);
-                        }
-                        run_state_targeted_delta(
-                            snapshot,
-                            latest_event_cursor,
-                            store,
-                            state.run_id,
-                            &state.scope,
-                        )
-                    },
-                )
-                .await;
-            if result.is_err() {
-                self.restore_runner_lease_after_failed_transition(previous, TurnStatus::Completed)
-                    .await;
-            }
-            self.cleanup_runner_lease_after_state(&result).await;
-            result
-        }
-        .instrument(span)
-        .await
-    }
-
-    async fn cancel_run(
-        &self,
-        request: CancelRunCompletionRequest,
-    ) -> Result<TurnRunState, TurnError> {
-        let max_terminal_records = self.limits.max_terminal_records;
-        self.apply_run_state_transition_with_targeted_delta(
-            "cancel_run",
-            request.run_id,
-            request.runner_id,
-            request.lease_token,
-            TurnStatus::Cancelled,
-            |store| {
-                let request = request.clone();
-                async move {
-                    let outcome = store.cancel_run(request).await;
-                    outcome
-                }
-            },
-            move |snapshot, latest_event_cursor, store, state| {
-                let terminal_records = snapshot
-                    .runs
-                    .iter()
-                    .filter(|record| record.status.is_terminal())
-                    .count();
-                if terminal_records >= max_terminal_records {
-                    return full_snapshot_delta(snapshot, store);
-                }
-                run_state_targeted_delta(
-                    snapshot,
-                    latest_event_cursor,
-                    store,
-                    state.run_id,
-                    &state.scope,
-                )
-            },
-        )
-        .await
-    }
-
-    async fn fail_run(&self, request: FailRunRequest) -> Result<TurnRunState, TurnError> {
-        self.apply_run_state_transition(
-            "fail_run",
-            request.run_id,
-            request.runner_id,
-            request.lease_token,
-            TurnStatus::Failed,
-            |store| {
-                let request = request.clone();
-                async move {
-                    let outcome = store.fail_run(request).await;
-                    outcome
-                }
-            },
-        )
-        .await
-    }
-
-    async fn record_runner_failure(
-        &self,
-        request: RecordRunnerFailureRequest,
-    ) -> Result<TurnRunState, TurnError> {
-        self.apply_run_state_transition(
-            "record_runner_failure",
-            request.run_id,
-            request.runner_id,
-            request.lease_token,
-            TurnStatus::Failed,
-            |store| {
-                let request = request.clone();
-                async move {
-                    let outcome = store.record_runner_failure(request).await;
-                    outcome
-                }
-            },
-        )
-        .await
-    }
-
-    async fn relinquish_run(
-        &self,
-        request: RelinquishRunRequest,
-    ) -> Result<TurnRunState, TurnError> {
-        self.apply_run_state_transition(
-            "relinquish_run",
-            request.run_id,
-            request.runner_id,
-            request.lease_token,
-            TurnStatus::Queued,
-            |store| {
-                let request = request.clone();
-                async move {
-                    let outcome = store.relinquish_run(request).await;
-                    outcome
-                }
-            },
-        )
-        .await
-    }
-
-    async fn apply_validated_loop_exit(
-        &self,
-        request: ApplyValidatedLoopExitRequest,
-    ) -> Result<TurnRunState, TurnError> {
-        self.apply_run_state_transition(
-            "apply_validated_loop_exit",
-            request.run_id,
-            request.runner_id,
-            request.lease_token,
-            retired_status_for_loop_exit(&request.mapping),
-            |store| {
-                let request = request.clone();
-                async move {
-                    let outcome = store.apply_validated_loop_exit(request).await;
-                    outcome
-                }
-            },
-        )
-        .await
-    }
-}
-
-#[derive(Serialize)]
-struct SpawnTreeReservationKeyForPath<'a> {
-    scope: &'a TurnScope,
-    root_run_id: TurnRunId,
-}
-
-enum RowPersistError {
-    Turn(TurnError),
-}
-
-impl RowPersistError {
-    fn into_turn(self) -> TurnError {
-        match self {
-            Self::Turn(error) => error,
-        }
-    }
-}
-
-impl From<TurnError> for RowPersistError {
-    fn from(error: TurnError) -> Self {
-        Self::Turn(error)
-    }
-}
-
-fn turn_record_key(record: &TurnRecord) -> Result<String, TurnError> {
-    Ok(record.turn_id.to_string())
-}
-
-fn run_record_key(record: &TurnRunRecord) -> Result<String, TurnError> {
-    Ok(record.run_id.to_string())
-}
-
-fn active_lock_record_key(record: &TurnActiveLockRecord) -> Result<String, TurnError> {
-    hash_key(&record.key)
-}
-
-fn checkpoint_record_key(record: &TurnCheckpointRecord) -> Result<String, TurnError> {
-    Ok(record.checkpoint_id.as_uuid().to_string())
-}
-
-fn loop_checkpoint_record_key(record: &LoopCheckpointRecord) -> Result<String, TurnError> {
-    Ok(record.checkpoint_id.as_uuid().to_string())
-}
-
-fn idempotency_record_key(record: &TurnIdempotencyRecord) -> Result<String, TurnError> {
-    hash_key(record)
-}
-
-fn event_record_key(record: &TurnLifecycleEvent) -> Result<String, TurnError> {
-    Ok(format!("{:020}", record.cursor.0))
-}
-
-fn admission_reservation_record_key(
-    record: &TurnAdmissionReservationRecord,
-) -> Result<String, TurnError> {
-    Ok(record.run_id.to_string())
-}
-
-fn spawn_tree_reservation_record_key(record: &SpawnTreeReservation) -> Result<String, TurnError> {
-    hash_key(&SpawnTreeReservationKeyForPath {
-        scope: &record.scope,
-        root_run_id: record.root_run_id,
-    })
-}
-
-fn snapshot_delta(
-    old: &TurnPersistenceSnapshot,
-    new: &TurnPersistenceSnapshot,
-) -> Result<SnapshotDelta, RowPersistError> {
-    let (turns_upsert, turns_delete) = delta_collection(&old.turns, &new.turns, |record| {
-        Ok(record.turn_id.to_string())
-    })?;
-    let (runs_upsert, runs_delete) =
-        delta_collection(&old.runs, &new.runs, |record| Ok(record.run_id.to_string()))?;
-    let (active_locks_upsert, active_locks_delete) =
-        delta_collection(&old.active_locks, &new.active_locks, |record| {
-            hash_key(&record.key)
-        })?;
-    let (checkpoints_upsert, checkpoints_delete) =
-        delta_collection(&old.checkpoints, &new.checkpoints, |record| {
-            Ok(record.checkpoint_id.as_uuid().to_string())
-        })?;
-    let (loop_checkpoints_upsert, loop_checkpoints_delete) =
-        delta_collection(&old.loop_checkpoints, &new.loop_checkpoints, |record| {
-            Ok(record.checkpoint_id.as_uuid().to_string())
-        })?;
-    let (idempotency_upsert, idempotency_delete) =
-        delta_collection(&old.idempotency_records, &new.idempotency_records, hash_key)?;
-    let (events_upsert, events_delete) = delta_collection(&old.events, &new.events, |record| {
-        Ok(format!("{:020}", record.cursor.0))
-    })?;
-    let (admission_reservations_upsert, admission_reservations_delete) = delta_collection(
-        &old.admission_reservations,
-        &new.admission_reservations,
-        |record| Ok(record.run_id.to_string()),
-    )?;
-    let (spawn_tree_reservations_upsert, spawn_tree_reservations_delete) = delta_collection(
-        &old.spawn_tree_reservations,
-        &new.spawn_tree_reservations,
-        |record| {
-            hash_key(&SpawnTreeReservationKeyForPath {
-                scope: &record.scope,
-                root_run_id: record.root_run_id,
-            })
-        },
-    )?;
-
-    Ok(SnapshotDelta {
-        turns_upsert,
-        turns_delete,
-        runs_upsert,
-        runs_delete,
-        active_locks_upsert,
-        active_locks_delete,
-        checkpoints_upsert,
-        checkpoints_delete,
-        loop_checkpoints_upsert,
-        loop_checkpoints_delete,
-        idempotency_upsert,
-        idempotency_delete,
-        events_upsert,
-        events_delete,
-        admission_reservations_upsert,
-        admission_reservations_delete,
-        spawn_tree_reservations_upsert,
-        spawn_tree_reservations_delete,
-        event_retention_floor: (old.event_retention_floor != new.event_retention_floor)
-            .then_some(new.event_retention_floor),
-    })
-}
-
-fn apply_delta(
-    snapshot: &mut TurnPersistenceSnapshot,
-    delta: SnapshotDelta,
-) -> Result<(), TurnError> {
-    if !delta.turns_upsert.is_empty() || !delta.turns_delete.is_empty() {
-        apply_delta_collection(
-            &mut snapshot.turns,
-            delta.turns_upsert,
-            delta.turns_delete,
-            |record| Ok(record.turn_id.to_string()),
-        )?;
-    }
-    if !delta.runs_upsert.is_empty() || !delta.runs_delete.is_empty() {
-        apply_delta_collection(
-            &mut snapshot.runs,
-            delta.runs_upsert,
-            delta.runs_delete,
-            |record| Ok(record.run_id.to_string()),
-        )?;
-    }
-    if !delta.active_locks_upsert.is_empty() || !delta.active_locks_delete.is_empty() {
-        apply_delta_collection(
-            &mut snapshot.active_locks,
-            delta.active_locks_upsert,
-            delta.active_locks_delete,
-            |record| hash_key(&record.key),
-        )?;
-    }
-    if !delta.checkpoints_upsert.is_empty() || !delta.checkpoints_delete.is_empty() {
-        apply_delta_collection(
-            &mut snapshot.checkpoints,
-            delta.checkpoints_upsert,
-            delta.checkpoints_delete,
-            |record| Ok(record.checkpoint_id.as_uuid().to_string()),
-        )?;
-    }
-    if !delta.loop_checkpoints_upsert.is_empty() || !delta.loop_checkpoints_delete.is_empty() {
-        apply_delta_collection(
-            &mut snapshot.loop_checkpoints,
-            delta.loop_checkpoints_upsert,
-            delta.loop_checkpoints_delete,
-            |record| Ok(record.checkpoint_id.as_uuid().to_string()),
-        )?;
-    }
-    if !delta.idempotency_upsert.is_empty() || !delta.idempotency_delete.is_empty() {
-        apply_delta_collection(
-            &mut snapshot.idempotency_records,
-            delta.idempotency_upsert,
-            delta.idempotency_delete,
-            hash_key,
-        )?;
-    }
-    if !delta.events_upsert.is_empty() || !delta.events_delete.is_empty() {
-        apply_delta_collection(
-            &mut snapshot.events,
-            delta.events_upsert,
-            delta.events_delete,
-            |record| Ok(format!("{:020}", record.cursor.0)),
-        )?;
-    }
-    if !delta.admission_reservations_upsert.is_empty()
-        || !delta.admission_reservations_delete.is_empty()
-    {
-        apply_delta_collection(
-            &mut snapshot.admission_reservations,
-            delta.admission_reservations_upsert,
-            delta.admission_reservations_delete,
-            |record| Ok(record.run_id.to_string()),
-        )?;
-    }
-    if !delta.spawn_tree_reservations_upsert.is_empty()
-        || !delta.spawn_tree_reservations_delete.is_empty()
-    {
-        apply_delta_collection(
-            &mut snapshot.spawn_tree_reservations,
-            delta.spawn_tree_reservations_upsert,
-            delta.spawn_tree_reservations_delete,
-            |record| {
-                hash_key(&SpawnTreeReservationKeyForPath {
-                    scope: &record.scope,
-                    root_run_id: record.root_run_id,
-                })
-            },
-        )?;
-    }
-    if let Some(event_retention_floor) = delta.event_retention_floor {
-        snapshot.event_retention_floor = event_retention_floor;
-    }
-    Ok(())
-}
-
-fn apply_delta_indexed(
-    snapshot: &mut TurnPersistenceSnapshot,
-    indexes: &mut RowSnapshotIndexes,
-    delta: SnapshotDelta,
-) -> Result<(), TurnError> {
-    if !delta.turns_upsert.is_empty() || !delta.turns_delete.is_empty() {
-        apply_delta_collection_indexed(
-            &mut snapshot.turns,
-            &mut indexes.turns,
-            delta.turns_upsert,
-            delta.turns_delete,
-            turn_record_key,
-        )?;
-    }
-    if !delta.runs_upsert.is_empty() || !delta.runs_delete.is_empty() {
-        apply_delta_collection_indexed(
-            &mut snapshot.runs,
-            &mut indexes.runs,
-            delta.runs_upsert,
-            delta.runs_delete,
-            run_record_key,
-        )?;
-    }
-    if !delta.active_locks_upsert.is_empty() || !delta.active_locks_delete.is_empty() {
-        apply_delta_collection_indexed(
-            &mut snapshot.active_locks,
-            &mut indexes.active_locks,
-            delta.active_locks_upsert,
-            delta.active_locks_delete,
-            active_lock_record_key,
-        )?;
-    }
-    if !delta.checkpoints_upsert.is_empty() || !delta.checkpoints_delete.is_empty() {
-        apply_delta_collection_indexed(
-            &mut snapshot.checkpoints,
-            &mut indexes.checkpoints,
-            delta.checkpoints_upsert,
-            delta.checkpoints_delete,
-            checkpoint_record_key,
-        )?;
-    }
-    if !delta.loop_checkpoints_upsert.is_empty() || !delta.loop_checkpoints_delete.is_empty() {
-        apply_delta_collection_indexed(
-            &mut snapshot.loop_checkpoints,
-            &mut indexes.loop_checkpoints,
-            delta.loop_checkpoints_upsert,
-            delta.loop_checkpoints_delete,
-            loop_checkpoint_record_key,
-        )?;
-    }
-    if !delta.idempotency_upsert.is_empty() || !delta.idempotency_delete.is_empty() {
-        apply_delta_collection_indexed(
-            &mut snapshot.idempotency_records,
-            &mut indexes.idempotency_records,
-            delta.idempotency_upsert,
-            delta.idempotency_delete,
-            idempotency_record_key,
-        )?;
-    }
-    if !delta.events_upsert.is_empty() || !delta.events_delete.is_empty() {
-        apply_delta_collection_indexed(
-            &mut snapshot.events,
-            &mut indexes.events,
-            delta.events_upsert,
-            delta.events_delete,
-            event_record_key,
-        )?;
-    }
-    if !delta.admission_reservations_upsert.is_empty()
-        || !delta.admission_reservations_delete.is_empty()
-    {
-        apply_delta_collection_indexed(
-            &mut snapshot.admission_reservations,
-            &mut indexes.admission_reservations,
-            delta.admission_reservations_upsert,
-            delta.admission_reservations_delete,
-            admission_reservation_record_key,
-        )?;
-    }
-    if !delta.spawn_tree_reservations_upsert.is_empty()
-        || !delta.spawn_tree_reservations_delete.is_empty()
-    {
-        apply_delta_collection_indexed(
-            &mut snapshot.spawn_tree_reservations,
-            &mut indexes.spawn_tree_reservations,
-            delta.spawn_tree_reservations_upsert,
-            delta.spawn_tree_reservations_delete,
-            spawn_tree_reservation_record_key,
-        )?;
-    }
-    if let Some(event_retention_floor) = delta.event_retention_floor {
-        snapshot.event_retention_floor = event_retention_floor;
-    }
-    Ok(())
-}
-
-fn delta_collection<T, K>(
-    old: &[T],
-    new: &[T],
-    key_fn: K,
-) -> Result<(Vec<T>, Vec<String>), RowPersistError>
-where
-    T: Clone + PartialEq,
-    K: Fn(&T) -> Result<String, TurnError>,
-{
-    let old_map = keyed_records(old, &key_fn)?;
-    let new_map = keyed_records(new, &key_fn)?;
-    let upsert = new_map
-        .iter()
-        .filter(|(key, record)| old_map.get(*key) != Some(*record))
-        .map(|(_key, record)| record.clone())
-        .collect();
-    let new_keys = new_map.keys().cloned().collect::<HashSet<_>>();
-    let delete = old_map
-        .keys()
-        .filter(|key| !new_keys.contains(*key))
-        .cloned()
-        .collect();
-    Ok((upsert, delete))
-}
-
-fn apply_delta_collection_indexed<T, K>(
-    records: &mut Vec<T>,
-    index: &mut HashMap<String, usize>,
-    upsert: Vec<T>,
-    delete: Vec<String>,
-    key_fn: K,
-) -> Result<(), TurnError>
-where
-    K: Fn(&T) -> Result<String, TurnError>,
-{
-    if !delete.is_empty() {
-        let deleted = delete.into_iter().collect::<HashSet<_>>();
-        let mut retained = Vec::with_capacity(records.len());
-        for record in records.drain(..) {
-            if !deleted.contains(&key_fn(&record)?) {
-                retained.push(record);
-            }
-        }
-        *records = retained;
-        *index = indexed_records(records, &key_fn)?;
-    }
-
-    for record in upsert {
-        let key = key_fn(&record)?;
-        if let Some(record_index) = index.get(&key).copied() {
-            if record_index >= records.len() {
-                return Err(TurnError::Unavailable {
-                    reason: "row-store snapshot index is out of bounds".to_string(),
-                });
-            }
-            records[record_index] = record;
-        } else {
-            let record_index = records.len();
-            records.push(record);
-            index.insert(key, record_index);
-        }
-    }
-    Ok(())
-}
-
-fn apply_delta_collection<T, K>(
-    records: &mut Vec<T>,
-    upsert: Vec<T>,
-    delete: Vec<String>,
-    key_fn: K,
-) -> Result<(), TurnError>
-where
-    K: Fn(&T) -> Result<String, TurnError>,
-{
-    if !delete.is_empty() {
-        let deleted = delete.into_iter().collect::<HashSet<_>>();
-        let mut retained = Vec::with_capacity(records.len());
-        for record in records.drain(..) {
-            if !deleted.contains(&key_fn(&record)?) {
-                retained.push(record);
-            }
-        }
-        *records = retained;
-    }
-
-    for record in upsert {
-        let key = key_fn(&record)?;
-        if let Some(index) = record_index(records, &key, &key_fn)? {
-            records[index] = record;
-        } else {
-            records.push(record);
-        }
-    }
-    Ok(())
-}
-
-fn record_index<T, K>(records: &[T], key: &str, key_fn: &K) -> Result<Option<usize>, TurnError>
-where
-    K: Fn(&T) -> Result<String, TurnError>,
-{
-    for (index, record) in records.iter().enumerate() {
-        if key_fn(record)? == key {
-            return Ok(Some(index));
-        }
-    }
-    Ok(None)
-}
-
-fn indexed_records<T, K>(records: &[T], key_fn: &K) -> Result<HashMap<String, usize>, TurnError>
-where
-    K: Fn(&T) -> Result<String, TurnError>,
-{
-    let mut index = HashMap::with_capacity(records.len());
-    for (record_index, record) in records.iter().enumerate() {
-        index.insert(key_fn(record)?, record_index);
-    }
-    Ok(index)
-}
-
-fn keyed_records<T, K>(records: &[T], key_fn: &K) -> Result<HashMap<String, T>, RowPersistError>
-where
-    T: Clone,
-    K: Fn(&T) -> Result<String, TurnError>,
-{
-    records
-        .iter()
-        .map(|record| Ok((key_fn(record)?, record.clone())))
-        .collect()
-}
-
-fn submit_turn_targeted_delta(
-    snapshot: &TurnPersistenceSnapshot,
-    latest_event_cursor: EventCursor,
-    store: &InMemoryTurnStateStore,
-    response: &SubmitTurnResponse,
-) -> Result<SnapshotDelta, TurnError> {
-    let SubmitTurnResponse::Accepted {
-        turn_id, run_id, ..
-    } = response;
-    let turn = store
-        .turn_record(*turn_id)
-        .ok_or_else(|| TurnError::Unavailable {
-            reason: "accepted turn missing from row-store hot state".to_string(),
-        })?;
-    let run = store
-        .run_record(*run_id)
-        .ok_or_else(|| TurnError::Unavailable {
-            reason: "accepted run missing from row-store hot state".to_string(),
-        })?;
-    let mut delta = SnapshotDelta {
-        turns_upsert: vec![turn.clone()],
-        runs_upsert: vec![run],
-        ..SnapshotDelta::default()
-    };
-    if let Some(lock) = store.active_lock_record(&turn.scope) {
-        delta.active_locks_upsert.push(lock);
-    }
-    if let Some(reservation) = store.admission_reservation(*run_id) {
-        delta.admission_reservations_upsert.push(reservation);
-    }
-    delta.idempotency_upsert.extend(
-        store
-            .idempotency_records_after(turn.created_at)
-            .into_iter()
-            .filter(|record| {
-                record.operation == crate::TurnIdempotencyOperationKind::Submit
-                    && record.run_id == Some(*run_id)
-            }),
-    );
-    add_event_delta(snapshot, latest_event_cursor, store, &mut delta)?;
-    Ok(delta)
-}
-
-fn full_snapshot_delta(
-    snapshot: &TurnPersistenceSnapshot,
-    store: &InMemoryTurnStateStore,
-) -> Result<SnapshotDelta, TurnError> {
-    let mut new_snapshot = store.persistence_snapshot();
-    preserve_loop_checkpoints(snapshot, &mut new_snapshot);
-    snapshot_delta(snapshot, &new_snapshot).map_err(|error| match error {
-        RowPersistError::Turn(error) => error,
-    })
-}
-
-fn row_store_durable_delta(mut delta: SnapshotDelta) -> SnapshotDelta {
-    // Tier-2 rows are the durable run record. Row-store cache limits may evict
-    // old terminal runs/events from memory, but persistence must not encode
-    // those cache evictions as data deletion.
-    delta.turns_delete.clear();
-    delta.runs_delete.clear();
-    delta.events_delete.clear();
-    delta.event_retention_floor = None;
-    delta
-}
-
-fn row_store_hot_cache_snapshot(
-    mut snapshot: TurnPersistenceSnapshot,
-    limits: InMemoryTurnStateStoreLimits,
-) -> TurnPersistenceSnapshot {
-    let mut terminal_runs = snapshot
-        .runs
-        .iter()
-        .filter(|record| record.status.is_terminal())
-        .map(|record| (record.event_cursor, record.run_id))
-        .collect::<Vec<_>>();
-    terminal_runs.sort_by_key(|(cursor, _)| *cursor);
-    let evicted_terminal_run_ids = terminal_runs
-        .len()
-        .saturating_sub(limits.max_terminal_records);
-    let evicted_terminal_run_ids = terminal_runs
-        .into_iter()
-        .take(evicted_terminal_run_ids)
-        .map(|(_, run_id)| run_id)
-        .collect::<HashSet<_>>();
-
-    if !evicted_terminal_run_ids.is_empty() {
-        snapshot
-            .runs
-            .retain(|record| !evicted_terminal_run_ids.contains(&record.run_id));
-        let retained_run_ids = snapshot
-            .runs
-            .iter()
-            .map(|record| record.run_id)
-            .collect::<HashSet<_>>();
-        let retained_turn_ids = snapshot
-            .runs
-            .iter()
-            .map(|record| record.turn_id)
-            .collect::<HashSet<_>>();
-        let active_spawn_roots = snapshot
-            .runs
-            .iter()
-            .filter(|record| !record.status.is_terminal())
-            .filter_map(|record| record.spawn_tree_root_run_id)
-            .collect::<HashSet<_>>();
-
-        snapshot
-            .turns
-            .retain(|record| retained_turn_ids.contains(&record.turn_id));
-        snapshot
-            .active_locks
-            .retain(|record| retained_run_ids.contains(&record.run_id));
-        snapshot
-            .checkpoints
-            .retain(|record| retained_run_ids.contains(&record.run_id));
-        snapshot
-            .loop_checkpoints
-            .retain(|record| retained_run_ids.contains(&record.run_id));
-        snapshot
-            .admission_reservations
-            .retain(|record| retained_run_ids.contains(&record.run_id));
-        snapshot.spawn_tree_reservations.retain(|record| {
-            retained_run_ids.contains(&record.root_run_id)
-                || active_spawn_roots.contains(&record.root_run_id)
-        });
-    }
-
-    snapshot.events.sort_by_key(|event| event.cursor);
-    if snapshot.events.len() > limits.max_events {
-        let excess = snapshot.events.len() - limits.max_events;
-        if let Some(last_pruned) = snapshot.events.get(excess.saturating_sub(1)) {
-            snapshot.event_retention_floor = snapshot.event_retention_floor.max(last_pruned.cursor);
-        }
-        snapshot.events.drain(0..excess);
-    }
-
-    let max_idempotency_records = limits.max_idempotency_records.saturating_mul(3);
-    snapshot
-        .idempotency_records
-        .sort_by_key(|record| record.created_at);
-    if snapshot.idempotency_records.len() > max_idempotency_records {
-        let excess = snapshot.idempotency_records.len() - max_idempotency_records;
-        snapshot.idempotency_records.drain(0..excess);
-    }
-
-    snapshot
-}
-
-fn preserve_loop_checkpoints(
-    baseline: &TurnPersistenceSnapshot,
-    new_snapshot: &mut TurnPersistenceSnapshot,
-) {
-    new_snapshot.loop_checkpoints = baseline.loop_checkpoints.clone();
-}
-
-fn loop_checkpoint_record_from_request(request: PutLoopCheckpointRequest) -> LoopCheckpointRecord {
-    LoopCheckpointRecord {
-        checkpoint_id: TurnCheckpointId::new(),
-        scope: request.scope,
-        turn_id: request.turn_id,
-        run_id: request.run_id,
-        state_ref: request.state_ref,
-        schema_id: request.schema_id,
-        schema_version: request.schema_version,
-        kind: request.kind,
-        gate_ref: request.gate_ref,
-        created_at: Utc::now(),
-    }
-}
-
-fn claimed_run_targeted_delta(
-    snapshot: &TurnPersistenceSnapshot,
-    latest_event_cursor: EventCursor,
-    store: &InMemoryTurnStateStore,
-    claimed: &Option<ClaimedTurnRun>,
-) -> Result<SnapshotDelta, TurnError> {
-    let Some(claimed) = claimed else {
-        return Ok(SnapshotDelta::default());
-    };
-    run_state_targeted_delta(
-        snapshot,
-        latest_event_cursor,
-        store,
-        claimed.state.run_id,
-        &claimed.state.scope,
-    )
-}
-
-fn run_state_targeted_delta(
-    snapshot: &TurnPersistenceSnapshot,
-    latest_event_cursor: EventCursor,
-    store: &InMemoryTurnStateStore,
-    run_id: TurnRunId,
-    scope: &TurnScope,
-) -> Result<SnapshotDelta, TurnError> {
-    let mut delta = SnapshotDelta::default();
-    match store.run_record(run_id) {
-        Some(run) => {
-            delta.runs_upsert.push(run);
-        }
-        None => {
-            delta.runs_delete.push(run_id.to_string());
-            if let Some(old_run) = snapshot.runs.iter().find(|record| record.run_id == run_id)
-                && store.turn_record(old_run.turn_id).is_none()
-            {
-                delta.turns_delete.push(old_run.turn_id.to_string());
-            }
-        }
-    }
-
-    if let Some(lock) = store.active_lock_record(scope) {
-        delta.active_locks_upsert.push(lock);
-    } else if let Some(old_lock) = snapshot
-        .active_locks
-        .iter()
-        .find(|record| record.key.scope == *scope)
-    {
-        delta.active_locks_delete.push(hash_key(&old_lock.key)?);
-    }
-
-    if let Some(reservation) = store.admission_reservation(run_id) {
-        delta.admission_reservations_upsert.push(reservation);
-    } else if snapshot
-        .admission_reservations
-        .iter()
-        .any(|record| record.run_id == run_id)
-    {
-        delta.admission_reservations_delete.push(run_id.to_string());
-    }
-
-    add_event_delta(snapshot, latest_event_cursor, store, &mut delta)?;
-    Ok(delta)
-}
-
-fn run_state_with_idempotency_targeted_delta(
-    snapshot: &TurnPersistenceSnapshot,
-    latest_event_cursor: EventCursor,
-    store: &InMemoryTurnStateStore,
-    run_id: TurnRunId,
-    scope: &TurnScope,
-    operation: crate::TurnIdempotencyOperationKind,
-) -> Result<SnapshotDelta, TurnError> {
-    let mut delta = run_state_targeted_delta(snapshot, latest_event_cursor, store, run_id, scope)?;
-    add_run_idempotency_delta(snapshot, store, &mut delta, run_id, operation);
-    Ok(delta)
-}
-
-fn blocked_run_targeted_delta(
-    snapshot: &TurnPersistenceSnapshot,
-    latest_event_cursor: EventCursor,
-    store: &InMemoryTurnStateStore,
-    state: &TurnRunState,
-) -> Result<SnapshotDelta, TurnError> {
-    let mut delta = run_state_targeted_delta(
-        snapshot,
-        latest_event_cursor,
-        store,
-        state.run_id,
-        &state.scope,
-    )?;
-    if let Some(checkpoint_id) = state.checkpoint_id {
-        let checkpoint =
-            store
-                .checkpoint_record(checkpoint_id)
-                .ok_or_else(|| TurnError::Unavailable {
-                    reason: "blocked run checkpoint missing from row-store hot state".to_string(),
-                })?;
-        delta.checkpoints_upsert.push(checkpoint);
-    }
-    Ok(delta)
-}
-
-fn add_run_idempotency_delta(
-    snapshot: &TurnPersistenceSnapshot,
-    store: &InMemoryTurnStateStore,
-    delta: &mut SnapshotDelta,
-    run_id: TurnRunId,
-    operation: crate::TurnIdempotencyOperationKind,
-) {
-    delta.idempotency_upsert.extend(
-        store
-            .idempotency_records_for_run_operation(run_id, operation)
-            .into_iter()
-            .filter(|record| !snapshot.idempotency_records.contains(record)),
-    );
-}
-
-fn latest_event_cursor(snapshot: &TurnPersistenceSnapshot) -> EventCursor {
-    snapshot
-        .events
-        .iter()
-        .map(|event| event.cursor)
-        .max()
-        .unwrap_or(snapshot.event_retention_floor)
-        .max(snapshot.event_retention_floor)
-}
-
-fn latest_event_cursor_after_delta(current: EventCursor, delta: &SnapshotDelta) -> EventCursor {
-    let event_cursor = delta
-        .events_upsert
-        .iter()
-        .map(|event| event.cursor)
-        .max()
-        .unwrap_or(current);
-    let retention_floor = delta.event_retention_floor.unwrap_or(current);
-    current.max(event_cursor).max(retention_floor)
-}
-
-fn add_event_delta(
-    snapshot: &TurnPersistenceSnapshot,
-    latest_event_cursor: EventCursor,
-    store: &InMemoryTurnStateStore,
-    delta: &mut SnapshotDelta,
-) -> Result<(), TurnError> {
-    delta
-        .events_upsert
-        .extend(store.events_after(latest_event_cursor));
-    let event_retention_floor = store.event_retention_floor();
-    if event_retention_floor != snapshot.event_retention_floor {
-        delta.event_retention_floor = Some(event_retention_floor);
-        for event in snapshot
-            .events
-            .iter()
-            .filter(|event| event.cursor <= event_retention_floor)
-        {
-            delta.events_delete.push(format!("{:020}", event.cursor.0));
-        }
-    }
-    Ok(())
-}
-
 fn turn_state_write_span(
     operation: &'static str,
     scope: Option<&TurnScope>,
@@ -2435,68 +727,4 @@ fn turn_state_write_span(
     }
 
     span
-}
-
-fn row_dir(collection: &str) -> Result<ScopedPath, TurnError> {
-    scoped_row_path(format!("{ROW_ROOT}/{collection}"))
-}
-
-fn row_path(collection: &str, key: &str) -> Result<ScopedPath, TurnError> {
-    scoped_row_path(format!("{ROW_ROOT}/{collection}/{key}.json"))
-}
-
-fn meta_path() -> Result<ScopedPath, TurnError> {
-    scoped_row_path(format!("{ROW_ROOT}/{META_DIR}/{META_FILE}"))
-}
-
-fn delta_log_path() -> Result<ScopedPath, TurnError> {
-    scoped_row_path(format!("{ROW_ROOT}/{DELTA_LOG}"))
-}
-
-fn scoped_row_path(path: String) -> Result<ScopedPath, TurnError> {
-    ScopedPath::new(path).map_err(|error| TurnError::Unavailable {
-        reason: format!("invalid turn-state row path: {error}"),
-    })
-}
-
-fn deserialize_row<T>(bytes: &[u8], collection: &'static str) -> Result<T, TurnError>
-where
-    T: DeserializeOwned,
-{
-    serde_json::from_slice(bytes).map_err(|error| TurnError::Unavailable {
-        reason: format!("turn-state {collection} row deserialization failed: {error}"),
-    })
-}
-
-fn hash_key<T>(record: &T) -> Result<String, TurnError>
-where
-    T: Serialize,
-{
-    let bytes = serde_jcs::to_vec(record).map_err(|error| TurnError::Unavailable {
-        reason: format!("turn-state row key serialization failed: {error}"),
-    })?;
-    Ok(hex::encode(blake3::hash(&bytes).as_bytes()))
-}
-
-fn fs_error(error: FilesystemError) -> TurnError {
-    tracing::debug!(%error, "turn state row-store filesystem operation failed");
-    TurnError::Unavailable {
-        reason: "turn state row-store persistence temporarily unavailable".to_string(),
-    }
-}
-
-fn retired_status_for_loop_exit(mapping: &crate::LoopExitMapping) -> TurnStatus {
-    match mapping {
-        crate::LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Completed) => {
-            TurnStatus::Completed
-        }
-        crate::LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Cancelled) => {
-            TurnStatus::Cancelled
-        }
-        crate::LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Blocked { reason, .. }) => {
-            reason.status()
-        }
-        crate::LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Failed { .. })
-        | crate::LoopExitMapping::RecoveryRequired { .. } => TurnStatus::Failed,
-    }
 }

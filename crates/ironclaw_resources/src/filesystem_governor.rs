@@ -4,7 +4,10 @@
 //! the authoritative reservation/tally state and persists an append-only delta
 //! journal through the caller's [`RootFilesystem`]. That makes in-process
 //! authority sound for quota decisions while avoiding per-reservation database
-//! transactions. Durable recovery loads the compacted
+//! transactions. This is not a distributed quota service: deployments must not
+//! run multiple independent filesystem governors over the same quota domain.
+//! Multi-replica deployments need one elected authority for each quota domain
+//! or a different distributed admission primitive. Durable recovery loads the compacted
 //! [`ResourceGovernorSnapshot`] written through [`FilesystemResourceGovernorStore`]
 //! and replays `/resources/deltas/log` from the snapshot cursor.
 //!
@@ -13,31 +16,34 @@
 //! shards in memory, enqueue one delta, and ack the caller after the group
 //! commit flusher durably appends that delta.
 
-use std::collections::{BTreeSet, HashMap};
-use std::hash::{Hash, Hasher};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, mpsc};
+use std::sync::{Arc, Mutex};
 
-use chrono::{DateTime, Utc};
 use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem, SeqNo};
-use ironclaw_host_api::{ReservationStatus, ResourceReservationId, ResourceScope, ScopedPath};
-use serde::{Deserialize, Serialize};
+use ironclaw_host_api::{ResourceReservationId, ResourceScope};
 use tracing::warn;
 
 use crate::cas_snapshot::{AsyncStorageWorkerPoolCell, new_worker_pool_cell, run_on_worker_pool};
 use crate::{
     AccountSnapshot, BudgetEvent, BudgetEventSink, Clock, FilesystemResourceGovernorStore,
-    NoOpBudgetEventSink, ReservationOutcome, ReservationRecord, ResourceAccount, ResourceError,
-    ResourceGovernor, ResourceGovernorStore, ResourceLimits, ResourceReceipt, ResourceState,
-    ResourceTally, SystemClock, account_snapshot_in_state, advance_period_if_rolled_over,
-    emit_reserve_events, most_specific_account, reconcile_in_state, release_in_state,
-    reserve_with_outcome_in_state, set_limit_in_state,
+    NoOpBudgetEventSink, ReservationOutcome, ResourceAccount, ResourceError, ResourceGovernor,
+    ResourceGovernorStore, ResourceLimits, ResourceReceipt, ResourceTally, SystemClock,
+    account_snapshot_in_state, advance_period_if_rolled_over, emit_reserve_events,
+    most_specific_account, reconcile_in_state, release_in_state, reserve_with_outcome_in_state,
+    set_limit_in_state,
 };
 use crate::{ResourceEstimate, ResourceUsage};
 
-const DELTA_LOG_PATH: &str = "/resources/deltas/log";
-const DELTA_JOURNAL_MAX_BATCH: usize = 256;
-const ACCOUNT_SHARDS: usize = 64;
+mod authority;
+mod journal;
+
+use authority::ResourceAuthority;
+use journal::{
+    PendingResourceDelta, ResourceDeltaJournal, ResourceGovernorDelta,
+    compact_resource_governor_snapshot, replay_journal,
+};
+
 const DEFAULT_COMPACTION_INTERVAL: usize = 1024;
 
 /// Filesystem-backed governor with process-local quota authority.
@@ -119,12 +125,19 @@ where
         Ok(ResourceAuthority::from_state(state, latest_seq))
     }
 
-    fn persist_delta(
+    fn enqueue_delta(
+        &self,
+        delta: ResourceGovernorDelta,
+    ) -> Result<PendingResourceDelta, ResourceError> {
+        self.delta_journal.enqueue(delta)
+    }
+
+    fn finish_delta(
         &self,
         authority: &ResourceAuthority,
-        delta: ResourceGovernorDelta,
+        pending: PendingResourceDelta,
     ) -> Result<SeqNo, ResourceError> {
-        let seq = self.delta_journal.persist(delta)?;
+        let seq = pending.wait()?;
         authority.set_latest_seq(seq)?;
         self.maybe_compact();
         Ok(seq)
@@ -133,7 +146,7 @@ where
     fn maybe_compact(&self) {
         let interval = self.compaction_interval.max(1);
         let prior = self.deltas_since_compaction.fetch_add(1, Ordering::Relaxed);
-        if (prior + 1) % interval != 0 {
+        if !(prior + 1).is_multiple_of(interval) {
             return;
         }
         if self.compaction_in_flight.swap(true, Ordering::AcqRel) {
@@ -170,7 +183,8 @@ where
         let authority = self.authority()?;
         authority.check_available()?;
         let now = self.clock.now();
-        let (tally, changed) = {
+        let (tally, pending) = {
+            let _commit = authority.lock_commit_for_accounts(std::slice::from_ref(account))?;
             let mut locked = authority.lock_accounts(std::slice::from_ref(account))?;
             let before = locked.account_parts(account);
             let mut state =
@@ -183,16 +197,24 @@ where
                 .unwrap_or_default();
             locked.write_accounts_from_state(std::slice::from_ref(account), &state);
             let after = locked.account_parts(account);
-            (tally, before != after)
-        };
-        if changed {
-            let delta = ResourceGovernorDelta::AccountSnapshot {
-                account: account.clone(),
-                at: now,
+            let pending = if before != after {
+                let delta = ResourceGovernorDelta::AccountSnapshot {
+                    account: account.clone(),
+                    at: now,
+                };
+                match self.enqueue_delta(delta) {
+                    Ok(pending) => Some(pending),
+                    Err(error) => return self.poison(&authority, error),
+                }
+            } else {
+                None
             };
-            if let Err(error) = self.persist_delta(&authority, delta) {
-                return self.poison(&authority, error);
-            }
+            (tally, pending)
+        };
+        if let Some(pending) = pending
+            && let Err(error) = self.finish_delta(&authority, pending)
+        {
+            return self.poison(&authority, error);
         }
         Ok(tally)
     }
@@ -201,7 +223,8 @@ where
         let authority = self.authority()?;
         authority.check_available()?;
         let now = self.clock.now();
-        let (tally, changed) = {
+        let (tally, pending) = {
+            let _commit = authority.lock_commit_for_accounts(std::slice::from_ref(account))?;
             let mut locked = authority.lock_accounts(std::slice::from_ref(account))?;
             let before = locked.account_parts(account);
             let mut state =
@@ -214,16 +237,24 @@ where
                 .unwrap_or_default();
             locked.write_accounts_from_state(std::slice::from_ref(account), &state);
             let after = locked.account_parts(account);
-            (tally, before != after)
-        };
-        if changed {
-            let delta = ResourceGovernorDelta::AccountSnapshot {
-                account: account.clone(),
-                at: now,
+            let pending = if before != after {
+                let delta = ResourceGovernorDelta::AccountSnapshot {
+                    account: account.clone(),
+                    at: now,
+                };
+                match self.enqueue_delta(delta) {
+                    Ok(pending) => Some(pending),
+                    Err(error) => return self.poison(&authority, error),
+                }
+            } else {
+                None
             };
-            if let Err(error) = self.persist_delta(&authority, delta) {
-                return self.poison(&authority, error);
-            }
+            (tally, pending)
+        };
+        if let Some(pending) = pending
+            && let Err(error) = self.finish_delta(&authority, pending)
+        {
+            return self.poison(&authority, error);
         }
         Ok(tally)
     }
@@ -241,19 +272,24 @@ where
         let authority = self.authority()?;
         authority.check_available()?;
         let now = self.clock.now();
-        {
+        let pending = {
+            let _commit = authority.lock_commit_for_accounts(std::slice::from_ref(&account))?;
             let mut locked = authority.lock_accounts(std::slice::from_ref(&account))?;
             let mut state =
                 locked.state_for_accounts(std::slice::from_ref(&account), HashMap::new());
             set_limit_in_state(&mut state, account.clone(), limits.clone(), now);
             locked.write_accounts_from_state(std::slice::from_ref(&account), &state);
-        }
-        let delta = ResourceGovernorDelta::SetLimit {
-            account: account.clone(),
-            limits,
-            at: now,
+            let delta = ResourceGovernorDelta::SetLimit {
+                account: account.clone(),
+                limits,
+                at: now,
+            };
+            match self.enqueue_delta(delta) {
+                Ok(pending) => pending,
+                Err(error) => return self.poison(&authority, error),
+            }
         };
-        if let Err(error) = self.persist_delta(&authority, delta) {
+        if let Err(error) = self.finish_delta(&authority, pending) {
             return self.poison(&authority, error);
         }
         self.event_sink
@@ -279,7 +315,8 @@ where
         authority.check_available()?;
         let now = self.clock.now();
         let accounts = ResourceAccount::cascade(&scope);
-        let result = {
+        let (outcome, pending) = {
+            let _commit = authority.lock_commit_for_accounts(&accounts)?;
             let mut reservations = authority.lock_reservations()?;
             let mut locked = authority.lock_accounts(&accounts)?;
             let mut reservation_subset = HashMap::new();
@@ -308,30 +345,33 @@ where
                     Err(error) => return self.poison(&authority, error),
                 }
             }
-            result
-        };
-
-        match result {
-            Ok(outcome) => {
-                let delta = ResourceGovernorDelta::Reserve {
-                    scope,
-                    estimate,
-                    reservation_id,
-                    at: now,
-                };
-                if let Err(error) = self.persist_delta(&authority, delta) {
-                    return self.poison(&authority, error);
+            match result {
+                Ok(outcome) => {
+                    let delta = ResourceGovernorDelta::Reserve {
+                        scope,
+                        estimate,
+                        reservation_id,
+                        at: now,
+                    };
+                    let pending = match self.enqueue_delta(delta) {
+                        Ok(pending) => pending,
+                        Err(error) => return self.poison(&authority, error),
+                    };
+                    (outcome, pending)
                 }
-                let result = Ok(outcome);
-                emit_reserve_events(self.event_sink.as_ref(), &result, now);
-                result
+                Err(error) => {
+                    let result = Err(error);
+                    emit_reserve_events(self.event_sink.as_ref(), &result, now);
+                    return result;
+                }
             }
-            Err(error) => {
-                let result = Err(error);
-                emit_reserve_events(self.event_sink.as_ref(), &result, now);
-                result
-            }
+        };
+        if let Err(error) = self.finish_delta(&authority, pending) {
+            return self.poison(&authority, error);
         }
+        let result = Ok(outcome);
+        emit_reserve_events(self.event_sink.as_ref(), &result, now);
+        result
     }
 
     fn reconcile(
@@ -341,13 +381,20 @@ where
     ) -> Result<ResourceReceipt, ResourceError> {
         let authority = self.authority()?;
         authority.check_available()?;
+        let accounts = {
+            let reservations = authority.lock_reservations()?;
+            let Some(record) = reservations.get(&reservation_id) else {
+                return Err(ResourceError::UnknownReservation { id: reservation_id });
+            };
+            record.accounts.clone()
+        };
         let now = self.clock.now();
-        let result = {
+        let (receipt, pending) = {
+            let _commit = authority.lock_commit_for_accounts(&accounts)?;
             let mut reservations = authority.lock_reservations()?;
             let Some(record) = reservations.get(&reservation_id).cloned() else {
                 return Err(ResourceError::UnknownReservation { id: reservation_id });
             };
-            let accounts = record.accounts.clone();
             let mut locked = authority.lock_accounts(&accounts)?;
             let mut reservation_subset = HashMap::new();
             reservation_subset.insert(reservation_id, record);
@@ -367,19 +414,19 @@ where
                     Err(error) => return self.poison(&authority, error),
                 }
             }
-            result
+            let receipt = result?;
+            let delta = ResourceGovernorDelta::Reconcile {
+                reservation_id,
+                actual,
+                at: now,
+            };
+            let pending = match self.enqueue_delta(delta) {
+                Ok(pending) => pending,
+                Err(error) => return self.poison(&authority, error),
+            };
+            (receipt, pending)
         };
-
-        let receipt = match result {
-            Ok(receipt) => receipt,
-            Err(error) => return Err(error),
-        };
-        let delta = ResourceGovernorDelta::Reconcile {
-            reservation_id,
-            actual,
-            at: now,
-        };
-        if let Err(error) = self.persist_delta(&authority, delta) {
+        if let Err(error) = self.finish_delta(&authority, pending) {
             return self.poison(&authority, error);
         }
         self.event_sink.emit(BudgetEvent::Reconciled {
@@ -396,13 +443,20 @@ where
     ) -> Result<ResourceReceipt, ResourceError> {
         let authority = self.authority()?;
         authority.check_available()?;
+        let accounts = {
+            let reservations = authority.lock_reservations()?;
+            let Some(record) = reservations.get(&reservation_id) else {
+                return Err(ResourceError::UnknownReservation { id: reservation_id });
+            };
+            record.accounts.clone()
+        };
         let now = self.clock.now();
-        let result = {
+        let (receipt, pending) = {
+            let _commit = authority.lock_commit_for_accounts(&accounts)?;
             let mut reservations = authority.lock_reservations()?;
             let Some(record) = reservations.get(&reservation_id).cloned() else {
                 return Err(ResourceError::UnknownReservation { id: reservation_id });
             };
-            let accounts = record.accounts.clone();
             let mut locked = authority.lock_accounts(&accounts)?;
             let mut reservation_subset = HashMap::new();
             reservation_subset.insert(reservation_id, record);
@@ -422,18 +476,18 @@ where
                     Err(error) => return self.poison(&authority, error),
                 }
             }
-            result
+            let receipt = result?;
+            let delta = ResourceGovernorDelta::Release {
+                reservation_id,
+                at: now,
+            };
+            let pending = match self.enqueue_delta(delta) {
+                Ok(pending) => pending,
+                Err(error) => return self.poison(&authority, error),
+            };
+            (receipt, pending)
         };
-
-        let receipt = match result {
-            Ok(receipt) => receipt,
-            Err(error) => return Err(error),
-        };
-        let delta = ResourceGovernorDelta::Release {
-            reservation_id,
-            at: now,
-        };
-        if let Err(error) = self.persist_delta(&authority, delta) {
+        if let Err(error) = self.finish_delta(&authority, pending) {
             return self.poison(&authority, error);
         }
         self.event_sink.emit(BudgetEvent::Released {
@@ -451,7 +505,8 @@ where
         let authority = self.authority()?;
         authority.check_available()?;
         let now = self.clock.now();
-        let (snapshot, changed) = {
+        let (snapshot, pending) = {
+            let _commit = authority.lock_commit_for_accounts(std::slice::from_ref(account))?;
             let mut locked = authority.lock_accounts(std::slice::from_ref(account))?;
             let before = locked.account_parts(account);
             let mut state =
@@ -459,527 +514,27 @@ where
             let snapshot = account_snapshot_in_state(&mut state, account, now);
             locked.write_accounts_from_state(std::slice::from_ref(account), &state);
             let after = locked.account_parts(account);
-            (snapshot, before != after)
-        };
-        if changed {
-            let delta = ResourceGovernorDelta::AccountSnapshot {
-                account: account.clone(),
-                at: now,
+            let pending = if before != after {
+                let delta = ResourceGovernorDelta::AccountSnapshot {
+                    account: account.clone(),
+                    at: now,
+                };
+                match self.enqueue_delta(delta) {
+                    Ok(pending) => Some(pending),
+                    Err(error) => return self.poison(&authority, error),
+                }
+            } else {
+                None
             };
-            if let Err(error) = self.persist_delta(&authority, delta) {
-                return self.poison(&authority, error);
-            }
+            (snapshot, pending)
+        };
+        if let Some(pending) = pending
+            && let Err(error) = self.finish_delta(&authority, pending)
+        {
+            return self.poison(&authority, error);
         }
         Ok(snapshot)
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum ResourceGovernorDelta {
-    SetLimit {
-        account: ResourceAccount,
-        limits: ResourceLimits,
-        at: DateTime<Utc>,
-    },
-    Reserve {
-        scope: ResourceScope,
-        estimate: ResourceEstimate,
-        reservation_id: ResourceReservationId,
-        at: DateTime<Utc>,
-    },
-    Reconcile {
-        reservation_id: ResourceReservationId,
-        actual: ResourceUsage,
-        at: DateTime<Utc>,
-    },
-    Release {
-        reservation_id: ResourceReservationId,
-        at: DateTime<Utc>,
-    },
-    AccountSnapshot {
-        account: ResourceAccount,
-        at: DateTime<Utc>,
-    },
-}
-
-impl ResourceGovernorDelta {
-    fn apply_to(self, state: &mut ResourceState) -> Result<(), ResourceError> {
-        match self {
-            Self::SetLimit {
-                account,
-                limits,
-                at,
-            } => {
-                set_limit_in_state(state, account, limits, at);
-                Ok(())
-            }
-            Self::Reserve {
-                scope,
-                estimate,
-                reservation_id,
-                at,
-            } => reserve_with_outcome_in_state(state, scope, estimate, reservation_id, at)
-                .map(|_| ()),
-            Self::Reconcile {
-                reservation_id,
-                actual,
-                at,
-            } => reconcile_in_state(state, reservation_id, actual, at).map(|_| ()),
-            Self::Release { reservation_id, at } => {
-                release_in_state(state, reservation_id, at).map(|_| ())
-            }
-            Self::AccountSnapshot { account, at } => {
-                let _ = account_snapshot_in_state(state, &account, at);
-                Ok(())
-            }
-        }
-    }
-}
-
-struct ResourceDeltaJournal<F>
-where
-    F: RootFilesystem,
-{
-    sender: mpsc::Sender<DeltaJournalRequest>,
-    _filesystem: std::marker::PhantomData<F>,
-}
-
-struct DeltaJournalRequest {
-    delta: ResourceGovernorDelta,
-    ack: mpsc::Sender<Result<SeqNo, ResourceError>>,
-}
-
-impl<F> ResourceDeltaJournal<F>
-where
-    F: RootFilesystem + 'static,
-{
-    fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
-        let (sender, receiver) = mpsc::channel();
-        if let Err(error) = std::thread::Builder::new()
-            .name("resource-governor-delta-journal".to_string())
-            .spawn(move || run_delta_journal_flusher(filesystem, receiver))
-        {
-            warn!(reason = %error, "resource governor delta journal thread failed to start");
-        }
-        Self {
-            sender,
-            _filesystem: std::marker::PhantomData,
-        }
-    }
-
-    fn persist(&self, delta: ResourceGovernorDelta) -> Result<SeqNo, ResourceError> {
-        let (ack, receiver) = mpsc::channel();
-        self.sender
-            .send(DeltaJournalRequest { delta, ack })
-            .map_err(|_| storage_error("resource governor delta journal stopped"))?;
-        receiver
-            .recv()
-            .map_err(|_| storage_error("resource governor delta journal stopped"))?
-    }
-}
-
-fn run_delta_journal_flusher<F>(
-    filesystem: Arc<ScopedFilesystem<F>>,
-    receiver: mpsc::Receiver<DeltaJournalRequest>,
-) where
-    F: RootFilesystem + 'static,
-{
-    let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            while let Ok(request) = receiver.recv() {
-                let _ = request.ack.send(Err(storage_error(format!(
-                    "resource governor delta journal runtime failed: {error}"
-                ))));
-            }
-            return;
-        }
-    };
-    while let Ok(first) = receiver.recv() {
-        let mut requests = Vec::with_capacity(DELTA_JOURNAL_MAX_BATCH);
-        requests.push(first);
-        std::thread::yield_now();
-        while requests.len() < DELTA_JOURNAL_MAX_BATCH {
-            match receiver.try_recv() {
-                Ok(request) => requests.push(request),
-                Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
-            }
-        }
-        let result = runtime.block_on(persist_delta_journal_batch(filesystem.as_ref(), &requests));
-        match result {
-            Ok(seqs) => {
-                for (request, seq) in requests.into_iter().zip(seqs) {
-                    let _ = request.ack.send(Ok(seq));
-                }
-            }
-            Err(error) => {
-                for request in requests {
-                    let _ = request.ack.send(Err(error.clone()));
-                }
-            }
-        }
-    }
-}
-
-async fn persist_delta_journal_batch<F>(
-    filesystem: &ScopedFilesystem<F>,
-    requests: &[DeltaJournalRequest],
-) -> Result<Vec<SeqNo>, ResourceError>
-where
-    F: RootFilesystem,
-{
-    let path = delta_log_path()?;
-    let payloads = requests
-        .iter()
-        .map(|request| serde_json::to_vec(&request.delta).map_err(storage_error))
-        .collect::<Result<Vec<_>, _>>()?;
-    if let [payload] = payloads.as_slice() {
-        return filesystem
-            .append(&ResourceScope::system(), &path, payload.clone())
-            .await
-            .map(|seq| vec![seq])
-            .map_err(fs_error);
-    }
-    let seqs = filesystem
-        .append_batch(&ResourceScope::system(), &path, payloads)
-        .await
-        .map_err(fs_error)?;
-    if seqs.len() != requests.len() {
-        return Err(storage_error(
-            "resource governor delta batch append returned an unexpected ack count",
-        ));
-    }
-    Ok(seqs)
-}
-
-fn compact_resource_governor_snapshot<F>(
-    snapshot_store: FilesystemResourceGovernorStore<F>,
-    filesystem: Arc<ScopedFilesystem<F>>,
-) -> Result<(), ResourceError>
-where
-    F: RootFilesystem + 'static,
-{
-    let snapshot = snapshot_store.inspect(|snapshot| Ok(snapshot.clone()))?;
-    let from = SeqNo::from_backend(snapshot.journal_seq);
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(storage_error)?;
-    let (state, latest_seq) = runtime.block_on(replay_journal(filesystem, snapshot.state, from))?;
-    snapshot_store.update(move |snapshot| {
-        if snapshot.journal_seq > latest_seq.get() {
-            return Ok(());
-        }
-        snapshot.schema_version = crate::RESOURCE_GOVERNOR_SNAPSHOT_SCHEMA_VERSION;
-        snapshot.state = state.clone();
-        snapshot.journal_seq = latest_seq.get();
-        Ok(())
-    })
-}
-
-async fn replay_journal<F>(
-    filesystem: Arc<ScopedFilesystem<F>>,
-    mut state: ResourceState,
-    from: SeqNo,
-) -> Result<(ResourceState, SeqNo), ResourceError>
-where
-    F: RootFilesystem,
-{
-    rebuild_tallies_from_reservations(&mut state);
-    let path = delta_log_path()?;
-    let records = match filesystem.tail(&ResourceScope::system(), &path, from).await {
-        Ok(records) => records,
-        Err(FilesystemError::NotFound { .. }) | Err(FilesystemError::Unsupported { .. }) => {
-            Vec::new()
-        }
-        Err(error) => return Err(fs_error(error)),
-    };
-    let mut latest = from;
-    for record in records {
-        latest = record.seq;
-        let delta: ResourceGovernorDelta = serde_json::from_slice(&record.payload)
-            .map_err(|error| storage_error(format!("decode resource governor delta: {error}")))?;
-        delta.apply_to(&mut state)?;
-    }
-    Ok((state, latest))
-}
-
-fn rebuild_tallies_from_reservations(state: &mut ResourceState) {
-    state.reserved_by_account.clear();
-    state.usage_by_account.clear();
-    for record in state.reservations.values() {
-        match record.status {
-            ReservationStatus::Active => {
-                for account in &record.accounts {
-                    state
-                        .reserved_by_account
-                        .entry(account.clone())
-                        .or_default()
-                        .add_assign(&record.tally);
-                }
-            }
-            ReservationStatus::Reconciled => {
-                let Some(actual) = &record.actual else {
-                    continue;
-                };
-                let spent = ResourceTally::from_usage(actual);
-                for account in &record.accounts {
-                    state
-                        .usage_by_account
-                        .entry(account.clone())
-                        .or_default()
-                        .add_assign(&spent);
-                }
-            }
-            ReservationStatus::Released => {}
-        }
-    }
-}
-
-struct ResourceAuthority {
-    shards: Vec<Mutex<AccountShard>>,
-    reservations: Mutex<HashMap<ResourceReservationId, ReservationRecord>>,
-    latest_seq: Mutex<SeqNo>,
-    poisoned: Mutex<Option<String>>,
-}
-
-#[derive(Default)]
-struct AccountShard {
-    limits: HashMap<ResourceAccount, ResourceLimits>,
-    reserved_by_account: HashMap<ResourceAccount, ResourceTally>,
-    usage_by_account: HashMap<ResourceAccount, ResourceTally>,
-    period_anchors: HashMap<ResourceAccount, DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct AccountParts {
-    limits: Option<ResourceLimits>,
-    reserved: Option<ResourceTally>,
-    usage: Option<ResourceTally>,
-    period_anchor: Option<DateTime<Utc>>,
-}
-
-impl ResourceAuthority {
-    fn from_state(state: ResourceState, latest_seq: SeqNo) -> Self {
-        let authority = Self {
-            shards: (0..ACCOUNT_SHARDS)
-                .map(|_| Mutex::new(AccountShard::default()))
-                .collect(),
-            reservations: Mutex::new(state.reservations),
-            latest_seq: Mutex::new(latest_seq),
-            poisoned: Mutex::new(None),
-        };
-        for (account, limits) in state.limits {
-            authority
-                .shard_for_account(&account)
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .limits
-                .insert(account, limits);
-        }
-        for (account, tally) in state.reserved_by_account {
-            authority
-                .shard_for_account(&account)
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .reserved_by_account
-                .insert(account, tally);
-        }
-        for (account, tally) in state.usage_by_account {
-            authority
-                .shard_for_account(&account)
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .usage_by_account
-                .insert(account, tally);
-        }
-        for (account, anchor) in state.period_anchors {
-            authority
-                .shard_for_account(&account)
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .period_anchors
-                .insert(account, anchor);
-        }
-        authority
-    }
-
-    fn check_available(&self) -> Result<(), ResourceError> {
-        let poisoned = self.poisoned.lock().map_err(|_| ResourceError::Storage {
-            reason: "resource governor poison lock poisoned".to_string(),
-        })?;
-        if let Some(reason) = poisoned.as_ref() {
-            return Err(ResourceError::Storage {
-                reason: reason.clone(),
-            });
-        }
-        Ok(())
-    }
-
-    fn poison(&self, error: ResourceError) {
-        if let ResourceError::Storage { reason } = error
-            && let Ok(mut poisoned) = self.poisoned.lock()
-        {
-            *poisoned = Some(reason);
-        }
-    }
-
-    fn set_latest_seq(&self, seq: SeqNo) -> Result<(), ResourceError> {
-        *self.latest_seq.lock().map_err(|_| ResourceError::Storage {
-            reason: "resource governor journal cursor lock poisoned".to_string(),
-        })? = seq;
-        Ok(())
-    }
-
-    fn lock_reservations(
-        &self,
-    ) -> Result<MutexGuard<'_, HashMap<ResourceReservationId, ReservationRecord>>, ResourceError>
-    {
-        self.reservations
-            .lock()
-            .map_err(|_| ResourceError::Storage {
-                reason: "resource governor reservation map lock poisoned".to_string(),
-            })
-    }
-
-    fn lock_accounts(
-        &self,
-        accounts: &[ResourceAccount],
-    ) -> Result<LockedAccounts<'_>, ResourceError> {
-        let mut indexes = BTreeSet::new();
-        for account in accounts {
-            indexes.insert(account_shard_index(account));
-        }
-        let mut guards = Vec::with_capacity(indexes.len());
-        for index in indexes {
-            let guard = self.shards[index]
-                .lock()
-                .map_err(|_| ResourceError::Storage {
-                    reason: "resource governor account shard lock poisoned".to_string(),
-                })?;
-            guards.push((index, guard));
-        }
-        Ok(LockedAccounts { guards })
-    }
-
-    fn shard_for_account(&self, account: &ResourceAccount) -> &Mutex<AccountShard> {
-        &self.shards[account_shard_index(account)]
-    }
-}
-
-struct LockedAccounts<'a> {
-    guards: Vec<(usize, MutexGuard<'a, AccountShard>)>,
-}
-
-impl LockedAccounts<'_> {
-    fn state_for_accounts(
-        &mut self,
-        accounts: &[ResourceAccount],
-        reservations: HashMap<ResourceReservationId, ReservationRecord>,
-    ) -> ResourceState {
-        let mut state = ResourceState {
-            reservations,
-            ..ResourceState::default()
-        };
-        for account in accounts {
-            let shard = self.shard_mut(account);
-            if let Some(limits) = shard.limits.get(account) {
-                state.limits.insert(account.clone(), limits.clone());
-            }
-            if let Some(tally) = shard.reserved_by_account.get(account) {
-                state
-                    .reserved_by_account
-                    .insert(account.clone(), tally.clone());
-            }
-            if let Some(tally) = shard.usage_by_account.get(account) {
-                state
-                    .usage_by_account
-                    .insert(account.clone(), tally.clone());
-            }
-            if let Some(anchor) = shard.period_anchors.get(account) {
-                state.period_anchors.insert(account.clone(), *anchor);
-            }
-        }
-        state
-    }
-
-    fn write_accounts_from_state(&mut self, accounts: &[ResourceAccount], state: &ResourceState) {
-        for account in accounts {
-            let shard = self.shard_mut(account);
-            write_optional(
-                &mut shard.limits,
-                account,
-                state.limits.get(account).cloned(),
-            );
-            write_optional(
-                &mut shard.reserved_by_account,
-                account,
-                state.reserved_by_account.get(account).cloned(),
-            );
-            write_optional(
-                &mut shard.usage_by_account,
-                account,
-                state.usage_by_account.get(account).cloned(),
-            );
-            write_optional(
-                &mut shard.period_anchors,
-                account,
-                state.period_anchors.get(account).copied(),
-            );
-        }
-    }
-
-    fn account_parts(&mut self, account: &ResourceAccount) -> AccountParts {
-        let shard = self.shard_mut(account);
-        AccountParts {
-            limits: shard.limits.get(account).cloned(),
-            reserved: shard.reserved_by_account.get(account).cloned(),
-            usage: shard.usage_by_account.get(account).cloned(),
-            period_anchor: shard.period_anchors.get(account).copied(),
-        }
-    }
-
-    fn shard_mut(&mut self, account: &ResourceAccount) -> &mut AccountShard {
-        let index = account_shard_index(account);
-        self.guards
-            .iter_mut()
-            .find(|(candidate, _)| *candidate == index)
-            .map(|(_, guard)| &mut **guard)
-            // lock_accounts builds the guard list from exactly the account
-            // shard indexes requested before LockedAccounts is constructed.
-            .expect("account shard was locked")
-    }
-}
-
-fn write_optional<T: Clone>(
-    map: &mut HashMap<ResourceAccount, T>,
-    account: &ResourceAccount,
-    value: Option<T>,
-) {
-    match value {
-        Some(value) => {
-            map.insert(account.clone(), value);
-        }
-        None => {
-            map.remove(account);
-        }
-    }
-}
-
-fn account_shard_index(account: &ResourceAccount) -> usize {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    account.hash(&mut hasher);
-    (hasher.finish() as usize) % ACCOUNT_SHARDS
-}
-
-fn delta_log_path() -> Result<ScopedPath, ResourceError> {
-    ScopedPath::new(DELTA_LOG_PATH.to_string()).map_err(|error| {
-        storage_error(format!("invalid resource governor delta log path: {error}"))
-    })
 }
 
 #[cfg(test)]
@@ -995,7 +550,7 @@ mod tests {
     use rust_decimal_macros::dec;
 
     use super::*;
-    use crate::{ResourceGovernorStore, ResourceLimits};
+    use crate::{BudgetPeriod, FakeClock, ResourceGovernorStore, ResourceLimits};
 
     fn scoped_resources_fs() -> Arc<ScopedFilesystem<InMemoryBackend>> {
         let backend = Arc::new(InMemoryBackend::new());
@@ -1074,6 +629,81 @@ mod tests {
         let snapshot = reloaded.account_snapshot(&account).unwrap().unwrap();
         assert_eq!(snapshot.ledger.spent.usd, dec!(0.25));
         assert_eq!(snapshot.ledger.reserved.usd, dec!(0));
+    }
+
+    #[test]
+    fn compaction_replay_preserves_rolled_over_usage_window() {
+        let scoped = scoped_resources_fs();
+        let start = chrono::DateTime::parse_from_rfc3339("2026-05-21T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let clock = FakeClock::new(start);
+        let scope = sample_scope();
+        let account = ResourceAccount::tenant(scope.tenant_id.clone());
+        let governor = FilesystemResourceGovernor::new(Arc::clone(&scoped))
+            .with_clock(Arc::new(clock.clone()))
+            .with_compaction_interval(4);
+
+        governor
+            .set_limit(
+                account.clone(),
+                ResourceLimits {
+                    max_usd: Some(dec!(5.00)),
+                    period: BudgetPeriod::Rolling24h,
+                    ..ResourceLimits::default()
+                },
+            )
+            .unwrap();
+        let reservation = governor
+            .reserve(
+                scope.clone(),
+                ResourceEstimate {
+                    usd: Some(dec!(4.50)),
+                    ..ResourceEstimate::default()
+                },
+            )
+            .unwrap();
+        governor
+            .reconcile(
+                reservation.id,
+                ResourceUsage {
+                    usd: dec!(4.50),
+                    ..ResourceUsage::default()
+                },
+            )
+            .unwrap();
+
+        clock.advance(chrono::Duration::hours(24) + chrono::Duration::minutes(1));
+        let rolled = governor.account_snapshot(&account).unwrap().unwrap();
+        assert_eq!(rolled.ledger.spent.usd, dec!(0));
+
+        let store = FilesystemResourceGovernorStore::new(Arc::clone(&scoped));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let snapshot = store.inspect(|snapshot| Ok(snapshot.clone())).unwrap();
+            if snapshot.journal_seq >= 4 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "compaction did not include rolled period state; snapshot={snapshot:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let reloaded = FilesystemResourceGovernor::new(scoped).with_clock(Arc::new(clock));
+        let snapshot = reloaded.account_snapshot(&account).unwrap().unwrap();
+        assert_eq!(snapshot.ledger.spent.usd, dec!(0));
+
+        reloaded
+            .reserve(
+                scope,
+                ResourceEstimate {
+                    usd: Some(dec!(4.50)),
+                    ..ResourceEstimate::default()
+                },
+            )
+            .expect("rolled-over spend must not be resurrected by compaction replay");
     }
 }
 

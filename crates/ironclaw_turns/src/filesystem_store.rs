@@ -636,8 +636,9 @@ pub enum FilesystemTurnStateStoreKind<F>
 where
     F: RootFilesystem,
 {
-    Blob(FilesystemTurnStateStore<F>),
-    Row(FilesystemTurnStateRowStore<F>),
+    // arch-exempt: large_file, boxed enum variant clippy fix in existing store facade, plan #5662
+    Blob(Box<FilesystemTurnStateStore<F>>),
+    Row(Box<FilesystemTurnStateRowStore<F>>),
 }
 
 impl<F> FilesystemTurnStateStoreKind<F>
@@ -645,20 +646,20 @@ where
     F: RootFilesystem,
 {
     pub fn blob(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
-        Self::Blob(FilesystemTurnStateStore::new(filesystem))
+        Self::Blob(Box::new(FilesystemTurnStateStore::new(filesystem)))
     }
 
     pub fn row(filesystem: Arc<ScopedFilesystem<F>>) -> Self
     where
         F: 'static,
     {
-        Self::Row(FilesystemTurnStateRowStore::new(filesystem))
+        Self::Row(Box::new(FilesystemTurnStateRowStore::new(filesystem)))
     }
 
     pub fn with_limits(self, limits: InMemoryTurnStateStoreLimits) -> Self {
         match self {
-            Self::Blob(store) => Self::Blob(store.with_limits(limits)),
-            Self::Row(store) => Self::Row(store.with_limits(limits)),
+            Self::Blob(store) => Self::Blob(Box::new((*store).with_limits(limits))),
+            Self::Row(store) => Self::Row(Box::new((*store).with_limits(limits))),
         }
     }
 

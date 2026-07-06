@@ -1,3 +1,4 @@
+// arch-exempt: large_file, filesystem turn-state contract suite decomposition, plan #5662
 //! Contract tests for [`FilesystemTurnStateStore`] against a
 //! [`ScopedFilesystem`] over a CAS-capable filesystem backend. The persistent
 //! shape is a lower-churn `/turns/state.json` snapshot; active runner leases
@@ -5,7 +6,7 @@
 
 use std::{
     sync::{
-        Arc,
+        Arc, Condvar, Mutex as StdMutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -24,16 +25,18 @@ use ironclaw_host_api::{
     TenantId, ThreadId, UserId, VirtualPath,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, AllowAllTurnAdmissionPolicy, BlockedReason, FilesystemTurnStateRowStore,
-    FilesystemTurnStateStore, GateRef, GetRunStateRequest, IdempotencyKey,
-    InMemoryRunProfileResolver, InMemoryTurnStateStoreLimits, ProductTurnContext,
-    ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest, RunOriginAdapter,
-    RunProfileRequest, SanitizedCancelReason, SanitizedFailure, SourceBindingRef,
-    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId,
-    TurnError, TurnEventKind, TurnEventProjectionSource, TurnLeaseToken, TurnOriginKind, TurnOwner,
+    AcceptedMessageRef, AdmissionRejection, AllowAllTurnAdmissionPolicy, BlockedReason,
+    CheckpointSchemaId, FilesystemTurnStateRowStore, FilesystemTurnStateStore, GateRef,
+    GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver,
+    InMemoryTurnStateStoreLimits, LoopCheckpointStore, ProductTurnContext,
+    PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
+    RunOriginAdapter, RunProfileRequest, RunProfileVersion, SanitizedCancelReason,
+    SanitizedFailure, SourceBindingRef, SubmitChildRunRequest, SubmitTurnRequest,
+    SubmitTurnResponse, TurnActor, TurnAdmissionPolicy, TurnCheckpointId, TurnError, TurnEventKind,
+    TurnEventProjectionSource, TurnId, TurnLeaseToken, TurnOriginKind, TurnOwner,
     TurnPersistenceSnapshot, TurnRunId, TurnRunnerId, TurnScope, TurnSpawnTreeStateStore,
     TurnStateStore, TurnStatus,
-    run_profile::LoopCheckpointStateRef,
+    run_profile::{LoopCheckpointKind, LoopCheckpointStateRef},
     runner::{
         BlockRunRequest, ClaimRunRequest, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
         RecoverExpiredLeasesRequest, TurnRunTransitionPort,
@@ -135,6 +138,35 @@ impl RootFilesystem for CountingFilesystem {
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         self.inner.delete(path).await
     }
+
+    async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {
+        self.inner.append(path, payload).await
+    }
+
+    async fn append_batch(
+        &self,
+        path: &VirtualPath,
+        payloads: Vec<Vec<u8>>,
+    ) -> Result<Vec<SeqNo>, FilesystemError> {
+        self.inner.append_batch(path, payloads).await
+    }
+
+    async fn tail(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+    ) -> Result<Vec<ironclaw_filesystem::EventRecord>, FilesystemError> {
+        self.inner.tail(path, from).await
+    }
+
+    async fn tail_bounded(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+        max_records: usize,
+    ) -> Result<Vec<ironclaw_filesystem::EventRecord>, FilesystemError> {
+        self.inner.tail_bounded(path, from, max_records).await
+    }
 }
 
 /// Wrap a [`RootFilesystem`] in a [`ScopedFilesystem`] that exposes the
@@ -166,6 +198,53 @@ where
     F: RootFilesystem + 'static,
 {
     scoped_turns_fs_at(backend, "test-tenant", "test-user")
+}
+
+async fn retry_get_run_state<F>(
+    store: &FilesystemTurnStateRowStore<F>,
+    scope: TurnScope,
+    run_id: TurnRunId,
+) -> ironclaw_turns::TurnRunState
+where
+    F: RootFilesystem,
+{
+    let mut last_error = None;
+    for _ in 0..8 {
+        match store
+            .get_run_state(GetRunStateRequest {
+                scope: scope.clone(),
+                run_id,
+            })
+            .await
+        {
+            Ok(state) => return state,
+            Err(error) => {
+                last_error = Some(error);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    }
+    panic!("run state replay did not recover after materialization retry: {last_error:?}");
+}
+
+async fn retry_read_turn_events<F>(
+    store: &FilesystemTurnStateRowStore<F>,
+    scope: &TurnScope,
+) -> ironclaw_turns::TurnEventPage
+where
+    F: RootFilesystem,
+{
+    let mut last_error = None;
+    for _ in 0..8 {
+        match store.read_turn_events_after(scope, None, None, 100).await {
+            Ok(events) => return events,
+            Err(error) => {
+                last_error = Some(error);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    }
+    panic!("event replay did not recover after materialization retry: {last_error:?}");
 }
 
 fn snapshot_virtual_path() -> VirtualPath {
@@ -248,6 +327,49 @@ impl<F> BlockingPutFilesystem<F> {
     }
 }
 
+struct BlockingAppendFilesystem<F> {
+    inner: F,
+    block_next_append: AtomicBool,
+    append_blocked: AtomicBool,
+    append_started: tokio::sync::Notify,
+    release_append: tokio::sync::Notify,
+}
+
+impl<F> BlockingAppendFilesystem<F> {
+    fn new(inner: F) -> Self {
+        Self {
+            inner,
+            block_next_append: AtomicBool::new(false),
+            append_blocked: AtomicBool::new(false),
+            append_started: tokio::sync::Notify::new(),
+            release_append: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn block_next_append(&self) {
+        self.block_next_append.store(true, Ordering::SeqCst);
+    }
+
+    async fn wait_for_blocked_append(&self) {
+        while !self.append_blocked.load(Ordering::SeqCst) {
+            self.append_started.notified().await;
+        }
+    }
+
+    fn release_blocked_append(&self) {
+        self.release_append.notify_one();
+    }
+
+    async fn maybe_block_append(&self) {
+        if self.block_next_append.swap(false, Ordering::SeqCst) {
+            self.append_blocked.store(true, Ordering::SeqCst);
+            self.append_started.notify_one();
+            self.release_append.notified().await;
+            self.append_blocked.store(false, Ordering::SeqCst);
+        }
+    }
+}
+
 struct BlockingSnapshotPutFilesystem<F> {
     inner: F,
     block_snapshot_puts: AtomicBool,
@@ -298,6 +420,61 @@ impl<F> RejectSnapshotGetFilesystem<F> {
 
     fn reject_snapshot_gets(&self) {
         self.reject_snapshot_gets.store(true, Ordering::SeqCst);
+    }
+}
+
+struct BlockingAdmissionPolicy {
+    state: StdMutex<BlockingAdmissionState>,
+    entered: Condvar,
+    released: Condvar,
+}
+
+struct BlockingAdmissionState {
+    entered: bool,
+    released: bool,
+}
+
+impl BlockingAdmissionPolicy {
+    fn new() -> Self {
+        Self {
+            state: StdMutex::new(BlockingAdmissionState {
+                entered: false,
+                released: false,
+            }),
+            entered: Condvar::new(),
+            released: Condvar::new(),
+        }
+    }
+
+    fn wait_until_entered(&self) {
+        let mut state = self.state.lock().expect("blocking admission mutex");
+        while !state.entered {
+            state = self
+                .entered
+                .wait(state)
+                .expect("blocking admission condvar");
+        }
+    }
+
+    fn release(&self) {
+        let mut state = self.state.lock().expect("blocking admission mutex");
+        state.released = true;
+        self.released.notify_all();
+    }
+}
+
+impl TurnAdmissionPolicy for BlockingAdmissionPolicy {
+    fn check_submit(&self, _request: &SubmitTurnRequest) -> Result<(), AdmissionRejection> {
+        let mut state = self.state.lock().expect("blocking admission mutex");
+        state.entered = true;
+        self.entered.notify_all();
+        while !state.released {
+            state = self
+                .released
+                .wait(state)
+                .expect("blocking admission condvar");
+        }
+        Ok(())
     }
 }
 
@@ -380,6 +557,16 @@ struct RejectingPutFilesystem<F> {
     put_calls: AtomicUsize,
 }
 
+struct RejectingAppendFilesystem<F> {
+    inner: F,
+    append_calls: AtomicUsize,
+}
+
+struct FailOncePutFilesystem<F> {
+    inner: F,
+    fail_next_put: AtomicBool,
+}
+
 impl<F> RejectingPutFilesystem<F> {
     fn new(inner: F) -> Self {
         Self {
@@ -390,6 +577,28 @@ impl<F> RejectingPutFilesystem<F> {
 
     fn put_calls(&self) -> usize {
         self.put_calls.load(Ordering::SeqCst)
+    }
+}
+
+impl<F> RejectingAppendFilesystem<F> {
+    fn new(inner: F) -> Self {
+        Self {
+            inner,
+            append_calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn append_calls(&self) -> usize {
+        self.append_calls.load(Ordering::SeqCst)
+    }
+}
+
+impl<F> FailOncePutFilesystem<F> {
+    fn new(inner: F) -> Self {
+        Self {
+            inner,
+            fail_next_put: AtomicBool::new(true),
+        }
     }
 }
 
@@ -429,6 +638,181 @@ where
 
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         self.inner.delete(path).await
+    }
+
+    async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {
+        self.inner.append(path, payload).await
+    }
+
+    async fn append_batch(
+        &self,
+        path: &VirtualPath,
+        payloads: Vec<Vec<u8>>,
+    ) -> Result<Vec<SeqNo>, FilesystemError> {
+        self.inner.append_batch(path, payloads).await
+    }
+
+    async fn tail(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+    ) -> Result<Vec<ironclaw_filesystem::EventRecord>, FilesystemError> {
+        self.inner.tail(path, from).await
+    }
+
+    async fn tail_bounded(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+        max_records: usize,
+    ) -> Result<Vec<ironclaw_filesystem::EventRecord>, FilesystemError> {
+        self.inner.tail_bounded(path, from, max_records).await
+    }
+}
+
+#[async_trait]
+impl<F> RootFilesystem for RejectingAppendFilesystem<F>
+where
+    F: RootFilesystem,
+{
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+
+    async fn append(
+        &self,
+        path: &VirtualPath,
+        _payload: Vec<u8>,
+    ) -> Result<SeqNo, FilesystemError> {
+        self.append_calls.fetch_add(1, Ordering::SeqCst);
+        Err(FilesystemError::PermissionDenied {
+            path: ScopedPath::new(path.as_str().to_string()).expect("scoped path"),
+            operation: FilesystemOperation::Append,
+        })
+    }
+
+    async fn append_batch(
+        &self,
+        path: &VirtualPath,
+        _payloads: Vec<Vec<u8>>,
+    ) -> Result<Vec<SeqNo>, FilesystemError> {
+        self.append_calls.fetch_add(1, Ordering::SeqCst);
+        Err(FilesystemError::PermissionDenied {
+            path: ScopedPath::new(path.as_str().to_string()).expect("scoped path"),
+            operation: FilesystemOperation::Append,
+        })
+    }
+
+    async fn tail(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+    ) -> Result<Vec<ironclaw_filesystem::EventRecord>, FilesystemError> {
+        self.inner.tail(path, from).await
+    }
+
+    async fn tail_bounded(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+        max_records: usize,
+    ) -> Result<Vec<ironclaw_filesystem::EventRecord>, FilesystemError> {
+        self.inner.tail_bounded(path, from, max_records).await
+    }
+}
+
+#[async_trait]
+impl<F> RootFilesystem for FailOncePutFilesystem<F>
+where
+    F: RootFilesystem,
+{
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        if self.fail_next_put.swap(false, Ordering::SeqCst) {
+            return Err(FilesystemError::PermissionDenied {
+                path: ScopedPath::new(path.as_str().to_string()).expect("scoped path"),
+                operation: FilesystemOperation::WriteFile,
+            });
+        }
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+
+    async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {
+        self.inner.append(path, payload).await
+    }
+
+    async fn append_batch(
+        &self,
+        path: &VirtualPath,
+        payloads: Vec<Vec<u8>>,
+    ) -> Result<Vec<SeqNo>, FilesystemError> {
+        self.inner.append_batch(path, payloads).await
+    }
+
+    async fn tail(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+    ) -> Result<Vec<ironclaw_filesystem::EventRecord>, FilesystemError> {
+        self.inner.tail(path, from).await
+    }
+
+    async fn tail_bounded(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+        max_records: usize,
+    ) -> Result<Vec<ironclaw_filesystem::EventRecord>, FilesystemError> {
+        self.inner.tail_bounded(path, from, max_records).await
     }
 }
 
@@ -510,6 +894,105 @@ where
 
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+
+    async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {
+        self.inner.append(path, payload).await
+    }
+
+    async fn append_batch(
+        &self,
+        path: &VirtualPath,
+        payloads: Vec<Vec<u8>>,
+    ) -> Result<Vec<SeqNo>, FilesystemError> {
+        self.inner.append_batch(path, payloads).await
+    }
+
+    async fn tail(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+    ) -> Result<Vec<ironclaw_filesystem::EventRecord>, FilesystemError> {
+        self.inner.tail(path, from).await
+    }
+
+    async fn tail_bounded(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+        max_records: usize,
+    ) -> Result<Vec<ironclaw_filesystem::EventRecord>, FilesystemError> {
+        self.inner.tail_bounded(path, from, max_records).await
+    }
+}
+
+#[async_trait]
+impl<F> RootFilesystem for BlockingAppendFilesystem<F>
+where
+    F: RootFilesystem,
+{
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+
+    async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {
+        self.maybe_block_append().await;
+        self.inner.append(path, payload).await
+    }
+
+    async fn append_batch(
+        &self,
+        path: &VirtualPath,
+        payloads: Vec<Vec<u8>>,
+    ) -> Result<Vec<SeqNo>, FilesystemError> {
+        self.maybe_block_append().await;
+        self.inner.append_batch(path, payloads).await
+    }
+
+    async fn tail(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+    ) -> Result<Vec<ironclaw_filesystem::EventRecord>, FilesystemError> {
+        self.inner.tail(path, from).await
+    }
+
+    async fn tail_bounded(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+        max_records: usize,
+    ) -> Result<Vec<ironclaw_filesystem::EventRecord>, FilesystemError> {
+        self.inner.tail_bounded(path, from, max_records).await
     }
 }
 
@@ -703,6 +1186,11 @@ fn accepted_run_id(response: &SubmitTurnResponse) -> TurnRunId {
     *run_id
 }
 
+fn accepted_turn_id(response: &SubmitTurnResponse) -> TurnId {
+    let SubmitTurnResponse::Accepted { turn_id, .. } = response;
+    *turn_id
+}
+
 #[tokio::test]
 async fn filesystem_turn_state_store_does_not_write_unchanged_idle_runner_snapshot() {
     let backend = Arc::new(engine_filesystem());
@@ -870,6 +1358,407 @@ async fn filesystem_turn_state_row_store_persists_rows_without_state_blob() {
         .await
         .unwrap();
     assert_eq!(state.status, TurnStatus::Completed);
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_row_store_concurrent_submits_preserve_all_runs() {
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = Arc::new(FilesystemTurnStateRowStore::new(Arc::clone(&scoped)));
+    let resolver = Arc::new(InMemoryRunProfileResolver::default());
+    let workers = 32;
+    let barrier = Arc::new(tokio::sync::Barrier::new(workers));
+    let mut handles = Vec::new();
+
+    for idx in 0..workers {
+        let store = Arc::clone(&store);
+        let resolver = Arc::clone(&resolver);
+        let barrier = Arc::clone(&barrier);
+        handles.push(tokio::spawn(async move {
+            let scope = turn_scope(&format!("thread-fs-row-concurrent-{idx}"));
+            let request =
+                submit_request_for(scope.clone(), &format!("idem-fs-row-concurrent-{idx}"));
+            barrier.wait().await;
+            let response = store
+                .submit_turn(request, &AllowAllTurnAdmissionPolicy, resolver.as_ref())
+                .await
+                .unwrap();
+            (scope, accepted_run_id(&response))
+        }));
+    }
+
+    let mut accepted = Vec::new();
+    for handle in handles {
+        accepted.push(handle.await.expect("submit task joins"));
+    }
+    assert_eq!(accepted.len(), workers);
+
+    let reopened = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    for (scope, run_id) in accepted {
+        let state = reopened
+            .get_run_state(GetRunStateRequest { scope, run_id })
+            .await
+            .unwrap();
+        assert_eq!(state.run_id, run_id);
+        assert_eq!(state.status, TurnStatus::Queued);
+    }
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_row_store_publish_is_optimistic_but_waits_for_append_ack() {
+    let backend = Arc::new(BlockingAppendFilesystem::new(engine_filesystem()));
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = Arc::new(FilesystemTurnStateRowStore::new(Arc::clone(&scoped)));
+    let scope = turn_scope("thread-fs-row-blocked-materialize");
+    let run_id = TurnRunId::new();
+    let mut request = submit_request_for(scope.clone(), "idem-fs-row-blocked-materialize");
+    request.requested_run_id = Some(run_id);
+    let second_scope = turn_scope("thread-fs-row-blocked-materialize-second");
+    let second_run_id = TurnRunId::new();
+    let mut second_request = submit_request_for(
+        second_scope.clone(),
+        "idem-fs-row-blocked-materialize-second",
+    );
+    second_request.requested_run_id = Some(second_run_id);
+
+    backend.block_next_append();
+    let submit_store = Arc::clone(&store);
+    let submit = tokio::spawn(async move {
+        let resolver = InMemoryRunProfileResolver::default();
+        let admission = AllowAllTurnAdmissionPolicy;
+        submit_store
+            .submit_turn(request, &admission, &resolver)
+            .await
+    });
+    backend.wait_for_blocked_append().await;
+
+    let visible = store
+        .get_run_state(GetRunStateRequest {
+            scope: scope.clone(),
+            run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(visible.status, TurnStatus::Queued);
+    assert!(
+        !submit.is_finished(),
+        "writer must still wait for the durable append ack before returning"
+    );
+
+    let second_store = Arc::clone(&store);
+    let second_submit = tokio::spawn(async move {
+        let resolver = InMemoryRunProfileResolver::default();
+        let admission = AllowAllTurnAdmissionPolicy;
+        second_store
+            .submit_turn(second_request, &admission, &resolver)
+            .await
+    });
+    let second_visible = tokio::time::timeout(
+        Duration::from_secs(1),
+        retry_get_run_state(&store, second_scope.clone(), second_run_id),
+    )
+    .await
+    .expect("commit gate must be released before the first durable append ack");
+    assert_eq!(second_visible.status, TurnStatus::Queued);
+    assert!(
+        !second_submit.is_finished(),
+        "second writer also waits for the single flusher's durable append ack"
+    );
+
+    backend.release_blocked_append();
+    let response = submit.await.expect("submit task joins").unwrap();
+    assert_eq!(accepted_run_id(&response), run_id);
+    let second_response = second_submit
+        .await
+        .expect("second submit task joins")
+        .unwrap();
+    assert_eq!(accepted_run_id(&second_response), second_run_id);
+
+    let state = store
+        .get_run_state(GetRunStateRequest { scope, run_id })
+        .await
+        .unwrap();
+    assert_eq!(state.status, TurnStatus::Queued);
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_row_store_loop_checkpoint_releases_gate_before_append_ack() {
+    let backend = Arc::new(BlockingAppendFilesystem::new(engine_filesystem()));
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = Arc::new(FilesystemTurnStateRowStore::new(Arc::clone(&scoped)));
+    let resolver = InMemoryRunProfileResolver::default();
+    let parent_scope = turn_scope("thread-fs-row-checkpoint-blocked-append");
+    let parent_response = store
+        .submit_turn(
+            submit_request_for(
+                parent_scope.clone(),
+                "idem-fs-row-checkpoint-blocked-append",
+            ),
+            &AllowAllTurnAdmissionPolicy,
+            &resolver,
+        )
+        .await
+        .unwrap();
+    let parent_run_id = accepted_run_id(&parent_response);
+    let parent_turn_id = accepted_turn_id(&parent_response);
+
+    backend.block_next_append();
+    let checkpoint_store = Arc::clone(&store);
+    let checkpoint_scope = parent_scope.clone();
+    let checkpoint = tokio::spawn(async move {
+        checkpoint_store
+            .put_loop_checkpoint(PutLoopCheckpointRequest {
+                scope: checkpoint_scope,
+                turn_id: parent_turn_id,
+                run_id: parent_run_id,
+                state_ref: LoopCheckpointStateRef::new("checkpoint:blocked-append").unwrap(),
+                schema_id: CheckpointSchemaId::new("interactive_checkpoint_v1").unwrap(),
+                schema_version: RunProfileVersion::new(1),
+                kind: LoopCheckpointKind::BeforeModel,
+                gate_ref: None,
+            })
+            .await
+    });
+    backend.wait_for_blocked_append().await;
+    assert!(
+        !checkpoint.is_finished(),
+        "checkpoint writer must still wait for the durable append ack"
+    );
+
+    let second_scope = turn_scope("thread-fs-row-checkpoint-blocked-append-second");
+    let second_run_id = TurnRunId::new();
+    let mut second_request = submit_request_for(
+        second_scope.clone(),
+        "idem-fs-row-checkpoint-blocked-append-second",
+    );
+    second_request.requested_run_id = Some(second_run_id);
+    let second_store = Arc::clone(&store);
+    let second_submit = tokio::spawn(async move {
+        let resolver = InMemoryRunProfileResolver::default();
+        let admission = AllowAllTurnAdmissionPolicy;
+        second_store
+            .submit_turn(second_request, &admission, &resolver)
+            .await
+    });
+    let second_visible = tokio::time::timeout(
+        Duration::from_secs(1),
+        retry_get_run_state(&store, second_scope.clone(), second_run_id),
+    )
+    .await
+    .expect("loop checkpoint must release the commit gate before append ack");
+    assert_eq!(second_visible.status, TurnStatus::Queued);
+    assert!(
+        !second_submit.is_finished(),
+        "later writer still waits for the flusher's durable append ack"
+    );
+
+    backend.release_blocked_append();
+    let checkpoint = checkpoint
+        .await
+        .expect("checkpoint task joins")
+        .expect("checkpoint write succeeds");
+    let second_response = second_submit
+        .await
+        .expect("second submit task joins")
+        .unwrap();
+    assert_eq!(accepted_run_id(&second_response), second_run_id);
+
+    let loaded = store
+        .get_loop_checkpoint(GetLoopCheckpointRequest {
+            scope: parent_scope,
+            turn_id: parent_turn_id,
+            run_id: parent_run_id,
+            checkpoint_id: checkpoint.checkpoint_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        loaded.as_ref().map(|record| record.checkpoint_id),
+        Some(checkpoint.checkpoint_id)
+    );
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_row_store_append_failure_clears_hot_cache() {
+    let backend = Arc::new(RejectingAppendFilesystem::new(engine_filesystem()));
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let scope = turn_scope("thread-fs-row-reject-append");
+    let run_id = TurnRunId::new();
+    let mut request = submit_request_for(scope.clone(), "idem-fs-row-reject-append");
+    request.requested_run_id = Some(run_id);
+    let resolver = InMemoryRunProfileResolver::default();
+
+    let error = store
+        .submit_turn(request, &AllowAllTurnAdmissionPolicy, &resolver)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, TurnError::Unavailable { .. }),
+        "durable delta append failure should fail the writer, got {error:?}"
+    );
+    assert_eq!(backend.append_calls(), 1);
+
+    let hidden = store
+        .get_run_state(GetRunStateRequest { scope, run_id })
+        .await;
+    assert!(
+        matches!(hidden, Err(TurnError::ScopeNotFound)),
+        "failed durable append should not publish hot cache state: {hidden:?}"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_row_store_materializes_unadvanced_prior_delta_before_cursor() {
+    let backend = Arc::new(FailOncePutFilesystem::new(engine_filesystem()));
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let resolver = InMemoryRunProfileResolver::default();
+    let first_scope = turn_scope("thread-fs-row-recover-prior-1");
+    let first_run_id = TurnRunId::new();
+    let mut first_request = submit_request_for(first_scope.clone(), "idem-fs-row-recover-prior-1");
+    first_request.requested_run_id = Some(first_run_id);
+
+    store
+        .submit_turn(first_request, &AllowAllTurnAdmissionPolicy, &resolver)
+        .await
+        .unwrap();
+
+    let second_scope = turn_scope("thread-fs-row-recover-prior-2");
+    let second_run_id = TurnRunId::new();
+    let mut second_request =
+        submit_request_for(second_scope.clone(), "idem-fs-row-recover-prior-2");
+    second_request.requested_run_id = Some(second_run_id);
+    store
+        .submit_turn(second_request, &AllowAllTurnAdmissionPolicy, &resolver)
+        .await
+        .unwrap();
+
+    let reopened = FilesystemTurnStateRowStore::new(scoped);
+    let first = retry_get_run_state(&reopened, first_scope, first_run_id).await;
+    assert_eq!(first.status, TurnStatus::Queued);
+    let second = retry_get_run_state(&reopened, second_scope, second_run_id).await;
+    assert_eq!(second.status, TurnStatus::Queued);
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_row_store_event_projection_replays_unmaterialized_journal() {
+    let backend = Arc::new(FailOncePutFilesystem::new(engine_filesystem()));
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let resolver = InMemoryRunProfileResolver::default();
+    let scope = turn_scope("thread-fs-row-event-replay");
+    let run_id = TurnRunId::new();
+    let mut request = submit_request_for(scope.clone(), "idem-fs-row-event-replay");
+    request.requested_run_id = Some(run_id);
+
+    store
+        .submit_turn(request, &AllowAllTurnAdmissionPolicy, &resolver)
+        .await
+        .unwrap();
+
+    let reopened = FilesystemTurnStateRowStore::new(scoped);
+    let events = retry_read_turn_events(&reopened, &scope).await;
+    assert!(
+        events
+            .entries
+            .iter()
+            .any(|event| event.run_id == run_id && event.kind == TurnEventKind::Submitted),
+        "event projection must replay durable delta journal tails before reading event rows"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_row_store_loop_checkpoint_survives_concurrent_full_snapshot_apply() {
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = Arc::new(FilesystemTurnStateRowStore::new(Arc::clone(&scoped)));
+    let resolver = InMemoryRunProfileResolver::default();
+    let parent_scope = turn_scope("thread-fs-row-checkpoint-race-parent");
+    let parent_response = store
+        .submit_turn(
+            submit_request_for(parent_scope.clone(), "idem-fs-row-checkpoint-race-parent"),
+            &AllowAllTurnAdmissionPolicy,
+            &resolver,
+        )
+        .await
+        .unwrap();
+    let parent_run_id = accepted_run_id(&parent_response);
+    let parent_turn_id = accepted_turn_id(&parent_response);
+
+    let admission = Arc::new(BlockingAdmissionPolicy::new());
+    let child_store = Arc::clone(&store);
+    let child_admission = Arc::clone(&admission);
+    let child_parent_scope = parent_scope.clone();
+    let child_scope = turn_scope("thread-fs-row-checkpoint-race-child");
+    let child = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            let resolver = InMemoryRunProfileResolver::default();
+            child_store
+                .submit_child_turn(
+                    child_run_request(
+                        child_parent_scope,
+                        parent_run_id,
+                        child_scope,
+                        "idem-fs-row-checkpoint-race-child",
+                        1,
+                    ),
+                    child_admission.as_ref(),
+                    &resolver,
+                )
+                .await
+        })
+    });
+    let wait_admission = Arc::clone(&admission);
+    tokio::task::spawn_blocking(move || wait_admission.wait_until_entered())
+        .await
+        .unwrap();
+
+    let checkpoint_store = Arc::clone(&store);
+    let checkpoint_scope = parent_scope.clone();
+    let checkpoint = tokio::spawn(async move {
+        checkpoint_store
+            .put_loop_checkpoint(PutLoopCheckpointRequest {
+                scope: checkpoint_scope,
+                turn_id: parent_turn_id,
+                run_id: parent_run_id,
+                state_ref: LoopCheckpointStateRef::new("checkpoint:row-race").unwrap(),
+                schema_id: CheckpointSchemaId::new("interactive_checkpoint_v1").unwrap(),
+                schema_version: RunProfileVersion::new(1),
+                kind: LoopCheckpointKind::BeforeModel,
+                gate_ref: None,
+            })
+            .await
+    });
+    tokio::task::yield_now().await;
+
+    admission.release();
+    tokio::task::spawn_blocking(move || child.join().expect("child submit thread joins"))
+        .await
+        .unwrap()
+        .unwrap();
+    let checkpoint = checkpoint
+        .await
+        .expect("checkpoint task joins")
+        .expect("checkpoint write succeeds");
+    let loaded = store
+        .get_loop_checkpoint(GetLoopCheckpointRequest {
+            scope: parent_scope,
+            turn_id: parent_turn_id,
+            run_id: parent_run_id,
+            checkpoint_id: checkpoint.checkpoint_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        loaded.as_ref().map(|record| record.checkpoint_id),
+        Some(checkpoint.checkpoint_id),
+        "full-snapshot row-store publication must not overwrite a concurrent loop checkpoint"
+    );
 }
 
 #[tokio::test]

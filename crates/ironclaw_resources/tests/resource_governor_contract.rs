@@ -1,7 +1,9 @@
+// arch-exempt: large_file, resource governor contract suite decomposition, plan #5662
 use std::{
     fs,
     sync::{Arc, Barrier},
     thread,
+    time::Duration,
 };
 
 use tempfile::tempdir;
@@ -32,6 +34,209 @@ impl ResourceGovernorStore for AlwaysFailingStore {
         Err(ResourceError::Storage {
             reason: "forced durable read failure".to_string(),
         })
+    }
+}
+
+struct RejectAppendFilesystem<F> {
+    inner: F,
+    append_calls: std::sync::atomic::AtomicUsize,
+}
+
+impl<F> RejectAppendFilesystem<F> {
+    fn new(inner: F) -> Self {
+        Self {
+            inner,
+            append_calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn append_calls(&self) -> usize {
+        self.append_calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl<F> ironclaw_filesystem::RootFilesystem for RejectAppendFilesystem<F>
+where
+    F: ironclaw_filesystem::RootFilesystem,
+{
+    fn capabilities(&self) -> ironclaw_filesystem::BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: ironclaw_filesystem::Entry,
+        cas: ironclaw_filesystem::CasExpectation,
+    ) -> Result<ironclaw_filesystem::RecordVersion, ironclaw_filesystem::FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<Option<ironclaw_filesystem::VersionedEntry>, ironclaw_filesystem::FilesystemError>
+    {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<Vec<ironclaw_filesystem::DirEntry>, ironclaw_filesystem::FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn stat(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<ironclaw_filesystem::FileStat, ironclaw_filesystem::FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), ironclaw_filesystem::FilesystemError> {
+        self.inner.delete(path).await
+    }
+
+    async fn append(
+        &self,
+        path: &VirtualPath,
+        _payload: Vec<u8>,
+    ) -> Result<ironclaw_filesystem::SeqNo, ironclaw_filesystem::FilesystemError> {
+        self.append_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(ironclaw_filesystem::FilesystemError::Unsupported {
+            path: path.clone(),
+            operation: ironclaw_filesystem::FilesystemOperation::Append,
+        })
+    }
+
+    async fn append_batch(
+        &self,
+        path: &VirtualPath,
+        _payloads: Vec<Vec<u8>>,
+    ) -> Result<Vec<ironclaw_filesystem::SeqNo>, ironclaw_filesystem::FilesystemError> {
+        self.append_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(ironclaw_filesystem::FilesystemError::Unsupported {
+            path: path.clone(),
+            operation: ironclaw_filesystem::FilesystemOperation::Append,
+        })
+    }
+}
+
+struct BlockFirstAppendFilesystem<F> {
+    inner: F,
+    append_calls: std::sync::atomic::AtomicUsize,
+    first_append_started: (std::sync::Mutex<bool>, std::sync::Condvar),
+    release_first_append: (std::sync::Mutex<bool>, std::sync::Condvar),
+}
+
+impl<F> BlockFirstAppendFilesystem<F> {
+    fn new(inner: F) -> Self {
+        Self {
+            inner,
+            append_calls: std::sync::atomic::AtomicUsize::new(0),
+            first_append_started: (std::sync::Mutex::new(false), std::sync::Condvar::new()),
+            release_first_append: (std::sync::Mutex::new(false), std::sync::Condvar::new()),
+        }
+    }
+
+    fn wait_for_first_append(&self) {
+        let (lock, cvar) = &self.first_append_started;
+        let mut started = lock.lock().expect("first append started lock");
+        while !*started {
+            started = cvar.wait(started).expect("first append started cvar");
+        }
+    }
+
+    fn release_first_append(&self) {
+        let (lock, cvar) = &self.release_first_append;
+        *lock.lock().expect("first append release lock") = true;
+        cvar.notify_all();
+    }
+
+    fn maybe_block_first_append(&self) {
+        let call = self
+            .append_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if call != 0 {
+            return;
+        }
+        {
+            let (lock, cvar) = &self.first_append_started;
+            *lock.lock().expect("first append started lock") = true;
+            cvar.notify_all();
+        }
+        let (lock, cvar) = &self.release_first_append;
+        let mut released = lock.lock().expect("first append release lock");
+        while !*released {
+            released = cvar.wait(released).expect("first append release cvar");
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl<F> ironclaw_filesystem::RootFilesystem for BlockFirstAppendFilesystem<F>
+where
+    F: ironclaw_filesystem::RootFilesystem,
+{
+    fn capabilities(&self) -> ironclaw_filesystem::BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: ironclaw_filesystem::Entry,
+        cas: ironclaw_filesystem::CasExpectation,
+    ) -> Result<ironclaw_filesystem::RecordVersion, ironclaw_filesystem::FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<Option<ironclaw_filesystem::VersionedEntry>, ironclaw_filesystem::FilesystemError>
+    {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<Vec<ironclaw_filesystem::DirEntry>, ironclaw_filesystem::FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn stat(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<ironclaw_filesystem::FileStat, ironclaw_filesystem::FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), ironclaw_filesystem::FilesystemError> {
+        self.inner.delete(path).await
+    }
+
+    async fn append(
+        &self,
+        path: &VirtualPath,
+        payload: Vec<u8>,
+    ) -> Result<ironclaw_filesystem::SeqNo, ironclaw_filesystem::FilesystemError> {
+        self.maybe_block_first_append();
+        self.inner.append(path, payload).await
+    }
+
+    async fn append_batch(
+        &self,
+        path: &VirtualPath,
+        payloads: Vec<Vec<u8>>,
+    ) -> Result<Vec<ironclaw_filesystem::SeqNo>, ironclaw_filesystem::FilesystemError> {
+        self.maybe_block_first_append();
+        self.inner.append_batch(path, payloads).await
     }
 }
 
@@ -1465,6 +1670,192 @@ async fn filesystem_resource_governor_replays_journaled_holds_and_usage_after_re
     let snapshot = reloaded_again.account_snapshot(&account).unwrap().unwrap();
     assert_eq!(snapshot.ledger.spent.usd, dec!(0.80));
     assert_eq!(snapshot.ledger.reserved.concurrency_slots, 0);
+}
+
+#[tokio::test]
+async fn filesystem_resource_governor_serializes_concurrent_reservations_on_shared_handle() {
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/resources").expect("alias"),
+        VirtualPath::new("/tenants/tenant1/users/user1/resources").expect("target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&backend),
+        mounts,
+    ));
+
+    let scope = sample_scope("tenant1", "user1", Some("project1"));
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    let governor = Arc::new(FilesystemResourceGovernor::new(Arc::clone(&scoped)));
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_concurrency_slots: Some(1),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+
+    let workers = 16;
+    let barrier = Arc::new(Barrier::new(workers));
+    let handles: Vec<_> = (0..workers)
+        .map(|_| {
+            let governor = Arc::clone(&governor);
+            let barrier = Arc::clone(&barrier);
+            let mut request_scope = scope.clone();
+            request_scope.invocation_id = InvocationId::new();
+            thread::spawn(move || {
+                barrier.wait();
+                governor
+                    .reserve(
+                        request_scope,
+                        ResourceEstimate {
+                            concurrency_slots: Some(1),
+                            ..ResourceEstimate::default()
+                        },
+                    )
+                    .is_ok()
+            })
+        })
+        .collect();
+
+    let successes = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("reservation thread joins"))
+        .filter(|accepted| *accepted)
+        .count();
+    assert_eq!(
+        successes, 1,
+        "shared filesystem governor handle must not oversubscribe concurrency"
+    );
+
+    let reloaded = FilesystemResourceGovernor::new(scoped);
+    let snapshot = reloaded.account_snapshot(&account).unwrap().unwrap();
+    assert_eq!(snapshot.ledger.reserved.concurrency_slots, 1);
+}
+
+#[tokio::test]
+async fn filesystem_resource_governor_releases_account_gate_before_delta_ack() {
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+
+    let backend = Arc::new(BlockFirstAppendFilesystem::new(InMemoryBackend::new()));
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/resources").expect("alias"),
+        VirtualPath::new("/tenants/tenant1/users/user1/resources").expect("target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&backend),
+        mounts,
+    ));
+
+    let scope = sample_scope("tenant1", "user1", Some("project1"));
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    let governor = Arc::new(FilesystemResourceGovernor::new(scoped));
+    let estimate = ResourceEstimate {
+        concurrency_slots: Some(1),
+        ..ResourceEstimate::default()
+    };
+
+    let first = {
+        let governor = Arc::clone(&governor);
+        let scope = scope.clone();
+        let estimate = estimate.clone();
+        thread::spawn(move || governor.reserve(scope, estimate).map(|_| ()))
+    };
+    backend.wait_for_first_append();
+
+    let second = {
+        let governor = Arc::clone(&governor);
+        let mut scope = scope.clone();
+        scope.invocation_id = InvocationId::new();
+        let estimate = estimate.clone();
+        thread::spawn(move || governor.reserve(scope, estimate).map(|_| ()))
+    };
+
+    thread::sleep(Duration::from_millis(50));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let reader = {
+        let governor = Arc::clone(&governor);
+        let account = account.clone();
+        thread::spawn(move || {
+            let tally = governor
+                .reserved_for(&account)
+                .expect("reserved tally remains readable while append is blocked");
+            tx.send(tally.concurrency_slots)
+                .expect("send reserved tally");
+        })
+    };
+
+    let observed = rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("account gate should be released before durable append ack");
+    backend.release_first_append();
+    first
+        .join()
+        .expect("first reserve thread joins")
+        .expect("first reserve succeeds");
+    second
+        .join()
+        .expect("second reserve thread joins")
+        .expect("second reserve succeeds");
+    reader.join().expect("reader thread joins");
+
+    assert_eq!(
+        observed, 2,
+        "both reservations should be visible in memory while the first append ack is pending"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_resource_governor_fails_closed_and_poisoned_after_delta_append_error() {
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+
+    let backend = Arc::new(RejectAppendFilesystem::new(InMemoryBackend::new()));
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/resources").expect("alias"),
+        VirtualPath::new("/tenants/tenant1/users/user1/resources").expect("target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&backend),
+        mounts,
+    ));
+
+    let scope = sample_scope("tenant1", "user1", Some("project1"));
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    let governor = FilesystemResourceGovernor::new(scoped);
+
+    let error = governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_usd: Some(dec!(1.00)),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap_err();
+    assert!(
+        matches!(error, ResourceError::Storage { .. }),
+        "delta append failure must surface as storage error: {error:?}"
+    );
+    assert_eq!(backend.append_calls(), 1);
+
+    let poisoned = governor.account_snapshot(&account).unwrap_err();
+    assert!(
+        matches!(poisoned, ResourceError::Storage { .. }),
+        "authority must fail closed after a durable journal error: {poisoned:?}"
+    );
 }
 
 /// Regression: a byte-only `RootFilesystem` (one that rejects `put` when

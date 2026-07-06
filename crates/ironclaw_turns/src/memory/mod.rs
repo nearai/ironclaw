@@ -1,3 +1,4 @@
+// arch-exempt: large_file, in-memory turn state decomposition, plan #5662
 use async_trait::async_trait;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -476,6 +477,7 @@ impl InMemoryTurnStateStore {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn overlay_runner_lease_record(
         &self,
         overlaid: TurnRunRecord,
