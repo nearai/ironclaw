@@ -336,9 +336,10 @@ Budgets: 10 hours wall-clock / $0 spend
   acceptance. It covers real approval/secret/resource persistence but not the
   server request path.
 - Hypothesis: Moving Postgres secrets from generic filesystem records to
-  native `ironclaw_secret_records` and `ironclaw_secret_leases` rows will remove
-  the secret lease CAS retry failure and let the combined workload reveal the
-  next bottleneck, likely the resource governor's single JSON snapshot.
+  temporary native secret/lease rows will remove the secret lease CAS retry
+  failure and let the combined workload reveal the next bottleneck, likely the
+  resource governor's single JSON snapshot. Superseded in Cycle 45 by the
+  per-record `FilesystemSecretStore` layout behind `RootFilesystem`.
 - Expected failure mode: A row store could weaken tenant/user/project lease
   isolation, expose secret material, or diverge from `SecretStore` one-shot
   semantics. The implementation must keep encrypted material only in the row
@@ -346,11 +347,11 @@ Budgets: 10 hours wall-clock / $0 spend
   consume/revoke, and keep libSQL on the existing store.
 - Diagnostic: Wire the row store only for the Postgres latency path first,
   rerun the focused control-plane score, and inspect the first failing store.
-- Change: Added `PostgresSecretStore` behind `ironclaw_secrets/postgres` with
-  one row per secret and one row per lease, row-level `FOR UPDATE` on
-  consume/revoke, and the same `SecretStore` trait surface. The latency runner
-  now uses this row-backed secret store only for Postgres; libSQL remains on
-  `FilesystemSecretStore`.
+- Change: Added a temporary direct Postgres secret store with one row per
+  secret and one row per lease, row-level `FOR UPDATE` on consume/revoke, and
+  the same `SecretStore` trait surface. The latency runner used this
+  row-backed secret store only for Postgres; libSQL remained on
+  `FilesystemSecretStore`. Superseded and removed in Cycle 45.
 - Result: `cargo check --manifest-path harness/latency/runner/Cargo.toml`
   passes with the pre-existing `OutboundDeliveryTargetEntry` warning. A
   focused five-sample control-plane score confirms the secret consume retry is
@@ -401,7 +402,8 @@ Budgets: 10 hours wall-clock / $0 spend
 - Result: `cargo fmt -p ironclaw_secrets -p ironclaw_resources --check`,
   `cargo fmt --manifest-path harness/latency/runner/Cargo.toml --check`,
   `cargo check --manifest-path harness/latency/runner/Cargo.toml`,
-  `cargo test -p ironclaw_secrets --features postgres`, and
+  `cargo test -p ironclaw_secrets` with the then-current direct Postgres
+  feature, and
   `cargo test -p ironclaw_resources --features postgres` passed. A focused
   `control_plane_snapshot` run with warmup 1, 20 samples, and concurrency 1/4
   passed for Postgres pool sizes 1 and 2 with zero errors and matching hashes.
@@ -2423,3 +2425,135 @@ Budgets: 10 hours wall-clock / $0 spend
   118.3ms, p99 120.3ms, throughput 1,587.9 ops/sec. Attribution p95:
   thread-store writes 64.2ms, turn-store 35.9ms, resource-governor 10.7ms,
   context reads 11.9ms. Stage p95: submit 29.3ms, claim 6.7ms, complete 4.4ms.
+
+## Cycle 44 - Thread Store Row Index for Reads and Activity Writes
+
+- Process note: do not open or update a PR from this cycle without explicit
+  go-ahead; this branch likely needs to be split/cleaned before review.
+- Graph note: `codebase-memory-mcp` was unavailable (`Transport closed`), so
+  code discovery fell back to repo guidance and targeted `rg`/source reads.
+- Prior-art check: the June-30 single-write finalized assistant path already
+  exists in `append_finalized_assistant_message`: finalized assistant messages
+  prefer the per-thread append log (`append_message_event`) and repair the
+  sequence index on retry. The remaining write tax was the turn-boundary
+  `touch_thread_updated_at` full `thread.json` CAS and the read tax was
+  `list_threads_for_scope` re-reading/deserializing every thread record for
+  every cursor page.
+- Added a focused `ironclaw_stress --scenario thread-list` workload:
+  it seeds 1000 titled threads under one scope, then measures a cold paginated
+  list and an immediate warm paginated list at page size 50.
+- Baseline before changing the read path:
+  - libSQL, one measured operation: cold list 11.31s, warm list 10.75s, total
+    operation 22.06s. A 5-operation run was manually stopped after exceeding a
+    minute because each page re-read all 1000 full thread records.
+  - Postgres pool 32, one measured operation: cold list 1.35s, warm list
+    1.23s, total operation 2.58s.
+- Implemented a derived per-thread index row collection under
+  `{scope_axes}/thread_index/<thread_id>.json` carrying the
+  `SessionThreadRecord`, `next_sequence`, and simple flags. `list_threads`
+  now loads compact index rows through `RootFilesystem::query` by prefix,
+  sorts those rows by `updated_at`/`created_at`, slices cursors in memory, and
+  keeps title derivation page-scoped using the stored `next_sequence`.
+- Added a hot per-scope list cache with explicit invalidation on index writes
+  and delete. The cache key includes tenant id plus scope axes.
+- Changed turn-boundary activity stamps to update the compact index row rather
+  than rewriting the full `thread.json` blob. `read_thread` and
+  `list_thread_history` overlay the index `updated_at` so external thread reads
+  still see current activity.
+- Migration note: index rows are derivable. If a scope has no index rows,
+  `list_threads_for_scope` bootstraps by scanning legacy thread records once,
+  writes derived rows, and then uses the index. Added a contract test that
+  deletes derived index rows and verifies first list rebuilds them.
+- Important correction during validation: the first implementation refreshed
+  the index on every `ensure_thread`, which regressed c100 mixed flow
+  (`thread_store_writes` p95 85.4ms, op p95 153.4ms). Fixed by tracking known
+  index rows in-process so steady-state idempotent `ensure_thread` calls do
+  not rewrite the index.
+- Post-change read workload:
+  - libSQL, 5 measured operations: cold list p95 23.1ms, warm list p95 0.33ms,
+    operation p95 23.5ms, throughput 42.8 ops/sec.
+  - Postgres pool 32, 5 measured operations: cold list p95 22.7ms, warm list
+    p95 0.31ms, operation p95 23.0ms, throughput 43.9 ops/sec.
+- Post-change c100 mixed flow (Postgres pool 32, filesystem-row, 100 users,
+  active-thread-count 0, 1,000 operations): 1,000/1,000 succeeded; op p95
+  129.4ms, p99 130.4ms, throughput 1,187.0 ops/sec. Attribution p95:
+  thread-store writes 64.6ms (holds prior 64.2ms), turn-store 40.9ms,
+  resource-governor 21.7ms, context reads 12.1ms. The op p95 is higher than
+  the prior 118.3ms run, but the thread-write top group held after the
+  `ensure_thread` steady-state fix; remaining variance is in turn/governor
+  attribution on this local run.
+- Validation:
+  - `cargo test -p ironclaw_threads --test filesystem_session_thread_contract`
+  - `cargo test -p ironclaw_stress`
+  - `IRONCLAW_FILESYSTEM_POSTGRES_URL=postgresql://postgres@127.0.0.1:55432/ironclaw_thread_list cargo test -p ironclaw_filesystem --features libsql,postgres --test db_root_filesystem_contract`
+  - Local Postgres was started with `pg_ctl` under
+    `/tmp/ironclaw-pg-row-thread-list` on port 55432 because Docker was not
+    available.
+
+## Cycle 45 - Remove Direct Postgres Secret Store
+
+- Process note: still no PR open/update/push/commit without explicit user
+  go-ahead.
+- Graph note: `codebase-memory-mcp` was unavailable again (`Transport closed`);
+  discovery fell back to repo guidance and targeted source reads.
+- Factual check: `FilesystemSecretStore` is already on the desired per-record
+  shape on this branch:
+  - one secret record at `/secrets/.../secrets/<handle>.json`;
+  - one lease record at `/secrets/.../secret-leases/<lease_id>.json`;
+  - `consume` and `revoke` use `cas_update` on only the lease record;
+  - encrypted material is only in the secret row payload, while lease rows carry
+    metadata/status.
+- AAD check: `filesystem_secret_aad` binds to owner scope
+  `(tenant,user,agent,project,handle)`, not the storage path. The per-record
+  layout therefore does not change AAD inputs and does not require
+  re-encryption for existing filesystem-store records.
+- Removed the direct Postgres secret-store bypass:
+  - deleted the direct Postgres secret store module;
+  - removed the secrets crate's Postgres feature and direct Postgres
+    dependencies;
+  - removed the latency runner's direct secret-store branch and rewired
+    Postgres to use `FilesystemSecretStore` over `PostgresRootFilesystem`;
+  - kept `FilesystemSecretStore` as the single production durable secret store
+    for both libSQL and Postgres RootFilesystem backends.
+- Added an in-store cache for resolved `/secrets` tenant-index roots. Before
+  this, `write_secret` and `write_lease` called `ensure_index` on every write.
+  The first `secret-consume` gate showed that concurrent first-time index
+  declarations failed during prefill (`database is locked` on libSQL and a
+  Postgres backend error). After sequential prefill, libSQL still segfaulted
+  under c32/c100 because measured lease writes continued hitting index DDL.
+  The cache serializes the first declaration per resolved root and skips
+  hot-path repeats.
+- Added `filesystem_secret_store_concurrent_consume_has_exactly_one_winner`:
+  32 concurrent consumers race one lease; exactly one returns material and the
+  remaining 31 observe `LeaseConsumed`.
+- Added `ironclaw_stress --scenario secret-consume`: prefill one encrypted
+  secret per synthetic user/scope, then measure concurrent `lease_once +
+  consume` operations through `FilesystemSecretStore` over the selected
+  RootFilesystem backend. This is the control-plane shape that would have
+  surfaced the old single-snapshot CAS storm as secret-store errors.
+- Validation so far:
+  - `rg 'deadpool|tokio_postgres' crates/ironclaw_secrets` returns no matches.
+  - `CARGO_INCREMENTAL=0 cargo test -p ironclaw_secrets` passed
+    (55 lib tests, 1 boundary test, 9 contract tests).
+  - `CARGO_INCREMENTAL=0 cargo test -p ironclaw_stress` passed (65 tests).
+  - `CARGO_INCREMENTAL=0 cargo check --manifest-path harness/latency/runner/Cargo.toml`
+    passed after rewiring the runner.
+  - `IRONCLAW_FILESYSTEM_POSTGRES_URL=postgresql://postgres@127.0.0.1:55432/ironclaw_thread_list CARGO_INCREMENTAL=0 cargo test -p ironclaw_filesystem --features libsql,postgres --test db_root_filesystem_contract`
+    passed (69 tests).
+  - `cargo fmt -p ironclaw_secrets -p ironclaw_stress --check` and
+    `cargo fmt --manifest-path harness/latency/runner/Cargo.toml --check`
+    passed.
+  - Repository search for the removed secret-store symbol/table names returns
+    no matches.
+  - First `cargo test -p ironclaw_secrets` attempt failed before compile with
+    `No space left on device`; freed 2.5GiB with targeted `cargo clean` and
+    reran with `CARGO_INCREMENTAL=0`.
+- `secret-consume` gate results after the cached-index fix:
+  - libSQL c32, 320 operations: 320/320 succeeded, zero errors, p95 368.4ms,
+    throughput 104.2 ops/sec.
+  - libSQL c100, 1000 operations: 1000/1000 succeeded, zero errors, p95 1.70s,
+    throughput 64.7 ops/sec. This clears the correctness/error gate but exposes
+    a large libSQL concurrent-write latency cliff.
+  - Postgres pool 32 c100, 1000 operations:
+    1000/1000 succeeded, zero errors, p95 20.9ms, p99 24.1ms, throughput
+    7,753.8 ops/sec.

@@ -104,6 +104,14 @@ pub(crate) fn render_run_summary(summary: &RunSummary) -> String {
                 summary.context_max_messages.to_string(),
             ),
             (
+                "thread_list_threads",
+                summary.thread_list_threads.to_string(),
+            ),
+            (
+                "thread_list_page_size",
+                summary.thread_list_page_size.to_string(),
+            ),
+            (
                 "context_growth_turns_per_op",
                 summary.context_growth_turns_per_operation.to_string(),
             ),
@@ -252,6 +260,11 @@ pub(crate) fn render_parent_summary(args: &Args, run_id: &str, summaries: &[RunS
                 "context_max_messages",
                 args.context_max_messages.to_string(),
             ),
+            ("thread_list_threads", args.thread_list_threads.to_string()),
+            (
+                "thread_list_page_size",
+                args.thread_list_page_size.to_string(),
+            ),
             (
                 "context_growth_turns_per_op",
                 args.context_growth_turns_per_operation.to_string(),
@@ -314,6 +327,8 @@ fn push_stage_latency_table(output: &mut String, stages: &UserTurnStageLatencySu
         ("submit_turn", &stages.submit_turn),
         ("mark_submitted", &stages.mark_submitted),
         ("mark_rejected_busy", &stages.mark_rejected_busy),
+        ("list_threads_cold", &stages.list_threads_cold),
+        ("list_threads_warm", &stages.list_threads_warm),
         ("claim_run", &stages.claim_run),
         ("block_run", &stages.block_run),
         ("resume_turn", &stages.resume_turn),

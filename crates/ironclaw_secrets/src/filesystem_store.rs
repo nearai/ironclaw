@@ -40,7 +40,7 @@
 //! TODO(reborn/fs-secrets): once `EncryptedBackend` ships, replace the inline
 //! `encrypt`/`decrypt` calls with plaintext writes wrapped by the decorator.
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
@@ -52,6 +52,7 @@ use ironclaw_filesystem::{
 use ironclaw_host_api::{HostApiError, ResourceScope, ScopedPath, SecretHandle, Timestamp};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 
 use crate::{
     CredentialAccount, CredentialAccountId, CredentialAccountStatus, CredentialAccountStore,
@@ -205,6 +206,7 @@ where
     filesystem: Arc<ScopedFilesystem<F>>,
     crypto: Arc<SecretsCrypto>,
     lease_ttl: Duration,
+    tenant_index_roots: Mutex<HashSet<String>>,
 }
 
 impl<F> FilesystemSecretStore<F>
@@ -216,6 +218,7 @@ where
             filesystem,
             crypto,
             lease_ttl: Duration::seconds(DEFAULT_SECRET_LEASE_TTL_SECONDS),
+            tenant_index_roots: Mutex::new(HashSet::new()),
         }
     }
 
@@ -228,6 +231,7 @@ where
             filesystem,
             crypto,
             lease_ttl,
+            tenant_index_roots: Mutex::new(HashSet::new()),
         }
     }
 
@@ -272,7 +276,7 @@ where
         let mut base_entry = Entry::bytes(body).with_content_type(ContentType::json());
         base_entry.kind = Some(kind);
         let entry = tag_entry_with_tenant(base_entry, &secret.scope);
-        ensure_tenant_id_index_secret(&self.filesystem, &secret.scope).await?;
+        self.ensure_tenant_id_index(&secret.scope).await?;
         self.filesystem
             .put(&secret.scope, &path, entry, CasExpectation::Any)
             .await
@@ -283,12 +287,29 @@ where
     async fn write_lease(&self, lease: &StoredLease) -> Result<(), SecretStoreError> {
         let path = lease_path(&lease.scope, lease.lease_id)?;
         let entry = serialize_lease_entry(lease)?;
-        ensure_tenant_id_index_secret(&self.filesystem, &lease.scope).await?;
+        self.ensure_tenant_id_index(&lease.scope).await?;
         self.filesystem
             .put(&lease.scope, &path, entry, CasExpectation::Any)
             .await
             .map(|_| ())
             .map_err(fs_to_secret_store_error)
+    }
+
+    async fn ensure_tenant_id_index(&self, scope: &ResourceScope) -> Result<(), SecretStoreError> {
+        let root = scoped_path_secret("/secrets")?;
+        let resolved_root = self
+            .filesystem
+            .resolve(scope, &root)
+            .map_err(fs_to_secret_store_error)?
+            .as_str()
+            .to_string();
+        let mut roots = self.tenant_index_roots.lock().await;
+        if roots.contains(&resolved_root) {
+            return Ok(());
+        }
+        ensure_tenant_id_index_secret(&self.filesystem, scope).await?;
+        roots.insert(resolved_root);
+        Ok(())
     }
 
     fn lease_to_public(stored: &StoredLease) -> SecretLease {
@@ -657,6 +678,7 @@ where
 {
     filesystem: Arc<ScopedFilesystem<F>>,
     crypto: Arc<SecretsCrypto>,
+    tenant_index_roots: Mutex<HashSet<String>>,
 }
 
 impl<F> FilesystemCredentialBroker<F>
@@ -664,7 +686,11 @@ where
     F: RootFilesystem,
 {
     pub fn new(filesystem: Arc<ScopedFilesystem<F>>, crypto: Arc<SecretsCrypto>) -> Self {
-        Self { filesystem, crypto }
+        Self {
+            filesystem,
+            crypto,
+            tenant_index_roots: Mutex::new(HashSet::new()),
+        }
     }
 
     fn encrypt_payload(
@@ -701,6 +727,26 @@ where
             }
         })
     }
+
+    async fn ensure_tenant_id_index(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<(), CredentialBrokerError> {
+        let root = scoped_path_broker("/secrets")?;
+        let resolved_root = self
+            .filesystem
+            .resolve(scope, &root)
+            .map_err(fs_to_broker_error)?
+            .as_str()
+            .to_string();
+        let mut roots = self.tenant_index_roots.lock().await;
+        if roots.contains(&resolved_root) {
+            return Ok(());
+        }
+        ensure_tenant_id_index_broker(&self.filesystem, scope).await?;
+        roots.insert(resolved_root);
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -732,7 +778,7 @@ where
         let mut base_entry = Entry::bytes(body).with_content_type(ContentType::json());
         base_entry.kind = Some(kind);
         let entry = tag_entry_with_tenant(base_entry, &account.scope);
-        ensure_tenant_id_index_broker(&self.filesystem, &account.scope).await?;
+        self.ensure_tenant_id_index(&account.scope).await?;
         self.filesystem
             .put(&account.scope, &path, entry, CasExpectation::Any)
             .await
@@ -830,7 +876,7 @@ where
         };
         let path = credential_session_path(session.scope(), session.correlation_id())?;
         let entry = serialize_session_entry(&stored, session.scope())?;
-        ensure_tenant_id_index_broker(&self.filesystem, session.scope()).await?;
+        self.ensure_tenant_id_index(session.scope()).await?;
         self.filesystem
             .put(session.scope(), &path, entry, CasExpectation::Any)
             .await
@@ -1567,6 +1613,62 @@ mod tests {
 
         let second = store.consume(&scope, lease.id).await.unwrap_err();
         assert!(second.is_consumed());
+    }
+
+    #[tokio::test]
+    async fn filesystem_secret_store_concurrent_consume_has_exactly_one_winner() {
+        const CONSUMERS: usize = 32;
+
+        let fs = Arc::new(InMemoryBackend::new());
+        let store = Arc::new(FilesystemSecretStore::new(
+            default_scoped_fs(fs),
+            test_crypto(),
+        ));
+        let scope = sample_scope("tenant-a", "user-a");
+        let handle = SecretHandle::new("api_key").unwrap();
+        store
+            .put(
+                scope.clone(),
+                handle.clone(),
+                SecretMaterial::from("one-shot-secret"),
+                None,
+            )
+            .await
+            .unwrap();
+        let lease = store.lease_once(&scope, &handle).await.unwrap();
+        let lease_id = lease.id;
+        let barrier = Arc::new(tokio::sync::Barrier::new(CONSUMERS));
+
+        let mut tasks = Vec::with_capacity(CONSUMERS);
+        for _ in 0..CONSUMERS {
+            let store = Arc::clone(&store);
+            let scope = scope.clone();
+            let barrier = Arc::clone(&barrier);
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                store.consume(&scope, lease_id).await
+            }));
+        }
+
+        let mut successes = 0;
+        let mut consumed = 0;
+        for task in tasks {
+            match task.await.expect("consumer task should not panic") {
+                Ok(material) => {
+                    successes += 1;
+                    assert_eq!(material.expose_secret(), "one-shot-secret");
+                }
+                Err(error) if error.is_consumed() => consumed += 1,
+                Err(error) => panic!("unexpected consume error: {error:?}"),
+            }
+        }
+
+        assert_eq!(successes, 1, "only one concurrent consume may succeed");
+        assert_eq!(
+            consumed,
+            CONSUMERS - 1,
+            "every losing consumer must observe LeaseConsumed"
+        );
     }
 
     #[tokio::test]

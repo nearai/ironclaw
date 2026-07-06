@@ -24,8 +24,9 @@ use ironclaw_threads::{
     AppendCapabilityDisplayPreviewRequest, AppendFinalizedAssistantMessageRequest,
     AppendToolResultReferenceRequest, CapabilityDisplayPreviewEnvelope,
     CapabilityDisplayPreviewEnvelopeInput, CapabilityDisplayPreviewStatus, EnsureThreadRequest,
-    FilesystemSessionThreadService, LoadContextWindowRequest, MessageContent, SessionThreadError,
-    SessionThreadService, ToolResultSafeSummary, UpdateAssistantDraftRequest,
+    FilesystemSessionThreadService, ListThreadsForScopeRequest, LoadContextWindowRequest,
+    MessageContent, SessionThreadError, SessionThreadService, ToolResultSafeSummary,
+    UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, BlockedReason, DefaultTurnCoordinator, FilesystemTurnStateBlockPersistence,
@@ -104,6 +105,8 @@ pub(crate) struct UserTurnStageLatencySummary {
     pub(crate) submit_turn: StageLatencySummary,
     pub(crate) mark_submitted: StageLatencySummary,
     pub(crate) mark_rejected_busy: StageLatencySummary,
+    pub(crate) list_threads_cold: StageLatencySummary,
+    pub(crate) list_threads_warm: StageLatencySummary,
     pub(crate) claim_run: StageLatencySummary,
     pub(crate) block_run: StageLatencySummary,
     pub(crate) resume_turn: StageLatencySummary,
@@ -156,6 +159,8 @@ pub(crate) struct UserTurnStageDurations {
     pub(crate) submit_turn: Option<Duration>,
     pub(crate) mark_submitted: Option<Duration>,
     pub(crate) mark_rejected_busy: Option<Duration>,
+    pub(crate) list_threads_cold: Option<Duration>,
+    pub(crate) list_threads_warm: Option<Duration>,
     pub(crate) claim_run: Option<Duration>,
     pub(crate) block_run: Option<Duration>,
     pub(crate) resume_turn: Option<Duration>,
@@ -434,6 +439,89 @@ pub(crate) async fn prefill_user_turn_history(
     Ok(Some(summary))
 }
 
+pub(crate) async fn prefill_thread_list(
+    workload: Arc<UserTurnWorkload>,
+    args: &Args,
+    identities: Arc<SyntheticIds>,
+) -> Result<Option<PrefillSummary>, String> {
+    if !matches!(args.scenario, Scenario::ThreadList) {
+        return Ok(None);
+    }
+
+    eprintln!(
+        "{} thread-list prefill starting target={} threads={} concurrency={}",
+        crate::log_prefix(args),
+        workload.target(),
+        args.thread_list_threads,
+        args.prefill_concurrency
+    );
+
+    let started = Instant::now();
+    let semaphore = Arc::new(Semaphore::new(args.prefill_concurrency));
+    let mut handles = Vec::with_capacity(args.thread_list_threads);
+    for thread_index in 0..args.thread_list_threads {
+        let permit = Arc::clone(&semaphore)
+            .acquire_owned()
+            .await
+            .map_err(|_| "thread-list prefill semaphore closed".to_string())?;
+        let workload = Arc::clone(&workload);
+        let identities = Arc::clone(&identities);
+        let args = args.clone();
+        handles.push((
+            thread_index,
+            tokio::spawn(async move {
+                let _permit = permit;
+                workload
+                    .prefill_thread_list_thread(&args, &identities, thread_index)
+                    .await
+            }),
+        ));
+    }
+
+    let mut samples = Vec::with_capacity(args.thread_list_threads);
+    let mut first_error = None;
+    for (thread_index, handle) in handles {
+        match handle.await {
+            Ok(sample) => samples.push(sample),
+            Err(error) => {
+                first_error.get_or_insert_with(|| {
+                    if error.is_panic() {
+                        eprintln!("thread-list prefill thread {thread_index} panicked: {error:?}");
+                        format!("thread-list prefill thread {thread_index} panicked")
+                    } else {
+                        eprintln!("thread-list prefill thread {thread_index} cancelled: {error:?}");
+                        format!("thread-list prefill thread {thread_index} cancelled")
+                    }
+                });
+            }
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+
+    let summary = summarize_thread_list_prefill(args, started.elapsed(), &samples);
+    eprintln!(
+        "{} thread-list prefill finished attempted={} succeeded={} failed={} duration_ms={} throughput_ops_sec={:.1}",
+        crate::log_prefix(args),
+        summary.attempted,
+        summary.succeeded,
+        summary.failed,
+        summary.duration_ms,
+        summary.throughput_ops_sec
+    );
+    if summary.failed > 0 {
+        return Err(format!(
+            "thread-list prefill failed attempted={} failed={} errors={}",
+            summary.attempted,
+            summary.failed,
+            format_prefill_errors(&summary.errors)
+        ));
+    }
+
+    Ok(Some(summary))
+}
+
 fn should_run_operation(
     operation_target: OperationTarget,
     started: Instant,
@@ -477,6 +565,17 @@ fn summarize_prefill(args: &Args, elapsed: Duration, samples: &[Sample]) -> Pref
         latency: latency_summary(&latencies),
         errors,
     }
+}
+
+fn summarize_thread_list_prefill(
+    args: &Args,
+    elapsed: Duration,
+    samples: &[Sample],
+) -> PrefillSummary {
+    let mut summary = summarize_prefill(args, elapsed, samples);
+    summary.threads = args.thread_list_threads;
+    summary.turns_per_thread = 0;
+    summary
 }
 
 fn format_prefill_errors(errors: &BTreeMap<String, u64>) -> String {
@@ -542,6 +641,28 @@ impl UserTurnWorkload {
             Self::Postgres(services) => {
                 services
                     .prefill_turn(args, identities, thread_index, turn_index)
+                    .await
+            }
+        }
+    }
+
+    async fn prefill_thread_list_thread(
+        &self,
+        args: &Args,
+        identities: &SyntheticIds,
+        thread_index: usize,
+    ) -> Sample {
+        match self {
+            #[cfg(feature = "libsql")]
+            Self::Libsql(services) => {
+                services
+                    .prefill_thread_list_thread(args, identities, thread_index)
+                    .await
+            }
+            #[cfg(feature = "postgres")]
+            Self::Postgres(services) => {
+                services
+                    .prefill_thread_list_thread(args, identities, thread_index)
                     .await
             }
         }
@@ -705,6 +826,54 @@ where
         .await
     }
 
+    async fn prefill_thread_list_thread(
+        &self,
+        args: &Args,
+        identities: &SyntheticIds,
+        thread_index: usize,
+    ) -> Sample {
+        let mut stages = UserTurnStageDurations::default();
+        let started = Instant::now();
+        let outcome = self
+            .prefill_thread_list_thread_inner(args, identities, thread_index, &mut stages)
+            .await;
+        let latency = started.elapsed();
+        let failure = outcome.err().map(|failure| failure.cause);
+        let error = failure.as_ref().map(|cause| cause.bucket.clone());
+        Sample {
+            latency,
+            error,
+            failure,
+            stages: Some(stages),
+        }
+    }
+
+    async fn prefill_thread_list_thread_inner(
+        &self,
+        _args: &Args,
+        identities: &SyntheticIds,
+        thread_index: usize,
+        stages: &mut UserTurnStageDurations,
+    ) -> Result<(), OperationFailure> {
+        let context = identities
+            .user_turn_context_for_user_index(0)
+            .map_err(|error| OperationFailure::invalid_request("thread_list_context", error))?;
+        let thread_id = thread_list_thread_id(thread_index)?;
+        time_stage(
+            &mut stages.ensure_thread,
+            self.thread_service.ensure_thread(EnsureThreadRequest {
+                scope: context.thread_scope,
+                thread_id: Some(thread_id),
+                created_by_actor_id: context.user_id.as_str().to_string(),
+                title: Some(format!("Thread list seed {thread_index:06}")),
+                metadata_json: None,
+            }),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| thread_failure("thread_list_prefill_ensure_thread", error))
+    }
+
     async fn run_operation(
         &self,
         args: &Args,
@@ -749,6 +918,13 @@ where
         let context = identities
             .user_turn_context(args, worker_index, operation_index)
             .map_err(|error| OperationFailure::invalid_request("build_context", error))?;
+
+        if matches!(args.scenario, Scenario::ThreadList) {
+            return self
+                .run_thread_list_operation(args, identities, stages)
+                .await;
+        }
+
         let turn_store = self.turn_store_for_context(&context)?;
         let turn_coordinator = DefaultTurnCoordinator::new(Arc::clone(&turn_store));
         let source_binding = "ironclaw-stress-webchat";
@@ -1107,6 +1283,87 @@ where
         }
 
         Ok(())
+    }
+
+    async fn run_thread_list_operation(
+        &self,
+        args: &Args,
+        identities: &SyntheticIds,
+        stages: &mut UserTurnStageDurations,
+    ) -> Result<(), OperationFailure> {
+        let context = identities
+            .user_turn_context_for_user_index(0)
+            .map_err(|error| OperationFailure::invalid_request("thread_list_context", error))?;
+        self.thread_service
+            .clear_thread_index_cache_for_scope(&context.thread_scope);
+
+        let cold_count = time_stage(
+            &mut stages.list_threads_cold,
+            self.list_thread_pages(&context.thread_scope, args.thread_list_page_size),
+        )
+        .await?;
+        if cold_count != args.thread_list_threads {
+            return Err(OperationFailure::new(
+                "thread_list_count_mismatch",
+                "list_threads_cold",
+                format!(
+                    "expected {} seeded threads, listed {cold_count}",
+                    args.thread_list_threads
+                ),
+            ));
+        }
+
+        let warm_count = time_stage(
+            &mut stages.list_threads_warm,
+            self.list_thread_pages(&context.thread_scope, args.thread_list_page_size),
+        )
+        .await?;
+        if warm_count != args.thread_list_threads {
+            return Err(OperationFailure::new(
+                "thread_list_count_mismatch",
+                "list_threads_warm",
+                format!(
+                    "expected {} seeded threads, listed {warm_count}",
+                    args.thread_list_threads
+                ),
+            ));
+        }
+
+        Ok(())
+    }
+
+    async fn list_thread_pages(
+        &self,
+        scope: &ironclaw_threads::ThreadScope,
+        page_size: usize,
+    ) -> Result<usize, OperationFailure> {
+        let mut cursor = None;
+        let mut listed = 0_usize;
+        let mut pages = 0_usize;
+        loop {
+            let response = self
+                .thread_service
+                .list_threads_for_scope(ListThreadsForScopeRequest {
+                    scope: scope.clone(),
+                    limit: Some(page_size as u32),
+                    cursor,
+                })
+                .await
+                .map_err(|error| thread_failure("list_threads", error))?;
+            listed = listed.saturating_add(response.threads.len());
+            pages = pages.saturating_add(1);
+            cursor = response.next_cursor;
+            if cursor.is_none() {
+                return Ok(listed);
+            }
+            if pages > 10_000 {
+                return Err(OperationFailure::new(
+                    "thread_list_cursor_loop",
+                    "list_threads",
+                    "thread list pagination exceeded 10000 pages",
+                ));
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1857,6 +2114,11 @@ fn stress_payload(mut base: String, minimum_bytes: usize) -> String {
     base
 }
 
+fn thread_list_thread_id(thread_index: usize) -> Result<ThreadId, OperationFailure> {
+    ThreadId::new(format!("thread-list-{thread_index:06}"))
+        .map_err(|error| OperationFailure::invalid_request("thread_list_thread_id", error))
+}
+
 fn operation_ref(args: &Args, worker_index: usize, operation_index: usize) -> String {
     let phase = if args.warmup_phase { ":warmup" } else { "" };
     format!(
@@ -1927,6 +2189,8 @@ fn stage_latencies_us(stages: &UserTurnStageDurations) -> serde_json::Value {
     insert_stage_latency(&mut output, "submit_turn", stages.submit_turn);
     insert_stage_latency(&mut output, "mark_submitted", stages.mark_submitted);
     insert_stage_latency(&mut output, "mark_rejected_busy", stages.mark_rejected_busy);
+    insert_stage_latency(&mut output, "list_threads_cold", stages.list_threads_cold);
+    insert_stage_latency(&mut output, "list_threads_warm", stages.list_threads_warm);
     insert_stage_latency(&mut output, "claim_run", stages.claim_run);
     insert_stage_latency(&mut output, "block_run", stages.block_run);
     insert_stage_latency(&mut output, "resume_turn", stages.resume_turn);

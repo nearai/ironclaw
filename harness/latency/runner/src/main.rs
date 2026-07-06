@@ -34,9 +34,7 @@ use ironclaw_resources::{
     FilesystemResourceGovernor, ResourceAccount, ResourceGovernor, ResourceLimits,
 };
 use ironclaw_run_state::{ApprovalRequestStore, ApprovalStatus, FilesystemApprovalRequestStore};
-use ironclaw_secrets::{
-    FilesystemSecretStore, PostgresSecretStore, SecretMaterial, SecretStore, SecretsCrypto,
-};
+use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore, SecretsCrypto};
 use ironclaw_triggers::{
     LibSqlTriggerRepository, PostgresTriggerRepository, TriggerId, TriggerRecord,
     TriggerRepository, TriggerSchedule, TriggerSourceKind, TriggerState,
@@ -340,12 +338,9 @@ async fn open_backend(
                 .build()?;
             let fs = Arc::new(PostgresRootFilesystem::new(pool.clone()));
             fs.run_migrations().await?;
-            let secret_store = PostgresSecretStore::new(pool.clone(), latency_secrets_crypto());
-            secret_store.run_migrations().await?;
             let trigger_repository = PostgresTriggerRepository::new(pool.clone());
             trigger_repository.run_migrations().await?;
-            let mut control_plane = control_plane_stores(Arc::clone(&fs));
-            control_plane.secret_store = Arc::new(secret_store);
+            let control_plane = control_plane_stores(Arc::clone(&fs));
             let turn_state =
                 filesystem_turn_state_store(Arc::clone(&fs), backend, postgres_pool_size)?;
             Ok(BackendContext {

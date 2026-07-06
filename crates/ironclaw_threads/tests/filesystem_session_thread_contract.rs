@@ -24,7 +24,7 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::{
     AgentId, CapabilityId, HostPath, InvocationId, MountAlias, MountGrant, MountPermissions,
-    MountView, ProjectId, TenantId, ThreadId, UserId, VirtualPath,
+    MountView, ProjectId, ScopedPath, TenantId, ThreadId, UserId, VirtualPath,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AppendAssistantDraftRequest,
@@ -1451,6 +1451,75 @@ async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
     assert_eq!(ids_b, ["t-b-001"]);
 }
 
+#[tokio::test]
+async fn filesystem_list_threads_bootstraps_missing_thread_index_rows() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-index-bootstrap", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let scope = scope("index-bootstrap");
+
+    for id in ["legacy-001", "legacy-002"] {
+        service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: Some(ThreadId::new(id).unwrap()),
+                created_by_actor_id: "actor-a".into(),
+                title: Some(id.into()),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    for id in ["legacy-001", "legacy-002"] {
+        scoped
+            .delete(
+                &scope.to_resource_scope(),
+                &thread_index_record_path_for_test(&scope, id),
+            )
+            .await
+            .expect("test setup removes derived index row");
+    }
+    service.clear_thread_index_cache_for_scope(&scope);
+
+    let listed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids: Vec<&str> = listed
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(ids, ["legacy-002", "legacy-001"]);
+
+    service.clear_thread_index_cache_for_scope(&scope);
+    let listed_again = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids_again: Vec<&str> = listed_again
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(
+        ids_again,
+        ["legacy-002", "legacy-001"],
+        "first list should rebuild durable derived index rows"
+    );
+}
+
 /// Regression: the "Recent" list must order by last interaction, not by
 /// creation time or thread id. Appending a message to the *older* thread
 /// has to bump it ahead of a more recently *created* one. Before this
@@ -2076,6 +2145,24 @@ fn scope(label: &str) -> ThreadScope {
         owner_user_id: Some(UserId::new(format!("user-{label}")).unwrap()),
         mission_id: None,
     }
+}
+
+fn thread_index_record_path_for_test(scope: &ThreadScope, thread_id: &str) -> ScopedPath {
+    ScopedPath::new(format!(
+        "/threads/agents/{}/projects/{}/owners/{}/thread_index/{thread_id}.json",
+        scope.agent_id.as_str(),
+        scope
+            .project_id
+            .as_ref()
+            .expect("test scope has project")
+            .as_str(),
+        scope
+            .owner_user_id
+            .as_ref()
+            .expect("test scope has owner")
+            .as_str()
+    ))
+    .unwrap()
 }
 
 fn assert_unknown_thread(error: SessionThreadError, thread_id: &ThreadId) {

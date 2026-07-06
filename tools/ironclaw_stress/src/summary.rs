@@ -80,6 +80,8 @@ pub(crate) fn summarize_user_turn_stages(
         submit_turn: summarize_stage(&stages, |stage| stage.submit_turn),
         mark_submitted: summarize_stage(&stages, |stage| stage.mark_submitted),
         mark_rejected_busy: summarize_stage(&stages, |stage| stage.mark_rejected_busy),
+        list_threads_cold: summarize_stage(&stages, |stage| stage.list_threads_cold),
+        list_threads_warm: summarize_stage(&stages, |stage| stage.list_threads_warm),
         claim_run: summarize_stage(&stages, |stage| stage.claim_run),
         block_run: summarize_stage(&stages, |stage| stage.block_run),
         resume_turn: summarize_stage(&stages, |stage| stage.resume_turn),
@@ -184,7 +186,11 @@ fn thread_store_write_duration(stage: &UserTurnStageDurations) -> Duration {
 }
 
 fn context_read_duration(stage: &UserTurnStageDurations) -> Duration {
-    sum_durations([stage.load_context])
+    sum_durations([
+        stage.load_context,
+        stage.list_threads_cold,
+        stage.list_threads_warm,
+    ])
 }
 
 fn turn_store_duration(stage: &UserTurnStageDurations) -> Duration {

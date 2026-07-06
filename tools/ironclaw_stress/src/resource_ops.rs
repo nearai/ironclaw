@@ -59,9 +59,11 @@ fn scenario_stage(scenario: Scenario) -> &'static str {
         Scenario::ReserveReconcile => "reserve_reconcile",
         Scenario::ChatTurn => "chat_turn",
         Scenario::TurnLifecycleChurn => "turn_lifecycle_churn",
+        Scenario::ThreadList => "thread_list",
         Scenario::MixedUserSession => "mixed_user_session",
         Scenario::ContextGrowth => "context_growth",
         Scenario::ToolSession => "tool_session",
+        Scenario::SecretConsume => "secret_consume",
         Scenario::CpuBurn => "cpu_burn",
         Scenario::MemoryChurn => "memory_churn",
     }

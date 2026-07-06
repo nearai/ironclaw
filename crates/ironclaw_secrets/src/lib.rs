@@ -11,12 +11,8 @@ mod crypto;
 mod filesystem_store;
 pub mod keychain;
 mod legacy_store;
-#[cfg(feature = "postgres")]
-mod postgres_store;
 
 pub use filesystem_store::{FilesystemCredentialBroker, FilesystemSecretStore};
-#[cfg(feature = "postgres")]
-pub use postgres_store::PostgresSecretStore;
 
 use std::collections::HashMap;
 use std::fmt;

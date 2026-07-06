@@ -35,7 +35,10 @@
 mod message_lookup_index;
 mod message_sequence_index;
 
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -84,6 +87,7 @@ const SESSION_THREAD_KIND: &str = "session_thread";
 const THREAD_MESSAGE_KIND: &str = "thread_message";
 const THREAD_SUMMARY_KIND: &str = "thread_summary";
 const THREAD_IDEMPOTENCY_KIND: &str = "thread_idempotency";
+const THREAD_INDEX_KIND: &str = "thread_index";
 
 /// Conservative fan-out for indexed range materialization.
 const INDEXED_RANGE_MESSAGE_READ_CONCURRENCY: usize = 8;
@@ -114,6 +118,21 @@ struct StoredThreadRecord {
     #[serde(flatten)]
     record: SessionThreadRecord,
     next_sequence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ThreadIndexRecord {
+    #[serde(flatten)]
+    record: SessionThreadRecord,
+    next_sequence: u64,
+    flags: ThreadIndexFlags,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct ThreadIndexFlags {
+    title_present: bool,
+    metadata_present: bool,
+    goal_present: bool,
 }
 
 /// On-disk transcript message record.
@@ -169,6 +188,8 @@ where
     F: RootFilesystem,
 {
     filesystem: Arc<ScopedFilesystem<F>>,
+    thread_index_cache: Mutex<HashMap<String, Arc<Vec<ThreadIndexRecord>>>>,
+    known_thread_index_rows: Mutex<HashSet<String>>,
 }
 
 impl<F> FilesystemSessionThreadService<F>
@@ -176,7 +197,15 @@ where
     F: RootFilesystem,
 {
     pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
-        Self { filesystem }
+        Self {
+            filesystem,
+            thread_index_cache: Mutex::new(HashMap::new()),
+            known_thread_index_rows: Mutex::new(HashSet::new()),
+        }
+    }
+
+    pub fn clear_thread_index_cache_for_scope(&self, scope: &ThreadScope) {
+        self.invalidate_thread_index_cache(scope);
     }
 
     fn thread_entry(record: &StoredThreadRecord) -> Result<Entry, SessionThreadError> {
@@ -217,6 +246,273 @@ where
         let mut entry = Entry::bytes(body).with_content_type(ContentType::json());
         entry.kind = Some(kind);
         Ok(entry)
+    }
+
+    fn thread_index_entry(record: &ThreadIndexRecord) -> Result<Entry, SessionThreadError> {
+        let body = serialize_pretty(record)?;
+        let kind = RecordKind::new(THREAD_INDEX_KIND).map_err(|error| {
+            SessionThreadError::Backend(format!("invalid thread_index record kind: {error}"))
+        })?;
+        let mut entry = Entry::bytes(body).with_content_type(ContentType::json());
+        entry.kind = Some(kind);
+        Ok(entry)
+    }
+
+    fn thread_index_record(stored: &StoredThreadRecord) -> ThreadIndexRecord {
+        ThreadIndexRecord {
+            record: stored.record.clone(),
+            next_sequence: stored.next_sequence,
+            flags: ThreadIndexFlags {
+                title_present: stored.record.title.is_some(),
+                metadata_present: stored.record.metadata_json.is_some(),
+                goal_present: stored.record.goal.is_some(),
+            },
+        }
+    }
+
+    fn invalidate_thread_index_cache(&self, scope: &ThreadScope) {
+        let key = thread_index_cache_key(scope);
+        if let Ok(mut cache) = self.thread_index_cache.lock() {
+            cache.remove(&key);
+        }
+    }
+
+    fn mark_thread_index_known(&self, scope: &ThreadScope, thread_id: &ThreadId) {
+        if let Ok(mut known) = self.known_thread_index_rows.lock() {
+            known.insert(thread_index_record_cache_key(scope, thread_id));
+        }
+    }
+
+    fn is_thread_index_known(&self, scope: &ThreadScope, thread_id: &ThreadId) -> bool {
+        self.known_thread_index_rows
+            .lock()
+            .map(|known| known.contains(&thread_index_record_cache_key(scope, thread_id)))
+            .unwrap_or(false)
+    }
+
+    async fn ensure_thread_index_record_exists(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<(), SessionThreadError> {
+        if self.is_thread_index_known(scope, thread_id) {
+            return Ok(());
+        }
+        if self
+            .read_thread_index_record(scope, thread_id)
+            .await?
+            .is_some()
+        {
+            self.mark_thread_index_known(scope, thread_id);
+            return Ok(());
+        }
+        self.refresh_thread_index_from_source(scope, thread_id)
+            .await
+    }
+
+    async fn write_thread_index_record(
+        &self,
+        record: &ThreadIndexRecord,
+    ) -> Result<(), SessionThreadError> {
+        let path = thread_index_record_path(&record.record.scope, &record.record.thread_id)?;
+        let entry = Self::thread_index_entry(record)?;
+        self.filesystem
+            .put(
+                &record.record.scope.to_resource_scope(),
+                &path,
+                entry,
+                CasExpectation::Any,
+            )
+            .await?;
+        self.mark_thread_index_known(&record.record.scope, &record.record.thread_id);
+        self.invalidate_thread_index_cache(&record.record.scope);
+        Ok(())
+    }
+
+    async fn refresh_thread_index_from_source(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<(), SessionThreadError> {
+        let Some((stored, _)) = self.read_thread_versioned(scope, thread_id).await? else {
+            return Ok(());
+        };
+        let index = Self::thread_index_record(&stored);
+        self.write_thread_index_record(&index).await
+    }
+
+    async fn touch_thread_index_updated_at(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<(), SessionThreadError> {
+        let now = Utc::now();
+        let index = match self.read_thread_index_record(scope, thread_id).await? {
+            Some(mut index) => {
+                index.record.updated_at = Some(now);
+                index
+            }
+            None => {
+                let Some((mut stored, _)) = self.read_thread_versioned(scope, thread_id).await?
+                else {
+                    return Ok(());
+                };
+                stored.record.updated_at = Some(now);
+                Self::thread_index_record(&stored)
+            }
+        };
+        self.write_thread_index_record(&index).await
+    }
+
+    async fn read_thread_index_record(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Option<ThreadIndexRecord>, SessionThreadError> {
+        let path = thread_index_record_path(scope, thread_id)?;
+        let Some(versioned) = self
+            .filesystem
+            .get(&scope.to_resource_scope(), &path)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let record = deserialize::<ThreadIndexRecord>(&versioned.entry.body)?;
+        if record.record.scope != *scope || record.record.thread_id != *thread_id {
+            return Ok(None);
+        }
+        Ok(Some(record))
+    }
+
+    async fn thread_record_with_index_overlay(
+        &self,
+        mut stored: StoredThreadRecord,
+    ) -> Result<SessionThreadRecord, SessionThreadError> {
+        if let Some(index) = self
+            .read_thread_index_record(&stored.record.scope, &stored.record.thread_id)
+            .await?
+        {
+            stored.record.updated_at = index.record.updated_at;
+            if stored.record.title.is_none() {
+                stored.record.title = index.record.title;
+            }
+        }
+        Ok(stored.record)
+    }
+
+    async fn cached_thread_index_for_scope(
+        &self,
+        scope: &ThreadScope,
+    ) -> Result<Arc<Vec<ThreadIndexRecord>>, SessionThreadError> {
+        let key = thread_index_cache_key(scope);
+        if let Ok(cache) = self.thread_index_cache.lock()
+            && let Some(cached) = cache.get(&key)
+        {
+            return Ok(Arc::clone(cached));
+        }
+
+        let loaded = Arc::new(self.load_thread_index_for_scope(scope).await?);
+        if let Ok(mut cache) = self.thread_index_cache.lock() {
+            cache.insert(key, Arc::clone(&loaded));
+        }
+        Ok(loaded)
+    }
+
+    async fn load_thread_index_for_scope(
+        &self,
+        scope: &ThreadScope,
+    ) -> Result<Vec<ThreadIndexRecord>, SessionThreadError> {
+        let mut entries = self.query_thread_index_records(scope).await?;
+        if entries.is_empty() {
+            entries = self.bootstrap_thread_index_for_scope(scope).await?;
+        }
+        entries.sort_by(|a, b| compare_thread_activity(&a.record, &b.record));
+        Ok(entries)
+    }
+
+    async fn query_thread_index_records(
+        &self,
+        scope: &ThreadScope,
+    ) -> Result<Vec<ThreadIndexRecord>, SessionThreadError> {
+        let root = thread_index_root(scope)?;
+        let mut records = Vec::new();
+        let mut offset = 0_u64;
+        loop {
+            let page = self
+                .filesystem
+                .query(
+                    &scope.to_resource_scope(),
+                    &root,
+                    &Filter::All,
+                    Page::new(offset, Page::MAX_LIMIT),
+                )
+                .await?;
+            if page.is_empty() {
+                break;
+            }
+            offset += page.len() as u64;
+            for versioned in page {
+                let record = deserialize::<ThreadIndexRecord>(&versioned.entry.body)?;
+                if record.record.scope == *scope {
+                    self.mark_thread_index_known(&record.record.scope, &record.record.thread_id);
+                    records.push(record);
+                }
+            }
+        }
+        Ok(records)
+    }
+
+    async fn bootstrap_thread_index_for_scope(
+        &self,
+        scope: &ThreadScope,
+    ) -> Result<Vec<ThreadIndexRecord>, SessionThreadError> {
+        let root = scoped_path(&format!("{}/threads", scope_axes_string(scope)))?;
+        let entries = match self
+            .filesystem
+            .list_dir(&scope.to_resource_scope(), &root)
+            .await
+        {
+            Ok(entries) => entries,
+            Err(error) if is_not_found(&error) => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let thread_ids: Vec<ThreadId> = entries
+            .into_iter()
+            .filter(|entry| entry.file_type == FileType::Directory)
+            .map(|entry| ThreadId::new(entry.name).map_err(invalid_path))
+            .collect::<Result<_, _>>()?;
+        let reads: Vec<(
+            ThreadId,
+            Result<Option<(StoredThreadRecord, RecordVersion)>, _>,
+        )> = futures::stream::iter(thread_ids)
+            .map(|tid| async move {
+                let result = self.read_thread_versioned(scope, &tid).await;
+                (tid, result)
+            })
+            .buffer_unordered(LIST_THREADS_RECORD_READ_CONCURRENCY)
+            .collect()
+            .await;
+
+        let mut records = Vec::with_capacity(reads.len());
+        for (thread_id, result) in reads {
+            match result {
+                Ok(Some((stored, _))) if stored.record.scope == *scope => {
+                    let index = Self::thread_index_record(&stored);
+                    self.write_thread_index_record(&index).await?;
+                    records.push(index);
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::debug!(
+                        thread_id = %thread_id.as_str(),
+                        scope = ?scope,
+                        ?error,
+                        "skipping unreadable thread record during thread index bootstrap",
+                    );
+                }
+            }
+        }
+        Ok(records)
     }
 
     async fn read_thread_versioned(
@@ -1164,55 +1460,19 @@ where
 
     /// Stamp `thread.updated_at = now` at a turn boundary (inbound accept,
     /// finalized assistant append) so `list_threads_for_scope` orders by
-    /// genuine recency without scanning transcripts. This is the single
-    /// extra thread-record write per turn that the native (non-thread-
-    /// record) `reserve_sequence` path otherwise avoids — bounded to turn
-    /// boundaries, not per message or per token.
+    /// genuine recency without scanning transcripts. The index row is the
+    /// recency authority for listing; avoiding a full `thread.json` CAS here
+    /// keeps activity writes row-shaped.
     ///
     /// Best-effort under contention: a `VersionMismatch` means a concurrent
-    /// activity write already advanced `updated_at` (the safe direction), so
-    /// after the bounded retry budget we return `Ok(())` rather than failing
-    /// the enclosing append — the message itself is already durably written.
-    /// A non-CAS backend error still propagates.
+    /// The message itself is already durably written before most callers reach
+    /// this path, so best-effort wrappers log and continue on failure.
     async fn touch_thread_updated_at(
         &self,
         scope: &ThreadScope,
         thread_id: &ThreadId,
     ) -> Result<(), SessionThreadError> {
-        let path = thread_record_path(scope, thread_id)?;
-        for _ in 0..FILESYSTEM_CAS_RETRIES {
-            // The `?` propagates real read errors; the `else` handles only the
-            // genuine "thread deleted between append and stamp" case — there is
-            // nothing to order in the sidebar, so nothing to touch.
-            let Some((mut stored, version)) = self.read_thread_versioned(scope, thread_id).await?
-            else {
-                return Ok(());
-            };
-            stored.record.updated_at = Some(Utc::now());
-            let entry = Self::thread_entry(&stored)?;
-            match put_with_cas(
-                self.filesystem.as_ref(),
-                &scope.to_resource_scope(),
-                &path,
-                entry,
-                CasExpectation::Version(version),
-            )
-            .await
-            {
-                Ok(()) => return Ok(()),
-                Err(PutError::VersionMismatch) => continue,
-                Err(PutError::Other(error)) => return Err(error),
-            }
-        }
-        // Retry budget exhausted purely on `VersionMismatch`: concurrent
-        // writers are advancing `updated_at` themselves, so the thread is
-        // already surfacing as recently-active. Don't fail the append over a
-        // best-effort ordering stamp.
-        tracing::debug!(
-            thread_id = %thread_id.as_str(),
-            "thread updated_at touch lost CAS race within retry budget; ordering stamp left to the concurrent writer",
-        );
-        Ok(())
+        self.touch_thread_index_updated_at(scope, thread_id).await
     }
 
     /// Best-effort recency stamp for after-commit call sites. The message is
@@ -1361,7 +1621,7 @@ where
         let title = request.title;
         let metadata_json = request.metadata_json;
         let thread_id_clone = thread_id.clone();
-        cas_update(
+        let record = cas_update(
             self.filesystem.as_ref(),
             &resource_scope,
             &path,
@@ -1420,7 +1680,10 @@ where
             },
         )
         .await
-        .map_err(map_cas_error)
+        .map_err(map_cas_error)?;
+        self.ensure_thread_index_record_exists(&record.scope, &record.thread_id)
+            .await?;
+        Ok(record)
     }
 
     async fn accept_inbound_message(
@@ -2194,8 +2457,9 @@ where
         let summaries = self
             .list_thread_summaries(&request.scope, &request.thread_id)
             .await?;
+        let thread_record = self.thread_record_with_index_overlay(thread).await?;
         Ok(ThreadHistory {
-            thread: thread.record,
+            thread: thread_record,
             summary_artifacts: history_summary_artifacts(&messages, summaries),
             messages: history_messages(&messages),
         })
@@ -2275,7 +2539,7 @@ where
                 thread_id: request.thread_id.clone(),
             })?
             .0;
-        Ok(thread.record)
+        self.thread_record_with_index_overlay(thread).await
     }
 
     async fn delete_thread(
@@ -2297,7 +2561,20 @@ where
             .delete(&scope.to_resource_scope(), &thread_root(scope, thread_id)?)
             .await
         {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                let index_path = thread_index_record_path(scope, thread_id)?;
+                match self
+                    .filesystem
+                    .delete(&scope.to_resource_scope(), &index_path)
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(error) if is_not_found(&error) => {}
+                    Err(error) => return Err(error.into()),
+                }
+                self.invalidate_thread_index_cache(scope);
+                Ok(())
+            }
             Err(error) if is_not_found(&error) => Err(SessionThreadError::UnknownThread {
                 thread_id: thread_id.clone(),
             }),
@@ -2380,104 +2657,11 @@ where
         &self,
         request: ListThreadsForScopeRequest,
     ) -> Result<ListThreadsForScopeResponse, SessionThreadError> {
-        // Per-request work scales with thread *count*, not transcript
-        // *volume*. Activity ordering (newest interaction first) needs each
-        // thread's `updated_at`, so we read all records under the scope
-        // (one `get` per thread, concurrency-bounded), sort by that
-        // timestamp, then slice the requested page. Activity ordering itself
-        // never scans transcripts — `updated_at` is stamped at turn
-        // boundaries by `touch_thread_updated_at`, so it already reflects
-        // recency. The heavier title-derivation probes still read transcripts,
-        // but only for the sliced page. The current `ScopedFilesystem` port
-        // exposes neither a
-        // cursor-paginated directory listing nor a timestamp index, and
-        // adding either belongs upstream of this crate. When a tenant grows
-        // past low thousands of threads under a single scope, replace this
-        // with a storage-level paginator (e.g. a secondary index keyed by
-        // `(scope, updated_at)`).
         let limit = request
             .limit
             .map(|n| (n as usize).clamp(1, LIST_THREADS_MAX_PAGE_SIZE))
             .unwrap_or(LIST_THREADS_DEFAULT_PAGE_SIZE);
-        let resource_scope = request.scope.to_resource_scope();
-        let root = scoped_path(&format!("{}/threads", scope_axes_string(&request.scope)))?;
-        let entries = match self.filesystem.list_dir(&resource_scope, &root).await {
-            Ok(entries) => entries,
-            Err(error) if is_not_found(&error) => {
-                return Ok(ListThreadsForScopeResponse {
-                    threads: Vec::new(),
-                    next_cursor: None,
-                });
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let thread_ids: Vec<ThreadId> = entries
-            .into_iter()
-            .filter(|entry| entry.file_type == FileType::Directory)
-            .map(|entry| ThreadId::new(entry.name).map_err(invalid_path))
-            .collect::<Result<_, _>>()?;
-        // Read every record to obtain its activity timestamp. `list_dir`
-        // only returns names, so each entry still requires a `get`.
-        // Bound the concurrency so a large scope can't fan out an
-        // unbounded burst of filesystem reads; ordering is irrelevant
-        // here since we sort by activity immediately after.
-        let scope = &request.scope;
-        let reads: Vec<(
-            ThreadId,
-            Result<Option<(StoredThreadRecord, RecordVersion)>, _>,
-        )> = futures::stream::iter(thread_ids)
-            .map(|tid| async move {
-                let result = self.read_thread_versioned(scope, &tid).await;
-                (tid, result)
-            })
-            .buffer_unordered(LIST_THREADS_RECORD_READ_CONCURRENCY)
-            .collect()
-            .await;
-        // Keep present, scope-matching records paired with their
-        // `next_sequence` (needed for page-scoped title derivation).
-        let mut listed: Vec<(SessionThreadRecord, u64)> = Vec::with_capacity(reads.len());
-        for (thread_id, result) in reads {
-            match result {
-                Ok(Some((stored, _))) if stored.record.scope == request.scope => {
-                    let next_sequence = stored.next_sequence;
-                    listed.push((stored.record, next_sequence));
-                }
-                Ok(_) => {
-                    // Absent record or scope-mismatched payload (e.g.
-                    // tenancy drift between disk and request) — skip
-                    // silently, matching the prior behavior.
-                }
-                Err(error) => {
-                    // silent-ok: list_threads is a sidebar read; one
-                    // corrupted record must not blank out the whole page.
-                    // Logged at `debug!` (not `warn!`) — this is an internal
-                    // diagnostic, and `info!`/`warn!` corrupt the REPL/TUI
-                    // display per the project logging rule.
-                    tracing::debug!(
-                        thread_id = %thread_id.as_str(),
-                        scope = ?request.scope,
-                        ?error,
-                        "skipping unreadable thread record during list_threads_for_scope",
-                    );
-                }
-            }
-        }
-        // Newest activity first, by `thread.updated_at` (falling back to
-        // `created_at`). The append paths stamp `updated_at` at turn
-        // boundaries via `touch_thread_updated_at` (inbound accept +
-        // finalized assistant append), so this is a true cross-thread
-        // recency signal — and it costs only the per-thread record read
-        // already done above, with no per-thread transcript scan. Tie-break
-        // on thread_id ascending so the order is stable and opaque cursors
-        // stay resumable — and to match the web sidebar's `byActivityDesc`
-        // comparator.
-        listed.sort_by(|(a, _), (b, _)| {
-            let a_key = a.updated_at.or(a.created_at);
-            let b_key = b.updated_at.or(b.created_at);
-            std::cmp::Reverse(a_key)
-                .cmp(&std::cmp::Reverse(b_key))
-                .then_with(|| a.thread_id.as_str().cmp(b.thread_id.as_str()))
-        });
+        let listed = self.cached_thread_index_for_scope(&request.scope).await?;
         // Opaque cursor is the last thread_id of the previous page; find
         // it in the freshly-sorted list and resume after it. A cursor
         // that no longer resolves (thread deleted between pages) ends the
@@ -2485,7 +2669,7 @@ where
         let start_index = match request.cursor.as_deref() {
             Some(cursor) => listed
                 .iter()
-                .position(|(record, _)| record.thread_id.as_str() == cursor)
+                .position(|index| index.record.thread_id.as_str() == cursor)
                 .map(|index| index + 1)
                 .unwrap_or(listed.len()),
             None => 0,
@@ -2498,10 +2682,11 @@ where
         // indices here and fan-out the indexed first-user reads below so
         // we don't serialize N transcript probes inline.
         let mut needs_title: Vec<(usize, ThreadId, u64)> = Vec::new();
-        for (record, next_sequence) in listed.drain(start_index..end_index) {
+        for index in &listed[start_index..end_index] {
             let idx = page.len();
+            let record = index.record.clone();
             if record.title.is_none() {
-                needs_title.push((idx, record.thread_id.clone(), next_sequence));
+                needs_title.push((idx, record.thread_id.clone(), index.next_sequence));
             }
             page.push(record);
         }
@@ -2675,6 +2860,21 @@ fn message_append_log_path(
     ))
 }
 
+fn thread_index_root(scope: &ThreadScope) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&format!("{}/thread_index", scope_axes_string(scope)))
+}
+
+fn thread_index_record_path(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&format!(
+        "{}/thread_index/{}.json",
+        scope_axes_string(scope),
+        thread_id.as_str()
+    ))
+}
+
 fn summaries_root(
     scope: &ThreadScope,
     thread_id: &ThreadId,
@@ -2731,6 +2931,22 @@ fn scope_axes_string(scope: &ThreadScope) -> String {
         base.push_str(mission_id.as_str());
     }
     base
+}
+
+fn thread_index_cache_key(scope: &ThreadScope) -> String {
+    format!("{}:{}", scope.tenant_id.as_str(), scope_axes_string(scope))
+}
+
+fn thread_index_record_cache_key(scope: &ThreadScope, thread_id: &ThreadId) -> String {
+    format!("{}:{}", thread_index_cache_key(scope), thread_id.as_str())
+}
+
+fn compare_thread_activity(a: &SessionThreadRecord, b: &SessionThreadRecord) -> std::cmp::Ordering {
+    let a_key = a.updated_at.or(a.created_at);
+    let b_key = b.updated_at.or(b.created_at);
+    std::cmp::Reverse(a_key)
+        .cmp(&std::cmp::Reverse(b_key))
+        .then_with(|| a.thread_id.as_str().cmp(b.thread_id.as_str()))
 }
 
 fn scoped_path(raw: &str) -> Result<ScopedPath, SessionThreadError> {
