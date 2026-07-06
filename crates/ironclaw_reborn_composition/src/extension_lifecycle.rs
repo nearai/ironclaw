@@ -4097,6 +4097,54 @@ mod tests {
         assert_eq!(requests[0].action, SecretCleanupAction::Uninstall);
     }
 
+    #[tokio::test]
+    async fn ui_facade_extension_remove_preserves_credential_still_shared_with_another_extension() {
+        // Fail-safe coverage for `revoke_exclusive_credentials`: `gmail` and
+        // `google-calendar` both authorize against the shared `google` provider.
+        // Removing `gmail` while `google-calendar` remains installed must NOT
+        // revoke the personal Google credential — it is still exclusive to the
+        // remaining extension, and deleting it would silently break Calendar.
+        // This exercises the `providers_still_in_use` preservation branch the
+        // single-extension revoke test above cannot reach.
+        let cleanup = Arc::new(RecordingExtensionCredentialCleanup::default());
+        let (_dir, _storage_root, facade, _active_registry, _installation_store) =
+            extension_lifecycle_fixture_with_catalog_service_and_cleanup(
+                AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+                Some(cleanup.clone() as Arc<dyn ExtensionCredentialCleanup>),
+            );
+        let gmail =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "gmail").expect("valid ref");
+        let calendar = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "google-calendar")
+            .expect("valid ref");
+
+        for package_ref in [gmail.clone(), calendar.clone()] {
+            facade
+                .execute(
+                    lifecycle_surface_context(),
+                    LifecycleProductAction::ExtensionInstall { package_ref },
+                )
+                .await
+                .expect("install Google extension");
+        }
+
+        let remove = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionRemove { package_ref: gmail },
+            )
+            .await
+            .expect("remove gmail via the WebUI facade");
+        assert_eq!(remove.phase, LifecyclePhase::Removed);
+
+        let requests = cleanup.requests.lock().expect("cleanup lock");
+        assert!(
+            requests.is_empty(),
+            "the shared google credential must be preserved while google-calendar \
+             still authorizes against it, got cleanup requests: {requests:?}"
+        );
+    }
+
     fn extension_management_port_fixture_with_catalog_and_service(
         catalog: AvailableExtensionCatalog,
         lifecycle_service: ExtensionLifecycleService,

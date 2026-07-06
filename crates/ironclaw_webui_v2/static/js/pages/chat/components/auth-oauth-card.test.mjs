@@ -193,3 +193,52 @@ test("AuthOauthCard refuses non-HTTPS authorization urls before any window.open"
   assert.equal(openAuthPopupCalls.length, 0);
   assert.ok(stateSets.includes("authGate.serviceUnavailable"));
 });
+
+// Render with the four useState slots forced ([opened, error, closedNotice,
+// watchNonce]) so we can exercise the waiting + closed-before-finish render
+// states the no-op-setter default stub can't reach.
+function renderCardWithStates(states, gate = defaultGate()) {
+  let stateIndex = 0;
+  const context = {
+    globalThis: {},
+    html: (strings, ...values) => ({ strings: Array.from(strings), values }),
+    React: {
+      useState: () => [states[stateIndex++], () => {}],
+      useCallback: (fn) => fn,
+      useMemo: (fn) => fn(),
+      useEffect: () => {},
+      useRef: (initial) => ({ current: initial ?? null }),
+    },
+    useT: () => (key, params) =>
+      params ? `${key}:${JSON.stringify(params)}` : key,
+    Button() {},
+    Icon() {},
+    Spinner() {},
+    AuthGateShell() {},
+    openAuthPopup: () => ({ ok: true, popup: null }),
+    window: {
+      open: () => ({ closed: false }),
+      setInterval: () => 0,
+      clearInterval() {},
+      setTimeout: () => 0,
+      clearTimeout() {},
+    },
+    URL,
+  };
+  vm.runInNewContext(authOauthCardSourceForTest(), context);
+  return context.globalThis.__testExports.AuthOauthCard({ gate, onCancel: () => {} });
+}
+
+test("AuthOauthCard shows the button loading + waiting label while the popup is open", () => {
+  // opened=true, closedNotice=false -> awaiting
+  const body = JSON.stringify(renderCardWithStates([true, "", false, 1]));
+  assert.match(body, /authGate\.authorizing/, "the button shows the waiting label");
+  assert.doesNotMatch(body, /closed before you finished/, "no closed notice while awaiting");
+});
+
+test("AuthOauthCard surfaces closed-before-finish feedback after the popup closes", () => {
+  // opened=true, closedNotice=true
+  const body = JSON.stringify(renderCardWithStates([true, "", true, 1]));
+  assert.match(body, /closed before you finished/, "closed-before-finish notice appears");
+  assert.doesNotMatch(body, /authGate\.authorizing/, "no waiting label once closed");
+});

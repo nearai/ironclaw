@@ -5290,6 +5290,55 @@ mod tests {
         );
     }
 
+    /// Caller-level regression for the Slack durable conversation store mount
+    /// alias. `slack_host_state_mount_view` has a unit test for the grant set,
+    /// but the grant only matters through the composed path: production wraps
+    /// the local-dev root filesystem with that view via
+    /// `local_dev_slack_host_state_filesystem`, then opens the store with
+    /// `RebornFilesystemConversationServices::new`, whose init reads
+    /// `/conversations/state.json`. Without the `/conversations` alias the
+    /// ScopedFilesystem rejects that path ("no mount alias matches scoped
+    /// path"), init fails, and every inbound Slack DM is silently dropped (the
+    /// bug fixed in 7917cf89f). This drives that exact composition so a future
+    /// edit that drops the alias fails here, not just in the mount-view unit
+    /// test the composition never consults directly.
+    #[cfg(all(
+        any(feature = "libsql", feature = "postgres"),
+        feature = "slack-v2-host-beta"
+    ))]
+    #[tokio::test]
+    async fn slack_durable_conversation_store_initializes_through_composed_host_state_mount() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let local_dev_root = dir.path().join("local-dev");
+        // `local_dev_project_filesystem` mounts these host paths; they must
+        // exist before the root filesystem is built.
+        std::fs::create_dir_all(local_dev_root.join("workspace")).expect("workspace dir");
+        std::fs::create_dir_all(local_dev_root.join("system/extensions"))
+            .expect("system extensions dir");
+
+        let root_filesystem = build_local_dev_root_filesystem(
+            &local_dev_root,
+            &local_dev_root.join("workspace"),
+            None,
+            LocalDevStorageBackendInput::LocalDefault,
+        )
+        .await
+        .expect("local-dev root filesystem")
+        .filesystem;
+
+        // Exactly how production composes the Slack host-state filesystem.
+        let host_state_filesystem = local_dev_slack_host_state_filesystem(root_filesystem);
+
+        let conversations = RebornFilesystemConversationServices::new(host_state_filesystem).await;
+
+        assert!(
+            conversations.is_ok(),
+            "durable conversation store must open `/conversations/state.json` \
+             through the composed Slack host-state mount view; got {:?}",
+            conversations.err()
+        );
+    }
+
     /// Verify that `attach_hosted_mcp_runtime` is soft-disabled when the host
     /// runtime has no HTTP egress (e.g. in-memory-only test services). The
     /// function must not panic or return an error; it simply skips the MCP

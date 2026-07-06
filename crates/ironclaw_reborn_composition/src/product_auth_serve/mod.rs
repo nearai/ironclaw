@@ -1569,6 +1569,54 @@ mod tests {
     use ironclaw_turns::{TurnRunId, TurnScope};
     use tower::ServiceExt;
 
+    // Contract: the origin-independent reconnect flow-status route is a
+    // read-only, authenticated, per-caller poll. Locking its policy here stops
+    // a future edit from silently loosening it (e.g. dropping bearer auth,
+    // accepting a body, or widening the rate-limit scope to per-IP/public).
+    #[test]
+    fn flow_status_route_descriptor_locks_read_only_bearer_policy() {
+        let descriptors = product_auth_route_descriptors();
+        let flow_status = descriptors
+            .iter()
+            .find(|descriptor| descriptor.route_id().as_str() == OAUTH_FLOW_STATUS_ROUTE_ID)
+            .expect("the flow-status descriptor must be registered");
+
+        assert_eq!(flow_status.method(), NetworkMethod::Get);
+
+        let policy = flow_status.policy();
+        // Read-only status probe: it never reads a request body.
+        assert!(
+            matches!(policy.body_limit(), BodyLimitPolicy::NoBody),
+            "flow-status must reject any request body"
+        );
+        // Bearer auth, scoped to the authenticated caller — so a browser cannot
+        // forge tenant/user and read another caller's flow.
+        assert!(
+            matches!(
+                policy.auth(),
+                IngressAuthPolicy::Required { schemes }
+                    if schemes.contains(&IngressAuthScheme::BearerToken)
+            ),
+            "flow-status must require bearer auth"
+        );
+        assert_eq!(
+            policy.scope_source(),
+            ironclaw_host_api::IngressScopeSource::AuthenticatedCaller
+        );
+        // Per-caller rate limit for the poll cadence; never per-IP/public.
+        assert!(
+            matches!(
+                policy.rate_limit(),
+                RateLimitPolicy::Limited {
+                    scope: RateLimitScope::PerCaller,
+                    ..
+                }
+            ),
+            "flow-status must be per-caller rate limited"
+        );
+        assert_eq!(policy.cors(), CorsPolicy::SameOriginOnly);
+    }
+
     struct NoopDispatcher;
 
     #[async_trait]
