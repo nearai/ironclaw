@@ -161,6 +161,12 @@ mod tests {
         ) -> Result<LoopCheckpointStateRef, AgentLoopHostError> {
             *self.stage_calls.lock().expect("not poisoned") += 1;
             let _ = request;
+            if self.fail {
+                return Err(AgentLoopHostError::new(
+                    ironclaw_turns::run_profile::AgentLoopHostErrorKind::Invalid,
+                    "stub stage failure",
+                ));
+            }
             LoopCheckpointStateRef::new("checkpoint:stub-staged").map_err(|reason| {
                 AgentLoopHostError::new(
                     ironclaw_turns::run_profile::AgentLoopHostErrorKind::Internal,
@@ -175,6 +181,12 @@ mod tests {
         ) -> Result<ironclaw_turns::run_profile::LoadedCheckpointPayload, AgentLoopHostError>
         {
             *self.load_calls.lock().expect("not poisoned") += 1;
+            if self.fail {
+                return Err(AgentLoopHostError::new(
+                    ironclaw_turns::run_profile::AgentLoopHostErrorKind::Invalid,
+                    "stub load failure",
+                ));
+            }
             Ok(ironclaw_turns::run_profile::LoadedCheckpointPayload {
                 kind: LoopCheckpointKind::BeforeModel,
                 schema_id: request.expected_schema_id,
@@ -277,6 +289,47 @@ mod tests {
             })
             .await
             .expect("forwarded load call succeeds");
+        assert_eq!(inner.load_call_count(), 1);
+    }
+
+    /// Mirrors the happy-path forwarding test above but with a failing inner
+    /// port: both pass-throughs must propagate the inner error unchanged
+    /// rather than swallowing it or falling through to a default.
+    #[tokio::test]
+    async fn stage_and_load_checkpoint_payload_forward_inner_error() {
+        let inner = Arc::new(StubCheckpointPort::failing());
+        let dispatcher = Arc::new(HookDispatcher::new(HookRegistry::new()));
+        let wrapped = HookedLoopCheckpointPort::new(inner.clone(), dispatcher, tenant());
+
+        let stage_err = wrapped
+            .stage_checkpoint_payload(ironclaw_turns::run_profile::StageCheckpointPayloadRequest {
+                kind: LoopCheckpointKind::BeforeModel,
+                schema_id: "test-schema".to_string(),
+                payload: b"payload".to_vec(),
+            })
+            .await
+            .expect_err("inner stage error must propagate");
+        assert_eq!(
+            stage_err.kind,
+            ironclaw_turns::run_profile::AgentLoopHostErrorKind::Invalid
+        );
+        assert_eq!(inner.stage_call_count(), 1);
+
+        let load_err = wrapped
+            .load_checkpoint_payload(ironclaw_turns::run_profile::LoadCheckpointPayloadRequest {
+                checkpoint_id: TurnCheckpointId::new(),
+                expected_schema_id: ironclaw_turns::run_profile::CheckpointSchemaId::new(
+                    "test-schema",
+                )
+                .expect("ok"),
+                expected_schema_version: ironclaw_turns::RunProfileVersion::new(1),
+            })
+            .await
+            .expect_err("inner load error must propagate");
+        assert_eq!(
+            load_err.kind,
+            ironclaw_turns::run_profile::AgentLoopHostErrorKind::Invalid
+        );
         assert_eq!(inner.load_call_count(), 1);
     }
 
