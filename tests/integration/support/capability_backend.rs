@@ -74,6 +74,19 @@ impl RebornCapabilityBackend {
         github_network_statuses: Vec<u16>,
         park_capability_gate: Option<ParkingCapabilityGate>,
     ) -> HarnessResult<GroupCapability> {
+        // Fail fast rather than silently ignore: only `BuiltinHttpTools` wires
+        // `park_capability_dispatch` below, so a gate paired with any other
+        // backend would otherwise dispatch un-parked with no signal to the
+        // caller.
+        if park_capability_gate.is_some()
+            && !matches!(self, RebornCapabilityBackend::BuiltinHttpTools)
+        {
+            return Err(
+                "park_tool_dispatch is only supported by RebornCapabilityBackend::BuiltinHttpTools \
+                 (select it via .with_builtin_http_tools())"
+                    .into(),
+            );
+        }
         Ok(match self {
             RebornCapabilityBackend::Echo => GroupCapability::Recording,
             RebornCapabilityBackend::BuiltinHttpTools => {
@@ -96,8 +109,8 @@ impl RebornCapabilityBackend {
                     host_runtime.install_process_script(scripted_process)?;
                 }
                 // E-GATEWAY tool-path analog of `park_model` (lease-wedge coverage,
-                // issue #5476). Only wired for this backend — no other caller needs
-                // it yet; other arms below ignore `park_capability_gate`.
+                // issue #5476). Only wired for this backend — the guard above
+                // fails the build if a gate is paired with any other backend.
                 let host_runtime = match park_capability_gate {
                     Some(gate) => host_runtime.park_capability_dispatch(gate),
                     None => host_runtime,

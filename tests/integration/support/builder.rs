@@ -142,6 +142,11 @@ pub struct RebornIntegrationHarnessBuilder {
     /// 90s) for lease-expiry-under-a-wedged-tool coverage. Threaded into
     /// `RebornIntegrationGroupBuilder::with_runner_lease_ttl_for_test`.
     runner_lease_ttl: Option<chrono::Duration>,
+    /// Shortens the underlying group's scheduler lease-recovery sweep
+    /// interval (default 10s) for lease-expiry-under-a-wedged-tool coverage.
+    /// Threaded into
+    /// `RebornIntegrationGroupBuilder::with_lease_recovery_interval_for_test`.
+    lease_recovery_interval: Option<Duration>,
 }
 
 impl RebornIntegrationHarnessBuilder {
@@ -233,6 +238,16 @@ impl RebornIntegrationHarnessBuilder {
     /// today's behavior byte-identical.
     pub fn with_runner_lease_ttl_for_test(mut self, ttl: chrono::Duration) -> Self {
         self.runner_lease_ttl = Some(ttl);
+        self
+    }
+
+    /// Shorten the underlying group's scheduler lease-recovery sweep interval
+    /// (default 10s) so a wedged run is reaped without waiting on the
+    /// production tick. `None` (default) leaves today's behavior
+    /// byte-identical. See
+    /// `RebornIntegrationGroupBuilder::with_lease_recovery_interval_for_test`.
+    pub fn with_lease_recovery_interval_for_test(mut self, interval: Duration) -> Self {
+        self.lease_recovery_interval = Some(interval);
         self
     }
 
@@ -456,6 +471,9 @@ impl RebornIntegrationHarnessBuilder {
         if let Some(ttl) = self.runner_lease_ttl {
             group_builder = group_builder.with_runner_lease_ttl_for_test(ttl);
         }
+        if let Some(interval) = self.lease_recovery_interval {
+            group_builder = group_builder.with_lease_recovery_interval_for_test(interval);
+        }
         let group: RebornIntegrationGroup = group_builder
             .build_with_capability(group_capability)
             .await?;
@@ -559,6 +577,7 @@ impl RebornIntegrationHarness {
             hook_dispatcher_builder_factory: None,
             park_tool_gate: None,
             runner_lease_ttl: None,
+            lease_recovery_interval: None,
         }
     }
 

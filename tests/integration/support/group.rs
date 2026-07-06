@@ -343,6 +343,7 @@ impl RebornIntegrationGroup {
             communication_context_provider: None,
             hook_dispatcher_builder_factory: None,
             runner_lease_ttl_override: None,
+            lease_recovery_interval_override: None,
         }
     }
 
@@ -535,6 +536,10 @@ pub struct RebornIntegrationGroupBuilder {
     /// `runner_lease_ttl` (default 90s) when set. Builder method lives in
     /// `group_options.rs`. Default `None` (today's behavior, byte-identical).
     runner_lease_ttl_override: Option<chrono::Duration>,
+    /// Lease-wedge coverage: overrides the scheduler's
+    /// `lease_recovery_interval` (default 10s) when set. Builder method lives
+    /// in `group_options.rs`. Default `None` (today's behavior, byte-identical).
+    lease_recovery_interval_override: Option<Duration>,
 }
 
 impl RebornIntegrationGroupBuilder {
@@ -789,6 +794,9 @@ impl RebornIntegrationGroupBuilder {
             loop_exit_evidence,
             config: DefaultPlannedRuntimeConfig {
                 poll_interval: Duration::from_millis(10),
+                lease_recovery_interval: self
+                    .lease_recovery_interval_override
+                    .unwrap_or(DefaultPlannedRuntimeConfig::default().lease_recovery_interval),
                 // Enabler (b): explicit builder opt-in wins; otherwise resolve
                 // via `from_env()` exactly like `DefaultPlannedRuntimeConfig`'s
                 // own `Default` impl — never mutate the process env from a

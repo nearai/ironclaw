@@ -5,9 +5,11 @@
 //! cancel coverage (`tests/integration/cancel.rs`), but until now nothing
 //! could park the tool/capability-dispatch path — so a scenario where a tool
 //! call outlives its run's scheduler lease was untestable. This proves the
-//! scheduler's real lease-recovery sweep (`recover_expired_leases`, ~10s
-//! cadence) reaps a wedged run into a terminal, observable state instead of
-//! leaving it `Running` forever.
+//! scheduler's real lease-recovery sweep (`recover_expired_leases`, 10s
+//! production cadence, shortened here via
+//! `with_lease_recovery_interval_for_test` so the test doesn't wait on the
+//! production tick) reaps a wedged run into a terminal, observable state
+//! instead of leaving it `Running` forever.
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
@@ -28,27 +30,19 @@ const HTTP_TOOL_URL: &str = "https://api.example.test/v1/items";
 
 /// A wedged tool call (parked mid-dispatch, never released) outlives a
 /// deliberately shortened test-only lease TTL well before its run's next
-/// heartbeat is due, so the scheduler's real ~10s lease-recovery tick must
-/// reap it: `TurnStatus::Failed` with the `lease_expired` category, not an
-/// unbounded hang.
+/// heartbeat is due, so the scheduler's real (test-shortened) lease-recovery
+/// tick must reap it: `TurnStatus::Failed` with the `lease_expired` category,
+/// not an unbounded hang.
 #[tokio::test]
 async fn wedged_tool_call_is_reaped_by_lease_expiry_not_left_running_forever() {
     let gate = ParkingCapabilityGate::new();
-
-    // Guarantees `gate.release()` runs even if an assertion below panics first,
-    // so the parked task is never leaked for the rest of the process's lifetime.
-    struct ReleaseOnDrop(ParkingCapabilityGate);
-    impl Drop for ReleaseOnDrop {
-        fn drop(&mut self) {
-            self.0.release();
-        }
-    }
-    let _guard = ReleaseOnDrop(gate.clone());
+    let _guard = gate.release_guard();
 
     let harness = RebornIntegrationHarness::test_default()
         .with_builtin_http_tools()
         .park_tool_dispatch(gate.clone())
         .with_runner_lease_ttl_for_test(chrono::Duration::milliseconds(200))
+        .with_lease_recovery_interval_for_test(Duration::from_millis(50))
         .script([RebornScriptedReply::tool_call(
             "builtin.http",
             json!({"url": HTTP_TOOL_URL}),
@@ -67,10 +61,13 @@ async fn wedged_tool_call_is_reaped_by_lease_expiry_not_left_running_forever() {
         .expect("tool dispatch parks before the timeout");
 
     // Never release: the tool call outlives its short, test-only lease.
-    let state = harness
-        .wait_for_status(run_id, TurnStatus::Failed)
-        .await
-        .expect("wedged run is reaped by lease-expiry recovery, not left Running forever");
+    let state = tokio::time::timeout(
+        Duration::from_secs(10),
+        harness.wait_for_status(run_id, TurnStatus::Failed),
+    )
+    .await
+    .expect("wedged run is reaped by lease-expiry recovery before the timeout")
+    .expect("wedged run is reaped by lease-expiry recovery, not left Running forever");
     assert_eq!(
         state.failure.as_ref().map(|failure| failure.category()),
         Some("lease_expired"),

@@ -59,6 +59,12 @@ impl ParkingCapabilityGate {
         let _ = self.0.release_tx.send(true);
     }
 
+    /// Guarantees `release()` runs even if a test assertion panics first, so a
+    /// parked dispatch is never leaked for the rest of the process's lifetime.
+    pub(crate) fn release_guard(&self) -> ParkingCapabilityGateReleaseGuard {
+        ParkingCapabilityGateReleaseGuard(self.clone())
+    }
+
     /// Runtime side: signal parked, then block until `release()` fires. A plain
     /// cooperative `.await` — no OS-thread blocking — so this stays safe under the
     /// default single-threaded `#[tokio::test]` flavor every sibling integration
@@ -77,6 +83,17 @@ impl ParkingCapabilityGate {
 impl Default for ParkingCapabilityGate {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// RAII guard returned by [`ParkingCapabilityGate::release_guard`]: releases
+/// the gate on drop so a test that panics before an explicit `release()` call
+/// never leaves the parked dispatch running for the rest of the process.
+pub(crate) struct ParkingCapabilityGateReleaseGuard(ParkingCapabilityGate);
+
+impl Drop for ParkingCapabilityGateReleaseGuard {
+    fn drop(&mut self) {
+        self.0.release();
     }
 }
 
@@ -167,7 +184,138 @@ impl HostRuntime for ParkingHostRuntime {
 mod tests {
     use std::time::Duration;
 
+    use chrono::Utc;
+    use ironclaw_host_api::{
+        CapabilityId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId, MountView,
+        ResourceEstimate, RuntimeKind, TrustClass, UserId,
+    };
+    use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+    use serde_json::Value;
+
     use super::*;
+
+    /// Minimal `HostRuntime` stub: every method the test doesn't drive panics,
+    /// so an accidental call to the wrong entry point fails loudly rather than
+    /// silently returning a stub value.
+    struct StubHostRuntime;
+
+    #[async_trait]
+    impl HostRuntime for StubHostRuntime {
+        async fn invoke_capability(
+            &self,
+            _request: RuntimeCapabilityRequest,
+        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+            panic!("test does not drive invoke_capability");
+        }
+
+        async fn spawn_capability(
+            &self,
+            _request: RuntimeCapabilityRequest,
+        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+            Err(HostRuntimeError::unavailable("stub forwards after release"))
+        }
+
+        async fn resume_capability(
+            &self,
+            _request: RuntimeCapabilityResumeRequest,
+        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+            panic!("test does not drive resume_capability");
+        }
+
+        async fn auth_resume_capability(
+            &self,
+            _request: RuntimeCapabilityAuthResumeRequest,
+        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+            panic!("test does not drive auth_resume_capability");
+        }
+
+        async fn resume_spawn_capability(
+            &self,
+            _request: RuntimeCapabilityResumeRequest,
+        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+            panic!("test does not drive resume_spawn_capability");
+        }
+
+        async fn visible_capabilities(
+            &self,
+            _request: RuntimeVisibleCapabilityRequest,
+        ) -> Result<RuntimeVisibleCapabilitySurface, HostRuntimeError> {
+            panic!("test does not drive visible_capabilities");
+        }
+
+        async fn cancel_work(
+            &self,
+            _request: CancelRuntimeWorkRequest,
+        ) -> Result<CancelRuntimeWorkOutcome, HostRuntimeError> {
+            panic!("test does not drive cancel_work");
+        }
+
+        async fn runtime_status(
+            &self,
+            _request: RuntimeStatusRequest,
+        ) -> Result<HostRuntimeStatus, HostRuntimeError> {
+            panic!("test does not drive runtime_status");
+        }
+
+        async fn health(&self) -> Result<HostRuntimeHealth, HostRuntimeError> {
+            panic!("test does not drive health");
+        }
+    }
+
+    fn stub_capability_request() -> RuntimeCapabilityRequest {
+        let context = ExecutionContext::local_default(
+            UserId::new("user").unwrap(),
+            ExtensionId::new("caller").unwrap(),
+            RuntimeKind::Wasm,
+            TrustClass::UserTrusted,
+            CapabilitySet::default(),
+            MountView::default(),
+        )
+        .unwrap();
+        RuntimeCapabilityRequest::new(
+            context,
+            CapabilityId::new("echo.say").unwrap(),
+            ResourceEstimate::default(),
+            Value::Null,
+            TrustDecision {
+                effective_trust: EffectiveTrustClass::user_trusted(),
+                authority_ceiling: AuthorityCeiling {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    max_resource_ceiling: None,
+                },
+                provenance: TrustProvenance::Default,
+                evaluated_at: Utc::now(),
+            },
+        )
+    }
+
+    /// `ParkingHostRuntime` parks both fresh-dispatch entry points
+    /// (`invoke_capability`, `spawn_capability`), but only `invoke_capability`
+    /// is exercised by the wedge integration test (`lease_wedge.rs` dispatches
+    /// a tool call, never a subagent spawn). This drives `spawn_capability`
+    /// directly: it must park until released, then forward to `inner`.
+    #[tokio::test]
+    async fn spawn_capability_parks_until_released_then_forwards_to_inner() {
+        let gate = ParkingCapabilityGate::new();
+        let runtime = ParkingHostRuntime::new(Arc::new(StubHostRuntime), gate.clone());
+
+        let call =
+            tokio::spawn(async move { runtime.spawn_capability(stub_capability_request()).await });
+
+        tokio::time::timeout(Duration::from_secs(5), gate.wait_until_parked())
+            .await
+            .expect("spawn_capability must park before the timeout");
+        gate.release();
+
+        let outcome = tokio::time::timeout(Duration::from_secs(5), call)
+            .await
+            .expect("released spawn_capability must complete before the timeout")
+            .expect("spawn_capability task must not panic");
+        assert!(
+            matches!(outcome, Err(HostRuntimeError::Unavailable { .. })),
+            "released spawn_capability must forward to the inner runtime, got {outcome:?}"
+        );
+    }
 
     /// Covers the same two `ParkingCapabilityGate` guarantees
     /// `ParkingModelGate`'s own unit test covers (see `scripted_provider.rs`):
