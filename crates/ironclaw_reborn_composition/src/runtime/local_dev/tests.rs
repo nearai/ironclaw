@@ -35,7 +35,7 @@ mod tests {
     };
     use ironclaw_threads::{
         EnsureThreadRequest, InMemorySessionThreadService, MessageKind, ThreadHistoryRequest,
-        ToolResultReferenceEnvelope, ToolResultSafeSummary,
+        ThreadScope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
     };
     use ironclaw_turns::{
         AcceptedMessageRef, LoopMessageRef, ReplyTargetBindingRef, RunProfileResolutionRequest,
