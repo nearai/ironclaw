@@ -242,3 +242,73 @@ TOML
 capture "${ratchet_sh}" "${fixtures_dir}/r_composition.lcov" "${empty_exemptions}" "${fixtures_dir}/r13_floor.toml"
 assert_exit_code "R13: enforce=false with no violations exits 0" 0 "${CAP_RC}"
 assert_contains "R13: unconditional DRY-RUN banner present even with no violations" "${CAP_OUT}" "Ratchet mode: DRY-RUN"
+
+# R14: [global].enforce is a quoted string ("false") instead of a native TOML
+# bool -> must be rejected, not coerced (bool("false") is truthy in Python,
+# which would silently flip a dry-run typo into enforcing). Pins PR #5718
+# coderabbit comment.
+cat > "${fixtures_dir}/r14_floor.toml" <<'TOML'
+[global]
+enforce = "false"
+floor_percent = 0.0
+TOML
+capture "${ratchet_sh}" "${fixtures_dir}/r_composition.lcov" "${empty_exemptions}" "${fixtures_dir}/r14_floor.toml"
+assert_exit_code "R14: enforce as a quoted string is rejected, exits 1" 1 "${CAP_RC}"
+assert_contains "R14: reports the enforce-must-be-boolean schema error" "${CAP_ERR}" \
+  "[global].enforce must be a boolean"
+
+# R15: the first per-crate floor is written as a single [crate] table (dict)
+# instead of [[crate]] (array-of-tables) -> must be rejected, not silently
+# replaced with an empty list (which would skip the per-crate gate entirely
+# even at enforce=true). Pins PR #5718 codex (P2) comment.
+cat > "${fixtures_dir}/r15_floor.toml" <<'TOML'
+[global]
+enforce = true
+floor_percent = 0.0
+
+[crate]
+name = "ironclaw_reborn_composition"
+floor_percent = 90.0
+TOML
+capture "${ratchet_sh}" "${fixtures_dir}/r_composition.lcov" "${empty_exemptions}" "${fixtures_dir}/r15_floor.toml"
+assert_exit_code "R15: a [crate] table instead of [[crate]] is rejected, exits 1" 1 "${CAP_RC}"
+assert_contains "R15: reports the [[crate]] array-of-tables schema error" "${CAP_ERR}" "[[crate]]"
+
+# R16: floor TOML has no [global] section at all -> exit 1, schema error
+# (existing branch had no regression case). Pins PR #5718 user comment.
+cat > "${fixtures_dir}/r16_floor.toml" <<'TOML'
+[[crate]]
+name = "ironclaw_reborn_composition"
+floor_percent = 90.0
+TOML
+capture "${ratchet_sh}" "${fixtures_dir}/r_composition.lcov" "${empty_exemptions}" "${fixtures_dir}/r16_floor.toml"
+assert_exit_code "R16: floor TOML missing [global] entirely exits 1" 1 "${CAP_RC}"
+assert_contains "R16: reports the missing-[global]-section schema error" "${CAP_ERR}" \
+  "missing required [global] section"
+
+# R17: [global] present but missing required 'floor_percent' -> exit 1,
+# schema error (existing branch had no regression case). Pins PR #5718 user
+# comment.
+cat > "${fixtures_dir}/r17_floor.toml" <<'TOML'
+[global]
+enforce = false
+TOML
+capture "${ratchet_sh}" "${fixtures_dir}/r_composition.lcov" "${empty_exemptions}" "${fixtures_dir}/r17_floor.toml"
+assert_exit_code "R17: [global] without floor_percent exits 1" 1 "${CAP_RC}"
+assert_contains "R17: reports the missing-floor_percent schema error" "${CAP_ERR}" \
+  "[global] missing required 'floor_percent'"
+
+# R18: [[crate]] entry has floor_percent but no 'name' -> exit 1, schema
+# error (existing branch had no regression case). Pins PR #5718 user comment.
+cat > "${fixtures_dir}/r18_floor.toml" <<'TOML'
+[global]
+enforce = false
+floor_percent = 0.0
+
+[[crate]]
+floor_percent = 90.0
+TOML
+capture "${ratchet_sh}" "${fixtures_dir}/r_composition.lcov" "${empty_exemptions}" "${fixtures_dir}/r18_floor.toml"
+assert_exit_code "R18: [[crate]] entry missing 'name' exits 1" 1 "${CAP_RC}"
+assert_contains "R18: reports the missing-'name' schema error" "${CAP_ERR}" \
+  "missing required 'name'"

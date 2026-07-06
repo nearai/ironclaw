@@ -305,3 +305,11 @@ assert_scope \
 has_core_code=true
 has_legacy_tests=true
 has_reborn_tests=true"
+
+assert_scope \
+  "shared coverage lcov lib is reborn-scoped (gemini: PR #5718 comment)" \
+  "scripts/ci/lib/reborn_coverage_lcov.py" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"

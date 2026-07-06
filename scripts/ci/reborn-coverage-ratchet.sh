@@ -93,14 +93,26 @@ if "floor_percent" not in global_cfg:
     print("coverage floor manifest [global] missing required 'floor_percent'", file=sys.stderr)
     sys.exit(1)
 
-enforce = bool(global_cfg.get("enforce", False))
+enforce_raw = global_cfg.get("enforce", False)
+if not isinstance(enforce_raw, bool):
+    print(
+        f"coverage floor manifest [global].enforce must be a boolean, got {enforce_raw!r}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+enforce = enforce_raw
 floor_percent_global = global_cfg["floor_percent"]
 tolerance_percent_global = float(global_cfg.get("tolerance_percent", 0.5))
 captured_total_lines_global = global_cfg.get("captured_total_lines")
 
 crate_entries_raw = floor.get("crate", [])
-if not isinstance(crate_entries_raw, list):
-    crate_entries_raw = []
+if "crate" in floor and not isinstance(crate_entries_raw, list):
+    print(
+        "coverage floor manifest has a 'crate' key that is not an array of tables — "
+        "per-crate floors must use [[crate]], not a single [crate] table",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 seen_names: set[str] = set()
 validated_crates = []

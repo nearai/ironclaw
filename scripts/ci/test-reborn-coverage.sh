@@ -794,6 +794,34 @@ else
   report_pass "C11: fake gh did not record a mutation (guard fires before gh use)"
 fi
 
+# C12: floor manifest exists (passes the C11 preflight guard) but is
+# malformed — missing [global] — so reborn-coverage-ratchet.sh itself exits
+# 1. The comment script's `|| true` around that call must still render the
+# ratchet's stderr into the sticky comment body and exit 0 (visibility-only,
+# never gates). Pins PR #5718 user comment.
+cat > "${fixtures_dir}/c12_malformed_floor.toml" <<'TOML'
+[[crate]]
+name = "ironclaw_reborn"
+floor_percent = 90.0
+TOML
+c12_log="${tmp_root}/c12-gh.log"
+capture env \
+  GH_TOKEN="fake-token" \
+  GITHUB_REPOSITORY="${gh_repo}" \
+  PR_NUMBER="${gh_pr}" \
+  PATH="${gh_bin_dir}:${PATH}" \
+  FAKE_GH_COMMENTS_JSON="${fixtures_dir}/c1_comments_empty.json" \
+  FAKE_GH_LOG="${c12_log}" \
+  "${comment_sh}" "${fixtures_dir}/c_basic_coverage.lcov" "${empty_exemptions}" "${fixtures_dir}/c12_malformed_floor.toml"
+assert_exit_code "C12: comment script still exits 0 for a malformed (but present) floor manifest" 0 "${CAP_RC}"
+if [ -f "${c12_log}" ]; then
+  c12_body="$(sed -n '/^BODY_START$/,/^BODY_END$/p' "${c12_log}" | sed '1d;$d')"
+  assert_contains "C12: rendered comment carries the ratchet schema error" "${c12_body}" \
+    "missing required [global] section"
+else
+  report_fail "C12: fake gh did not record a mutation (comment must still render/upsert)"
+fi
+
 # ---------------------------------------------------------------------------
 # D. reborn-coverage-int-tier-tests.sh (int-tier suite discovery)
 # ---------------------------------------------------------------------------
