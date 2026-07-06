@@ -116,9 +116,15 @@ async fn capability_io_resolves_staged_inputs_and_materializes_run_scoped_result
         serde_json::json!({ "reply": "hello" })
     );
 
-    io.resolve_capability_input(&run_context, &input_ref)
-        .await
-        .expect_err("staged input refs should be consumed on successful read");
+    // Inputs stay resolvable within their run so the executor's bounded
+    // capability retry can re-resolve the same ref (issue #5608); results
+    // remain consume-on-read. `prune_run` is the input's only removal path.
+    assert_eq!(
+        io.resolve_capability_input(&run_context, &input_ref)
+            .await
+            .expect("staged input refs stay resolvable within their run"),
+        serde_json::json!({ "text": "hello" })
+    );
     io.result_for_ref(&run_context, &result_ref)
         .expect_err("staged result refs should be consumed on successful read");
 
@@ -133,6 +139,11 @@ async fn capability_io_resolves_staged_inputs_and_materializes_run_scoped_result
         io.result_for_ref(&run_context, &result_ref).unwrap(),
         serde_json::json!({ "reply": "terminal" })
     );
+
+    io.prune_run(&run_context).expect("run pruned");
+    io.resolve_capability_input(&run_context, &input_ref)
+        .await
+        .expect_err("pruned input refs must no longer resolve");
 }
 
 /// F6: ProductLiveCapabilityIo::write_capability_result must return a byte_len

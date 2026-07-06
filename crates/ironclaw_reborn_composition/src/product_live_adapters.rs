@@ -63,9 +63,12 @@ pub enum ProductLivePlannedRuntimeAdapterError {
 /// an entrypoint-level hook to pass the same store into its projection services.
 ///
 /// Inputs and results are keyed by run-scoped refs so provider tool-call payloads and
-/// runtime outputs cannot be read across loop runs. Staged refs are consumed on successful read.
-/// Each store is capped at 1024 staged refs and 4 MiB of serialized JSON; callers should still
-/// prune entries when a run completes to clear refs that were staged but never consumed.
+/// runtime outputs cannot be read across loop runs. Staged inputs are retained for their
+/// run so the executor's bounded capability retry can re-resolve the same `input_ref`
+/// (issue #5608 — mirrors `ProviderToolCallInputResolver`'s non-consuming provider-input
+/// map and `LocalDevCapabilityIo`'s input store); staged results are consumed on
+/// successful read. Each store is capped at 1024 staged refs and 4 MiB of serialized
+/// JSON; callers should still prune entries when a run completes.
 pub struct ProductLiveCapabilityIo {
     inputs: Mutex<HashMap<String, StagedCapabilityInput>>,
     results: Mutex<HashMap<String, StagedCapabilityResult>>,
@@ -191,11 +194,15 @@ impl LoopCapabilityInputResolver for ProductLiveCapabilityIo {
         input_ref: &CapabilityInputRef,
     ) -> Result<serde_json::Value, AgentLoopHostError> {
         ensure_ref_scoped_to_run("input", input_ref.as_str(), run_context)?;
-        let mut inputs = self
+        let inputs = self
             .inputs
             .lock()
             .map_err(|_| capability_io_internal_error())?;
-        let input = inputs.remove(input_ref.as_str()).ok_or_else(|| {
+        // Non-consuming read: the executor's bounded capability retry re-issues
+        // the invocation with the SAME run-scoped input_ref, so a consumed ref
+        // would turn every retryable failure into a terminal driver_unavailable
+        // (issue #5608). Entries are dropped by `prune_run`, never by resolve.
+        let input = inputs.get(input_ref.as_str()).ok_or_else(|| {
             AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
                 "capability input ref was not staged for this loop run",
