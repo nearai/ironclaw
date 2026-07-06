@@ -77,7 +77,10 @@ RUN cargo build \
 FROM debian:bookworm-slim AS runtime
 
 RUN apt-get -o Acquire::Retries=3 update \
-    && apt-get -o Acquire::Retries=3 install -y --no-install-recommends ca-certificates \
+    && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+        ca-certificates \
+        postgresql-client \
+        sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/dist/ironclaw-reborn /usr/local/bin/ironclaw-reborn

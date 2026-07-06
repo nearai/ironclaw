@@ -711,6 +711,8 @@ impl RebornBinaryE2EHarness {
         let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
         let milestone_sink =
             Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+        let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
+        let exposes_spawn_subagent = capability_mode.exposes_spawn_subagent();
         let (
             capability_factory,
             capability_surface_resolver,
@@ -718,12 +720,28 @@ impl RebornBinaryE2EHarness {
             capability_result_writer,
             capability_recorder,
         ) = capability_mode.into_parts(milestone_sink.clone())?;
+        let mut runtime_config = DefaultPlannedRuntimeConfig {
+            // Keep the durable runner heartbeat at its production default;
+            // test responsiveness comes from fast scheduler polling below.
+            poll_interval: Duration::from_millis(10),
+            // The binary-E2E harness runs many scripted runtimes in one test
+            // process. Keep each harness deterministic; scheduler worker-pool
+            // concurrency is covered by lower-level runtime tests.
+            worker_count: Some(std::num::NonZeroUsize::MIN),
+            ..DefaultPlannedRuntimeConfig::default()
+        };
+        if exposes_spawn_subagent {
+            // Explicit spawn regression tests need the tool surface even though
+            // production currently disables model-facing spawn by default.
+            runtime_config.disabled_capability_ids = Vec::new();
+        }
         let turn_state_for_evidence: Arc<dyn TurnStateStore> = turn_store.clone();
         let evidence = Arc::new(HarnessLoopExitEvidencePort {
             inner: ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
                 thread_harness.service.clone(),
                 turn_state_for_evidence,
                 Arc::clone(&loop_checkpoint_store),
+                subagent_gate_store.clone(),
                 thread_scope.clone(),
             ),
             loop_checkpoint_store: Arc::clone(&loop_checkpoint_store),
@@ -743,19 +761,14 @@ impl RebornBinaryE2EHarness {
             capability_surface_resolver,
             capability_result_writer,
             subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
-            subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
+            subagent_gate_store,
             subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
             subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
                 capability_input_resolver,
             )),
             subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
             loop_exit_evidence: evidence,
-            config: DefaultPlannedRuntimeConfig {
-                // Keep the durable runner heartbeat at its production default;
-                // test responsiveness comes from fast scheduler polling below.
-                poll_interval: Duration::from_millis(10),
-                ..DefaultPlannedRuntimeConfig::default()
-            },
+            config: runtime_config,
             model_route_resolver: None,
             cancellation_factory: None,
             skill_context_source: None,
