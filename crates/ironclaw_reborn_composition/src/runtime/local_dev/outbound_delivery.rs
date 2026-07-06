@@ -298,14 +298,9 @@ impl LocalDevSyntheticCapabilityHandler for OutboundDeliveryTargetSetHandler {
         .await
         {
             Ok(response) => response,
-            Err(error) if error.code == RebornServicesErrorCode::NotFound => {
-                return Ok(CapabilityOutcome::Failed(CapabilityFailure {
-                    error_kind: CapabilityFailureKind::InvalidInput,
-                    safe_summary: "outbound delivery target is not available".to_string(),
-                    detail: None,
-                }));
-            }
-            Err(error) => return Err(outbound_delivery_host_error("set_target", error)),
+            // See `outbound_delivery_outcome`: recoverable service errors are
+            // model-visible failures, not terminal host errors.
+            Err(error) => return outbound_delivery_outcome(error),
         };
         if let Some(approved_lease) = approved_lease {
             // Lease consumption races (expired / exhausted between claim and

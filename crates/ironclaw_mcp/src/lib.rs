@@ -1852,7 +1852,7 @@ mod tests {
         let json = parse_mcp_response(&mcp_response("application/json", ok_body), id)
             .expect("plain JSON framing parses");
         assert_eq!(json.result, Some(json!({"ok": true})));
-        assert!(!json.error);
+        assert!(json.error.is_none());
 
         // SSE single-event framing (content-type text/event-stream).
         let sse_single = parse_mcp_response(
@@ -1892,7 +1892,10 @@ mod tests {
             id,
         )
         .expect("JSON error-object is a valid response, not a parse failure");
-        assert!(json_err.error, "plain-JSON error object flags error");
+        assert!(
+            json_err.error.is_some(),
+            "plain-JSON error object flags error"
+        );
         assert_eq!(json_err.result, None, "error object carries no result");
 
         let sse_err = parse_mcp_response(
@@ -1903,7 +1906,10 @@ mod tests {
             id,
         )
         .expect("SSE error-object is a valid response, not a parse failure");
-        assert!(sse_err.error, "SSE-framed error object flags error");
+        assert!(
+            sse_err.error.is_some(),
+            "SSE-framed error object flags error"
+        );
         assert_eq!(sse_err.result, None, "error object carries no result");
     }
 
