@@ -1,0 +1,21 @@
+version: 1
+reviewers:
+  - id: reviewer
+    display_name: ironloop/common-reviewer
+    instructions: .ironloop/agents/common-reviewer/AGENTS.md
+    auto_review: true
+
+developers:
+  - id: implementer
+    display_name: ironloop/small-fix-implementer
+    instructions: .ironloop/agents/small-fix-implementer/AGENTS.md
+    actions: ["implement"]
+
+  - id: resolver
+    display_name: ironloop/small-fix-resolver
+    instructions: .ironloop/agents/small-fix-resolver/AGENTS.md
+    actions: ["resolve"]
+    auto_resolve:
+      enabled: true
+      quiet_period_seconds: 300
+      max_attempts: 5
