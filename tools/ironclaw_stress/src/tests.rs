@@ -149,6 +149,21 @@ fn chat_turn_rejects_multi_process_runs() {
 }
 
 #[test]
+fn prewarm_dispatches_secret_and_process_local_scenarios() {
+    assert_eq!(
+        Scenario::SecretConsume.prewarm_target(),
+        PrewarmTarget::SecretControlPlane
+    );
+    assert_eq!(Scenario::CpuBurn.prewarm_target(), PrewarmTarget::None);
+    assert_eq!(Scenario::MemoryChurn.prewarm_target(), PrewarmTarget::None);
+    assert_eq!(
+        Scenario::ReserveRelease.prewarm_target(),
+        PrewarmTarget::ResourceGovernor
+    );
+    assert_eq!(Scenario::ChatTurn.prewarm_target(), PrewarmTarget::UserTurn);
+}
+
+#[test]
 fn turn_lifecycle_churn_is_a_user_turn_scenario() {
     let mut args = test_args();
     args.scenario = Scenario::TurnLifecycleChurn;
@@ -883,6 +898,24 @@ fn bottleneck_report_identifies_failure_stage_and_db_growth() {
     assert!(rendered.contains("model_tool_wait"));
     assert!(rendered.contains("model_wait"));
     assert!(rendered.contains("libsql_growth"));
+}
+
+#[test]
+fn bottleneck_report_includes_thread_list_stage_latency() {
+    let args = test_args();
+    let mut summary = run_summary_with_bottlenecks();
+    let stages = summary
+        .stage_latency
+        .as_mut()
+        .expect("test summary has stage latency");
+    stages.list_threads_cold = stage(1, 2_000_000);
+    stages.model_wait = stage(1, 1_000);
+    let captured = capture::CapturedRun::Single(Box::new(summary));
+
+    let rendered = analysis::render_bottleneck_report(&args, "run", &captured);
+
+    assert!(rendered.contains("list_threads_cold"));
+    assert!(rendered.contains("larger --thread-list-count"));
 }
 
 #[test]

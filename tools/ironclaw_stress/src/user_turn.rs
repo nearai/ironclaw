@@ -1744,7 +1744,9 @@ where
 }
 
 fn row_turn_store_key(scope: &ResourceScope) -> String {
-    format!("{}:{}", scope.tenant_id.as_str(), scope.user_id.as_str())
+    let tenant = scope.tenant_id.as_str();
+    let user = scope.user_id.as_str();
+    format!("{}:{tenant}:{}:{user}", tenant.len(), user.len())
 }
 
 fn user_turn_mount_view(run_id: &str, scope: &ResourceScope) -> Result<MountView, HostApiError> {

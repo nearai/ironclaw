@@ -161,10 +161,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path_depths = env_list_usize("LATENCY_PATH_DEPTHS", &[2]);
     let payload_bytes = env_list_usize("LATENCY_PAYLOAD_BYTES", &[512]);
     let profile = env::var("LATENCY_PROFILE").unwrap_or_else(|_| "full-dev".to_string());
-    let mode = if profile == "holdout" {
-        "holdout"
-    } else {
-        "dev"
+    let mode = match profile.as_str() {
+        "holdout" => "holdout",
+        "acceptance" => "acceptance",
+        _ => "dev",
     }
     .to_string();
 
@@ -207,23 +207,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     ]);
 
+    let path_depths_shared: Arc<[usize]> = Arc::from(path_depths.clone());
+    let payload_bytes_shared: Arc<[usize]> = Arc::from(payload_bytes.clone());
+
     let mut results = Vec::new();
     if backends.contains(&BackendName::Libsql) {
         let libsql_backend = open_backend(BackendName::Libsql, None).await?;
         let libsql_run_id = uuid::Uuid::new_v4().simple().to_string();
         for &workload in &workloads {
             for &concurrency in &concurrency {
+                let run_id = format!("{libsql_run_id}-{}-c{concurrency}", workload.name);
                 let row = run_workload(
-                    libsql_backend.clone(),
-                    BackendName::Libsql,
-                    None,
-                    &libsql_run_id,
-                    workload,
+                    WorkloadExecution {
+                        backend_context: libsql_backend.clone(),
+                        backend: BackendName::Libsql,
+                        postgres_pool_size: None,
+                        run_id: run_id.into(),
+                        workload,
+                        path_depths: Arc::clone(&path_depths_shared),
+                        payload_bytes: Arc::clone(&payload_bytes_shared),
+                    },
                     concurrency,
                     warmup,
                     samples,
-                    &path_depths,
-                    &payload_bytes,
                 )
                 .await?;
                 results.push(row);
@@ -238,17 +244,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let postgres_run_id = uuid::Uuid::new_v4().simple().to_string();
             for &workload in &workloads {
                 for &concurrency in &concurrency {
+                    let run_id = format!("{postgres_run_id}-{}-c{concurrency}", workload.name);
                     let row = run_workload(
-                        postgres_backend.clone(),
-                        BackendName::Postgres,
-                        Some(postgres_pool_size),
-                        &postgres_run_id,
-                        workload,
+                        WorkloadExecution {
+                            backend_context: postgres_backend.clone(),
+                            backend: BackendName::Postgres,
+                            postgres_pool_size: Some(postgres_pool_size),
+                            run_id: run_id.into(),
+                            workload,
+                            path_depths: Arc::clone(&path_depths_shared),
+                            payload_bytes: Arc::clone(&payload_bytes_shared),
+                        },
                         concurrency,
                         warmup,
                         samples,
-                        &path_depths,
-                        &payload_bytes,
                     )
                     .await?;
                     results.push(row);
@@ -276,7 +285,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         results,
         comparisons,
     };
+    let gate_failed = scored_gate_failed(&report.mode, &report.results, &report.comparisons);
     println!("{}", serde_json::to_string_pretty(&report)?);
+    if gate_failed {
+        return Err(std::io::Error::other(
+            "latency gate failed: scored rows had errors or required comparisons missed thresholds",
+        )
+        .into());
+    }
     Ok(())
 }
 
@@ -290,6 +306,18 @@ struct BackendContext {
     resource_governor: Arc<dyn ResourceGovernor>,
     webui_session: Arc<OnceCell<WebuiRuntimeContext>>,
     webui_postgres_pool: Option<deadpool_postgres::Pool>,
+    _tempdir: Option<Arc<tempfile::TempDir>>,
+}
+
+#[derive(Clone)]
+struct WorkloadExecution {
+    backend_context: BackendContext,
+    backend: BackendName,
+    postgres_pool_size: Option<usize>,
+    run_id: Arc<str>,
+    workload: Workload,
+    path_depths: Arc<[usize]>,
+    payload_bytes: Arc<[usize]>,
 }
 
 trait TurnLifecycleStore: TurnStateStore + TurnRunTransitionPort + LoopCheckpointStore {}
@@ -311,7 +339,7 @@ async fn open_backend(
     match backend {
         BackendName::Libsql => {
             let dir = tempfile::tempdir()?;
-            let db_path = dir.keep().join("latency-libsql.db");
+            let db_path = dir.path().join("latency-libsql.db");
             let db = Arc::new(libsql::Builder::new_local(db_path).build().await?);
             let fs = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)));
             fs.run_migrations().await?;
@@ -328,6 +356,7 @@ async fn open_backend(
                 resource_governor: control_plane.resource_governor,
                 webui_session: Arc::new(OnceCell::new()),
                 webui_postgres_pool: None,
+                _tempdir: Some(Arc::new(dir)),
             })
         }
         BackendName::Postgres => {
@@ -358,6 +387,7 @@ async fn open_backend(
                 resource_governor: control_plane.resource_governor,
                 webui_session: Arc::new(OnceCell::new()),
                 webui_postgres_pool: Some(pool),
+                _tempdir: None,
             })
         }
     }
@@ -452,76 +482,29 @@ fn latency_secrets_crypto() -> Arc<SecretsCrypto> {
 }
 
 async fn run_workload(
-    backend_context: BackendContext,
-    backend: BackendName,
-    postgres_pool_size: Option<usize>,
-    run_id: &str,
-    workload: Workload,
+    execution: WorkloadExecution,
     concurrency: usize,
     warmup: usize,
     samples: usize,
-    path_depths: &[usize],
-    payload_bytes: &[usize],
 ) -> Result<ResultRow, Box<dyn std::error::Error>> {
-    let workload_run_id = format!("{run_id}-{}-c{concurrency}", workload.name);
     for i in 0..warmup {
-        setup_workload(
-            backend_context.clone(),
-            backend,
-            postgres_pool_size,
-            &workload_run_id,
-            workload,
-            i,
-            path_depths,
-            payload_bytes,
-        )
-        .await?;
-        let _ = run_one(
-            backend_context.clone(),
-            backend,
-            postgres_pool_size,
-            &workload_run_id,
-            workload,
-            i,
-            path_depths,
-            payload_bytes,
-        )
-        .await;
+        setup_workload(execution.clone(), i)
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let _ = run_one(execution.clone(), i).await;
     }
 
     let sem = Arc::new(Semaphore::new(concurrency.max(1)));
     let started = Instant::now();
     let mut tasks = Vec::with_capacity(samples);
     for i in 0..samples {
-        setup_workload(
-            backend_context.clone(),
-            backend,
-            postgres_pool_size,
-            &workload_run_id,
-            workload,
-            i + warmup,
-            path_depths,
-            payload_bytes,
-        )
-        .await?;
         let permit = Arc::clone(&sem).acquire_owned().await?;
-        let backend_context = backend_context.clone();
-        let run_id = workload_run_id.clone();
-        let path_depths = path_depths.to_vec();
-        let payload_bytes = payload_bytes.to_vec();
+        let execution = execution.clone();
         tasks.push(tokio::spawn(async move {
             let _permit = permit;
-            run_one(
-                backend_context,
-                backend,
-                postgres_pool_size,
-                &run_id,
-                workload,
-                i + warmup,
-                &path_depths,
-                &payload_bytes,
-            )
-            .await
+            let sample = i + warmup;
+            setup_workload(execution.clone(), sample).await?;
+            run_one(execution, sample).await
         }));
     }
 
@@ -553,9 +536,9 @@ async fn run_workload(
     latencies.sort_unstable();
 
     Ok(ResultRow {
-        backend,
-        postgres_pool_size,
-        workload: workload.name,
+        backend: execution.backend,
+        postgres_pool_size: execution.postgres_pool_size,
+        workload: execution.workload.name,
         concurrency,
         samples,
         errors,
@@ -574,20 +557,20 @@ struct Sample {
 }
 
 async fn run_one(
-    backend_context: BackendContext,
-    backend: BackendName,
-    postgres_pool_size: Option<usize>,
-    run_id: &str,
-    workload: Workload,
+    execution: WorkloadExecution,
     sample: usize,
-    path_depths: &[usize],
-    payload_bytes: &[usize],
 ) -> Result<Sample, Box<dyn std::error::Error + Send + Sync>> {
-    let depth = path_depths[sample % path_depths.len()].max(1);
-    let payload_len = payload_bytes[sample % payload_bytes.len()].max(1);
-    let prefix = workload_prefix(backend, run_id, workload.name, depth)?;
+    let depth = execution.path_depths[sample % execution.path_depths.len()].max(1);
+    let payload_len = execution.payload_bytes[sample % execution.payload_bytes.len()].max(1);
+    let prefix = workload_prefix(
+        execution.backend,
+        &execution.run_id,
+        execution.workload.name,
+        depth,
+    )?;
+    let backend_context = execution.backend_context;
     let started = Instant::now();
-    let state = match workload.kind {
+    let state = match execution.workload.kind {
         WorkloadKind::PutGet => put_get(backend_context.fs, &prefix, sample, payload_len).await?,
         WorkloadKind::QueryExact => {
             query_exact(backend_context.fs, &prefix, sample, payload_len).await?
@@ -601,9 +584,9 @@ async fn run_one(
         WorkloadKind::TriggerSeedList => {
             trigger_seed_list(
                 backend_context.trigger_repository,
-                backend,
-                postgres_pool_size,
-                run_id,
+                execution.backend,
+                execution.postgres_pool_size,
+                &execution.run_id,
                 sample,
             )
             .await?
@@ -613,9 +596,9 @@ async fn run_one(
                 backend_context.approval_requests,
                 backend_context.secret_store,
                 backend_context.resource_governor,
-                backend,
-                postgres_pool_size,
-                run_id,
+                execution.backend,
+                execution.postgres_pool_size,
+                &execution.run_id,
                 sample,
             )
             .await?
@@ -623,19 +606,25 @@ async fn run_one(
         WorkloadKind::TurnLifecycle => {
             turn_lifecycle(
                 backend_context.turn_state,
-                backend,
-                postgres_pool_size,
-                run_id,
+                execution.backend,
+                execution.postgres_pool_size,
+                &execution.run_id,
                 sample,
                 payload_len,
             )
             .await?
         }
         WorkloadKind::WebuiSession => {
-            webui_session(backend_context, backend, postgres_pool_size, sample).await?
+            webui_session(
+                backend_context,
+                execution.backend,
+                execution.postgres_pool_size,
+                sample,
+            )
+            .await?
         }
         WorkloadKind::HostedSubstrateBuild => {
-            hosted_substrate_build(backend, sample, postgres_pool_size).await?
+            hosted_substrate_build(execution.backend, sample, execution.postgres_pool_size).await?
         }
     };
     Ok(Sample {
@@ -645,17 +634,11 @@ async fn run_one(
 }
 
 async fn setup_workload(
-    backend_context: BackendContext,
-    backend: BackendName,
-    postgres_pool_size: Option<usize>,
-    run_id: &str,
-    workload: Workload,
+    execution: WorkloadExecution,
     sample: usize,
-    path_depths: &[usize],
-    payload_bytes: &[usize],
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if matches!(
-        workload.kind,
+        execution.workload.kind,
         WorkloadKind::TriggerSeedList
             | WorkloadKind::TurnLifecycle
             | WorkloadKind::HostedSubstrateBuild
@@ -663,23 +646,32 @@ async fn setup_workload(
         return Ok(());
     }
 
-    if matches!(workload.kind, WorkloadKind::WebuiSession) {
-        ensure_webui_runtime_context(&backend_context, backend, postgres_pool_size)
-            .await
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
+    if matches!(execution.workload.kind, WorkloadKind::WebuiSession) {
+        ensure_webui_runtime_context(
+            &execution.backend_context,
+            execution.backend,
+            execution.postgres_pool_size,
+        )
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
         return Ok(());
     }
 
-    if matches!(workload.kind, WorkloadKind::ControlPlaneSnapshot) {
-        setup_control_plane_indexes(backend_context.fs).await?;
+    if matches!(execution.workload.kind, WorkloadKind::ControlPlaneSnapshot) {
+        setup_control_plane_indexes(execution.backend_context.fs).await?;
         return Ok(());
     }
 
-    let depth = path_depths[sample % path_depths.len()].max(1);
-    let prefix = workload_prefix(backend, run_id, workload.name, depth)?;
-    let fs = backend_context.fs;
+    let depth = execution.path_depths[sample % execution.path_depths.len()].max(1);
+    let prefix = workload_prefix(
+        execution.backend,
+        &execution.run_id,
+        execution.workload.name,
+        depth,
+    )?;
+    let fs = execution.backend_context.fs;
     setup_create_dir_all(Arc::clone(&fs), &prefix).await?;
-    match workload.kind {
+    match execution.workload.kind {
         WorkloadKind::PutGet => {
             let parent = child(&prefix, "entry")?;
             setup_create_dir_all(fs, &parent).await?;
@@ -695,7 +687,7 @@ async fn setup_workload(
                 ),
             )
             .await?;
-            seed_query_exact_records(fs, &prefix, sample, payload_bytes).await?;
+            seed_query_exact_records(fs, &prefix, sample, &execution.payload_bytes).await?;
         }
         WorkloadKind::AppendTail => {
             let parent = child(&prefix, "events")?;
@@ -717,7 +709,7 @@ async fn setup_workload(
 async fn setup_create_dir_all(
     fs: Arc<dyn RootFilesystem>,
     prefix: &VirtualPath,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     for attempt in 0..5 {
         match fs.create_dir_all(prefix).await {
             Ok(()) => return Ok(()),
@@ -732,7 +724,7 @@ async fn setup_create_dir_all(
 
 async fn setup_control_plane_indexes(
     fs: Arc<dyn RootFilesystem>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let scoped = scoped_control_plane_fs(fs);
     let scope = ResourceScope::system();
     let secrets_root = ScopedPath::new("/secrets")?;
@@ -757,7 +749,7 @@ async fn setup_ensure_index(
     fs: Arc<dyn RootFilesystem>,
     prefix: &VirtualPath,
     spec: IndexSpec,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     for attempt in 0..5 {
         match fs.ensure_index(prefix, &spec).await {
             Ok(()) => return Ok(()),
@@ -828,6 +820,14 @@ fn compare(results: &[ResultRow]) -> Vec<ComparisonRow> {
         });
     }
     comparisons
+}
+
+fn scored_gate_failed(mode: &str, results: &[ResultRow], comparisons: &[ComparisonRow]) -> bool {
+    let scored_rows_failed = results.iter().any(|row| row.errors > 0);
+    let hard_comparison_failed = comparisons.iter().any(|row| row.hard_fail);
+    let threshold_comparison_failed =
+        matches!(mode, "holdout" | "acceptance") && comparisons.iter().any(|row| !row.dev_pass);
+    scored_rows_failed || hard_comparison_failed || threshold_comparison_failed
 }
 
 fn percentile_ms(latencies: &[Duration], percentile: f64) -> f64 {
@@ -914,7 +914,7 @@ fn filter_workloads(workloads: Vec<Workload>) -> Vec<Workload> {
     let filtered = workloads
         .iter()
         .copied()
-        .filter(|workload| requested.iter().any(|name| *name == workload.name))
+        .filter(|workload| requested.contains(&workload.name))
         .collect::<Vec<_>>();
     if filtered.is_empty() {
         workloads
@@ -947,4 +947,88 @@ fn payload(seed: usize, len: usize) -> Vec<u8> {
     (0..len)
         .map(|i| ((seed.wrapping_mul(31).wrapping_add(i)) % 251) as u8)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn result_row(backend: BackendName, workload: &'static str, errors: usize) -> ResultRow {
+        ResultRow {
+            backend,
+            postgres_pool_size: None,
+            workload,
+            concurrency: 1,
+            samples: 1,
+            errors,
+            first_error: None,
+            throughput_ops_sec: 1.0,
+            p50_ms: 1.0,
+            p95_ms: 1.0,
+            p99_ms: 1.0,
+            state_hash: "state".to_string(),
+        }
+    }
+
+    fn comparison_row(hard_fail: bool) -> ComparisonRow {
+        ComparisonRow {
+            workload: "put_get",
+            concurrency: 1,
+            postgres_pool_size: 1,
+            postgres_p50_ratio: 1.0,
+            postgres_p95_ratio: 1.0,
+            postgres_p99_ratio: 1.0,
+            postgres_throughput_ratio: 1.0,
+            errors_ok: true,
+            state_hash_ok: true,
+            dev_pass: !hard_fail,
+            hard_fail,
+        }
+    }
+
+    #[test]
+    fn scored_gate_fails_when_any_result_row_has_errors() {
+        let results = vec![result_row(BackendName::Libsql, "put_get", 1)];
+
+        assert!(scored_gate_failed("dev", &results, &[]));
+    }
+
+    #[test]
+    fn scored_gate_fails_when_required_comparison_hard_fails() {
+        let comparisons = vec![comparison_row(true)];
+
+        assert!(scored_gate_failed("dev", &[], &comparisons));
+    }
+
+    #[test]
+    fn scored_gate_fails_holdout_when_required_comparison_misses_threshold() {
+        let mut comparison = comparison_row(false);
+        comparison.dev_pass = false;
+
+        assert!(scored_gate_failed("holdout", &[], &[comparison]));
+    }
+
+    #[test]
+    fn scored_gate_fails_acceptance_when_required_comparison_misses_threshold() {
+        let mut comparison = comparison_row(false);
+        comparison.dev_pass = false;
+
+        assert!(scored_gate_failed("acceptance", &[], &[comparison]));
+    }
+
+    #[test]
+    fn scored_gate_allows_dev_threshold_miss_without_hard_failure() {
+        let mut comparison = comparison_row(false);
+        comparison.dev_pass = false;
+
+        assert!(!scored_gate_failed("dev", &[], &[comparison]));
+    }
+
+    #[test]
+    fn scored_gate_passes_clean_rows_and_comparisons() {
+        let results = vec![result_row(BackendName::Postgres, "put_get", 0)];
+        let comparisons = vec![comparison_row(false)];
+
+        assert!(!scored_gate_failed("holdout", &results, &comparisons));
+    }
 }

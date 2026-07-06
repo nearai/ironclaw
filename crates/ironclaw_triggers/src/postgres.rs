@@ -88,8 +88,7 @@ impl TriggerRepository for PostgresTriggerRepository {
         let active_run_ref = record.active_run_ref.as_ref().map(ToString::to_string);
         let created_at = fmt_ts(&record.created_at);
 
-        let sql = format!(
-            r#"
+        let sql = r#"
                 INSERT INTO trigger_records (
                     trigger_id, tenant_id, creator_user_id, agent_id, project_id,
                     name, source, schedule_expression, schedule_timezone, schedule_kind, prompt,
@@ -119,11 +118,10 @@ impl TriggerRepository for PostgresTriggerRepository {
                     active_fire_slot = EXCLUDED.active_fire_slot,
                     active_run_ref = EXCLUDED.active_run_ref,
                     schedule_at = EXCLUDED.schedule_at
-                "#
-        );
+                "#;
         cached_execute(
             &client,
-            &sql,
+            sql,
             &[
                 &trigger_id,
                 &tenant_id,

@@ -73,11 +73,11 @@ pub(super) async fn webui_session(
     Ok(state)
 }
 
-pub(super) async fn ensure_webui_runtime_context<'a>(
-    backend_context: &'a BackendContext,
+pub(super) async fn ensure_webui_runtime_context(
+    backend_context: &BackendContext,
     backend: BackendName,
     postgres_pool_size: Option<usize>,
-) -> Result<&'a WebuiRuntimeContext, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<&WebuiRuntimeContext, Box<dyn std::error::Error + Send + Sync>> {
     let postgres_pool = backend_context.webui_postgres_pool.clone();
     backend_context
         .webui_session
@@ -203,6 +203,7 @@ async fn hosted_libsql_substrate_build(
             path_or_url: events_db_path.display().to_string(),
             auth_token: None,
         },
+        process_local_resource_governor_singleton: true,
         secret_master_key: Some(latency_secret_master_key()),
         trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
         runtime_policy: production_runtime_policy()?,
@@ -235,6 +236,7 @@ async fn hosted_postgres_substrate_build(
                 url: ironclaw_secrets::SecretMaterial::from(url),
                 tls_options: Default::default(),
             },
+            process_local_resource_governor_singleton: true,
             secret_master_key: Some(latency_secret_master_key()),
             trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
             runtime_policy: production_runtime_policy()?,

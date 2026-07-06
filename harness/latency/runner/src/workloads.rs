@@ -24,9 +24,10 @@ pub(super) async fn query_exact(
 ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
     let key = IndexKey::new("bucket")?;
     let bucket = format!("b{}", sample % 8);
+    let sample_prefix = child(prefix, &format!("sample-{sample}"))?;
     let rows = fs
         .query(
-            prefix,
+            &sample_prefix,
             &Filter::Eq {
                 key,
                 value: IndexValue::Text(bucket),
@@ -42,7 +43,7 @@ pub(super) async fn seed_query_exact_records(
     prefix: &VirtualPath,
     sample: usize,
     payload_bytes: &[usize],
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let key = IndexKey::new("bucket")?;
     let kind = ironclaw_filesystem::RecordKind::new("latency_record")?;
     let bucket = format!("b{}", sample % 8);
@@ -238,7 +239,7 @@ pub(super) async fn control_plane_snapshot(
         ^ ((metadata.handle.as_str().len() as u64) << 24)
         ^ ((material.expose_secret().len() as u64) << 32)
         ^ ((receipt_has_actual as u64) << 40)
-        ^ ((account_snapshot.ledger.spent.output_bytes as u64) << 48))
+        ^ (account_snapshot.ledger.spent.output_bytes << 48))
 }
 
 async fn resource_governor_round_trip(

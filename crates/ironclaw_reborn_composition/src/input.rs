@@ -330,6 +330,7 @@ impl RebornBuildInput {
                 host_home_root: None,
                 pool,
                 secret_master_key,
+                process_local_resource_governor_singleton: true,
             },
         ))
     }

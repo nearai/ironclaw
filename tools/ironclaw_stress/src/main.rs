@@ -672,6 +672,26 @@ impl Scenario {
     pub(crate) fn is_process_local(self) -> bool {
         matches!(self, Self::CpuBurn | Self::MemoryChurn)
     }
+
+    fn prewarm_target(self) -> PrewarmTarget {
+        if self.is_process_local() {
+            PrewarmTarget::None
+        } else if self.is_resource_governor() {
+            PrewarmTarget::ResourceGovernor
+        } else if self.is_secret_control_plane() {
+            PrewarmTarget::SecretControlPlane
+        } else {
+            PrewarmTarget::UserTurn
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrewarmTarget {
+    None,
+    ResourceGovernor,
+    SecretControlPlane,
+    UserTurn,
 }
 
 struct BackendHandle {
@@ -1231,21 +1251,40 @@ async fn prewarm(args: &Args, run_id: &str) -> Result<(), String> {
         args.scenario.as_str(),
         run_id
     );
-    if args.scenario.is_resource_governor() {
-        let backend = build_backend(args, run_id).await?;
-        let account =
-            ResourceAccount::tenant(TenantId::new("stress-prewarm").map_err(display_err)?);
-        backend
-            .governor
-            .account_snapshot(&account)
-            .map_err(|error| format!("prewarm failed: {error:?}"))?;
-    } else {
-        let workload = build_user_turn_workload(args, run_id).await?;
-        eprintln!(
-            "{} prewarmed target={}",
-            log_prefix(args),
-            workload.target()
-        );
+    match args.scenario.prewarm_target() {
+        PrewarmTarget::None => {
+            eprintln!(
+                "{} prewarm skipped for process-local scenario",
+                log_prefix(args)
+            );
+        }
+        PrewarmTarget::ResourceGovernor => {
+            let backend = build_backend(args, run_id).await?;
+            let account =
+                ResourceAccount::tenant(TenantId::new("stress-prewarm").map_err(display_err)?);
+            backend
+                .governor
+                .account_snapshot(&account)
+                .map_err(|error| format!("prewarm failed: {error:?}"))?;
+        }
+        PrewarmTarget::SecretControlPlane => {
+            let workload = Arc::new(build_secret_consume_workload(args, run_id).await?);
+            let identities = Arc::new(SyntheticIds::new(args)?);
+            secret_ops::prefill_secrets(Arc::clone(&workload), args, identities).await?;
+            eprintln!(
+                "{} prewarmed target={}",
+                log_prefix(args),
+                workload.target()
+            );
+        }
+        PrewarmTarget::UserTurn => {
+            let workload = build_user_turn_workload(args, run_id).await?;
+            eprintln!(
+                "{} prewarmed target={}",
+                log_prefix(args),
+                workload.target()
+            );
+        }
     }
     Ok(())
 }

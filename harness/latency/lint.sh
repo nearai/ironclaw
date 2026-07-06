@@ -21,13 +21,8 @@ case "${LATENCY_BACKENDS:-libsql,postgres}" in
     ;;
 esac
 
-if rg -n "LATENCY_|latency|benchmark|bench" crates src \
-  -g '*.rs' >/tmp/ironclaw-latency-lint.$$ 2>/dev/null; then
-  if rg -n "sleep|tokio::time::sleep|std::thread::sleep|mock readiness|fast path|fast-path" \
-    /tmp/ironclaw-latency-lint.$$ >/dev/null 2>&1; then
-    rm -f /tmp/ironclaw-latency-lint.$$
-    echo "VOID: constraint violation"
-    exit 1
-  fi
+if rg -n "LATENCY_|latency|benchmark|bench" crates src -g '*.rs' 2>/dev/null \
+  | rg -q "sleep|tokio::time::sleep|std::thread::sleep|mock readiness|fast path|fast-path"; then
+  echo "VOID: constraint violation"
+  exit 1
 fi
-rm -f /tmp/ironclaw-latency-lint.$$
