@@ -63,7 +63,8 @@ pub use budget_gateway::{
 pub use durable::open_local_dev_extension_installation_store_for_test;
 #[cfg(all(feature = "test-support", feature = "libsql"))]
 pub use durable::{
-    open_local_dev_approval_request_store_for_test, open_local_dev_trigger_repository_for_test,
+    open_local_dev_approval_request_store_for_test,
+    open_local_dev_approval_settings_stores_for_test, open_local_dev_trigger_repository_for_test,
 };
 pub use local_dev_boot::LOCAL_DEV_DB_FILENAME;
 #[cfg(any(feature = "libsql", feature = "postgres"))]

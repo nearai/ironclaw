@@ -101,6 +101,11 @@ fn parse_json_or_null(bytes: &[u8]) -> Value {
     if bytes.is_empty() {
         Value::Null
     } else {
-        serde_json::from_slice(bytes).unwrap_or(Value::Null)
+        serde_json::from_slice(bytes).unwrap_or_else(|err| {
+            panic!(
+                "response body is not valid JSON ({err}): {}",
+                String::from_utf8_lossy(bytes)
+            )
+        })
     }
 }

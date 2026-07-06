@@ -511,11 +511,11 @@ impl HostRuntimeCapabilityHarness {
         // `outbound_target_tools()` supplies the facade.
         let outbound_target_tools = match outbound_target_facade {
             Some((facade, requires_approval)) => {
-                let tool_permission_overrides = services
-                    .local_dev_tool_permission_overrides_for_test()
+                let tool_permission_overrides = tool_permission_overrides
+                    .clone()
                     .ok_or("outbound_target_tools requires a local-dev tool-override store")?;
-                let persistent_approval_policies = services
-                    .local_dev_persistent_approval_policies_for_test()
+                let persistent_approval_policies = persistent_approval_policies
+                    .clone()
                     .ok_or("outbound_target_tools requires a local-dev persistent-policy store")?;
                 Some(OutboundTargetToolsParts {
                     facade,

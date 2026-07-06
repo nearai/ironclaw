@@ -151,7 +151,7 @@ impl RebornOperatorToolCatalog for TestOperatorToolCatalog {
 }
 
 #[tokio::test]
-async fn settings_tool_permission_put_then_cold_read() {
+async fn settings_tool_permission_post_then_cold_read() {
     // `builtin_tools()`'s "core_builtin" profile builds its `HostRuntime` by
     // hand and never captures tool_permission_overrides/auto_approve_settings/
     // persistent_approval_policies (all `None` there). `live_approvals()`
@@ -181,9 +181,9 @@ async fn settings_tool_permission_put_then_cold_read() {
 
     let services = RebornServices::new(h.thread_harness.service.clone(), h.coordinator.clone())
         .with_operator_approval_config(
-            overrides.clone(),
-            auto_approve.clone(),
-            persistent_policies.clone(),
+            overrides,
+            auto_approve,
+            persistent_policies,
             Arc::new(TestOperatorToolCatalog),
         );
     let router = mount_webui_v2_router(Arc::new(services), caller.clone());
@@ -198,21 +198,29 @@ async fn settings_tool_permission_put_then_cold_read() {
         serde_json::json!({"state": "disabled"}),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "PUT response body: {body}");
+    assert_eq!(status, StatusCode::OK, "POST response body: {body}");
     assert_eq!(body["entry"]["value"]["state"], "disabled");
 
-    // Cold read: a SECOND `RebornServices` over a fresh thread service, same
-    // overrides/auto_approve/persistent_policies `Arc`s — those stores are
-    // the durable state under test, not the thread history.
+    // Cold read: a SECOND `RebornServices` over a fresh thread service AND
+    // freshly-reopened tool-permission-override/auto-approve/persistent-policy
+    // stores at the same on-disk `storage_root` (not the live `Arc`s above) —
+    // this is what actually proves the POSTed state survives a store reopen,
+    // rather than a second facade reading the same in-process handles.
     let fresh_thread_service = h
         .thread_harness
         .service_instance()
         .expect("fresh thread service instance");
+    let (fresh_overrides, fresh_auto_approve, fresh_persistent_policies) =
+        ironclaw_reborn_composition::test_support::open_local_dev_approval_settings_stores_for_test(
+            &capability_harness.storage_root_for_test(),
+        )
+        .await
+        .expect("reopen fresh local-dev approval-settings stores");
     let cold_services = RebornServices::new(Arc::new(fresh_thread_service), h.coordinator.clone())
         .with_operator_approval_config(
-            overrides,
-            auto_approve,
-            persistent_policies,
+            fresh_overrides,
+            fresh_auto_approve,
+            fresh_persistent_policies,
             Arc::new(TestOperatorToolCatalog),
         );
     let cold_router = mount_webui_v2_router(Arc::new(cold_services), caller);
@@ -226,7 +234,7 @@ async fn settings_tool_permission_put_then_cold_read() {
         .unwrap_or_else(|| panic!("tool.builtin.http entry present in cold read: {body}"));
     assert_eq!(
         entry["value"]["state"], "disabled",
-        "PUT'd permission state must survive the cold read: {entry}"
+        "POSTed permission state must survive the cold read: {entry}"
     );
 }
 

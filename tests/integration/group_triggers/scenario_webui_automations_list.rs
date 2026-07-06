@@ -30,7 +30,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         ])
         .build()
         .await?;
-    h.submit_turn("create a daily trigger").await?;
+    h.submit_turn("create a one-time trigger").await?;
 
     let created = h.tool_result_output("builtin.trigger_create").await?;
     let trigger_id = created["trigger"]["trigger_id"]
