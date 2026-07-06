@@ -247,6 +247,13 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// Read via `trigger_repository_for_test` to wire
     /// `RebornAutomationProductFacade` over the same repo a prior turn used.
     trigger_repository: Option<Arc<dyn ironclaw_triggers::TriggerRepository>>,
+    /// The full `RebornServices` bundle this harness's `new_with_options` built
+    /// (`build_reborn_services`), retained so a group can build the REAL
+    /// approval/auth interaction services over it instead of the harness's
+    /// piecewise test-support accessors. `Some` only for `new_with_options`-built
+    /// harnesses; `None` for the lower-level constructors and the Echo backend.
+    /// Read via `reborn_services_for_test`.
+    reborn_services: Option<ironclaw_reborn_composition::RebornServices>,
 }
 
 impl HostRuntimeCapabilityHarness {
@@ -527,8 +534,12 @@ impl HostRuntimeCapabilityHarness {
             None => None,
         };
         let pending_approval_scopes = Arc::new(Mutex::new(HashMap::new()));
+        // `.clone()` (not a move) so `services` survives intact below —
+        // `reborn_services_for_test` needs the WHOLE `RebornServices` value,
+        // not just the pieces already extracted above.
         let runtime = services
             .host_runtime
+            .clone()
             .ok_or("local-dev Reborn services missing host runtime")?;
         let runtime = Arc::new(RecordingHostRuntime::new(
             runtime,
@@ -568,7 +579,20 @@ impl HostRuntimeCapabilityHarness {
             tool_permission_overrides,
             persistent_approval_policies,
             trigger_repository,
+            reborn_services: Some(services),
         })
+    }
+
+    /// The full `RebornServices` bundle this harness was built from, if built
+    /// via `new_with_options`. Lets a caller build the REAL approval/auth
+    /// interaction services over this harness's own local-dev composition
+    /// (`RebornServices::local_dev_approval_interaction_service_with_turn_state_for_test`
+    /// et al.), e.g. so a group can wire genuine `submit_inbound`-driven
+    /// gate dispatch instead of the harness's direct-resume test shortcut.
+    pub(crate) fn reborn_services_for_test(
+        &self,
+    ) -> Option<&ironclaw_reborn_composition::RebornServices> {
+        self.reborn_services.as_ref()
     }
 
     pub(crate) fn capability_factory(

@@ -130,5 +130,6 @@ pub(crate) async fn qa_smoke_tools() -> HarnessResult<HostRuntimeCapabilityHarne
         tool_permission_overrides: None,
         persistent_approval_policies: None,
         trigger_repository: None,
+        reborn_services: None,
     })
 }

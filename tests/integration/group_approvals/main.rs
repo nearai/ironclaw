@@ -41,6 +41,7 @@ mod scenario_failure_category_demasked;
 mod scenario_gate_ref_edge_cases;
 mod scenario_gate_then_approve;
 mod scenario_gate_then_deny;
+mod scenario_submit_inbound_approval_resolution;
 
 use reborn_support::builder::StorageMode;
 use reborn_support::group::{RebornIntegrationGroup, ScenarioReport};
@@ -91,6 +92,33 @@ async fn approvals_group_e2e() {
     report.record(
         "ask_each_time_resumes_once",
         scenario_ask_each_time_resumes_once::run(&g).await,
+    );
+    report.assert_all_passed();
+}
+
+/// Proof-of-seam group — the harness mid-stack bypass that resolved
+/// approval gates via `TurnCoordinator::resume_turn` directly, never through
+/// `ApprovalInteractionService::resolve`, is removed for this group only.
+/// `.with_real_gate_dispatch_services()` wires the REAL interaction services
+/// over the group's own shared turn-state store, so
+/// `submit_approval_resolution` reaches the literal `submit_inbound` dispatch
+/// arm a real adapter's "approve"/"deny" reply hits.
+#[tokio::test]
+async fn approvals_group_real_gate_dispatch_e2e() {
+    let g = RebornIntegrationGroup::builder()
+        .with_real_gate_dispatch_services()
+        .live_approvals()
+        .await
+        .expect("group builds");
+
+    let mut report = ScenarioReport::new();
+    report.record(
+        "submit_inbound_approval_resolution_approve",
+        scenario_submit_inbound_approval_resolution::approve(&g).await,
+    );
+    report.record(
+        "submit_inbound_approval_resolution_deny",
+        scenario_submit_inbound_approval_resolution::deny(&g).await,
     );
     report.assert_all_passed();
 }
