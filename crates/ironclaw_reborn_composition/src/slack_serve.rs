@@ -336,6 +336,19 @@ fn ingress_error_response(error: SlackIngressError) -> Response {
                 SlackWebhookErrorCategory::Capacity,
             )
         }
+        SlackIngressError::ConversationStoreUnavailable { reason } => {
+            tracing::error!(
+                target = "ironclaw::reborn::slack_events",
+                reason = %reason,
+                "Slack Events API durable conversation store unavailable"
+            );
+            // Storage/infra outage, not an auth failure: 503 so Slack retries
+            // delivery instead of treating the installation as unauthorized.
+            error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                SlackWebhookErrorCategory::TemporarilyUnavailable,
+            )
+        }
     }
 }
 
@@ -908,6 +921,19 @@ mod tests {
     #[test]
     fn runner_error_response_maps_adapter_panicked_to_503() {
         let response = runner_error_response(RunnerError::AdapterPanicked);
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn ingress_error_response_maps_conversation_store_unavailable_to_503() {
+        // Regression: a durable conversation-binding-store outage is an infra
+        // fault, not an authentication failure. It must surface as 503 (so
+        // Slack retries delivery), never the 401 that InstallationNotFound
+        // would have produced.
+        let response = ingress_error_response(SlackIngressError::ConversationStoreUnavailable {
+            reason: "host state filesystem offline".to_string(),
+        });
 
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }

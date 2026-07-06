@@ -327,6 +327,8 @@ pub enum SlackIngressError {
         tenant_id: TenantId,
         adapter_installation_id: AdapterInstallationId,
     },
+    #[error("Slack durable conversation binding store is unavailable: {reason}")]
+    ConversationStoreUnavailable { reason: String },
 }
 
 pub trait SlackInstallationResolver: Send + Sync {

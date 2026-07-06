@@ -658,7 +658,9 @@ impl DynamicSlackInstallationResolver {
         .await
         .map_err(|error| {
             tracing::error!(%error, "Slack durable conversation store unavailable");
-            SlackIngressError::InstallationNotFound
+            SlackIngressError::ConversationStoreUnavailable {
+                reason: error.to_string(),
+            }
         })?;
         let record = build_slack_installation_record_with_resolvers(
             &self.parts,
