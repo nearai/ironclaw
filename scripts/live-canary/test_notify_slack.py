@@ -24,6 +24,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -484,6 +485,7 @@ class RebornQaSlackReportTests(unittest.TestCase):
         self.assertIn("- Branch: `codex/canary-smoke`", body)
         self.assertIn("- Target: `abcdef0123`", body)
         self.assertIn("- Commit: `abcdef0`", body)
+        self.assertIn("/canary all PR #42 abcdef0123 comment 987 by @\u200bmaintainer", body)
         self.assertNotIn("mainsha", body)
         self.assertIn("| `reborn-webui-v2-live-qa` | `reborn-webui-v2` |", body)
         self.assertIn("#### QA 2: 1/2 passed", body)
@@ -491,6 +493,115 @@ class RebornQaSlackReportTests(unittest.TestCase):
         self.assertIn(":x: `2D` Calendar prep assistant", body)
         self.assertIn("Failure: requires live Google runtime access", body)
         self.assertIn("[GitHub run artifacts]", body)
+
+    def test_github_comment_body_includes_junit_fallback_for_failed_lane(self):
+        report = notify.LaneReport(
+            lane="auth|lane",
+            provider="mock",
+            passed=0,
+            failed=1,
+            tests=1,
+            duration_s=0.5,
+            status="fail",
+            junit_failures=[("test_name", "bad | value from @team")],
+        )
+
+        body = notify.github_comment_body(
+            [report],
+            "https://github.com/nearai/ironclaw/actions/runs/123",
+            "abcdef0123456789",
+            category_summary="failure from @team | table",
+            run_context=notify.CanaryRunContext(
+                repository="nearai/ironclaw",
+                target_pr="42",
+                target_branch="branch`name",
+                target_ref="abcdef0123456789",
+                trigger_context="/canary @team | table",
+            ),
+        )
+
+        self.assertIn("- Branch: `branch'name`", body)
+        self.assertIn("/canary @\u200bteam \\| table", body)
+        self.assertIn("failure from @\u200bteam \\| table", body)
+        self.assertIn("### auth\\|lane (mock)", body)
+        self.assertIn("- Failures:", body)
+        self.assertIn("  - `test_name`: bad \\| value from @\u200bteam", body)
+
+    def test_post_pr_comment_validates_target_is_decimal_pull_request(self):
+        with self.assertRaisesRegex(ValueError, "decimal pull request number"):
+            notify.post_pr_comment(
+                [],
+                repo="nearai/ironclaw",
+                github_token="token",
+                run_context=notify.CanaryRunContext(target_pr="42abc"),
+                run_url=None,
+                commit=None,
+            )
+
+        with (
+            mock.patch.object(notify, "get_json", return_value={"number": 42}) as get_json,
+            mock.patch.object(
+                notify,
+                "post_json",
+                return_value={"html_url": "https://github.com/nearai/ironclaw/pull/42#issuecomment-1"},
+            ) as post_json,
+        ):
+            url = notify.post_pr_comment(
+                [],
+                repo="nearai/ironclaw",
+                github_token="token",
+                run_context=notify.CanaryRunContext(target_pr="42"),
+                run_url=None,
+                commit=None,
+            )
+
+        self.assertEqual(
+            url,
+            "https://github.com/nearai/ironclaw/pull/42#issuecomment-1",
+        )
+        get_json.assert_called_once()
+        self.assertIn("/pulls/42", get_json.call_args.args[0])
+        post_json.assert_called_once()
+        self.assertIn("/issues/42/comments", post_json.call_args.args[0])
+
+    def test_main_posts_pr_comment_without_slack_webhook(self):
+        report = notify.LaneReport(
+            lane="reborn-webui-v2-live-qa",
+            provider="reborn-webui-v2",
+            passed=1,
+            failed=0,
+            tests=1,
+            status="pass",
+        )
+        env = {
+            "CANARY_POST_PR_COMMENT": "1",
+            "CANARY_TARGET_PR": "42",
+            "CANARY_TARGET_BRANCH": "codex/canary-smoke",
+            "CANARY_TARGET_REF": "abcdef0123456789",
+            "GITHUB_REPOSITORY": "nearai/ironclaw",
+            "GITHUB_TOKEN": "token",
+        }
+        with (
+            mock.patch.dict(notify.os.environ, env, clear=True),
+            mock.patch.object(sys, "argv", ["notify_slack.py"]),
+            mock.patch.object(
+                notify,
+                "discover_lane_dirs",
+                return_value=[Path("reborn-webui-v2-live-qa/reborn-webui-v2/run")],
+            ),
+            mock.patch.object(notify, "collect_lane", return_value=report),
+            mock.patch.object(notify, "post_json") as post_json,
+            mock.patch.object(
+                notify,
+                "post_pr_comment",
+                return_value="https://github.com/nearai/ironclaw/pull/42#issuecomment-1",
+            ) as post_pr_comment,
+        ):
+            rc = notify.main()
+
+        self.assertEqual(rc, 0)
+        post_json.assert_not_called()
+        post_pr_comment.assert_called_once()
 
     def test_reborn_rows_fit_with_scheduled_all_lane_report(self):
         case_rows = [

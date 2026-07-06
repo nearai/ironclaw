@@ -74,7 +74,6 @@ on:
 
 permissions:
   contents: read
-  issues: write
 
 concurrency:
   group: live-canary-${{ github.event_name }}-${{ inputs.lane || github.event.schedule }}
@@ -1146,6 +1145,10 @@ jobs:
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:

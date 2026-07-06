@@ -30,6 +30,7 @@ ANTHROPIC_VERSION = "2023-06-01"
 MAX_LOG_BYTES = 20_000
 SLACK_MAX_BLOCKS = 50
 GITHUB_COMMENT_BODY_LIMIT = 65_000
+GITHUB_MD_MENTION_BREAK = "@\u200b"
 
 HAIKU_SYSTEM = (
     "You analyze CI canary test logs. Given a lane's summary, JUnit digest, "
@@ -737,6 +738,21 @@ def _format_run_context(context: CanaryRunContext | None) -> str:
     return " • ".join(parts)
 
 
+def _github_md_text(value: object, limit: int | None = None) -> str:
+    text = _trim_slack_text(value, limit) if limit else str(value or "").strip()
+    return (
+        text.replace("\\", "\\\\")
+        .replace("@", GITHUB_MD_MENTION_BREAK)
+        .replace("|", "\\|")
+        .replace("`", "\\`")
+    )
+
+
+def _github_md_code(value: object, limit: int | None = None) -> str:
+    text = _trim_slack_text(value, limit) if limit else str(value or "").strip()
+    return text.replace("`", "'").replace("\n", " ")
+
+
 def slack_payload(
     reports: list[LaneReport],
     run_url: str | None,
@@ -835,18 +851,18 @@ def _markdown_run_context_lines(
         else:
             lines.append(f"- PR: #{run_context.target_pr}")
     if run_context and run_context.target_branch:
-        lines.append(f"- Branch: `{_trim_slack_text(run_context.target_branch, 120)}`")
+        lines.append(f"- Branch: `{_github_md_code(run_context.target_branch, 120)}`")
     if run_context and run_context.target_ref:
-        lines.append(f"- Target: `{_trim_slack_text(run_context.target_ref, 40)[:10]}`")
+        lines.append(f"- Target: `{_github_md_code(run_context.target_ref[:10])}`")
     if run_context and run_context.trigger_context:
-        lines.append(f"- Trigger: {_trim_slack_text(run_context.trigger_context, 200)}")
+        lines.append(f"- Trigger: {_github_md_text(run_context.trigger_context, 200)}")
     display_commit = (
         run_context.target_ref
         if run_context and run_context.target_ref
         else commit
     )
     if display_commit:
-        lines.append(f"- Commit: `{display_commit[:7]}`")
+        lines.append(f"- Commit: `{_github_md_code(display_commit[:7])}`")
     if run_url:
         lines.append(f"- Run: [GitHub Actions]({run_url})")
     return lines
@@ -872,12 +888,13 @@ def _markdown_reborn_case_lines(
                 else ""
             )
             lines.append(
-                f"- {status} `{_qa_case_rows(case)}` {case.feature}{latency}"
+                f"- {status} `{_github_md_code(_qa_case_rows(case))}` "
+                f"{_github_md_text(case.feature)}{latency}"
             )
             if not case.success and case.message:
-                lines.append(f"  - Failure: {case.message}")
+                lines.append(f"  - Failure: {_github_md_text(case.message)}")
             if not case.success and case.debug_paths:
-                paths = ", ".join(f"`{path}`" for path in case.debug_paths)
+                paths = ", ".join(f"`{_github_md_code(path)}`" for path in case.debug_paths)
                 if run_url:
                     lines.append(
                         f"  - Debug: [GitHub run artifacts]({run_url}) - {paths}"
@@ -920,12 +937,13 @@ def github_comment_body(
             "skip": ":heavy_minus_sign:",
         }.get(r.status, ":grey_question:")
         lines.append(
-            f"| `{r.lane}` | `{r.provider}` | {status} {r.status} | "
+            f"| `{_github_md_code(r.lane)}` | `{_github_md_code(r.provider)}` | "
+            f"{status} {r.status} | "
             f"{r.passed}/{r.tests} | {r.failed} | {r.duration_s:.0f}s |"
         )
 
     if category_summary:
-        lines.extend(["", "### Summary by Category", "", category_summary])
+        lines.extend(["", "### Summary by Category", "", _github_md_text(category_summary)])
 
     detail_lines: list[str] = []
     for r in reports:
@@ -933,25 +951,33 @@ def github_comment_body(
             detail_lines.extend(
                 [
                     "",
-                    f"### {r.lane} ({r.provider})",
+                    f"### {_github_md_text(r.lane)} ({_github_md_text(r.provider)})",
                     "",
                 ]
             )
             detail_lines.extend(_markdown_reborn_case_lines(r.reborn_qa_cases, run_url))
         elif r.status == "fail":
-            detail_lines.extend(["", f"### {r.lane} ({r.provider})"])
+            detail_lines.extend(
+                ["", f"### {_github_md_text(r.lane)} ({_github_md_text(r.provider)})"]
+            )
             if r.test_name:
-                detail_lines.append(f"- Test: `{r.test_name}`")
+                detail_lines.append(f"- Test: `{_github_md_code(r.test_name)}`")
             if r.error:
-                detail_lines.append(f"- Error: {r.error}")
+                detail_lines.append(f"- Error: {_github_md_text(r.error)}")
             if r.root_cause:
-                detail_lines.append(f"- Root Cause: {r.root_cause}")
+                detail_lines.append(f"- Root Cause: {_github_md_text(r.root_cause)}")
             if r.fix:
-                detail_lines.append(f"- Fix: {r.fix}")
+                detail_lines.append(f"- Fix: {_github_md_text(r.fix)}")
             if r.reason:
-                detail_lines.append(f"- Reason: {r.reason}")
+                detail_lines.append(f"- Reason: {_github_md_text(r.reason)}")
             if r.notable:
-                detail_lines.append(f"- Note: {r.notable}")
+                detail_lines.append(f"- Note: {_github_md_text(r.notable)}")
+            if r.junit_failures:
+                detail_lines.append("- Failures:")
+                for name, msg in r.junit_failures[:10]:
+                    detail_lines.append(
+                        f"  - `{_github_md_code(name)}`: {_github_md_text(msg)}"
+                    )
     if detail_lines:
         lines.extend(detail_lines)
 
@@ -976,11 +1002,18 @@ def post_pr_comment(
 ) -> str:
     if not run_context.target_pr:
         return ""
+    if not run_context.target_pr.isdecimal():
+        raise ValueError("target_pr must be a decimal pull request number")
     headers = {
         "Authorization": f"Bearer {github_token}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
+    get_json(
+        f"https://api.github.com/repos/{repo}/pulls/{run_context.target_pr}",
+        headers,
+        timeout=15,
+    )
     created = post_json(
         f"https://api.github.com/repos/{repo}/issues/"
         f"{run_context.target_pr}/comments",
@@ -1332,6 +1365,7 @@ def main() -> int:
                 file=sys.stderr,
             )
         if args.post_pr_comment and run_context.target_pr:
+            print("\n--- GitHub PR Comment Body (Dry Run) ---", file=sys.stderr)
             print(
                 github_comment_body(
                     reports,
@@ -1339,7 +1373,8 @@ def main() -> int:
                     args.commit,
                     category_summary=category_summary,
                     run_context=run_context,
-                )
+                ),
+                file=sys.stderr,
             )
         return 0
 
