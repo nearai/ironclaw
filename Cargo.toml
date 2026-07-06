@@ -281,6 +281,9 @@ ironclaw_extensions = { path = "crates/ironclaw_extensions", version = "0.1.0" }
 ironclaw_filesystem = { path = "crates/ironclaw_filesystem", version = "0.1.0" }
 ironclaw_mcp = { path = "crates/ironclaw_mcp", version = "0.1.0" }
 ironclaw_first_party_extensions = { path = "crates/ironclaw_first_party_extensions", version = "0.1.0" }
+# W6-COLD-SPOTS: `CommunicationPreferenceRecord`/`CommunicationPreferenceKey`
+# for the outbound-store-durability reopen test.
+ironclaw_outbound = { path = "crates/ironclaw_outbound", version = "0.1.0" }
 # Recording hook doubles + `HookDispatcherBuilderFactory` builders for the
 # C-HOOKS / E-HOOK-INFRA int-tier coverage (tests/integration/support/hooks.rs).
 ironclaw_hooks = { path = "crates/ironclaw_hooks", version = "0.1.0" }
@@ -478,6 +481,10 @@ path = "tests/integration/mcp.rs"
 [[test]]
 name = "reborn_integration_oauth_connect"
 path = "tests/integration/oauth_connect.rs"
+
+[[test]]
+name = "reborn_integration_outbound_store_durability"
+path = "tests/integration/outbound_store_durability.rs"
 
 [[test]]
 name = "reborn_integration_outbound_target"

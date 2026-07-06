@@ -3941,6 +3941,7 @@ dependencies = [
  "ironclaw_memory",
  "ironclaw_network",
  "ironclaw_oauth",
+ "ironclaw_outbound",
  "ironclaw_processes",
  "ironclaw_product_adapters",
  "ironclaw_product_workflow",
