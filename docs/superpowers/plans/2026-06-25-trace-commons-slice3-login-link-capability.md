@@ -181,9 +181,16 @@ pub async fn mint_account_login_link_via_sink(
     );
     let parsed: serde_json::Value =
         serde_json::from_slice(&response.body).context("login-link response was not valid JSON")?;
-    let account_id = parsed["account_id"].as_str().unwrap_or_default().to_string();
-    let link = parsed["url"].as_str().unwrap_or_default().to_string();
-    anyhow::ensure!(!link.is_empty(), "login-link response missing url");
+    // Fail loud on malformed responses: both fields are required, and an
+    // empty-string default would propagate a broken contract downstream.
+    let account_id = parsed["account_id"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("login-link response missing account_id"))?
+        .to_string();
+    let link = parsed["url"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("login-link response missing url"))?
+        .to_string();
     Ok(AccountLoginLink { account_id, url: link })
 }
 ```

@@ -51,7 +51,7 @@ Spec: `docs/superpowers/specs/2026-06-25-trace-commons-instance-enrollment-profi
   `DefaultTraceUploadCredentialProvider` (per-user bearer).
 - Produces:
   ```rust
-  #[derive(Debug, Clone, serde::Serialize)]
+  #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
   pub struct AccountTraceItem {
       pub submission_id: String,
       pub status: String,

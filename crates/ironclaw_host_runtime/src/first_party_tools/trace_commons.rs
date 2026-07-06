@@ -667,7 +667,11 @@ pub(super) async fn dispatch_status(
     ) {
         Ok(resolution) => resolution,
         Err(error) => {
-            tracing::debug!(%error, "trace commons status: local policy read failed");
+            // The resolver error can embed the policy file's host path; the
+            // host_runtime guideline forbids raw paths in logs. Log only the
+            // safe fact, matching the sibling dispatchers.
+            let _ = error;
+            tracing::debug!("trace commons status: local policy read failed");
             return Ok(json!({
                 "error_code": "PolicyReadFailed",
                 "message": "Could not read local Trace Commons enrollment state; the policy file may be unreadable or corrupt."

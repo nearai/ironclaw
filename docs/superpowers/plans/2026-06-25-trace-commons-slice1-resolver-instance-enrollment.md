@@ -284,7 +284,16 @@ git commit -m "feat(traces): instance-level enrollment write path (scope None)"
 
 ---
 
-### Task 3: Admin-gated instance enrollment on `AdminScope`
+### Task 3: Admin-gated instance enrollment on `AdminScope` — SUPERSEDED, do not implement
+
+> **Superseded in review (see note at the end of this task):** the
+> `AdminScope::enroll_instance_trace_commons` wrapper described below was
+> implemented and later REMOVED from `src/tenant.rs` — new Reborn features must
+> not land in the retiring v1 monolith. The crate-side entry point is
+> `ironclaw_reborn_traces::onboarding::onboard_instance_with_sink` (Task 2);
+> an admin-gated Reborn surface will wrap it when instance enrollment gets a
+> product entry point. The original task text is retained below only as a
+> historical record of what was planned.
 
 **Files:**
 - Modify: `src/tenant.rs:933-978` (add a method to `AdminScope`)
