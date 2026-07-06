@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **Target repo:** `ironclaw` (`/Users/zakimanian/code/ironclaw`). Independent of
+> **Target repo:** `ironclaw`. Independent of
 > Slice 0 (it adds a resolver + admin-gated instance enrollment that writes an
 > instance-level policy; the per-user `subject` it produces is *consumed* by
 > Slice 2). Safe to build and merge before Slice 0 lands.
@@ -377,6 +377,13 @@ Expected: PASS; zero warnings.
 git add src/tenant.rs
 git commit -m "feat(admin): AdminScope::enroll_instance_trace_commons (admin-gated instance enrollment)"
 ```
+
+> **Superseded in review:** the `AdminScope::enroll_instance_trace_commons`
+> wrapper was removed from `src/tenant.rs` — new Reborn features must not land
+> in the retiring v1 monolith. The crate-side entry point is
+> `ironclaw_reborn_traces::onboarding::onboard_instance_with_sink`; an
+> admin-gated Reborn surface will wrap it when instance enrollment gets a
+> product entry point.
 
 ---
 

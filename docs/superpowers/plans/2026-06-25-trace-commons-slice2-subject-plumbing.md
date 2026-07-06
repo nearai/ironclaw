@@ -225,9 +225,10 @@ extend it:
 ```rust
     // Attach the per-user subject so instance-enrolled users are attributed
     // individually. Personal-invite enrollments resolve to `subject: None`.
-    let subject = crate::contribution::resolve_trace_credentials(tenant_id, user_id)
-        .ok()
-        .flatten()
+    // Propagate resolver failures with `?` — do NOT `.ok().flatten()` them
+    // into `subject: None`, which would mis-mint instance-enrolled claims
+    // and mask backend problems.
+    let subject = crate::contribution::resolve_trace_credentials(tenant_id, user_id)?
         .and_then(|r| r.subject);
     let context = TraceUploadClaimContext::for_envelope(envelope)
         .with_scope_dir(dir.to_path_buf())

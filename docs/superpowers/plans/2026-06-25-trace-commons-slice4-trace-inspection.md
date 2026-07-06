@@ -126,10 +126,11 @@ Then implement `fetch_account_traces_via_sink` mirroring
 `mint_account_login_link_via_sink` (Slice 3 Task 1): resolve credentials, mint the
 per-user bearer, build `<origin>/v1/account/traces?limit=N` via the same origin
 helper, `sink.execute` a `Get`, parse the JSON array into `Vec<AccountTraceItem>`
-(use serde derive on `AccountTraceItem`; unknown server fields ignored). Empty/
-non-2xx → return `Ok(vec![])` for unenrolled, `Err` for transport failures
-(match the credit endpoint's lenient "zero-state, not error" behavior for the
-unenrolled case).
+(use serde derive on `AccountTraceItem`; unknown server fields ignored). Only
+the explicit zero-states return `Ok(vec![])`: unenrolled (resolver returns
+`None`) and HTTP 404 (enrolled principal with no account/traces yet). Every
+other non-2xx (401/403/429/5xx) and all transport failures return `Err` so
+backend outages surface instead of hiding behind an empty-list UI.
 
 - [ ] **Step 4: Run test to verify it passes**
 

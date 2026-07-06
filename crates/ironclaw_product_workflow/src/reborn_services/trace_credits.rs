@@ -128,7 +128,7 @@ pub(super) async fn account_traces_for_user(
 ) -> Result<RebornAccountTracesResponse, AccountTracesError> {
     // Identity stays typed inside this crate; only cross to `&str` at the
     // `ironclaw_reborn_traces` boundary, which is stringly-typed.
-    let enrolled = resolve_trace_credentials(tenant_id.as_str(), user_id.as_str())
+    let enrolled = resolve_trace_credentials(tenant_id, user_id)
         .map_err(|e| AccountTracesError::ResolveCredentials(format!("{e:#}")))?
         .is_some();
     if !enrolled {

@@ -197,8 +197,13 @@ pub(super) fn account_login_link_manifest() -> Result<CapabilityManifest, Extens
          confirmed=true after the user explicitly asks. Routes through host network egress.",
         // ReadFilesystem: the dispatch reads local enrollment/policy/device-key
         // state before egress (mirrors profile_token's effect set).
+        // WriteFilesystem: the minted one-time URL is persisted to a local
+        // delivery file (never returned on the model-visible surface), so the
+        // manifest must declare that credential-file write for policy/approval
+        // surfaces.
         vec![
             EffectKind::ReadFilesystem,
+            EffectKind::WriteFilesystem,
             EffectKind::Network,
             EffectKind::ExternalWrite,
         ],
@@ -657,8 +662,8 @@ pub(super) async fn dispatch_status(
     // — a user who IS enrolled would be told they are not. Report the read
     // failure honestly without asserting an enrollment state.
     let resolution = match resolve_trace_credentials(
-        request.scope.tenant_id.as_str(),
-        request.scope.user_id.as_str(),
+        &request.scope.tenant_id,
+        &request.scope.user_id,
     ) {
         Ok(resolution) => resolution,
         Err(error) => {
@@ -786,10 +791,7 @@ pub(super) async fn dispatch_profile_token(
     // guard for the confirmed+enrolled mint path. Route through the shared
     // resolver so instance-only contributors (personal policy absent, instance
     // policy enabled) pass the gate instead of being falsely rejected.
-    match resolve_trace_credentials(
-        request.scope.tenant_id.as_str(),
-        request.scope.user_id.as_str(),
-    ) {
+    match resolve_trace_credentials(&request.scope.tenant_id, &request.scope.user_id) {
         Ok(Some(_)) => {}
         Ok(None) => {
             return Ok(profile_token_error_value(
@@ -973,10 +975,7 @@ pub(super) async fn dispatch_profile_set(
     // Route the enrollment gate through the shared resolver so instance-only
     // contributors (personal policy absent, instance policy enabled) pass
     // instead of being falsely rejected as not enrolled.
-    match resolve_trace_credentials(
-        request.scope.tenant_id.as_str(),
-        request.scope.user_id.as_str(),
-    ) {
+    match resolve_trace_credentials(&request.scope.tenant_id, &request.scope.user_id) {
         Ok(Some(_)) => {}
         Ok(None) => {
             return Ok(profile_set_error_value(
@@ -1105,10 +1104,7 @@ pub(super) async fn dispatch_account_login_link(
     // resolver so instance-only contributors pass the gate — matching
     // `mint_account_login_link_via_sink`, which already resolves instance
     // enrollment via `resolve_trace_credentials`.
-    match resolve_trace_credentials(
-        request.scope.tenant_id.as_str(),
-        request.scope.user_id.as_str(),
-    ) {
+    match resolve_trace_credentials(&request.scope.tenant_id, &request.scope.user_id) {
         Ok(Some(_)) => {}
         Ok(None) => {
             return Ok(account_login_link_error_value(
@@ -1190,16 +1186,21 @@ fn persist_account_login_link(scope: &str, link: &AccountLoginLink) -> std::io::
 
     let dir = trace_contribution_dir_for_scope(Some(scope));
     std::fs::create_dir_all(&dir)?;
-    let path = dir.join("account_login_link.url");
+    // Each mint gets its own final file (uuid suffix): two concurrent same-scope
+    // mints both return minted=true, so a shared fixed path would let the later
+    // rename silently clobber the earlier caller's only copy of its one-time
+    // URL. Readers list `account_login_link.*.url` files rather than assuming a
+    // fixed name. Stale siblings are pruned best-effort below (the links
+    // themselves are one-time-use and expire server-side).
+    let mint_id = uuid::Uuid::new_v4();
+    let path = dir.join(format!("account_login_link.{mint_id}.url"));
+    prune_stale_account_login_links(&dir);
 
     // Atomic write: a unique temp file (per-write uuid name so concurrent mints
     // don't race on a fixed temp path; created 0600 on Unix), fsync, then rename
     // onto the final path — the same temp+rename credential-write discipline as
     // the profile token, so a reader only ever sees a complete URL.
-    let temp_path = dir.join(format!(
-        "account_login_link.url.{}.tmp",
-        uuid::Uuid::new_v4()
-    ));
+    let temp_path = dir.join(format!("account_login_link.{mint_id}.tmp"));
     let write_temp = || -> std::io::Result<()> {
         #[cfg(unix)]
         let mut file = {
@@ -1227,6 +1228,34 @@ fn persist_account_login_link(scope: &str, link: &AccountLoginLink) -> std::io::
         return Err(error);
     }
     Ok(path)
+}
+
+/// Best-effort removal of expired login-link delivery files (and orphaned temp
+/// files) older than one hour. The minted links are one-time-use and expire
+/// server-side well within that window, so anything older is dead credential
+/// material that should not accumulate on disk. Errors are ignored: pruning
+/// must never fail a fresh mint.
+fn prune_stale_account_login_links(dir: &std::path::Path) {
+    const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let is_link_file = name.starts_with("account_login_link.")
+            && (name.ends_with(".url") || name.ends_with(".tmp"));
+        if !is_link_file {
+            continue;
+        }
+        let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        if now.duration_since(modified).is_ok_and(|age| age > MAX_AGE) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 fn format_account_login_link(link: &AccountLoginLink) -> Value {

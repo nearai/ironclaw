@@ -4157,13 +4157,15 @@ fn resolve_trace_credentials_at(
 /// else fall back to the admin-provisioned instance enrollment (scope `None`)
 /// with a per-user pseudonymous subject. Returns `None` when neither is enabled.
 pub fn resolve_trace_credentials(
-    tenant_id: &str,
-    user_id: &str,
+    tenant_id: &TenantId,
+    user_id: &UserId,
 ) -> anyhow::Result<Option<TraceCredentialResolution>> {
+    // Typed at the public boundary so callers can't transpose tenant/user;
+    // stringify only when handing off to the dir-parameterised core.
     resolve_trace_credentials_at(
         ironclaw_common::paths::ironclaw_base_dir().as_path(),
-        tenant_id,
-        user_id,
+        tenant_id.as_str(),
+        user_id.as_str(),
     )
 }
 
@@ -6184,30 +6186,44 @@ fn validate_community_profile_bio(bio: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Build the hardened HTTP client for community-profile requests: pinned DNS
-/// resolution against the validated ingest host, bounded timeouts, and no
-/// redirect following — mirroring `fetch_trace_upload_claim_from_issuer`.
-async fn community_profile_http_client(
+/// Build a hardened HTTP client for Trace Commons account-surface requests:
+/// pinned DNS resolution against the validated host (private/internal IPs
+/// rejected via `resolve_trace_upload_claim_issuer_host`), policy-derived
+/// bounded timeouts, and no redirect following — mirroring
+/// `fetch_trace_upload_claim_from_issuer`. The pinned resolution closes the
+/// DNS-rebinding window between claim validation and the follow-up request.
+async fn pinned_trace_commons_http_client(
     policy: &StandingTraceContributionPolicy,
     url: &reqwest::Url,
+    user_agent: &str,
 ) -> anyhow::Result<reqwest::Client> {
     let host = url
         .host_str()
-        .ok_or_else(|| anyhow::anyhow!("Trace Commons community profile URL requires a host"))?
+        .ok_or_else(|| anyhow::anyhow!("Trace Commons request URL requires a host"))?
         .to_ascii_lowercase();
-    let port = url.port_or_known_default().ok_or_else(|| {
-        anyhow::anyhow!("Trace Commons community profile URL requires a known port")
-    })?;
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| anyhow::anyhow!("Trace Commons request URL requires a known port"))?;
     let resolved_addrs = resolve_trace_upload_claim_issuer_host(&host, port).await?;
     let timeout = trace_upload_claim_issuer_timeout(policy)?;
     reqwest::Client::builder()
         .timeout(timeout)
         .connect_timeout(timeout.min(Duration::from_secs(3)))
         .redirect(reqwest::redirect::Policy::none())
-        .user_agent("ironclaw-trace-commons-community-profile/0.1")
+        .user_agent(user_agent)
         .resolve_to_addrs(&host, &resolved_addrs)
         .build()
-        .context("failed to build Trace Commons community profile HTTP client")
+        .context("failed to build pinned Trace Commons HTTP client")
+}
+
+/// Build the hardened HTTP client for community-profile requests. See
+/// [`pinned_trace_commons_http_client`].
+async fn community_profile_http_client(
+    policy: &StandingTraceContributionPolicy,
+    url: &reqwest::Url,
+) -> anyhow::Result<reqwest::Client> {
+    pinned_trace_commons_http_client(policy, url, "ironclaw-trace-commons-community-profile/0.1")
+        .await
 }
 
 fn community_profile_method_label(method: ContributionHttpMethod) -> &'static str {
@@ -6515,6 +6531,10 @@ async fn mint_account_login_link_inner(
     let body_bytes = serde_json::to_vec(&body).map_err(|e| {
         AccountLoginLinkError::Backend(anyhow::Error::new(e).context("serialize login-link body"))
     })?;
+    // Honor the operator-tuned issuer timeout rather than a hardcoded value,
+    // matching `execute_community_profile_request`.
+    let timeout = trace_upload_claim_issuer_timeout(&resolution.policy)
+        .map_err(AccountLoginLinkError::Backend)?;
     let response = sink
         .execute(ContributionHttpRequest {
             method: ContributionHttpMethod::Post,
@@ -6522,7 +6542,7 @@ async fn mint_account_login_link_inner(
             bearer_token: Some(bearer),
             json_body: Some(body_bytes),
             response_body_limit: TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES as u64,
-            timeout_ms: 10_000,
+            timeout_ms: u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX),
         })
         .await
         .map_err(|e| {
@@ -6612,14 +6632,17 @@ pub async fn fetch_account_traces_via_sink(
 /// sink required).
 ///
 /// This is the facade-safe counterpart to [`fetch_account_traces_via_sink`]: it
-/// uses the same [`trace_remote_http_client`] that trace submission uses, so it
-/// obeys the same SSRF mitigations and TLS settings without coupling the caller
-/// to a host-egress `ContributionHttpSink`. Use this from WebUI facades and any
-/// non-agent surface. Use [`fetch_account_traces_via_sink`] from the agent
-/// runtime where all egress must flow through `RuntimeHttpEgress`.
+/// uses the [`pinned_trace_commons_http_client`] (private-IP-filtered, pinned
+/// DNS resolution — the same hardening as the upload-claim issuer request), so
+/// a rebinding host cannot redirect this bearer-authenticated GET to an
+/// internal address, without coupling the caller to a host-egress
+/// `ContributionHttpSink`. Use this from WebUI facades and any non-agent
+/// surface. Use [`fetch_account_traces_via_sink`] from the agent runtime where
+/// all egress must flow through `RuntimeHttpEgress`.
 ///
-/// Returns `Ok(vec![])` when the user is not enrolled or the server returns a
-/// non-2xx status. Transport failures return `Err`.
+/// Returns `Ok(vec![])` when the user is not enrolled, or when the server
+/// returns 404 (an enrolled principal with no account/traces yet). Any other
+/// non-2xx status and all transport failures return `Err`.
 pub async fn fetch_account_traces(
     tenant_id: &str,
     user_id: &str,
@@ -6660,10 +6683,15 @@ async fn fetch_account_traces_direct(
         .bearer_token(&resolution.policy, &context, false)
         .await?;
     let url = account_traces_url(&resolution.policy, limit)?;
-    let client = trace_remote_http_client()
-        .map_err(|e| anyhow::anyhow!("failed to build trace HTTP client: {e}"))?;
+    let url = reqwest::Url::parse(&url).context("account traces URL is not a valid URL")?;
+    // Pinned-DNS, private-IP-filtered client: the bearer minted above must not
+    // be attachable to an internal address via DNS rebinding between the claim
+    // request and this GET.
+    let client =
+        pinned_trace_commons_http_client(&resolution.policy, &url, "ironclaw-trace-commons-client")
+            .await?;
     let response = client
-        .get(&url)
+        .get(url)
         .bearer_auth(&bearer)
         .send()
         .await
@@ -6714,14 +6742,18 @@ async fn fetch_account_traces_inner(
         .bearer_token(&resolution.policy, &context, false)
         .await?;
     let url = account_traces_url(&resolution.policy, limit)?;
+    // Honor the operator-tuned issuer timeout rather than a hardcoded value,
+    // and cap the body at the account-traces ceiling (a legitimate trace list
+    // can exceed the smaller claim-response cap the mint paths use).
+    let timeout = trace_upload_claim_issuer_timeout(&resolution.policy)?;
     let response = sink
         .execute(ContributionHttpRequest {
             method: ContributionHttpMethod::Get,
             url,
             bearer_token: Some(bearer),
             json_body: None,
-            response_body_limit: TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES as u64,
-            timeout_ms: 10_000,
+            response_body_limit: ACCOUNT_TRACES_MAX_RESPONSE_BYTES as u64,
+            timeout_ms: u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX),
         })
         .await
         .map_err(|e| anyhow::anyhow!("account traces request failed: {e}"))?;
@@ -7107,8 +7139,16 @@ async fn flush_trace_contribution_queue_for_scope_with_credential_provider(
 
     // Flush keeps the scoped lock through submission and status-sync network calls
     // so another same-scope flush cannot submit or remove the same queue file.
-    match sync_remote_trace_submission_records_for_scope_unlocked_with_credential_provider(
-        scope, provider,
+    // Sync with the SAME resolved target (policy, device-key dir, subject) the
+    // submissions above used, so instance-enrolled scopes get their final
+    // credit status instead of a per-scope re-read that resolves to a disabled
+    // personal policy.
+    match sync_remote_trace_submission_records_for_scope_unlocked_with_target(
+        scope,
+        &policy,
+        &scope_dir,
+        subject.as_deref(),
+        provider,
     )
     .await
     {
@@ -7194,10 +7234,18 @@ async fn sync_remote_trace_submission_records_for_scope_with_credential_provider
     scope: Option<&str>,
     provider: &dyn TraceUploadCredentialProvider,
 ) -> anyhow::Result<usize> {
-    let policy = read_trace_policy_for_scope(scope)?;
-    if !policy.enabled {
+    // Resolve the effective enrollment (personal-invite or instance) the same
+    // way the flush does, so instance-enrolled scopes sync with the instance
+    // policy + device key + per-user subject instead of a disabled per-scope
+    // policy read that would silently return Ok(0).
+    let Some(EffectiveFlushTarget {
+        policy,
+        device_key_dir,
+        subject,
+    }) = resolve_effective_flush_target(scope)?
+    else {
         return Ok(0);
-    }
+    };
     let Some(endpoint) = policy.ingestion_endpoint.as_deref() else {
         return Ok(0);
     };
@@ -7216,24 +7264,33 @@ async fn sync_remote_trace_submission_records_for_scope_with_credential_provider
     }
 
     let status_endpoint = trace_submission_status_endpoint(endpoint)?;
-    let scope_dir = trace_contribution_dir_for_scope(scope);
     let updates = fetch_trace_submission_statuses_with_credential_provider(
         &status_endpoint,
         &policy,
         provider,
         &submission_ids,
-        Some(&scope_dir),
+        Some(&device_key_dir),
+        subject.as_deref(),
     )
     .await?;
     let _guard = lock_trace_scope_for_mutation(scope).await;
     apply_remote_trace_submission_statuses_for_scope_unlocked(scope, &updates)
 }
 
-async fn sync_remote_trace_submission_records_for_scope_unlocked_with_credential_provider(
+/// Status-sync core used by the queue flush: syncs the local records of
+/// `scope` against the remote, authenticating with the caller-resolved
+/// effective flush target (`policy` + `device_key_dir` + `subject`) rather
+/// than re-reading the per-scope policy. An instance-enrolled user has no
+/// enabled per-scope policy and its device key lives at the instance dir, so
+/// re-reading here would silently sync nothing (or with the wrong credential
+/// context) right after a successful instance-attributed submission.
+async fn sync_remote_trace_submission_records_for_scope_unlocked_with_target(
     scope: Option<&str>,
+    policy: &StandingTraceContributionPolicy,
+    device_key_dir: &Path,
+    subject: Option<&str>,
     provider: &dyn TraceUploadCredentialProvider,
 ) -> anyhow::Result<usize> {
-    let policy = read_trace_policy_for_scope(scope)?;
     if !policy.enabled {
         return Ok(0);
     }
@@ -7252,13 +7309,13 @@ async fn sync_remote_trace_submission_records_for_scope_unlocked_with_credential
     }
 
     let status_endpoint = trace_submission_status_endpoint(endpoint)?;
-    let scope_dir = trace_contribution_dir_for_scope(scope);
     let updates = fetch_trace_submission_statuses_with_credential_provider(
         &status_endpoint,
-        &policy,
+        policy,
         provider,
         &submission_ids,
-        Some(&scope_dir),
+        Some(device_key_dir),
+        subject,
     )
     .await?;
     apply_remote_trace_submission_statuses_for_scope_unlocked(scope, &updates)
@@ -7315,6 +7372,7 @@ pub async fn fetch_trace_submission_statuses(
         &provider,
         submission_ids,
         None,
+        None,
     )
     .await
 }
@@ -7330,6 +7388,7 @@ pub async fn fetch_trace_submission_statuses_with_policy(
         &DefaultTraceUploadCredentialProvider,
         submission_ids,
         None,
+        None,
     )
     .await
 }
@@ -7340,9 +7399,11 @@ async fn fetch_trace_submission_statuses_with_credential_provider(
     provider: &dyn TraceUploadCredentialProvider,
     submission_ids: &[Uuid],
     scope_dir: Option<&Path>,
+    subject: Option<&str>,
 ) -> anyhow::Result<Vec<TraceSubmissionStatusUpdate>> {
     let context = {
-        let ctx = TraceUploadClaimContext::for_status_sync();
+        let ctx =
+            TraceUploadClaimContext::for_status_sync().with_subject(subject.map(str::to_string));
         if let Some(dir) = scope_dir {
             ctx.with_scope_dir(dir.to_path_buf())
         } else {
@@ -9786,6 +9847,30 @@ mod tests {
                 *current = self.fresh.clone();
             }
             Ok(current.clone())
+        }
+    }
+
+    /// Records the (subject, scope_dir) of every claim context it is asked to
+    /// mint for, so tests can assert the credential context that status sync
+    /// actually used.
+    #[derive(Default)]
+    struct CapturingUploadCredentialProvider {
+        contexts: std::sync::Mutex<Vec<(Option<String>, Option<PathBuf>)>>,
+    }
+
+    #[async_trait]
+    impl TraceUploadCredentialProvider for CapturingUploadCredentialProvider {
+        async fn bearer_token(
+            &self,
+            _policy: &StandingTraceContributionPolicy,
+            context: &TraceUploadClaimContext,
+            _force_refresh: bool,
+        ) -> anyhow::Result<String> {
+            self.contexts
+                .lock()
+                .expect("capturing provider lock")
+                .push((context.subject.clone(), context.scope_dir.clone()));
+            Ok("captured-token".to_string())
         }
     }
 
@@ -12597,6 +12682,93 @@ mod tests {
                 "Bearer fresh-upload-claim".to_string(),
                 "Bearer fresh-upload-claim".to_string()
             ]
+        );
+
+        let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
+    }
+
+    /// Regression: an instance-only-enrolled scope has NO enabled per-scope
+    /// policy — its policy, device key, and per-user subject come from the
+    /// resolved effective flush target. Status sync must run off that resolved
+    /// target instead of re-reading the per-scope policy (which would silently
+    /// return Ok(0) right after a successful instance-attributed submission,
+    /// so final credit status never lands locally).
+    #[tokio::test]
+    async fn status_sync_with_target_uses_resolved_instance_credential_context() {
+        let scope = format!("trace-instance-status-sync-test-{}", Uuid::new_v4());
+
+        // Seed a Submitted record for the scope. Deliberately do NOT write a
+        // per-scope policy: the old per-scope re-read would bail with Ok(0).
+        let record = submitted_credit_record(1.0, None, None, Vec::new());
+        let submission_id = record.submission_id;
+        let trace_id = record.trace_id;
+        write_local_trace_records_for_scope(Some(&scope), &[record]).expect("record writes");
+
+        let app = axum::Router::new().route(
+            "/v1/contributors/me/submission-status",
+            axum::routing::post(move || async move {
+                axum::Json(vec![TraceSubmissionStatusUpdate {
+                    submission_id,
+                    trace_id,
+                    status: "accepted".to_string(),
+                    credit_points_pending: 1.0,
+                    credit_points_final: Some(2.0),
+                    credit_points_ledger: 0.0,
+                    credit_points_total: Some(2.0),
+                    explanation: Vec::new(),
+                    delayed_credit_explanations: Vec::new(),
+                }])
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock trace commons listener binds");
+        let endpoint = format!(
+            "http://{}/v1/traces",
+            listener.local_addr().expect("local addr")
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let instance_policy = StandingTraceContributionPolicy {
+            enabled: true,
+            ingestion_endpoint: Some(endpoint),
+            ..Default::default()
+        };
+        let instance_dir = tempfile::tempdir().expect("instance device-key dir");
+        let provider = CapturingUploadCredentialProvider::default();
+
+        let synced = sync_remote_trace_submission_records_for_scope_unlocked_with_target(
+            Some(&scope),
+            &instance_policy,
+            instance_dir.path(),
+            Some("subject-abc"),
+            &provider,
+        )
+        .await
+        .expect("instance-target status sync succeeds");
+        assert_eq!(synced, 1, "the submitted record must sync its final status");
+
+        let contexts = provider.contexts.lock().expect("contexts lock");
+        assert_eq!(contexts.len(), 1, "one bearer mint for one status chunk");
+        assert_eq!(
+            contexts[0].0.as_deref(),
+            Some("subject-abc"),
+            "claim context must carry the resolved per-user subject"
+        );
+        assert_eq!(
+            contexts[0].1.as_deref(),
+            Some(instance_dir.path()),
+            "claim context must use the resolved instance device-key dir"
+        );
+        drop(contexts);
+
+        let records = read_local_trace_records_for_scope(Some(&scope)).expect("records read");
+        assert_eq!(
+            records[0].credit_points_final,
+            Some(2.0),
+            "final credit from the remote update must land on the local record"
         );
 
         let _ = std::fs::remove_dir_all(trace_contribution_dir_for_scope(Some(&scope)));
@@ -16197,11 +16369,17 @@ mod tests {
 
     /// Helper: enroll an instance scope at `base` against a mock that serves the
     /// claim issuer plus `/v1/account/traces` returning `status`/`body`. Returns
-    /// the result of `fetch_account_traces_inner`.
+    /// the results of BOTH fetch paths — the sink-backed
+    /// `fetch_account_traces_inner` (agent path) and the direct
+    /// `fetch_account_traces_direct` (WebUI/CLI path, pinned reqwest client) —
+    /// so status-handling regressions in either path are caught.
     async fn fetch_account_traces_with_status(
         status: axum::http::StatusCode,
         body: serde_json::Value,
-    ) -> anyhow::Result<Vec<AccountTraceItem>> {
+    ) -> (
+        anyhow::Result<Vec<AccountTraceItem>>,
+        anyhow::Result<Vec<AccountTraceItem>>,
+    ) {
         let claim_jwt = test_jwt_with_header(serde_json::json!({"alg": "EdDSA", "kid": "k1"}));
         let claim_jwt_for_mock = claim_jwt.clone();
         let app = axum::Router::new()
@@ -16249,31 +16427,50 @@ mod tests {
             .unwrap();
 
         let sink = ReqwestContributionSink;
-        fetch_account_traces_inner(base.path(), "tenant-dev", "alice", None, &sink).await
+        let via_sink =
+            fetch_account_traces_inner(base.path(), "tenant-dev", "alice", None, &sink).await;
+        let direct = fetch_account_traces_direct(base.path(), "tenant-dev", "alice", None).await;
+        (via_sink, direct)
     }
 
     #[tokio::test]
     async fn fetch_account_traces_errors_on_server_error() {
         // A 5xx must NOT be swallowed as an empty list — it surfaces as Err so
-        // the WebUI boundary renders a sanitized unavailable state.
-        let result = fetch_account_traces_with_status(
+        // the WebUI boundary renders a sanitized unavailable state. Both the
+        // sink-backed (agent) and direct (WebUI/CLI) paths must agree.
+        let (via_sink, direct) = fetch_account_traces_with_status(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             serde_json::json!({"error": "boom"}),
         )
         .await;
-        assert!(result.is_err(), "5xx must surface as an error, not empty");
+        assert!(
+            via_sink.is_err(),
+            "sink path: 5xx must surface as an error, not empty"
+        );
+        assert!(
+            direct.is_err(),
+            "direct path: 5xx must surface as an error, not empty"
+        );
     }
 
     #[tokio::test]
     async fn fetch_account_traces_404_is_empty() {
         // 404 = no account/traces yet for this enrolled principal → legitimate
-        // empty state, not an error.
-        let items = fetch_account_traces_with_status(
+        // empty state, not an error. Both fetch paths must agree.
+        let (via_sink, direct) = fetch_account_traces_with_status(
             axum::http::StatusCode::NOT_FOUND,
             serde_json::json!({"error": "no account"}),
         )
-        .await
-        .expect("404 must be the empty zero-state");
-        assert!(items.is_empty());
+        .await;
+        assert!(
+            via_sink
+                .expect("sink path: 404 must be the empty zero-state")
+                .is_empty()
+        );
+        assert!(
+            direct
+                .expect("direct path: 404 must be the empty zero-state")
+                .is_empty()
+        );
     }
 }

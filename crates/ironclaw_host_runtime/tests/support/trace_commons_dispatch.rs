@@ -375,10 +375,10 @@ pub fn test_jwt_eddsa(kid: &str) -> String {
     )
 }
 
-/// Recursively search `dir` for an `account_login_link.url` file and return its
-/// contents. The file is written under the caller scope's trace-contribution
-/// state dir; tests assert the secret URL is delivered there rather than on the
-/// model-visible surface.
+/// Recursively search `dir` for an `account_login_link.<uuid>.url` delivery
+/// file and return its contents. Each mint writes a uniquely-named file (so
+/// concurrent mints cannot clobber each other); tests assert the secret URL is
+/// delivered there rather than on the model-visible surface.
 pub fn find_persisted_login_link(dir: &std::path::Path) -> Option<String> {
     let entries = std::fs::read_dir(dir).ok()?;
     for entry in entries.flatten() {
@@ -387,7 +387,11 @@ pub fn find_persisted_login_link(dir: &std::path::Path) -> Option<String> {
             if let Some(found) = find_persisted_login_link(&path) {
                 return Some(found);
             }
-        } else if path.file_name().and_then(|n| n.to_str()) == Some("account_login_link.url") {
+        } else if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("account_login_link.") && n.ends_with(".url"))
+        {
             return std::fs::read_to_string(&path).ok();
         }
     }

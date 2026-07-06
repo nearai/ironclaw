@@ -142,7 +142,17 @@ pub async fn mint_account_login_link_via_sink(
 ) -> anyhow::Result<AccountLoginLink> {
     let resolution = resolve_trace_credentials(tenant_id, user_id)?
         .ok_or_else(|| anyhow::anyhow!("not enrolled in Trace Commons"))?;
-    let context = TraceUploadClaimContext::for_account(resolution.subject.clone());
+    // DeviceKey auth loads the tenant keypair from the scope dir, so the
+    // context MUST chain `.with_scope_dir(...)`: the instance device key for
+    // instance enrollment (`subject` is `Some`), the per-user scope dir for
+    // personal-invite enrollment.
+    let scope_dir = if resolution.subject.is_some() {
+        trace_contribution_dir_for_scope(None)
+    } else {
+        trace_contribution_dir_for_scope(Some(resolution.state_scope.as_str()))
+    };
+    let context = TraceUploadClaimContext::for_account(resolution.subject.clone())
+        .with_scope_dir(scope_dir);
     // Mint the per-user bearer the same way submission does.
     let provider = DefaultTraceUploadCredentialProvider;
     let bearer = provider

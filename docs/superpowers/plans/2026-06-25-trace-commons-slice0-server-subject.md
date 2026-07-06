@@ -2,9 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **Target repo:** `trace-commons-server`. Working copy:
-> `/Users/zakimanian/code/trace-commons-server/.worktrees/contributor-account-slice1-impl/`
-> (branch `contributor-account-slice1`). This is a SERVER plan; the IronClaw
+> **Target repo:** `trace-commons-server` (branch `contributor-account-slice1`;
+> use your local checkout/worktree of that repo). This is a SERVER plan; the IronClaw
 > client slices (1–4) are planned separately and depend on this one being merged
 > or contract-frozen.
 
@@ -22,14 +21,20 @@ trace-readback ownership all become per-user automatically — no separate
 login-link or submission change. The change is additive: absent `subject`
 reproduces today's behavior byte-for-byte.
 
+**Server contract note (required by Slice 3):** in addition to the claim
+principal change, `/v1/account/login-links` and `create_or_reuse_account` must
+accept the optional `subject` per the design spec — the login-link/account
+contract is part of this slice's documented API surface, not an implicit
+side effect of the claim change.
+
 **Tech Stack:** Rust, axum, jsonwebtoken (EdDSA), tokio, serde. Spec:
 `docs/superpowers/specs/2026-06-25-trace-commons-instance-enrollment-profiles-inspection-design.md`
 (in the ironclaw repo).
 
 ## Global Constraints
 
-- All file paths below are relative to the working copy
-  `/Users/zakimanian/code/trace-commons-server/.worktrees/contributor-account-slice1-impl/`.
+- All file paths below are relative to the `trace-commons-server` repository
+  root (branch `contributor-account-slice1`).
 - Zero clippy warnings: the repo gates with `RUSTFLAGS="-D warnings"`.
 - Backward compatibility is mandatory: a request with no `subject` MUST produce
   an identical claim (`sub`/`principal_ref` == raw `device_key_id`) to today.
