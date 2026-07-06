@@ -753,11 +753,15 @@ impl SlackFinalReplyDeliveryObserver {
 
     /// Model B: a first-contact DM from a Slack user with no identity binding is
     /// rejected with `BindingRequired`. Instead of silently dropping it, greet
-    /// them with a connect nudge. Deliberately performs NO binding lookup (the
-    /// sender is unbound by definition) and posts only a fixed, host-authored
-    /// message — no agent turn runs, no tools execute, no data is read. Slack
-    /// transport retries arrive as `Duplicate` (not `Rejected`), so this fires
-    /// at most once per inbound event.
+    /// them with a connect nudge — but ONLY in a 1:1 DM. An unbound user's
+    /// app-mention in a shared channel also rejects with `BindingRequired`, and
+    /// the host nudge must never be posted into a shared channel where everyone
+    /// sees a message addressed to one person, so this gates on the DM channel
+    /// id prefix ('D') and skips shared/group conversations. Deliberately
+    /// performs NO binding lookup (the sender is unbound by definition) and
+    /// posts only a fixed, host-authored message — no agent turn runs, no tools
+    /// execute, no data is read. Slack transport retries arrive as `Duplicate`
+    /// (not `Rejected`), so this fires at most once per inbound event.
     async fn post_connect_nudge_if_unbound_user_message(
         &self,
         envelope: &ProductInboundEnvelope,
@@ -770,6 +774,19 @@ impl SlackFinalReplyDeliveryObserver {
             return false;
         }
         if !matches!(envelope.payload(), ProductInboundPayload::UserMessage(_)) {
+            return false;
+        }
+        // Only nudge in a 1:1 DM. An unbound user's app-mention in a SHARED
+        // channel also rejects with `BindingRequired`; posting the host connect
+        // nudge there would drop a message addressed to one user into a channel
+        // everyone can see. Slack DM (im) channel ids start with 'D'; shared
+        // channels ('C') and multi-person/group DMs ('G') are excluded, and a
+        // missing/blank conversation ref fails closed (no post).
+        if !envelope
+            .external_conversation_ref()
+            .conversation_id()
+            .starts_with('D')
+        {
             return false;
         }
         if let Err(error) = post_slack_message(
@@ -2956,6 +2973,23 @@ mod tests {
         event_id: &str,
         payload: ProductInboundPayload,
     ) -> ProductInboundEnvelope {
+        build_test_envelope(event_id, "D123", payload)
+    }
+
+    /// Like `envelope` but with a caller-specified conversation id, so tests can
+    /// distinguish a 1:1 DM ('D...') from a shared channel ('C...').
+    fn envelope_in_conversation(
+        conversation_id: &str,
+        payload: ProductInboundPayload,
+    ) -> ProductInboundEnvelope {
+        build_test_envelope("evt:test", conversation_id, payload)
+    }
+
+    fn build_test_envelope(
+        event_id: &str,
+        conversation_id: &str,
+        payload: ProductInboundPayload,
+    ) -> ProductInboundEnvelope {
         let adapter_id =
             ironclaw_product_adapters::ProductAdapterId::new("slack_v2").expect("adapter");
         let installation_id = AdapterInstallationId::new("install_alpha").expect("installation");
@@ -2975,7 +3009,8 @@ mod tests {
         let parsed = ParsedProductInbound::new(
             ExternalEventId::new(event_id).expect("event"),
             ExternalActorRef::new("slack_user", "U123", None::<String>).expect("actor"),
-            ExternalConversationRef::new(Some("T123"), "D123", None, None).expect("conversation"),
+            ExternalConversationRef::new(Some("T123"), conversation_id, None, None)
+                .expect("conversation"),
             payload,
         )
         .expect("parsed inbound");
@@ -4304,6 +4339,46 @@ mod tests {
             posted[0].contains("connect your Slack account"),
             "the connect nudge must tell the user to connect, got: {}",
             posted[0]
+        );
+    }
+
+    /// Regression: an unbound user's app-mention in a SHARED channel also
+    /// rejects with `BindingRequired`, but the host connect-nudge must NOT be
+    /// posted into the shared channel — only a 1:1 DM gets it. Same shape as
+    /// `rejected_unbound_user_message_posts_connect_nudge` but with a shared
+    /// channel ('C0SHARED') conversation, asserting zero posts.
+    #[tokio::test]
+    async fn rejected_unbound_user_message_in_shared_channel_posts_no_connect_nudge() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("C0SHARED", "1000.1"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::Running,
+        ));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+        let env = envelope_in_conversation("C0SHARED", user_message_payload());
+        let ack = rejected_ack(ironclaw_product_adapters::ProductRejectionKind::BindingRequired);
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        let posted: Vec<String> = egress
+            .calls()
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .map(|c| String::from_utf8_lossy(&c.body).to_string())
+            .collect();
+        assert!(
+            posted.is_empty(),
+            "an unbound app-mention in a shared channel must NOT get a connect nudge posted into the channel, got: {posted:?}"
         );
     }
 
