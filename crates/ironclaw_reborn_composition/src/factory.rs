@@ -611,8 +611,11 @@ impl RebornServices {
         Some(Arc::clone(&local_runtime.project_service))
     }
 
-    /// W6-COLD-SPOTS: the SAME `Arc` production wires as `outbound_preferences`.
-    /// `None` without a local-dev runtime.
+    /// Test-support access to the local-dev communication-preference repository
+    /// (W6-COLD-SPOTS seam). This is the SAME `Arc` that `build_local_dev_store_graph`
+    /// wires into `RebornLocalRuntimeServices::outbound_preferences` via
+    /// `local_dev_outbound_store`, for tests only. Returns `None` for
+    /// production-profile compositions without a local-dev runtime.
     #[cfg(feature = "test-support")]
     pub fn local_dev_outbound_preferences_for_test(
         &self,
@@ -621,8 +624,12 @@ impl RebornServices {
         Some(Arc::clone(&local_runtime.outbound_preferences))
     }
 
-    /// W6-COLD-SPOTS: on-disk local-dev root, for reopen tests (see
-    /// `open_local_dev_outbound_preferences_store_for_test`).
+    /// Test-support access to the on-disk local-dev storage root (W6-COLD-SPOTS
+    /// seam), for tests only — mirrors the same `local_runtime.local_dev_storage_root`
+    /// that `build_local_dev_store_graph` establishes in production. Used to reopen
+    /// a fresh outbound-preferences store at the same root (see
+    /// `open_local_dev_outbound_preferences_store_for_test`). Returns `None` for
+    /// production-profile compositions without a local-dev runtime.
     #[cfg(feature = "test-support")]
     pub fn local_dev_storage_root_for_test(&self) -> Option<PathBuf> {
         let local_runtime = self.local_runtime.as_ref()?;
@@ -2775,19 +2782,18 @@ pub(crate) async fn open_local_dev_approval_request_store_for_test(
 }
 
 /// W6-COLD-SPOTS: fresh `CommunicationPreferenceRepository` reopen, mirrors
-/// [`open_local_dev_approval_request_store_for_test`]. Tests only.
+/// [`open_local_dev_approval_request_store_for_test`]. Reuses
+/// [`local_dev_outbound_store`] — the same composition-owned construction the
+/// production `build_local_dev_store_graph` path uses — so the reopen path
+/// never drifts from production and needs no `disallowed_methods` exception.
+/// Tests only.
 #[cfg(all(feature = "test-support", feature = "libsql"))]
-// A reopen over the same on-disk root, not a second live store (clippy.toml's
-// disallowed-methods guardrail targets the latter — see its reason string).
-#[allow(clippy::disallowed_methods)]
 pub(crate) async fn open_local_dev_outbound_preferences_store_for_test(
     storage_root: &Path,
 ) -> Result<Arc<dyn CommunicationPreferenceRepository>, RebornBuildError> {
     let mut composite = CompositeRootFilesystem::new();
     mount_default_local_dev_database_roots(storage_root, &mut composite).await?;
-    let scoped = crate::wrap_scoped(Arc::new(composite));
-    Ok(Arc::new(FilesystemOutboundStateStore::new(scoped))
-        as Arc<dyn CommunicationPreferenceRepository>)
+    Ok(local_dev_outbound_store(Arc::new(composite)).outbound_preferences)
 }
 
 /// Test-only (C-DURABLE seam): open a FRESH, independent

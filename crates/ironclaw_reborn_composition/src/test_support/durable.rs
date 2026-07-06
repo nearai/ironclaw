@@ -41,8 +41,10 @@ pub async fn open_local_dev_trigger_repository_for_test(
     crate::factory::open_local_dev_trigger_repository_for_test(storage_root).await
 }
 
-/// W6-COLD-SPOTS: reopen a fresh `CommunicationPreferenceRepository`.
-/// Mirrors [`open_local_dev_approval_request_store_for_test`].
+/// Test-support entry point (W6-COLD-SPOTS): reopen a fresh, independent
+/// `CommunicationPreferenceRepository` at an existing local-dev `storage_root`.
+/// Mirrors [`open_local_dev_approval_request_store_for_test`] for outbound
+/// preferences instead of approval-gate records. Tests only.
 #[cfg(all(feature = "test-support", feature = "libsql"))]
 pub async fn open_local_dev_outbound_preferences_store_for_test(
     storage_root: &std::path::Path,
