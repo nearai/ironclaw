@@ -38,7 +38,12 @@ mapfile -t names < <(
       -exec sh -c 'test -f "$1/main.rs"' _ {} ';' -print \
       | sed -E 's#^tests/integration/group_#reborn_group_#'
   } | LC_ALL=C sort -u | while IFS= read -r candidate; do
-    if grep -qF "name = \"${candidate}\"" Cargo.toml; then
+    if awk -v name="${candidate}" '
+      /^\[\[test\]\]/ { in_test=1; next }
+      /^\[/ { in_test=0 }
+      in_test && $0 == "name = \"" name "\"" { found=1; exit }
+      END { exit !found }
+    ' Cargo.toml; then
       printf '%s\n' "${candidate}"
     fi
   done
