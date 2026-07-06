@@ -167,6 +167,15 @@ impl RebornIntegrationGroup {
         Self::builder().skill_management_tools().await
     }
 
+    /// Group with the five `builtin.trace_commons.*` capabilities (enabler
+    /// (c): the C-TRACECAP enrollment surface). Reuses the SAME
+    /// `profiles::trace_commons::trace_commons_tools()` preset the QA/trace
+    /// tier uses, over the real turn -> capability path. Auto-approve is
+    /// enabled by the profile so scripted onboard/status calls are not gated.
+    pub async fn trace_commons_tools() -> HarnessResult<Self> {
+        Self::builder().trace_commons_tools().await
+    }
+
     /// Group with the attachment read port + inbound lander wired (C-ATTACH
     /// seam), no first-party capability dispatch. Use
     /// [`RebornThreadBuilder::with_model_override`] to route a thread through a
@@ -404,6 +413,15 @@ impl RebornIntegrationGroupBuilder {
     /// [`RebornIntegrationGroup::skill_management_tools`].
     pub async fn skill_management_tools(self) -> HarnessResult<RebornIntegrationGroup> {
         let host_runtime = super::super::harness::profiles::skill::skill_management_tools().await?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.build_with_capability(capability).await
+    }
+
+    /// Build a trace-commons group. See
+    /// [`RebornIntegrationGroup::trace_commons_tools`].
+    pub async fn trace_commons_tools(self) -> HarnessResult<RebornIntegrationGroup> {
+        let host_runtime =
+            super::super::harness::profiles::trace_commons::trace_commons_tools().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.build_with_capability(capability).await
     }

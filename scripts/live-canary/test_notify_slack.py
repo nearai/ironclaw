@@ -391,6 +391,50 @@ class RebornQaSlackReportTests(unittest.TestCase):
         self.assertNotIn("in#1234567890", qa_text)
         self.assertNotIn("out#9876543210", qa_text)
 
+    def test_slack_payload_includes_pr_branch_context_when_present(self):
+        report = notify.LaneReport(
+            lane="reborn-webui-v2-live-qa",
+            provider="reborn-webui-v2",
+            passed=1,
+            failed=0,
+            tests=1,
+            duration_s=1.2,
+            status="pass",
+        )
+
+        payload = notify.slack_payload(
+            [report],
+            "https://github.com/nearai/ironclaw/actions/runs/123",
+            "mainsha0123456789",
+            run_context=notify.CanaryRunContext(
+                repository="nearai/ironclaw",
+                trigger_context="/canary PR #42 abcdef0123 comment 987 by @maintainer",
+                target_pr="42",
+                target_branch="codex/canary-smoke",
+                target_ref="abcdef0123456789",
+            ),
+        )
+
+        context_texts = [
+            element["text"]
+            for block in payload["blocks"]
+            if block.get("type") == "context"
+            for element in block.get("elements", [])
+        ]
+        combined_context = "\n".join(context_texts)
+        self.assertIn(
+            "PR <https://github.com/nearai/ironclaw/pull/42|#42>",
+            combined_context,
+        )
+        self.assertIn("branch `codex/canary-smoke`", combined_context)
+        self.assertIn("target `abcdef0123`", combined_context)
+        self.assertIn(
+            "/canary PR #42 abcdef0123 comment 987 by @maintainer",
+            combined_context,
+        )
+        self.assertIn("commit `abcdef0`", combined_context)
+        self.assertNotIn("mainsha", combined_context)
+
     def test_reborn_rows_fit_with_scheduled_all_lane_report(self):
         case_rows = [
             f"{group}{suffix}"

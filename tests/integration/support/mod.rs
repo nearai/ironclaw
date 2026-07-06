@@ -16,6 +16,7 @@ pub mod hooks;
 pub mod http_matcher;
 pub mod oauth_flow;
 pub mod outbound_preferences;
+pub mod planned_runtime_parts_shape;
 pub mod process;
 pub mod product_workflow;
 pub mod project_service_fault;
