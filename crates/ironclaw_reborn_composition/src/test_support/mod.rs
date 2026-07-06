@@ -40,6 +40,12 @@
 //! 11. [`projection`] — `build_webui_event_stream_for_test`, a deliberately
 //!     narrowed `ProjectionStream` (turn-lifecycle events only) for the SSE
 //!     activity-stream scenario (W5-WEBUI-API-1 Enabler A).
+//! 12. [`slack_host_state`] — `slack_host_state_for_test`,
+//!     `slack_host_state_for_test_with_pairing_ttl`, [`SlackHostStateTestParts`]
+//!     — the real `FilesystemSlackHostState` (Slack host-beta pairing/binding
+//!     store) split into its trait facets, for driving the real Slack
+//!     pairing/actor-resolution services instead of a fake (W5-SLACK-PAIR
+//!     seam). Only compiled under `slack-v2-host-beta`.
 
 mod automation;
 mod budget_gateway;
@@ -50,6 +56,8 @@ mod outbound_delivery;
 mod project_create;
 mod projection;
 mod skill_activation;
+#[cfg(feature = "slack-v2-host-beta")]
+mod slack_host_state;
 mod trace_capture;
 mod trigger_materializer;
 mod user_profile;
@@ -92,6 +100,10 @@ pub use projection::build_webui_event_stream_for_test;
 pub use skill_activation::{
     SKILL_ACTIVATE_CAPABILITY_ID, SkillActivationTestSource,
     build_local_dev_skill_context_source_for_test, wrap_skill_activation_capability_for_test,
+};
+#[cfg(all(feature = "test-support", feature = "slack-v2-host-beta"))]
+pub use slack_host_state::{
+    SlackHostStateTestParts, slack_host_state_for_test, slack_host_state_for_test_with_pairing_ttl,
 };
 #[cfg(feature = "test-support")]
 pub use trace_capture::trace_capture_turn_event_sink_for_test;

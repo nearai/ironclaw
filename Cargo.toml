@@ -296,11 +296,21 @@ ironclaw_reborn = { path = "crates/ironclaw_reborn", version = "0.1.0", features
 # int-tier coverage lane (identity_resolution_smoke / webui_v2_router_smoke);
 # feature unification compiles them into every int-tier build, behaviorally
 # inert for suites that never call them.
-ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support", "libsql", "webui-v2-beta"] }
+# W5-SLACK-PAIR: `slack-v2-host-beta` grows the lcov denominator by ~42k lines
+# of feature-gated slack_*.rs modules (previously invisible, not 0%) and
+# unlocks composing them in int-tier tests. Feature unification recompiles
+# all 17 gated modules into every int-tier test binary — real, one-time
+# build-time cost for the lane, behaviorally inert for suites that never
+# reference Slack types.
+ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support", "libsql", "webui-v2-beta", "slack-v2-host-beta"] }
 # Direct dev-dep: composition deliberately does NOT re-export the bare
 # `webui_v2_router`/`WebUiV2State` (facade-only rule), and the router smoke
 # drives the bare router, not the `webui_v2_app` wrapper.
 ironclaw_webui_v2 = { path = "crates/ironclaw_webui_v2", version = "0.1.0", features = ["webui-v2-beta"] }
+# Direct dev-dep for the same reason as ironclaw_webui_v2 above: composition's
+# facade-only rule means it re-exports no SLACK_V2_ADAPTER_ID/SLACK_USER_ACTOR_KIND-style
+# constants; Slack pairing/actor-resolution int-tier tests need them directly.
+ironclaw_slack_v2_adapter = { path = "crates/ironclaw_slack_v2_adapter", version = "0.1.0" }
 ironclaw_reborn_config = { path = "crates/ironclaw_reborn_config", version = "0.1.0" }
 ironclaw_reborn_openai_compat = { path = "crates/ironclaw_reborn_openai_compat", version = "0.1.0", features = ["openai-compat-beta"] }
 ironclaw_run_state = { path = "crates/ironclaw_run_state", version = "0.1.0" }
@@ -500,6 +510,17 @@ path = "tests/integration/secrets.rs"
 [[test]]
 name = "reborn_integration_skill_activate"
 path = "tests/integration/skill_activate.rs"
+
+[[test]]
+name = "reborn_integration_slack_pairing_actor_resolution"
+path = "tests/integration/slack_pairing_actor_resolution.rs"
+
+[[test]]
+name = "reborn_integration_slack_pairing_redeem"
+path = "tests/integration/slack_pairing_redeem.rs"
+# Drives the real durable backend (`LibSqlRootFilesystem`) — the store's
+# consume path needs versioned CAS, which plain LocalFilesystem lacks.
+required-features = ["libsql"]
 
 [[test]]
 name = "reborn_integration_tool_call"

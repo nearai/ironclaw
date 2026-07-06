@@ -800,13 +800,28 @@ fi
 #
 # The script derives its repo root from its own path and `cd`s there, so
 # each case copies it into a fresh temp tree's scripts/ci/ and builds a
-# tests/integration/ subtree alongside it, then invokes the copy.
+# tests/integration/ subtree alongside it, then invokes the copy. It also
+# filters candidates against a `[[test]] name = "..."` entry in Cargo.toml
+# (see that script's header comment), so every case seeds a fake Cargo.toml
+# with one `[[test]]` block per fixture suite the case constructs — mirrors
+# the real repo root always having a `[[test]]` entry per suite.
 
 setup_int_tier_case() {
   local case_dir="$1"
+  shift
   mkdir -p "${case_dir}/scripts/ci" "${case_dir}/tests/integration"
   cp "${int_tier_sh}" "${case_dir}/scripts/ci/reborn-coverage-int-tier-tests.sh"
   chmod +x "${case_dir}/scripts/ci/reborn-coverage-int-tier-tests.sh"
+  : > "${case_dir}/Cargo.toml"
+  local candidate
+  for candidate in "$@"; do
+    cat >>"${case_dir}/Cargo.toml" <<EOF
+[[test]]
+name = "${candidate}"
+path = "tests/integration/${candidate}.rs"
+
+EOF
+  done
 }
 
 # D1: empty tests/integration/ -> non-zero exit + discovery error.
@@ -819,7 +834,7 @@ assert_contains "D1: empty tests/integration/ prints the discovery error" "${CAP
 
 # D2: one tests/integration/foo.rs -> --test / reborn_integration_foo.
 d2="${tmp_root}/d2"
-setup_int_tier_case "${d2}"
+setup_int_tier_case "${d2}" reborn_integration_foo
 : > "${d2}/tests/integration/foo.rs"
 capture "${d2}/scripts/ci/reborn-coverage-int-tier-tests.sh"
 assert_exit_code "D2: single flat integration file exits 0" 0 "${CAP_RC}"
@@ -828,7 +843,7 @@ assert_eq "D2: single flat integration file emits its --test pair" \
 
 # D3: one tests/integration/group_bar/main.rs -> --test / reborn_group_bar.
 d3="${tmp_root}/d3"
-setup_int_tier_case "${d3}"
+setup_int_tier_case "${d3}" reborn_group_bar
 mkdir -p "${d3}/tests/integration/group_bar"
 : > "${d3}/tests/integration/group_bar/main.rs"
 capture "${d3}/scripts/ci/reborn-coverage-int-tier-tests.sh"
@@ -838,7 +853,7 @@ assert_eq "D3: single group dir emits its --test pair, dir->name rewrite applied
 
 # D3b: a half-scaffolded group dir (no main.rs yet) is skipped, not errored.
 d3b="${tmp_root}/d3b"
-setup_int_tier_case "${d3b}"
+setup_int_tier_case "${d3b}" reborn_group_bar
 mkdir -p "${d3b}/tests/integration/group_bar" "${d3b}/tests/integration/group_incomplete"
 : > "${d3b}/tests/integration/group_bar/main.rs"
 capture "${d3b}/scripts/ci/reborn-coverage-int-tier-tests.sh"
@@ -849,7 +864,7 @@ assert_eq "D3b: half-scaffolded group dir (no main.rs) is skipped" \
 # D4: multiple files + dirs, created out of alphabetical order -> sorted,
 # deduped output. Group dirs ('g') sort before integration files ('i').
 d4="${tmp_root}/d4"
-setup_int_tier_case "${d4}"
+setup_int_tier_case "${d4}" reborn_group_beta reborn_group_omega reborn_integration_alpha reborn_integration_zeta
 : > "${d4}/tests/integration/zeta.rs"
 : > "${d4}/tests/integration/alpha.rs"
 mkdir -p "${d4}/tests/integration/group_omega" "${d4}/tests/integration/group_beta"
@@ -865,7 +880,7 @@ assert_eq "D4: multiple suites sorted+deduped in expected order" \
 # mistaken for a suite (no main.rs, and doesn't match the `group_*` name
 # pattern either) — mirrors the real tests/integration/support/ harness tree.
 d5="${tmp_root}/d5"
-setup_int_tier_case "${d5}"
+setup_int_tier_case "${d5}" reborn_integration_only
 : > "${d5}/tests/integration/only.rs"
 mkdir -p "${d5}/tests/integration/support"
 : > "${d5}/tests/integration/support/mod.rs"

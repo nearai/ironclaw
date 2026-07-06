@@ -3955,6 +3955,7 @@ dependencies = [
  "ironclaw_safety",
  "ironclaw_secrets",
  "ironclaw_skills",
+ "ironclaw_slack_v2_adapter",
  "ironclaw_threads",
  "ironclaw_triggers",
  "ironclaw_trust",
