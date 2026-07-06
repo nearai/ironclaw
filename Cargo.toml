@@ -496,6 +496,10 @@ name = "reborn_integration_project_create"
 path = "tests/integration/project_create.rs"
 
 [[test]]
+name = "reborn_integration_real_egress_pipeline"
+path = "tests/integration/real_egress_pipeline.rs"
+
+[[test]]
 name = "reborn_integration_safety"
 path = "tests/integration/safety.rs"
 

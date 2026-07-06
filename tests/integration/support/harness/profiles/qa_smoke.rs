@@ -118,6 +118,7 @@ pub(crate) async fn qa_smoke_tools() -> HarnessResult<HostRuntimeCapabilityHarne
         results: Arc::new(Mutex::new(Vec::new())),
         http_egress: None,
         network_egress: None,
+        real_egress_transport: None,
         process_port: None,
         profile_filesystem: None,
         project_service: None,

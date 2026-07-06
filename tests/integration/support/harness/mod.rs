@@ -39,7 +39,7 @@ use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilitySurfaceProfileResolver, HostRuntimeLoopCapabilityPortFactory,
     LoopCapabilityPortFactory, LoopCapabilityResultWriter,
 };
-use ironclaw_network::NetworkHttpRequest;
+use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
 use ironclaw_product_workflow::{ProjectService, ResolvedBinding};
 use ironclaw_reborn_composition::test_support::SkillActivationTestSource;
 use ironclaw_reborn_composition::{
@@ -60,13 +60,14 @@ pub(crate) use super::doubles::{
     EmptyIdentityContextSource, HarnessCapabilityPortFactory,
     HostRuntimeHarnessCapabilityPortFactory, RecordingApprovalRequestStore,
     RecordingCapabilityResultWriter, RecordingDelegatingCapabilityPort, RecordingHostRuntime,
-    RecordingNetworkHttpEgress, RecordingRuntimeHttpEgress, RecordingTestCapabilityPort,
-    StaticCapabilitySurfaceProfileResolver,
+    RecordingNetworkHttpEgress, RecordingNetworkHttpTransport, RecordingRuntimeHttpEgress,
+    RecordingTestCapabilityPort, StaticCapabilitySurfaceProfileResolver,
 };
 pub(crate) use assembly::{
     LocalDevRootMounts, bundled_extension_provider_trust, capability_ids_from_strs,
     copy_dir_recursive, host_runtime_storage_roots, http_test_policy, local_dev_all_effects,
     local_dev_host_runtime_with_http_egress, local_dev_host_runtime_with_live_http_egress,
+    local_dev_host_runtime_with_real_egress_pipeline,
     local_dev_host_runtime_with_registry_and_egress, local_dev_mount_descriptor,
     local_dev_root_filesystem, memory_mounts, qa_smoke_mounts, skill_mounts, wildcard_test_policy,
     workspace_mounts,
@@ -167,6 +168,12 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     results: Arc<Mutex<Vec<RecordedCapabilityResult>>>,
     http_egress: Option<Arc<RecordingRuntimeHttpEgress>>,
     network_egress: Option<Arc<RecordingNetworkHttpEgress>>,
+    /// S1 seam: wire-level transport recorder installed only by
+    /// `.with_real_egress_pipeline()`. Sits BELOW the real
+    /// `PolicyNetworkHttpEgress` (network-policy enforcement) and the real
+    /// `HostHttpEgressService` (leak scan) — both run for real before a
+    /// request reaches this double. `None` for every other construction.
+    real_egress_transport: Option<Arc<RecordingNetworkHttpTransport>>,
     /// Inert recording process port. `Some` when the harness injected a
     /// `RecordingProcessPort`; `None` when the live `LocalHostProcessPort` was
     /// used (`.with_live_shell()` path).
@@ -556,6 +563,7 @@ impl HostRuntimeCapabilityHarness {
             results: Arc::new(Mutex::new(Vec::new())),
             http_egress: None,
             network_egress: None,
+            real_egress_transport: None,
             process_port: None,
             profile_filesystem,
             project_service,
@@ -686,6 +694,33 @@ impl HostRuntimeCapabilityHarness {
             .as_ref()
             .map(|egress| egress.requests())
             .unwrap_or_default()
+    }
+
+    /// Every request that reached the S1 wire-level transport recorder, in
+    /// call order. Empty (not an error) for every harness that did not opt
+    /// into `.with_real_egress_pipeline()`.
+    pub(crate) fn real_egress_transport_requests(&self) -> Vec<NetworkTransportRequest> {
+        self.real_egress_transport
+            .as_ref()
+            .map(|transport| transport.requests())
+            .unwrap_or_default()
+    }
+
+    /// Install FIFO scripted response bodies (S1 seam) onto the real-egress
+    /// transport recorder, consumed ahead of its default body. Errors if this
+    /// harness did not wire the real-egress pipeline.
+    pub(crate) fn install_real_egress_response_bodies(
+        &self,
+        bodies: impl IntoIterator<Item = Vec<u8>>,
+    ) -> HarnessResult<()> {
+        let transport = self
+            .real_egress_transport
+            .as_ref()
+            .ok_or("host runtime harness has no real-egress transport to script")?;
+        for body in bodies {
+            transport.push_response_body(body);
+        }
+        Ok(())
     }
 
     pub(crate) fn workspace_file_path(&self, relative: &str) -> PathBuf {

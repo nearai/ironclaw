@@ -24,9 +24,10 @@ use ironclaw_host_runtime::{
 use ironclaw_reborn_composition::ProductLiveCapabilityIo;
 
 use super::super::{
-    HarnessResult, HostRuntimeCapabilityHarness, RecordingRuntimeHttpEgress,
-    host_runtime_storage_roots, http_test_policy, local_dev_host_runtime_with_http_egress,
-    local_dev_host_runtime_with_live_http_egress, memory_mounts, workspace_mounts,
+    HarnessResult, HostRuntimeCapabilityHarness, RecordingNetworkHttpTransport,
+    RecordingRuntimeHttpEgress, host_runtime_storage_roots, http_test_policy,
+    local_dev_host_runtime_with_http_egress, local_dev_host_runtime_with_live_http_egress,
+    local_dev_host_runtime_with_real_egress_pipeline, memory_mounts, workspace_mounts,
 };
 
 /// Configuration axes for [`core_builtin_tools`]. `Default` matches the
@@ -47,6 +48,14 @@ pub(crate) struct CoreBuiltinOptions {
     /// the harness) instead of the default recording-egress runtime
     /// construction. Set via `.with_live_http_egress()`.
     pub(crate) live_http_egress: bool,
+    /// S1 seam: `true` selects `local_dev_host_runtime_with_real_egress_pipeline`
+    /// — the REAL production egress pipeline (network-policy enforcement +
+    /// leak scan) with only the wire-level transport recorded, instead of the
+    /// whole-pipeline-bypassing `RecordingRuntimeHttpEgress`. Set via
+    /// `.with_real_egress_pipeline()`. Mutually exclusive with
+    /// `live_http_egress` in practice (the last one set on `CoreBuiltinOptions`
+    /// wins at the `core_builtin_tools` call site below).
+    pub(crate) real_egress_pipeline: bool,
 }
 
 impl Default for CoreBuiltinOptions {
@@ -55,6 +64,7 @@ impl Default for CoreBuiltinOptions {
             network_policy: http_test_policy(),
             recording_process: true,
             live_http_egress: false,
+            real_egress_pipeline: false,
         }
     }
 }
@@ -76,6 +86,13 @@ impl CoreBuiltinOptions {
         self.live_http_egress = true;
         self
     }
+
+    /// S1 seam: run the real production egress pipeline (network-policy
+    /// enforcement + leak scan) with only the wire-level transport recorded.
+    pub(crate) fn with_real_egress_pipeline(mut self) -> Self {
+        self.real_egress_pipeline = true;
+        self
+    }
 }
 
 /// Core built-in tools (`time`/`json`/`http`/`memory_*`/`profile_set`/
@@ -87,8 +104,25 @@ pub(crate) async fn core_builtin_tools(
         network_policy,
         recording_process,
         live_http_egress,
+        real_egress_pipeline,
     } = options;
-    if live_http_egress {
+    if real_egress_pipeline {
+        let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
+        let transport = RecordingNetworkHttpTransport::with_body(br#"{"ok":true}"#.to_vec());
+        let runtime = local_dev_host_runtime_with_real_egress_pipeline(
+            storage_root.clone(),
+            transport.clone(),
+        )?;
+        let mut harness = core_builtin_tools_from_runtime(
+            root,
+            workspace_root,
+            runtime,
+            network_policy,
+            UserId::new("reborn-e2e-core-builtins-real-egress-user")?,
+        )?;
+        harness.real_egress_transport = Some(Arc::new(transport));
+        Ok(harness)
+    } else if live_http_egress {
         let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
         let runtime = local_dev_host_runtime_with_live_http_egress(storage_root.clone())?;
         core_builtin_tools_from_runtime(
@@ -220,6 +254,7 @@ fn core_builtin_tools_from_runtime(
         results: Arc::new(Mutex::new(Vec::new())),
         http_egress: None,
         network_egress: None,
+        real_egress_transport: None,
         process_port: None,
         profile_filesystem: None,
         project_service: None,

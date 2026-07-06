@@ -33,7 +33,7 @@ use ironclaw_host_api::{
     RuntimeHttpEgressRequest, VirtualPath,
 };
 use ironclaw_llm::Role;
-use ironclaw_network::NetworkHttpRequest;
+use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
 use ironclaw_product_adapters::{ProductInboundAck, ProductTriggerReason, ProductWorkflow};
 use ironclaw_product_workflow::{
     DefaultProductWorkflow, ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
@@ -100,6 +100,10 @@ pub struct RebornIntegrationHarnessBuilder {
     /// W4-AUTHGATE-WIRE: FIFO scripted statuses for the `GithubIssueTools`
     /// backend's **network**-egress lane (see `with_github_network_status`).
     github_network_statuses: Vec<u16>,
+    /// S1 seam: FIFO scripted response bodies for the real-egress-pipeline
+    /// backend's wire-level transport recorder (see
+    /// `with_real_egress_response_bodies`).
+    real_egress_response_bodies: Vec<Vec<u8>>,
     storage: StorageMode,
     safety_context: Option<InstructionSafetyContext>,
     /// How the `BuiltinHttpTools` backend wires `builtin.shell`. One enum instead
@@ -357,6 +361,30 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// S1 seam: wire the real first-party tool runtime over the REAL
+    /// production egress pipeline — `PolicyNetworkHttpEgress` (network-policy
+    /// enforcement + DNS/private-IP checks) and `HostHttpEgressService` (leak
+    /// scan) both run for real; only the wire-level transport is a recorder.
+    /// Distinct from [`with_builtin_http_tools`](Self::with_builtin_http_tools),
+    /// whose `RecordingRuntimeHttpEgress` bypasses both security layers.
+    pub fn with_real_egress_pipeline(mut self) -> Self {
+        self.capability = RebornCapabilityBackend::BuiltinHttpToolsRealEgress;
+        self
+    }
+
+    /// Like [`with_real_egress_pipeline`](Self::with_real_egress_pipeline),
+    /// but also installs FIFO scripted response bodies onto the wire-level
+    /// transport recorder — for scripting a response the real leak-scan
+    /// pipeline should react to.
+    pub fn with_real_egress_response_bodies(
+        mut self,
+        bodies: impl IntoIterator<Item = Vec<u8>>,
+    ) -> Self {
+        self.capability = RebornCapabilityBackend::BuiltinHttpToolsRealEgress;
+        self.real_egress_response_bodies = bodies.into_iter().collect();
+        self
+    }
+
     /// Wire the real MCP runtime backed by a loopback mock MCP server.
     ///
     /// `mcp_url` is the full mock endpoint URL (e.g. `server.mcp_url()`). The
@@ -394,6 +422,7 @@ impl RebornIntegrationHarnessBuilder {
                 self.keyed_http_responses,
                 self.web_access_response_bodies,
                 self.github_network_statuses,
+                self.real_egress_response_bodies,
             )
             .await?;
 
@@ -517,6 +546,7 @@ impl RebornIntegrationHarness {
             keyed_http_responses: Vec::new(),
             web_access_response_bodies: Vec::new(),
             github_network_statuses: Vec::new(),
+            real_egress_response_bodies: Vec::new(),
             storage: StorageMode::default(),
             safety_context: None,
             shell_mode: ShellMode::default(),
@@ -927,6 +957,15 @@ impl RebornIntegrationHarness {
     pub(super) fn captured_network_requests(&self) -> Vec<NetworkHttpRequest> {
         let mut all = self.capability_recorder.network_http_requests();
         all.split_off(self.baseline_network_count)
+    }
+
+    /// S1 seam: every request that reached the real-egress-pipeline's
+    /// wire-level transport recorder (`.with_real_egress_pipeline()`), in call
+    /// order. Empty (not baseline-sliced — this backend is single-shot, never
+    /// group-shared) both when the harness didn't opt in and when real
+    /// network-policy enforcement denied every call before the transport.
+    pub(super) fn real_egress_transport_requests(&self) -> Vec<NetworkTransportRequest> {
+        self.capability_recorder.real_egress_transport_requests()
     }
 
     /// Assert that a `builtin.shell` command was recorded by the inert process

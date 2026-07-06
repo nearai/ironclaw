@@ -67,6 +67,7 @@ pub(crate) async fn web_access_tools() -> HarnessResult<HostRuntimeCapabilityHar
         results: Arc::new(Mutex::new(Vec::new())),
         http_egress: Some(http_egress),
         network_egress: None,
+        real_egress_transport: None,
         process_port: None,
         profile_filesystem: None,
         project_service: None,

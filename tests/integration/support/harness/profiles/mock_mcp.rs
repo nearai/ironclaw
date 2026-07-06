@@ -85,6 +85,7 @@ pub(crate) async fn mock_mcp_tools(
         results: Arc::new(Mutex::new(Vec::new())),
         http_egress: None,
         network_egress: None,
+        real_egress_transport: None,
         process_port: None,
         profile_filesystem: None,
         project_service: None,

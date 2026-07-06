@@ -42,6 +42,12 @@ pub(super) enum RebornCapabilityBackend {
     /// web-access declares no `runtime_credentials`, so this wires the plain default
     /// `GrantAuthorizer` — no credential-injecting authorizer is needed.
     WebAccessTools,
+    /// S1 seam: real first-party tool runtime over the REAL production egress
+    /// pipeline (`PolicyNetworkHttpEgress` network-policy enforcement +
+    /// `HostHttpEgressService` leak scan) with only the wire-level transport
+    /// recorded. Distinct from `BuiltinHttpTools`, whose
+    /// `RecordingRuntimeHttpEgress` bypasses that whole pipeline.
+    BuiltinHttpToolsRealEgress,
 }
 
 /// Which process port the built `BuiltinHttpTools` runtime installs for
@@ -71,6 +77,7 @@ impl RebornCapabilityBackend {
         keyed_http_responses: Vec<ScriptedHttpResponse>,
         web_access_response_bodies: Vec<Vec<u8>>,
         github_network_statuses: Vec<u16>,
+        real_egress_response_bodies: Vec<Vec<u8>>,
     ) -> HarnessResult<GroupCapability> {
         Ok(match self {
             RebornCapabilityBackend::Echo => GroupCapability::Recording,
@@ -129,6 +136,15 @@ impl RebornCapabilityBackend {
                 // C-WEBACCESS — see the `WebAccessTools` variant docs above.
                 let host_runtime = super::harness::profiles::web_access::web_access_tools().await?;
                 host_runtime.install_web_access_responses(web_access_response_bodies)?;
+                GroupCapability::HostRuntime(Arc::new(host_runtime))
+            }
+            RebornCapabilityBackend::BuiltinHttpToolsRealEgress => {
+                // S1 — see the `BuiltinHttpToolsRealEgress` variant docs above.
+                let host_runtime = core_builtin::core_builtin_tools(
+                    CoreBuiltinOptions::default().with_real_egress_pipeline(),
+                )
+                .await?;
+                host_runtime.install_real_egress_response_bodies(real_egress_response_bodies)?;
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
         })
