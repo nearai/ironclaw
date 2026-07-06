@@ -304,7 +304,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri("/styles/app.css")
+                    .uri("/dist/app.css")
                     .body(Body::empty())
                     .expect("request"),
             )
@@ -695,18 +695,14 @@ mod tests {
 
     #[test]
     fn asset_table_includes_known_files() {
-        // Spot-check core SPA entry points — the chat surface (in-scope
-        // for #3886) plus one representative page-tree file (extensions,
-        // which wires the 9th v2 endpoint) — so a build.rs regression
-        // that drops a whole subtree breaks loudly.
+        // Spot-check the generated SPA bundle plus committed public assets so
+        // a build.rs regression that drops either class breaks loudly.
         for required in [
-            "styles/app.css",
-            "js/main.js",
-            "js/lib/api.js",
-            "js/app/app.js",
-            "js/app/auth.js",
-            "js/pages/chat/chat-page.js",
-            "js/pages/extensions/extensions-page.js",
+            "dist/app.js",
+            "dist/app.css",
+            "dist/wallet-connect.js",
+            "assets/favicon.svg",
+            "vendor/purify.min.js",
         ] {
             assert!(
                 assets::lookup(required).is_some(),
@@ -715,8 +711,13 @@ mod tests {
         }
     }
 
+    fn source_text(path: &str) -> String {
+        let full = format!("{}/frontend/src/{path}", env!("CARGO_MANIFEST_DIR"));
+        std::fs::read_to_string(&full).unwrap_or_else(|e| panic!("read {full}: {e}"))
+    }
+
     // Locks the WebChat v2 SSO login-ticket contract documented
-    // in `app/auth.js` (issue #4116 review finding #11). The
+    // in `frontend/src/app/auth.ts` (issue #4116 review finding #11). The
     // user-visible OAuth login path is "callback redirects to
     // `/v2?login_ticket=<ticket>` → SPA strips the ticket from the
     // URL → exchanges it via `/auth/session/exchange` → stores the
@@ -725,16 +726,14 @@ mod tests {
     // No JS test runner ships in this workspace and a real
     // Playwright e2e for the OAuth flow requires Google
     // credentials. This Rust assertion is the lightweight
-    // regression: it inspects the embedded asset bytes for the
+    // regression: it inspects the frontend source for the
     // call shapes that implement each invariant. A refactor that
     // drops any one of them fails loudly here; the deep semantics
     // belong on a follow-up e2e once the SSO mount is wired into
     // a real binary.
     #[test]
     fn auth_js_carries_login_ticket_contract() {
-        let asset =
-            assets::lookup("js/app/auth.js").expect("auth.js must be in the embedded asset table");
-        let source = std::str::from_utf8(asset.bytes).expect("auth.js is UTF-8");
+        let source = source_text("app/auth.ts");
 
         // 1. Reads and strips the one-time login ticket from the
         //    query string before exchanging it for the bearer.
