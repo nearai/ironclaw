@@ -93,8 +93,8 @@ pub use model::{
     NoOpPolicyGuard,
 };
 pub use model_observation::{
-    CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputIssueCode, CapabilityInputRepair,
-    CapabilityRecoveryHint, MODEL_OBSERVATION_DETAIL_MAX_BYTES,
+    CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputRepair, CapabilityRecoveryHint,
+    MODEL_OBSERVATION_DETAIL_MAX_BYTES,
     MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleArtifact,
     ModelVisibleToolObservation, ObservationTrust, SameCallRetryConstraint, ToolObservationDetail,
     ToolObservationStatus, ToolRecoveryObservation, validate_model_observation_detail,
