@@ -57,11 +57,17 @@ export function useNotifications({
   }, [scope]);
 
   const query = useQuery({
-    queryKey: ["notifications", "approval-threads", scope || "pending-profile"],
+    queryKey: [
+      "notifications",
+      "approval-threads",
+      scope || "pending-profile",
+      activeThreadId || "no-active-thread",
+    ],
     queryFn: () =>
       listThreads({
         limit: NOTIFICATION_THREAD_LIMIT,
         needsApproval: true,
+        candidateThreadId: activeThreadId || undefined,
       }),
     enabled: enabled && Boolean(scope),
     refetchInterval: NOTIFICATION_REFETCH_MS,

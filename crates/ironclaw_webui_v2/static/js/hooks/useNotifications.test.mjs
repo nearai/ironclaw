@@ -211,7 +211,7 @@ test("queries only threads that need approval", async () => {
   ]);
 });
 
-test("does not use active thread as an approval query candidate", async () => {
+test("uses active thread as an approval query candidate", async () => {
   const harness = instantiate(
     {
       data: { threads: [] },
@@ -225,7 +225,7 @@ test("does not use active thread as an approval query candidate", async () => {
 
   await harness.queryOptions.queryFn();
   assert.deepEqual(plainThreadRequests(harness.listThreadCalls), [
-    { limit: 20, needsApproval: true, candidateThreadId: undefined },
+    { limit: 20, needsApproval: true, candidateThreadId: "thread-active" },
   ]);
 });
 
