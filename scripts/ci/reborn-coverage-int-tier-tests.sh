@@ -14,6 +14,16 @@
 # Discovery is dynamic so coverage automatically picks up new int-tier suites
 # as they land (mirrors scripts/ci/run-reborn-group-tests.sh's dir->name
 # rewrite and scripts/ci/run-reborn-root-partition.sh's overall shape).
+#
+# Candidate names are filtered against Cargo.toml's `[[test]] name = "..."`
+# entries: not every flat tests/integration/<name>.rs file is its own binary
+# — a file can be a #[path]-mounted shared-fixture sibling included by two or
+# more real suites instead (see slack_pairing_fixtures.rs, mounted by
+# slack_pairing_redeem.rs / slack_pairing_actor_resolution.rs), and such
+# siblings have no `[[test]]` entry of their own. Without this filter, a bare
+# directory scan derives a nonexistent `--test reborn_integration_<sibling>`
+# arg and `cargo llvm-cov ... test` fails outright with "no test target
+# named" before running anything in the lane.
 
 set -euo pipefail
 
@@ -27,7 +37,16 @@ mapfile -t names < <(
     find tests/integration -mindepth 1 -maxdepth 1 -type d -name 'group_*' \
       -exec sh -c 'test -f "$1/main.rs"' _ {} ';' -print \
       | sed -E 's#^tests/integration/group_#reborn_group_#'
-  } | LC_ALL=C sort -u
+  } | LC_ALL=C sort -u | while IFS= read -r candidate; do
+    if awk -v name="${candidate}" '
+      /^\[\[test\]\]/ { in_test=1; next }
+      /^\[/ { in_test=0 }
+      in_test && $0 == "name = \"" name "\"" { found=1; exit }
+      END { exit !found }
+    ' Cargo.toml; then
+      printf '%s\n' "${candidate}"
+    fi
+  done
 )
 
 if [ "${#names[@]}" -eq 0 ]; then
