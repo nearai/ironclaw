@@ -4,6 +4,14 @@ import test from "node:test";
 import vm from "node:vm";
 import { productAuthOAuthEventsSource } from "../../../lib/product-auth-oauth-events.vm-inline.mjs";
 
+// The origin-independent flow-status poll is fire-and-forget: the interval
+// callback kicks off `fetchOauthFlowStatus(...)` without awaiting it, so the
+// completion runs on a microtask after the synchronous interval returns. Yield
+// to the event loop so those microtasks drain before asserting.
+function flushAsyncWork() {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 function useExtensionsOauthSourceForTest() {
   const source = readFileSync(new URL("./useExtensions.js", import.meta.url), "utf8");
   const lines = [];
@@ -49,6 +57,7 @@ test("useOauthSetup exposes the popup-watcher phase as authorizing", () => {
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
+    fetchOauthFlowStatus: () => Promise.resolve(null),
     fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
@@ -125,6 +134,7 @@ test("useOauthSetup waits for the matching Slack OAuth callback when reconnectin
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
+    fetchOauthFlowStatus: () => Promise.resolve(null),
     fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
@@ -269,6 +279,7 @@ test("useOauthSetup completes reconnect when polling sees Slack become configure
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
+    fetchOauthFlowStatus: () => Promise.resolve(null),
     fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
@@ -403,6 +414,7 @@ test("useOauthSetup keeps polling reconnect after Slack closes the OAuth popup",
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
+    fetchOauthFlowStatus: () => Promise.resolve(null),
     fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
@@ -530,6 +542,7 @@ test("useOauthSetup surfaces a flow-matched failure signal as a retryable error 
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
+    fetchOauthFlowStatus: () => Promise.resolve(null),
     fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
@@ -689,6 +702,7 @@ test("useOauthSetup reconnect ignores the pre-flow configured snapshot and waits
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
+    fetchOauthFlowStatus: () => Promise.resolve(null),
     fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
@@ -818,6 +832,7 @@ test("useOauthSetup ignores a stale OAuth callback when the flow response carrie
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
+    fetchOauthFlowStatus: () => Promise.resolve(null),
     fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
@@ -906,4 +921,264 @@ test("useOauthSetup ignores a stale OAuth callback when the flow response carrie
 
   // The watcher is still authorizing — it never falsely completed.
   assert.deepEqual(stateUpdates, [{ index: 0, value: true }]);
+});
+
+test("useOauthSetup completes reconnect from the origin-independent flow-status poll when no browser signal arrives", async () => {
+  const stateUpdates = [];
+  const intervals = [];
+  const storage = new Map();
+  let mutationConfig = null;
+  let stateIndex = 0;
+  let configuredCount = 0;
+  const flowStatusCalls = [];
+  const popup = { closed: false, location: { href: "about:blank" } };
+  const context = {
+    Date,
+    Error,
+    Promise,
+    React: {
+      useCallback: (fn) => fn,
+      useEffect: () => {},
+      useRef: (initial) => ({ current: initial }),
+      useState: (initial) => {
+        const index = stateIndex++;
+        return [
+          typeof initial === "function" ? initial() : initial,
+          (value) => stateUpdates.push({ index, value }),
+        ];
+      },
+    },
+    URL,
+    activateExtension: () => {},
+    approvePairingCode: () => {},
+    fetchExtensionRegistry: () => {},
+    fetchExtensionSetup: () => {},
+    fetchExtensions: () => {},
+    // Cross-origin callback: the same-origin localStorage/BroadcastChannel
+    // signal never reaches this tab. The server-side flow-status poll is the
+    // ONLY completion path.
+    fetchOauthFlowStatus: (flowId, invocationId) => {
+      flowStatusCalls.push({ flowId, invocationId });
+      return Promise.resolve({ status: "completed" });
+    },
+    fetchPairingRequests: () => {},
+    gatewayStatus: () => {},
+    globalThis: {},
+    installExtension: () => {},
+    isChannelExtensionKind: () => false,
+    listConnectableChannels: () => {},
+    removeExtension: () => {},
+    startExtensionOauth: () => {},
+    submitExtensionSetup: () => {},
+    useMutation: (config) => {
+      mutationConfig = config;
+      return { isPending: false, mutate: () => {}, error: null };
+    },
+    useQuery: () => ({ data: {}, isLoading: false }),
+    // Already-configured reconnect: the setup cache reports the secret as
+    // `provided`, so `requireCallbackCompletion` is true and the
+    // provided-secret poll fallback is disabled — configured-state polling can
+    // never complete this flow.
+    useQueryClient: () => ({
+      getQueryData: (queryKey) => {
+        if (JSON.stringify(queryKey) === JSON.stringify(["extension-setup", "slack"])) {
+          return {
+            secrets: [
+              {
+                name: "slack_personal_oauth",
+                provider: "slack_personal",
+                provided: true,
+              },
+            ],
+          };
+        }
+        return null;
+      },
+      invalidateQueries: () => {},
+    }),
+    useT: () => (key) => key,
+    window: {
+      clearInterval: () => {},
+      localStorage: {
+        getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+        setItem: (key, value) => storage.set(key, String(value)),
+      },
+      open: () => popup,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      setInterval: (callback) => {
+        intervals.push(callback);
+        return intervals.length;
+      },
+    },
+  };
+  vm.runInNewContext(useExtensionsOauthSourceForTest(), context);
+
+  context.globalThis.__testExports.useOauthSetup(
+    { id: "slack" },
+    {
+      onConfigured: () => {
+        configuredCount += 1;
+      },
+    },
+  );
+
+  mutationConfig.onSuccess(
+    {
+      res: {
+        authorization_url: "https://slack.com/oauth/v2/authorize",
+        flow_id: "flow-new",
+        callback_scope: { invocation_id: "invocation-new" },
+      },
+      popup,
+    },
+    {
+      secret: {
+        provider: "slack_personal",
+        provided: true,
+      },
+    },
+  );
+
+  // No storage/BroadcastChannel signal is ever written. The poll fires on the
+  // interval tick and resolves on a microtask.
+  intervals[0]();
+  await flushAsyncWork();
+
+  assert.equal(configuredCount, 1, "the flow-status poll must complete the reconnect");
+  // The poll must carry the flow id AND the invocation id the start response
+  // minted, so the caller-scoped backend can locate its own flow.
+  assert.deepEqual(flowStatusCalls[0], {
+    flowId: "flow-new",
+    invocationId: "invocation-new",
+  });
+  assert.deepEqual(stateUpdates, [
+    { index: 0, value: true },
+    { index: 0, value: false },
+  ]);
+});
+
+test("useOauthSetup surfaces a failed flow-status poll as a retryable error when no browser signal arrives", async () => {
+  const stateUpdates = [];
+  const intervals = [];
+  const storage = new Map();
+  let mutationConfig = null;
+  let stateIndex = 0;
+  let configuredCount = 0;
+  const popup = { closed: false, location: { href: "about:blank" } };
+  const context = {
+    Date,
+    Error,
+    Promise,
+    React: {
+      useCallback: (fn) => fn,
+      useEffect: () => {},
+      useRef: (initial) => ({ current: initial }),
+      useState: (initial) => {
+        const index = stateIndex++;
+        return [
+          typeof initial === "function" ? initial() : initial,
+          (value) => stateUpdates.push({ index, value }),
+        ];
+      },
+    },
+    URL,
+    activateExtension: () => {},
+    approvePairingCode: () => {},
+    fetchExtensionRegistry: () => {},
+    fetchExtensionSetup: () => {},
+    fetchExtensions: () => {},
+    fetchOauthFlowStatus: () => Promise.resolve({ status: "failed" }),
+    fetchPairingRequests: () => {},
+    gatewayStatus: () => {},
+    globalThis: {},
+    installExtension: () => {},
+    isChannelExtensionKind: () => false,
+    listConnectableChannels: () => {},
+    removeExtension: () => {},
+    startExtensionOauth: () => {},
+    submitExtensionSetup: () => {},
+    useMutation: (config) => {
+      mutationConfig = config;
+      return { isPending: false, mutate: () => {}, error: null };
+    },
+    useQuery: () => ({ data: {}, isLoading: false }),
+    useQueryClient: () => ({
+      getQueryData: (queryKey) => {
+        if (JSON.stringify(queryKey) === JSON.stringify(["extension-setup", "slack"])) {
+          return {
+            secrets: [
+              {
+                name: "slack_personal_oauth",
+                provider: "slack_personal",
+                provided: true,
+              },
+            ],
+          };
+        }
+        return null;
+      },
+      invalidateQueries: () => {},
+    }),
+    useT: () => (key) => key,
+    window: {
+      clearInterval: () => {},
+      localStorage: {
+        getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+        setItem: (key, value) => storage.set(key, String(value)),
+      },
+      open: () => popup,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      setInterval: (callback) => {
+        intervals.push(callback);
+        return intervals.length;
+      },
+    },
+  };
+  vm.runInNewContext(useExtensionsOauthSourceForTest(), context);
+
+  context.globalThis.__testExports.useOauthSetup(
+    { id: "slack" },
+    {
+      onConfigured: () => {
+        configuredCount += 1;
+      },
+    },
+  );
+
+  mutationConfig.onSuccess(
+    {
+      res: {
+        authorization_url: "https://slack.com/oauth/v2/authorize",
+        flow_id: "flow-fails",
+        callback_scope: { invocation_id: "invocation-fails" },
+      },
+      popup,
+    },
+    {
+      secret: {
+        provider: "slack_personal",
+        provided: true,
+      },
+    },
+  );
+
+  intervals[0]();
+  await flushAsyncWork();
+
+  assert.equal(configuredCount, 0, "a failed flow must not report configured");
+  assert.ok(
+    stateUpdates.some((update) => update.index === 0 && update.value === false),
+    "the watcher must stop on a failed flow-status poll",
+  );
+  assert.ok(
+    stateUpdates.some(
+      (update) =>
+        update.index === 1 &&
+        typeof update.value === "string" &&
+        /authorization failed/i.test(update.value),
+    ),
+    "a failed flow-status poll must surface a retryable error",
+  );
 });

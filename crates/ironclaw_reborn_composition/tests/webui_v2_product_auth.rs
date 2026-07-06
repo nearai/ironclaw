@@ -11,14 +11,15 @@ use axum::extract::ConnectInfo;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_auth::{
-    AuthChallenge, AuthContinuationEvent, AuthFlowId, AuthFlowManager, AuthInteractionId,
-    AuthInteractionService, AuthProductError, AuthProductScope, AuthProviderClient, AuthProviderId,
-    AuthSurface, CredentialAccountLabel, CredentialAccountService, CredentialAccountStatus,
-    CredentialOwnership, CredentialSetupService, GOOGLE_CALENDAR_READONLY_SCOPE,
-    GOOGLE_GMAIL_READONLY_SCOPE, InMemoryAuthProductServices, ManualTokenSetupRequest,
-    NewCredentialAccount, OAuthProviderCallbackRequest, OAuthProviderExchange,
-    OAuthProviderExchangeContext, OAuthProviderRefresh, OAuthProviderRefreshRequest, ProviderScope,
-    SecretCleanupService, SecretSubmitRequest, SecretSubmitResult,
+    AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthFlowId, AuthFlowKind,
+    AuthFlowManager, AuthInteractionId, AuthInteractionService, AuthProductError, AuthProductScope,
+    AuthProviderClient, AuthProviderId, AuthSurface, CredentialAccountLabel,
+    CredentialAccountService, CredentialAccountStatus, CredentialOwnership, CredentialSetupService,
+    GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_READONLY_SCOPE, InMemoryAuthProductServices,
+    ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthAuthorizationUrl,
+    OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderExchangeContext,
+    OAuthProviderRefresh, OAuthProviderRefreshRequest, ProviderScope, SecretCleanupService,
+    SecretSubmitRequest, SecretSubmitResult,
 };
 use ironclaw_host_api::{
     AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
@@ -604,6 +605,26 @@ async fn post_oauth_start(app: &axum::Router, body: serde_json::Value) -> axum::
                 .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot")
+}
+
+async fn get_oauth_flow_status(
+    app: &axum::Router,
+    flow_id: &str,
+    query: &str,
+) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!(
+                    "/api/reborn/product-auth/oauth/flow/{flow_id}/status{query}"
+                ))
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .body(Body::empty())
                 .expect("request"),
         )
         .await
@@ -1250,6 +1271,129 @@ async fn product_auth_oauth_routes_create_flow_and_complete_callback() {
     assert_eq!(callback_json["flow_id"], started.flow_id);
     assert_eq!(callback_json["status"], "completed");
     assert_eq!(dispatcher.events().len(), 1);
+}
+
+// The origin-independent reconnect backstop: after the callback marks the flow
+// completed, the caller-scoped flow-status poll reports "completed" so the
+// reconnect modal can close even when the same-origin browser signal never
+// arrived. Also locks the read's error surface: malformed id → 400, unknown id
+// → 404, and no secret material ever crosses the read.
+#[tokio::test]
+async fn product_auth_oauth_flow_status_reports_completed_without_secrets() {
+    let (app, _dispatcher) = build_app_with_product_auth();
+    // Start WITHOUT session/thread so the flow scope is thread/session-free —
+    // exactly what the caller-scoped poll re-derives from the invocation id.
+    let started =
+        start_oauth_flow(&app, "status-state-secret", "status-pkce-secret", json!({})).await;
+    let callback_response = app
+        .clone()
+        .oneshot(callback_request(callback_uri(
+            &started.flow_id,
+            &started.invocation_id,
+            USER,
+            "status-state-secret",
+            "&provider=github&account_label=work%20github&code=status-auth-code&scopes=repo",
+        )))
+        .await
+        .expect("oneshot");
+    assert_eq!(callback_response.status(), StatusCode::OK);
+
+    // Origin-independent poll: the browser echoes the invocation id the start
+    // response minted so the caller-scoped `get_flow` can match its own flow.
+    let response = get_oauth_flow_status(
+        &app,
+        &started.flow_id,
+        &format!("?invocation_id={}", started.invocation_id),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+    let json: serde_json::Value = serde_json::from_str(&body).expect("status json");
+    assert_eq!(json["status"], "completed");
+    // Status enum only — no state/PKCE/code/token material may cross this read.
+    assert!(!body.contains("status-state-secret"));
+    assert!(!body.contains("status-pkce-secret"));
+    assert!(!body.contains("status-auth-code"));
+    assert!(!body.contains("oauth-access"));
+    assert!(!body.contains("oauth-refresh"));
+
+    // Malformed flow id → 4xx before any backend read.
+    let malformed = get_oauth_flow_status(
+        &app,
+        "not-a-uuid",
+        &format!("?invocation_id={}", started.invocation_id),
+    )
+    .await;
+    assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+
+    // Unknown flow id → 404, indistinguishable from a cross-scope flow.
+    let unknown = get_oauth_flow_status(
+        &app,
+        "11111111-1111-1111-1111-111111111111",
+        &format!("?invocation_id={}", started.invocation_id),
+    )
+    .await;
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+}
+
+// A flow owned by a DIFFERENT scope must surface as 404, never 403: the read
+// cannot be used as a cross-user existence oracle. Full-scope equality in
+// `get_flow` rejects the mismatched owner even when the attacker supplies the
+// exact invocation id, because the trusted tenant/user come from the
+// authenticated caller — not the browser.
+#[tokio::test]
+async fn product_auth_oauth_flow_status_hides_cross_scope_flow_as_not_found() {
+    let shared = Arc::new(InMemoryAuthProductServices::new());
+    let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+        shared.clone(),
+        Arc::new(RecordingAuthDispatcher::default()),
+    ));
+    let app = build_app_with_product_auth_service(product_auth);
+
+    // Seed a flow owned by a DIFFERENT user in the same tenant/agent/project.
+    let other_invocation = InvocationId::new();
+    let other_scope = AuthProductScope::new(
+        ResourceScope {
+            tenant_id: TenantId::new(TENANT).expect("tenant"),
+            user_id: UserId::new("user-mallory").expect("user"),
+            agent_id: Some(AgentId::new(AGENT).expect("agent")),
+            project_id: Some(ProjectId::new(PROJECT).expect("project")),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: other_invocation,
+        },
+        AuthSurface::Callback,
+    );
+    let flow = shared
+        .create_flow(NewAuthFlow {
+            id: Some(AuthFlowId::new()),
+            scope: other_scope,
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: AuthProviderId::new("github").expect("provider"),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
+                    .expect("authorization url"),
+                expires_at: Utc::now() + ChronoDuration::minutes(5),
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            opaque_state_hash: None,
+            pkce_verifier_hash: None,
+            expires_at: Utc::now() + ChronoDuration::minutes(5),
+        })
+        .await
+        .expect("seed cross-user flow");
+
+    // USER (the only authenticated identity) polls mallory's flow, even with the
+    // exact invocation id. Cross-scope must read as not-found, never forbidden.
+    let response = get_oauth_flow_status(
+        &app,
+        &flow.id.to_string(),
+        &format!("?invocation_id={other_invocation}"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_ne!(response.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]

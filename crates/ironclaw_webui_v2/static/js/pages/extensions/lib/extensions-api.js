@@ -56,6 +56,23 @@ export function startExtensionOauth(packageRef, secret) {
     }
   );
 }
+// Origin-independent OAuth completion backstop. The same-origin
+// localStorage/BroadcastChannel signal emitted by the callback page never
+// reaches the opener when the callback runs on a different origin (local ngrok
+// callback vs 127.0.0.1 opener, or split app/callback domains in prod). Polling
+// the durable flow status by id closes that gap. `invocationId` is the id the
+// start response minted (`callback_scope.invocation_id`); the caller-scoped
+// backend needs it to locate its own flow. Non-OK responses (e.g. a transient
+// 404 while the flow is still pending) resolve to null so the poll never throws.
+export function fetchOauthFlowStatus(flowId, invocationId) {
+  const query = invocationId
+    ? `?invocation_id=${encodeURIComponent(invocationId)}`
+    : "";
+  return apiFetch(
+    `/api/reborn/product-auth/oauth/flow/${encodeURIComponent(flowId)}/status${query}`
+  ).catch(() => null);
+}
+
 export function fetchPairingRequests() {
   return Promise.resolve({ requests: [] });
 }

@@ -80,6 +80,8 @@ use crate::{
 
 pub(crate) const OAUTH_START_PATH: &str = "/api/reborn/product-auth/oauth/start";
 pub(crate) const OAUTH_CALLBACK_PATH: &str = "/api/reborn/product-auth/oauth/callback/{flow_id}";
+pub(crate) const OAUTH_FLOW_STATUS_PATH: &str =
+    "/api/reborn/product-auth/oauth/flow/{flow_id}/status";
 pub(crate) const GOOGLE_OAUTH_START_PATH: &str = "/api/reborn/product-auth/oauth/google/start";
 pub(crate) const GOOGLE_OAUTH_CALLBACK_PATH: &str =
     "/api/reborn/product-auth/oauth/google/callback";
@@ -100,6 +102,7 @@ pub(crate) const LIFECYCLE_CLEANUP_PATH: &str = "/api/reborn/product-auth/lifecy
 
 const OAUTH_START_ROUTE_ID: &str = "product_auth.oauth.start";
 const OAUTH_CALLBACK_ROUTE_ID: &str = "product_auth.oauth.callback";
+const OAUTH_FLOW_STATUS_ROUTE_ID: &str = "product_auth.oauth.flow_status";
 const GOOGLE_OAUTH_START_ROUTE_ID: &str = "product_auth.oauth.google.start";
 const GOOGLE_OAUTH_CALLBACK_ROUTE_ID: &str = "product_auth.oauth.google.callback";
 #[cfg(feature = "slack-v2-host-beta")]
@@ -136,6 +139,15 @@ const ACCOUNTS_REFRESH_MAX_REQUESTS: NonZeroU32 = match NonZeroU32::new(5) {
     None => unreachable!(),
 };
 const OAUTH_CALLBACK_MAX_REQUESTS: NonZeroU32 = match NonZeroU32::new(120) {
+    Some(value) => value,
+    // SAFETY: 120 is a non-zero literal rate limit.
+    None => unreachable!(),
+};
+// The reconnect watcher polls flow status on a ~2s cadence (30 req/min) while a
+// user completes OAuth in a popup, so the read cap is deliberately higher than
+// the 20/min mutation cap. Still per-caller and bounded so a client cannot spin
+// the read hot.
+const OAUTH_FLOW_STATUS_MAX_REQUESTS: NonZeroU32 = match NonZeroU32::new(120) {
     Some(value) => value,
     // SAFETY: 120 is a non-zero literal rate limit.
     None => unreachable!(),
@@ -451,6 +463,10 @@ pub(crate) fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductA
         protected: Router::new()
             .route(OAUTH_START_PATH, post(oauth::oauth_start_handler))
             .route(
+                OAUTH_FLOW_STATUS_PATH,
+                get(oauth::oauth_flow_status_handler),
+            )
+            .route(
                 GOOGLE_OAUTH_START_PATH,
                 post(oauth::google_oauth_start_handler),
             )
@@ -533,6 +549,12 @@ pub(crate) fn product_auth_route_descriptors() -> Vec<IngressRouteDescriptor> {
         accounts_refresh_policy(),
     ));
     descriptors.push(descriptor(
+        OAUTH_FLOW_STATUS_ROUTE_ID,
+        NetworkMethod::Get,
+        OAUTH_FLOW_STATUS_PATH,
+        flow_status_policy(),
+    ));
+    descriptors.push(descriptor(
         OAUTH_CALLBACK_ROUTE_ID,
         NetworkMethod::Get,
         OAUTH_CALLBACK_PATH,
@@ -586,6 +608,29 @@ pub(super) fn protected_mutation_policy() -> IngressPolicy {
         effect_path: AllowedEffectPath::ProductWorkflow,
     })
     .expect("product-auth OAuth start policy must validate") // safety: LocalGateway + bearer + AuthenticatedCaller is the same authenticated local product workflow shape used by WebUI mutations.
+}
+
+pub(super) fn flow_status_policy() -> IngressPolicy {
+    IngressPolicy::new(IngressPolicyParts {
+        listener_class: ListenerClass::LocalGateway,
+        auth: IngressAuthPolicy::Required {
+            schemes: vec![IngressAuthScheme::BearerToken],
+        },
+        scope_source: ironclaw_host_api::IngressScopeSource::AuthenticatedCaller,
+        // Read-only status probe: no request body is read, so reject any.
+        body_limit: BodyLimitPolicy::NoBody,
+        rate_limit: RateLimitPolicy::Limited {
+            scope: RateLimitScope::PerCaller,
+            max_requests: OAUTH_FLOW_STATUS_MAX_REQUESTS,
+            window_seconds: OAUTH_RATE_WINDOW_SECONDS,
+        },
+        cors: CorsPolicy::SameOriginOnly,
+        websocket_origin: WebSocketOriginPolicy::NotApplicable,
+        streaming: StreamingMode::None,
+        audit: AuditTraceClass::UserAction,
+        effect_path: AllowedEffectPath::ProductWorkflow,
+    })
+    .expect("product-auth OAuth flow-status policy must validate") // safety: same authenticated LocalGateway shape as the OAuth start mutation, but NoBody + read-only per-caller poll cadence.
 }
 
 pub(super) fn accounts_refresh_policy() -> IngressPolicy {
@@ -695,6 +740,25 @@ pub(crate) struct ProductOAuthStartResponse {
     pub(crate) expires_at: Timestamp,
     pub(crate) continuation: AuthContinuationRef,
     pub(crate) callback_scope: OAuthCallbackScopeHint,
+}
+
+/// Sanitized durable flow-status projection returned by the origin-independent
+/// OAuth flow-status poll. Carries the lifecycle status enum ONLY — never
+/// tokens, PKCE verifiers, authorization codes, or opaque state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct OAuthFlowStatusResponse {
+    pub(crate) status: AuthFlowStatus,
+}
+
+/// Query fields for the flow-status poll. The browser echoes back the
+/// `invocation_id` the start response minted (`callback_scope.invocation_id`)
+/// so the caller-scoped handler can re-derive the exact `AuthProductScope`
+/// `get_flow` matched on when the flow was created; the trusted
+/// tenant/user/agent/project still come from the authenticated caller, so a
+/// forged `invocation_id` cannot reach another owner's flow.
+#[derive(Deserialize)]
+pub(super) struct OAuthFlowStatusQuery {
+    invocation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

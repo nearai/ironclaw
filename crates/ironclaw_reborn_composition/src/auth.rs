@@ -1187,6 +1187,35 @@ impl RebornProductAuthServices {
         Ok(record.provider)
     }
 
+    /// Read a scoped flow's durable lifecycle status for the origin-independent
+    /// OAuth flow-status poll.
+    ///
+    /// Ownership is enforced by `get_flow`'s full-scope match: a flow owned by a
+    /// different scope surfaces as `CrossScopeDenied`, which we deliberately
+    /// remap to the same not-found signal as an unknown flow so the read cannot
+    /// be used as a cross-user existence oracle. The returned value is the
+    /// status enum only — no tokens, PKCE verifiers, codes, or opaque state.
+    #[allow(
+        dead_code,
+        reason = "used by the webui-v2-beta OAuth flow-status poll route"
+    )]
+    pub(crate) async fn flow_status(
+        &self,
+        scope: &AuthProductScope,
+        flow_id: AuthFlowId,
+    ) -> Result<AuthFlowStatus, RebornOAuthCallbackError> {
+        match self.flow_manager.get_flow(scope, flow_id).await {
+            Ok(Some(record)) => Ok(record.status),
+            Ok(None) => Err(AuthProductError::UnknownOrExpiredFlow.into()),
+            // Never distinguish "owned by another scope" from "unknown": both
+            // return not-found so a caller cannot probe another owner's flows.
+            Err(AuthProductError::CrossScopeDenied) => {
+                Err(AuthProductError::UnknownOrExpiredFlow.into())
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
     #[allow(
         dead_code,
         reason = "used by the webui-v2-beta OAuth callback route when DCR fallback PKCE storage is enabled"

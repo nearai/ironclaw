@@ -21,6 +21,7 @@ import {
   fetchExtensionSetup,
   submitExtensionSetup,
   startExtensionOauth,
+  fetchOauthFlowStatus,
   fetchPairingRequests,
   approvePairingCode,
 } from "../lib/extensions-api.js";
@@ -41,6 +42,15 @@ function authPopupFailureMessage(reason) {
 
 function oauthResponseFlowId(response) {
   return response?.flow_id || response?.flowId || null;
+}
+
+// The invocation id the start response minted, carried on the callback-scope
+// hint. The origin-independent flow-status poll sends it back so the
+// caller-scoped backend can re-derive the exact scope its `get_flow` matched
+// on when the flow was created.
+function oauthResponseInvocationId(response) {
+  const scope = response?.callback_scope || response?.callbackScope || null;
+  return scope?.invocation_id || scope?.invocationId || null;
 }
 
 function extensionListItemIsConfigured(extension) {
@@ -403,7 +413,7 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
   }, [packageKey, queryClient]);
 
   const watchOauthProgress = React.useCallback(
-    (popup, { flowId = null, requireCallbackCompletion = false } = {}) => {
+    (popup, { flowId = null, invocationId = null, requireCallbackCompletion = false } = {}) => {
       clearWatcher();
       configuredRef.current = false;
       const browserWindow =
@@ -422,6 +432,9 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
       let stopped = false;
       let timer = null;
       let unsubscribe = () => {};
+      // Guard against overlapping in-flight status polls so a slow request
+      // cannot stack fetches across interval ticks.
+      let flowStatusPending = false;
 
       function cleanup() {
         if (stopped) return;
@@ -458,6 +471,34 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
         return true;
       }
 
+      // Origin-independent backstop: the callback page's completion signal is
+      // same-origin (localStorage/BroadcastChannel), so a cross-origin callback
+      // (local ngrok callback vs 127.0.0.1 opener, or split app/callback domains
+      // in prod) never reaches this tab. Poll the durable flow status by id so
+      // the watcher can still resolve. Fire-and-forget with a pending guard so
+      // the interval never blocks or stacks requests; the browser signal above
+      // stays the fast path.
+      function pollFlowStatus() {
+        if (stopped || !flowId || flowStatusPending) return;
+        flowStatusPending = true;
+        Promise.resolve(fetchOauthFlowStatus(flowId, invocationId))
+          .then((result) => {
+            if (stopped) return;
+            const status = result?.status;
+            if (status === "completed") {
+              complete();
+            } else if (status === "failed") {
+              setAuthError("Authorization failed. Try connecting again.");
+              stopWatcher();
+              refreshSetupState();
+            }
+          })
+          .catch(() => {})
+          .finally(() => {
+            flowStatusPending = false;
+          });
+      }
+
       unsubscribe = subscribeProductAuthOAuthCompletion(browserWindow, handleCompletion);
 
       timer = browserWindow.setInterval(() => {
@@ -465,6 +506,7 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
         if (handleCompletion(readLatestProductAuthOAuthCompletion(browserWindow))) {
           return;
         }
+        pollFlowStatus();
         const configured = setupIsConfigured({
           allowProvidedSecrets: !requireCallbackCompletion,
         });
@@ -519,6 +561,7 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
         const flowId = oauthResponseFlowId(res);
         watchOauthProgress(authPopup, {
           flowId,
+          invocationId: oauthResponseInvocationId(res),
           requireCallbackCompletion: Boolean(flowId && variables?.secret?.provided),
         });
       }

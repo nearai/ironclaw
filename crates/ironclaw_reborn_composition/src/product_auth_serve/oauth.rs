@@ -76,6 +76,40 @@ pub(super) async fn oauth_start_handler(
     }))
 }
 
+/// Origin-independent OAuth flow-status poll.
+///
+/// The callback page signals the opener via same-origin `localStorage` +
+/// `BroadcastChannel`; a cross-origin callback (local ngrok callback vs
+/// `127.0.0.1` opener, or split app/callback domains in prod) never reaches the
+/// opener, so the reconnect watcher can hang. This read lets the watcher poll
+/// durable flow status by id instead.
+///
+/// Caller-scoped: the trusted tenant/user/agent/project come from the
+/// authenticated caller; the browser only echoes back the `invocation_id` the
+/// start response minted so `get_flow`'s full-scope equality can locate the
+/// caller's own flow. A flow that is unknown OR owned by another scope both
+/// surface as `404 not_found` — never a 403 that would leak existence across
+/// users. The response carries the sanitized status enum only: no tokens, PKCE
+/// verifiers, authorization codes, or opaque state.
+pub(super) async fn oauth_flow_status_handler(
+    State(state): State<ProductAuthRouteState>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(flow_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<OAuthFlowStatusQuery>,
+) -> Result<Json<OAuthFlowStatusResponse>, ProductAuthRouteFailure> {
+    let flow_id = AuthFlowId::from_uuid(
+        Uuid::parse_str(&flow_id).map_err(|_| ProductAuthRouteFailure::malformed_callback())?,
+    );
+    let fields = ScopeFields {
+        session_id: None,
+        thread_id: None,
+        invocation_id: query.invocation_id,
+    };
+    let scope = scope_from_authenticated_caller_parts_requiring_invocation(&caller, &fields)?;
+    let status = run_with_backend_timeout(state.product_auth.flow_status(&scope, flow_id)).await?;
+    Ok(Json(OAuthFlowStatusResponse { status }))
+}
+
 pub(super) async fn google_oauth_start_handler(
     State(state): State<ProductAuthRouteState>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
