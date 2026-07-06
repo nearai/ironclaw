@@ -74,6 +74,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 concurrency:
   group: live-canary-${{ github.event_name }}-${{ inputs.lane || github.event.schedule }}
@@ -1174,11 +1175,13 @@ jobs:
           CANARY_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           GITHUB_SHA: ${{ github.sha }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ github.token }}
           CANARY_TARGET_BRANCH: ${{ github.event_name == 'workflow_dispatch' && inputs.target_branch || '' }}
           CANARY_TARGET_PR: ${{ github.event_name == 'workflow_dispatch' && inputs.target_pr || '' }}
           CANARY_TARGET_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.target_ref || '' }}
           CANARY_TRIGGER_CONTEXT: ${{ github.event_name == 'workflow_dispatch' && inputs.trigger_context || '' }}
           CANARY_CREATE_ISSUES: "0"
+          CANARY_POST_PR_COMMENT: ${{ github.event_name == 'workflow_dispatch' && inputs.target_pr != '' && '1' || '0' }}
         run: |
           # The notifier is intentionally side-effect-light: it exits 0 even on
           # failure so the canary run's overall status isn't masked by a flaky

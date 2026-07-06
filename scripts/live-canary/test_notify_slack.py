@@ -435,6 +435,63 @@ class RebornQaSlackReportTests(unittest.TestCase):
         self.assertIn("commit `abcdef0`", combined_context)
         self.assertNotIn("mainsha", combined_context)
 
+    def test_github_comment_body_includes_pr_branch_and_case_results(self):
+        report = notify.LaneReport(
+            lane="reborn-webui-v2-live-qa",
+            provider="reborn-webui-v2",
+            passed=1,
+            failed=1,
+            tests=2,
+            duration_s=2.5,
+            status="fail",
+            reborn_qa_cases=[
+                notify.RebornQaCaseReport(
+                    rows=("2A",),
+                    case="qa_2a_gmail_connect",
+                    feature="Gmail connection flow",
+                    success=True,
+                    latency_ms=1200,
+                ),
+                notify.RebornQaCaseReport(
+                    rows=("2D",),
+                    case="qa_2d_calendar_prep_live_chat",
+                    feature="Calendar prep assistant",
+                    success=False,
+                    latency_ms=1300,
+                    message="requires live Google runtime access",
+                    debug_paths=[
+                        "reborn-webui-v2-live-qa/reborn-webui-v2/20260628T000000Z/results.json",
+                    ],
+                ),
+            ],
+        )
+
+        body = notify.github_comment_body(
+            [report],
+            "https://github.com/nearai/ironclaw/actions/runs/123",
+            "mainsha0123456789",
+            run_context=notify.CanaryRunContext(
+                repository="nearai/ironclaw",
+                trigger_context="/canary all PR #42 abcdef0123 comment 987 by @maintainer",
+                target_pr="42",
+                target_branch="codex/canary-smoke",
+                target_ref="abcdef0123456789",
+            ),
+        )
+
+        self.assertIn("## Live canary result: 0 passed, 1 failed of 1 lanes", body)
+        self.assertIn("- PR: [#42](https://github.com/nearai/ironclaw/pull/42)", body)
+        self.assertIn("- Branch: `codex/canary-smoke`", body)
+        self.assertIn("- Target: `abcdef0123`", body)
+        self.assertIn("- Commit: `abcdef0`", body)
+        self.assertNotIn("mainsha", body)
+        self.assertIn("| `reborn-webui-v2-live-qa` | `reborn-webui-v2` |", body)
+        self.assertIn("#### QA 2: 1/2 passed", body)
+        self.assertIn(":white_check_mark: `2A` Gmail connection flow", body)
+        self.assertIn(":x: `2D` Calendar prep assistant", body)
+        self.assertIn("Failure: requires live Google runtime access", body)
+        self.assertIn("[GitHub run artifacts]", body)
+
     def test_reborn_rows_fit_with_scheduled_all_lane_report(self):
         case_rows = [
             f"{group}{suffix}"

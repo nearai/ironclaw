@@ -29,6 +29,7 @@ ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
 MAX_LOG_BYTES = 20_000
 SLACK_MAX_BLOCKS = 50
+GITHUB_COMMENT_BODY_LIMIT = 65_000
 
 HAIKU_SYSTEM = (
     "You analyze CI canary test logs. Given a lane's summary, JUnit digest, "
@@ -818,6 +819,186 @@ def slack_payload(
     return {"blocks": blocks}
 
 
+def _markdown_run_context_lines(
+    run_context: CanaryRunContext | None,
+    run_url: str | None,
+    commit: str | None,
+) -> list[str]:
+    lines: list[str] = []
+    if run_context and run_context.target_pr:
+        if run_context.repository:
+            lines.append(
+                f"- PR: [#{run_context.target_pr}]"
+                f"(https://github.com/{run_context.repository}/pull/"
+                f"{run_context.target_pr})"
+            )
+        else:
+            lines.append(f"- PR: #{run_context.target_pr}")
+    if run_context and run_context.target_branch:
+        lines.append(f"- Branch: `{_trim_slack_text(run_context.target_branch, 120)}`")
+    if run_context and run_context.target_ref:
+        lines.append(f"- Target: `{_trim_slack_text(run_context.target_ref, 40)[:10]}`")
+    if run_context and run_context.trigger_context:
+        lines.append(f"- Trigger: {_trim_slack_text(run_context.trigger_context, 200)}")
+    display_commit = (
+        run_context.target_ref
+        if run_context and run_context.target_ref
+        else commit
+    )
+    if display_commit:
+        lines.append(f"- Commit: `{display_commit[:7]}`")
+    if run_url:
+        lines.append(f"- Run: [GitHub Actions]({run_url})")
+    return lines
+
+
+def _markdown_reborn_case_lines(
+    cases: list[RebornQaCaseReport],
+    run_url: str | None,
+) -> list[str]:
+    lines: list[str] = []
+    grouped: dict[str, list[RebornQaCaseReport]] = {}
+    for case in cases:
+        grouped.setdefault(_qa_group_key(case), []).append(case)
+    for group in sorted(grouped, key=_qa_group_sort_key):
+        group_cases = grouped[group]
+        passed = sum(1 for case in group_cases if case.success)
+        lines.append(f"#### QA {group}: {passed}/{len(group_cases)} passed")
+        for case in group_cases:
+            status = ":white_check_mark:" if case.success else ":x:"
+            latency = (
+                f" ({case.latency_ms / 1000.0:.1f}s)"
+                if isinstance(case.latency_ms, (int, float))
+                else ""
+            )
+            lines.append(
+                f"- {status} `{_qa_case_rows(case)}` {case.feature}{latency}"
+            )
+            if not case.success and case.message:
+                lines.append(f"  - Failure: {case.message}")
+            if not case.success and case.debug_paths:
+                paths = ", ".join(f"`{path}`" for path in case.debug_paths)
+                if run_url:
+                    lines.append(
+                        f"  - Debug: [GitHub run artifacts]({run_url}) - {paths}"
+                    )
+                else:
+                    lines.append(f"  - Debug: {paths}")
+        lines.append("")
+    return lines
+
+
+def github_comment_body(
+    reports: list[LaneReport],
+    run_url: str | None,
+    commit: str | None,
+    *,
+    category_summary: str = "",
+    run_context: CanaryRunContext | None = None,
+) -> str:
+    red = sum(1 for r in reports if r.status == "fail")
+    green = sum(1 for r in reports if r.status == "pass")
+    lines = [
+        f"## Live canary result: {green} passed, {red} failed of {len(reports)} lanes",
+        "",
+    ]
+    context_lines = _markdown_run_context_lines(run_context, run_url, commit)
+    if context_lines:
+        lines.extend(context_lines)
+        lines.append("")
+
+    lines.extend(
+        [
+            "| Lane | Provider | Status | Passed | Failed | Duration |",
+            "| --- | --- | --- | ---: | ---: | ---: |",
+        ]
+    )
+    for r in reports:
+        status = {
+            "pass": ":white_check_mark:",
+            "fail": ":x:",
+            "skip": ":heavy_minus_sign:",
+        }.get(r.status, ":grey_question:")
+        lines.append(
+            f"| `{r.lane}` | `{r.provider}` | {status} {r.status} | "
+            f"{r.passed}/{r.tests} | {r.failed} | {r.duration_s:.0f}s |"
+        )
+
+    if category_summary:
+        lines.extend(["", "### Summary by Category", "", category_summary])
+
+    detail_lines: list[str] = []
+    for r in reports:
+        if r.reborn_qa_cases:
+            detail_lines.extend(
+                [
+                    "",
+                    f"### {r.lane} ({r.provider})",
+                    "",
+                ]
+            )
+            detail_lines.extend(_markdown_reborn_case_lines(r.reborn_qa_cases, run_url))
+        elif r.status == "fail":
+            detail_lines.extend(["", f"### {r.lane} ({r.provider})"])
+            if r.test_name:
+                detail_lines.append(f"- Test: `{r.test_name}`")
+            if r.error:
+                detail_lines.append(f"- Error: {r.error}")
+            if r.root_cause:
+                detail_lines.append(f"- Root Cause: {r.root_cause}")
+            if r.fix:
+                detail_lines.append(f"- Fix: {r.fix}")
+            if r.reason:
+                detail_lines.append(f"- Reason: {r.reason}")
+            if r.notable:
+                detail_lines.append(f"- Note: {r.notable}")
+    if detail_lines:
+        lines.extend(detail_lines)
+
+    lines.append("")
+    lines.append("_Auto-posted by `scripts/live-canary/notify_slack.py`._")
+    body = "\n".join(lines)
+    if len(body) <= GITHUB_COMMENT_BODY_LIMIT:
+        return body
+    suffix = "\n\n_Comment truncated because the canary report exceeded GitHub's body limit._"
+    return body[: GITHUB_COMMENT_BODY_LIMIT - len(suffix)].rstrip() + suffix
+
+
+def post_pr_comment(
+    reports: list[LaneReport],
+    *,
+    repo: str,
+    github_token: str,
+    run_context: CanaryRunContext,
+    run_url: str | None,
+    commit: str | None,
+    category_summary: str = "",
+) -> str:
+    if not run_context.target_pr:
+        return ""
+    headers = {
+        "Authorization": f"Bearer {github_token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    created = post_json(
+        f"https://api.github.com/repos/{repo}/issues/"
+        f"{run_context.target_pr}/comments",
+        {
+            "body": github_comment_body(
+                reports,
+                run_url,
+                commit,
+                category_summary=category_summary,
+                run_context=run_context,
+            )
+        },
+        headers,
+        timeout=15,
+    )
+    return str(created.get("html_url") or "")
+
+
 def categorize_failures(api_key: str, reports: list[LaneReport]) -> str:
     """Second-pass Haiku call: group failed lanes by shared root cause.
 
@@ -1048,6 +1229,15 @@ def main() -> int:
         ),
     )
     p.add_argument(
+        "--post-pr-comment",
+        action="store_true",
+        default=os.environ.get("CANARY_POST_PR_COMMENT") == "1",
+        help=(
+            "Post the final canary report as a PR comment when "
+            "CANARY_TARGET_PR is set."
+        ),
+    )
+    p.add_argument(
         "--create-issues",
         action="store_true",
         default=os.environ.get("CANARY_CREATE_ISSUES") == "1",
@@ -1130,7 +1320,7 @@ def main() -> int:
         run_context=run_context,
     )
 
-    if args.dry_run or not args.slack_webhook:
+    if args.dry_run:
         print(json.dumps(payload, indent=2))
         # Dry-run still surfaces what the issue creator WOULD do so a
         # local invocation can sanity-check title/body shapes.
@@ -1141,21 +1331,61 @@ def main() -> int:
                 f"{len(failed)} issue(s) on {args.repo}",
                 file=sys.stderr,
             )
+        if args.post_pr_comment and run_context.target_pr:
+            print(
+                github_comment_body(
+                    reports,
+                    args.run_url,
+                    args.commit,
+                    category_summary=category_summary,
+                    run_context=run_context,
+                )
+            )
         return 0
 
-    try:
-        post_json(args.slack_webhook, payload, {}, timeout=10)
+    if args.slack_webhook:
+        try:
+            post_json(args.slack_webhook, payload, {}, timeout=10)
+            print(
+                f"[notify_slack] posted Slack message for {len(reports)} lane(s)",
+                file=sys.stderr,
+            )
+        except Exception as e:
+            print(f"[notify_slack] slack post failed: {e} — sending fallback", file=sys.stderr)
+            try:
+                post_json(args.slack_webhook, fallback_payload(reports, args.run_url), {}, timeout=10)
+                print("[notify_slack] fallback posted", file=sys.stderr)
+            except Exception as e2:
+                print(f"[notify_slack] fallback also failed: {e2}", file=sys.stderr)
+    else:
+        print("[notify_slack] no SLACK_WEBHOOK_URL — skipping Slack post", file=sys.stderr)
+
+    if args.post_pr_comment and run_context.target_pr and args.github_token:
+        try:
+            comment_url = post_pr_comment(
+                reports,
+                repo=args.repo,
+                github_token=args.github_token,
+                run_context=run_context,
+                run_url=args.run_url,
+                commit=args.commit,
+                category_summary=category_summary,
+            )
+            print(
+                f"[notify_slack] posted PR canary comment: {comment_url or '?'}",
+                file=sys.stderr,
+            )
+        except Exception as e:
+            print(
+                f"[notify_slack] PR comment post failed: {type(e).__name__}: {e}",
+                file=sys.stderr,
+            )
+    elif args.post_pr_comment and run_context.target_pr:
         print(
-            f"[notify_slack] posted Slack message for {len(reports)} lane(s)",
+            "[notify_slack] --post-pr-comment set but no GITHUB_TOKEN / "
+            "GH_TOKEN / CANARY_ISSUES_TOKEN — skipping PR comment",
             file=sys.stderr,
         )
-    except Exception as e:
-        print(f"[notify_slack] slack post failed: {e} — sending fallback", file=sys.stderr)
-        try:
-            post_json(args.slack_webhook, fallback_payload(reports, args.run_url), {}, timeout=10)
-            print("[notify_slack] fallback posted", file=sys.stderr)
-        except Exception as e2:
-            print(f"[notify_slack] fallback also failed: {e2}", file=sys.stderr)
 
     # Issue creation runs AFTER Slack so a Slack-side failure doesn't
     # block the GitHub-side bookkeeping (and vice versa).
