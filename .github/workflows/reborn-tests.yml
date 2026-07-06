@@ -250,6 +250,12 @@ jobs:
         if: ${{ steps.bucket-settings.outputs.needs_webui_node == 'true' }}
         run: corepack enable pnpm
 
+      - name: Install WebUI frontend dependencies
+        if: ${{ steps.bucket-settings.outputs.needs_webui_node == 'true' }}
+        run: |
+          cd crates/ironclaw_webui_v2/frontend
+          pnpm install --frozen-lockfile
+
       - name: Install mold and clang
         run: |
           scripts/ci/install-ci-apt-packages.sh clang mold

@@ -52,9 +52,10 @@ mod tests {
         EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
         EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
     };
+    use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
     use crate::outbound::{
-        OutboundDeliveryTargetEntry, OutboundDeliveryTargetProvider,
-        OutboundDeliveryTargetRegistry, RebornOutboundPreferencesFacade,
+        OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistry,
+        RebornOutboundPreferencesFacade,
     };
     use crate::runtime::local_dev_filesystem_skill_context_source;
 

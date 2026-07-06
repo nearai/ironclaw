@@ -47,6 +47,17 @@ export default defineConfig({
     manifest: true,
     sourcemap: false,
     target: "es2022",
+    rollupOptions: {
+      input: {
+        app: resolve(here, "index.html"),
+        "wallet-connect": resolve(here, "src/wallet-connect.ts"),
+      },
+      external: ["@hot-labs/near-connect"],
+      output: {
+        entryFileNames: (chunk) =>
+          chunk.name === "wallet-connect" ? "wallet-connect.js" : "assets/[name]-[hash].js",
+      },
+    },
   },
   test: {
     environment: "node",

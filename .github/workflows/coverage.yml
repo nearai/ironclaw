@@ -193,6 +193,11 @@ jobs:
       - name: Enable pnpm
         run: corepack enable pnpm
 
+      - name: Install WebUI frontend dependencies
+        run: |
+          cd crates/ironclaw_webui_v2/frontend
+          pnpm install --frozen-lockfile
+
       # Pre-build the reborn binary under the same llvm-cov env so the E2E
       # fixtures find it cached instead of doing a cold instrumented build
       # inside a pytest timeout. openai-compat-beta is a strict superset of

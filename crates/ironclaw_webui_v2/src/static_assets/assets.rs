@@ -26,8 +26,13 @@ pub(crate) fn lookup(path: &str) -> Option<&'static Asset> {
 mod tests {
     use super::*;
 
-    fn asset_text(path: &str) -> &'static str {
-        std::str::from_utf8(lookup(path).expect("asset exists").bytes).expect("asset is utf-8")
+    fn bundled_javascript() -> String {
+        ASSETS
+            .iter()
+            .filter(|(path, _)| path.starts_with("assets/app-") && path.ends_with(".js"))
+            .map(|(_, asset)| std::str::from_utf8(asset.bytes).expect("asset is utf-8"))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Read a frontend source file straight from `frontend/src/` on disk.
@@ -409,7 +414,7 @@ mod tests {
         assert!(detail_panel.contains("primary_status_tone"));
         assert!(detail_panel.contains("window.confirm"));
 
-        let app_bundle = asset_text("dist/app.js");
+        let app_bundle = bundled_javascript();
         let app_bundle_contains_encoded_automation_route = |suffix: &str| {
             app_bundle
                 .split("/automations/${encodeURIComponent(")
@@ -427,9 +432,7 @@ mod tests {
             .split("/automations/${encodeURIComponent(")
             .any(|tail| {
                 let near = tail.chars().take(220).collect::<String>();
-                (near.contains("method:\"DELETE\"") || near.contains("method:`DELETE`"))
-                    && !near.contains("/pause")
-                    && !near.contains("/resume")
+                near.contains("DELETE") && !near.contains("/pause") && !near.contains("/resume")
             });
         assert!(
             app_bundle_contains_encoded_automation_delete,
@@ -503,7 +506,7 @@ mod tests {
         assert!(layout.contains("sidebar.desktopOpen ? \"md:flex\" : \"md:hidden\""));
         assert!(layout.contains("sidebarOpen=${sidebar.currentOpen}"));
 
-        let bundle = asset_text("dist/app.js");
+        let bundle = bundled_javascript();
         assert!(bundle.contains("ironclaw:v2-sidebar-open"));
         assert!(bundle.contains("desktopOpen"));
         assert!(bundle.contains("mobileOpen"));
