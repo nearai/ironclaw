@@ -712,18 +712,14 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Run Reborn settings JS tests
+      - name: Enable pnpm
+        run: corepack enable pnpm
+
+      - name: Run Reborn WebUI frontend tests
         run: |
-          mapfile -t tests < <(
-            find crates/ironclaw_webui_v2/static/js/pages/settings \
-              -type f \( -name '*.test.mjs' -o -name '*.test.js' \) \
-              | sort
-          )
-          if [ "${#tests[@]}" -eq 0 ]; then
-            echo "No Reborn settings JS tests found"
-            exit 1
-          fi
-          node --test "${tests[@]}"
+          cd crates/ironclaw_webui_v2/frontend
+          pnpm install --frozen-lockfile
+          pnpm test
 
   qa-recorded-fixtures:
     name: Reborn QA recorded fixtures

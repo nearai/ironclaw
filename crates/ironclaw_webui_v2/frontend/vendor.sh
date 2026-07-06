@@ -54,7 +54,7 @@ while IFS= read -r url; do
 done < <(printf '%s\n' "$RAW_CSS" | grep -oE 'https://fonts\.gstatic\.com/[^)]+\.woff2' | sort -u)
 
 # Normalize single-quoted font-family / format() names to double quotes to
-# match the repo CSS convention (see static/styles/app.css).
+# match the repo CSS convention (see src/styles/app.css).
 CSS="${CSS//\'/\"}"
 
 printf '%s\n' "$CSS" > "$FONTS_DIR/fonts.css"
