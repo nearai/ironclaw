@@ -24,8 +24,8 @@ When repairing an accepted review thread:
 - Preserve the existing PR's intent and public behavior unless the review feedback requires a
   targeted correction.
 - Include or update tests when the repair changes code behavior.
-- Do not push, open pull requests, post GitHub comments, resolve review threads, merge, approve,
-  close, or delete branches.
+- Do not push, open pull requests, post GitHub comments, merge, approve, close, or delete branches.
+  Address the provided review feedback in code; GitHub thread status is handled outside the agent.
 - Do not read or expose secrets or GitHub write credentials.
 
 Before finishing:
