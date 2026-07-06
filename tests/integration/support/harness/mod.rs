@@ -315,7 +315,7 @@ impl HostRuntimeCapabilityHarness {
             )
             .await
             .map_err(|error| format!("manual token setup failed: {error:?}"))?;
-        product_auth
+        let submitted = product_auth
             .submit_manual_token(
                 ironclaw_reborn_composition::RebornManualTokenSubmitRequest::new(
                     scope.clone(),
@@ -329,13 +329,17 @@ impl HostRuntimeCapabilityHarness {
             return Ok(());
         }
         let record_source = product_auth.credential_account_record_source_for_test();
+        // Match on the account THIS call minted (`submitted.account_id`), not
+        // the first provider match: a scope with multiple existing accounts
+        // for the same provider (e.g. two Google accounts) would otherwise
+        // silently pick an unrelated account's secret handle.
         let minted_handle = record_source
             .accounts_for_owner(&scope)
             .await
             .map_err(|error| format!("account read-back after manual token failed: {error:?}"))?
             .into_iter()
-            .filter(|account| account.provider == provider_id)
-            .find_map(|account| account.access_secret)
+            .find(|account| account.id == submitted.account_id)
+            .and_then(|account| account.access_secret)
             .ok_or("manual-token account with a secret handle not found on read-back")?;
         product_auth
             .credential_account_service()

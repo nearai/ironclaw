@@ -14,6 +14,9 @@
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
+use ironclaw_auth::{
+    GOOGLE_GMAIL_MODIFY_SCOPE, GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
+};
 use serde_json::json;
 
 pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
@@ -69,9 +72,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
             "google",
             "itest google",
             &[
-                "https://www.googleapis.com/auth/gmail.modify",
-                "https://www.googleapis.com/auth/gmail.readonly",
-                "https://www.googleapis.com/auth/gmail.send",
+                GOOGLE_GMAIL_MODIFY_SCOPE,
+                GOOGLE_GMAIL_READONLY_SCOPE,
+                GOOGLE_GMAIL_SEND_SCOPE,
             ],
         )
         .await?;
