@@ -172,7 +172,7 @@ use crate::{
     },
     extension_installation_store::FilesystemExtensionInstallationStore,
     extension_lifecycle::{
-        ActiveExtensionPublisher, RebornLocalExtensionManagementPort,
+        ActiveExtensionPublisher, ExtensionCredentialCleanup, RebornLocalExtensionManagementPort,
         restore_extension_lifecycle_state,
     },
     extension_lifecycle_capabilities::{
@@ -1572,6 +1572,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         extension_installation_store,
         extension_lifecycle_service,
         active_extensions,
+        Some(Arc::clone(&product_auth) as Arc<dyn ExtensionCredentialCleanup>),
     ));
     let nearai_mcp_bootstrap_outcome = crate::nearai_mcp::bootstrap_nearai_mcp(
         nearai_mcp_bootstrap_config,
@@ -6367,7 +6368,14 @@ mod tests {
             .as_ref()
             .expect("extension management");
         extension_management
-            .remove(nearai_ref.clone())
+            .remove(
+                nearai_ref.clone(),
+                &ironclaw_host_api::ResourceScope::local_default(
+                    ironclaw_host_api::UserId::new("factory-remove-test").expect("valid user"),
+                    ironclaw_host_api::InvocationId::new(),
+                )
+                .expect("valid scope"),
+            )
             .await
             .expect("disable NEAR AI MCP extension");
         let outcome = crate::nearai_mcp::bootstrap_nearai_mcp(

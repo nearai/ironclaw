@@ -200,8 +200,11 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
             }
             EXTENSION_REMOVE_CAPABILITY_ID => {
                 let input: ExtensionIdInput = parse_input(request.input)?;
+                // Credential revocation lives on the port's `remove` (the single
+                // convergence point shared with the WebUI facade), so the scope
+                // is threaded through rather than cleaned up here.
                 self.extension_management
-                    .remove(extension_package_ref(input.extension_id)?)
+                    .remove(extension_package_ref(input.extension_id)?, &request.scope)
                     .await
             }
             _ => {
@@ -622,6 +625,147 @@ mod tests {
         let after_remove = active_extension_capability_ids(&extension_management).await;
         assert!(!after_remove.iter().any(|id| id == "web-access.search"));
         assert!(!storage_root.join("system/extensions/web-access").exists());
+    }
+
+    #[tokio::test]
+    async fn local_dev_extension_remove_revokes_exclusive_credential_so_reactivation_requires_auth()
+    {
+        // Regression (#slack model-B): before the pairing->OAuth swap, removing an
+        // extension cleared its credentials, so the agent could not silently
+        // re-add it. OAuth personal credentials are stored `UserReusable` and are
+        // preserved across extension removal by default, so without an explicit
+        // provider-scoped cleanup on remove the agent re-installs the bundled
+        // extension and re-activates on the surviving token — no OAuth re-consent.
+        // Removing an extension whose credential provider it exclusively owns must
+        // revoke that credential so re-activation raises the auth gate again.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "extension-tools-remove-revoke-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+
+        invoke_json(
+            &services,
+            EXTENSION_INSTALL_CAPABILITY_ID,
+            serde_json::json!({"extension_id": "github"}),
+        )
+        .await
+        .expect("install succeeds");
+        let context = execution_context([EXTENSION_ACTIVATE_CAPABILITY_ID]);
+        seed_configured_account(&services, &context.resource_scope, "github").await;
+        let activate = invoke_json(
+            &services,
+            EXTENSION_ACTIVATE_CAPABILITY_ID,
+            serde_json::json!({"extension_id": "github"}),
+        )
+        .await
+        .expect("activate succeeds with a configured credential");
+        assert_eq!(activate["payload"]["activated"], true);
+
+        let remove = invoke_json(
+            &services,
+            EXTENSION_REMOVE_CAPABILITY_ID,
+            serde_json::json!({"extension_id": "github"}),
+        )
+        .await
+        .expect("remove succeeds");
+        assert_eq!(remove["payload"]["removed"], true);
+
+        // Re-install (bundled, free) then attempt to re-activate: the revoked
+        // credential must force a fresh auth gate rather than silently re-adding.
+        invoke_json(
+            &services,
+            EXTENSION_INSTALL_CAPABILITY_ID,
+            serde_json::json!({"extension_id": "github"}),
+        )
+        .await
+        .expect("reinstall succeeds");
+        let outcome = invoke_outcome(
+            &services,
+            EXTENSION_ACTIVATE_CAPABILITY_ID,
+            serde_json::json!({"extension_id": "github"}),
+        )
+        .await;
+        let RuntimeCapabilityOutcome::AuthRequired(gate) = outcome else {
+            panic!("expected re-activation after remove to require auth, got {outcome:?}");
+        };
+        assert_eq!(gate.credential_requirements.len(), 1);
+        assert_eq!(gate.credential_requirements[0].provider.as_str(), "github");
+    }
+
+    #[tokio::test]
+    async fn local_dev_extension_remove_preserves_shared_credential_used_by_another_extension() {
+        // Exclusivity guard: removing one extension must NOT revoke a credential
+        // still used by another installed extension. Gmail and Google Calendar
+        // share the `google` provider; removing Gmail must leave the Google
+        // credential intact so Calendar keeps working.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "extension-tools-remove-shared-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+
+        for extension_id in ["gmail", "google-calendar"] {
+            invoke_json(
+                &services,
+                EXTENSION_INSTALL_CAPABILITY_ID,
+                serde_json::json!({ "extension_id": extension_id }),
+            )
+            .await
+            .expect("install succeeds");
+        }
+        let context = execution_context([EXTENSION_ACTIVATE_CAPABILITY_ID]);
+        // One reusable Google credential covering both extensions' scopes.
+        seed_configured_account_with_scopes(
+            &services,
+            &context.resource_scope,
+            "google",
+            &[
+                "https://www.googleapis.com/auth/gmail.modify",
+                "https://www.googleapis.com/auth/gmail.readonly",
+                "https://www.googleapis.com/auth/gmail.send",
+                "https://www.googleapis.com/auth/calendar.events",
+                "https://www.googleapis.com/auth/calendar.readonly",
+            ],
+            true,
+        )
+        .await;
+        for extension_id in ["gmail", "google-calendar"] {
+            let activate = invoke_json(
+                &services,
+                EXTENSION_ACTIVATE_CAPABILITY_ID,
+                serde_json::json!({ "extension_id": extension_id }),
+            )
+            .await
+            .expect("activate succeeds with the shared google credential");
+            assert_eq!(activate["payload"]["activated"], true);
+        }
+
+        let remove = invoke_json(
+            &services,
+            EXTENSION_REMOVE_CAPABILITY_ID,
+            serde_json::json!({"extension_id": "gmail"}),
+        )
+        .await
+        .expect("remove succeeds");
+        assert_eq!(remove["payload"]["removed"], true);
+
+        // Calendar still uses `google`, so the shared credential must survive:
+        // re-activation succeeds without an auth gate.
+        let outcome = invoke_outcome(
+            &services,
+            EXTENSION_ACTIVATE_CAPABILITY_ID,
+            serde_json::json!({"extension_id": "google-calendar"}),
+        )
+        .await;
+        assert!(
+            matches!(outcome, RuntimeCapabilityOutcome::Completed(_)),
+            "removing gmail must not revoke the shared google credential calendar still uses, got {outcome:?}"
+        );
     }
 
     #[tokio::test]

@@ -3,6 +3,11 @@
 // model-B remodel (docs/plans/2026-07-05-slack-bot-tools-remodel.md), plan #5604
 use std::{collections::BTreeSet, sync::Arc};
 
+use async_trait::async_trait;
+use ironclaw_auth::{
+    AuthProductScope, AuthProviderId, AuthSurface, SecretCleanupAction, SecretCleanupReport,
+    SecretCleanupRequest,
+};
 use ironclaw_extensions::{
     CapabilityVisibility, ExtensionActivationState, ExtensionError, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
@@ -20,9 +25,44 @@ use ironclaw_product_workflow::{
     ChannelConnectionRequirement, LifecycleExtensionSummary, LifecycleExtensionSurfaceKind,
     LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
     LifecycleProductPayload, LifecycleProductResponse, LifecycleSearchExtensionSummary,
-    ProductWorkflowError, RebornChannelConnectStrategy,
+    ProductWorkflowError, RebornChannelConnectStrategy, RebornServicesError,
 };
 use tokio::sync::Mutex;
+
+use crate::RebornProductAuthServices;
+
+/// Narrow lifecycle-cleanup port over product-auth so extension removal can
+/// revoke the removed extension's exclusively-owned reusable credential without
+/// depending on the whole product-auth bundle (and so tests can record the
+/// issued cleanup). Production forwards to the guardrail-sanctioned
+/// [`RebornProductAuthServices::cleanup_credentials_for_lifecycle`]. This is the
+/// single convergence point for both removal entrypoints (the WebUI facade and
+/// the `builtin.extension_remove` agent capability), so revocation cannot be
+/// bypassed through one door.
+#[async_trait]
+pub(crate) trait ExtensionCredentialCleanup: Send + Sync {
+    async fn cleanup_for_lifecycle(
+        &self,
+        request: SecretCleanupRequest,
+    ) -> Result<SecretCleanupReport, RebornServicesError>;
+}
+
+#[async_trait]
+impl ExtensionCredentialCleanup for RebornProductAuthServices {
+    async fn cleanup_for_lifecycle(
+        &self,
+        request: SecretCleanupRequest,
+    ) -> Result<SecretCleanupReport, RebornServicesError> {
+        RebornProductAuthServices::cleanup_credentials_for_lifecycle(self, request)
+            .await
+            .map_err(|error| {
+                RebornServicesError::internal_from(format!(
+                    "extension credential cleanup failed: {:?}",
+                    error.code
+                ))
+            })
+    }
+}
 
 mod active_publication;
 #[cfg(test)]
@@ -60,6 +100,10 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
     active_extensions: ActiveExtensionPublisher,
     operation_lock: Arc<Mutex<()>>,
+    // Genuinely optional (not an `optional_arc` smell): a composition without
+    // product auth cannot have minted a reusable OAuth credential, so there is
+    // nothing to revoke on removal.
+    credential_cleanup: Option<Arc<dyn ExtensionCredentialCleanup>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -169,6 +213,7 @@ impl RebornLocalExtensionManagementPort {
         installation_store: Arc<dyn ExtensionInstallationStore>,
         lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
         active_extensions: ActiveExtensionPublisher,
+        credential_cleanup: Option<Arc<dyn ExtensionCredentialCleanup>>,
     ) -> Self {
         Self {
             filesystem,
@@ -177,6 +222,7 @@ impl RebornLocalExtensionManagementPort {
             lifecycle_service,
             active_extensions,
             operation_lock: Arc::new(Mutex::new(())),
+            credential_cleanup,
         }
     }
 
@@ -641,12 +687,157 @@ impl RebornLocalExtensionManagementPort {
         Ok(is_hosted_http_mcp_package(&package))
     }
 
+    /// Remove an installed extension. This is the single convergence point both
+    /// removal entrypoints call — the WebUI facade
+    /// ([`LifecycleProductAction::ExtensionRemove`]) and the
+    /// `builtin.extension_remove` agent capability — so the credential
+    /// revocation below cannot be bypassed through one door.
+    ///
+    /// On success it revokes the removed extension's reusable personal
+    /// credentials for providers now exclusive to it (see
+    /// [`Self::revoke_exclusive_credentials`]).
     pub(crate) async fn remove(
         &self,
         package_ref: LifecyclePackageRef,
+        scope: &ResourceScope,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        let _operation_guard = self.operation_lock.lock().await;
-        self.remove_locked(package_ref).await
+        // Capture the removed extension's credential providers and id BEFORE
+        // taking the operation lock: `activation_credential_requirements` takes
+        // the same lock, and the manifest is gone once removal succeeds.
+        let removed_extension_id = package_ref.id.as_str().to_string();
+        let removed_providers = self.removed_extension_providers(&package_ref).await;
+        let response = {
+            let _operation_guard = self.operation_lock.lock().await;
+            self.remove_locked(package_ref).await
+        };
+        if response.is_ok() {
+            self.revoke_exclusive_credentials(scope, &removed_extension_id, &removed_providers)
+                .await;
+        }
+        response
+    }
+
+    /// Credential providers the extension declares, captured before removal (its
+    /// manifest is gone afterward). Best-effort: on error returns empty so the
+    /// removal still proceeds without cleanup.
+    async fn removed_extension_providers(&self, package_ref: &LifecyclePackageRef) -> Vec<String> {
+        match self.activation_credential_requirements(package_ref).await {
+            Ok(requirements) => {
+                let mut providers: Vec<String> = Vec::new();
+                for requirement in requirements {
+                    let provider = requirement.provider.as_str().to_string();
+                    if !providers.contains(&provider) {
+                        providers.push(provider);
+                    }
+                }
+                providers
+            }
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    "could not resolve extension credential providers before removal; skipping credential cleanup"
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    /// After a successful removal, revoke the removed extension's reusable
+    /// personal credentials for providers now exclusive to it (no other
+    /// installed extension still declares them). Best-effort: cleanup never
+    /// fails or rolls back the removal, and it fails safe (revokes nothing) when
+    /// it cannot prove a provider is unused, so a shared credential is never
+    /// deleted out from under another extension.
+    async fn revoke_exclusive_credentials(
+        &self,
+        scope: &ResourceScope,
+        removed_extension_id: &str,
+        removed_providers: &[String],
+    ) {
+        let Some(cleanup) = self.credential_cleanup.as_ref() else {
+            return;
+        };
+        if removed_providers.is_empty() {
+            return;
+        }
+        let Some(providers_still_in_use) = self.providers_still_in_use().await else {
+            return;
+        };
+        let extension_id = match ExtensionId::new(removed_extension_id) {
+            Ok(extension_id) => extension_id,
+            Err(error) => {
+                tracing::debug!(%error, "removed extension id invalid for credential cleanup");
+                return;
+            }
+        };
+        for provider in removed_providers {
+            if providers_still_in_use.contains(provider) {
+                // Shared with another installed extension; preserve the account.
+                continue;
+            }
+            let auth_provider = match AuthProviderId::new(provider.as_str()) {
+                Ok(auth_provider) => auth_provider,
+                Err(error) => {
+                    tracing::debug!(%error, provider, "provider id invalid for credential cleanup");
+                    continue;
+                }
+            };
+            let request = SecretCleanupRequest {
+                scope: AuthProductScope::credential_owner(scope, AuthSurface::Callback),
+                extension_id: extension_id.clone(),
+                provider: Some(auth_provider),
+                action: SecretCleanupAction::Uninstall,
+            };
+            if let Err(error) = cleanup.cleanup_for_lifecycle(request).await {
+                tracing::debug!(
+                    %error,
+                    provider,
+                    "extension removal credential cleanup failed; continuing"
+                );
+            }
+        }
+    }
+
+    /// Providers still declared by extensions that remain installed after a
+    /// removal. Returns `None` when the set cannot be resolved so the caller
+    /// fails safe and skips revocation rather than risk deleting a shared
+    /// credential.
+    async fn providers_still_in_use(&self) -> Option<BTreeSet<String>> {
+        let response = match self.list_installed().await {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    "could not enumerate installed extensions after removal; skipping credential cleanup"
+                );
+                return None;
+            }
+        };
+        let Some(LifecycleProductPayload::ExtensionList { extensions, .. }) = response.payload
+        else {
+            return Some(BTreeSet::new());
+        };
+        let mut providers = BTreeSet::new();
+        for installed in extensions {
+            match self
+                .activation_credential_requirements(&installed.summary.package_ref)
+                .await
+            {
+                Ok(requirements) => {
+                    for requirement in requirements {
+                        providers.insert(requirement.provider.as_str().to_string());
+                    }
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        "could not resolve a remaining extension's credential providers; skipping credential cleanup"
+                    );
+                    return None;
+                }
+            }
+        }
+        Some(providers)
     }
 
     async fn remove_locked(
@@ -2037,7 +2228,9 @@ mod tests {
         )
         .await
         .expect("activate Slack and internal user tools");
-        port.remove(slack_ref).await.expect("remove public Slack");
+        port.remove(slack_ref, &hosted_mcp_scope("extension-remove-test"))
+            .await
+            .expect("remove public Slack");
 
         let installed_ids = installation_store
             .list_installations()
@@ -2338,7 +2531,7 @@ mod tests {
             .await
             .expect("tools/list request should start");
 
-        port.remove(package_ref)
+        port.remove(package_ref, &hosted_mcp_scope("extension-remove-test"))
             .await
             .expect("remove can proceed while discovery is in flight");
         release_tools_list
@@ -2398,7 +2591,7 @@ mod tests {
             vec![EffectKind::Network, EffectKind::ExternalWrite]
         );
 
-        port.remove(package_ref)
+        port.remove(package_ref, &hosted_mcp_scope("extension-remove-test"))
             .await
             .expect("remove fixture extension");
         let removed_decision = trust_policy
@@ -3484,6 +3677,7 @@ mod tests {
                 Arc::clone(&active_registry),
                 test_extension_trust_policy(),
             ),
+            None,
         );
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
@@ -3635,7 +3829,7 @@ mod tests {
         );
 
         let error = port
-            .remove(package_ref)
+            .remove(package_ref, &hosted_mcp_scope("extension-remove-test"))
             .await
             .expect_err("delete installation failure is reported");
 
@@ -3690,7 +3884,7 @@ mod tests {
         let trust_input = extension_trust_policy_input(&package).expect("trust input");
 
         let error = port
-            .remove(package_ref)
+            .remove(package_ref, &hosted_mcp_scope("extension-remove-test"))
             .await
             .expect_err("delete manifest failure is reported");
 
@@ -3729,7 +3923,7 @@ mod tests {
         let trust_input = extension_trust_policy_input(&package).expect("trust input");
 
         let error = port
-            .remove(package_ref)
+            .remove(package_ref, &hosted_mcp_scope("extension-remove-test"))
             .await
             .expect_err("delete files failure is reported");
 
@@ -3835,6 +4029,74 @@ mod tests {
         )
     }
 
+    #[derive(Default)]
+    struct RecordingExtensionCredentialCleanup {
+        requests: std::sync::Mutex<Vec<SecretCleanupRequest>>,
+    }
+
+    #[async_trait]
+    impl ExtensionCredentialCleanup for RecordingExtensionCredentialCleanup {
+        async fn cleanup_for_lifecycle(
+            &self,
+            request: SecretCleanupRequest,
+        ) -> Result<SecretCleanupReport, RebornServicesError> {
+            self.requests.lock().expect("cleanup lock").push(request);
+            Ok(SecretCleanupReport::default())
+        }
+    }
+
+    #[tokio::test]
+    async fn ui_facade_extension_remove_revokes_exclusive_credential_at_convergence_point() {
+        // Convergence coverage: the WebUI facade removal door (`ExtensionRemove`)
+        // and the `builtin.extension_remove` agent capability both call
+        // `RebornLocalExtensionManagementPort::remove`, so credential revocation
+        // cannot be bypassed through the UI door — the door users actually use.
+        let cleanup = Arc::new(RecordingExtensionCredentialCleanup::default());
+        let (_dir, _storage_root, facade, _active_registry, _installation_store) =
+            extension_lifecycle_fixture_with_catalog_service_and_cleanup(
+                AvailableExtensionCatalog::from_first_party_assets()
+                    .expect("first-party GitHub catalog"),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+                Some(cleanup.clone() as Arc<dyn ExtensionCredentialCleanup>),
+            );
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
+
+        facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("install github");
+        let remove = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionRemove { package_ref },
+            )
+            .await
+            .expect("remove github via the WebUI facade");
+        assert_eq!(remove.phase, LifecyclePhase::Removed);
+
+        let requests = cleanup.requests.lock().expect("cleanup lock");
+        assert_eq!(
+            requests.len(),
+            1,
+            "the UI-facade removal door must revoke exactly the exclusive github credential"
+        );
+        assert_eq!(
+            requests[0]
+                .provider
+                .as_ref()
+                .map(|provider| provider.as_str()),
+            Some("github")
+        );
+        assert_eq!(requests[0].extension_id.as_str(), "github");
+        assert_eq!(requests[0].action, SecretCleanupAction::Uninstall);
+    }
+
     fn extension_management_port_fixture_with_catalog_and_service(
         catalog: AvailableExtensionCatalog,
         lifecycle_service: ExtensionLifecycleService,
@@ -3928,6 +4190,7 @@ mod tests {
                 Arc::clone(&active_registry),
                 Arc::clone(&trust_policy),
             ),
+            None,
         ));
         (
             dir,
@@ -3941,6 +4204,24 @@ mod tests {
     fn extension_lifecycle_fixture_with_catalog_and_service(
         catalog: AvailableExtensionCatalog,
         lifecycle_service: ExtensionLifecycleService,
+    ) -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        crate::lifecycle::RebornLocalLifecycleFacade,
+        Arc<SharedExtensionRegistry>,
+        Arc<InMemoryExtensionInstallationStore>,
+    ) {
+        extension_lifecycle_fixture_with_catalog_service_and_cleanup(
+            catalog,
+            lifecycle_service,
+            None,
+        )
+    }
+
+    fn extension_lifecycle_fixture_with_catalog_service_and_cleanup(
+        catalog: AvailableExtensionCatalog,
+        lifecycle_service: ExtensionLifecycleService,
+        credential_cleanup: Option<Arc<dyn ExtensionCredentialCleanup>>,
     ) -> (
         tempfile::TempDir,
         std::path::PathBuf,
@@ -3988,6 +4269,7 @@ mod tests {
                 Arc::clone(&active_registry),
                 test_extension_trust_policy(),
             ),
+            credential_cleanup,
         ));
         let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(skill_management)
             .with_extension_management(extension_management);
@@ -4103,6 +4385,7 @@ mod tests {
                 Arc::clone(&active_registry),
                 Arc::clone(&trust_policy),
             ),
+            None,
         );
         (dir, port, active_registry, failing_store, trust_policy)
     }
@@ -4149,6 +4432,7 @@ mod tests {
                 Arc::clone(&active_registry),
                 Arc::clone(&trust_policy),
             ),
+            None,
         );
         (dir, port, active_registry, installation_store, trust_policy)
     }
