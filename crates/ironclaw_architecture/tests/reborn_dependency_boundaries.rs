@@ -312,7 +312,6 @@ fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
         "crates/ironclaw_product_adapters/src",
         "crates/ironclaw_product_adapter_registry/src",
         "crates/ironclaw_product_workflow/src",
-        "crates/ironclaw_product_workflow_storage/src",
         "crates/ironclaw_reborn_webui_ingress/src",
         "crates/ironclaw_wasm_product_adapters/src",
         "crates/ironclaw_webui_v2/src",
@@ -722,12 +721,18 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
         // rebuild provider calls only from stored replay metadata.
         "crates/ironclaw_reborn/src/model_gateway.rs",
         "crates/ironclaw_agent_loop/src/executor/capability_helpers.rs",
+        // Progressive tool disclosure is itself a model-protocol boundary: the
+        // catalog/selector and the bridging decorator map provider tool names
+        // (advertised, deferred, and synthetic bridge names) to/from capability
+        // ids and rebuild provider calls for the resolved target.
+        "crates/ironclaw_reborn/src/tool_disclosure.rs",
+        "crates/ironclaw_reborn/src/tool_disclosure_port.rs",
         // Composition-local protocol surfaces that reconstruct provider-shaped
-        // output or local-dev synthetic provider tools.
+        // output or local-dev provider tools.
         "crates/ironclaw_reborn_composition/src/openai_compat_serve.rs",
         "crates/ironclaw_reborn_composition/src/runtime/local_dev/external_tool_capability.rs",
         "crates/ironclaw_reborn_composition/src/runtime/local_dev/synthetic_capability.rs",
-        "crates/ironclaw_reborn_composition/src/trace_capture.rs",
+        "crates/ironclaw_reborn_composition/src/observability/trace_capture.rs",
     ]);
     let violations = uses
         .into_iter()
@@ -997,9 +1002,30 @@ fn wasm_sandbox_core_is_standalone_v1_parity_kernel() {
     let workspace_deps = workspace_dependency_names(package)
         .filter_map(|dependency| dependency["name"].as_str())
         .collect::<Vec<_>>();
+    let allowed_workspace_deps = ["ironclaw_wasm_limiter"];
+    let forbidden_workspace_deps = workspace_deps
+        .iter()
+        .copied()
+        .filter(|dependency| !allowed_workspace_deps.contains(dependency))
+        .collect::<Vec<_>>();
     assert!(
-        workspace_deps.is_empty(),
-        "WASM sandbox core should stay independent of IronClaw domain crates; got {workspace_deps:?}"
+        forbidden_workspace_deps.is_empty(),
+        "WASM sandbox core should stay independent of IronClaw product/runtime crates; \
+         only the low-level shared limiter workspace crate is allowed. Got forbidden deps: \
+         {forbidden_workspace_deps:?}; all workspace deps: {workspace_deps:?}"
+    );
+
+    let limiter_package = packages
+        .iter()
+        .find(|package| package["name"] == "ironclaw_wasm_limiter")
+        .expect("ironclaw_wasm_limiter must be a workspace package");
+    let limiter_workspace_deps = workspace_dependency_names(limiter_package)
+        .filter_map(|dependency| dependency["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        limiter_workspace_deps.is_empty(),
+        "ironclaw_wasm_limiter is allowed only as low-level WASM accounting; \
+         got workspace deps: {limiter_workspace_deps:?}"
     );
 }
 
@@ -1869,6 +1895,40 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             allowed: vec!["ironclaw_host_api", "ironclaw_memory"],
         },
         BoundaryRule {
+            // Canonical Reborn identity layer: it maps external identities to a
+            // stable `UserId` at the bottom of the stack. It may use only host
+            // scope newtypes plus the durable filesystem substrate.
+            crate_name: "ironclaw_reborn_identity",
+            allowed: vec!["ironclaw_filesystem", "ironclaw_host_api"],
+        },
+        BoundaryRule {
+            // The v1->Reborn migration tool is an intentional one-way bridge:
+            // it reads through the root `ironclaw` crate and writes through the
+            // Reborn state substrate + composition's `migration-support` seam.
+            // Keep its broad bridge deps explicit so new live serving/runtime
+            // deps cannot appear silently.
+            crate_name: "ironclaw_reborn_migration",
+            allowed: vec![
+                "ironclaw",
+                "ironclaw_common",
+                "ironclaw_extensions",
+                "ironclaw_filesystem",
+                "ironclaw_host_api",
+                "ironclaw_host_runtime",
+                "ironclaw_memory",
+                "ironclaw_memory_native",
+                "ironclaw_reborn_composition",
+                "ironclaw_reborn_identity",
+                "ironclaw_secrets",
+                "ironclaw_threads",
+                "ironclaw_triggers",
+            ],
+        },
+        BoundaryRule {
+            // ironclaw_filesystem is permitted: the durable idempotency ledger
+            // was folded into this facade from the retired
+            // `ironclaw_product_workflow_storage` crate and remains
+            // feature-gated behind `storage`.
             crate_name: "ironclaw_product_workflow",
             allowed: vec![
                 "ironclaw_approvals",
@@ -1878,6 +1938,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_common",
                 "ironclaw_conversations",
                 "ironclaw_events",
+                "ironclaw_filesystem",
                 "ironclaw_host_api",
                 "ironclaw_outbound",
                 "ironclaw_product_adapters",
@@ -1918,21 +1979,9 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             crate_name: "ironclaw_reborn_openai_compat",
             allowed: vec![
                 "ironclaw_attachments",
-                "ironclaw_host_api",
-                "ironclaw_product_adapters",
-            ],
-        },
-        BoundaryRule {
-            // Durable storage for OpenAI-compatible public refs sits behind
-            // the OpenAiCompatRefStore port. It may use the universal
-            // filesystem backend and the OpenAI-compatible contract crate, but
-            // must not grow route handling, ProductWorkflow orchestration, or
-            // runtime/composition reach-through.
-            crate_name: "ironclaw_reborn_openai_compat_storage",
-            allowed: vec![
                 "ironclaw_filesystem",
                 "ironclaw_host_api",
-                "ironclaw_reborn_openai_compat",
+                "ironclaw_product_adapters",
             ],
         },
         BoundaryRule {
@@ -1950,15 +1999,17 @@ fn boundary_rules() -> Vec<BoundaryRule> {
         },
         BoundaryRule {
             // First-party extensions are userland implementation packages.
-            // They may consume scoped storage and pure safety helpers, but
-            // must not receive ambient runtime authority or loop-facing
-            // runtime handles.
+            // They may consume scoped storage, pure safety helpers, and the
+            // shared observability crate for latency instrumentation; they must
+            // not receive ambient runtime authority or loop-facing runtime
+            // handles.
             crate_name: "ironclaw_first_party_extensions",
             allowed: vec![
                 "ironclaw_auth",
                 "ironclaw_extractors",
                 "ironclaw_filesystem",
                 "ironclaw_host_api",
+                "ironclaw_observability",
                 "ironclaw_safety",
                 "ironclaw_skills",
             ],
@@ -2008,8 +2059,14 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             allowed: vec!["ironclaw_host_api", "ironclaw_reborn_composition"],
         },
         BoundaryRule {
+            // ironclaw_observability is permitted: ScopedFilesystem emits
+            // optional live latency traces for storage operations.
             crate_name: "ironclaw_filesystem",
-            allowed: vec!["ironclaw_host_api", "ironclaw_safety"],
+            allowed: vec![
+                "ironclaw_host_api",
+                "ironclaw_observability",
+                "ironclaw_safety",
+            ],
         },
         BoundaryRule {
             crate_name: "ironclaw_resources",
@@ -2162,7 +2219,13 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // routes turn-coordination persistence through ScopedFilesystem
             // under the universal-fs-dispatch rework (plan
             // 2026-05-14-universal-fs-dispatch).
-            allowed: vec!["ironclaw_filesystem", "ironclaw_host_api"],
+            // ironclaw_observability is permitted: the coordinator emits
+            // optional live latency traces for turn scheduling.
+            allowed: vec![
+                "ironclaw_filesystem",
+                "ironclaw_host_api",
+                "ironclaw_observability",
+            ],
         },
         // The hooks framework depends on `ironclaw_turns` and host primitives
         // but must not pull in runtime adapters or dispatcher concretions.
@@ -2184,9 +2247,15 @@ fn boundary_rules() -> Vec<BoundaryRule> {
         // product adapters, dispatcher, capability host, filesystem, network,
         // secrets, DB backends, or the loop-support adapter layer — those all
         // sit above agent_loop in the stack and would create an inversion.
+        // `ironclaw_observability` is permitted only for neutral latency traces.
         BoundaryRule {
             crate_name: "ironclaw_agent_loop",
-            allowed: vec!["ironclaw_common", "ironclaw_host_api", "ironclaw_turns"],
+            allowed: vec![
+                "ironclaw_common",
+                "ironclaw_host_api",
+                "ironclaw_observability",
+                "ironclaw_turns",
+            ],
         },
         BoundaryRule {
             crate_name: "ironclaw_capabilities",

@@ -42,6 +42,7 @@ fn capability_activity() -> CapabilityActivityView {
         process_id: None,
         output_bytes: None,
         error_kind: None,
+        error_detail: None,
         subtitle: Some("src/main.rs".to_string()),
         input_summary: Some("path: src/main.rs".to_string()),
         updated_at: Utc::now(),
@@ -104,6 +105,7 @@ fn auth_prompt() -> AuthPromptView {
         account_label: None,
         authorization_url: None,
         expires_at: None,
+        connection: None,
     }
 }
 

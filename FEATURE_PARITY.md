@@ -338,7 +338,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Plugin tools | ✅ | ✅ | WASM tools |
 | GSuite WASM tools | ✅ | 🚧 | Reborn bundles operation-level Google Drive/Docs/Sheets/Slides WASM packages with host-mediated HTTP egress, product-auth scoped bearer injection, and manifest-declared Google OAuth setup metadata; full live-recorded parity remains follow-up |
 | Hosted MCP extensions | ✅ | 🚧 | Reborn composes host-mediated MCP runtime, bundles the current Notion MCP supported tool set, wires Notion ProductAuth OAuth exchange/refresh, can use Reborn ProductAuth DCR OAuth setup through the host callback origin, and can activate hosted MCP packages with live `tools/list` schema discovery through host-staged product-auth credentials |
-| NEAR AI MCP extension | ✅ | 🚧 | Host-bundled Reborn MCP extension exposes `nearai.web_search` via host-mediated HTTP and `llm_nearai_api_key`; local-dev startup now auto-seeds product-auth and activates the bundled MCP extension when `NEARAI_BASE_URL` plus `NEARAI_API_KEY` are configured, and WebChat v2 no longer projects that host-managed credential as extension setup work while NEAR remains a static supported-tool adapter |
+| NEAR AI MCP extension | ✅ | 🚧 | Host-bundled Reborn MCP extension exposes `nearai.web_search` via host-mediated HTTP and `llm_nearai_api_key`; local-dev startup now auto-seeds product-auth and activates the bundled MCP extension when `NEARAI_BASE_URL` plus `NEARAI_API_KEY` are configured, runtime credential resolution treats that seeded account as host-managed for the bundled `nearai` requester across WebUI SSO users in the same tenant/agent scope, with project-scoped host credentials limited to their project and tenant/agent-level host credentials covering project-scoped runtime calls, without exposing it to other requesters/providers, and WebChat v2 no longer projects that host-managed credential as extension setup work while NEAR remains a static supported-tool adapter |
 | Tool policies (allow/deny) | ✅ | ✅ | Reborn now stores scoped persistent `AlwaysAllow` approval policies for manifest-allow capabilities and replays them at the current sandbox scope; WebChat v2 exposes authenticated caller-scoped tool approval settings at `/api/webchat/v2/settings/tools` so regular multi-user sessions do not need operator config access; product-facing revoke paths remain follow-up while the policy-store revoke interface is available |
 | Exec approvals (`/approve`) | ✅ | ✅ | TUI approval overlay |
 | Tool inventory cache | ✅ | ❌ | Coalesced effective-tool inventory cache with channel-registry invalidation |
@@ -712,6 +712,18 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Gmail pub/sub | ✅ | ❌ | P3 | |
 | Inferred follow-up commitments | ✅ | ❌ | P3 | Heartbeat-delivered reminders; opt-in batched extraction |
 
+**State migration (v1/engine-v2 → Reborn):** `crates/ironclaw_reborn_migration`
+converts persisted automations. Cron routines and cron missions convert to
+Reborn `TriggerRecord`s (mission threads land under `ThreadScope.mission_id`).
+Because Reborn's `TriggerSourceKind` is `Schedule`-only, **event / system-event /
+webhook / manual routines and non-cron mission cadences have no `TriggerRecord`
+target** and are recorded in the migration manifest rather than converted — even
+where the runtime supports the *behavior* via hooks/`event_emit`, the durable
+automation row does not carry over. Guardrails, notify config, run counters,
+`routine_runs` history (no public run-history insert), and mission-only fields
+(focus/approach/success-criteria) likewise have no target. See the crate's
+CLAUDE.md for the full mapping + gap catalog.
+
 ### Owner: _Unassigned_
 
 ---
@@ -823,7 +835,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 
 ### P1 - High Priority
 
-- 🚧 Slack channel (real implementation): Reborn host-beta route can be explicitly mounted by `ironclaw-reborn serve` with Slack Events API signing, DM/app-mention routing through Product Workflow/Reborn, final-reply delivery, host-state-backed personal binding pairing, WebUI v2 admin-managed allowed-channel picker, durable WebUI channel-route assignment APIs, provider-side default outbound target inventory for shared channels and explicitly provisioned personal DMs, a host-bundled Reborn extension manifest declaring the Slack ProductAdapter host API, and deterministic chat-side connect action metadata; DMs execute as the paired actor, while shared channel turns route to allowed dynamic or static channel subjects and fail closed for unrouted channels in admin-managed mode; production install/setup hardening and fuller E2E coverage remain follow-up.
+- 🚧 Slack channel (real implementation): Reborn host-beta route can be explicitly mounted by `ironclaw-reborn serve` with Slack Events API signing, slash-command pairing recovery, DM/app-mention routing through Product Workflow/Reborn, final-reply delivery, host-state-backed personal binding pairing, WebUI v2 chat-first pairing panels that redeem codes locally without sending them to the model, admin-managed allowed-channel picker, durable WebUI channel-route assignment APIs, provider-side default outbound target inventory for shared channels and explicitly provisioned personal DMs, and a host-bundled Reborn extension manifest declaring the Slack ProductAdapter host API; DMs execute as the paired actor, while shared channel turns route to allowed dynamic or static channel subjects and fail closed for unrouted channels in admin-managed mode; broader production install/setup hardening remains follow-up.
 - ✅ Telegram channel (WASM, polling-first setup, DM pairing, caption, /start)
 - ❌ WhatsApp channel
 - ✅ Multi-provider failover (`FailoverProvider` with retryable error classification)

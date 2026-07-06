@@ -45,6 +45,7 @@ mod first_party_tools;
 mod http_body;
 mod invocation_services;
 pub mod memory_binding;
+mod latency;
 pub mod memory_context;
 pub mod memory_native_extension;
 pub mod memory_profiles;

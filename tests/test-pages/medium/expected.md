@@ -27,7 +27,7 @@ Photography was my lucky way of experiencing the many types of people
  like Flickr to see how others could frame the world in ways I hadn’t previously
  considered.
 
-topleftpixel.com
+*topleftpixel.com*
 
 I started discovering beautiful things the [web could do with images](http://wvs.topleftpixel.com/13/02/06/timelapse-strips-homewood.htm):
  things not possible with print. Just as every generation revolts against
@@ -97,7 +97,8 @@ Our questioning of other student journalists in 15 student newsrooms brought
  was seen as “a career with words.” The other 5% were designers, designing
  words on computers, for print.
 - Not enough discussion between the business side and web efforts
-From our 2011 research
+
+*From our 2011 research*
 
 ### Common problems in student newsrooms (2013)
 
@@ -120,7 +121,6 @@ Two years later, we went back and looked at what had changed. We talked
 - Significantly reduced print production of many papers
 - Computers aren’t set up for experimenting with software and code, and
  often locked down
-
 
 Newsrooms have traditionally been covered in copies of The New York Times
  or Globe and Mail. Instead newsrooms should try spend at 20 minutes each
@@ -151,7 +151,7 @@ We need to rethink how long the new shoe design will be valid. It’s more
 In our 2013 research we found that almost 50% of student newsrooms had
  created roles specifically for the web. **This sounds great, but is still problematic in its current state.**
 
-**We designed many of these slides to help explain to ourselves what we were doing**
+***We designed many of these slides to help explain to ourselves what we were doing***
 
 When a newsroom decides to create a position for the web, it’s often with
  the intent of having content flow steadily from writers onto the web. This
@@ -180,7 +180,6 @@ The
  interactivity is not considered when developing the story. The web then
  ends up as a resting place for print words.
 
-
 Editors at newsrooms are still figuring out how to convince writers of
  the benefit to having their content online. There’s still a stronger draw
  to writers seeing their name in print than on the web. Showing writers
@@ -198,8 +197,8 @@ We’re OK with this problem, if we see newsrooms continue to take small
  steps towards having all their editors involved in the stories for the
  web.
 
-The current Open Journalism site was a few years in the making. This was
- an original launch page we use in 2012
+*The current Open Journalism site was a few years in the making. This was
+an original launch page we use in 2012*
 
 ### What we know
 
@@ -236,7 +235,6 @@ Skill diversity needs to change. We encourage every student newsroom we
  at design, data, code, words, and images into one room is one of the coolest
  experience I’ve had. Everyone benefits from a more diverse newsroom.
 
-
 ### What we don’t know
 
 - **Sharing curiosity for the web**  
@@ -258,9 +256,7 @@ We don’t know what journalism or the web will be like in 10 years, but
  newsroom climate, than we are in teaching students to have the ability
  to learn new tools quickly as they come and go.
 
-Another slide from 2012 website
-
-
+*Another slide from 2012 website*
 
 ### What we’re trying to share with others
 
@@ -268,7 +264,6 @@ Another slide from 2012 website
 There are too many options to get started. We hope to provide an opinionated
  guide that follows both our experiences, research, and observations from
  trying to teach our peers.
-
 
 Student newsrooms don’t have investors to please. Student newsrooms can
  change their website every week if they want to try a new design or interaction.
@@ -282,7 +277,7 @@ We’re also asking professional newsrooms to be more open about their process
  writing about it, and sharing code. We need to start building a bridge
  between student journalism and professional newsrooms.
 
-2012
+*2012*
 
 ### This is a start
 

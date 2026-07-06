@@ -1,0 +1,161 @@
+name: Setup OVH sccache
+description: Install sccache and configure the OVH Redis cache plus distributed compiler backend when credentials are available.
+
+inputs:
+  cache-ssh-host:
+    description: SSH host used to tunnel to the private OVH Redis sccache backend.
+    required: false
+    default: ""
+  cache-ssh-user:
+    description: SSH user used to tunnel to the private OVH Redis sccache backend.
+    required: false
+    default: "sccache-cache"
+  cache-ssh-port:
+    description: SSH port used to tunnel to the private OVH Redis sccache backend.
+    required: false
+    default: "22"
+  cache-ssh-private-key:
+    description: Private SSH key for the private OVH Redis sccache tunnel.
+    required: false
+    default: ""
+  cache-ssh-known-hosts:
+    description: Strict known_hosts content for the private OVH Redis sccache tunnel.
+    required: false
+    default: ""
+  redis-password:
+    description: Redis password for the private OVH sccache cache backend.
+    required: false
+    default: ""
+  redis-local-port:
+    description: Local port for the Redis SSH tunnel.
+    required: false
+    default: "6380"
+  redis-key-prefix:
+    description: Key prefix for entries written to the OVH Redis sccache cache.
+    required: false
+    default: "ironclaw/rust/v1"
+  scheduler-url:
+    description: HTTPS URL for the sccache-dist scheduler.
+    required: false
+    default: ""
+  auth-token:
+    description: Token for the sccache-dist scheduler.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Skip unavailable OVH sccache
+      if: ${{ inputs.auth-token == '' && (inputs.redis-password == '' || inputs.cache-ssh-private-key == '' || inputs.cache-ssh-host == '' || inputs.cache-ssh-known-hosts == '') }}
+      shell: bash
+      run: echo "::notice title=OVH sccache skipped::SCCACHE_DIST_AUTH_TOKEN or OVH Redis cache credentials are unavailable; using local compilation."
+
+    - name: Install sccache
+      if: ${{ inputs.auth-token != '' || (inputs.redis-password != '' && inputs.cache-ssh-private-key != '' && inputs.cache-ssh-host != '' && inputs.cache-ssh-known-hosts != '') }}
+      uses: mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e # v0.0.10
+      with:
+        version: v0.16.0
+
+    - name: Configure OVH sccache
+      if: ${{ inputs.auth-token != '' || (inputs.redis-password != '' && inputs.cache-ssh-private-key != '' && inputs.cache-ssh-host != '' && inputs.cache-ssh-known-hosts != '') }}
+      shell: bash
+      env:
+        SCCACHE_CACHE_SSH_HOST: ${{ inputs.cache-ssh-host }}
+        SCCACHE_CACHE_SSH_USER: ${{ inputs.cache-ssh-user }}
+        SCCACHE_CACHE_SSH_PORT: ${{ inputs.cache-ssh-port }}
+        SCCACHE_CACHE_SSH_PRIVATE_KEY: ${{ inputs.cache-ssh-private-key }}
+        SCCACHE_CACHE_SSH_KNOWN_HOSTS: ${{ inputs.cache-ssh-known-hosts }}
+        SCCACHE_REDIS_PASSWORD: ${{ inputs.redis-password }}
+        SCCACHE_REDIS_LOCAL_PORT: ${{ inputs.redis-local-port }}
+        SCCACHE_REDIS_KEY_PREFIX: ${{ inputs.redis-key-prefix }}
+        SCCACHE_DIST_SCHEDULER_URL: ${{ inputs.scheduler-url }}
+        SCCACHE_DIST_AUTH_TOKEN: ${{ inputs.auth-token }}
+      run: |
+        set -euo pipefail
+
+        cache_enabled=false
+        if [[ -n "${SCCACHE_REDIS_PASSWORD}" || -n "${SCCACHE_CACHE_SSH_PRIVATE_KEY}" || -n "${SCCACHE_CACHE_SSH_HOST}" || -n "${SCCACHE_CACHE_SSH_KNOWN_HOSTS}" ]]; then
+          if [[ -z "${SCCACHE_REDIS_PASSWORD}" || -z "${SCCACHE_CACHE_SSH_PRIVATE_KEY}" || -z "${SCCACHE_CACHE_SSH_HOST}" || -z "${SCCACHE_CACHE_SSH_KNOWN_HOSTS}" ]]; then
+            echo "::error title=Incomplete OVH Redis cache settings::SCCACHE_REDIS_PASSWORD, cache SSH host, private key, and known_hosts must be provided together."
+            exit 1
+          fi
+          cache_enabled=true
+        fi
+
+        dist_enabled=false
+        if [[ -n "${SCCACHE_DIST_AUTH_TOKEN}" ]]; then
+          dist_enabled=true
+        fi
+
+        if [[ "${dist_enabled}" == "true" && -z "${SCCACHE_DIST_SCHEDULER_URL}" ]]; then
+          echo "::error title=Missing scheduler URL::SCCACHE_DIST_SCHEDULER_URL is required when SCCACHE_DIST_AUTH_TOKEN is set."
+          exit 1
+        fi
+
+        if [[ "${dist_enabled}" == "true" && "${SCCACHE_DIST_SCHEDULER_URL}" != https://* ]]; then
+          echo "::error title=Insecure scheduler URL::SCCACHE_DIST_SCHEDULER_URL must use https://"
+          exit 1
+        fi
+
+        toml_basic_string() {
+          VALUE="$1" python3 -c 'import json, os; print(json.dumps(os.environ["VALUE"]))'
+        }
+
+        scheduler_url_toml="$(toml_basic_string "${SCCACHE_DIST_SCHEDULER_URL}")"
+        auth_token_toml="$(toml_basic_string "${SCCACHE_DIST_AUTH_TOKEN}")"
+        redis_password_toml="$(toml_basic_string "${SCCACHE_REDIS_PASSWORD}")"
+        redis_key_prefix_toml="$(toml_basic_string "${SCCACHE_REDIS_KEY_PREFIX}")"
+        redis_endpoint_toml="$(toml_basic_string "redis://127.0.0.1:${SCCACHE_REDIS_LOCAL_PORT}")"
+
+        if [[ "${cache_enabled}" == "true" ]]; then
+          mkdir -p "${HOME}/.ssh"
+          chmod 700 "${HOME}/.ssh"
+          ssh_key="${RUNNER_TEMP}/sccache-cache-ssh-key"
+          known_hosts="${RUNNER_TEMP}/sccache-cache-known-hosts"
+          printf '%s\n' "${SCCACHE_CACHE_SSH_PRIVATE_KEY}" | tr -d '\r' > "${ssh_key}"
+          printf '%s\n' "${SCCACHE_CACHE_SSH_KNOWN_HOSTS}" | tr -d '\r' > "${known_hosts}"
+          chmod 600 "${ssh_key}" "${known_hosts}"
+
+          ssh -f -N \
+            -o ExitOnForwardFailure=yes \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=3 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="${known_hosts}" \
+            -i "${ssh_key}" \
+            -p "${SCCACHE_CACHE_SSH_PORT}" \
+            -L "127.0.0.1:${SCCACHE_REDIS_LOCAL_PORT}:127.0.0.1:6379" \
+            "${SCCACHE_CACHE_SSH_USER}@${SCCACHE_CACHE_SSH_HOST}"
+        fi
+
+        mkdir -p "${HOME}/.config/sccache"
+        {
+          if [[ "${cache_enabled}" == "true" ]]; then
+            printf '%s\n' "[cache.redis]"
+            printf 'endpoint = %s\n' "${redis_endpoint_toml}"
+            printf 'password = %s\n' "${redis_password_toml}"
+            printf '%s\n' "expiration = 1209600"
+            printf 'key_prefix = %s\n' "${redis_key_prefix_toml}"
+            printf '%s\n' ""
+          fi
+
+          if [[ "${dist_enabled}" == "true" ]]; then
+            printf '%s\n' "[dist]"
+            printf 'scheduler_url = %s\n' "${scheduler_url_toml}"
+            printf '%s\n' "toolchains = []"
+            printf '%s\n' "toolchain_cache_size = 5368709120"
+            printf '%s\n' ""
+            printf '%s\n' "[dist.auth]"
+            printf '%s\n' 'type = "token"'
+            printf 'token = %s\n' "${auth_token_toml}"
+          fi
+        } > "${HOME}/.config/sccache/config"
+        chmod 600 "${HOME}/.config/sccache/config"
+        echo "RUSTC_WRAPPER=sccache" >> "${GITHUB_ENV}"
+        sccache --stop-server || true
+        if [[ "${dist_enabled}" == "true" ]]; then
+          if ! sccache --dist-status; then
+            echo "::warning title=sccache-dist scheduler probe failed::Distributed compilation may fall back or fail if the scheduler remains unavailable."
+          fi
+        fi

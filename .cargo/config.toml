@@ -1,0 +1,19 @@
+# Repo-wide Cargo configuration. Cargo discovers this file by walking up from
+# any invocation's working directory, so these settings apply to every cargo
+# command in every CI workflow (and to local builds) without per-workflow env.
+#
+# Network resilience: CI runners have cold caches and re-fetch the dependency
+# graph from crates.io on every run, where transient failures — HTTP/2 framing
+# resets ("curl [16] Error in the HTTP2 framing layer"), "SSL_read: unexpected
+# eof", registry hiccups — otherwise fail the whole job. Centralizing the
+# retry/transport settings here (instead of scattering CARGO_NET_RETRY across
+# individual workflows) means a new workflow can never silently miss them.
+[net]
+retries = 10
+git-fetch-with-cli = true   # git deps fetch via the git CLI, which retries too
+
+[http]
+# Disable HTTP/2 multiplexing: under the highly-parallel CI dependency fetches
+# it is the source of the framing-reset / unexpected-eof flakes above. Slightly
+# slower cold downloads, far fewer spurious failures.
+multiplexing = false

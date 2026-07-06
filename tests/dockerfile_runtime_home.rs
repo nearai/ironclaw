@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::Command;
 
 #[cfg(unix)]
@@ -211,9 +212,8 @@ fn reborn_hosted_single_tenant_volume_seed_config_uses_volume_storage() {
 #[test]
 fn reborn_hosted_single_tenant_seed_config_keeps_disabled_slack_legacy_free() {
     let config = read_repo_file("docker/reborn/config.hosted-single-tenant.toml");
-    let parsed = config
-        .parse::<toml::Value>()
-        .expect("hosted seed config should be valid TOML");
+    let parsed =
+        toml::from_str::<toml::Value>(&config).expect("hosted seed config should be valid TOML");
     let slack = parsed
         .get("slack")
         .and_then(toml::Value::as_table)

@@ -1007,6 +1007,7 @@ async fn publish_loop_milestone_projects_capability_lifecycle_to_runtime_events(
             provider: Some(provider_id.clone()),
             runtime: Some(RuntimeKind::FirstParty),
             reason_kind: CapabilityFailureKind::OperationFailed,
+            safe_summary: None,
         },
     ] {
         sink.publish_loop_milestone(milestone_for(scope.clone(), run_id, kind))

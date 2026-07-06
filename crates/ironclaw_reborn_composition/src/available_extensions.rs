@@ -186,7 +186,7 @@ fn onboarding(package_ref: &LifecyclePackageRef) -> Option<LifecycleExtensionOnb
             "After authorization completes, activate Notion to publish its MCP tools.",
         )),
         "web-access" => Some(onboarding_message(
-            "Web Access does not need credentials. Activate it to make web search and saved-result retrieval tools available.",
+            "Web Access does not need credentials. Activate it to make web search and page-content retrieval tools available.",
             Some("No credentials are required for Web Access."),
             None,
             "Activate Web Access to publish its tools.",
@@ -546,6 +546,14 @@ pub(crate) fn web_access_manifest_digest() -> String {
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) fn slack_manifest_digest() -> String {
     sha256_digest_token(SLACK_MANIFEST.as_bytes())
+}
+
+/// The bundled Slack extension manifest TOML. The serve layer projects the
+/// Slack host-ingress route descriptors from this manifest rather than from
+/// Rust literals (see `slack_serve::slack_events_route_descriptors`).
+#[cfg(feature = "slack-v2-host-beta")]
+pub(crate) fn slack_manifest_toml() -> &'static str {
+    SLACK_MANIFEST
 }
 
 pub(crate) fn nearai_mcp_manifest_toml_for_config(
@@ -1728,6 +1736,27 @@ mod tests {
             assert!(
                 expected.is_subset(&ids),
                 "{query} should discover every GSuite package; got {ids:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bundled_google_sheet_queries_discover_drive_lookup_tool() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+
+        for query in ["google sheets", "google sheet", "spreadsheet"] {
+            let ids = catalog
+                .search(query)
+                .map(|package| package.package_ref.id.as_str())
+                .collect::<BTreeSet<_>>();
+
+            assert!(
+                ids.contains("google-drive"),
+                "{query} should discover Google Drive for spreadsheet-name lookup; got {ids:?}"
+            );
+            assert!(
+                ids.contains("google-sheets"),
+                "{query} should still discover Google Sheets; got {ids:?}"
             );
         }
     }

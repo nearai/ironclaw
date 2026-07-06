@@ -1,6 +1,5 @@
 use std::collections::{HashMap, VecDeque};
 
-use async_trait::async_trait;
 use ironclaw_turns::TurnRunId;
 
 use crate::subagent::spawn_result::SubagentResultTombstone;
@@ -11,19 +10,6 @@ const MAX_TOMBSTONE_RECORDS: usize = 4096;
 pub enum TombstoneStoreError {
     #[error("subagent tombstone store backend failed: {reason}")]
     Backend { reason: String },
-}
-
-#[async_trait]
-pub trait SubagentResultTombstoneStore: Send + Sync {
-    async fn write_tombstone(
-        &self,
-        tombstone: SubagentResultTombstone,
-    ) -> Result<(), TombstoneStoreError>;
-
-    async fn read_tombstone(
-        &self,
-        child_run_id: TurnRunId,
-    ) -> Result<Option<SubagentResultTombstone>, TombstoneStoreError>;
 }
 
 #[derive(Default)]
@@ -41,11 +27,8 @@ impl BoundedSubagentResultTombstoneStore {
     pub fn new() -> Self {
         Self::default()
     }
-}
 
-#[async_trait]
-impl SubagentResultTombstoneStore for BoundedSubagentResultTombstoneStore {
-    async fn write_tombstone(
+    pub async fn write_tombstone(
         &self,
         tombstone: SubagentResultTombstone,
     ) -> Result<(), TombstoneStoreError> {
@@ -69,7 +52,7 @@ impl SubagentResultTombstoneStore for BoundedSubagentResultTombstoneStore {
         Ok(())
     }
 
-    async fn read_tombstone(
+    pub async fn read_tombstone(
         &self,
         child_run_id: TurnRunId,
     ) -> Result<Option<SubagentResultTombstone>, TombstoneStoreError> {

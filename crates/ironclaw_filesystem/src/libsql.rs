@@ -28,6 +28,49 @@ const LIBSQL_CONNECT_ATTEMPTS: u32 = 3;
 #[cfg(feature = "libsql")]
 const LIBSQL_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(50);
 
+/// Per-connection PRAGMAs applied to every libSQL connection.
+///
+/// libSQL/SQLite is a single-writer engine: there is no true "parallel
+/// write" mode for a local file. Concurrent writers always serialise on
+/// the database write lock. The throughput lever is therefore making each
+/// write cheap and keeping readers from blocking the writer — which is
+/// exactly what these PRAGMAs do, alongside `journal_mode=WAL` (set once at
+/// migration time, see `run_migrations`).
+///
+/// - `busy_timeout=5000`: unchanged from the prior policy. A writer that
+///   finds the write lock held waits up to 5s rather than failing fast.
+/// - `synchronous=NORMAL`: in WAL mode this is crash-safe for the
+///   *application* (committed transactions survive a process crash); only an
+///   OS/power loss can roll back the most-recent commits, and the database
+///   stays consistent regardless. It removes one fsync per commit, which is
+///   the dominant cost of the serial-write path under load. This is the
+///   standard high-throughput SQLite setting. Use `FULL` only if per-commit
+///   power-loss durability is required (it is not for turn/loop state).
+/// - `temp_store=MEMORY`: keep transient indexes/sorters off disk.
+/// - `cache_size=-16000`: ~16 MiB page cache per connection (negative =
+///   KiB), so hot pages (the turn-state and resource-snapshot rows that are
+///   read-modify-written every turn) stay resident instead of being
+///   re-read from the OS page cache on each op.
+/// - `mmap_size`: memory-map up to 256 MiB for reads, cutting read syscall
+///   overhead on the many read-before-write checks (`exact_entry`,
+///   `has_child_entry`, snapshot loads) that surround each write.
+/// - `wal_autocheckpoint=1000`: bound WAL growth (checkpoint every ~1000
+///   pages / ~4 MiB) so the WAL does not grow without limit under a burst
+///   of writes.
+///
+/// `journal_mode` is deliberately NOT set here: it is a persistent,
+/// database-level property (stored in the file header) and changing it
+/// inside or alongside ordinary work is wasteful and cannot run inside a
+/// transaction. It is set exactly once in `run_migrations`.
+#[cfg(feature = "libsql")]
+const LIBSQL_CONNECTION_PRAGMAS: &str = "\
+    PRAGMA busy_timeout = 5000;\
+    PRAGMA synchronous = NORMAL;\
+    PRAGMA temp_store = MEMORY;\
+    PRAGMA cache_size = -16000;\
+    PRAGMA mmap_size = 268435456;\
+    PRAGMA wal_autocheckpoint = 1000;";
+
 #[cfg(feature = "libsql")]
 impl LibSqlRootFilesystem {
     pub fn new(db: Arc<libsql::Database>) -> Self {
@@ -36,6 +79,29 @@ impl LibSqlRootFilesystem {
 
     pub async fn run_migrations(&self) -> Result<(), FilesystemError> {
         let conn = self.connect().await?;
+        // Switch the database to WAL journaling once, here, before any
+        // transaction is opened. WAL is persisted in the database header, so
+        // a single successful run sticks for the life of the file and for
+        // every future connection; re-running migrations on an
+        // already-WAL database is a cheap no-op.
+        //
+        // This is the single biggest lever on concurrent-write latency: the
+        // default `DELETE` rollback journal takes an EXCLUSIVE lock over the
+        // whole file for every commit and blocks readers for the duration,
+        // so the many read-before-write checks on the turn/loop path
+        // serialise behind each writer. WAL lets readers run concurrently
+        // with the (still single) writer and turns each commit into an
+        // append to the WAL instead of a rollback-journal create/fsync/
+        // delete cycle.
+        //
+        // `journal_mode` cannot be changed inside a transaction, so it must
+        // run before the `BEGIN IMMEDIATE` below. Use `query` to drain the
+        // single row the pragma returns (the resulting mode).
+        conn.query("PRAGMA journal_mode = WAL", ())
+            .await
+            .map_err(|error| {
+                infrastructure_libsql_error(FilesystemOperation::CreateDirAll, error)
+            })?;
         // Wrap every step in a single SQLite transaction so a mid-migration
         // crash can't leave concurrent readers observing a half-migrated
         // schema (e.g. `is_dir` column present but `version` missing). SQLite
@@ -87,7 +153,11 @@ where
     for attempt in 0..LIBSQL_CONNECT_ATTEMPTS {
         match open() {
             Ok(conn) => {
-                conn.query("PRAGMA busy_timeout = 5000", ())
+                // Apply the per-connection PRAGMAs in a single round-trip.
+                // `execute_batch` runs each statement and discards the rows
+                // PRAGMAs like `busy_timeout` return, which is exactly what
+                // we want — we only care about the side effect.
+                conn.execute_batch(LIBSQL_CONNECTION_PRAGMAS)
                     .await
                     .map_err(|error| {
                         infrastructure_libsql_error(FilesystemOperation::Stat, error)
@@ -890,6 +960,25 @@ impl RootFilesystem for LibSqlRootFilesystem {
         if deleted == 0 {
             return Err(not_found(path.clone(), FilesystemOperation::Delete));
         }
+        // Sweep the append-event log for this path and its subtree. Append-only
+        // finalized assistant messages live in `root_filesystem_events`, so a
+        // delete/recreate of the same thread would otherwise replay stale
+        // history from the old log. Mirrors the entries-delete predicate above.
+        conn.execute(
+            "DELETE FROM root_filesystem_events WHERE path = ?1 OR path LIKE ?2 ESCAPE '!'",
+            libsql::params![path.as_str(), child_path_like_pattern(path)],
+        )
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
+        // Sweep any reserved sequence counter for this path and its subtree so
+        // a delete/recreate restarts sequences from 1 rather than resuming
+        // stale state. Mirrors the entries-delete predicate above.
+        conn.execute(
+            "DELETE FROM root_filesystem_sequences WHERE path = ?1 OR path LIKE ?2 ESCAPE '!'",
+            libsql::params![path.as_str(), child_path_like_pattern(path)],
+        )
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
         Ok(())
     }
 
@@ -1087,6 +1176,39 @@ impl RootFilesystem for LibSqlRootFilesystem {
         }
     }
 
+    async fn reserve_sequence(&self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                INSERT INTO root_filesystem_sequences (path, next_seq, updated_at)
+                VALUES (?1, 2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                ON CONFLICT(path) DO UPDATE SET
+                    next_seq = root_filesystem_sequences.next_seq + 1,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                RETURNING next_seq - 1
+                "#,
+                libsql::params![path.as_str()],
+            )
+            .await
+            .map_err(|error| {
+                libsql_db_error(path.clone(), FilesystemOperation::ReserveSeq, error)
+            })?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReserveSeq, error))?
+            .ok_or_else(|| FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::ReserveSeq,
+                reason: "sequence reservation returned no row".to_string(),
+            })?;
+        let seq_raw: i64 = row.get(0).map_err(|error| {
+            libsql_db_error(path.clone(), FilesystemOperation::ReserveSeq, error)
+        })?;
+        seq_no_from_i64(path, seq_raw, FilesystemOperation::ReserveSeq)
+    }
+
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         let conn = self.connect().await?;
         let transaction = conn.transaction().await.map_err(|error| {
@@ -1148,6 +1270,7 @@ async fn run_libsql_migrations_inner(conn: &libsql::Connection) -> Result<(), Fi
     ensure_libsql_records_columns(conn).await?;
     ensure_libsql_index_specs_table(conn).await?;
     ensure_libsql_events_table(conn).await?;
+    ensure_libsql_sequences_table(conn).await?;
     Ok(())
 }
 
@@ -1565,6 +1688,14 @@ async fn ensure_libsql_events_table(conn: &libsql::Connection) -> Result<(), Fil
 }
 
 #[cfg(feature = "libsql")]
+async fn ensure_libsql_sequences_table(conn: &libsql::Connection) -> Result<(), FilesystemError> {
+    conn.execute_batch(LIBSQL_SEQUENCES_SCHEMA)
+        .await
+        .map_err(|error| infrastructure_libsql_error(FilesystemOperation::ReserveSeq, error))?;
+    Ok(())
+}
+
+#[cfg(feature = "libsql")]
 fn seq_no_from_i64(
     path: &VirtualPath,
     raw: i64,
@@ -1861,6 +1992,15 @@ CREATE INDEX IF NOT EXISTS idx_root_filesystem_events_path_seq
     ON root_filesystem_events(path, seq);
 "#;
 
+#[cfg(feature = "libsql")]
+const LIBSQL_SEQUENCES_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS root_filesystem_sequences (
+    path TEXT PRIMARY KEY,
+    next_seq INTEGER NOT NULL CHECK (next_seq > 0),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+"#;
+
 #[cfg(test)]
 mod tests {
     //! Deterministic regression tests for libSQL behaviours that aren't
@@ -1995,5 +2135,49 @@ mod tests {
         let row = rows.next().await.unwrap().unwrap();
         let timeout: i64 = row.get(0).unwrap();
         assert_eq!(timeout, 5000);
+    }
+
+    /// `run_migrations` must switch the database into WAL journaling, which
+    /// is the property that lets readers run concurrently with the single
+    /// writer instead of serialising behind a whole-file EXCLUSIVE lock.
+    /// WAL is persisted in the file header, so this also asserts that a
+    /// *fresh* connection opened after migration observes the mode — i.e.
+    /// the setting stuck rather than applying only to the migration
+    /// connection.
+    #[tokio::test]
+    async fn migrations_enable_wal_journal_mode() {
+        let (fs, _dir) = fresh_backend().await;
+        let conn = fs.connect().await.unwrap();
+        let mut rows = conn.query("PRAGMA journal_mode", ()).await.unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let mode: String = row.get(0).unwrap();
+        assert_eq!(
+            mode.to_ascii_lowercase(),
+            "wal",
+            "migrations must leave the database in WAL journaling mode"
+        );
+    }
+
+    /// Every connection handed out by `connect` must carry the
+    /// throughput-tuning PRAGMAs, not just `busy_timeout`. `synchronous`
+    /// and `temp_store` are the two with stable, asserted numeric encodings
+    /// (`NORMAL` = 1, `MEMORY` = 2); checking them confirms the whole batch
+    /// was applied to the connection rather than silently skipped.
+    #[tokio::test]
+    async fn connect_applies_performance_pragmas() {
+        let (fs, _dir) = fresh_backend().await;
+        let conn = fs.connect().await.unwrap();
+
+        let mut rows = conn.query("PRAGMA synchronous", ()).await.unwrap();
+        let synchronous: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        assert_eq!(synchronous, 1, "synchronous must be NORMAL (1)");
+
+        let mut rows = conn.query("PRAGMA temp_store", ()).await.unwrap();
+        let temp_store: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        assert_eq!(temp_store, 2, "temp_store must be MEMORY (2)");
+
+        let mut rows = conn.query("PRAGMA busy_timeout", ()).await.unwrap();
+        let busy_timeout: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        assert_eq!(busy_timeout, 5000, "busy_timeout must remain 5000");
     }
 }

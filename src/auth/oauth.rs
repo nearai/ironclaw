@@ -11,7 +11,6 @@ use crate::tools::wasm::{ssrf_safe_client_builder_for_target, validate_and_resol
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ironclaw_common::ExtensionName;
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
@@ -210,7 +209,7 @@ pub fn build_oauth_url(
     // Generate PKCE verifier and challenge
     let (code_verifier, code_challenge) = if use_pkce {
         let mut verifier_bytes = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut verifier_bytes);
+        fill_secure_random(&mut verifier_bytes);
         let verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
 
         let mut hasher = Sha256::new();
@@ -224,7 +223,7 @@ pub fn build_oauth_url(
 
     // Generate random state for CSRF protection
     let mut state_bytes = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut state_bytes);
+    fill_secure_random(&mut state_bytes);
     let state = URL_SAFE_NO_PAD.encode(state_bytes);
 
     // Build the authorization URL via the `url` crate so query-string encoding
@@ -251,6 +250,14 @@ pub fn build_oauth_url(
         code_verifier,
         state,
     })
+}
+
+fn fill_secure_random(bytes: &mut [u8]) {
+    use rand::{RngExt as _, TryRng as _};
+
+    if rand::rngs::SysRng.try_fill_bytes(bytes).is_err() {
+        rand::rng().fill(bytes);
+    }
 }
 
 /// Append OAuth authorization-request query parameters to `authorization_url`.

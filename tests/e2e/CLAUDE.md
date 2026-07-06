@@ -2,6 +2,13 @@
 
 Python/Playwright test suite that runs against a live ironclaw instance. Added in PR #553 ("Trajectory benchmarks and e2e trace test rig").
 
+**Two surfaces are covered, not one.** The suite drives both:
+
+- the **legacy `ironclaw` gateway** (`/`, `#auth-screen`, `/api/chat/*`) via the `ironclaw_binary` + `page` fixtures, and
+- the **Reborn `ironclaw-reborn serve` WebChat v2 SPA** (`/v2/`, `/api/webchat/v2/*`) via the `ironclaw_reborn_binary` + `reborn_v2_server` / `reborn_v2_browser` / `reborn_v2_page` fixtures.
+
+When adding a browser test for the v2 SPA, use the `reborn_v2_*` fixtures and `SEL_V2` selectors — **not** the legacy `page`/`SEL`. See `test_reborn_webui_v2_smoke.py` for the canonical v2 example.
+
 ## Setup
 
 ```bash
@@ -45,19 +52,55 @@ HEADED=1 pytest scenarios/
 
 ## Test Scenarios
 
+The suite has grown to ~65+ scenario files. The table below is a **representative
+subset grouped by surface**, not an exhaustive list — run `pytest scenarios/ --co -q`
+from `tests/e2e/` for the full, current set.
+
+**Legacy `ironclaw` gateway (browser via `page` / `SEL`):**
+
 | File | What it tests |
 |------|--------------|
 | `test_connection.py` | Gateway reachability, tab navigation, auth rejection (no token shows auth screen) |
-| `test_chat.py` | Send message via browser UI, verify streamed response from mock LLM, attachment upload/thread rendering, and empty-message suppression |
-| `test_html_injection.py` | XSS vectors injected directly via `page.evaluate("addMessage('assistant', ...)")` are sanitized by `renderMarkdown`; user messages are shown as escaped plain text |
-| `test_skills.py` | Skills tab UI visibility, ClawHub search (skipped if registry unreachable), install + remove lifecycle |
-| `test_sse_reconnect.py` | SSE reconnect basics plus keepalive comments, multi-tab fanout, restart recovery/history rebuild, stale reconnect IDs, and connection-limit handling |
-| `test_tool_approval.py` | Approval card appears, buttons disable on approve/deny, parameters toggle via `page.evaluate("showApproval(...)")`; the waiting-approval regression uses a real HTTP tool call |
-| `test_extension_uninstall_cleanup.py` | Real install/setup/remove coverage for WASM tools, WASM channels, OAuth-backed shared Google tools, and MCP servers; verifies uninstall deletes stored secrets from the libSQL `secrets` table while preserving shared credentials until the last referencing extension is removed |
-| `test_oauth_refresh.py` | Hosted Gmail OAuth regression: complete setup via `/oauth/callback`, expire the stored access token in libSQL, trigger a real `gmail` tool call through `/api/chat/send`, verify refresh goes through the mock `/oauth/refresh` proxy without forwarding `client_secret`, and assert the Gmail tool result contains seeded Emulate data |
-| `test_emulate_reborn_provider_contracts.py` | Provider-contract coverage for Reborn-backed Emulate fixtures: Google Gmail/Calendar/Drive seeded reads and writes, Slack auth/conversation/channel/thread/DM delivery plus reactions/user lookup, and GitHub repo/issue/PR/search/branch/git-object/release/fork/action-route surfaces |
-| `test_reborn_emulate_full_path.py` | Full-path Reborn + Emulate coverage: install/auth a first-party extension through IronClaw, drive a scripted model tool call through chat, and assert provider-side state through Emulate readback |
-| `test_dom_resource_limits.py` | DOM pruning at MAX_DOM_MESSAGES cap, no setInterval timer leaks across SSE reconnect cycles, streaming message preservation during pruning |
+| `test_chat.py` | Send message via browser UI, verify streamed response from mock LLM, attachments, empty-message suppression |
+| `test_html_injection.py` | XSS vectors are sanitized by `renderMarkdown`; user messages shown as escaped plain text |
+| `test_skills.py` | Skills tab UI, ClawHub search (skipped if registry unreachable), install + remove lifecycle |
+| `test_sse_reconnect.py` | SSE reconnect, keepalive comments, multi-tab fanout, restart recovery, connection-limit handling |
+| `test_tool_approval.py` | Approval card appears, buttons disable on approve/deny; waiting-approval regression uses a real HTTP tool call |
+| `test_dom_resource_limits.py` | DOM pruning at `MAX_DOM_MESSAGES`, no `setInterval` leaks across reconnect cycles |
+
+**Reborn `ironclaw-reborn serve` WebChat v2 SPA (browser via `reborn_v2_*` / `SEL_V2`):**
+
+| File | What it tests |
+|------|--------------|
+| `test_reborn_webui_v2_smoke.py` | Canonical v2 smoke: serve boots, SPA renders authed shell, bearer auth + `?token=` shim scope, text turn persists/streams, thread list/delete, timeline pagination, composer-while-running, approval-gate send block, **new-chat-while-a-run-is-active (the #5256 `submitBusyRef` deadlock regression)** |
+| `test_reborn_gateway_smoke.py` | Legacy `ironclaw` web channel (`/api/chat/*`) under `ENGINE_V2` — NOT the reborn binary |
+| `test_reborn_v2_file_download.py` | Agent-produced workspace files are downloadable from the v2 UI |
+| `test_v2_activity_shell.py` | v2 activity shell rendering |
+| `test_v2_*_flow.py` / `test_v2_engine_*.py` | v2 auth/OAuth matrix (GitHub PAT, GSuite, Notion MCP) and v2-engine approval/auth/tool-lifecycle/error-handling |
+
+### Reborn E2E coverage gate
+
+The Code Coverage workflow does **not** run the entire historical Python E2E
+tree. It reads `tests/e2e/reborn_coverage_tests.txt`, which is limited to
+scenarios that start the standalone `ironclaw-reborn serve` binary and exercise
+the Reborn WebChat v2 or OpenAI-compatible API surface. The manifest may use
+pytest node IDs to include only the Reborn binary/API checks from a broader
+scenario file.
+
+Do not add legacy `ironclaw` gateway tests to that manifest, even if they run
+with `ENGINE_V2=true`. Those are compatibility/runtime E2E tests. Direct
+Emulate provider-contract tests are also excluded from the Reborn coverage gate
+because they primarily validate the fixture provider, while current hosted
+full-path Emulate tests still start the legacy gateway binary.
+
+**Provider-contract / full-path (Emulate-backed):**
+
+| File | What it tests |
+|------|--------------|
+| `test_emulate_reborn_provider_contracts.py` | Reborn Emulate fixture contracts: Google/Slack/GitHub seeded reads + stateful writes |
+| `test_reborn_emulate_full_path.py` | Install/auth a first-party extension, drive a scripted tool call, assert provider state via Emulate |
+| `test_oauth_refresh.py` | Hosted Gmail OAuth refresh: expire token, real tool call, refresh via mock proxy without leaking `client_secret` |
+| `test_extension_uninstall_cleanup.py` | Install/remove for WASM tools/channels, shared Google tools, MCP; uninstall deletes secrets, preserves shared creds |
 
 ## `helpers.py`
 
@@ -77,8 +120,11 @@ All fixtures are defined in `tests/e2e/conftest.py`. Running `pytest scenarios/`
 
 | Fixture | What it does |
 |---------|-------------|
-| `ironclaw_binary` | Checks `target/debug/ironclaw`; if absent, runs `cargo build --no-default-features --features libsql` (timeout 600s). |
-| `mock_llm_server` | Starts `mock_llm.py --port 0`, reads the assigned port from stdout, waits for `/v1/models` to return 200. Yields the base URL. |
+| `ironclaw_binary` | Legacy gateway binary. Checks `target/debug/ironclaw`; if absent, runs `cargo build --no-default-features --features libsql` (timeout 600s). |
+| `ironclaw_reborn_binary` | Reborn v2 binary. Builds `target/debug/ironclaw-reborn` with `--features webui-v2-beta` (transitively `libsql`) when stale/missing. Used by the v2 SPA scenarios. |
+| `reborn_v2_server` | Starts `ironclaw-reborn serve` (v2 SPA under `/v2/`, `local-dev` profile) against `mock_llm_server`; config written via `_write_config_toml` (selects the `openai` provider pointed at the mock). Waits for `/api/health`; SIGINT teardown. (Module-scoped, defined in `test_reborn_webui_v2_smoke.py`.) |
+| `reborn_v2_browser` | Chromium instance for the v2 scenarios, independent of the legacy `browser` fixture (generous launch timeout + retry). |
+| `mock_llm_server` | Starts `mock_llm.py --port 0`, reads the assigned port from stdout, waits for `/v1/models` to return 200. Yields the base URL. Serves canned responses including delayed ones (e.g. `"editable composer slow response"` → ~5s) so tests can act while a run is in flight. |
 | `emulate_google_server` | Starts `npx --yes emulate@0.7.0 --service google` with `fixtures/emulate/google_gmail.yaml`, waits for the Gmail messages endpoint to serve the seeded account, and yields the base URL for HTTP rewrite maps. The seed covers Gmail, Calendar, and Drive. Local runs skip if `npx` is unavailable; CI fails. |
 | `emulate_slack_server` | Starts `npx --yes emulate@0.7.0 --service slack` with `fixtures/emulate/slack.yaml`, waits for seeded token auth to pass `auth.test`, and yields the base URL for Slack provider-contract assertions. |
 | `emulate_github_server` | Starts `npx --yes emulate@0.7.0 --service github` with `fixtures/emulate/github.yaml`, waits for `/user` to return the seeded actor, and yields the base URL for GitHub provider-contract assertions. |
@@ -95,7 +141,8 @@ All fixtures are defined in `tests/e2e/conftest.py`. Running `pytest scenarios/`
 
 | Fixture | What it does |
 |---------|-------------|
-| `page` | Creates a fresh browser **context** (viewport 1280×720) and **page** per test, navigates to `/?token=e2e-test-token`, and waits for `#auth-screen` to become hidden before yielding. Closes the context after each test. |
+| `page` | Legacy gateway. Creates a fresh browser **context** (viewport 1280×720) and **page** per test, navigates to `/?token=e2e-test-token`, and waits for `#auth-screen` to become hidden before yielding. Closes the context after each test. |
+| `reborn_v2_page` | Reborn v2 SPA. Fresh context/page navigated to `/v2/?token=<REBORN_V2_AUTH_TOKEN>`, waits for `SEL_V2["chat_composer"]` (authed `/chat` shell). Use this (not `page`) for v2 browser tests. |
 
 The function-scoped `page` fixture means **each test gets a clean browser context** (cookies, storage, etc.) but reuses the same ironclaw server and browser process. Tests that need the server URL directly (e.g., `test_auth_rejection`) accept `ironclaw_server` as an additional parameter.
 

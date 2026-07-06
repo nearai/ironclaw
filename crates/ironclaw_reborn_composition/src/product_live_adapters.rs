@@ -317,6 +317,23 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
             .record_running_invocation(invocation_id, input_ref);
     }
 
+    async fn stage_capability_failure_preview(
+        &self,
+        run_context: &LoopRunContext,
+        invocation_id: InvocationId,
+        capability_id: &CapabilityId,
+        summary: &str,
+    ) {
+        // In-memory only, matching this writer's success path
+        // (`write_capability_result` does not persist previews durably here).
+        self.display_previews.record_failure_preview(
+            &run_context.run_id.to_string(),
+            invocation_id,
+            capability_id,
+            summary,
+        );
+    }
+
     async fn update_capability_result(
         &self,
         run_context: &LoopRunContext,

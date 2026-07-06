@@ -22,16 +22,15 @@ use std::sync::Arc;
 
 #[cfg(test)]
 mod approval_test_support;
-mod attachment_landing;
 mod auth;
 #[cfg(test)]
 mod auth_dcr_tests;
 mod auth_prompt;
 mod automation;
 mod available_extensions;
-mod budget;
-mod budget_events;
 mod bundled_skills;
+#[cfg(feature = "slack-v2-host-beta")]
+mod channel_connection_resume;
 mod communication_context;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 mod credential_refresh_worker;
@@ -49,7 +48,6 @@ mod factory;
 mod failure_summary;
 mod google_oauth;
 mod gsuite;
-mod hooks;
 mod input;
 mod lifecycle;
 #[cfg(feature = "root-llm-provider")]
@@ -69,7 +67,6 @@ mod mcp;
 mod mcp_discovery;
 mod memory_binding;
 mod memory_provider_factory;
-mod mount_filesystem_reader;
 #[cfg(all(feature = "root-llm-provider", feature = "webui-v2-beta"))]
 mod nearai_login_serve;
 mod nearai_mcp;
@@ -78,12 +75,10 @@ mod oauth_dcr;
 mod oauth_dcr_protocol;
 mod oauth_gate;
 mod oauth_provider_client;
+mod observability;
 #[cfg(feature = "openai-compat-beta")]
 mod openai_compat_serve;
-mod operator_logs;
-mod operator_service_lifecycle;
-mod outbound_delivery_capability_surface;
-mod outbound_preferences;
+mod outbound;
 mod product_auth_durable;
 mod product_auth_providers;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -96,13 +91,12 @@ mod product_live_adapters;
 mod production_runtime_policy;
 mod profile;
 mod profile_approval_authorization;
-mod project_filesystem_reader;
-mod project_service;
 mod projection;
-mod trajectory_observer;
 pub use auth_prompt::{AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller};
 #[cfg(feature = "slack-v2-host-beta")]
 mod delivered_gate_routing;
+#[cfg(feature = "slack-v2-host-beta")]
+mod host_ingress;
 #[cfg(feature = "root-llm-provider")]
 mod provider_admin;
 #[cfg(feature = "root-llm-provider")]
@@ -117,6 +111,9 @@ mod skill_learning;
 mod skill_listing;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_actor_identity;
+#[cfg(feature = "slack-v2-host-beta")]
+#[cfg(feature = "slack-v2-host-beta")]
+mod slack_channel_connection;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_channel_routes;
 #[cfg(feature = "slack-v2-host-beta")]
@@ -147,9 +144,9 @@ mod slack_personal_binding_serve;
 pub mod slack_serve;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_setup;
+mod support;
 #[cfg(feature = "test-support")]
 pub mod test_support;
-mod trace_capture;
 mod trigger_poller;
 mod trigger_poller_trusted_submit;
 mod web_access;
@@ -176,25 +173,20 @@ pub use auth::{
     RebornProductAuthServicePorts, RebornProductAuthServices,
 };
 pub use automation::RebornAutomationProductFacade;
-pub use budget::build_default_budget_accountant;
-pub use budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
 pub use error::RebornBuildError;
 pub use extension_lifecycle_command::{
     RebornExtensionLifecycleCommand, RebornExtensionLifecycleCommandError,
     execute_reborn_extension_lifecycle_command, render_reborn_extension_lifecycle_response,
 };
 #[cfg(feature = "test-support")]
+pub use factory::AttachmentTestSupport;
+#[cfg(feature = "test-support")]
 pub use factory::RebornLocalDevApprovalTestParts;
+#[cfg(feature = "migration-support")]
+pub use factory::extension_installation_store_for_migration;
 pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
 pub use failure_summary::reborn_failure_summary_for_category;
 pub use gsuite::{bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers};
-pub use hooks::{
-    HOOKS_ENABLED_ENV, HOOKS_THIRD_PARTY_ENABLED_ENV, HookDispatcherBuilderFactory,
-    HookProjectionRegistry, HooksActivationConfig, MAX_INSTALLED_EXTENSIONS_CONSIDERED,
-    MAX_TOTAL_HOOKS_PER_TENANT, ThirdPartyDiscoveryInput, build_hook_dispatcher_builder_factory,
-    build_hook_dispatcher_builder_factory_for_tenant, build_hook_projection_registry,
-    tenant_extension_root,
-};
 pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
 #[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_auth::GoogleOAuthRouteConfig;
@@ -224,9 +216,8 @@ pub use llm_config_service::{LlmReloadTrigger, RebornLlmConfigService};
 pub use llm_key_store::{LlmKeyStore, LlmKeyStoreError};
 pub use local_runtime_profile::{
     RebornLocalRuntimeProfileError, RebornLocalRuntimeProfileOptions,
-    hosted_single_tenant_runtime_policy, hosted_single_tenant_volume_build_input,
-    hosted_single_tenant_volume_runtime_policy, local_dev_runtime_policy,
-    local_dev_yolo_runtime_policy, local_runtime_build_input,
+    hosted_single_tenant_runtime_policy, hosted_single_tenant_volume_runtime_policy,
+    local_dev_runtime_policy, local_dev_yolo_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options,
 };
 pub use memory_binding::{memory_binding_diagnostics, resolve_memory_binding_policy};
@@ -237,9 +228,21 @@ pub use memory_provider_factory::{
 pub use nearai_mcp::{
     NearAiMcpBootstrapConfig, NearAiMcpBootstrapConfigError, nearai_mcp_bootstrap_config_from_env,
 };
+pub use observability::budget::build_default_budget_accountant;
+pub use observability::budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
+pub use observability::hooks::{
+    HOOKS_ENABLED_ENV, HOOKS_THIRD_PARTY_ENABLED_ENV, HookDispatcherBuilderFactory,
+    HookProjectionRegistry, HooksActivationConfig, MAX_INSTALLED_EXTENSIONS_CONSIDERED,
+    MAX_TOTAL_HOOKS_PER_TENANT, ThirdPartyDiscoveryInput, build_hook_dispatcher_builder_factory,
+    build_hook_dispatcher_builder_factory_for_tenant, build_hook_projection_registry,
+    tenant_extension_root,
+};
+pub use observability::operator_logs::{
+    OperatorLogLayer, capture_tracing_log, operator_log_buffer,
+};
+pub use observability::trajectory_observer::RebornTrajectoryObserver;
 #[cfg(feature = "openai-compat-beta")]
 pub use openai_compat_serve::build_openai_compat_route_mount;
-pub use operator_logs::{OperatorLogLayer, capture_tracing_log, operator_log_buffer};
 pub use product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
     ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
@@ -350,7 +353,7 @@ pub use slack_serve::{
     SlackInstallationSelector, SlackTeamId, slack_events_route_descriptors,
     slack_events_route_mount,
 };
-pub use trajectory_observer::RebornTrajectoryObserver;
+pub use web_access::register_bundled_web_access_first_party_handlers;
 pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
 pub use webui_rate_limit::RateLimitConfigError;
@@ -890,6 +893,8 @@ where
 
 #[derive(Debug, Error)]
 pub enum RebornCompositionError {
+    #[error("invalid reborn production configuration: {reason}")]
+    InvalidConfig { reason: String },
     #[error(
         "reborn production composition requires a configured or keychain-resolvable secret master key"
     )]

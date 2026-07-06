@@ -2,7 +2,7 @@
 name = "ironclaw_reborn_cli"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.92"
+rust-version.workspace = true
 description = "Standalone IronClaw Reborn binary"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
@@ -69,6 +69,15 @@ libsql = [
 memory-mem0 = [
     "ironclaw_reborn_composition/memory-mem0",
 ]
+# Coordinate turn state in a single in-process `InMemoryTurnStateStore` authority
+# instead of the per-user `state.json` filesystem CAS store (the runtime-wedge
+# fix). Forwards to `ironclaw_reborn_composition/inmemory-turn-state`; see that
+# crate's feature doc for the durability trade-off (in-flight turns are volatile
+# across a hard crash, gate-blocked turns are persisted off the hot path and a
+# graceful shutdown flushes the full snapshot).
+inmemory-turn-state = [
+    "ironclaw_reborn_composition/inmemory-turn-state",
+]
 [dependencies]
 anyhow = "1"
 async-trait = { version = "0.1", optional = true }
@@ -85,7 +94,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "mul
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "io-util", "io-std", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }

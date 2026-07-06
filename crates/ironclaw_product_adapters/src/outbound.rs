@@ -227,6 +227,10 @@ pub struct CapabilityActivityView {
     pub process_id: Option<ProcessId>,
     pub output_bytes: Option<u64>,
     pub error_kind: Option<String>,
+    /// Bounded, sanitized failure summary for a failed activity (e.g. a
+    /// builtin's `"invalid JSON: ..."` message), so the live per-tool card can
+    /// show the real reason instead of only `error_kind`.
+    pub error_detail: Option<String>,
     /// Inline primary-argument detail for the activity row, surfaced while the
     /// invocation is still running (the completed card carries its own).
     pub subtitle: Option<String>,
@@ -258,6 +262,8 @@ impl Serialize for CapabilityActivityView {
             output_bytes: Option<u64>,
             error_kind: &'a Option<String>,
             #[serde(skip_serializing_if = "Option::is_none")]
+            error_detail: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             subtitle: &'a Option<String>,
             #[serde(skip_serializing_if = "Option::is_none")]
             input_summary: &'a Option<String>,
@@ -277,6 +283,7 @@ impl Serialize for CapabilityActivityView {
             process_id: &self.process_id,
             output_bytes: self.output_bytes,
             error_kind: &self.error_kind,
+            error_detail: &self.error_detail,
             subtitle: &self.subtitle,
             input_summary: &self.input_summary,
             updated_at: &self.updated_at,
@@ -299,6 +306,7 @@ impl CapabilityActivityView {
             process_id: input.process_id,
             output_bytes: input.output_bytes,
             error_kind: input.error_kind,
+            error_detail: input.error_detail,
             subtitle: input.subtitle,
             input_summary: input.input_summary,
             updated_at: input.updated_at,
@@ -312,6 +320,13 @@ impl CapabilityActivityView {
         if let Some(error_kind) = self.error_kind.as_deref() {
             validate_error_kind("capability_activity_error_kind", error_kind)?;
         }
+        // Sanitized/bounded upstream; re-validate at the product boundary so an
+        // upstream regression can't leak unbounded/control-char text.
+        validate_optional_display_text(
+            "capability_activity_error_detail",
+            self.error_detail.as_deref(),
+            CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
+        )?;
         // The running-frame input fields are sanitized/byte-bounded upstream;
         // re-validate them at the product boundary (as `error_kind` is) so an
         // upstream regression can't leak unbounded/control-char text to the
@@ -342,6 +357,7 @@ pub struct CapabilityActivityViewInput {
     pub process_id: Option<ProcessId>,
     pub output_bytes: Option<u64>,
     pub error_kind: Option<String>,
+    pub error_detail: Option<String>,
     pub subtitle: Option<String>,
     pub input_summary: Option<String>,
     pub updated_at: DateTime<Utc>,
@@ -367,6 +383,8 @@ impl<'de> Deserialize<'de> for CapabilityActivityView {
             output_bytes: Option<u64>,
             error_kind: Option<String>,
             #[serde(default)]
+            error_detail: Option<String>,
+            #[serde(default)]
             subtitle: Option<String>,
             #[serde(default)]
             input_summary: Option<String>,
@@ -385,6 +403,7 @@ impl<'de> Deserialize<'de> for CapabilityActivityView {
             process_id: wire.process_id,
             output_bytes: wire.output_bytes,
             error_kind: wire.error_kind,
+            error_detail: wire.error_detail,
             subtitle: wire.subtitle,
             input_summary: wire.input_summary,
             updated_at: wire.updated_at,
@@ -938,18 +957,56 @@ impl<'de> Deserialize<'de> for ApprovalPromptDetailView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthPromptChallengeKind {
-    /// Browser-based OAuth challenge. When `authorization_url` is present, the
-    /// browser can open it in a new tab and wait for the OAuth callback to
+    /// Browser-based OAuth relay challenge. When `authorization_url` is present,
+    /// the browser can open it in a new tab and wait for the OAuth callback to
     /// resume the run server-side. When the provider is unavailable or
     /// unconfigured, the URL may be absent so UI can still render an
     /// OAuth-specific unavailable state instead of the generic auth fallback.
+    ///
+    /// Wire value is `oauth_url` (for browser OAuth). The challenge kind is
+    /// always re-derived at projection time from the persisted credential
+    /// setup, never deserialized back from the wire.
     #[serde(rename = "oauth_url")]
     OAuthUrl,
-    /// User must type a manual token (PAT, API key) into the chat form.
+    /// User pastes a secret string into the chat form. Wire value is
+    /// `manual_token` (via `rename_all = "snake_case"`): paste a secret. Covers
+    /// a GitHub PAT, an API key, AND a channel pairing code (e.g. Slack): the
+    /// interaction modality — "paste a string" — is identical; what differs is
+    /// the resolve route, which rides in `connection` context (present for
+    /// channel pairing, absent for a stored-credential secret).
     ManualToken,
     /// Other challenge kind (account selection, setup required, reauthorize).
     /// The UI should fall back to a generic "authentication required" card.
     Other,
+}
+
+/// Connection context for a channel-pairing challenge riding the `manual_token`
+/// modality. Present on an auth prompt when the paste is a pairing code that
+/// connects an inbound channel (e.g. Slack), carrying the render copy and the
+/// resolve-route discriminator (`channel`) so one paste card serves both a
+/// stored-credential secret and a channel pairing code. Additive + serde-default
+/// so rows written before this field deserialize as `None`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ConnectionPromptContext {
+    /// Connectable channel id (e.g. `slack`). Doubles as the resolve-route
+    /// discriminator: "this paste is a pairing code for channel X".
+    pub channel: String,
+    /// Connect strategy wire value (e.g. `inbound_proof_code`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<String>,
+    /// Backend-authored connect instructions for the pairing card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    /// Placeholder for the paste input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_placeholder: Option<String>,
+    /// Submit button label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submit_label: Option<String>,
+    /// Error copy shown when the pasted code is rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -982,6 +1039,12 @@ pub struct AuthPromptView {
     /// Challenge expiry. Present when the auth flow has a bounded TTL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Channel-pairing connection context. Present only for a `manual_token`
+    /// challenge whose paste is a pairing code (channel connection), carrying
+    /// the render copy + resolve route. Absent for stored-credential secrets and
+    /// OAuth. Additive + serde-default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection: Option<ConnectionPromptContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -999,6 +1062,9 @@ pub struct AuthPromptContextView {
     /// Challenge expiry. Present when the auth flow has a bounded TTL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Channel-pairing connection context — see [`AuthPromptView::connection`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection: Option<ConnectionPromptContext>,
 }
 
 impl AuthPromptContextView {
@@ -1008,6 +1074,7 @@ impl AuthPromptContextView {
         account_label: Option<String>,
         authorization_url: Option<String>,
         expires_at: Option<DateTime<Utc>>,
+        connection: Option<ConnectionPromptContext>,
     ) -> Result<Self, ProductAdapterError> {
         let view = Self {
             challenge_kind,
@@ -1015,6 +1082,7 @@ impl AuthPromptContextView {
             account_label,
             authorization_url,
             expires_at,
+            connection,
         };
         view.validate()?;
         Ok(view)
@@ -1030,6 +1098,7 @@ impl AuthPromptContextView {
             prompt.account_label.clone(),
             prompt.authorization_url.clone(),
             prompt.expires_at,
+            prompt.connection.clone(),
         )
         .map(Some)
     }
@@ -1048,6 +1117,45 @@ impl AuthPromptContextView {
         validate_optional_display_text(
             "auth_prompt_authorization_url",
             self.authorization_url.as_deref(),
+            PROJECTION_TEXT_MAX_BYTES,
+        )?;
+        if let Some(connection) = self.connection.as_ref() {
+            connection.validate()?;
+        }
+        Ok(())
+    }
+}
+
+impl ConnectionPromptContext {
+    fn validate(&self) -> Result<(), ProductAdapterError> {
+        validate_optional_display_text(
+            "connection_channel",
+            Some(self.channel.as_str()),
+            PROJECTION_ITEM_ID_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "connection_strategy",
+            self.strategy.as_deref(),
+            PROJECTION_ITEM_ID_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "connection_instructions",
+            self.instructions.as_deref(),
+            PROJECTION_TEXT_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "connection_input_placeholder",
+            self.input_placeholder.as_deref(),
+            PROJECTION_TEXT_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "connection_submit_label",
+            self.submit_label.as_deref(),
+            PROJECTION_TEXT_MAX_BYTES,
+        )?;
+        validate_optional_display_text(
+            "connection_error_message",
+            self.error_message.as_deref(),
             PROJECTION_TEXT_MAX_BYTES,
         )
     }
@@ -1069,6 +1177,8 @@ impl<'de> Deserialize<'de> for AuthPromptContextView {
             authorization_url: Option<String>,
             #[serde(default)]
             expires_at: Option<DateTime<Utc>>,
+            #[serde(default)]
+            connection: Option<ConnectionPromptContext>,
         }
 
         let wire = Wire::deserialize(deserializer)?;
@@ -1078,6 +1188,7 @@ impl<'de> Deserialize<'de> for AuthPromptContextView {
             wire.account_label,
             wire.authorization_url,
             wire.expires_at,
+            wire.connection,
         )
         .map_err(serde::de::Error::custom)
     }
@@ -1138,6 +1249,11 @@ pub enum ProductProjectionItem {
         body: Option<String>,
         #[serde(default)]
         allow_always: bool,
+        /// Auth challenge context. For a `manual_token` gate whose paste is a
+        /// pairing code, its `connection` field carries the channel-connection
+        /// render copy + resolve route — the single canonical place the
+        /// projection-gate consumer reads it (no duplicate top-level field, per
+        /// the wire-contract no-duplicate-fields rule).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auth_context: Option<AuthPromptContextView>,
     },
@@ -1506,6 +1622,8 @@ mod tests {
 
     #[test]
     fn auth_prompt_challenge_kind_all_variants_roundtrip() {
+        // Stable wire values: `oauth_url` (browser OAuth) and `manual_token`
+        // (paste a secret — PAT / API key / channel pairing code).
         for (variant, expected) in [
             (AuthPromptChallengeKind::OAuthUrl, "\"oauth_url\""),
             (AuthPromptChallengeKind::ManualToken, "\"manual_token\""),
@@ -1517,6 +1635,65 @@ mod tests {
                 serde_json::from_str(&serialized).expect("deserialize challenge kind");
             assert_eq!(decoded, variant);
         }
+    }
+
+    #[test]
+    fn auth_prompt_context_round_trips_channel_connection() {
+        // A manual_token challenge whose paste is a pairing code carries the
+        // connection context (channel + copy). Round-trip it through the wire.
+        let run_id = TurnRunId::new();
+        let state = ProductProjectionState::new(
+            "thread-1",
+            vec![ProductProjectionItem::Gate {
+                run_id,
+                gate_kind: ProductGateKind::Auth,
+                gate_ref: "gate:connect-slack".to_string(),
+                invocation_id: None,
+                headline: "Connect Slack".to_string(),
+                body: Some("Message the app to get a pairing code.".to_string()),
+                allow_always: false,
+                auth_context: Some(
+                    AuthPromptContextView::new(
+                        AuthPromptChallengeKind::ManualToken,
+                        Some("slack".to_string()),
+                        None,
+                        None,
+                        None,
+                        Some(ConnectionPromptContext {
+                            channel: "slack".to_string(),
+                            strategy: Some("inbound_proof_code".to_string()),
+                            instructions: Some(
+                                "Message the app to get a pairing code.".to_string(),
+                            ),
+                            input_placeholder: Some("Enter Slack pairing code...".to_string()),
+                            submit_label: Some("Connect".to_string()),
+                            error_message: Some("Invalid or expired pairing code.".to_string()),
+                        }),
+                    )
+                    .expect("valid connection auth context"),
+                ),
+            }],
+        )
+        .expect("valid connection gate projection");
+        let value = serde_json::to_value(&state).expect("serialize");
+
+        // Connection context rides the gate's auth_context (single canonical
+        // place); there is no duplicate top-level Gate.connection field.
+        assert_eq!(
+            value["items"][0]["gate"]["auth_context"]["challenge_kind"],
+            "manual_token"
+        );
+        assert_eq!(
+            value["items"][0]["gate"]["auth_context"]["connection"]["channel"],
+            "slack"
+        );
+        assert_eq!(
+            value["items"][0]["gate"]["auth_context"]["connection"]["input_placeholder"],
+            "Enter Slack pairing code..."
+        );
+        let decoded: ProductProjectionState =
+            serde_json::from_value(value).expect("deserialize connection gate projection");
+        assert_eq!(decoded, state);
     }
 
     #[test]
@@ -1574,6 +1751,7 @@ mod tests {
                     process_id: None,
                     output_bytes: None,
                     error_kind: None,
+                    error_detail: None,
                     subtitle: None,
                     input_summary: None,
                     updated_at: Utc::now(),
@@ -1734,6 +1912,7 @@ mod tests {
                         None,
                         Some("https://github.com/login/oauth/authorize".to_string()),
                         None,
+                        None,
                     )
                     .expect("valid auth context"),
                 ),
@@ -1772,6 +1951,7 @@ mod tests {
             account_label: None,
             authorization_url: Some("x".repeat(PROJECTION_TEXT_MAX_BYTES + 1)),
             expires_at: None,
+            connection: None,
         };
 
         assert!(AuthPromptContextView::from_auth_prompt(&prompt).is_err());
@@ -1978,6 +2158,7 @@ mod tests {
             process_id: None,
             output_bytes: Some(12),
             error_kind: None,
+            error_detail: None,
             subtitle: None,
             input_summary: None,
             updated_at: Utc::now(),
@@ -2234,6 +2415,7 @@ mod tests {
             process_id: None,
             output_bytes: None,
             error_kind: Some("/tmp/private-host-path".to_string()),
+            error_detail: None,
             subtitle: None,
             input_summary: None,
             updated_at: Utc::now(),
@@ -2278,6 +2460,7 @@ mod tests {
             process_id: None,
             output_bytes: None,
             error_kind: None,
+            error_detail: None,
             subtitle: None,
             input_summary: None,
             updated_at: Utc::now(),

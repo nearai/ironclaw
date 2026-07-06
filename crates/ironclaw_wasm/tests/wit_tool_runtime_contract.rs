@@ -441,7 +441,7 @@ fn execution_error_preserves_usage_when_guest_traps_after_host_egress() {
 #[test]
 fn allows_multiple_linear_memories_within_aggregate_memory_budget() {
     let runtime = WitToolRuntime::new(WitToolRuntimeConfig {
-        default_limits: ironclaw_wasm::WitToolLimits::default()
+        default_limits: ironclaw_wasm_sandbox_core::SandboxLimits::default()
             .with_memory_bytes(128 * 1024)
             .with_fuel(100_000)
             .with_timeout(std::time::Duration::from_secs(5)),
@@ -462,7 +462,7 @@ fn allows_multiple_linear_memories_within_aggregate_memory_budget() {
 #[test]
 fn rejects_multiple_linear_memories_that_exceed_aggregate_memory_budget() {
     let runtime = WitToolRuntime::new(WitToolRuntimeConfig {
-        default_limits: ironclaw_wasm::WitToolLimits::default()
+        default_limits: ironclaw_wasm_sandbox_core::SandboxLimits::default()
             .with_memory_bytes(64 * 1024)
             .with_fuel(100_000)
             .with_timeout(std::time::Duration::from_secs(5)),
@@ -543,7 +543,7 @@ fn guest_trap_after_overdue_host_import_reports_deadline_and_preserves_usage() {
     }
 
     let runtime = WitToolRuntime::new(WitToolRuntimeConfig {
-        default_limits: ironclaw_wasm::WitToolLimits::default()
+        default_limits: ironclaw_wasm_sandbox_core::SandboxLimits::default()
             .with_memory_bytes(1024 * 1024)
             .with_fuel(100_000)
             .with_timeout(Duration::from_millis(20)),
@@ -628,7 +628,7 @@ fn execution_fails_when_host_import_returns_after_deadline() {
     }
 
     let runtime = WitToolRuntime::new(WitToolRuntimeConfig {
-        default_limits: ironclaw_wasm::WitToolLimits::default()
+        default_limits: ironclaw_wasm_sandbox_core::SandboxLimits::default()
             .with_memory_bytes(1024 * 1024)
             .with_fuel(100_000)
             .with_timeout(Duration::from_millis(20)),

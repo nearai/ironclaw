@@ -7,11 +7,21 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
+use ironclaw_host_api::{
+    AgentId, ApprovalRequestId, CapabilityId, ProjectId, TenantId, ThreadId, Timestamp, UserId,
+};
 use ironclaw_product_workflow::{
-    AutomationListRequest, AutomationProductFacade, ProductAgentBoundCaller,
-    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornServicesErrorCode, RebornServicesErrorKind,
+    ApprovalInteractionActionView, ApprovalInteractionScope, ApprovalInteractionService,
+    AutomationListRequest, AutomationProductFacade, ListPendingApprovalsRequest,
+    ListPendingApprovalsResponse, PendingApprovalInteractionView, ProductAgentBoundCaller,
+    ProductWorkflowError, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
+    RebornAutomationSource, RebornAutomationState, RebornServices, RebornServicesApi,
+    RebornServicesErrorCode, RebornServicesErrorKind, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, WebUiAuthenticatedCaller, WebUiListThreadsRequest,
+    approval_gate_ref, automation_trigger_thread_metadata_json,
+};
+use ironclaw_threads::{
+    EnsureThreadRequest, InMemorySessionThreadService, SessionThreadService, ThreadScope,
 };
 use ironclaw_triggers::{
     ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClearActiveFireRequest,
@@ -20,7 +30,7 @@ use ironclaw_triggers::{
     TriggerId, TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord,
     TriggerSchedule, TriggerSourceKind, TriggerState,
 };
-use ironclaw_turns::TurnRunId;
+use ironclaw_turns::{DefaultTurnCoordinator, InMemoryTurnStateStore, TurnRunId};
 
 use super::RebornAutomationProductFacade;
 
@@ -105,6 +115,102 @@ fn make_run_record(trigger_id: TriggerId, status: TriggerRunHistoryStatus) -> Tr
         status,
         submitted_at: now(),
         completed_at: None,
+    }
+}
+
+fn webui_caller(caller: &ProductAgentBoundCaller) -> WebUiAuthenticatedCaller {
+    WebUiAuthenticatedCaller::new(
+        caller.tenant_id.clone(),
+        caller.user_id.clone(),
+        Some(caller.agent_id.clone()),
+        caller.project_id.clone(),
+    )
+}
+
+fn trigger_thread_scope(caller: &ProductAgentBoundCaller) -> ThreadScope {
+    ThreadScope {
+        tenant_id: caller.tenant_id.clone(),
+        agent_id: caller.agent_id.clone(),
+        project_id: caller.project_id.clone(),
+        owner_user_id: Some(caller.user_id.clone()),
+        mission_id: None,
+    }
+}
+
+async fn seed_accepted_run(
+    repo: &InMemoryTriggerRepository,
+    record: TriggerRecord,
+    thread_id: ThreadId,
+) -> TurnRunId {
+    let tenant_id = record.tenant_id.clone();
+    let trigger_id = record.trigger_id;
+    let fire_slot = record.next_run_at;
+    repo.upsert_trigger(record).await.expect("upsert trigger");
+    repo.claim_due_fire(ClaimDueFireRequest {
+        tenant_id: tenant_id.clone(),
+        trigger_id,
+        fire_slot,
+        now: fire_slot,
+    })
+    .await
+    .expect("claim due fire");
+    let run_id = TurnRunId::new();
+    repo.mark_fire_accepted(FireAcceptedRequest {
+        tenant_id,
+        trigger_id,
+        fire_slot,
+        run_id,
+        thread_id,
+        submitted_at: fire_slot,
+    })
+    .await
+    .expect("mark fire accepted");
+    run_id
+}
+
+struct ActorFallbackApprovalInteractionService {
+    pending_thread_id: ThreadId,
+    tenant_id: TenantId,
+    owner_user_id: UserId,
+    agent_id: AgentId,
+    project_id: Option<ProjectId>,
+}
+
+#[async_trait]
+impl ApprovalInteractionService for ActorFallbackApprovalInteractionService {
+    async fn list_pending(
+        &self,
+        request: ListPendingApprovalsRequest,
+    ) -> Result<ListPendingApprovalsResponse, ProductWorkflowError> {
+        let is_expected_scope = request.scope.thread_id == self.pending_thread_id
+            && request.scope.tenant_id == self.tenant_id
+            && request.scope.agent_id.as_ref() == Some(&self.agent_id)
+            && request.scope.project_id == self.project_id
+            && !request.scope.has_explicit_thread_owner()
+            && request.actor.user_id == self.owner_user_id;
+        if !is_expected_scope {
+            return Ok(ListPendingApprovalsResponse { approvals: vec![] });
+        }
+        let approval_request_id = ApprovalRequestId::new();
+        Ok(ListPendingApprovalsResponse {
+            approvals: vec![PendingApprovalInteractionView {
+                scope: ApprovalInteractionScope::from_turn(&request.scope, &request.actor),
+                run_id: TurnRunId::new(),
+                gate_ref: approval_gate_ref(approval_request_id).expect("approval gate ref"),
+                approval_request_id,
+                summary: "Approval required".to_string(),
+                action: ApprovalInteractionActionView::Dispatch {
+                    capability_id: CapabilityId::new("demo.echo").expect("capability id"),
+                },
+            }],
+        })
+    }
+
+    async fn resolve(
+        &self,
+        _request: ResolveApprovalInteractionRequest,
+    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
+        panic!("resolve is not used by notification list tests")
     }
 }
 
@@ -521,6 +627,71 @@ async fn automation_facade_maps_run_history_and_skips_batch_when_run_limit_zero(
     assert!(
         mapped.thread_id.is_some(),
         "post-acceptance run must carry a canonical thread_id"
+    );
+}
+
+#[tokio::test]
+async fn notification_thread_list_discovers_pending_approval_from_real_run_history() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let c = caller();
+    let trigger_id = TriggerId::new();
+    let thread_id = ThreadId::new("01890f0f-test-7000-8000-0000000000aa").expect("valid thread id");
+    let record = make_record(
+        trigger_id,
+        &c,
+        TriggerState::Scheduled,
+        "Needs approval trigger",
+        "* * * * *",
+    );
+    seed_accepted_run(&repo, record, thread_id.clone()).await;
+
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: trigger_thread_scope(&c),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: c.user_id.as_str().to_string(),
+            title: Some("Needs approval trigger run".to_string()),
+            metadata_json: Some(automation_trigger_thread_metadata_json(
+                trigger_id.to_string(),
+            )),
+        })
+        .await
+        .expect("trigger thread stored");
+
+    let turn_state = Arc::new(InMemoryTurnStateStore::default());
+    let services = RebornServices::new(
+        thread_service,
+        Arc::new(DefaultTurnCoordinator::new(turn_state)),
+    )
+    .with_automation_product_facade(Arc::new(RebornAutomationProductFacade::new(repo)))
+    .with_approval_interactions(Arc::new(ActorFallbackApprovalInteractionService {
+        pending_thread_id: thread_id.clone(),
+        tenant_id: c.tenant_id.clone(),
+        owner_user_id: c.user_id.clone(),
+        agent_id: c.agent_id.clone(),
+        project_id: c.project_id.clone(),
+    }));
+
+    let response = services
+        .list_threads(
+            webui_caller(&c),
+            WebUiListThreadsRequest {
+                needs_approval: true,
+                ..WebUiListThreadsRequest::default()
+            },
+        )
+        .await
+        .expect("list approval notification threads");
+
+    assert_eq!(
+        response
+            .threads
+            .iter()
+            .map(|thread| thread.thread_id.clone())
+            .collect::<Vec<_>>(),
+        vec![thread_id],
+        "bare needs_approval query must discover automation run threads from real trigger run history",
     );
 }
 

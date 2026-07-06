@@ -252,6 +252,7 @@ pub fn convert_messages(messages: &[OpenAiMessage]) -> Result<Vec<ChatMessage>, 
                     name: m.name.clone(),
                     tool_calls: None,
                     reasoning: None,
+                    reasoning_details: None,
                 }),
             }
         })

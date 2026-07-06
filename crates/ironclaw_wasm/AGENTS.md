@@ -13,7 +13,7 @@
 
 - The Reborn WASM component runtime lane (load/compile/validate/meter/execute already-selected components), currently:
 - The runtime + execution surface: `WitToolRuntime` (`runtime`), `WitToolHost`, `WitToolRequest`/`WitToolExecution`/`PreparedWitTool`, `WasmLogLevel`/`WasmLogRecord` (`types`, `host`), and `bindings`/`limiter`/`store`.
-- Runtime config + ABI version: `WitToolRuntimeConfig`, `WitToolLimits`, `WIT_TOOL_VERSION` (`config`); errors `WasmError`/`WasmHostError` (`error`).
+- Runtime config + ABI version: `WitToolRuntimeConfig`, `WIT_TOOL_VERSION` (`config`; per-execution limits use the shared `ironclaw_wasm_sandbox_core::SandboxLimits`); errors `WasmError`/`WasmHostError` (`error`).
 - Mediated, fail-closed host-capability seams (`host`): the `WasmHostHttp`/`WasmHostSecrets`/`WasmHostTools`/`WasmHostWorkspace`/`WasmHostClock` traits with their `Deny*`/`Recording*`/`System*` implementations, `WasmRuntimeHttpAdapter` + `WasmHttpRequest`/`WasmHttpResponse`, and staged credential handoff (`WasmRuntimeCredentialProvider`/`WasmRuntimeCredentialRequest`, `WasmStagedRuntimeCredential`/`WasmStagedRuntimeCredentials`, `WasmRuntimePolicyDiscarder`).
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 

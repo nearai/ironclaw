@@ -53,6 +53,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 "timestamp": { "type": "string", "description": "Alias for input" },
                 "timestamp2": { "type": "string", "description": "Second timestamp for diff" },
                 "timezone": { "type": "string", "description": "IANA timezone name" },
+                "utc_offset": { "type": "string", "description": "UTC offset for now output, e.g. +03:00 or -07:00" },
                 "from_timezone": { "type": "string", "description": "IANA timezone for interpreting the input" },
                 "to_timezone": { "type": "string", "description": "IANA timezone for conversion output" },
                 "format": { "type": "string", "description": "chrono format string for format operation" },
@@ -78,7 +79,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         "schemas/builtin/shell.input.v1.json" => json!({
             "type": "object",
             "properties": {
-                "command": { "type": "string", "description": "Shell command to execute" },
+                "command": { "type": "string", "description": "Shell command to execute. Prefer ONE command that does the whole job: combine steps with '&&' or pipes, or write and run a single script (awk/python) — do NOT issue one command per metric/day/line, and don't re-read files you already have." },
                 "workdir": { "type": "string", "description": "Optional scoped working directory" },
                 "timeout": { "type": "integer", "minimum": 1, "description": "Timeout in seconds" }
             },
@@ -405,7 +406,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "Prompt submitted when the trigger fires. Runtime validation caps UTF-8 content at 32768 bytes. Do not embed delivery routing here; when the user asks to send routine or trigger results through an outbound product/channel, first select the target through the visible outbound delivery target capabilities, then create the trigger."
+                    "description": "Prompt submitted when the trigger fires. Runtime validation caps UTF-8 content at 32768 bytes. Do not embed delivery routing here; when the user asks to send routine or trigger results through an outbound product/channel, first select the target through the visible outbound delivery target capabilities, then create the trigger. Write only the action to perform when the trigger fires — direct imperative steps (e.g. 'Check the calendar for the next meeting, summarize it, email the summary'). Do not describe creating, scheduling, or configuring the trigger itself; rewrite the user's scheduling request into the run-time action."
                 },
                 "schedule": {
                     "description": "When and how often the trigger fires. This value is the schedule object itself. For recurring triggers use {\"kind\":\"cron\",\"expression\":\"0 14 * * 2\",\"timezone\":\"America/Los_Angeles\"}. For one-time triggers use {\"kind\":\"once\",\"at\":\"2026-06-23T14:00:00\",\"timezone\":\"America/Los_Angeles\"}. Do not pass {\"operation\":\"parse\",\"data\":...}.",
@@ -557,4 +558,30 @@ fn response_body_limit_schema(require_save_to: bool) -> Value {
         "default": default,
         "description": description
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_builtin_input_schema_ref;
+
+    #[test]
+    fn trigger_create_prompt_description_warns_against_self_referential_creation_prompts() {
+        // Issue #5505 (generation-time defense): the model must write the
+        // trigger's per-fire action steps, not meta-instructions describing
+        // creating/scheduling the trigger itself — otherwise a fired trigger
+        // re-invokes trigger_create instead of doing the task ("a routine
+        // that creates routines").
+        let schema =
+            resolve_builtin_input_schema_ref("schemas/builtin/trigger_create.input.v1.json")
+                .expect("trigger_create schema is registered");
+        let description = schema["properties"]["prompt"]["description"]
+            .as_str()
+            .expect("prompt description is a string");
+
+        assert!(
+            description
+                .contains("Do not describe creating, scheduling, or configuring the trigger"),
+            "prompt description must warn against self-referential creation prompts: {description}"
+        );
+    }
 }

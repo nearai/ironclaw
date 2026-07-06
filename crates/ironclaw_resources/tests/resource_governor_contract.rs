@@ -23,6 +23,16 @@ impl ResourceGovernorStore for AlwaysFailingStore {
             reason: "forced durable write failure".to_string(),
         })
     }
+
+    fn inspect<T, F>(&self, _inspect: F) -> Result<T, ResourceError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static,
+    {
+        Err(ResourceError::Storage {
+            reason: "forced durable read failure".to_string(),
+        })
+    }
 }
 
 #[test]
@@ -723,6 +733,217 @@ fn persistent_governor_reloads_active_holds_and_usage_from_store() {
 }
 
 #[test]
+fn persistent_governor_unlimited_fast_path_avoids_durable_writes_until_finite_limit() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("resource-governor.json");
+    let scope = sample_scope("tenant1", "user1", Some("project1"));
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+
+    let governor = PersistentResourceGovernor::new(JsonFileResourceGovernorStore::new(&path))
+        .with_unlimited_fast_path();
+    let reservation = governor
+        .reserve(
+            scope.clone(),
+            ResourceEstimate {
+                usd: Some(dec!(0.20)),
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+    assert!(
+        !path.exists(),
+        "unlimited fast path should not create the durable governor snapshot"
+    );
+
+    governor
+        .reconcile(
+            reservation.id,
+            ResourceUsage {
+                usd: dec!(0.20),
+                ..ResourceUsage::default()
+            },
+        )
+        .unwrap();
+    assert!(
+        matches!(
+            governor.release(reservation.id),
+            Err(ResourceError::ReservationClosed {
+                status: ReservationStatus::Reconciled,
+                ..
+            })
+        ),
+        "same-process lifecycle checks are still enforced"
+    );
+    assert!(
+        !path.exists(),
+        "reconcile on the unlimited fast path should not create the durable snapshot"
+    );
+
+    let active = governor
+        .reserve(
+            scope.clone(),
+            ResourceEstimate {
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+    assert!(
+        !path.exists(),
+        "active unlimited fast-path reservations should stay process-local before finite limits"
+    );
+
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_concurrency_slots: Some(1),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+    let denied = governor
+        .reserve(
+            scope,
+            ResourceEstimate {
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(
+        denied,
+        ResourceError::LimitExceeded {
+            denial,
+            ..
+        } if denial.dimension == ResourceDimension::ConcurrencySlots
+    ));
+    governor.release(active.id).unwrap();
+}
+
+#[test]
+fn persistent_governor_unlimited_fast_path_ignores_legacy_durable_activity() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("resource-governor.json");
+    let scope = sample_scope("tenant1", "user1", Some("project1"));
+    let tenant_account = ResourceAccount::tenant(scope.tenant_id.clone());
+    let user_account = ResourceAccount::user(scope.tenant_id.clone(), scope.user_id.clone());
+    let unrelated_account = ResourceAccount::tenant(TenantId::new("tenant-unrelated").unwrap());
+
+    let legacy_governor =
+        PersistentResourceGovernor::new(JsonFileResourceGovernorStore::new(&path));
+    legacy_governor
+        .set_limit(tenant_account.clone(), ResourceLimits::default())
+        .unwrap();
+    let legacy_reservation = legacy_governor
+        .reserve(
+            scope.clone(),
+            ResourceEstimate {
+                usd: Some(dec!(0.20)),
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+    legacy_governor
+        .reconcile(
+            legacy_reservation.id,
+            ResourceUsage {
+                usd: dec!(0.20),
+                ..ResourceUsage::default()
+            },
+        )
+        .unwrap();
+    let legacy_usage = legacy_governor.usage_for(&tenant_account).unwrap();
+    assert_eq!(
+        legacy_usage.usd,
+        dec!(0.20),
+        "test setup must leave durable usage for the fast path to ignore"
+    );
+    let before_fast_path = fs::read_to_string(&path).unwrap();
+    let before_fast_path_json: serde_json::Value = serde_json::from_str(&before_fast_path).unwrap();
+    assert!(
+        before_fast_path_json["state"]["usage_by_account"]
+            .as_array()
+            .is_some_and(|entries| !entries.is_empty()),
+        "legacy fixture must contain durable usage so the test exercises accounting cleanup"
+    );
+    assert!(
+        before_fast_path_json["state"]["reservations"]
+            .as_array()
+            .is_some_and(|entries| !entries.is_empty()),
+        "legacy fixture must contain durable reservations so the test exercises accounting cleanup"
+    );
+
+    let governor = PersistentResourceGovernor::new(JsonFileResourceGovernorStore::new(&path))
+        .with_unlimited_fast_path();
+    governor
+        .set_limit(unrelated_account, ResourceLimits::default())
+        .unwrap();
+    assert_eq!(
+        governor.usage_for(&user_account).unwrap(),
+        ResourceTally::default(),
+        "unlimited set_limit must not seed local fast-path state with legacy durable usage"
+    );
+    let after_unlimited_limit = fs::read_to_string(&path).unwrap();
+
+    let reservation = governor
+        .reserve(
+            scope.clone(),
+            ResourceEstimate {
+                usd: Some(dec!(0.10)),
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+    governor
+        .reconcile(
+            reservation.id,
+            ResourceUsage {
+                usd: dec!(0.10),
+                ..ResourceUsage::default()
+            },
+        )
+        .unwrap();
+
+    assert!(
+        matches!(
+            governor.release(reservation.id),
+            Err(ResourceError::ReservationClosed {
+                status: ReservationStatus::Reconciled,
+                ..
+            })
+        ),
+        "same-process lifecycle checks should still use local state"
+    );
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        after_unlimited_limit,
+        "legacy durable usage/reservations should not force unlimited fast-path writes"
+    );
+
+    governor
+        .set_limit(
+            tenant_account.clone(),
+            ResourceLimits {
+                max_usd: Some(dec!(10.00)),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+
+    let reloaded = PersistentResourceGovernor::new(JsonFileResourceGovernorStore::new(&path));
+    let snapshot = reloaded.account_snapshot(&tenant_account).unwrap().unwrap();
+    assert_eq!(
+        snapshot.ledger.spent.usd,
+        dec!(0.30),
+        "finite-limit transition should preserve legacy durable usage and merge fast-path usage"
+    );
+}
+
+#[test]
 fn persistent_governor_serializes_concurrent_reservations_across_handles() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("resource-governor.json");
@@ -1172,6 +1393,322 @@ async fn filesystem_persistent_governor_reloads_active_holds_and_usage_from_stor
                 && denial.dimension == ResourceDimension::Usd
                 && denial.current_usage == ResourceValue::Decimal(dec!(0.95))
     ));
+}
+
+/// Regression: a byte-only `RootFilesystem` (one that rejects `put` when
+/// `Entry::kind` is set) must surface `CasUpdateError::CasUnsupported` ->
+/// `ResourceError::Storage` via `map_cas_error` (cas_snapshot.rs:243-258)
+/// rather than silently succeeding with a blind overwrite. Today this
+/// crate's filesystem-store tests only exercise `InMemoryBackend`, which
+/// supports versioned CAS and therefore never takes the
+/// `CasUnsupported` branch.
+///
+/// `LocalFilesystem` is used here because it is the canonical byte-only
+/// `RootFilesystem`: its `put` impl rejects entries with
+/// `entry.kind.is_some()`, which `cas_update` maps to `CasUnsupported`.
+/// Mirrors `ironclaw_run_state`'s
+/// `filesystem_approval_store_fails_closed_on_byte_only_backend`
+/// regression
+/// (crates/ironclaw_run_state/tests/run_state_contract.rs:1027-1048) for
+/// the resources crate's CAS snapshot stores.
+#[tokio::test]
+async fn filesystem_resource_governor_store_fails_closed_on_byte_only_backend() {
+    use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
+    use ironclaw_host_api::{
+        HostPath, MountAlias, MountGrant, MountPermissions, MountView, VirtualPath,
+    };
+
+    let dir = tempdir().expect("temp dir");
+    let mut local_fs = LocalFilesystem::new();
+    local_fs
+        .mount_local(
+            VirtualPath::new("/tenants").expect("virtual root"),
+            HostPath::from_path_buf(dir.path().to_path_buf()),
+        )
+        .expect("mount /tenants at temp dir");
+
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/resources").expect("alias"),
+        VirtualPath::new("/tenants/tenant1/users/user1/resources").expect("target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::new(local_fs),
+        mounts,
+    ));
+
+    let governor = PersistentResourceGovernor::new(FilesystemResourceGovernorStore::new(scoped));
+
+    let err = governor
+        .try_set_limit(
+            ResourceAccount::tenant(TenantId::new("tenant1").unwrap()),
+            ResourceLimits::default(),
+        )
+        .unwrap_err();
+
+    assert!(
+        matches!(&err, ResourceError::Storage { reason } if reason.contains("compare-and-swap")),
+        "expected Storage(CasUnsupported) from byte-only LocalFilesystem but got {err:?}",
+    );
+}
+
+/// Mirrors `filesystem_resource_governor_store_fails_closed_on_byte_only_backend`
+/// for `FilesystemBudgetGateStore`. Both stores route through the same
+/// shared `CasSnapshotStore` encoder (cas_snapshot.rs:221-227) and
+/// `map_cas_error` (cas_snapshot.rs:243-258), so a byte-only backend must
+/// fail closed for budget-gate writes too rather than blind-overwriting a
+/// pending gate.
+#[tokio::test]
+async fn filesystem_budget_gate_store_fails_closed_on_byte_only_backend() {
+    use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
+    use ironclaw_host_api::{
+        HostPath, MountAlias, MountGrant, MountPermissions, MountView, VirtualPath,
+    };
+
+    let dir = tempdir().expect("temp dir");
+    let mut local_fs = LocalFilesystem::new();
+    local_fs
+        .mount_local(
+            VirtualPath::new("/tenants").expect("virtual root"),
+            HostPath::from_path_buf(dir.path().to_path_buf()),
+        )
+        .expect("mount /tenants at temp dir");
+
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/resources").expect("alias"),
+        VirtualPath::new("/tenants/tenant1/users/user1/resources").expect("target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::new(local_fs),
+        mounts,
+    ));
+
+    let store = FilesystemBudgetGateStore::new(scoped);
+    let scope = sample_scope("tenant1", "user1", None);
+    let gate = BudgetApprovalGate {
+        id: BudgetGateId::new(),
+        needed: ResourceApprovalNeeded {
+            account: ResourceAccount::tenant(scope.tenant_id.clone()),
+            dimension: ResourceDimension::Usd,
+            limit: ResourceValue::Decimal(dec!(10)),
+            current_usage: ResourceValue::Decimal(dec!(0)),
+            active_reserved: ResourceValue::Decimal(dec!(0)),
+            requested: ResourceValue::Decimal(dec!(9)),
+            utilization: 0.91,
+            period_end: None,
+        },
+        opened_at: chrono::Utc::now(),
+        expires_at: chrono::Utc::now() + chrono::Duration::hours(24),
+        status: BudgetGateStatus::Pending,
+    };
+
+    let err = store.open(&scope, gate).unwrap_err();
+    assert!(
+        matches!(&err, BudgetGateError::Storage { reason } if reason.contains("compare-and-swap")),
+        "expected Storage(CasUnsupported) from byte-only LocalFilesystem but got {err:?}",
+    );
+}
+
+/// Backend wrapper that races *every* versioned `put` against a watched
+/// path, ported verbatim (mechanics) from `ironclaw_secrets`'s
+/// `AlwaysRacingBackend`
+/// (crates/ironclaw_secrets/src/filesystem_store.rs:2085-2127) for the PR
+/// #5234 review follow-up (Medium): no resource-caller test in this crate
+/// drove a *persistent* `FilesystemError::VersionMismatch` through
+/// `FilesystemResourceGovernorStore`/`FilesystemBudgetGateStore` to pin
+/// `map_cas_error`'s `CasUpdateError::RetriesExhausted` ->
+/// `ResourceError::Storage` mapping (cas_snapshot.rs:265-267). The
+/// byte-only tests above only exercise `CasUnsupported`; the helper crate
+/// (`ironclaw_secrets`) separately pins persistent `VersionMismatch`, but
+/// nothing here did for a resource-governor caller.
+///
+/// On every `put` against the watched path with a `CasExpectation::Version`
+/// precondition, an out-of-band write under `Any` bumps the stored version
+/// first, so the delegated put always observes a stale version and returns
+/// `VersionMismatch` — driving `cas_update` past `FILESYSTEM_CAS_RETRIES`
+/// (32) on every attempt rather than just the first, so the retry budget is
+/// exhausted instead of recovered.
+struct PersistentVersionMismatchBackend {
+    inner: Arc<ironclaw_filesystem::InMemoryBackend>,
+    watched: String,
+    races: std::sync::atomic::AtomicUsize,
+}
+
+impl PersistentVersionMismatchBackend {
+    fn new(
+        inner: Arc<ironclaw_filesystem::InMemoryBackend>,
+        watched: ironclaw_host_api::VirtualPath,
+    ) -> Self {
+        Self {
+            inner,
+            watched: watched.as_str().to_string(),
+            races: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn races(&self) -> usize {
+        self.races.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl ironclaw_filesystem::RootFilesystem for PersistentVersionMismatchBackend {
+    fn capabilities(&self) -> ironclaw_filesystem::BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &ironclaw_host_api::VirtualPath,
+        entry: ironclaw_filesystem::Entry,
+        cas: ironclaw_filesystem::CasExpectation,
+    ) -> Result<ironclaw_filesystem::RecordVersion, ironclaw_filesystem::FilesystemError> {
+        let should_race = path.as_str() == self.watched
+            && matches!(cas, ironclaw_filesystem::CasExpectation::Version(_));
+        if should_race && let Some(current) = self.inner.get(path).await? {
+            self.races.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = self
+                .inner
+                .put(
+                    path,
+                    current.entry,
+                    ironclaw_filesystem::CasExpectation::Any,
+                )
+                .await;
+        }
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(
+        &self,
+        path: &ironclaw_host_api::VirtualPath,
+    ) -> Result<Option<ironclaw_filesystem::VersionedEntry>, ironclaw_filesystem::FilesystemError>
+    {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(
+        &self,
+        path: &ironclaw_host_api::VirtualPath,
+    ) -> Result<Vec<ironclaw_filesystem::DirEntry>, ironclaw_filesystem::FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn stat(
+        &self,
+        path: &ironclaw_host_api::VirtualPath,
+    ) -> Result<ironclaw_filesystem::FileStat, ironclaw_filesystem::FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(
+        &self,
+        path: &ironclaw_host_api::VirtualPath,
+    ) -> Result<(), ironclaw_filesystem::FilesystemError> {
+        self.inner.delete(path).await
+    }
+
+    async fn query(
+        &self,
+        path: &ironclaw_host_api::VirtualPath,
+        filter: &ironclaw_filesystem::Filter,
+        page: ironclaw_filesystem::Page,
+    ) -> Result<Vec<ironclaw_filesystem::VersionedEntry>, ironclaw_filesystem::FilesystemError>
+    {
+        self.inner.query(path, filter, page).await
+    }
+
+    async fn ensure_index(
+        &self,
+        path: &ironclaw_host_api::VirtualPath,
+        spec: &ironclaw_filesystem::IndexSpec,
+    ) -> Result<(), ironclaw_filesystem::FilesystemError> {
+        self.inner.ensure_index(path, spec).await
+    }
+}
+
+/// Drives a *persistent* `VersionMismatch` through
+/// `FilesystemResourceGovernorStore::try_set_limit` and pins the
+/// `CasUpdateError::RetriesExhausted` -> `ResourceError::Storage` mapping
+/// (cas_snapshot.rs:265-267, PR #5234 review follow-up, Medium). Companion
+/// to `filesystem_resource_governor_store_fails_closed_on_byte_only_backend`
+/// above, which pins the sibling `CasUnsupported` branch.
+#[tokio::test]
+async fn filesystem_resource_governor_store_surfaces_storage_error_on_persistent_version_mismatch()
+{
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, ScopedPath};
+
+    let inner = Arc::new(InMemoryBackend::new());
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/resources").expect("alias"),
+        VirtualPath::new("/tenants/tenant1/users/user1/resources").expect("target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+
+    // Resolve the snapshot's virtual path the same way the production store
+    // does (alias-relative `/resources/snapshot.json` under the store's
+    // default scope, `ResourceScope::system()`), so the wrapper below races
+    // the exact path `FilesystemResourceGovernorStore` writes.
+    let bootstrap_scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&inner),
+        mounts.clone(),
+    ));
+    let watched = bootstrap_scoped
+        .resolve(
+            &ResourceScope::system(),
+            &ScopedPath::new("/resources/snapshot.json".to_string()).expect("scoped path"),
+        )
+        .expect("resolve snapshot path");
+
+    // Seed the snapshot file via a plain (non-racing) store first. The
+    // very first write to an absent path goes through
+    // `CasExpectation::Absent`, not `Version(_)` (cas.rs:328-331), so the
+    // wrapper — which only races a `Version(_)` precondition — would never
+    // see a race on a from-scratch snapshot. Bootstrapping ensures the
+    // mutation under test lands on an *existing* snapshot whose every
+    // retry attempt carries `CasExpectation::Version(_)`.
+    PersistentResourceGovernor::new(FilesystemResourceGovernorStore::new(Arc::clone(
+        &bootstrap_scoped,
+    )))
+    .try_set_limit(
+        ResourceAccount::tenant(TenantId::new("tenant-bootstrap").unwrap()),
+        ResourceLimits::default(),
+    )
+    .expect("bootstrap write to seed the snapshot");
+
+    let racing = Arc::new(PersistentVersionMismatchBackend::new(
+        Arc::clone(&inner),
+        watched,
+    ));
+    let racing_scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&racing),
+        mounts,
+    ));
+    let governor =
+        PersistentResourceGovernor::new(FilesystemResourceGovernorStore::new(racing_scoped));
+
+    let err = governor
+        .try_set_limit(
+            ResourceAccount::tenant(TenantId::new("tenant1").unwrap()),
+            ResourceLimits::default(),
+        )
+        .unwrap_err();
+
+    assert!(
+        matches!(&err, ResourceError::Storage { reason } if reason.contains("retries exhausted")),
+        "expected Storage(RetriesExhausted) from a backend that perpetually \
+         races the CAS version but got {err:?}",
+    );
+    assert_eq!(
+        racing.races(),
+        ironclaw_filesystem::FILESYSTEM_CAS_RETRIES,
+        "every retry attempt must have raced the same path"
+    );
 }
 
 fn sample_scope(tenant: &str, user: &str, project: Option<&str>) -> ResourceScope {

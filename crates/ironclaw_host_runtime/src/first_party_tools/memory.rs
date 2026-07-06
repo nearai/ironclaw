@@ -32,6 +32,7 @@ pub const MEMORY_WRITE_CAPABILITY_ID: &str = "ironclaw.memory.write";
 pub const MEMORY_READ_CAPABILITY_ID: &str = "ironclaw.memory.read";
 pub const MEMORY_TREE_CAPABILITY_ID: &str = "ironclaw.memory.tree";
 const MEMORY_PROMPT_SAFETY_EXTENSION_ID: &str = "memory.prompt_safety";
+const MEMORY_SEARCH_SCOPE: &str = "reborn_internal_persistent_memory";
 
 struct MemoryServices {
     invocation: MemoryInvocation,
@@ -448,6 +449,8 @@ fn search_response_to_value(response: MemoryServiceSearchResponse) -> Value {
         "query": response.query,
         "results": results,
         "result_count": result_count,
+        "search_scope": MEMORY_SEARCH_SCOPE,
+        "external_services_searched": false,
     })
 }
 
@@ -588,6 +591,11 @@ mod tests {
             .expect("memory_search should succeed through IronClaw memory facade");
 
         assert_eq!(result.output["result_count"], 1);
+        assert_eq!(
+            result.output["search_scope"],
+            "reborn_internal_persistent_memory"
+        );
+        assert_eq!(result.output["external_services_searched"], false);
         assert_eq!(
             result.output["results"][0]["content"],
             "captured through IronClaw memory"

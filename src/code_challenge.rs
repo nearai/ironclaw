@@ -7,7 +7,6 @@
 //! - submission normalization
 //! - pending challenge bookkeeping
 
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 /// User-facing payload for a code-based verification flow.
@@ -88,16 +87,19 @@ pub fn normalize_submitted_code(submission: &str) -> Option<String> {
 }
 
 /// Generate a fixed-length code from the provided alphabet.
+///
+/// Each character is selected with `random_range` (thread-local OS-seeded
+/// CSPRNG), which rejection-samples to avoid the modulo bias of
+/// `byte % alphabet.len()` for alphabets whose length does not divide 256.
 pub fn generate_code(len: usize, alphabet: &[u8]) -> String {
+    use rand::RngExt as _;
+
     if len == 0 || alphabet.is_empty() {
         return String::new();
     }
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     (0..len)
-        .map(|_| {
-            let idx = rng.gen_range(0..alphabet.len());
-            alphabet[idx] as char
-        })
+        .map(|_| alphabet[rng.random_range(0..alphabet.len())] as char)
         .collect()
 }

@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use ironclaw_auth::{AuthErrorCode, CredentialRefreshRequest};
-use rand::Rng;
+use rand::RngExt as _;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -193,7 +193,7 @@ async fn tick_once(
     // work. Non-leader processes skip this tick entirely.
     let outcome = deps
         .leader_lock
-        .run_as_leader(|| sweep_once(deps, settings, cancel))
+        .run_as_leader(|| sweep_once(deps, settings, cancel, Utc::now()))
         .await;
 
     match outcome {
@@ -205,12 +205,16 @@ async fn tick_once(
 }
 
 /// The actual sweep executed only by the leader process.
-async fn sweep_once(
+///
+/// Accepts an explicit `now` instant so callers can inject a frozen clock for
+/// deterministic testing. Production callers (`tick_once`) always pass
+/// `Utc::now()`; tests pass a future instant to simulate idle accounts.
+pub(crate) async fn sweep_once(
     deps: &CredentialRefreshWorkerDeps,
     settings: &CredentialRefreshSettings,
     cancel: &CancellationToken,
+    now: chrono::DateTime<chrono::Utc>,
 ) {
-    let now = Utc::now();
     let idle_threshold = match chrono::Duration::from_std(settings.idle_threshold) {
         Ok(d) => d,
         Err(error) => {
@@ -363,7 +367,7 @@ fn jitter_delay(max: Duration) -> Duration {
         return Duration::ZERO;
     }
     let max_nanos = max.as_nanos().min(u64::MAX as u128);
-    let nanos = rand::thread_rng().gen_range(0..=max_nanos);
+    let nanos = rand::rng().random_range(0..=max_nanos);
     let nanos = u64::try_from(nanos).unwrap_or(u64::MAX);
     Duration::from_nanos(nanos)
 }

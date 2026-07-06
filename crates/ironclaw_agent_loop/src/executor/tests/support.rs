@@ -77,6 +77,7 @@ pub(super) struct MockHost {
     cancel_after_model_response: Arc<Mutex<bool>>,
     cancel_after_batch_invocation: Arc<Mutex<bool>>,
     fail_checkpoint: Arc<Mutex<Option<LoopCheckpointKind>>>,
+    fail_checkpoint_payload: Arc<Mutex<Option<(LoopCheckpointKind, AgentLoopHostErrorKind)>>>,
     fail_visible_capabilities: bool,
     fail_prompt_bundle: bool,
     fail_batch_with: Arc<Mutex<Option<AgentLoopHostErrorKind>>>,
@@ -118,6 +119,7 @@ impl MockHost {
             cancel_after_model_response: Arc::new(Mutex::new(false)),
             cancel_after_batch_invocation: Arc::new(Mutex::new(false)),
             fail_checkpoint: Arc::new(Mutex::new(None)),
+            fail_checkpoint_payload: Arc::new(Mutex::new(None)),
             fail_visible_capabilities: false,
             fail_prompt_bundle: false,
             fail_batch_with: Arc::new(Mutex::new(None)),
@@ -305,6 +307,15 @@ impl MockHost {
 
     pub(super) fn fail_checkpoint(self, kind: LoopCheckpointKind) -> Self {
         *self.fail_checkpoint.lock().expect("lock") = Some(kind);
+        self
+    }
+
+    pub(super) fn fail_checkpoint_payload(
+        self,
+        kind: LoopCheckpointKind,
+        error_kind: AgentLoopHostErrorKind,
+    ) -> Self {
+        *self.fail_checkpoint_payload.lock().expect("lock") = Some((kind, error_kind));
         self
     }
 
@@ -703,6 +714,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
         Ok(VisibleCapabilitySurface {
             version: self.visible_surface_version.clone(),
             descriptors,
+            callable_capability_ids: None,
         })
     }
 
@@ -811,6 +823,19 @@ impl ironclaw_turns::run_profile::LoopCheckpointPort for MockHost {
         &self,
         request: StageCheckpointPayloadRequest,
     ) -> Result<LoopCheckpointStateRef, AgentLoopHostError> {
+        if let Some((_, error_kind)) = self
+            .fail_checkpoint_payload
+            .lock()
+            .expect("lock")
+            .as_ref()
+            .filter(|(kind, _)| *kind == request.kind)
+            .copied()
+        {
+            return Err(AgentLoopHostError::new(
+                error_kind,
+                "scripted checkpoint payload failure",
+            ));
+        }
         self.staged_payloads.lock().expect("lock").push(request);
         LoopCheckpointStateRef::for_run(&self.context, "state")
             .map_err(|error| AgentLoopHostError::new(AgentLoopHostErrorKind::Internal, error))

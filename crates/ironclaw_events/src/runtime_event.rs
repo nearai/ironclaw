@@ -1,6 +1,7 @@
 use chrono::Utc;
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, InvocationId, ProcessId, ResourceScope, RuntimeKind, Timestamp,
+    CapabilityId, ExtensionId, INPUT_ENCODE_HUMAN_SUMMARY, InvocationId, ProcessId, ResourceScope,
+    RuntimeKind, Timestamp,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -60,11 +61,12 @@ pub enum RuntimeEventKind {
 /// Redacted runtime event payload.
 ///
 /// All optional fields are absent unless meaningful for the event kind.
-/// `error_kind` is constrained by [`sanitize_error_kind`] on every wire
+/// `error_kind` and `error_summary` are constrained by
+/// [`sanitize_error_kind`] and [`sanitize_error_summary`] on every wire
 /// crossing:
 ///
-/// - the typed `dispatch_failed` / `model_failed` / `loop_failed` /
-///   `process_failed` constructors apply sanitization at construction time;
+/// - the typed failure constructors and [`RuntimeEvent::with_error_summary`]
+///   apply sanitization at construction time;
 /// - the custom [`Deserialize`] impl re-runs the sanitizer on any inbound
 ///   JSONL/wire payload;
 /// - the custom [`Serialize`] impl re-runs the sanitizer before emitting the
@@ -90,6 +92,8 @@ pub struct RuntimeEvent {
     pub process_id: Option<ProcessId>,
     pub output_bytes: Option<u64>,
     pub error_kind: Option<String>,
+    /// Sanitized, host-authored failure summary for display-only projections.
+    pub error_summary: Option<String>,
     /// Hex-encoded blake3 hook identity. Present only on hook events.
     pub hook_id: Option<String>,
     /// Closed-vocabulary hook point label (e.g. `before_capability`). Present
@@ -130,6 +134,8 @@ struct RuntimeEventWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     error_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    error_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     hook_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     hook_point: Option<String>,
@@ -164,6 +170,10 @@ impl Serialize for RuntimeEvent {
             process_id: self.process_id,
             output_bytes: self.output_bytes,
             error_kind: self.error_kind.clone().map(sanitize_error_kind),
+            error_summary: self
+                .error_summary
+                .as_deref()
+                .and_then(sanitize_error_summary_str),
             hook_id: self.hook_id.clone().map(sanitize_hook_id),
             hook_point: self.hook_point.clone().map(sanitize_hook_label),
             hook_trust_class: self.hook_trust_class.clone().map(sanitize_hook_label),
@@ -208,6 +218,8 @@ struct TrustedRuntimeEventWire {
     #[serde(default)]
     error_kind: Option<String>,
     #[serde(default)]
+    error_summary: Option<String>,
+    #[serde(default)]
     hook_id: Option<String>,
     #[serde(default)]
     hook_point: Option<String>,
@@ -245,6 +257,10 @@ impl From<TrustedRuntimeKindWire> for RuntimeKind {
 
 impl RuntimeEventWire {
     fn into_event(self) -> RuntimeEvent {
+        let error_summary = self
+            .error_summary
+            .as_deref()
+            .and_then(sanitize_error_summary_str);
         RuntimeEvent {
             event_id: self.event_id,
             timestamp: self.timestamp,
@@ -257,6 +273,7 @@ impl RuntimeEventWire {
             process_id: self.process_id,
             output_bytes: self.output_bytes,
             error_kind: self.error_kind.map(sanitize_error_kind),
+            error_summary,
             hook_id: self.hook_id.map(sanitize_hook_id),
             hook_point: self.hook_point.map(sanitize_hook_label),
             hook_trust_class: self.hook_trust_class.map(sanitize_hook_label),
@@ -269,6 +286,10 @@ impl RuntimeEventWire {
 
 impl TrustedRuntimeEventWire {
     fn into_event(self) -> RuntimeEvent {
+        let error_summary = self
+            .error_summary
+            .as_deref()
+            .and_then(sanitize_error_summary_str);
         RuntimeEvent {
             event_id: self.event_id,
             timestamp: self.timestamp,
@@ -281,6 +302,7 @@ impl TrustedRuntimeEventWire {
             process_id: self.process_id,
             output_bytes: self.output_bytes,
             error_kind: self.error_kind.map(sanitize_error_kind),
+            error_summary,
             hook_id: self.hook_id.map(sanitize_hook_id),
             hook_point: self.hook_point.map(sanitize_hook_label),
             hook_trust_class: self.hook_trust_class.map(sanitize_hook_label),
@@ -610,6 +632,7 @@ impl RuntimeEvent {
             process_id: payload.process_id,
             output_bytes: payload.output_bytes,
             error_kind: payload.error_kind,
+            error_summary: None,
             hook_id: payload.hook_id,
             hook_point: payload.hook_point,
             hook_trust_class: payload.hook_trust_class,
@@ -653,6 +676,11 @@ impl RuntimeEvent {
             kind: RuntimeEventKind::CapabilityActivityFailed,
             ..Self::dispatch_failed(scope, capability_id, provider, runtime, error_kind)
         }
+    }
+
+    pub fn with_error_summary(mut self, summary: impl AsRef<str>) -> Self {
+        self.error_summary = sanitize_error_summary(summary);
+        self
     }
 
     /// Construct a [`RuntimeEventKind::HookDispatched`] event.
@@ -768,6 +796,9 @@ pub const UNCLASSIFIED_ERROR_KIND: &str = "Unclassified";
 
 const MAX_ERROR_KIND_LEN: usize = 64;
 const MAX_ERROR_KIND_SEGMENT_LEN: usize = 24;
+const MAX_ERROR_SUMMARY_BYTES: usize = 512;
+const REDACTED_ERROR_SUMMARY: &str = "the tool failure details were redacted";
+const WORKSPACE_FILE_ERROR_SUMMARY: &str = "can't access your workspace file";
 
 /// Collapse any error_kind value that does not match the stable classification
 /// shape into the single `Unclassified` token. This is the redaction guard
@@ -792,6 +823,232 @@ pub fn sanitize_error_kind(error_kind: impl Into<String>) -> String {
     } else {
         UNCLASSIFIED_ERROR_KIND.to_string()
     }
+}
+
+pub fn sanitize_error_summary(summary: impl AsRef<str>) -> Option<String> {
+    sanitize_error_summary_str(summary.as_ref())
+}
+
+fn sanitize_error_summary_str(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed == INPUT_ENCODE_HUMAN_SUMMARY {
+        return Some(INPUT_ENCODE_HUMAN_SUMMARY.to_string());
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if is_workspace_file_error_summary(trimmed, &lower) {
+        return Some(WORKSPACE_FILE_ERROR_SUMMARY.to_string());
+    }
+    if !is_safe_error_summary(trimmed, &lower) {
+        return Some(REDACTED_ERROR_SUMMARY.to_string());
+    }
+    Some(truncate_error_summary(trimmed))
+}
+
+fn is_workspace_file_error_summary(value: &str, lower: &str) -> bool {
+    if value == WORKSPACE_FILE_ERROR_SUMMARY {
+        return false;
+    }
+    if contains_internal_workspace_filename(lower) {
+        return true;
+    }
+    let mentions_workspace_file = mentions_workspace_file_context(lower);
+    if mentions_workspace_file && contains_filename_like_token(lower) {
+        return true;
+    }
+    mentions_workspace_file
+        && (lower.contains("failed")
+            || lower.contains("not found")
+            || lower.contains("denied")
+            || lower.contains("missing")
+            || lower.contains("can't access")
+            || lower.contains("cannot access"))
+}
+
+fn mentions_workspace_file_context(lower: &str) -> bool {
+    [
+        "workspace file",
+        "workspace path",
+        "filesystem",
+        "file not found",
+        "file failed",
+        "read_file",
+        "write_file",
+        "list_dir",
+        "path workspace",
+    ]
+    .iter()
+    .any(|phrase| contains_bounded_phrase(lower, phrase))
+}
+
+fn contains_bounded_phrase(value: &str, phrase: &str) -> bool {
+    value.match_indices(phrase).any(|(start, matched)| {
+        let end = start + matched.len();
+        is_phrase_boundary(char_before(value, start)) && is_phrase_boundary(char_at(value, end))
+    })
+}
+
+fn char_before(value: &str, byte_index: usize) -> Option<char> {
+    value.get(..byte_index)?.chars().next_back()
+}
+
+fn char_at(value: &str, byte_index: usize) -> Option<char> {
+    value.get(byte_index..)?.chars().next()
+}
+
+fn is_phrase_boundary(character: Option<char>) -> bool {
+    match character {
+        Some(character) => !character.is_ascii_alphanumeric() && character != '_',
+        None => true,
+    }
+}
+
+fn contains_internal_workspace_filename(lower: &str) -> bool {
+    [
+        ".system",
+        "agents.md",
+        "bootstrap.md",
+        "heartbeat.md",
+        "identity.md",
+        "memory.md",
+        "soul.md",
+        "tools.md",
+        "user.md",
+    ]
+    .iter()
+    .any(|forbidden| lower.contains(forbidden))
+}
+
+fn contains_filename_like_token(lower: &str) -> bool {
+    lower
+        .split(|character: char| character.is_whitespace())
+        .map(|token| {
+            token.trim_matches(|character: char| {
+                matches!(
+                    character,
+                    '"' | '\'' | '(' | ')' | ',' | ':' | ';' | '[' | ']' | '{' | '}'
+                )
+            })
+        })
+        .any(is_filename_like_token)
+}
+
+fn is_filename_like_token(token: &str) -> bool {
+    let Some((stem, extension)) = token.rsplit_once('.') else {
+        return false;
+    };
+    if stem.is_empty() || extension.is_empty() || extension.len() > 8 {
+        return false;
+    }
+    if !is_common_filename_extension(extension) {
+        return false;
+    }
+    stem.chars()
+        .any(|character| character.is_ascii_alphanumeric())
+        && extension
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+}
+
+fn is_common_filename_extension(extension: &str) -> bool {
+    matches!(
+        extension,
+        "bash"
+            | "css"
+            | "csv"
+            | "env"
+            | "html"
+            | "js"
+            | "json"
+            | "jsonl"
+            | "lock"
+            | "log"
+            | "md"
+            | "py"
+            | "rs"
+            | "sh"
+            | "toml"
+            | "ts"
+            | "txt"
+            | "yaml"
+            | "yml"
+    )
+}
+
+fn is_safe_error_summary(value: &str, lower: &str) -> bool {
+    if value.chars().any(|character| {
+        character == '\0'
+            || character.is_control()
+            || !character.is_ascii()
+            || matches!(
+                character,
+                '{' | '}' | '[' | ']' | '`' | '<' | '>' | '/' | '\\'
+            )
+    }) {
+        return false;
+    }
+    for forbidden in [
+        "access token",
+        "api key",
+        "api_key",
+        "apikey",
+        "authorization:",
+        "bearer ",
+        "password",
+        "passwd",
+        "provider error",
+        "raw runtime",
+        "secret",
+        "stack trace",
+        "traceback",
+    ] {
+        if lower.contains(forbidden) {
+            return false;
+        }
+    }
+    !contains_secret_like_token(lower)
+}
+
+fn contains_secret_like_token(lower: &str) -> bool {
+    lower
+        .split(|character: char| {
+            !character.is_ascii_alphanumeric() && !matches!(character, '-' | '_' | '.')
+        })
+        .any(is_secret_like_token)
+}
+
+fn is_secret_like_token(token: &str) -> bool {
+    [
+        "sk-",
+        "sk-ant-",
+        "ghp_",
+        "github_pat_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "ghr_",
+        "glpat-",
+        "gcp-",
+        "ya29.",
+        "aiza",
+    ]
+    .iter()
+    .any(|prefix| token.starts_with(prefix))
+        || (token.len() >= 16 && (token.starts_with("akia") || token.starts_with("asia")))
+}
+
+fn truncate_error_summary(value: &str) -> String {
+    const ELLIPSIS: &str = "...";
+    if value.len() <= MAX_ERROR_SUMMARY_BYTES {
+        return value.to_string();
+    }
+    let mut end = MAX_ERROR_SUMMARY_BYTES - ELLIPSIS.len();
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{}", &value[..end], ELLIPSIS)
 }
 
 fn is_safe_error_kind(value: &str) -> bool {
@@ -885,7 +1142,9 @@ fn is_safe_hook_id(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{AgentId, InvocationId, ProjectId, TenantId, UserId};
+    use ironclaw_host_api::{
+        AgentId, INPUT_ENCODE_HUMAN_SUMMARY, InvocationId, ProjectId, TenantId, UserId,
+    };
 
     fn scope() -> ResourceScope {
         ResourceScope {
@@ -907,6 +1166,156 @@ mod tests {
         // 64-char lowercase hex matching the blake3 hook id shape produced by
         // `ironclaw_hooks::HookId::to_hex`.
         "0123456789abcdef".repeat(4)
+    }
+
+    #[test]
+    fn runtime_event_error_summary_round_trips_with_redaction() {
+        let event = RuntimeEvent::capability_activity_failed(
+            scope(),
+            capability(),
+            None,
+            None,
+            "operation_failed",
+        )
+        .with_error_summary(
+            "read_file failed for path workspace ironclaw_issues.json: file not found",
+        );
+        let wire = serde_json::to_string(&event).expect("serialize runtime event");
+        let decoded: RuntimeEvent = serde_json::from_str(&wire).expect("deserialize runtime event");
+        assert_eq!(
+            decoded.error_summary.as_deref(),
+            Some(WORKSPACE_FILE_ERROR_SUMMARY)
+        );
+
+        let tool_input_event = RuntimeEvent::capability_activity_failed(
+            scope(),
+            capability(),
+            None,
+            None,
+            "invalid_input",
+        )
+        .with_error_summary(INPUT_ENCODE_HUMAN_SUMMARY);
+        let wire = serde_json::to_string(&tool_input_event).expect("serialize runtime event");
+        let decoded: RuntimeEvent = serde_json::from_str(&wire).expect("deserialize runtime event");
+        assert_eq!(
+            decoded.error_summary.as_deref(),
+            Some(INPUT_ENCODE_HUMAN_SUMMARY)
+        );
+
+        let non_filesystem_identifier_event = RuntimeEvent::capability_activity_failed(
+            scope(),
+            CapabilityId::new("builtin.json").unwrap(),
+            None,
+            None,
+            "invalid_input",
+        )
+        .with_error_summary("builtin.json returned invalid input");
+        let wire = serde_json::to_string(&non_filesystem_identifier_event)
+            .expect("serialize runtime event");
+        let decoded: RuntimeEvent = serde_json::from_str(&wire).expect("deserialize runtime event");
+        assert_eq!(
+            decoded.error_summary.as_deref(),
+            Some("builtin.json returned invalid input")
+        );
+
+        let non_filesystem_suffix_event = RuntimeEvent::capability_activity_failed(
+            scope(),
+            CapabilityId::new("builtin.json").unwrap(),
+            None,
+            None,
+            "invalid_input",
+        )
+        .with_error_summary("profile not found for builtin.json");
+        let wire =
+            serde_json::to_string(&non_filesystem_suffix_event).expect("serialize runtime event");
+        let decoded: RuntimeEvent = serde_json::from_str(&wire).expect("deserialize runtime event");
+        assert_eq!(
+            decoded.error_summary.as_deref(),
+            Some("profile not found for builtin.json")
+        );
+
+        let internal_filename_event = RuntimeEvent::capability_activity_failed(
+            scope(),
+            capability(),
+            None,
+            None,
+            "operation_failed",
+        )
+        .with_error_summary("failed to read AGENTS.md");
+        let wire =
+            serde_json::to_string(&internal_filename_event).expect("serialize runtime event");
+        let decoded: RuntimeEvent = serde_json::from_str(&wire).expect("deserialize runtime event");
+        assert_eq!(
+            decoded.error_summary.as_deref(),
+            Some(WORKSPACE_FILE_ERROR_SUMMARY)
+        );
+
+        let path_event = RuntimeEvent::capability_activity_failed(
+            scope(),
+            capability(),
+            None,
+            None,
+            "operation_failed",
+        )
+        .with_error_summary("read_file failed for /tmp/api_key.txt: secret leaked");
+        let wire = serde_json::to_string(&path_event).expect("serialize runtime event");
+        let decoded: RuntimeEvent = serde_json::from_str(&wire).expect("deserialize runtime event");
+        assert_eq!(
+            decoded.error_summary.as_deref(),
+            Some(WORKSPACE_FILE_ERROR_SUMMARY)
+        );
+
+        let unsafe_event = RuntimeEvent::capability_activity_failed(
+            scope(),
+            capability(),
+            None,
+            None,
+            "operation_failed",
+        )
+        .with_error_summary("provider error: bearer token leaked");
+        let wire = serde_json::to_string(&unsafe_event).expect("serialize runtime event");
+        let decoded: RuntimeEvent = serde_json::from_str(&wire).expect("deserialize runtime event");
+        assert_eq!(
+            decoded.error_summary.as_deref(),
+            Some(REDACTED_ERROR_SUMMARY)
+        );
+
+        for secret_like_summary in [
+            "provider returned AKIAIOSFODNN7EXAMPLE",
+            "provider returned ASIAIOSFODNN7EXAMPLE",
+            "provider returned gcp-live-secret",
+            "provider returned sk-ant-live-secret",
+            "provider returned ghp_live_secret",
+            "provider returned github_pat_live_secret",
+            "provider returned ya29.live-secret",
+        ] {
+            let event = RuntimeEvent::capability_activity_failed(
+                scope(),
+                capability(),
+                None,
+                None,
+                "operation_failed",
+            )
+            .with_error_summary(secret_like_summary);
+            let wire = serde_json::to_string(&event).expect("serialize runtime event");
+            let decoded: RuntimeEvent =
+                serde_json::from_str(&wire).expect("deserialize runtime event");
+            assert_eq!(
+                decoded.error_summary.as_deref(),
+                Some(REDACTED_ERROR_SUMMARY),
+                "summary must be redacted: {secret_like_summary}"
+            );
+        }
+    }
+
+    #[test]
+    fn truncate_error_summary_preserves_utf8_boundaries() {
+        let summary = "a".repeat(MAX_ERROR_SUMMARY_BYTES - 4) + "ééé";
+        let truncated = truncate_error_summary(&summary);
+
+        assert!(truncated.ends_with("..."));
+        assert!(truncated.is_char_boundary(truncated.len()));
+        assert!(truncated.len() <= MAX_ERROR_SUMMARY_BYTES);
     }
 
     #[test]
