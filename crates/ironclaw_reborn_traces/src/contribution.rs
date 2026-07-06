@@ -4835,6 +4835,24 @@ impl TraceRemoteRequestFailure {
             Some(reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN)
         )
     }
+
+    fn endpoint_invalid(message: String) -> Self {
+        Self {
+            status: None,
+            kind: TraceQueueTelemetryFailureKind::Endpoint,
+            message,
+            source: None,
+        }
+    }
+
+    fn dns_rejected(message: String) -> Self {
+        Self {
+            status: None,
+            kind: TraceQueueTelemetryFailureKind::NetworkDns,
+            message,
+            source: None,
+        }
+    }
 }
 
 impl std::fmt::Display for TraceRemoteRequestFailure {
@@ -6831,13 +6849,46 @@ fn trace_remote_request_timeout() -> Duration {
 // (3) authenticates with the enrolled-policy bearer token, never a model-
 // supplied value. So this is an intentional trusted internal lane, not an
 // un-gated external-write hole. See PR #4559 discussion.
-fn trace_remote_http_client() -> Result<reqwest::Client, TraceRemoteRequestFailure> {
+// In addition to the enrollment-time endpoint validation described above, each
+// background request pins its own DNS resolution below
+// (`pinned_trace_remote_http_client`), so a host that passed validation at
+// enrollment cannot later rebind to a private/internal address and receive the
+// bearer-authenticated submit/status/revoke requests.
+async fn pinned_trace_remote_http_client(
+    endpoint: &str,
+) -> Result<reqwest::Client, TraceRemoteRequestFailure> {
+    let url = reqwest::Url::parse(endpoint).map_err(|error| {
+        TraceRemoteRequestFailure::endpoint_invalid(format!(
+            "trace remote endpoint is not a valid URL: {error}"
+        ))
+    })?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| {
+            TraceRemoteRequestFailure::endpoint_invalid(
+                "trace remote endpoint requires a host".to_string(),
+            )
+        })?
+        .to_ascii_lowercase();
+    let port = url.port_or_known_default().ok_or_else(|| {
+        TraceRemoteRequestFailure::endpoint_invalid(
+            "trace remote endpoint requires a known port".to_string(),
+        )
+    })?;
+    let resolved_addrs = resolve_trace_upload_claim_issuer_host(&host, port)
+        .await
+        .map_err(|error| {
+            TraceRemoteRequestFailure::dns_rejected(format!(
+                "trace remote endpoint host resolution rejected: {error}"
+            ))
+        })?;
     let timeout = trace_remote_request_timeout();
     reqwest::Client::builder()
         .timeout(timeout)
         .connect_timeout(timeout.min(Duration::from_secs(5)))
         .redirect(reqwest::redirect::Policy::none())
         .user_agent("ironclaw-trace-commons-client")
+        .resolve_to_addrs(&host, &resolved_addrs)
         .build()
         .map_err(|error| {
             TraceRemoteRequestFailure::request_failed("trace remote HTTP client", error)
@@ -6911,7 +6962,8 @@ async fn submit_trace_envelope_to_endpoint_with_token(
     endpoint: &str,
     token: &str,
 ) -> Result<TraceSubmissionReceipt, TraceRemoteRequestFailure> {
-    let response = trace_remote_http_client()?
+    let response = pinned_trace_remote_http_client(endpoint)
+        .await?
         .post(endpoint)
         .bearer_auth(token)
         .header("Idempotency-Key", envelope.submission_id.to_string())
@@ -7444,7 +7496,8 @@ async fn fetch_trace_submission_statuses_chunk_with_token(
     submission_ids: &[Uuid],
     token: &str,
 ) -> Result<String, TraceRemoteRequestFailure> {
-    let response = trace_remote_http_client()?
+    let response = pinned_trace_remote_http_client(status_endpoint)
+        .await?
         .post(status_endpoint)
         .bearer_auth(token)
         .json(&TraceSubmissionStatusRequest {
@@ -8031,7 +8084,8 @@ async fn revoke_trace_submission_at_endpoint_with_token(
     endpoint: &str,
     token: &str,
 ) -> Result<(), TraceRemoteRequestFailure> {
-    let response = trace_remote_http_client()?
+    let response = pinned_trace_remote_http_client(endpoint)
+        .await?
         .delete(endpoint)
         .bearer_auth(token)
         .json(&serde_json::json!({ "submission_id": submission_id }))
@@ -16472,5 +16526,21 @@ mod tests {
                 .expect("direct path: 404 must be the empty zero-state")
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn pinned_trace_remote_client_rejects_private_endpoint_hosts() {
+        // The background submit/status/revoke lane pins DNS per request: a host
+        // resolving to a private/link-local address must be rejected before any
+        // bearer-authenticated request is built (DNS-rebinding defense).
+        let error = pinned_trace_remote_http_client("http://169.254.169.254/v1/traces")
+            .await
+            .expect_err("link-local endpoint host must be rejected");
+        assert_eq!(error.kind, TraceQueueTelemetryFailureKind::NetworkDns);
+
+        // The literal-loopback local-dev exception still applies.
+        pinned_trace_remote_http_client("http://127.0.0.1:8080/v1/traces")
+            .await
+            .expect("literal loopback endpoint builds (local-dev exception)");
     }
 }
