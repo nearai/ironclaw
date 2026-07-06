@@ -194,14 +194,26 @@ pub use llm_admin::llm_catalog::{
 pub use llm_admin::llm_config_service::{LlmReloadTrigger, RebornLlmConfigService};
 #[cfg(feature = "root-llm-provider")]
 pub use llm_admin::llm_key_store::{LlmKeyStore, LlmKeyStoreError};
+pub use llm_admin::nearai_mcp::{
+    NearAiMcpBootstrapConfig, NearAiMcpBootstrapConfigError, nearai_mcp_bootstrap_config_from_env,
+};
+#[cfg(feature = "openai-compat-beta")]
+pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
+#[cfg(feature = "root-llm-provider")]
+pub use llm_admin::provider_admin::{
+    RebornModelRoutesState, RebornProviderAdmin, RebornProviderAdminError, RebornProviderInfo,
+    RebornProviderList, RebornProviderMetadata, RebornProviderSelection, RebornProviderStatus,
+    RebornProviderWriteOutcome, RebornV1State,
+};
+#[cfg(feature = "root-llm-provider")]
+pub use llm_admin::provider_admin_product_command::RebornProviderAdminProductCommandService;
+#[cfg(feature = "root-llm-provider")]
+pub use llm_admin::provider_repo::{ProviderRepo, ProviderRepoError};
 pub use local_runtime_profile::{
     RebornLocalRuntimeProfileError, RebornLocalRuntimeProfileOptions,
     hosted_single_tenant_runtime_policy, hosted_single_tenant_volume_runtime_policy,
     local_dev_runtime_policy, local_dev_yolo_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options,
-};
-pub use llm_admin::nearai_mcp::{
-    NearAiMcpBootstrapConfig, NearAiMcpBootstrapConfigError, nearai_mcp_bootstrap_config_from_env,
 };
 pub use observability::budget::build_default_budget_accountant;
 pub use observability::budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
@@ -216,8 +228,6 @@ pub use observability::operator_logs::{
     OperatorLogLayer, capture_tracing_log, operator_log_buffer,
 };
 pub use observability::trajectory_observer::RebornTrajectoryObserver;
-#[cfg(feature = "openai-compat-beta")]
-pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
 pub use product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
     ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
@@ -227,16 +237,6 @@ pub use product_live_adapters::{
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use production_runtime_policy::RebornProductionRuntimePolicy;
 pub use profile::{RebornCompositionProfile, RebornCompositionProfileParseError};
-#[cfg(feature = "root-llm-provider")]
-pub use llm_admin::provider_admin::{
-    RebornModelRoutesState, RebornProviderAdmin, RebornProviderAdminError, RebornProviderInfo,
-    RebornProviderList, RebornProviderMetadata, RebornProviderSelection, RebornProviderStatus,
-    RebornProviderWriteOutcome, RebornV1State,
-};
-#[cfg(feature = "root-llm-provider")]
-pub use llm_admin::provider_admin_product_command::RebornProviderAdminProductCommandService;
-#[cfg(feature = "root-llm-provider")]
-pub use llm_admin::provider_repo::{ProviderRepo, ProviderRepoError};
 pub use readiness::{
     RebornFacadeReadiness, RebornReadiness, RebornReadinessDiagnostic,
     RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,

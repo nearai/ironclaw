@@ -1225,9 +1225,11 @@ impl RebornRuntime {
         let session = self.webui_llm_session()?;
         let reload = self.webui_llm_reload_trigger()?;
         let states = self.webui_nearai_login_states()?;
-        Some(crate::llm_admin::nearai_login_serve::nearai_login_callback_mount(
-            session, reload, boot, states,
-        ))
+        Some(
+            crate::llm_admin::nearai_login_serve::nearai_login_callback_mount(
+                session, reload, boot, states,
+            ),
+        )
     }
 
     /// Live LLM-provider reload trigger for the settings service. Returns the
@@ -1238,12 +1240,14 @@ impl RebornRuntime {
     pub(crate) fn webui_llm_reload_trigger(&self) -> Option<Arc<dyn crate::LlmReloadTrigger>> {
         let boot = self.boot.as_ref()?;
         let parts = self.llm_reload.as_ref()?;
-        Some(Arc::new(crate::llm_admin::llm_reload::RebornLlmReloadAdapter::new(
-            boot.clone(),
-            Arc::clone(&parts.reload_handle),
-            Arc::clone(&parts.session),
-            crate::LlmKeyStore::new(self.services.secret_store()),
-        )))
+        Some(Arc::new(
+            crate::llm_admin::llm_reload::RebornLlmReloadAdapter::new(
+                boot.clone(),
+                Arc::clone(&parts.reload_handle),
+                Arc::clone(&parts.session),
+                crate::LlmKeyStore::new(self.services.secret_store()),
+            ),
+        ))
     }
 
     /// Diagnostic id for the no-profile run profile selected by this runtime.
@@ -3960,11 +3964,12 @@ async fn bootstrap_nearai_mcp_from_effective_llm(
     let Some(llm) = llm else {
         return Ok(());
     };
-    let Some(config) = crate::llm_admin::nearai_mcp::nearai_mcp_bootstrap_config_from_llm_config(&llm.config)
-        .await
-        .map_err(|error| RebornRuntimeError::InvalidArgument {
-            reason: format!("NEAR AI MCP bootstrap config: {error}"),
-        })?
+    let Some(config) =
+        crate::llm_admin::nearai_mcp::nearai_mcp_bootstrap_config_from_llm_config(&llm.config)
+            .await
+            .map_err(|error| RebornRuntimeError::InvalidArgument {
+                reason: format!("NEAR AI MCP bootstrap config: {error}"),
+            })?
     else {
         return Ok(());
     };
@@ -4159,7 +4164,8 @@ struct LlmGatewayBundle {
 pub(crate) struct RebornLlmReloadParts {
     pub(crate) reload_handle: Arc<ironclaw_llm::LlmReloadHandle>,
     pub(crate) session: Arc<ironclaw_llm::SessionManager>,
-    pub(crate) nearai_login_states: Arc<crate::llm_admin::llm_config_service::NearAiLoginStateStore>,
+    pub(crate) nearai_login_states:
+        Arc<crate::llm_admin::llm_config_service::NearAiLoginStateStore>,
 }
 
 #[cfg(feature = "root-llm-provider")]
@@ -4232,7 +4238,9 @@ fn wrap_swappable_gateway(
         reload: RebornLlmReloadParts {
             reload_handle,
             session,
-            nearai_login_states: Arc::new(crate::llm_admin::llm_config_service::NearAiLoginStateStore::new()),
+            nearai_login_states: Arc::new(
+                crate::llm_admin::llm_config_service::NearAiLoginStateStore::new(),
+            ),
         },
     })
 }

@@ -1934,9 +1934,10 @@ mod tests {
             ironclaw_reborn_config::RebornConfigFile::load(&boot.home().config_file_path())
                 .expect("load config file");
 
-        let resolved = crate::llm_admin::llm_catalog::resolve_reborn_runtime_llm(&boot, config_file.as_ref())
-            .expect("resolution succeeds")
-            .expect("a provider is resolved from the selection");
+        let resolved =
+            crate::llm_admin::llm_catalog::resolve_reborn_runtime_llm(&boot, config_file.as_ref())
+                .expect("resolution succeeds")
+                .expect("a provider is resolved from the selection");
         assert_eq!(resolved.provider_id(), "nearai");
         assert_eq!(resolved.model(), "deepseek-ai/DeepSeek-V4-Flash");
     }

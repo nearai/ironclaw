@@ -189,7 +189,8 @@ pub struct RebornBuildInput {
     pub(crate) product_auth_ports: Option<RebornProductAuthServicePorts>,
     pub(crate) oauth_provider_configs: Vec<OAuthProviderBackendConfig>,
     pub(crate) oauth_dcr_provider_configs: Vec<OAuthDcrProviderBackendConfig>,
-    pub(crate) nearai_mcp_bootstrap_config: Option<crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
+    pub(crate) nearai_mcp_bootstrap_config:
+        Option<crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
     /// Concurrency limits applied to the in-memory turn-state store.
     /// Defaults to no limits (all caps `None` / unlimited).
     pub(crate) turn_state_store_limits: InMemoryTurnStateStoreLimits,
