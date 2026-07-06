@@ -18,9 +18,9 @@ runtime_credentials = [
 ]
 default_permission = "ask"
 visibility = "model"
-input_schema_ref = "schemas/slack_user/search_messages.input.v1.json"
-output_schema_ref = "schemas/slack_user/raw_output.v1.json"
-prompt_doc_ref = "prompts/slack_user/search_messages.md"
+input_schema_ref = "schemas/slack/search_messages.input.v1.json"
+output_schema_ref = "schemas/slack/raw_output.v1.json"
+prompt_doc_ref = "prompts/slack/search_messages.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
@@ -32,9 +32,9 @@ runtime_credentials = [
 ]
 default_permission = "ask"
 visibility = "model"
-input_schema_ref = "schemas/slack_user/list_conversations.input.v1.json"
-output_schema_ref = "schemas/slack_user/raw_output.v1.json"
-prompt_doc_ref = "prompts/slack_user/list_conversations.md"
+input_schema_ref = "schemas/slack/list_conversations.input.v1.json"
+output_schema_ref = "schemas/slack/raw_output.v1.json"
+prompt_doc_ref = "prompts/slack/list_conversations.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
@@ -46,9 +46,9 @@ runtime_credentials = [
 ]
 default_permission = "ask"
 visibility = "model"
-input_schema_ref = "schemas/slack_user/get_conversation_history.input.v1.json"
-output_schema_ref = "schemas/slack_user/raw_output.v1.json"
-prompt_doc_ref = "prompts/slack_user/get_conversation_history.md"
+input_schema_ref = "schemas/slack/get_conversation_history.input.v1.json"
+output_schema_ref = "schemas/slack/raw_output.v1.json"
+prompt_doc_ref = "prompts/slack/get_conversation_history.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
@@ -60,9 +60,9 @@ runtime_credentials = [
 ]
 default_permission = "ask"
 visibility = "model"
-input_schema_ref = "schemas/slack_user/get_user_info.input.v1.json"
-output_schema_ref = "schemas/slack_user/raw_output.v1.json"
-prompt_doc_ref = "prompts/slack_user/get_user_info.md"
+input_schema_ref = "schemas/slack/get_user_info.input.v1.json"
+output_schema_ref = "schemas/slack/raw_output.v1.json"
+prompt_doc_ref = "prompts/slack/get_user_info.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
@@ -74,7 +74,7 @@ runtime_credentials = [
 ]
 default_permission = "ask"
 visibility = "model"
-input_schema_ref = "schemas/slack_user/send_message.input.v1.json"
-output_schema_ref = "schemas/slack_user/raw_output.v1.json"
-prompt_doc_ref = "prompts/slack_user/send_message.md"
+input_schema_ref = "schemas/slack/send_message.input.v1.json"
+output_schema_ref = "schemas/slack/raw_output.v1.json"
+prompt_doc_ref = "prompts/slack/send_message.md"
 required_host_ports = ["host.runtime.http_egress"]
