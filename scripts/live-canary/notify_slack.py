@@ -742,15 +742,18 @@ def _github_md_text(value: object, limit: int | None = None) -> str:
     text = _trim_slack_text(value, limit) if limit else str(value or "").strip()
     return (
         text.replace("\\", "\\\\")
+        .replace("\n", " ")
         .replace("@", GITHUB_MD_MENTION_BREAK)
         .replace("|", "\\|")
         .replace("`", "\\`")
+        .replace("[", "\\[")
+        .replace("]", "\\]")
     )
 
 
 def _github_md_code(value: object, limit: int | None = None) -> str:
     text = _trim_slack_text(value, limit) if limit else str(value or "").strip()
-    return text.replace("`", "'").replace("\n", " ")
+    return text.replace("`", "'").replace("\n", " ").replace("|", "\\|")
 
 
 def slack_payload(
@@ -1002,7 +1005,7 @@ def post_pr_comment(
 ) -> str:
     if not run_context.target_pr:
         return ""
-    if not run_context.target_pr.isdecimal():
+    if not run_context.target_pr.isascii() or not run_context.target_pr.isdigit():
         raise ValueError("target_pr must be a decimal pull request number")
     headers = {
         "Authorization": f"Bearer {github_token}",
