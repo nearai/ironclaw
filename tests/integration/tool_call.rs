@@ -125,12 +125,23 @@ async fn runs_http_save_tool_call_through_recorded_egress() {
         .expect("final reply finalized");
 }
 
-/// The globally-disabled `builtin.spawn_subagent` capability
-/// (`ironclaw_reborn::runtime::DISABLED_CAPABILITY_IDS`, stripped by the
-/// outermost `PerSurfaceCapabilityDenyDecorator`) must never reach the
-/// model-facing tool list, from either the flavor-aware spawn decorator or the
-/// host-runtime first-party manifest stub. `builtin__http` is asserted present
-/// as the non-vacuity control.
+/// The globally-disabled `builtin.spawn_subagent` capability (configured
+/// through `DefaultPlannedRuntimeConfig::disabled_capability_ids`, applied as
+/// the OUTERMOST `PerSurfaceCapabilityDenyDecorator` in
+/// `build_default_planned_runtime_inner` — see that function's doc comments)
+/// must never reach the model-facing tool list, whichever port would
+/// otherwise have surfaced it: the flavor-aware `SubagentSpawnCapabilityDecorator`
+/// (always wired, independent of any harness extension registry) or the
+/// host-runtime first-party manifest stub (`builtin_first_party_package()` in
+/// `crates/ironclaw_host_runtime/src/first_party_tools/mod.rs`, included in
+/// `core_builtin_tools()`'s registry unconditionally).
+///
+/// Non-vacuity: confirmed by direct inspection that `core_builtin_tools()`'s
+/// capability port surfaces `builtin__spawn_subagent` when the deny decorator
+/// is bypassed (i.e. `spawn_decorator` runs before the outermost deny filter
+/// in composition order) — so this assertion is pinning a real strip, not
+/// asserting absence from an already-empty surface. `builtin__http` is
+/// asserted present as the non-vacuity control for THIS test's own capture.
 #[tokio::test]
 async fn disabled_spawn_subagent_capability_is_stripped_from_model_surface() {
     let h = RebornIntegrationHarness::test_default()

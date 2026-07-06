@@ -89,6 +89,13 @@ pub(crate) enum HarnessCapabilityMode {
 }
 
 impl HarnessCapabilityMode {
+    pub(crate) fn exposes_spawn_subagent(&self) -> bool {
+        match self {
+            Self::Recording(port) => port.exposes_spawn_subagent(),
+            Self::HostRuntime(_) => false,
+        }
+    }
+
     pub(crate) fn into_parts(
         self,
         milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
