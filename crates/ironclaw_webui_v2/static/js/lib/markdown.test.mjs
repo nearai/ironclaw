@@ -34,6 +34,7 @@ test("renderMarkdown routes parsed HTML through DOMPurify.sanitize, stripping ha
         },
       },
       DOMPurify: {
+        addHook: () => {},
         sanitize: (raw) => {
           calls.sanitize.push(raw);
           return raw.replace(/ onerror="[^"]*"/g, "");
