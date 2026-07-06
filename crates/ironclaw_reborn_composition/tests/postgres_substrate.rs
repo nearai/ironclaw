@@ -101,6 +101,7 @@ async fn postgres_substrate_builder_rejects_invalid_secret_master_key() {
                 url: SecretString::from(database_url),
                 tls_options: Default::default(),
             },
+            process_local_resource_governor_singleton: true,
             secret_master_key: Some(SecretString::from("too-short")),
             trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
             runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
@@ -139,6 +140,7 @@ async fn postgres_substrate_builder_rejects_weak_env_secret_master_key() {
                 url: SecretString::from(database_url),
                 tls_options: Default::default(),
             },
+            process_local_resource_governor_singleton: true,
             secret_master_key: None,
             trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
             runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
@@ -156,6 +158,38 @@ async fn postgres_substrate_builder_rejects_weak_env_secret_master_key() {
         Err(RebornCompositionError::Secret(
             ironclaw_secrets::SecretError::InvalidMasterKey
         ))
+    ));
+}
+
+#[tokio::test]
+async fn postgres_substrate_builder_rejects_without_singleton_resource_governor_authority() {
+    let Some((_container, pool, database_url)) = postgres_pool_or_skip().await else {
+        return;
+    };
+
+    let result =
+        build_postgres_production_host_runtime_services(PostgresProductionSubstrateConfig {
+            pool,
+            event_store: RebornEventStoreConfig::Postgres {
+                url: SecretString::from(database_url),
+                tls_options: Default::default(),
+            },
+            process_local_resource_governor_singleton: false,
+            secret_master_key: Some(SecretString::from("01234567890123456789012345678901")),
+            trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
+            runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
+                production_runtime_policy(),
+                sandbox_process_port(),
+            )
+            .unwrap(),
+            turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
+            surface_version: CapabilitySurfaceVersion::new("test-surface").unwrap(),
+        })
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(RebornCompositionError::InvalidConfig { reason }) if reason.contains("singleton or elected resource-governor owner")
     ));
 }
 
@@ -183,6 +217,7 @@ async fn build_postgres_test_services(
             url: SecretString::from(database_url),
             tls_options: Default::default(),
         },
+        process_local_resource_governor_singleton: true,
         secret_master_key: Some(SecretString::from("01234567890123456789012345678901")),
         trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
         runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(

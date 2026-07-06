@@ -250,7 +250,7 @@ impl LockedAccounts<'_> {
             .map(|(_, guard)| &mut **guard)
             // lock_accounts builds the guard list from exactly the account
             // shard indexes requested before LockedAccounts is constructed.
-            .expect("account shard was locked")
+            .expect("account shard was locked") // safety: lock_accounts constructs guards for every requested account shard.
     }
 }
 

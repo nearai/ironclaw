@@ -16,7 +16,7 @@ use crate::{FilesystemSessionThreadService, SessionThreadError, SessionThreadRec
 
 use super::{
     LIST_THREADS_RECORD_READ_CONCURRENCY, StoredThreadRecord, deserialize, invalid_path,
-    is_not_found, map_cas_error, scope_axes_string, scoped_path, serialize_pretty,
+    is_not_found, map_cas_error, scope_axes_string, scoped_path, serialize_pretty, thread_root,
 };
 
 const THREAD_INDEX_KIND: &str = "thread_index";
@@ -296,19 +296,7 @@ where
         &self,
         scope: &ThreadScope,
     ) -> Result<Arc<Vec<ThreadIndexRecord>>, SessionThreadError> {
-        let key = thread_index_cache_key(scope);
-        if let Ok(cache) = self.thread_index_cache.lock()
-            && let Some(cached) = cache.get(&key)
-        {
-            return Ok(Arc::clone(cached));
-        }
-
-        let loaded = Arc::new(self.load_thread_index_for_scope(scope).await?);
-        if let Ok(mut cache) = self.thread_index_cache.lock() {
-            cache.insert(key.clone(), Arc::clone(&loaded));
-            evict_hash_map_entry_over_limit(&mut cache, THREAD_INDEX_CACHE_MAX_SCOPES, &key);
-        }
-        Ok(loaded)
+        self.load_thread_index_for_scope(scope).await.map(Arc::new)
     }
 
     async fn load_thread_index_for_scope(
@@ -340,6 +328,7 @@ where
     ) -> Result<Vec<ThreadIndexRecord>, SessionThreadError> {
         let root = thread_index_root(scope)?;
         let mut records = Vec::new();
+        let mut stale_records = Vec::new();
         let mut offset = 0_u64;
         loop {
             let page = self
@@ -358,12 +347,42 @@ where
             for versioned in page {
                 let record = deserialize::<ThreadIndexRecord>(&versioned.entry.body)?;
                 if record.record.scope == *scope {
-                    self.mark_thread_index_known(&record.record.scope, &record.record.thread_id);
-                    records.push(record);
+                    if self
+                        .thread_index_source_exists(&record.record.scope, &record.record.thread_id)
+                        .await?
+                    {
+                        self.mark_thread_index_known(
+                            &record.record.scope,
+                            &record.record.thread_id,
+                        );
+                        records.push(record);
+                    } else {
+                        stale_records.push((record.record.scope, record.record.thread_id));
+                    }
                 }
             }
         }
+        for (scope, thread_id) in stale_records {
+            self.delete_thread_index_record(&scope, &thread_id).await?;
+        }
         Ok(records)
+    }
+
+    async fn thread_index_source_exists(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<bool, SessionThreadError> {
+        let root = thread_root(scope, thread_id)?;
+        match self
+            .filesystem
+            .stat(&scope.to_resource_scope(), &root)
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(error) if is_not_found(&error) => Ok(false),
+            Err(error) => Err(error.into()),
+        }
     }
 
     async fn bootstrap_thread_index_for_scope(
@@ -455,24 +474,17 @@ fn thread_index_record_cache_key(scope: &ThreadScope, thread_id: &ThreadId) -> S
     format!("{}:{}", thread_index_cache_key(scope), thread_id.as_str())
 }
 
-fn evict_hash_map_entry_over_limit<V>(
-    map: &mut HashMap<String, V>,
-    max_entries: usize,
-    keep: &str,
-) {
-    if map.len() <= max_entries {
-        return;
-    }
-    if let Some(victim) = map.keys().find(|key| key.as_str() != keep).cloned() {
-        map.remove(&victim);
-    }
-}
-
 fn evict_hash_set_entry_over_limit(set: &mut HashSet<String>, max_entries: usize, keep: &str) {
     if set.len() <= max_entries {
         return;
     }
-    if let Some(victim) = set.iter().find(|key| key.as_str() != keep).cloned() {
+    let mut keys = set.iter();
+    let victim = match keys.next() {
+        Some(first) if first.as_str() == keep => keys.next().cloned(),
+        Some(first) => Some(first.clone()),
+        None => None,
+    };
+    if let Some(victim) = victim {
         set.remove(&victim);
     }
 }

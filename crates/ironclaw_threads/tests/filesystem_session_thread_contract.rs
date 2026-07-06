@@ -223,6 +223,70 @@ async fn filesystem_delete_thread_retry_cleans_stale_thread_index_row() {
 }
 
 #[tokio::test]
+async fn filesystem_list_threads_skips_stale_thread_index_after_partial_delete() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-list-stale-index", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let request_scope = scope("list-stale-index");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-list-stale-index").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("stale title".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: request_scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .expect("warm list creates thread index row");
+
+    scoped
+        .delete(
+            &request_scope.to_resource_scope(),
+            &thread_root_path_for_test(&request_scope, thread.thread_id.as_str()),
+        )
+        .await
+        .expect("test setup removes source thread root but leaves derived index row");
+    service.clear_thread_index_cache_for_scope(&request_scope);
+
+    let listed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: request_scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        listed
+            .threads
+            .iter()
+            .all(|record| record.thread_id != thread.thread_id),
+        "list_threads_for_scope must not expose an index row whose source thread root is gone"
+    );
+    assert!(
+        scoped
+            .get(
+                &request_scope.to_resource_scope(),
+                &thread_index_record_path_for_test(&request_scope, thread.thread_id.as_str()),
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "stale index row should be removed during list cleanup"
+    );
+}
+
+#[tokio::test]
 async fn filesystem_delete_thread_removes_inbound_idempotency_records() {
     let backend = Arc::new(InMemoryBackend::new());
     let scoped = scoped_threads_fs_at(backend, "tenant-delete-idempotency", "alice");

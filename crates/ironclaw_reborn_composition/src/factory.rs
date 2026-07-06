@@ -911,6 +911,8 @@ struct RebornLocalDevStoreGraphInput {
     project_repository: Arc<dyn ProjectRepository>,
     /// Concurrency limits for the in-memory (or filesystem-backed) turn-state store.
     turn_state_store_limits: ironclaw_turns::InMemoryTurnStateStoreLimits,
+    #[cfg(feature = "postgres")]
+    postgres_resource_governor_singleton: Option<bool>,
     /// Raw libSQL substrate handle, carried so the canonical Reborn identity
     /// store rides the same `reborn-local-dev.db` instead of opening a second
     /// handle (see `RebornRuntime::open_reborn_identity_resolver`).
@@ -1052,57 +1054,68 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         ..
     } = input;
     let local_runtime_identity_for_nearai_mcp = local_runtime_identity.clone();
-    let (root, workspace_root, host_home_root, storage_backend_input, secret_master_key) =
-        match storage {
-            RebornStorageInput::LocalDev { .. }
-                if profile == RebornCompositionProfile::HostedSingleTenant =>
-            {
-                return Err(RebornBuildError::InvalidConfig {
+    let (
+        root,
+        workspace_root,
+        host_home_root,
+        storage_backend_input,
+        secret_master_key,
+        postgres_resource_governor_singleton,
+    ) = match storage {
+        RebornStorageInput::LocalDev { .. }
+            if profile == RebornCompositionProfile::HostedSingleTenant =>
+        {
+            return Err(RebornBuildError::InvalidConfig {
                     reason: "profile=hosted-single-tenant requires hosted single-tenant Postgres storage input"
                         .to_string(),
                 });
-            }
-            RebornStorageInput::LocalDev {
-                root,
-                workspace_root,
-                host_home_root,
-            } => (
-                root,
-                workspace_root,
-                host_home_root,
-                LocalDevStorageBackendInput::LocalDefault,
-                None::<ironclaw_secrets::SecretMaterial>,
-            ),
-            #[cfg(feature = "postgres")]
-            RebornStorageInput::HostedSingleTenantPostgres { .. }
-                if profile != RebornCompositionProfile::HostedSingleTenant =>
-            {
-                return Err(RebornBuildError::InvalidConfig {
-                    reason: format!("{profile} profile requires local-runtime storage input"),
-                });
-            }
-            #[cfg(feature = "postgres")]
-            RebornStorageInput::HostedSingleTenantPostgres {
-                root,
-                workspace_root,
-                host_home_root,
-                pool,
-                secret_master_key,
-            } => (
-                root,
-                workspace_root,
-                host_home_root,
-                LocalDevStorageBackendInput::Postgres(pool),
-                Some(secret_master_key),
-            ),
-            _ => {
-                return Err(RebornBuildError::InvalidConfig {
-                    reason: format!("{profile} profile requires local-runtime storage input"),
-                });
-            }
-        };
+        }
+        RebornStorageInput::LocalDev {
+            root,
+            workspace_root,
+            host_home_root,
+        } => (
+            root,
+            workspace_root,
+            host_home_root,
+            LocalDevStorageBackendInput::LocalDefault,
+            None::<ironclaw_secrets::SecretMaterial>,
+            None::<bool>,
+        ),
+        #[cfg(feature = "postgres")]
+        RebornStorageInput::HostedSingleTenantPostgres { .. }
+            if profile != RebornCompositionProfile::HostedSingleTenant =>
+        {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!("{profile} profile requires local-runtime storage input"),
+            });
+        }
+        #[cfg(feature = "postgres")]
+        RebornStorageInput::HostedSingleTenantPostgres {
+            root,
+            workspace_root,
+            host_home_root,
+            pool,
+            secret_master_key,
+            process_local_resource_governor_singleton,
+        } => (
+            root,
+            workspace_root,
+            host_home_root,
+            LocalDevStorageBackendInput::Postgres(pool),
+            Some(secret_master_key),
+            Some(process_local_resource_governor_singleton),
+        ),
+        _ => {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!("{profile} profile requires local-runtime storage input"),
+            });
+        }
+    };
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     let _ = secret_master_key;
+    #[cfg(not(feature = "postgres"))]
+    let _ = postgres_resource_governor_singleton;
     std::fs::create_dir_all(&root).map_err(|_| RebornBuildError::InvalidConfig {
         reason: "local-dev storage root could not be initialized".to_string(),
     })?;
@@ -1257,6 +1270,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         trigger_repository,
         project_repository,
         turn_state_store_limits,
+        #[cfg(feature = "postgres")]
+        postgres_resource_governor_singleton,
         #[cfg(feature = "libsql")]
         identity_substrate_db,
     })
@@ -1906,6 +1921,8 @@ async fn build_local_dev_store_graph(
         trigger_repository,
         project_repository,
         turn_state_store_limits,
+        #[cfg(feature = "postgres")]
+        postgres_resource_governor_singleton,
         #[cfg(feature = "libsql")]
         identity_substrate_db,
     } = input;
@@ -1980,6 +1997,10 @@ async fn build_local_dev_store_graph(
     let budget_gate_store: Arc<dyn BudgetGateStore> = Arc::new(FilesystemBudgetGateStore::new(
         Arc::clone(&scoped_filesystem),
     ));
+    #[cfg(feature = "postgres")]
+    if let Some(singleton) = postgres_resource_governor_singleton {
+        ensure_postgres_resource_governor_authority_for_build(singleton)?;
+    }
     let resource_governor = FilesystemResourceGovernor::new(Arc::clone(&scoped_filesystem))
         .with_event_sink(Arc::clone(&budget_event_sink));
     let resource_governor: Arc<LocalDevResourceGovernor> = Arc::new(resource_governor);
@@ -3601,6 +3622,7 @@ async fn build_production_shaped(
             path_or_url,
             auth_token,
             secret_master_key,
+            process_local_resource_governor_singleton,
         } => {
             // Mint the scheduler wake wiring here, before building the coordinator, so:
             // 1. The notifier can satisfy `HostRuntimeServices.with_turn_run_wake_notifier_dyn`
@@ -3629,7 +3651,15 @@ async fn build_production_shaped(
                 turn_state_store_limits,
                 scheduler_wake_wiring,
             };
-            build_libsql_production(context, db, path_or_url, auth_token, secret_master_key).await
+            build_libsql_production(
+                context,
+                db,
+                path_or_url,
+                auth_token,
+                secret_master_key,
+                process_local_resource_governor_singleton,
+            )
+            .await
         }
         #[cfg(feature = "postgres")]
         RebornStorageInput::Postgres {
@@ -3637,6 +3667,7 @@ async fn build_production_shaped(
             url,
             tls_options,
             secret_master_key,
+            process_local_resource_governor_singleton,
         } => {
             // Mint the scheduler wake wiring here, before building the coordinator, so:
             // 1. The notifier can satisfy `HostRuntimeServices.with_turn_run_wake_notifier_dyn`
@@ -3665,7 +3696,15 @@ async fn build_production_shaped(
                 turn_state_store_limits,
                 scheduler_wake_wiring,
             };
-            build_postgres_production(context, pool, url, tls_options, secret_master_key).await
+            build_postgres_production(
+                context,
+                pool,
+                url,
+                tls_options,
+                secret_master_key,
+                process_local_resource_governor_singleton,
+            )
+            .await
         }
     }
 }
@@ -3774,6 +3813,7 @@ where
     TPolicy: ironclaw_trust::TrustPolicy + 'static,
     TWake: ironclaw_turns::TurnRunWakeNotifier + 'static,
 {
+    ensure_libsql_resource_governor_authority(config.process_local_resource_governor_singleton)?;
     let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&config.database)));
     filesystem.run_migrations().await?;
     let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
@@ -3793,6 +3833,30 @@ where
     .await
 }
 
+#[cfg(feature = "libsql")]
+fn ensure_libsql_resource_governor_authority(
+    process_local_singleton: bool,
+) -> Result<(), crate::RebornCompositionError> {
+    if process_local_singleton {
+        return Ok(());
+    }
+    Err(crate::RebornCompositionError::InvalidConfig {
+        reason: "libSQL production FilesystemResourceGovernor uses process-local tallies; configure a singleton or elected resource-governor owner before sharing one database across runtime processes".to_string(),
+    })
+}
+
+#[cfg(feature = "libsql")]
+fn ensure_libsql_resource_governor_authority_for_build(
+    process_local_singleton: bool,
+) -> Result<(), RebornBuildError> {
+    if process_local_singleton {
+        return Ok(());
+    }
+    Err(RebornBuildError::InvalidConfig {
+        reason: "libSQL FilesystemResourceGovernor uses process-local tallies; configure a singleton or elected resource-governor owner before sharing one database across runtime processes".to_string(),
+    })
+}
+
 #[cfg(feature = "postgres")]
 pub(crate) async fn build_postgres_production_host_runtime_services<TPolicy, TWake>(
     config: crate::PostgresProductionSubstrateConfig<TPolicy, TWake>,
@@ -3802,6 +3866,7 @@ where
     TWake: ironclaw_turns::TurnRunWakeNotifier + 'static,
 {
     let pool = config.pool;
+    ensure_postgres_resource_governor_authority(config.process_local_resource_governor_singleton)?;
     let filesystem = Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(
         pool.clone(),
     ));
@@ -3825,6 +3890,30 @@ where
         },
     )
     .await
+}
+
+#[cfg(feature = "postgres")]
+fn ensure_postgres_resource_governor_authority(
+    process_local_singleton: bool,
+) -> Result<(), crate::RebornCompositionError> {
+    if process_local_singleton {
+        return Ok(());
+    }
+    Err(crate::RebornCompositionError::InvalidConfig {
+        reason: "Postgres production FilesystemResourceGovernor uses process-local tallies; configure a singleton or elected resource-governor owner before sharing one database across runtime processes".to_string(),
+    })
+}
+
+#[cfg(feature = "postgres")]
+fn ensure_postgres_resource_governor_authority_for_build(
+    process_local_singleton: bool,
+) -> Result<(), RebornBuildError> {
+    if process_local_singleton {
+        return Ok(());
+    }
+    Err(RebornBuildError::InvalidConfig {
+        reason: "Postgres FilesystemResourceGovernor uses process-local tallies; configure a singleton or elected resource-governor owner before sharing one database across runtime processes".to_string(),
+    })
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -4362,9 +4451,11 @@ async fn build_libsql_production(
     path_or_url: String,
     auth_token: Option<ironclaw_secrets::SecretMaterial>,
     secret_master_key: ironclaw_secrets::SecretMaterial,
+    process_local_resource_governor_singleton: bool,
 ) -> Result<RebornServices, RebornBuildError> {
     use ironclaw_filesystem::LibSqlRootFilesystem;
 
+    ensure_libsql_resource_governor_authority_for_build(process_local_resource_governor_singleton)?;
     let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)));
     filesystem.run_migrations().await?;
     let trigger_repository = Arc::new(ironclaw_triggers::LibSqlTriggerRepository::new(db));
@@ -4412,9 +4503,13 @@ async fn build_postgres_production(
     _url: ironclaw_secrets::SecretMaterial,
     _tls_options: ironclaw_reborn_event_store::PostgresPoolTlsOptions,
     secret_master_key: ironclaw_secrets::SecretMaterial,
+    process_local_resource_governor_singleton: bool,
 ) -> Result<RebornServices, RebornBuildError> {
     use ironclaw_filesystem::PostgresRootFilesystem;
 
+    ensure_postgres_resource_governor_authority_for_build(
+        process_local_resource_governor_singleton,
+    )?;
     // A4: Clone the pool before it is moved into PostgresTriggerRepository so we
     // can thread it to the credential keepalive worker as a leader-lock for
     // sweep serialization.
@@ -4528,6 +4623,17 @@ mod tests {
         },
         runtime::SKILL_ACTIVATE_CAPABILITY_ID,
     };
+
+    #[cfg(feature = "libsql")]
+    #[test]
+    fn libsql_build_resource_governor_guard_requires_singleton_authority() {
+        assert!(ensure_libsql_resource_governor_authority_for_build(true).is_ok());
+        assert!(matches!(
+            ensure_libsql_resource_governor_authority_for_build(false),
+            Err(RebornBuildError::InvalidConfig { reason })
+                if reason.contains("libSQL FilesystemResourceGovernor uses process-local tallies")
+        ));
+    }
 
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     #[tokio::test]

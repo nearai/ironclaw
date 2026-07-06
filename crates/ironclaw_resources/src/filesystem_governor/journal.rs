@@ -176,6 +176,7 @@ fn run_delta_journal_flusher<F>(
                 for request in requests {
                     let _ = request.ack.send(Err(error.clone()));
                 }
+                break;
             }
         }
     }

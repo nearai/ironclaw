@@ -303,11 +303,14 @@ where
             .map_err(fs_to_secret_store_error)?
             .as_str()
             .to_string();
-        let mut roots = self.tenant_index_roots.lock().await;
-        if roots.contains(&resolved_root) {
-            return Ok(());
+        {
+            let roots = self.tenant_index_roots.lock().await;
+            if roots.contains(&resolved_root) {
+                return Ok(());
+            }
         }
         ensure_tenant_id_index_secret(&self.filesystem, scope).await?;
+        let mut roots = self.tenant_index_roots.lock().await;
         roots.insert(resolved_root);
         Ok(())
     }
@@ -739,11 +742,14 @@ where
             .map_err(fs_to_broker_error)?
             .as_str()
             .to_string();
-        let mut roots = self.tenant_index_roots.lock().await;
-        if roots.contains(&resolved_root) {
-            return Ok(());
+        {
+            let roots = self.tenant_index_roots.lock().await;
+            if roots.contains(&resolved_root) {
+                return Ok(());
+            }
         }
         ensure_tenant_id_index_broker(&self.filesystem, scope).await?;
+        let mut roots = self.tenant_index_roots.lock().await;
         roots.insert(resolved_root);
         Ok(())
     }

@@ -158,11 +158,19 @@ where
         let spawn = std::thread::Builder::new()
             .name("resource-governor-compactor".to_string())
             .spawn(move || {
+                struct CompactionGuard(Arc<AtomicBool>);
+
+                impl Drop for CompactionGuard {
+                    fn drop(&mut self) {
+                        self.0.store(false, Ordering::Release);
+                    }
+                }
+
+                let _guard = CompactionGuard(in_flight);
                 let compacted = compact_resource_governor_snapshot(snapshot_store, filesystem);
                 if let Err(error) = compacted {
                     warn!(reason = %error, "resource governor compaction write failed");
                 }
-                in_flight.store(false, Ordering::Release);
             });
         if let Err(error) = spawn {
             warn!(reason = %error, "resource governor compaction thread failed to start");
@@ -368,6 +376,11 @@ where
         };
         if let Err(error) = self.finish_delta(&authority, pending) {
             return self.poison(&authority, error);
+        }
+        if let Err(error) = authority.check_available() {
+            let result = Err(error);
+            emit_reserve_events(self.event_sink.as_ref(), &result, now);
+            return result;
         }
         let result = Ok(outcome);
         emit_reserve_events(self.event_sink.as_ref(), &result, now);
