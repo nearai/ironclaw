@@ -33,6 +33,11 @@ reopen), not `wait_for_status(Completed)` alone.
   fix PR that turns them green.
 - **Consolidate:** extend an existing suite before creating a new one
   (see CLAUDE.md Testing Discipline rule 2).
+- **Coverage ratchet:** Reborn integration-tier coverage is also gated
+  by a committed ratchet floor
+  (`tests/integration/coverage-floor.toml`) — dry-run only until the
+  post-#5656 recapture PR sets `enforce = true`; see the floor file's
+  own header for the same-PR floor-raise workflow.
 
 ## Key Patterns
 

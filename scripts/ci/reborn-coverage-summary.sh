@@ -106,8 +106,10 @@ if total > 0:
     lines.append("</details>")
     lines.append("")
     lines.append(
-        "_This signal is informational: coverage never gates the PR — not the percentage, "
-        "not the per-crate holes, not the 0-coverage callout._"
+        "_This table itself is informational and never gates the PR on its own — not the "
+        "percentage, not the per-crate holes, not the 0-coverage callout. A separate coverage "
+        "ratchet (dry-run until enforce=true; see tests/integration/coverage-floor.toml) can "
+        "fail the build on specific configured floors._"
     )
 
 lines.append("")
