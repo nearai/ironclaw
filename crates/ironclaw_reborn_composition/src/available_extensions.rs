@@ -584,7 +584,7 @@ fn gmail_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
 fn slack_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     bundled_extension_package(
         SLACK_EXTENSION_ID,
-        "Slack (personal)",
+        "Slack",
         SLACK_MANIFEST,
         slack_assets(),
     )

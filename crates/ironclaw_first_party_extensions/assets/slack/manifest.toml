@@ -1,8 +1,8 @@
 schema_version = "reborn.extension_manifest.v2"
 id = "slack"
-name = "Slack (personal)"
+name = "Slack"
 version = "0.1.0"
-description = "Act as you in Slack via a personal user token (xoxp-): search all your messages, list and read your DMs and group DMs, read channel history, and post as you. Distinct from the bot-token Slack channel; uses its own slack_user_token credential."
+description = "Act as you in Slack via your own user token (xoxp-): search all your messages, list and read your DMs and group DMs, read channel history, and post as you."
 trust = "first_party_requested"
 
 [runtime]
