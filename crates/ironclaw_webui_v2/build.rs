@@ -27,7 +27,8 @@ fn main() {
     println!("cargo:rerun-if-changed=static");
     println!("cargo:rerun-if-changed=frontend/build.mjs");
     println!("cargo:rerun-if-changed=frontend/package.json");
-    println!("cargo:rerun-if-changed=frontend/package-lock.json");
+    println!("cargo:rerun-if-changed=frontend/pnpm-lock.yaml");
+    println!("cargo:rerun-if-changed=frontend/pnpm-workspace.yaml");
     println!("cargo:rerun-if-changed=build.rs");
 
     let webui_enabled = env::var_os("CARGO_FEATURE_WEBUI_V2_BETA").is_some();
@@ -123,33 +124,7 @@ fn build_frontend_dist(manifest_dir: &Path, dist_dir: &Path) {
 }
 
 fn ensure_frontend_dependencies(frontend_dir: &Path) {
-    let node_modules = frontend_dir.join("node_modules");
-    let package_json = frontend_dir.join("package.json");
-    let package_lock = frontend_dir.join("package-lock.json");
-    let install_marker = node_modules.join(".package-lock.json");
-
-    let needs_install = if !node_modules.is_dir() || !install_marker.is_file() {
-        true
-    } else {
-        let marker_modified = modified_time(&install_marker);
-        modified_time(&package_lock) > marker_modified
-            || modified_time(&package_json) > marker_modified
-    };
-
-    if needs_install {
-        run_command(
-            npm_command(),
-            &["ci", "--no-audit", "--no-fund"],
-            frontend_dir,
-            &[],
-        );
-    }
-}
-
-fn modified_time(path: &Path) -> std::time::SystemTime {
-    fs::metadata(path)
-        .and_then(|metadata| metadata.modified())
-        .unwrap_or_else(|error| panic!("read modified time for {}: {error}", path.display()))
+    run_pnpm(&["install", "--frozen-lockfile"], frontend_dir);
 }
 
 fn run_command(command: &str, args: &[&str], cwd: &Path, envs: &[(&str, &Path)]) {
@@ -213,8 +188,19 @@ fn display_command(command: &str, args: &[&str]) -> String {
         .join(" ")
 }
 
-fn npm_command() -> &'static str {
-    if cfg!(windows) { "npm.cmd" } else { "npm" }
+fn run_pnpm(args: &[&str], cwd: &Path) {
+    let mut corepack_args = Vec::with_capacity(args.len() + 1);
+    corepack_args.push("pnpm");
+    corepack_args.extend_from_slice(args);
+    run_command(corepack_command(), &corepack_args, cwd, &[]);
+}
+
+fn corepack_command() -> &'static str {
+    if cfg!(windows) {
+        "corepack.cmd"
+    } else {
+        "corepack"
+    }
 }
 
 fn node_command() -> &'static str {
