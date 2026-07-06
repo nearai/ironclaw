@@ -34,6 +34,17 @@ const HTTP_TOOL_URL: &str = "https://api.example.test/v1/items";
 #[tokio::test]
 async fn wedged_tool_call_is_reaped_by_lease_expiry_not_left_running_forever() {
     let gate = ParkingCapabilityGate::new();
+
+    // Guarantees `gate.release()` runs even if an assertion below panics first,
+    // so the parked task is never leaked for the rest of the process's lifetime.
+    struct ReleaseOnDrop(ParkingCapabilityGate);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+    let _guard = ReleaseOnDrop(gate.clone());
+
     let harness = RebornIntegrationHarness::test_default()
         .with_builtin_http_tools()
         .park_tool_dispatch(gate.clone())
@@ -65,9 +76,4 @@ async fn wedged_tool_call_is_reaped_by_lease_expiry_not_left_running_forever() {
         Some("lease_expired"),
         "recovered run must be tagged with the lease_expired failure category"
     );
-
-    // Best-effort cleanup: let the orphaned executor task's own subsequent
-    // write attempt (which will fail on the now-stale lease) unwind instead
-    // of leaking a parked task for the rest of the process's lifetime.
-    gate.release();
 }

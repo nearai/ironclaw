@@ -5,7 +5,7 @@
 //! by `tests/integration/lease_wedge.rs` to cover lease-expiry recovery of a
 //! wedged in-flight tool call (issue #5476).
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_runtime::{
@@ -15,50 +15,48 @@ use ironclaw_host_runtime::{
     RuntimeStatusRequest, VisibleCapabilityRequest as RuntimeVisibleCapabilityRequest,
     VisibleCapabilitySurface as RuntimeVisibleCapabilitySurface,
 };
-use tokio::sync::oneshot;
+use tokio::sync::watch;
 
 /// Synchronization handle for a [`ParkingHostRuntime`]: the test waits until the
-/// capability dispatch parks, then releases it. Uses `oneshot` (not `Notify`) so
-/// release-before-park and a second `park()` call are both lost-wakeup-free —
-/// `Notify`'s single permit would deadlock the latter. Verbatim mirror of
-/// `scripted_provider::ParkingModelGate`, renamed for the tool-dispatch seam.
+/// capability dispatch parks, then releases it. Uses `watch` (not `oneshot`) so
+/// both signals are level-triggered flags rather than one-shot consumables —
+/// every waiter, including a second/concurrent `wait_until_parked()` call, sees
+/// the same state instead of racing a single `.take()`.
 #[derive(Clone)]
 pub(crate) struct ParkingCapabilityGate(Arc<ParkingState>);
 
 struct ParkingState {
-    parked_tx: Mutex<Option<oneshot::Sender<()>>>,
-    parked_rx: Mutex<Option<oneshot::Receiver<()>>>,
-    release_tx: Mutex<Option<oneshot::Sender<()>>>,
-    release_rx: Mutex<Option<oneshot::Receiver<()>>>,
+    parked_tx: watch::Sender<bool>,
+    parked_rx: watch::Receiver<bool>,
+    release_tx: watch::Sender<bool>,
+    release_rx: watch::Receiver<bool>,
 }
 
 impl ParkingCapabilityGate {
     pub(crate) fn new() -> Self {
-        let (parked_tx, parked_rx) = oneshot::channel();
-        let (release_tx, release_rx) = oneshot::channel();
+        let (parked_tx, parked_rx) = watch::channel(false);
+        let (release_tx, release_rx) = watch::channel(false);
         Self(Arc::new(ParkingState {
-            parked_tx: Mutex::new(Some(parked_tx)),
-            parked_rx: Mutex::new(Some(parked_rx)),
-            release_tx: Mutex::new(Some(release_tx)),
-            release_rx: Mutex::new(Some(release_rx)),
+            parked_tx,
+            parked_rx,
+            release_tx,
+            release_rx,
         }))
     }
 
     /// Await until the parked capability dispatch has signalled it is blocked.
-    /// Returns immediately on any subsequent call (the channel is consumed once).
+    /// Idempotent and safe to call concurrently or repeatedly: each call clones
+    /// its own receiver and checks the current flag before waiting on a change.
     pub(crate) async fn wait_until_parked(&self) {
-        let rx = lock(&self.0.parked_rx).take();
-        if let Some(rx) = rx {
-            rx.await
-                .expect("parking host runtime dropped before signalling parked");
+        let mut rx = self.0.parked_rx.clone();
+        while !*rx.borrow() {
+            let _ = rx.changed().await;
         }
     }
 
     /// Release the parked capability dispatch so it delegates to the inner runtime.
     pub(crate) fn release(&self) {
-        if let Some(tx) = lock(&self.0.release_tx).take() {
-            let _ = tx.send(());
-        }
+        let _ = self.0.release_tx.send(true);
     }
 
     /// Runtime side: signal parked, then block until `release()` fires. A plain
@@ -68,13 +66,10 @@ impl ParkingCapabilityGate {
     /// only to hold the tool call open long enough for the run's real, short-TTL
     /// (test-only) scheduler lease to expire before its own next heartbeat.
     async fn park(&self) {
-        if let Some(tx) = lock(&self.0.parked_tx).take() {
-            let _ = tx.send(());
-        }
-        let rx = lock(&self.0.release_rx).take();
-        if let Some(rx) = rx {
-            rx.await
-                .expect("parking gate dropped before releasing the parked capability dispatch");
+        let _ = self.0.parked_tx.send(true);
+        let mut rx = self.0.release_rx.clone();
+        while !*rx.borrow() {
+            let _ = rx.changed().await;
         }
     }
 }
@@ -83,10 +78,6 @@ impl Default for ParkingCapabilityGate {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Wraps `inner` (the harness's already-composed `Arc<dyn HostRuntime>`, typically
@@ -196,5 +187,25 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), gate.park())
             .await
             .expect("second park() after channels are consumed must return immediately");
+    }
+
+    /// Pins the `watch`-based rewrite's idempotent-wait guarantee: unlike a
+    /// `oneshot` + `.take()`, repeated `wait_until_parked` calls each check the
+    /// current flag rather than consuming a channel, so every call — not just
+    /// the first — correctly observes the park.
+    #[tokio::test]
+    async fn wait_until_parked_is_idempotent_across_repeated_calls() {
+        let gate = ParkingCapabilityGate::new();
+        let park_gate = gate.clone();
+        tokio::spawn(async move { park_gate.park().await });
+
+        tokio::time::timeout(Duration::from_secs(5), gate.wait_until_parked())
+            .await
+            .expect("first wait_until_parked call must observe the park");
+        tokio::time::timeout(Duration::from_secs(5), gate.wait_until_parked())
+            .await
+            .expect("second wait_until_parked call must also observe the park");
+
+        gate.release();
     }
 }
