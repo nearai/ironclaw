@@ -52,10 +52,10 @@ use ironclaw_turns::{
     RunProfileResolver, TurnId, TurnRunId, TurnScope, TurnStateStore,
     run_profile::{
         AgentLoopHostError, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-        InMemoryLoopHostMilestoneSink, InstructionSafetyContext, LoopCancelReasonKind,
-        LoopModelBudgetAccountant, LoopModelPolicyGuard, LoopRunContext, NoOpBudgetAccountant,
-        NoOpPolicyGuard, PromptMode, ProviderToolCall, RegisterProviderToolCallRequest,
-        VisibleCapabilityRequest,
+        EmptyMemoryPromptContextService, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
+        LoopCancelReasonKind, LoopModelBudgetAccountant, LoopModelPolicyGuard, LoopRunContext,
+        NoOpBudgetAccountant, NoOpPolicyGuard, PromptMode, ProviderToolCall,
+        RegisterProviderToolCallRequest, VisibleCapabilityRequest,
     },
 };
 
@@ -1349,6 +1349,7 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
         input_queue: Some(adapters.input_queue),
         identity_context_source: adapters.identity_context_source,
         user_profile_source: Arc::new(EmptyUserProfileSource),
+        memory_context_source: Arc::new(EmptyMemoryPromptContextService),
         model_policy_guard: Some(adapters.model_policy_guard),
         model_budget_accountant: Some(adapters.model_budget_accountant),
         safety_context: Some(adapters.safety_context),

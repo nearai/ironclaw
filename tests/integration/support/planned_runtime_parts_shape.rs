@@ -75,6 +75,7 @@ where
         attachment_read_port,
         input_queue,
         identity_context_source: _,
+        memory_context_source: _,
         user_profile_source: _,
         model_policy_guard,
         model_budget_accountant,

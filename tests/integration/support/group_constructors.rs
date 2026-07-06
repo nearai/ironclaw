@@ -105,6 +105,15 @@ impl RebornIntegrationGroup {
         Self::builder().profile_tools().await
     }
 
+    /// Group whose ONLY capability is `builtin.memory_write`
+    /// (W4-MEMCTX-ENVELOPE seam). Auto-approve is enabled. Unlike
+    /// `builtin_tools()`, this group's runtime wires a real
+    /// `MemoryPromptContextService` over the harness's local-dev filesystem,
+    /// so a seeded write reaches a later turn's system prompt.
+    pub async fn memory_context_tools() -> HarnessResult<Self> {
+        Self::builder().memory_context_tools().await
+    }
+
     /// Group with trigger-management tools
     /// (trigger_create/list/pause/resume/remove). Auto-approve is enabled for
     /// all capability ids in the group scope so the `Ask`-mode verbs dispatch
@@ -320,6 +329,25 @@ impl RebornIntegrationGroupBuilder {
         // through `build_with_capability`.
         let host_runtime = build_group_capability_with_base(
             super::super::harness::profiles::profile::profile_tools_profile()?,
+            &base,
+        )
+        .await?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.into_group(base, capability).await
+    }
+
+    /// Build a memory-context-tools group. See
+    /// [`RebornIntegrationGroup::memory_context_tools`].
+    pub async fn memory_context_tools(self) -> HarnessResult<RebornIntegrationGroup> {
+        let base = self.build_base().await?;
+        // Align `builtin.memory_write`'s executor to the canonical subject user
+        // (mirrors `profile_tools`) — otherwise a write and the prompt-context
+        // read-back resolve under different users, since the harness's fixed
+        // capability-dispatch user_id is otherwise independent of the run's
+        // binding-actor scope `ThreadBackedLoopContextPort` resolves memory
+        // recall against.
+        let host_runtime = build_group_capability_with_base(
+            super::super::harness::profiles::memory_context::memory_context_tools_profile()?,
             &base,
         )
         .await?;

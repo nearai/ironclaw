@@ -46,11 +46,16 @@
 //!     store) split into its trait facets, for driving the real Slack
 //!     pairing/actor-resolution services instead of a fake (W5-SLACK-PAIR
 //!     seam). Only compiled under `slack-v2-host-beta`.
+//! 13. [`memory_context`] — `build_memory_context_source_for_test`, the
+//!     production `MemoryPromptContextService` match (real filesystem-backed
+//!     service vs. empty no-op) for wiring memory-recall prompt injection into
+//!     the integration harness's single planned runtime.
 
 mod automation;
 mod budget_gateway;
 mod durable;
 mod local_dev_boot;
+mod memory_context;
 mod oauth_product_auth;
 mod outbound_delivery;
 mod project_create;
@@ -82,6 +87,8 @@ pub use local_dev_boot::{
     build_default_local_dev_database_roots_for_test,
     build_local_dev_approval_gate_evidence_for_test, mount_local_dev_database_roots_for_test,
 };
+#[cfg(feature = "test-support")]
+pub use memory_context::build_memory_context_source_for_test;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use oauth_product_auth::build_google_oauth_product_auth_for_test;
 pub use oauth_product_auth::{

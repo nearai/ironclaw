@@ -472,6 +472,10 @@ name = "reborn_integration_identity_resolution_smoke"
 path = "tests/integration/identity_resolution_smoke.rs"
 
 [[test]]
+name = "reborn_integration_memory_prompt_context"
+path = "tests/integration/memory_prompt_context.rs"
+
+[[test]]
 name = "reborn_integration_mcp"
 path = "tests/integration/mcp.rs"
 

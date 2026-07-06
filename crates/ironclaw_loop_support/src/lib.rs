@@ -133,7 +133,7 @@ use ironclaw_threads::{
     ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
-    LoopGateRef, LoopMessageRef, TurnId, TurnRunId, TurnScope,
+    LoopGateRef, LoopMessageRef, TurnActor, TurnId, TurnRunId, TurnScope,
     run_profile::ModelProfileId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
@@ -145,8 +145,9 @@ use ironclaw_turns::{
         LoopContextPort, LoopContextRequest, LoopDriverNoteKind, LoopHostMilestoneEmitter,
         LoopHostMilestoneSink, LoopInputCursor, LoopModelMessage, LoopModelPort, LoopModelRequest,
         LoopModelResponse, LoopModelUsage, LoopPromptBundleAuthority, LoopRunContext,
-        LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput,
-        PromptMode, UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, MemoryPromptContextRequest,
+        MemoryPromptContextService, ModelStreamChunk, ParentLoopOutput, PromptMode,
+        UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
         sanitize_model_visible_text, sort_instruction_snippets_for_prompt,
     },
 };
@@ -154,6 +155,10 @@ use serde::{Deserialize, Serialize};
 
 const EMPTY_SURFACE_VERSION: &str = "empty:v1";
 const LOOP_SYSTEM_ROLE: &str = "system";
+/// Upper bound on memory snippets admitted into one loop context bundle.
+/// Not yet caller-configurable — no composition site has needed a different
+/// value; revisit if one does.
+const DEFAULT_MEMORY_CONTEXT_MAX_SNIPPETS: usize = 5;
 
 pub fn raw_agent_loop_host_error(
     component: &'static str,
@@ -205,6 +210,7 @@ where
     max_messages: usize,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
+    memory_context_source: Option<Arc<dyn MemoryPromptContextService>>,
     identity_budget: IdentityBudget,
     prompt_context_budget: PromptContextTokenBudget,
     context_window_cache: Option<Arc<ThreadContextWindowCache>>,
@@ -272,6 +278,7 @@ where
             max_messages,
             skill_context_source: None,
             identity_context_source: None,
+            memory_context_source: None,
             identity_budget: IdentityBudget::default(),
             prompt_context_budget: PromptContextTokenBudget::default(),
             context_window_cache: None,
@@ -290,6 +297,14 @@ where
         source: Arc<dyn HostIdentityContextSource>,
     ) -> Self {
         self.identity_context_source = Some(source);
+        self
+    }
+
+    pub fn with_memory_context_source(
+        mut self,
+        source: Arc<dyn MemoryPromptContextService>,
+    ) -> Self {
+        self.memory_context_source = Some(source);
         self
     }
 
@@ -383,6 +398,30 @@ where
             }
             None => Vec::new(),
         };
+        let memory_snippets = match self.memory_context_source.as_deref() {
+            Some(source) => match latest_user_message_query(&context.messages) {
+                Some(query) => {
+                    let actor = self.run_context.actor().cloned().unwrap_or_else(|| {
+                        TurnActor::new(self.run_context.scope.to_resource_scope().user_id)
+                    });
+                    source
+                        .load_memory_snippets(MemoryPromptContextRequest {
+                            scope: self.run_context.scope.clone(),
+                            actor,
+                            query,
+                            max_snippets: DEFAULT_MEMORY_CONTEXT_MAX_SNIPPETS,
+                            context_profile_id: self
+                                .run_context
+                                .resolved_run_profile
+                                .context_profile_id
+                                .clone(),
+                        })
+                        .await?
+                }
+                None => Vec::new(),
+            },
+            None => Vec::new(),
+        };
 
         let compaction_message_index = context
             .messages
@@ -402,7 +441,7 @@ where
                 .collect(),
             compaction_message_index,
             instruction_snippets,
-            memory_snippets: Vec::new(),
+            memory_snippets,
         })
     }
 }
@@ -1838,6 +1877,18 @@ fn history_summaries_by_ref(summaries: Vec<SummaryArtifact>) -> HashMap<String, 
                 .map(|message_ref| (message_ref.as_str().to_string(), context_message))
         })
         .collect()
+}
+
+/// Search query for memory recall: the most recent user-authored message in
+/// the loaded context window, or `None` if the window has no user message
+/// (nothing to search for — the caller must skip the memory lookup entirely).
+fn latest_user_message_query(messages: &[ContextMessage]) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .find(|message| message.kind == MessageKind::User)
+        .map(|message| message.content.trim().to_string())
+        .filter(|content| !content.is_empty())
 }
 
 fn context_message_to_compaction_metadata(

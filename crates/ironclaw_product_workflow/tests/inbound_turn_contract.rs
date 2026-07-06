@@ -51,9 +51,9 @@ use ironclaw_turns::{
     TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId, TurnRunState, TurnRunWake,
     TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
-        AgentLoopHostError, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
-        LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken, LoopInputCursorToken,
-        LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard, PromptMode,
+        AgentLoopHostError, EmptyMemoryPromptContextService, InMemoryLoopHostMilestoneSink,
+        InstructionSafetyContext, LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken,
+        LoopInputCursorToken, LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard, PromptMode,
     },
 };
 use tokio::time::{sleep, timeout};
@@ -696,6 +696,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         input_queue: Some(Arc::new(EmptyInputQueue)),
         identity_context_source: Arc::new(EmptyIdentityContextSource),
         user_profile_source: Arc::new(EmptyUserProfileSource),
+        memory_context_source: Arc::new(EmptyMemoryPromptContextService),
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
@@ -866,6 +867,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         input_queue: Some(Arc::new(EmptyInputQueue)),
         identity_context_source: Arc::new(EmptyIdentityContextSource),
         user_profile_source: Arc::new(EmptyUserProfileSource),
+        memory_context_source: Arc::new(EmptyMemoryPromptContextService),
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
@@ -1048,6 +1050,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         input_queue: Some(Arc::new(EmptyInputQueue)),
         identity_context_source: Arc::new(EmptyIdentityContextSource),
         user_profile_source: Arc::new(EmptyUserProfileSource),
+        memory_context_source: Arc::new(EmptyMemoryPromptContextService),
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),

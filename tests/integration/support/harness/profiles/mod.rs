@@ -4,6 +4,7 @@ pub(crate) mod core_builtin;
 pub(crate) mod extension;
 pub(crate) mod file;
 pub(crate) mod github;
+pub(crate) mod memory_context;
 pub(crate) mod mock_mcp;
 pub(crate) mod outbound;
 pub(crate) mod process;

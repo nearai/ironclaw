@@ -403,6 +403,11 @@ fn profile_capability_ids_by_domain() -> HarnessResult<Vec<(&'static str, Vec<St
             "github",
             ids_of(profiles::github::file_and_github_auth_tools_profile()?),
         ),
+        // memory_context_tools_profile() (harness/profiles/memory_context.rs).
+        (
+            "memory_context",
+            ids_of(profiles::memory_context::memory_context_tools_profile()?),
+        ),
         // mock_mcp: SYNTHETIC_CAPABILITY_SKIP_LIST.
         ("mock_mcp", vec![]),
         // outbound_target_tools_profile(): SYNTHETIC_CAPABILITY_SKIP_LIST.
@@ -468,8 +473,8 @@ fn harness_profile_capability_ids_are_a_production_subset() {
     let rows = profile_capability_ids_by_domain().expect("profile constructors build");
     assert_eq!(
         rows.len(),
-        16,
-        "expected exactly the 16 harness/profiles/*.rs domains named in the module doc"
+        17,
+        "expected exactly the 17 harness/profiles/*.rs domains named in the module doc"
     );
     for (domain, ids) in &rows {
         for id in ids {

@@ -73,8 +73,8 @@ use ironclaw_turns::{
         LoopModelPolicyGuard, LoopModelPort, LoopModelRequest, LoopModelResponse,
         LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
         LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopRunInfoPort,
-        LoopRuntimeContext, LoopTranscriptPort, NoOpBudgetAccountant, NoOpPolicyGuard,
-        ProviderToolCall, ProviderToolDefinition, RegisterProviderToolCallRequest,
+        LoopRuntimeContext, LoopTranscriptPort, MemoryPromptContextService, NoOpBudgetAccountant,
+        NoOpPolicyGuard, ProviderToolCall, ProviderToolDefinition, RegisterProviderToolCallRequest,
         RunScopedHookMilestoneSink, StageCheckpointPayloadRequest, SystemInferencePort,
         UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
@@ -963,6 +963,7 @@ where
     event_subscription: Option<EventTriggeredHookSubscription>,
     safety_context: InstructionSafetyContext,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
+    memory_context_source: Option<Arc<dyn MemoryPromptContextService>>,
     /// Per-run user agent-context profile source. Resolved once at loop start;
     /// result is stamped into `LoopRuntimeContext.user_profile`. Defaults to
     /// `EmptyUserProfileSource` (returns `None`) so callers that do not wire a
@@ -1033,6 +1034,7 @@ where
             event_subscription: None,
             safety_context,
             identity_context_source: None,
+            memory_context_source: None,
             user_profile_source: Arc::new(EmptyUserProfileSource),
             communication_context_provider: None,
             input_queue: None,
@@ -1312,6 +1314,14 @@ where
         self
     }
 
+    pub fn with_memory_context_source(
+        mut self,
+        source: Arc<dyn MemoryPromptContextService>,
+    ) -> Self {
+        self.memory_context_source = Some(source);
+        self
+    }
+
     /// Installs the per-user profile source. The source is resolved once at
     /// loop start; its result is stamped into `LoopRuntimeContext.user_profile`
     /// so the model sees the user's timezone/locale/location every turn.
@@ -1446,6 +1456,9 @@ where
         }
         if let Some(source) = self.identity_context_source.as_ref() {
             context_adapter = context_adapter.with_identity_context_source(source.clone());
+        }
+        if let Some(source) = self.memory_context_source.as_ref() {
+            context_adapter = context_adapter.with_memory_context_source(source.clone());
         }
         context_adapter = context_adapter.with_milestone_sink(Arc::clone(&self.milestone_sink));
         let context: Arc<dyn LoopContextPort> = Arc::new(context_adapter);
