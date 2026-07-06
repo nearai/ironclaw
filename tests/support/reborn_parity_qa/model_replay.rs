@@ -371,11 +371,21 @@ impl RebornTraceReplayModelGateway {
             .iter()
             .position(|step| step.matches_request(&request))
         else {
+            eprintln!(
+                "trace replay has no matching step; request metadata: {}; remaining steps: {}",
+                request_metadata_summary(&request),
+                state
+                    .steps
+                    .iter()
+                    .map(replay_step_summary)
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            );
             return Err(HostManagedModelError::safe(
                 HostManagedModelErrorKind::Unavailable,
                 format!(
-                    "trace replay has no matching step for request messages: {}",
-                    request_message_summary(&request)
+                    "trace replay has no matching step for request metadata: {}",
+                    request_metadata_summary(&request)
                 ),
             ));
         };
@@ -439,16 +449,43 @@ impl ReplayStep {
     }
 }
 
-fn request_message_summary(request: &HostManagedModelRequest) -> String {
-    request
+fn request_metadata_summary(request: &HostManagedModelRequest) -> String {
+    let roles = request
         .messages
         .iter()
-        .map(|message| {
-            let snippet = message.content.chars().take(80).collect::<String>();
-            format!("{:?}:{snippet}", message.role)
-        })
+        .map(|message| format!("{:?}", message.role))
         .collect::<Vec<_>>()
-        .join(" | ")
+        .join(",");
+    format!(
+        "messages={},roles=[{}],surface_version_present={},resolved_route_present={}",
+        request.messages.len(),
+        roles,
+        request.surface_version.is_some(),
+        request.resolved_model_route.is_some()
+    )
+}
+
+fn replay_step_summary(step: &ReplayStep) -> String {
+    let output = match &step.output {
+        ReplayOutput::Response(_) => "response",
+        ReplayOutput::AssertProviderToolsThenResponse { .. } => {
+            "assert_provider_tools_then_response"
+        }
+        ReplayOutput::AssertProviderToolsThenProviderToolCalls { .. } => {
+            "assert_provider_tools_then_provider_tool_calls"
+        }
+        ReplayOutput::DelayedResponse { .. } => "delayed_response",
+        ReplayOutput::ProviderToolCalls(_) => "provider_tool_calls",
+    };
+    let request_contains = step
+        .request_contains
+        .as_ref()
+        .map(|value| format!("redacted:{} chars", value.chars().count()))
+        .unwrap_or_else(|| "any".to_string());
+    format!(
+        "{output}(request_contains={request_contains}, expected_tool_results={})",
+        step.expected_tool_results.len()
+    )
 }
 
 async fn provider_tool_calls_response(

@@ -11,15 +11,17 @@ use std::sync::{
 use async_trait::async_trait;
 use ironclaw_host_api::{CapabilityId, ExtensionId, ProviderToolName, RuntimeKind};
 use ironclaw_host_runtime::READ_FILE_CAPABILITY_ID;
-use ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID;
+use ironclaw_loop_support::{
+    DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, build_spawn_subagent_parameters_schema,
+};
 use ironclaw_turns::{
     LoopGateRef,
     run_profile::{
-        AgentLoopHostError, CapabilityBatchInvocation, CapabilityBatchOutcome,
-        CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
-        CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, CapabilitySurfaceVersion,
-        ConcurrencyHint, LoopCapabilityPort, ProviderToolCallReplay, ProviderToolDefinition,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
+        CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityDescriptorView,
+        CapabilityInputRef, CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage,
+        CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, ProviderToolCallReplay,
+        ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 use serde_json::json;
@@ -27,6 +29,7 @@ use serde_json::json;
 pub(crate) const TEST_CAPABILITY_ID: &str = "test.echo";
 pub(crate) const TEST_CAPABILITY_SURFACE_VERSION: &str = "trace_replay_v1";
 const SUBAGENT_ALLOWED_TEST_TOOL_NAME: &str = "test_read_file";
+const SPAWN_SUBAGENT_PROVIDER_TOOL_NAME: &str = "builtin__spawn_subagent";
 
 #[derive(Clone)]
 pub struct RecordingTestCapabilityPort {
@@ -106,6 +109,30 @@ impl RecordingTestCapabilityPort {
         }
     }
 
+    pub(crate) fn exposes_spawn_subagent(&self) -> bool {
+        self.expose_spawn_subagent
+    }
+
+    fn spawn_subagent_capability_id() -> CapabilityId {
+        CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).expect("valid capability id")
+    }
+
+    fn capability_id_for_provider_tool(
+        &self,
+        tool_name: &ProviderToolName,
+    ) -> Result<CapabilityId, AgentLoopHostError> {
+        if tool_name.as_str() == self.primary_tool_name() {
+            return Ok(self.primary_capability_id());
+        }
+        if self.expose_spawn_subagent && tool_name.as_str() == SPAWN_SUBAGENT_PROVIDER_TOOL_NAME {
+            return Ok(Self::spawn_subagent_capability_id());
+        }
+        Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            format!("provider tool call {tool_name} is outside the visible capability surface"),
+        ))
+    }
+
     pub(crate) fn invocations(&self) -> Vec<CapabilityInvocation> {
         self.invocations.lock().unwrap().clone()
     }
@@ -117,10 +144,7 @@ impl RecordingTestCapabilityPort {
     pub(crate) fn capability_allowlist(&self) -> Vec<CapabilityId> {
         let mut allowlist = vec![self.primary_capability_id()];
         if self.expose_spawn_subagent {
-            allowlist.push(
-                CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
-                    .expect("valid capability id"),
-            );
+            allowlist.push(Self::spawn_subagent_capability_id());
         }
         allowlist
     }
@@ -142,7 +166,7 @@ impl RecordingTestCapabilityPort {
 #[async_trait]
 impl LoopCapabilityPort for RecordingTestCapabilityPort {
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
-        let definitions = vec![ProviderToolDefinition {
+        let mut definitions = vec![ProviderToolDefinition {
             capability_id: self.primary_capability_id(),
             name: ProviderToolName::new(self.primary_tool_name()).expect("provider tool name"),
             description: "Echo a test payload".to_string(),
@@ -153,6 +177,15 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
                 }
             }),
         }];
+        if self.expose_spawn_subagent {
+            definitions.push(ProviderToolDefinition {
+                capability_id: Self::spawn_subagent_capability_id(),
+                name: ProviderToolName::new(SPAWN_SUBAGENT_PROVIDER_TOOL_NAME)
+                    .expect("provider tool name"),
+                description: "Spawn a child subagent run and wait for its result".to_string(),
+                parameters: build_spawn_subagent_parameters_schema(&[]),
+            });
+        }
         Ok(definitions)
     }
 
@@ -161,7 +194,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
         request: ironclaw_turns::run_profile::RegisterProviderToolCallRequest,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
         let call = request.tool_call;
-        let capability_id = self.primary_capability_id();
+        let capability_id = self.capability_id_for_provider_tool(&call.name)?;
         Ok(CapabilityCallCandidate {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)
@@ -188,7 +221,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
         &self,
         _request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-        let descriptors = vec![CapabilityDescriptorView {
+        let mut descriptors = vec![CapabilityDescriptorView {
             capability_id: self.primary_capability_id(),
             provider: Some(ExtensionId::new("test").expect("valid provider")),
             runtime: RuntimeKind::FirstParty,
@@ -197,6 +230,17 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
             concurrency_hint: ConcurrencyHint::SafeForParallel,
             parameters_schema: json!({"type": "object"}),
         }];
+        if self.expose_spawn_subagent {
+            descriptors.push(CapabilityDescriptorView {
+                capability_id: Self::spawn_subagent_capability_id(),
+                provider: None,
+                runtime: RuntimeKind::FirstParty,
+                safe_name: DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID.to_string(),
+                safe_description: "Spawn a child subagent run and wait for its result".to_string(),
+                concurrency_hint: ConcurrencyHint::Exclusive,
+                parameters_schema: build_spawn_subagent_parameters_schema(&[]),
+            });
+        }
         Ok(VisibleCapabilitySurface {
             version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)
                 .expect("valid surface version"),
