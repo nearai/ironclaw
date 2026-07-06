@@ -34,6 +34,11 @@ function messageListSourceForTest() {
   return `${lines.join("\n")}
 globalThis.__testExports = {
   BOTTOM_FOLLOW_THRESHOLD_PX,
+  FLOATING_CONTROL_BOTTOM_OFFSET_PX,
+  FLOATING_CONTROL_SIZE_PX,
+  FLOATING_CONTROL_SPACER_HEIGHT_PX,
+  FLOATING_CONTROL_STYLE,
+  FLOATING_CONTROL_SPACER_STYLE,
   distanceFromBottom,
   isNearBottom,
   scrollToBottom,
@@ -169,6 +174,14 @@ test("MessageList observes content growth from streamed markdown layout", () => 
 });
 
 test("MessageList renders a floating thread logs shortcut", () => {
+  const {
+    FLOATING_CONTROL_BOTTOM_OFFSET_PX,
+    FLOATING_CONTROL_SIZE_PX,
+    FLOATING_CONTROL_SPACER_HEIGHT_PX,
+    FLOATING_CONTROL_STYLE,
+    FLOATING_CONTROL_SPACER_STYLE,
+  } = loadHelpers();
+
   assert.match(
     messageListSource,
     /import \{ Link \} from "react-router";/,
@@ -191,17 +204,36 @@ test("MessageList renders a floating thread logs shortcut", () => {
   );
   assert.match(
     messageListSource,
-    /\$\{logsPath &&\s+html`<div aria-hidden="true" className="hidden h-14 shrink-0 sm:block" \/>`\}/,
-    "floating controls should reserve space with an end-of-content spacer only when the desktop logs button is visible",
+    /<div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">/,
+    "message-list should keep the transcript area as the floating-control anchor",
+  );
+  assert.doesNotMatch(
+    messageListSource,
+    /bottom-\[\$\{|h-\[\$\{|bottom-\[128px\]|h-\[164px\]/,
+    "floating controls should not rely on Tailwind generated arbitrary classes",
+  );
+  assert.equal(FLOATING_CONTROL_BOTTOM_OFFSET_PX, 128);
+  assert.equal(FLOATING_CONTROL_SIZE_PX, 36);
+  assert.equal(
+    FLOATING_CONTROL_SPACER_HEIGHT_PX,
+    FLOATING_CONTROL_BOTTOM_OFFSET_PX + FLOATING_CONTROL_SIZE_PX,
+    "spacer height should track the floating control offset plus control size",
+  );
+  assert.equal(FLOATING_CONTROL_STYLE.bottom, 128);
+  assert.equal(FLOATING_CONTROL_SPACER_STYLE.height, 164);
+  assert.match(
+    messageListSource,
+    /className="hidden shrink-0 sm:block"[\s\S]*style=\$\{FLOATING_CONTROL_SPACER_STYLE\}/,
+    "floating logs control should reserve style-driven end-of-content space only when the desktop logs button is visible",
   );
   assert.match(
     messageListSource,
-    /const FLOATING_LOGS_BUTTON_CLASS =[\s\S]*group absolute bottom-5 right-5 z-10 hidden size-9[\s\S]*border-\[color-mix\(in_srgb,var\(--v2-accent\)_28%,var\(--v2-panel-border\)\)\][\s\S]*bg-\[color-mix\(in_srgb,var\(--v2-surface\)_88%,var\(--v2-accent\)_12%\)\][\s\S]*sm:inline-flex/,
+    /const FLOATING_LOGS_BUTTON_CLASS =[\s\S]*group absolute right-5 z-10 hidden size-9[\s\S]*border-\[color-mix\(in_srgb,var\(--v2-accent\)_28%,var\(--v2-panel-border\)\)\][\s\S]*bg-\[color-mix\(in_srgb,var\(--v2-surface\)_88%,var\(--v2-accent\)_12%\)\][\s\S]*sm:inline-flex/,
     "floating logs button should be hidden on mobile and restore the desktop control at sm",
   );
   assert.match(
     messageListSource,
-    /<\$\{Link\}\s+to=\$\{logsPath\}[\s\S]*className=\$\{FLOATING_LOGS_BUTTON_CLASS\}[\s\S]*<\$\{Icon\} name="logs"/,
+    /<\$\{Link\}\s+to=\$\{logsPath\}[\s\S]*className=\$\{FLOATING_LOGS_BUTTON_CLASS\}[\s\S]*style=\$\{FLOATING_CONTROL_STYLE\}[\s\S]*<\$\{Icon\} name="logs"/,
     "thread logs shortcut should render as a visible bottom-right icon button",
   );
   assert.match(
@@ -211,7 +243,7 @@ test("MessageList renders a floating thread logs shortcut", () => {
   );
   assert.match(
     messageListSource,
-    /className="absolute bottom-4 left-1\/2 z-10 inline-flex max-w-\[calc\(100%-2rem\)\][\s\S]*items-center gap-1\.5 whitespace-nowrap rounded-full border border-\[var\(--v2-panel-border\)\][\s\S]*bg-\[var\(--v2-surface\)\] px-3 py-1\.5 text-xs font-medium text-\[var\(--v2-text-strong\)\][\s\S]*shadow-\[0_10px_30px_-12px_rgba\(0,0,0,0\.7\)\]/,
-    "jump-to-latest should use the same pill style on mobile and desktop",
+    /const JUMP_TO_BOTTOM_BUTTON_CLASS =[\s\S]*absolute left-1\/2 z-10 inline-flex max-w-\[calc\(100%-2rem\)\][\s\S]*items-center gap-1\.5 whitespace-nowrap rounded-full border border-\[var\(--v2-panel-border\)\][\s\S]*bg-\[var\(--v2-surface\)\] px-3 py-1\.5 text-xs font-medium text-\[var\(--v2-text-strong\)\][\s\S]*className=\$\{JUMP_TO_BOTTOM_BUTTON_CLASS\}[\s\S]*style=\$\{FLOATING_CONTROL_STYLE\}/,
+    "jump-to-latest should keep the pill style while using the composer-safe floating offset",
   );
 });
