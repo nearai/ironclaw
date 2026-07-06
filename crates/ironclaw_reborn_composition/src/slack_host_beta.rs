@@ -920,13 +920,40 @@ fn build_slack_installation_resolver_with_resolvers(
     subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>>,
 ) -> Result<Arc<StaticSlackInstallationResolver>, SlackHostBetaBuildError> {
     let parts = SlackHostBetaRuntimeParts::from_runtime(runtime)?;
+    // Sync/test entrypoint: no async context to rehydrate a durable store, so
+    // bindings are in-memory here. Production Slack traffic flows through the
+    // async `runtime_setup` path, which supplies the durable store.
     let record = build_slack_installation_record_with_resolvers(
         &parts,
         config,
         actor_user_resolver,
         subject_route_resolver,
+        SlackConversationServices::from_shared(Arc::new(InMemoryConversationServices::default())),
     )?;
     Ok(Arc::new(StaticSlackInstallationResolver::new([record])))
+}
+
+/// The conversation binding + actor-pairing services backing a Slack
+/// installation. Both handles share one backing store: production (async)
+/// wiring supplies a durable filesystem-backed store that survives process
+/// restarts, while the sync/test path supplies an in-memory one.
+pub(crate) struct SlackConversationServices {
+    binding: Arc<dyn ironclaw_conversations::ConversationBindingService>,
+    pairing: Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
+}
+
+impl SlackConversationServices {
+    pub(crate) fn from_shared<S>(services: Arc<S>) -> Self
+    where
+        S: ironclaw_conversations::ConversationBindingService
+            + ironclaw_conversations::ConversationActorPairingService
+            + 'static,
+    {
+        Self {
+            binding: services.clone(),
+            pairing: services,
+        }
+    }
 }
 
 fn build_slack_installation_record_with_resolvers(
@@ -934,13 +961,11 @@ fn build_slack_installation_record_with_resolvers(
     config: SlackHostBetaConfig,
     actor_user_resolver: Arc<dyn ProductActorUserResolver>,
     subject_route_resolver: Option<Arc<dyn ProductConversationSubjectRouteResolver>>,
+    conversation_services: SlackConversationServices,
 ) -> Result<SlackInstallationRecord, SlackHostBetaBuildError> {
     // The resolver controls inbound Slack actor binding. `config.user_id`
     // scopes host-mediated Slack bot-token egress and shared-route fallback
     // mapping. Shared Slack channel execution is configured separately.
-    tracing::warn!(
-        "Slack host-beta uses in-memory conversation bindings; Slack conversation binding continuity is lost on process restart"
-    );
     let adapter_id = ProductAdapterId::new(SLACK_V2_ADAPTER_ID)
         .map_err(|reason| invalid_config("adapter_id", reason.to_string()))?;
     let token_handle = slack_bot_token_handle()?;
@@ -951,11 +976,10 @@ fn build_slack_installation_record_with_resolvers(
         auth_requirement: slack_request_signature_auth_requirement(),
     }));
 
-    let conversations = Arc::new(InMemoryConversationServices::default());
-    let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
-        conversations.clone();
-    let actor_pairings: Arc<dyn ironclaw_conversations::ConversationActorPairingService> =
-        conversations.clone();
+    let SlackConversationServices {
+        binding: conversation_port,
+        pairing: actor_pairings,
+    } = conversation_services;
     let mut scope = ProductInstallationScope::with_default_scope(
         config.tenant_id.clone(),
         config.agent_id.clone(),

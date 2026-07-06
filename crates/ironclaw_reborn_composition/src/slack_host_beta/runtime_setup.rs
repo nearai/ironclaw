@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use ironclaw_conversations::RebornFilesystemConversationServices;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId};
 use ironclaw_outbound::TriggeredRunDeliveryStore;
 use ironclaw_product_adapters::{AdapterInstallationId, EgressCredentialHandle};
@@ -49,12 +50,12 @@ use crate::slack_setup::{
 };
 
 use super::{
-    ProvisioningSlackPersonalUserBinder, SlackHostBetaActorUserResolver, SlackHostBetaBuildError,
-    SlackHostBetaConfig, SlackHostBetaConfigInput, SlackHostBetaMounts, SlackHostBetaRuntimeConfig,
-    SlackHostBetaRuntimeParts, SlackPersonalConnectionScope, SlackPersonalConnectionScopeResolver,
-    SlackPersonalDmTargetProvisioning, build_slack_installation_record_with_resolvers,
-    build_triggered_run_delivery_hook_from_parts, slack_bot_token_handle,
-    slack_protocol_egress_from_parts,
+    ProvisioningSlackPersonalUserBinder, SlackConversationServices, SlackHostBetaActorUserResolver,
+    SlackHostBetaBuildError, SlackHostBetaConfig, SlackHostBetaConfigInput, SlackHostBetaMounts,
+    SlackHostBetaRuntimeConfig, SlackHostBetaRuntimeParts, SlackPersonalConnectionScope,
+    SlackPersonalConnectionScopeResolver, SlackPersonalDmTargetProvisioning,
+    build_slack_installation_record_with_resolvers, build_triggered_run_delivery_hook_from_parts,
+    slack_bot_token_handle, slack_protocol_egress_from_parts,
 };
 
 pub(super) async fn build_runtime_mounts(
@@ -647,11 +648,24 @@ impl DynamicSlackInstallationResolver {
                 config.installation_id.clone(),
                 Arc::clone(&self.channel_route_store),
             ));
+        // Durable, filesystem-backed conversation binding store so Slack
+        // conversation continuity survives a process restart. Backend
+        // (libSQL / Postgres / local disk) is a property of the host-state
+        // root filesystem, shared with the idempotency ledger.
+        let conversations = RebornFilesystemConversationServices::new(Arc::clone(
+            &self.parts.local_runtime.host_state_filesystem,
+        ))
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "Slack durable conversation store unavailable");
+            SlackIngressError::InstallationNotFound
+        })?;
         let record = build_slack_installation_record_with_resolvers(
             &self.parts,
             config,
             actor_user_resolver,
             Some(subject_route_resolver),
+            SlackConversationServices::from_shared(Arc::new(conversations)),
         )
         .map_err(map_build_error_to_ingress_not_found(
             "build Slack installation resolver",
