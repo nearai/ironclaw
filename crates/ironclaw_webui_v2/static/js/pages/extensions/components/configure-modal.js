@@ -32,10 +32,13 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
       : extension?.packageRef?.id || "";
   const channelId = extension?.channel || packageId;
   const lifecycleState = extensionLifecycleState(extension);
-  const isSlackChannel = channelId.toLowerCase() === "slack";
+  // Model B: the visible Slack extension is the user-tools package (id `slack`),
+  // not the bot channel (which is hidden operator infrastructure). This flag
+  // gates the tools extension's post-OAuth auto-activate.
+  const isSlackToolsExtension = channelId.toLowerCase() === "slack";
   const handleOauthConfigured = React.useCallback(async () => {
     onClose();
-    if (isSlackChannel && packageId) {
+    if (isSlackToolsExtension && packageId) {
       try {
         await activateExtension({ id: packageId });
       } catch {
@@ -60,7 +63,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
       }
     }
     if (onSaved) onSaved();
-  }, [channelId, extension?.kind, isSlackChannel, onClose, onSaved, packageId, queryClient]);
+  }, [channelId, extension?.kind, isSlackToolsExtension, onClose, onSaved, packageId, queryClient]);
   const oauthMutation = useOauthSetup(extension?.packageRef, {
     onConfigured: handleOauthConfigured,
   });
@@ -108,7 +111,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
     (secret) => (secret.setup?.kind || "manual_token") === "manual_token"
   );
   const isPairingChannel =
-    !isSlackChannel &&
+    !isSlackToolsExtension &&
     isChannelExtensionKind(extension?.kind) &&
     (lifecycleState === "pairing" || lifecycleState === "pairing_required");
   const channelPairingInstructions = t("pairing.instructions");
