@@ -11,6 +11,11 @@
  * WebUI can clear this gate immediately, then projection_update confirms the
  * resumed run state.
  *
+ * While the popup is open we show a spinner ("waiting to authorize"); if the
+ * popup is closed before the gate clears, we surface a "closed before
+ * finishing" notice with a re-open CTA. Completion still arrives via the
+ * completion signal or the resumed-run projection — this is UI feedback only.
+ *
  * Security invariants (issue #4112):
  * - No raw token, PKCE verifier, opaque state, or auth code is ever handled
  *   by this component. The server supplies only an opaque IDP URL.
@@ -25,6 +30,12 @@ import { Button } from "../../../design-system/button.js";
 import { Icon } from "../../../design-system/icons.js";
 import { openAuthPopup } from "../../../lib/product-auth-oauth-events.js";
 import { AuthGateShell } from "./auth-gate-shell.js";
+
+// After a popup closes we wait briefly before flagging it as abandoned: a
+// successful callback closes the popup itself, and the gate then clears via
+// the completion signal / resumed-run projection. This grace window avoids a
+// "closed before finishing" flash on a normal success.
+const CLOSED_NOTICE_GRACE_MS = 1500;
 
 // User-facing names for OAuth provider ids. The gate payload carries the raw
 // provider id (e.g. `slack_personal`), which must never leak into copy —
@@ -49,6 +60,10 @@ export function AuthOauthCard({ gate, onCancel }) {
   const t = useT();
   const [opened, setOpened] = React.useState(false);
   const [error, setError] = React.useState("");
+  const [closedNotice, setClosedNotice] = React.useState(false);
+  // Bumped on every open so the close-watcher effect restarts for the new popup.
+  const [watchNonce, setWatchNonce] = React.useState(0);
+  const popupRef = React.useRef(null);
   const hasHttpsAuthorizationUrl = React.useMemo(() => {
     if (!gate.authorizationUrl) return false;
     try {
@@ -57,9 +72,32 @@ export function AuthOauthCard({ gate, onCancel }) {
       return false;
     }
   }, [gate.authorizationUrl]);
+
+  // Reset transient UI when the gate changes (new run / new flow).
   React.useEffect(() => {
     setError("");
+    setOpened(false);
+    setClosedNotice(false);
   }, [gate.authorizationUrl, gate.gateRef, gate.runId]);
+
+  // While a popup is open, watch for it closing. On close, wait a grace period
+  // (the callback closes the popup on success too) before surfacing the
+  // "closed before finishing" notice.
+  React.useEffect(() => {
+    if (!watchNonce) return undefined;
+    let graceTimer = null;
+    const poll = window.setInterval(() => {
+      const popup = popupRef.current;
+      if (popup && popup.closed) {
+        window.clearInterval(poll);
+        graceTimer = window.setTimeout(() => setClosedNotice(true), CLOSED_NOTICE_GRACE_MS);
+      }
+    }, 500);
+    return () => {
+      window.clearInterval(poll);
+      if (graceTimer) window.clearTimeout(graceTimer);
+    };
+  }, [watchNonce]);
 
   const providerLabel = gate.provider
     ? providerDisplayName(gate.provider)
@@ -83,19 +121,25 @@ export function AuthOauthCard({ gate, onCancel }) {
     // travels via the localStorage/BroadcastChannel contract, which never
     // uses window.opener.
     setError("");
+    setClosedNotice(false);
     const popup = window.open("about:blank", "_blank", "width=600,height=600");
     if (!popup) {
       setError("Authorization popup was blocked.");
       return;
     }
     popup.opener = null;
+    popupRef.current = popup;
     openAuthPopup(gate.authorizationUrl, popup);
     setOpened(true);
+    setWatchNonce((nonce) => nonce + 1);
   }, [gate.authorizationUrl, hasHttpsAuthorizationUrl]);
 
   const openLabel = opened
     ? t("authGate.reopenAuthorization", { provider: providerLabel })
     : t("authGate.openAuthorization", { provider: providerLabel });
+
+  // Popup open and the gate hasn't cleared yet — show the waiting spinner.
+  const awaiting = opened && !closedNotice;
 
   return html`
     <${AuthGateShell}
@@ -117,13 +161,14 @@ export function AuthOauthCard({ gate, onCancel }) {
           className="auth-oauth"
           data-testid="auth-oauth-open"
           variant="primary"
+          loading=${awaiting}
           onClick=${(event) => {
             event.preventDefault();
             openAuth();
           }}
         >
-          <${Icon} name="link" className="h-4 w-4" />
-          ${openLabel}
+          ${!awaiting && html`<${Icon} name="link" className="h-4 w-4" />`}
+          ${awaiting ? t("authGate.authorizing", { provider: providerLabel }) : openLabel}
         <//>
         <${Button}
           type="button"
@@ -143,9 +188,15 @@ export function AuthOauthCard({ gate, onCancel }) {
           ${error}
         </div>
       `}
-      ${opened &&
+      ${closedNotice &&
       html`
-        <p className="mt-2 text-xs text-iron-300">${t("authGate.oauthWaiting")}</p>
+        <div
+          className="mt-3 rounded-md border border-amber-400/25 bg-amber-500/10 px-3 py-2 text-xs text-amber-200"
+          role="status"
+        >
+          The ${providerLabel} authorization window closed before you finished
+          connecting. Re-open it above to try again.
+        </div>
       `}
     <//>
   `;

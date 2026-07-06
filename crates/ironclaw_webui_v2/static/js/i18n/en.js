@@ -198,6 +198,7 @@ registerPack("en", {
   "authGate.openAuthorization": "Open {provider} authorization",
   "authGate.reopenAuthorization": "Re-open {provider} authorization",
   "authGate.oauthWaiting": "Waiting for authorization to complete\u2026 You can close the popup tab once you\u2019ve approved access.",
+  "authGate.authorizing": "Waiting for {provider}\u2026",
   "authGate.expiresAt": "Expires",
   "authGate.oauthProviderFallback": "the provider",
   "authGate.serviceUnavailable": "Service unavailable",

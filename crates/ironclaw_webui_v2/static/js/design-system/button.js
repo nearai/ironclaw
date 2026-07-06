@@ -19,6 +19,7 @@
  */
 import { html } from "../lib/html.js";
 import { cn } from "../utils/cn.js";
+import { Spinner } from "./spinner.js";
 
 /* ── Gradient assets (Tailwind can't express these) ────────────────── */
 
@@ -68,39 +69,6 @@ const VARIANTS = {
     "border border-[rgba(217,101,116,0.6)] bg-transparent text-[#ff6480] " +
     "hover:bg-[rgba(217,101,116,0.08)] active:bg-[rgba(217,101,116,0.14)]",
 };
-
-/* ── Loading spinner ───────────────────────────────────────────────── */
-// Stroke-based ring + rounded arc (cleaner than a filled quarter-glyph),
-// sized to sit inline with the label. `v2-spin` is a 0.8s linear rotation
-// that is suppressed under prefers-reduced-motion.
-
-function Spinner() {
-  return html`
-    <svg
-      className="v2-spin h-4 w-4 shrink-0"
-      viewBox="0 0 24 24"
-      fill="none"
-      role="status"
-      aria-label="Loading"
-    >
-      <circle
-        cx="12"
-        cy="12"
-        r="9"
-        stroke="currentColor"
-        strokeWidth="2.5"
-        className="opacity-25"
-      />
-      <path
-        d="M21 12a9 9 0 0 0-9-9"
-        stroke="currentColor"
-        strokeWidth="2.5"
-        strokeLinecap="round"
-        className="opacity-90"
-      />
-    </svg>
-  `;
-}
 
 /* ── Component ─────────────────────────────────────────────────────── */
 

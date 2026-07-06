@@ -38,11 +38,13 @@ function renderCard({ gate, blockPopup = false } = {}) {
       useCallback: (fn) => fn,
       useMemo: (fn) => fn(),
       useEffect: () => {},
+      useRef: (initial) => ({ current: initial ?? null }),
     },
     useT: () => (key, params) =>
       params ? `${key}:${JSON.stringify(params)}` : key,
     Button() {},
     Icon() {},
+    Spinner() {},
     AuthGateShell() {},
     openAuthPopup: (url, popup) => {
       openAuthPopupCalls.push({ url, popup });
