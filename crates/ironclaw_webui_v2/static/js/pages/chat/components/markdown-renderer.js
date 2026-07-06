@@ -60,14 +60,15 @@ function enhanceCodeBlocks(root, t) {
       return b;
     };
 
-    let wrapped = false;
     const wrapBtn = mkBtn(labels.wrap);
     wrapBtn.dataset.codeBlockRole = "wrap";
     wrapBtn.addEventListener("click", () => {
-      wrapped = !wrapped;
+      const wrapped = pre.dataset.wrapped !== "1";
       pre.dataset.wrapped = wrapped ? "1" : "0";
       pre.style.whiteSpace = wrapped ? "pre-wrap" : "";
-      wrapBtn.textContent = wrapped ? labels.noWrap : labels.wrap;
+      wrapBtn.textContent = wrapped
+        ? wrapBtn.dataset.labelNoWrap || labels.noWrap
+        : wrapBtn.dataset.labelWrap || labels.wrap;
     });
 
     const copyBtn = mkBtn(labels.copy);
@@ -76,8 +77,8 @@ function enhanceCodeBlocks(root, t) {
       try {
         await navigator.clipboard.writeText(codeEl ? codeEl.innerText : pre.innerText);
         copyBtn.dataset.copied = "1";
-        copyBtn.textContent = labels.copied;
-        toast(labels.codeCopied, { tone: "success" });
+        copyBtn.textContent = copyBtn.dataset.labelCopied || labels.copied;
+        toast(copyBtn.dataset.labelCodeCopied || labels.codeCopied, { tone: "success" });
         setTimeout(() => {
           copyBtn.dataset.copied = "0";
           copyBtn.textContent = copyBtn.dataset.labelCopy || labels.copy;
@@ -95,7 +96,6 @@ function enhanceCodeBlocks(root, t) {
       pre.style.maxHeight = `${COLLAPSE_PX}px`;
       pre.style.overflowX = "auto";
       pre.style.overflowY = "hidden";
-      let expanded = false;
       const toggle = document.createElement("button");
       toggle.type = "button";
       toggle.dataset.codeBlockRole = "expand";
@@ -104,11 +104,13 @@ function enhanceCodeBlocks(root, t) {
       toggle.style.cssText =
         "display:block;width:100%;text-align:center;font-family:var(--font-mono,monospace);font-size:11px;color:var(--v2-accent-text);background:var(--v2-surface-soft);border:0;border-top:1px solid var(--v2-panel-border);padding:5px;cursor:pointer";
       toggle.addEventListener("click", () => {
-        expanded = !expanded;
+        const expanded = toggle.dataset.expanded !== "1";
         toggle.dataset.expanded = expanded ? "1" : "0";
         pre.style.maxHeight = expanded ? "none" : `${COLLAPSE_PX}px`;
         pre.style.overflowY = expanded ? "visible" : "hidden";
-        toggle.textContent = expanded ? labels.showLess : labels.showMore;
+        toggle.textContent = expanded
+          ? toggle.dataset.labelShowLess || labels.showLess
+          : toggle.dataset.labelShowMore || labels.showMore;
       });
       wrap.appendChild(toggle);
     }
@@ -129,6 +131,7 @@ function syncCodeBlockLabels(pre, labels) {
   if (copyBtn) {
     copyBtn.dataset.labelCopy = labels.copy;
     copyBtn.dataset.labelCopied = labels.copied;
+    copyBtn.dataset.labelCodeCopied = labels.codeCopied;
     copyBtn.textContent = copyBtn.dataset.copied === "1" ? labels.copied : labels.copy;
   }
   const toggle = frame.querySelector('[data-code-block-role="expand"]');
