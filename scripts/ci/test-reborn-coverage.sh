@@ -5,14 +5,27 @@
 #   - reborn-coverage-summary.sh        (report + --zero-crates modes)
 #   - reborn-coverage-comment.sh        (sticky PR comment upsert via `gh api`)
 #   - reborn-coverage-int-tier-tests.sh (int-tier suite discovery)
+#   - reborn-coverage-ratchet.sh        (coverage-floor ratchet gate)
 #
 # Mirrors test-classify-test-scope.sh: self-contained, locates the
 # scripts-under-test relative to this file's own directory, builds its own
 # fixtures in a mktemp dir, and reports PASS/FAIL per case. Unlike that
 # precedent (which exits on the first failure), this suite runs every case
 # and prints a final summary, exiting non-zero only if something failed —
-# with four scripts and ~25 cases, seeing the full picture in one run beats
-# stopping at the first mismatch.
+# with five scripts and 50 cases (M/A/B/C/D/R sections), seeing the full
+# picture in one run beats stopping at the first mismatch.
+#
+# reborn-coverage-summary.sh and reborn-coverage-ratchet.sh share one lcov-
+# parsing + exemption-filtering + by-crate-aggregation implementation
+# (scripts/ci/lib/reborn_coverage_lcov.py) — the M/A/B/C sections below are
+# this module's regression proof (exercised transitively through both
+# consuming scripts), not a separate lib-level test file.
+#
+# The R section (reborn-coverage-ratchet.sh cases) lives in the sibling
+# test-reborn-coverage-ratchet-cases.sh, `source`d near the end of this file —
+# split out to keep this file under 1000 lines once a fifth script's cases
+# joined the suite. That file is not standalone; it shares this script's
+# helpers, fixtures, and PASS_COUNT/FAIL_COUNT counters.
 #
 # reborn-coverage-summary.sh and reborn-coverage-comment.sh consume a merged,
 # crate-filtered lcov tracefile (scripts/ci/reborn-coverage-merge-lcov.sh) plus
@@ -42,6 +55,7 @@ merge_sh="${script_dir}/reborn-coverage-merge-lcov.sh"
 summary_sh="${script_dir}/reborn-coverage-summary.sh"
 comment_sh="${script_dir}/reborn-coverage-comment.sh"
 int_tier_sh="${script_dir}/reborn-coverage-int-tier-tests.sh"
+ratchet_sh="${script_dir}/reborn-coverage-ratchet.sh"
 
 tmp_root="$(mktemp -d)"
 trap 'rm -rf "${tmp_root}"' EXIT
@@ -558,6 +572,15 @@ LH:0
 end_of_record
 EOF
 
+# Permissive floor (dry-run, floor 0.0) so C-section cases exercise the
+# comment script's OWN behavior (marker/upsert/callout), not ratchet gating —
+# ratchet-specific behavior is covered by the R section below.
+cat > "${fixtures_dir}/c_permissive_floor.toml" <<'TOML'
+[global]
+enforce = false
+floor_percent = 0.0
+TOML
+
 cat > "${fixtures_dir}/c1_comments_empty.json" <<'JSON'
 []
 JSON
@@ -583,7 +606,7 @@ capture env \
   PATH="${gh_bin_dir}:${PATH}" \
   FAKE_GH_COMMENTS_JSON="${fixtures_dir}/c1_comments_empty.json" \
   FAKE_GH_LOG="${c1_log}" \
-  "${comment_sh}" "${fixtures_dir}/c_basic_coverage.lcov" "${empty_exemptions}"
+  "${comment_sh}" "${fixtures_dir}/c_basic_coverage.lcov" "${empty_exemptions}" "${fixtures_dir}/c_permissive_floor.toml"
 assert_exit_code "C1: comment script exits 0 (no existing sticky)" 0 "${CAP_RC}"
 
 if [ -f "${c1_log}" ]; then
@@ -606,7 +629,7 @@ capture env \
   PATH="${gh_bin_dir}:${PATH}" \
   FAKE_GH_COMMENTS_JSON="${fixtures_dir}/c2_comments_with_sticky.json" \
   FAKE_GH_LOG="${c2_log}" \
-  "${comment_sh}" "${fixtures_dir}/c_basic_coverage.lcov" "${empty_exemptions}"
+  "${comment_sh}" "${fixtures_dir}/c_basic_coverage.lcov" "${empty_exemptions}" "${fixtures_dir}/c_permissive_floor.toml"
 assert_exit_code "C2: comment script exits 0 (existing sticky)" 0 "${CAP_RC}"
 
 if [ -f "${c2_log}" ]; then
@@ -626,7 +649,7 @@ capture env \
   PATH="${gh_bin_dir}:${PATH}" \
   FAKE_GH_COMMENTS_JSON="${fixtures_dir}/c1_comments_empty.json" \
   FAKE_GH_LOG="${c3_log}" \
-  "${comment_sh}" "${fixtures_dir}/c_zero_coverage.lcov" "${empty_exemptions}"
+  "${comment_sh}" "${fixtures_dir}/c_zero_coverage.lcov" "${empty_exemptions}" "${fixtures_dir}/c_permissive_floor.toml"
 assert_exit_code "C3: comment script exits 0 (zero-covered crate present)" 0 "${CAP_RC}"
 
 if [ -f "${c3_log}" ]; then
@@ -644,7 +667,7 @@ fi
 capture env -u GH_TOKEN \
   GITHUB_REPOSITORY="${gh_repo}" \
   PR_NUMBER="${gh_pr}" \
-  "${comment_sh}" "${fixtures_dir}/c_basic_coverage.lcov" "${empty_exemptions}"
+  "${comment_sh}" "${fixtures_dir}/c_basic_coverage.lcov" "${empty_exemptions}" "${fixtures_dir}/c_permissive_floor.toml"
 assert_exit_code "C4: GH_TOKEN unset exits non-zero" 1 "${CAP_RC}"
 assert_contains "C4: GH_TOKEN unset reports the missing-var guard" "${CAP_ERR}" "GH_TOKEN must be set"
 
@@ -652,7 +675,7 @@ assert_contains "C4: GH_TOKEN unset reports the missing-var guard" "${CAP_ERR}" 
 capture env -u PR_NUMBER \
   GH_TOKEN="fake-token" \
   GITHUB_REPOSITORY="${gh_repo}" \
-  "${comment_sh}" "${fixtures_dir}/c_basic_coverage.lcov" "${empty_exemptions}"
+  "${comment_sh}" "${fixtures_dir}/c_basic_coverage.lcov" "${empty_exemptions}" "${fixtures_dir}/c_permissive_floor.toml"
 assert_exit_code "C5: PR_NUMBER unset exits non-zero" 1 "${CAP_RC}"
 assert_contains "C5: PR_NUMBER unset reports the missing-var guard" "${CAP_ERR}" "PR_NUMBER must be set"
 
@@ -660,7 +683,7 @@ assert_contains "C5: PR_NUMBER unset reports the missing-var guard" "${CAP_ERR}"
 capture env -u GITHUB_REPOSITORY \
   GH_TOKEN="fake-token" \
   PR_NUMBER="${gh_pr}" \
-  "${comment_sh}" "${fixtures_dir}/c_basic_coverage.lcov" "${empty_exemptions}"
+  "${comment_sh}" "${fixtures_dir}/c_basic_coverage.lcov" "${empty_exemptions}" "${fixtures_dir}/c_permissive_floor.toml"
 assert_exit_code "C6: GITHUB_REPOSITORY unset exits non-zero" 1 "${CAP_RC}"
 assert_contains "C6: GITHUB_REPOSITORY unset reports the missing-var guard" "${CAP_ERR}" "GITHUB_REPOSITORY must be set"
 
@@ -675,7 +698,7 @@ capture env \
   PATH="${gh_bin_dir}:${PATH}" \
   FAKE_GH_COMMENTS_JSON="${fixtures_dir}/c1_comments_empty.json" \
   FAKE_GH_LOG="${c7_log}" \
-  "${comment_sh}" "${fixtures_dir}/does_not_exist.lcov" "${empty_exemptions}"
+  "${comment_sh}" "${fixtures_dir}/does_not_exist.lcov" "${empty_exemptions}" "${fixtures_dir}/c_permissive_floor.toml"
 assert_exit_code "C7: comment script exits non-zero for missing coverage lcov" 1 "${CAP_RC}"
 assert_contains "C7: comment script reports missing coverage lcov" "${CAP_ERR}" "coverage lcov file not found"
 if [ -f "${c7_log}" ]; then
@@ -693,7 +716,7 @@ capture env \
   PATH="${gh_bin_dir}:${PATH}" \
   FAKE_GH_COMMENTS_JSON="${fixtures_dir}/c1_comments_empty.json" \
   FAKE_GH_LOG="${c8_log}" \
-  "${comment_sh}" "${fixtures_dir}/c_basic_coverage.lcov" "${fixtures_dir}/does_not_exist_exemptions.toml"
+  "${comment_sh}" "${fixtures_dir}/c_basic_coverage.lcov" "${fixtures_dir}/does_not_exist_exemptions.toml" "${fixtures_dir}/c_permissive_floor.toml"
 assert_exit_code "C8: comment script exits non-zero for missing exemptions manifest" 1 "${CAP_RC}"
 assert_contains "C8: comment script reports missing exemptions manifest" "${CAP_ERR}" "coverage exemptions manifest not found"
 if [ -f "${c8_log}" ]; then
@@ -713,7 +736,7 @@ capture env \
   PATH="${gh_bin_dir}:${PATH}" \
   FAKE_GH_COMMENTS_JSON="${fixtures_dir}/c1_comments_empty.json" \
   FAKE_GH_LOG="${c9_log}" \
-  "${comment_sh}" "${fixtures_dir}/a10_two_crates.lcov" "${fixtures_dir}/a10_crate_exemption.toml"
+  "${comment_sh}" "${fixtures_dir}/a10_two_crates.lcov" "${fixtures_dir}/a10_crate_exemption.toml" "${fixtures_dir}/c_permissive_floor.toml"
 assert_exit_code "C9: comment script exits 0 (zero-covered crate whole-crate-exempted)" 0 "${CAP_RC}"
 if [ -f "${c9_log}" ]; then
   c9_body="$(sed -n '/^BODY_START$/,/^BODY_END$/p' "${c9_log}" | sed '1d;$d')"
@@ -721,6 +744,82 @@ if [ -f "${c9_log}" ]; then
     "${c9_body}" "0 int-tier coverage"
 else
   report_fail "C9: fake gh did not record a mutation"
+fi
+
+# C10: the ratchet section is rendered at the very top of the comment body —
+# after the (hidden, first-line) marker, but before the 0%-crate callout and
+# the coverage header (decision: simplest placement given
+# reborn-coverage-summary.sh has no exposed seam to splice "before the
+# per-crate table" specifically — see reborn-coverage-comment.sh's own
+# header comment).
+c10_log="${tmp_root}/c10-gh.log"
+capture env \
+  GH_TOKEN="fake-token" \
+  GITHUB_REPOSITORY="${gh_repo}" \
+  PR_NUMBER="${gh_pr}" \
+  PATH="${gh_bin_dir}:${PATH}" \
+  FAKE_GH_COMMENTS_JSON="${fixtures_dir}/c1_comments_empty.json" \
+  FAKE_GH_LOG="${c10_log}" \
+  "${comment_sh}" "${fixtures_dir}/c_zero_coverage.lcov" "${empty_exemptions}" "${fixtures_dir}/c_permissive_floor.toml"
+assert_exit_code "C10: comment script exits 0 (ratchet section present)" 0 "${CAP_RC}"
+if [ -f "${c10_log}" ]; then
+  c10_body="$(sed -n '/^BODY_START$/,/^BODY_END$/p' "${c10_log}" | sed '1d;$d')"
+  assert_contains "C10: body contains the ratchet section heading" "${c10_body}" "### Coverage ratchet"
+  assert_contains "C10: ratchet section carries the unconditional mode banner" "${c10_body}" "Ratchet mode: DRY-RUN"
+  assert_line_before "C10: ratchet section precedes the 0%-crate callout" "${c10_body}" \
+    "### Coverage ratchet" "⚠️ 1 Reborn crate(s) have 0 int-tier coverage"
+  assert_line_before "C10: ratchet section precedes the coverage header" "${c10_body}" \
+    "### Coverage ratchet" "## Reborn integration-tier coverage"
+else
+  report_fail "C10: fake gh did not record a mutation"
+fi
+
+# C11: missing floor manifest -> same "fires before gh use" guard shape as
+# C7/C8 (file-existence guards run before GH_TOKEN/GITHUB_REPOSITORY/PR_NUMBER
+# are consulted, and before any `gh` call).
+c11_log="${tmp_root}/c11-gh.log"
+capture env \
+  GH_TOKEN="fake-token" \
+  GITHUB_REPOSITORY="${gh_repo}" \
+  PR_NUMBER="${gh_pr}" \
+  PATH="${gh_bin_dir}:${PATH}" \
+  FAKE_GH_COMMENTS_JSON="${fixtures_dir}/c1_comments_empty.json" \
+  FAKE_GH_LOG="${c11_log}" \
+  "${comment_sh}" "${fixtures_dir}/c_basic_coverage.lcov" "${empty_exemptions}" "${fixtures_dir}/does_not_exist_floor.toml"
+assert_exit_code "C11: comment script exits non-zero for missing floor manifest" 1 "${CAP_RC}"
+assert_contains "C11: comment script reports missing floor manifest" "${CAP_ERR}" "coverage floor manifest not found"
+if [ -f "${c11_log}" ]; then
+  report_fail "C11: fake gh did not record a mutation (guard fires before gh use)"
+else
+  report_pass "C11: fake gh did not record a mutation (guard fires before gh use)"
+fi
+
+# C12: floor manifest exists (passes the C11 preflight guard) but is
+# malformed — missing [global] — so reborn-coverage-ratchet.sh itself exits
+# 1. The comment script's `|| true` around that call must still render the
+# ratchet's stderr into the sticky comment body and exit 0 (visibility-only,
+# never gates). Pins PR #5718 user comment.
+cat > "${fixtures_dir}/c12_malformed_floor.toml" <<'TOML'
+[[crate]]
+name = "ironclaw_reborn"
+floor_percent = 90.0
+TOML
+c12_log="${tmp_root}/c12-gh.log"
+capture env \
+  GH_TOKEN="fake-token" \
+  GITHUB_REPOSITORY="${gh_repo}" \
+  PR_NUMBER="${gh_pr}" \
+  PATH="${gh_bin_dir}:${PATH}" \
+  FAKE_GH_COMMENTS_JSON="${fixtures_dir}/c1_comments_empty.json" \
+  FAKE_GH_LOG="${c12_log}" \
+  "${comment_sh}" "${fixtures_dir}/c_basic_coverage.lcov" "${empty_exemptions}" "${fixtures_dir}/c12_malformed_floor.toml"
+assert_exit_code "C12: comment script still exits 0 for a malformed (but present) floor manifest" 0 "${CAP_RC}"
+if [ -f "${c12_log}" ]; then
+  c12_body="$(sed -n '/^BODY_START$/,/^BODY_END$/p' "${c12_log}" | sed '1d;$d')"
+  assert_contains "C12: rendered comment carries the ratchet schema error" "${c12_body}" \
+    "missing required [global] section"
+else
+  report_fail "C12: fake gh did not record a mutation (comment must still render/upsert)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -817,6 +916,17 @@ capture "${d5}/scripts/ci/reborn-coverage-int-tier-tests.sh"
 assert_exit_code "D5: support/ dir alongside flat suites exits 0" 0 "${CAP_RC}"
 assert_eq "D5: support/ dir is not discovered as a suite" \
   "$(printf -- '--test\nreborn_integration_only')" "${CAP_OUT}"
+
+# ---------------------------------------------------------------------------
+# R. reborn-coverage-ratchet.sh (coverage-floor ratchet gate)
+# ---------------------------------------------------------------------------
+#
+# Split into test-reborn-coverage-ratchet-cases.sh (sourced below, sharing
+# this script's helpers/fixtures/counters) to keep this file under 1000
+# lines as a fifth script's worth of cases joined the suite.
+
+# shellcheck source=./test-reborn-coverage-ratchet-cases.sh
+source "${script_dir}/test-reborn-coverage-ratchet-cases.sh"
 
 # ---------------------------------------------------------------------------
 # Summary
