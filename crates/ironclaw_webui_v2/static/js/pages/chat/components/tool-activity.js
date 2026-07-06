@@ -341,7 +341,7 @@ function ToolResult({ text }) {
               ${columns.map(
                 (col) => html`<th
                   key=${col}
-                  className="v2-wrap-anywhere border-b border-iron-700/60 bg-iron-900 px-2 py-1 font-semibold text-iron-100"
+                  className="border-b border-iron-700/60 bg-iron-900 px-2 py-1 font-semibold text-iron-100"
                 >${col}</th>`
               )}
             </tr>
@@ -352,7 +352,7 @@ function ToolResult({ text }) {
                 ${columns.map(
                   (col) => html`<td
                     key=${col}
-                    className="v2-wrap-anywhere border-b border-iron-700/40 px-2 py-1 text-iron-200"
+                    className="border-b border-iron-700/40 px-2 py-1 text-iron-200"
                   >${formatCell(row[col])}</td>`
                 )}
               </tr>`

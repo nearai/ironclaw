@@ -191,8 +191,8 @@ test("MessageList renders a floating thread logs shortcut", () => {
   );
   assert.match(
     messageListSource,
-    /\$\{logsPath && html`<div aria-hidden="true" className="h-14 shrink-0" \/>`\}/,
-    "floating controls should reserve space with an end-of-content spacer",
+    /\$\{logsPath &&\s+html`<div aria-hidden="true" className="hidden h-14 shrink-0 sm:block" \/>`\}/,
+    "floating controls should reserve space with an end-of-content spacer only when the desktop logs button is visible",
   );
   assert.match(
     messageListSource,

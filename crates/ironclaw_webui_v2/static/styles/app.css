@@ -493,13 +493,6 @@ input:focus, select:focus, textarea:focus {
     overflow-wrap: anywhere;
     word-break: break-word;
   }
-  .markdown-body pre {
-    max-width: 100%;
-    overflow-x: auto;
-    white-space: pre-wrap;
-    word-break: break-all;
-    overflow-wrap: anywhere;
-  }
   .markdown-body table {
     display: block;
     overflow-x: auto;

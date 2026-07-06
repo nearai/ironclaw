@@ -256,7 +256,8 @@ export function MessageList({
               />`
         )}
         ${children}
-        ${logsPath && html`<div aria-hidden="true" className="h-14 shrink-0" />`}
+        ${logsPath &&
+        html`<div aria-hidden="true" className="hidden h-14 shrink-0 sm:block" />`}
       </div>
     </div>
     ${logsPath &&

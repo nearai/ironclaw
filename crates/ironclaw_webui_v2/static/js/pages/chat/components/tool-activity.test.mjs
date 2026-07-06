@@ -32,6 +32,16 @@ test("tool activity cards keep long tool output inside the mobile viewport", () 
     /className="v2-wrap-anywhere max-w-full overflow-x-auto whitespace-pre-wrap rounded bg-iron-900 p-2 font-mono text-\[var\(--v2-positive-text\)\]"/,
     "tool result previews should wrap long lines within the detail panel",
   );
+  assert.match(
+    toolActivitySource,
+    /<div className="max-w-full overflow-x-auto rounded border border-iron-700\/60">/,
+    "tool result tables should scroll horizontally inside the detail panel",
+  );
+  assert.doesNotMatch(
+    toolActivitySource,
+    /className="v2-wrap-anywhere border-b border-iron-700\/(?:60|40)/,
+    "tool result table cells should keep natural column widths instead of aggressively wrapping",
+  );
 });
 
 test("activity run wrappers use mobile-safe width constraints", () => {
