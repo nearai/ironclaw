@@ -16,6 +16,17 @@ use super::super::{
     host_runtime_storage_roots, workspace_mounts,
 };
 
+/// Real capability ids `web_access_tools` registers on the built harness —
+/// a single source shared with the wiring-parity capability-id subset check
+/// (`tests/integration/wiring_parity.rs`) instead of a second
+/// hand-transcribed copy of this list.
+pub(crate) fn web_access_tools_capability_ids() -> HarnessResult<Vec<CapabilityId>> {
+    Ok(vec![
+        CapabilityId::new(WEB_SEARCH_CAPABILITY_ID)?,
+        CapabilityId::new(WEB_GET_CONTENT_CAPABILITY_ID)?,
+    ])
+}
+
 /// C-WEBACCESS: wires the real first-party web-access capabilities through production's
 /// `WebAccessExecutor`; no credential-injecting authorizer needed (declares zero `runtime_credentials`).
 ///
@@ -44,10 +55,7 @@ pub(crate) async fn web_access_tools() -> HarnessResult<HostRuntimeCapabilityHar
         workspace_root,
         mounts,
         capability_mount_overrides: Vec::new(),
-        capability_ids: vec![
-            CapabilityId::new(WEB_SEARCH_CAPABILITY_ID)?,
-            CapabilityId::new(WEB_GET_CONTENT_CAPABILITY_ID)?,
-        ],
+        capability_ids: web_access_tools_capability_ids()?,
         runtime_kind: RuntimeKind::FirstParty,
         effect_kinds: vec![EffectKind::DispatchCapability, EffectKind::Network],
         network_policy: harness_web_access::exa_mcp_test_network_policy(),

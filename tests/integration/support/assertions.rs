@@ -261,6 +261,60 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Assert some captured `tools` argument (the provider tool-calling schema
+    /// shipped alongside the messages, NOT system-prompt text — see
+    /// `TraceLlm::captured_tool_definitions`) contains a definition named
+    /// `name`, across every request this thread has sent so far (C-TOOLDISCLOSURE).
+    /// This is the channel `ToolDisclosureMode::Bridged` rewrites: bridged runs
+    /// replace the flat per-capability tool list with the bridge meta tools.
+    /// Only `tool_search` is ever ADVERTISED to the model; `tool_describe`/
+    /// `tool_call` are retained internally for describe-first routing and
+    /// never appear in the captured tool definitions.
+    pub async fn assert_model_tools_contains(&self, name: &str) -> HarnessResult<()> {
+        let definitions = self.scripted_llm.captured_tool_definitions();
+        if definitions
+            .iter()
+            .flatten()
+            .any(|definition| definition.name == name)
+        {
+            return Ok(());
+        }
+        let seen: Vec<String> = definitions
+            .iter()
+            .flatten()
+            .map(|definition| definition.name.clone())
+            .collect();
+        Err(format!("no captured tool definition named {name:?}; saw {seen:?}").into())
+    }
+
+    /// Inverse of [`assert_model_tools_contains`]: assert NO captured `tools`
+    /// argument contains a definition named `name`. Paired with the positive
+    /// assertion to prove disclosure mode *replaces* the tool surface rather
+    /// than merely adding to it.
+    ///
+    /// Errors (rather than vacuously passing) when ZERO tool definitions were
+    /// captured across every request: an empty tool surface trivially
+    /// "excludes" anything, which would let a broken wiring (e.g. no request
+    /// captured at all) pass silently. Callers must first prove SOME tool
+    /// list was captured — every existing caller already does, via a paired
+    /// `assert_model_tools_contains` on the same harness.
+    pub async fn assert_model_tools_excludes(&self, name: &str) -> HarnessResult<()> {
+        let definitions = self.scripted_llm.captured_tool_definitions();
+        let mut all_definitions = definitions.iter().flatten().peekable();
+        if all_definitions.peek().is_none() {
+            return Err(format!(
+                "vacuous exclusion: zero tool definitions captured across {} request(s); \
+                 cannot prove {name:?} was excluded from a tool surface that was never sent",
+                definitions.len()
+            )
+            .into());
+        }
+        if all_definitions.any(|definition| definition.name == name) {
+            return Err(format!("captured tool definition unexpectedly named {name:?}").into());
+        }
+        Ok(())
+    }
+
     /// Collects the persisted `safe_summary` field of every `ToolResultReference`
     /// message on this thread's FULL history (not baseline-sliced — safe only
     /// for single-turn harnesses today). Shared collector for
