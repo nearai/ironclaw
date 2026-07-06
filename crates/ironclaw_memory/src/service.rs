@@ -550,14 +550,18 @@ fn optional_u64(input: &Value, key: &'static str) -> Option<u64> {
     input.get(key).and_then(Value::as_u64)
 }
 
-/// Reject a write `target` that would escape the scoped memory mount. Mirrors the
-/// fail-closed `not` pattern the model-facing `document-write` input schema
-/// advertises — `(^/)|(\.\.)|(\\)`: an absolute path (leading `/`), any `..`
-/// traversal, or a backslash separator. Reserved names (`daily_log`, `memory`,
-/// `heartbeat`, `bootstrap`) and ordinary relative document paths (`notes/x.md`)
-/// pass unchanged.
+/// Reject a write `target` that would escape the scoped memory mount or fail to
+/// name a document. Mirrors the fail-closed `not` pattern the model-facing
+/// `document-write` input schema advertises: blank, absolute path (leading `/`),
+/// any `..` traversal, or a backslash separator. Reserved names (`daily_log`,
+/// `memory`, `heartbeat`, `bootstrap`) and ordinary relative document paths
+/// (`notes/x.md`) pass unchanged.
 fn reject_out_of_scope_target(target: &str) -> Result<(), MemoryServiceError> {
-    if target.starts_with('/') || target.contains("..") || target.contains('\\') {
+    if target.trim().is_empty()
+        || target.starts_with('/')
+        || target.contains("..")
+        || target.contains('\\')
+    {
         return Err(MemoryServiceError::input());
     }
     Ok(())
@@ -619,7 +623,14 @@ mod tests {
         // A traversal-shaped target must be rejected at the contract layer, ahead
         // of provider dispatch — the model-facing schema is not host-enforced, and
         // a swapped provider (e.g. mem0) would otherwise use the target verbatim.
-        for target in ["/abs", "../escape", "notes/../secrets", "notes\\evil"] {
+        for target in [
+            "",
+            "   ",
+            "/abs",
+            "../escape",
+            "notes/../secrets",
+            "notes\\evil",
+        ] {
             let input = json!({ "target": target, "content": "x" });
             let result = MemoryServiceWriteRequest::from_tool_input(&input);
             assert!(
