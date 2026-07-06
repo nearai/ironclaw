@@ -61,7 +61,7 @@ pub enum SlackUserAction {
         oldest: Option<String>,
     },
 
-    /// Get information about a user (name, real name, email).
+    /// Get information about a user (name, real name).
     GetUserInfo {
         /// User ID (e.g., "U1234567890").
         user_id: String,
