@@ -28,6 +28,9 @@ MODEL = "claude-haiku-4-5-20251001"
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
 MAX_LOG_BYTES = 20_000
+SLACK_MAX_BLOCKS = 50
+GITHUB_COMMENT_BODY_LIMIT = 65_000
+GITHUB_MD_MENTION_BREAK = "@\u200b"
 
 HAIKU_SYSTEM = (
     "You analyze CI canary test logs. Given a lane's summary, JUnit digest, "
@@ -66,6 +69,25 @@ CATEGORIZE_SYSTEM = (
 
 
 @dataclass
+class RebornQaCaseReport:
+    rows: tuple[str, ...]
+    case: str
+    feature: str
+    success: bool
+    latency_ms: int | float | None = None
+    message: str = ""
+    tool_calls: list["RebornQaToolCall"] = field(default_factory=list)
+    debug_paths: list[str] = field(default_factory=list)
+
+
+@dataclass
+class RebornQaToolCall:
+    name: str
+    args_hash: str = ""
+    output_digest: str = ""
+
+
+@dataclass
 class LaneReport:
     lane: str
     provider: str
@@ -87,6 +109,16 @@ class LaneReport:
     error: str = ""
     root_cause: str = ""
     fix: str = ""
+    reborn_qa_cases: list[RebornQaCaseReport] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class CanaryRunContext:
+    repository: str = ""
+    trigger_context: str = ""
+    target_pr: str = ""
+    target_branch: str = ""
+    target_ref: str = ""
 
 
 def read_tail(path: Path, n_bytes: int) -> str:
@@ -181,6 +213,208 @@ def parse_results_json(path: Path, report: LaneReport) -> None:
             report.duration_s += latency / 1000.0
 
 
+def _trim_slack_text(value: object, limit: int = 180) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"\s+", " ", text)
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _trim_slack_block_text(value: object, limit: int = 2900) -> str:
+    text = str(value or "").strip()
+    text = "\n".join(re.sub(r"[ \t]+", " ", line).strip() for line in text.splitlines())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _reborn_case_from_result(entry: dict) -> str:
+    details = entry.get("details") or {}
+    if isinstance(details, dict):
+        case = details.get("case")
+        if isinstance(case, str) and case:
+            return case
+    mode = entry.get("mode")
+    if isinstance(mode, str) and mode.startswith("live:"):
+        return mode.removeprefix("live:")
+    return str(mode or "?")
+
+
+def _reborn_failure_message(entry: dict) -> str:
+    if entry.get("success"):
+        return ""
+    details = entry.get("details") or {}
+    if not isinstance(details, dict):
+        return ""
+    for key in ("error", "message", "reason", "gate"):
+        value = details.get(key)
+        if value:
+            return _trim_slack_text(value, 360)
+    blocked = details.get("blocked")
+    if blocked:
+        return _trim_slack_text(f"blocked={blocked}", 360)
+    return ""
+
+
+def _decode_payload_hex(value: object) -> dict:
+    if not isinstance(value, str) or not value:
+        return {}
+    try:
+        decoded = bytes.fromhex(value).decode("utf-8")
+        payload = json.loads(decoded)
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _signature_key(signature: object) -> tuple[str, str] | None:
+    if not isinstance(signature, dict):
+        return None
+    name = signature.get("name")
+    if not name:
+        return None
+    args_hash = signature.get("args_hash")
+    return (str(name), str(args_hash or ""))
+
+
+def parse_reborn_trace_tool_calls(trace_path: Path) -> list[RebornQaToolCall]:
+    """Read a scrubbed Reborn trace and return hashed tool I/O summaries.
+
+    Trace payloads can contain live integration data. The checkpoint state
+    exposes stable argument hashes and output digests, which are enough for
+    correlating "what tool ran with which input/output identity" without
+    posting raw Gmail, Slack, Docs, Sheets, or web content into Slack.
+    """
+    if not trace_path.exists() or trace_path.stat().st_size == 0:
+        return []
+    try:
+        data = json.loads(trace_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    entries = data.get("entries") or []
+    if not isinstance(entries, list):
+        return []
+
+    best_signatures: list[dict] = []
+    best_outputs: list[dict] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        contents = entry.get("contents") or {}
+        if not isinstance(contents, dict):
+            continue
+        payload = _decode_payload_hex(contents.get("payload_hex"))
+        signatures = payload.get("recent_call_signatures", {}).get("items", [])
+        outputs = payload.get("seen_capability_output_digests", {}).get("items", [])
+        if isinstance(signatures, list) and len(signatures) > len(best_signatures):
+            best_signatures = [item for item in signatures if isinstance(item, dict)]
+        if isinstance(outputs, list) and len(outputs) > len(best_outputs):
+            best_outputs = [item for item in outputs if isinstance(item, dict)]
+
+    output_by_signature: dict[tuple[str, str], str] = {}
+    for item in best_outputs:
+        key = _signature_key(item.get("signature"))
+        if key is None:
+            continue
+        output = item.get("output_digest")
+        if output is not None:
+            output_by_signature[key] = str(output)
+
+    tool_calls: list[RebornQaToolCall] = []
+    for signature in best_signatures:
+        key = _signature_key(signature)
+        if key is None:
+            continue
+        name, args_hash = key
+        tool_calls.append(
+            RebornQaToolCall(
+                name=name,
+                args_hash=args_hash,
+                output_digest=output_by_signature.get(key, ""),
+            )
+        )
+    return tool_calls
+
+
+def parse_reborn_qa_case_reports(lane_dir: Path, report: LaneReport) -> None:
+    if report.lane != "reborn-webui-v2-live-qa":
+        return
+    results_path = lane_dir / "results.json"
+    if not results_path.exists() or results_path.stat().st_size == 0:
+        return
+    try:
+        results_data = json.loads(results_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    results = results_data.get("results") or []
+    if not isinstance(results, list):
+        return
+
+    manifest_by_case: dict[str, dict] = {}
+    manifest_path = lane_dir / "case-manifest.json"
+    if manifest_path.exists() and manifest_path.stat().st_size > 0:
+        try:
+            manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            manifest_data = {}
+        for case_data in manifest_data.get("cases") or []:
+            if isinstance(case_data, dict) and isinstance(case_data.get("case"), str):
+                manifest_by_case[case_data["case"]] = case_data
+
+    cases: list[RebornQaCaseReport] = []
+    artifact_path_prefix = "/".join(lane_dir.parts[-3:])
+    for entry in results:
+        if not isinstance(entry, dict):
+            continue
+        case = _reborn_case_from_result(entry)
+        details = entry.get("details") or {}
+        if not isinstance(details, dict):
+            details = {}
+        manifest = manifest_by_case.get(case, {})
+        rows = (
+            details.get("qa_rows")
+            or details.get("rows")
+            or manifest.get("qa_rows")
+            or manifest.get("rows")
+            or []
+        )
+        if isinstance(rows, str):
+            row_tuple = (rows,)
+        elif isinstance(rows, list):
+            row_tuple = tuple(str(row) for row in rows if row)
+        else:
+            row_tuple = ()
+        feature = (
+            details.get("feature")
+            or manifest.get("feature")
+            or case.replace("_", " ")
+        )
+        latency = entry.get("latency_ms")
+        tool_calls = parse_reborn_trace_tool_calls(lane_dir / "traces" / f"{case}.json")
+        debug_paths = []
+        if not entry.get("success"):
+            debug_paths = [
+                f"{artifact_path_prefix}/results.json",
+                f"{artifact_path_prefix}/test-output.log",
+                f"{artifact_path_prefix}/traces/{case}.json",
+                f"{artifact_path_prefix}/traces/index.json",
+            ]
+        cases.append(
+            RebornQaCaseReport(
+                rows=row_tuple,
+                case=case,
+                feature=_trim_slack_text(feature, 120),
+                success=bool(entry.get("success")),
+                latency_ms=latency if isinstance(latency, (int, float)) else None,
+                message=_reborn_failure_message(entry),
+                tool_calls=tool_calls,
+                debug_paths=debug_paths,
+            )
+        )
+    report.reborn_qa_cases = cases
+
+
 SUMMARY_STATUS_RE = re.compile(
     r"^\|\s*Status\s*\|\s*`(?P<status>-?\d+)`\s*\|\s*$", re.MULTILINE
 )
@@ -219,6 +453,7 @@ def collect_lane(lane_dir: Path) -> LaneReport | None:
     # enrichment is source-agnostic.
     parse_junit(lane_dir / "auth-canary-junit.xml", r)
     parse_results_json(lane_dir / "results.json", r)
+    parse_reborn_qa_case_reports(lane_dir, r)
     r.summary_md = read_tail(lane_dir / "summary.md", 4_000)
     r.log_tail = read_tail(lane_dir / "test-output.log", MAX_LOG_BYTES)
 
@@ -358,12 +593,176 @@ def run_haiku(api_key: str, report: LaneReport) -> None:
     report.fix = str(data.get("fix", ""))[:300]
 
 
+QA_ROW_PREFIX_RE = re.compile(r"^(?P<num>\d+)")
+
+
+def _qa_case_rows(case: RebornQaCaseReport) -> str:
+    return ", ".join(case.rows) if case.rows else case.case
+
+
+def _qa_group_key(case: RebornQaCaseReport) -> str:
+    for row in case.rows:
+        match = QA_ROW_PREFIX_RE.match(row)
+        if match:
+            return match.group("num")
+    return _qa_case_rows(case)
+
+
+def _qa_group_sort_key(value: str) -> tuple[int, int | str]:
+    if value.isdigit():
+        return (0, int(value))
+    return (1, value)
+
+
+def _format_reborn_tool_summary(cases: list[RebornQaCaseReport]) -> list[str]:
+    calls: list[RebornQaToolCall] = []
+    for case in cases:
+        calls.extend(case.tool_calls)
+    if not calls:
+        return []
+
+    distinct_tools = list(dict.fromkeys(call.name for call in calls))
+    tool_names = ", ".join(f"`{name}`" for name in distinct_tools[:8])
+    if len(distinct_tools) > 8:
+        tool_names += f", +{len(distinct_tools) - 8} more"
+
+    lines = [f"*Tools:* {len(calls)} calls across {len(distinct_tools)} tools: {tool_names}"]
+    return lines
+
+
+def _format_reborn_failure_lines(
+    cases: list[RebornQaCaseReport],
+    run_url: str | None,
+) -> list[str]:
+    lines: list[str] = []
+    for case in cases:
+        if case.success:
+            continue
+        rows = _qa_case_rows(case)
+        message = case.message or "failed"
+        lines.append(f"*Failure `{rows}`:* {message}")
+        if case.debug_paths:
+            paths = ", ".join(f"`{path}`" for path in case.debug_paths)
+            if run_url:
+                lines.append(f"*Debug `{rows}`:* <{run_url}|GitHub run artifacts> → {paths}")
+            else:
+                lines.append(f"*Debug `{rows}`:* artifacts → {paths}")
+    return lines
+
+
+def _format_reborn_qa_group(
+    group: str,
+    cases: list[RebornQaCaseReport],
+    run_url: str | None = None,
+) -> list[dict]:
+    passed = sum(1 for case in cases if case.success)
+    failed = len(cases) - passed
+    status = ":white_check_mark:" if failed == 0 else ":x:"
+    duration_ms = sum(
+        case.latency_ms for case in cases if isinstance(case.latency_ms, (int, float))
+    )
+    duration = f" in {duration_ms / 1000.0:.1f}s" if duration_ms else ""
+
+    case_summaries = [
+        f"`{_qa_case_rows(case)}` {case.feature}"
+        for case in cases
+    ]
+    lines = [
+        f"{status} *QA {group}* — {passed}/{len(cases)} passed{duration}",
+        f"*Cases:* {_trim_slack_text('; '.join(case_summaries), 900)}",
+    ]
+    lines.extend(_format_reborn_failure_lines(cases, run_url))
+    lines.extend(_format_reborn_tool_summary(cases))
+    blocks: list[dict] = []
+    current: list[str] = []
+    continuation_header = f"{status} *QA {group}* — continued"
+    for line in lines:
+        candidate = "\n".join([*current, line])
+        if current and len(candidate) > 2900:
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": _trim_slack_block_text("\n".join(current), 2900),
+                    },
+                }
+            )
+            current = [continuation_header, line]
+        else:
+            current.append(line)
+    if current:
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": _trim_slack_block_text("\n".join(current), 2900),
+                },
+            }
+        )
+    return blocks
+
+
+def _format_reborn_qa_groups(
+    cases: list[RebornQaCaseReport],
+    run_url: str | None = None,
+) -> list[dict]:
+    grouped: dict[str, list[RebornQaCaseReport]] = {}
+    for case in cases:
+        grouped.setdefault(_qa_group_key(case), []).append(case)
+    blocks: list[dict] = []
+    for group in sorted(grouped, key=_qa_group_sort_key):
+        blocks.extend(_format_reborn_qa_group(group, grouped[group], run_url))
+    return blocks
+
+
+def _format_run_context(context: CanaryRunContext | None) -> str:
+    if context is None:
+        return ""
+    parts: list[str] = []
+    if context.target_pr:
+        if context.repository:
+            parts.append(
+                f"PR <https://github.com/{context.repository}/pull/"
+                f"{context.target_pr}|#{context.target_pr}>"
+            )
+        else:
+            parts.append(f"PR #{context.target_pr}")
+    if context.target_branch:
+        parts.append(f"branch `{_trim_slack_text(context.target_branch, 120)}`")
+    if context.target_ref:
+        parts.append(f"target `{_trim_slack_text(context.target_ref, 40)[:10]}`")
+    if context.trigger_context:
+        parts.append(_trim_slack_text(context.trigger_context, 160))
+    return " • ".join(parts)
+
+
+def _github_md_text(value: object, limit: int | None = None) -> str:
+    text = _trim_slack_text(value, limit) if limit else str(value or "").strip()
+    return (
+        text.replace("\\", "\\\\")
+        .replace("\n", " ")
+        .replace("@", GITHUB_MD_MENTION_BREAK)
+        .replace("|", "\\|")
+        .replace("`", "\\`")
+        .replace("[", "\\[")
+        .replace("]", "\\]")
+    )
+
+
+def _github_md_code(value: object, limit: int | None = None) -> str:
+    text = _trim_slack_text(value, limit) if limit else str(value or "").strip()
+    return text.replace("`", "'").replace("\n", " ").replace("|", "\\|")
+
+
 def slack_payload(
     reports: list[LaneReport],
     run_url: str | None,
     commit: str | None,
     *,
     category_summary: str = "",
+    run_context: CanaryRunContext | None = None,
 ) -> dict:
     emoji = {"pass": ":white_check_mark:", "fail": ":x:", "skip": ":heavy_minus_sign:"}
     red = sum(1 for r in reports if r.status == "fail")
@@ -372,7 +771,13 @@ def slack_payload(
     blocks: list[dict] = [
         {"type": "header", "text": {"type": "plain_text", "text": header}},
     ]
+    context_text = _format_run_context(run_context)
+    if context_text:
+        blocks.append(
+            {"type": "context", "elements": [{"type": "mrkdwn", "text": context_text}]}
+        )
     for r in reports:
+        renders_reborn_qa_groups = bool(r.reborn_qa_cases)
         header_line = (
             f"{emoji.get(r.status, ':grey_question:')} *{r.lane}* ({r.provider}) — "
             f"{r.passed}/{r.tests} passed, {r.failed} failed in {r.duration_s:.0f}s"
@@ -382,7 +787,11 @@ def slack_payload(
         # fields. The shape mirrors the issue-friendly format reviewers
         # asked for so a Slack reader can paste it straight into a
         # GitHub issue if needed.
-        if r.status == "fail" and (r.test_name or r.error or r.root_cause):
+        if (
+            r.status == "fail"
+            and not renders_reborn_qa_groups
+            and (r.test_name or r.error or r.root_cause)
+        ):
             if r.test_name:
                 lines.append(f"  *Test:* `{r.test_name}`")
             if r.error:
@@ -391,19 +800,22 @@ def slack_payload(
                 lines.append(f"  *Root Cause:* {r.root_cause}")
             if r.fix:
                 lines.append(f"  *Fix:* {r.fix}")
-        elif r.reason:
+        elif r.reason and not renders_reborn_qa_groups:
             # For passing/skipped lanes we keep the existing single-
             # line reason summary (Haiku's free-form notable).
             lines.append(f"> {r.reason}")
-        if r.tools_used:
+        if r.tools_used and not renders_reborn_qa_groups:
             lines.append(f"tools: {', '.join(r.tools_used)} (≈{r.tool_calls_total} calls)")
-        if r.notable:
+        if r.notable and not renders_reborn_qa_groups:
             lines.append(f"_{r.notable}_")
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
+        if renders_reborn_qa_groups:
+            remaining = max(0, SLACK_MAX_BLOCKS - len(blocks))
+            blocks.extend(_format_reborn_qa_groups(r.reborn_qa_cases, run_url)[:remaining])
 
     # Cross-lane "Summary by Category" block — only emitted when there
     # are >=2 failures (with 1 the per-lane block is already enough).
-    if category_summary:
+    if category_summary and len(blocks) + 2 <= SLACK_MAX_BLOCKS:
         blocks.append({"type": "divider"})
         blocks.append(
             {
@@ -415,13 +827,212 @@ def slack_payload(
             }
         )
     ctx: list[str] = []
-    if commit:
+    if run_context and run_context.target_ref:
+        ctx.append(f"commit `{run_context.target_ref[:7]}`")
+    elif commit:
         ctx.append(f"commit `{commit[:7]}`")
     if run_url:
         ctx.append(f"<{run_url}|GitHub run>")
-    if ctx:
+    if ctx and len(blocks) < SLACK_MAX_BLOCKS:
         blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": " • ".join(ctx)}]})
     return {"blocks": blocks}
+
+
+def _markdown_run_context_lines(
+    run_context: CanaryRunContext | None,
+    run_url: str | None,
+    commit: str | None,
+) -> list[str]:
+    lines: list[str] = []
+    if run_context and run_context.target_pr:
+        if run_context.repository:
+            lines.append(
+                f"- PR: [#{run_context.target_pr}]"
+                f"(https://github.com/{run_context.repository}/pull/"
+                f"{run_context.target_pr})"
+            )
+        else:
+            lines.append(f"- PR: #{run_context.target_pr}")
+    if run_context and run_context.target_branch:
+        lines.append(f"- Branch: `{_github_md_code(run_context.target_branch, 120)}`")
+    if run_context and run_context.target_ref:
+        lines.append(f"- Target: `{_github_md_code(run_context.target_ref[:10])}`")
+    if run_context and run_context.trigger_context:
+        lines.append(f"- Trigger: {_github_md_text(run_context.trigger_context, 200)}")
+    display_commit = (
+        run_context.target_ref
+        if run_context and run_context.target_ref
+        else commit
+    )
+    if display_commit:
+        lines.append(f"- Commit: `{_github_md_code(display_commit[:7])}`")
+    if run_url:
+        lines.append(f"- Run: [GitHub Actions]({run_url})")
+    return lines
+
+
+def _markdown_reborn_case_lines(
+    cases: list[RebornQaCaseReport],
+    run_url: str | None,
+) -> list[str]:
+    lines: list[str] = []
+    grouped: dict[str, list[RebornQaCaseReport]] = {}
+    for case in cases:
+        grouped.setdefault(_qa_group_key(case), []).append(case)
+    for group in sorted(grouped, key=_qa_group_sort_key):
+        group_cases = grouped[group]
+        passed = sum(1 for case in group_cases if case.success)
+        lines.append(f"#### QA {group}: {passed}/{len(group_cases)} passed")
+        for case in group_cases:
+            status = ":white_check_mark:" if case.success else ":x:"
+            latency = (
+                f" ({case.latency_ms / 1000.0:.1f}s)"
+                if isinstance(case.latency_ms, (int, float))
+                else ""
+            )
+            lines.append(
+                f"- {status} `{_github_md_code(_qa_case_rows(case))}` "
+                f"{_github_md_text(case.feature)}{latency}"
+            )
+            if not case.success and case.message:
+                lines.append(f"  - Failure: {_github_md_text(case.message)}")
+            if not case.success and case.debug_paths:
+                paths = ", ".join(f"`{_github_md_code(path)}`" for path in case.debug_paths)
+                if run_url:
+                    lines.append(
+                        f"  - Debug: [GitHub run artifacts]({run_url}) - {paths}"
+                    )
+                else:
+                    lines.append(f"  - Debug: {paths}")
+        lines.append("")
+    return lines
+
+
+def github_comment_body(
+    reports: list[LaneReport],
+    run_url: str | None,
+    commit: str | None,
+    *,
+    category_summary: str = "",
+    run_context: CanaryRunContext | None = None,
+) -> str:
+    red = sum(1 for r in reports if r.status == "fail")
+    green = sum(1 for r in reports if r.status == "pass")
+    lines = [
+        f"## Live canary result: {green} passed, {red} failed of {len(reports)} lanes",
+        "",
+    ]
+    context_lines = _markdown_run_context_lines(run_context, run_url, commit)
+    if context_lines:
+        lines.extend(context_lines)
+        lines.append("")
+
+    lines.extend(
+        [
+            "| Lane | Provider | Status | Passed | Failed | Duration |",
+            "| --- | --- | --- | ---: | ---: | ---: |",
+        ]
+    )
+    for r in reports:
+        status = {
+            "pass": ":white_check_mark:",
+            "fail": ":x:",
+            "skip": ":heavy_minus_sign:",
+        }.get(r.status, ":grey_question:")
+        lines.append(
+            f"| `{_github_md_code(r.lane)}` | `{_github_md_code(r.provider)}` | "
+            f"{status} {r.status} | "
+            f"{r.passed}/{r.tests} | {r.failed} | {r.duration_s:.0f}s |"
+        )
+
+    if category_summary:
+        lines.extend(["", "### Summary by Category", "", _github_md_text(category_summary)])
+
+    detail_lines: list[str] = []
+    for r in reports:
+        if r.reborn_qa_cases:
+            detail_lines.extend(
+                [
+                    "",
+                    f"### {_github_md_text(r.lane)} ({_github_md_text(r.provider)})",
+                    "",
+                ]
+            )
+            detail_lines.extend(_markdown_reborn_case_lines(r.reborn_qa_cases, run_url))
+        elif r.status == "fail":
+            detail_lines.extend(
+                ["", f"### {_github_md_text(r.lane)} ({_github_md_text(r.provider)})"]
+            )
+            if r.test_name:
+                detail_lines.append(f"- Test: `{_github_md_code(r.test_name)}`")
+            if r.error:
+                detail_lines.append(f"- Error: {_github_md_text(r.error)}")
+            if r.root_cause:
+                detail_lines.append(f"- Root Cause: {_github_md_text(r.root_cause)}")
+            if r.fix:
+                detail_lines.append(f"- Fix: {_github_md_text(r.fix)}")
+            if r.reason:
+                detail_lines.append(f"- Reason: {_github_md_text(r.reason)}")
+            if r.notable:
+                detail_lines.append(f"- Note: {_github_md_text(r.notable)}")
+            if r.junit_failures:
+                detail_lines.append("- Failures:")
+                for name, msg in r.junit_failures[:10]:
+                    detail_lines.append(
+                        f"  - `{_github_md_code(name)}`: {_github_md_text(msg)}"
+                    )
+    if detail_lines:
+        lines.extend(detail_lines)
+
+    lines.append("")
+    lines.append("_Auto-posted by `scripts/live-canary/notify_slack.py`._")
+    body = "\n".join(lines)
+    if len(body) <= GITHUB_COMMENT_BODY_LIMIT:
+        return body
+    suffix = "\n\n_Comment truncated because the canary report exceeded GitHub's body limit._"
+    return body[: GITHUB_COMMENT_BODY_LIMIT - len(suffix)].rstrip() + suffix
+
+
+def post_pr_comment(
+    reports: list[LaneReport],
+    *,
+    repo: str,
+    github_token: str,
+    run_context: CanaryRunContext,
+    run_url: str | None,
+    commit: str | None,
+    category_summary: str = "",
+) -> str:
+    if not run_context.target_pr:
+        return ""
+    if not run_context.target_pr.isascii() or not run_context.target_pr.isdigit():
+        raise ValueError("target_pr must be a decimal pull request number")
+    headers = {
+        "Authorization": f"Bearer {github_token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    get_json(
+        f"https://api.github.com/repos/{repo}/pulls/{run_context.target_pr}",
+        headers,
+        timeout=15,
+    )
+    created = post_json(
+        f"https://api.github.com/repos/{repo}/issues/"
+        f"{run_context.target_pr}/comments",
+        {
+            "body": github_comment_body(
+                reports,
+                run_url,
+                commit,
+                category_summary=category_summary,
+                run_context=run_context,
+            )
+        },
+        headers,
+        timeout=15,
+    )
+    return str(created.get("html_url") or "")
 
 
 def categorize_failures(api_key: str, reports: list[LaneReport]) -> str:
@@ -654,6 +1265,15 @@ def main() -> int:
         ),
     )
     p.add_argument(
+        "--post-pr-comment",
+        action="store_true",
+        default=os.environ.get("CANARY_POST_PR_COMMENT") == "1",
+        help=(
+            "Post the final canary report as a PR comment when "
+            "CANARY_TARGET_PR is set."
+        ),
+    )
+    p.add_argument(
         "--create-issues",
         action="store_true",
         default=os.environ.get("CANARY_CREATE_ISSUES") == "1",
@@ -721,11 +1341,22 @@ def main() -> int:
                 file=sys.stderr,
             )
 
+    run_context = CanaryRunContext(
+        repository=args.repo,
+        trigger_context=os.environ.get("CANARY_TRIGGER_CONTEXT", ""),
+        target_pr=os.environ.get("CANARY_TARGET_PR", ""),
+        target_branch=os.environ.get("CANARY_TARGET_BRANCH", ""),
+        target_ref=os.environ.get("CANARY_TARGET_REF", ""),
+    )
     payload = slack_payload(
-        reports, args.run_url, args.commit, category_summary=category_summary
+        reports,
+        args.run_url,
+        args.commit,
+        category_summary=category_summary,
+        run_context=run_context,
     )
 
-    if args.dry_run or not args.slack_webhook:
+    if args.dry_run:
         print(json.dumps(payload, indent=2))
         # Dry-run still surfaces what the issue creator WOULD do so a
         # local invocation can sanity-check title/body shapes.
@@ -736,21 +1367,63 @@ def main() -> int:
                 f"{len(failed)} issue(s) on {args.repo}",
                 file=sys.stderr,
             )
+        if args.post_pr_comment and run_context.target_pr:
+            print("\n--- GitHub PR Comment Body (Dry Run) ---", file=sys.stderr)
+            print(
+                github_comment_body(
+                    reports,
+                    args.run_url,
+                    args.commit,
+                    category_summary=category_summary,
+                    run_context=run_context,
+                ),
+                file=sys.stderr,
+            )
         return 0
 
-    try:
-        post_json(args.slack_webhook, payload, {}, timeout=10)
+    if args.slack_webhook:
+        try:
+            post_json(args.slack_webhook, payload, {}, timeout=10)
+            print(
+                f"[notify_slack] posted Slack message for {len(reports)} lane(s)",
+                file=sys.stderr,
+            )
+        except Exception as e:
+            print(f"[notify_slack] slack post failed: {e} — sending fallback", file=sys.stderr)
+            try:
+                post_json(args.slack_webhook, fallback_payload(reports, args.run_url), {}, timeout=10)
+                print("[notify_slack] fallback posted", file=sys.stderr)
+            except Exception as e2:
+                print(f"[notify_slack] fallback also failed: {e2}", file=sys.stderr)
+    else:
+        print("[notify_slack] no SLACK_WEBHOOK_URL — skipping Slack post", file=sys.stderr)
+
+    if args.post_pr_comment and run_context.target_pr and args.github_token:
+        try:
+            comment_url = post_pr_comment(
+                reports,
+                repo=args.repo,
+                github_token=args.github_token,
+                run_context=run_context,
+                run_url=args.run_url,
+                commit=args.commit,
+                category_summary=category_summary,
+            )
+            print(
+                f"[notify_slack] posted PR canary comment: {comment_url or '?'}",
+                file=sys.stderr,
+            )
+        except Exception as e:
+            print(
+                f"[notify_slack] PR comment post failed: {type(e).__name__}: {e}",
+                file=sys.stderr,
+            )
+    elif args.post_pr_comment and run_context.target_pr:
         print(
-            f"[notify_slack] posted Slack message for {len(reports)} lane(s)",
+            "[notify_slack] --post-pr-comment set but no GITHUB_TOKEN / "
+            "GH_TOKEN / CANARY_ISSUES_TOKEN — skipping PR comment",
             file=sys.stderr,
         )
-    except Exception as e:
-        print(f"[notify_slack] slack post failed: {e} — sending fallback", file=sys.stderr)
-        try:
-            post_json(args.slack_webhook, fallback_payload(reports, args.run_url), {}, timeout=10)
-            print("[notify_slack] fallback posted", file=sys.stderr)
-        except Exception as e2:
-            print(f"[notify_slack] fallback also failed: {e2}", file=sys.stderr)
 
     # Issue creation runs AFTER Slack so a Slack-side failure doesn't
     # block the GitHub-side bookkeeping (and vice versa).

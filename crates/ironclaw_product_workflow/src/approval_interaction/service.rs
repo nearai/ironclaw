@@ -180,7 +180,10 @@ impl DefaultApprovalInteractionService {
     ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
         let action = ApprovalCapabilityAction::from_action(gate.request().action.as_ref())?;
         let status = gate.status();
-        if matches!(status, ApprovalStatus::Denied | ApprovalStatus::Expired) {
+        if matches!(
+            status,
+            ApprovalStatus::Denied | ApprovalStatus::Expired | ApprovalStatus::Discarded
+        ) {
             return Err(approval_rejected(
                 ApprovalInteractionRejectionKind::StaleGate,
             ));
@@ -221,7 +224,7 @@ impl DefaultApprovalInteractionService {
                     .ensure_spawn_lease(gate.resource_scope(), gate.request().id, terms)
                     .await
             }
-            (ApprovalStatus::Denied | ApprovalStatus::Expired, _) => {
+            (ApprovalStatus::Denied | ApprovalStatus::Expired | ApprovalStatus::Discarded, _) => {
                 return Err(approval_rejected(
                     ApprovalInteractionRejectionKind::StaleGate,
                 ));
@@ -284,13 +287,8 @@ impl DefaultApprovalInteractionService {
             grantee,
             approved_by: Principal::User(request.actor.user_id.clone()),
             constraints: ironclaw_host_api::GrantConstraints {
-                allowed_effects: terms.allowed_effects,
-                mounts: terms.mounts,
-                network: terms.network,
-                secrets: terms.secrets,
-                resource_ceiling: terms.resource_ceiling,
-                expires_at: terms.expires_at,
                 max_invocations: None,
+                ..terms.constraints
             },
             source_approval_request_id: Some(gate.request().id),
         };
@@ -352,7 +350,7 @@ impl DefaultApprovalInteractionService {
                     .await?;
             }
             ApprovalStatus::Denied => {}
-            ApprovalStatus::Approved | ApprovalStatus::Expired => {
+            ApprovalStatus::Approved | ApprovalStatus::Expired | ApprovalStatus::Discarded => {
                 return Err(approval_rejected(
                     ApprovalInteractionRejectionKind::StaleGate,
                 ));

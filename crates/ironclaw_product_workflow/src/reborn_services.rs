@@ -8,6 +8,7 @@ use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::{Arc, Mutex as StdMutex, Weak},
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -45,13 +46,13 @@ use uuid::Uuid;
 use crate::{
     ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
     AuthInteractionRejectionKind, AuthInteractionService, LifecyclePackageRef,
-    LifecycleProductFacade, ProductWorkflowError, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller,
-    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand,
-    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest,
+    LifecycleProductFacade, ListPendingApprovalsRequest, ProductWorkflowError,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
+    UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand, WebUiInboundValidationCode,
+    WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
     approval_interaction::RejectingApprovalInteractionService,
     auth_interaction::RejectingAuthInteractionService,
     binding_ref::{
@@ -82,11 +83,11 @@ pub use fs_browse::{
     RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
 };
 use ironclaw_approvals::{
-    AutoApproveSettingInput, AutoApproveSettingKey, AutoApproveSettingStore,
-    PersistentApprovalAction, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
-    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore, ToolPermissionOverride,
-    ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStore,
-    ToolPermissionState, permission_mode_allows_persistent_approval,
+    AUTO_APPROVE_DEFAULT_ENABLED, AutoApproveSettingInput, AutoApproveSettingKey,
+    AutoApproveSettingStore, PersistentApprovalAction, PersistentApprovalPolicyError,
+    PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
+    ToolPermissionOverride, ToolPermissionOverrideInput, ToolPermissionOverrideKey,
+    ToolPermissionOverrideStore, ToolPermissionState, permission_mode_allows_persistent_approval,
 };
 pub use llm_config::{
     CodexLoginStart, LlmActiveSelection, LlmConfigService, LlmConfigServiceError,
@@ -223,6 +224,40 @@ impl ConnectableChannelsProductFacade for StaticConnectableChannelsProductFacade
         Ok(RebornConnectableChannelListResponse {
             channels: self.channels.iter().cloned().collect(),
         })
+    }
+}
+
+/// Per-user channel connection state. Returns, for the calling user, which
+/// channel extensions they have personally connected (e.g. Slack pairing).
+/// Keyed by channel package id (e.g. `"slack"`) -> `true` when connected.
+/// Only channels that have a per-user connection concept appear in the map;
+/// absence means "no per-user connection concept for this channel".
+#[async_trait]
+pub trait ChannelConnectionFacade: Send + Sync {
+    async fn caller_channel_connections(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<std::collections::HashMap<String, bool>, RebornServicesError>;
+
+    async fn disconnect_channel_for_caller(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _channel: &str,
+    ) -> Result<(), RebornServicesError> {
+        Err(RebornServicesError::service_unavailable(false))
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StaticChannelConnectionFacade;
+
+#[async_trait]
+impl ChannelConnectionFacade for StaticChannelConnectionFacade {
+    async fn caller_channel_connections(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<std::collections::HashMap<String, bool>, RebornServicesError> {
+        Ok(std::collections::HashMap::new())
     }
 }
 
@@ -577,6 +612,41 @@ pub struct TriggerRunThreadScope {
     /// `creator_user_id` stored on the trigger record, which equals
     /// `owner_user_id` in the stored thread scope.
     pub creator_user_id: UserId,
+}
+
+#[derive(Debug, Clone)]
+struct AutomationNotificationTitle(String);
+
+impl AutomationNotificationTitle {
+    const MAX_CHARS: usize = 120;
+
+    fn from_name(name: &str) -> Option<Self> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let sanitized = trimmed
+            .chars()
+            .filter(|character| !character.is_control())
+            .take(Self::MAX_CHARS)
+            .collect::<String>();
+        let sanitized = sanitized.trim();
+        if sanitized.is_empty() {
+            None
+        } else {
+            Some(Self(sanitized.to_string()))
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AutomationApprovalThreadCandidate {
+    thread_id: ThreadId,
+    title: Option<AutomationNotificationTitle>,
 }
 
 #[async_trait]
@@ -948,6 +1018,8 @@ fn operator_config_invalid_value(field: &'static str) -> RebornServicesError {
     ))
 }
 
+// `internal_from` logs the backend cause while keeping the facade payload
+// sanitized, so operator diagnostics survive without leaking over the wire.
 fn operator_config_store_error(error: impl std::fmt::Display) -> RebornServicesError {
     RebornServicesError::internal_from(error)
 }
@@ -963,7 +1035,9 @@ async fn auto_approve_config_entry(
         .get(&key)
         .await
         .map_err(operator_config_store_error)?;
-    let enabled = record.as_ref().is_some_and(|record| record.enabled);
+    let enabled = record
+        .as_ref()
+        .map_or(AUTO_APPROVE_DEFAULT_ENABLED, |record| record.enabled);
     Ok(RebornOperatorConfigEntry {
         key: AUTO_APPROVE_CONFIG_KEY.to_string(),
         value: serde_json::json!(enabled),
@@ -1183,6 +1257,24 @@ fn tool_permission_state_wire(state: ToolPermissionState) -> &'static str {
         ToolPermissionState::AskEachTime => "ask_each_time",
         ToolPermissionState::Disabled => "disabled",
     }
+}
+
+/// Wire enum for the WebUI settings/tools permission request body.
+///
+/// Request-side vocabulary on the RebornServicesApi contract surface: the
+/// three resolved [`ToolPermissionState`] values plus `default`, which clears
+/// the stored per-capability override. The serialized strings must stay
+/// byte-identical to what [`parse_tool_permission_state`] accepts and
+/// [`tool_permission_state_wire`] emits — the
+/// `settings_tool_permission_state_wire_strings_stay_linked` test pins that
+/// link so the request enum cannot drift from the storage vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsToolPermissionState {
+    Default,
+    AlwaysAllow,
+    AskEachTime,
+    Disabled,
 }
 
 enum ToolPermissionUpdate {
@@ -1626,6 +1718,18 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
         request: RebornTimelineRequest,
     ) -> Result<RebornTimelineResponse, RebornServicesError>;
+
+    /// Return the effective global auto-approve toggle for the authenticated
+    /// caller. This is a narrow session-bootstrap read, not the operator
+    /// config key/value surface; implementations must derive scope from the
+    /// trusted caller. The default returns `Ok(false)` for compositions that
+    /// have not wired the approval settings surface.
+    async fn global_auto_approve_enabled(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<bool, RebornServicesError> {
+        Ok(false)
+    }
 
     /// Read the raw bytes of one landed attachment so the browser can render an
     /// image thumbnail (or download a file) for a persisted message. The default
@@ -2355,6 +2459,7 @@ pub struct RebornServices {
     automation_facade: Arc<dyn AutomationProductFacade>,
     skills_facade: Arc<dyn SkillsProductFacade>,
     connectable_channels_facade: Arc<dyn ConnectableChannelsProductFacade>,
+    channel_connection_facade: Arc<dyn ChannelConnectionFacade>,
     outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade>,
     operator_status: Arc<dyn OperatorStatusService>,
     operator_logs: Arc<dyn OperatorLogsService>,
@@ -2389,6 +2494,7 @@ impl RebornServices {
             automation_facade: Arc::new(UnsupportedAutomationProductFacade::new_static()),
             skills_facade: Arc::new(UnsupportedSkillsProductFacade::new_static()),
             connectable_channels_facade: Arc::new(StaticConnectableChannelsProductFacade::default()),
+            channel_connection_facade: Arc::new(StaticChannelConnectionFacade),
             outbound_preferences_facade: Arc::new(
                 UnsupportedOutboundPreferencesProductFacade::new_static(),
             ),
@@ -2517,6 +2623,14 @@ impl RebornServices {
         self
     }
 
+    pub fn with_channel_connection_facade(
+        mut self,
+        channel_connection_facade: Arc<dyn ChannelConnectionFacade>,
+    ) -> Self {
+        self.channel_connection_facade = channel_connection_facade;
+        self
+    }
+
     pub fn with_outbound_preferences_facade(
         mut self,
         outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade>,
@@ -2626,6 +2740,30 @@ impl RebornServices {
 
 #[async_trait]
 impl RebornServicesApi for RebornServices {
+    async fn global_auto_approve_enabled(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<bool, RebornServicesError> {
+        let Some(config) = &self.operator_approval_config else {
+            return Ok(false);
+        };
+        let scope = caller_resource_scope(&caller);
+        let operator_scope = operator_tool_permission_scope(&scope);
+        config
+            .auto_approve
+            .is_enabled(&operator_scope)
+            .await
+            .map_err(|error| {
+                tracing::debug!(
+                    tenant_id = %caller.tenant_id,
+                    user_id = %caller.user_id,
+                    error = %error,
+                    "failed to read global auto-approve setting"
+                );
+                operator_config_store_error(error)
+            })
+    }
+
     async fn get_operator_setup(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -3651,7 +3789,8 @@ impl RebornServicesApi for RebornServices {
             owner_user_id: Some(caller.user_id.clone()),
             mission_id: None,
         };
-        self.list_visible_threads_for_scope(scope, request).await
+        self.list_visible_threads_for_scope(scope, request, caller)
+            .await
     }
 
     async fn list_automations(
@@ -3781,6 +3920,7 @@ impl RebornServicesApi for RebornServices {
         extensions::list_extensions(
             Arc::clone(&self.lifecycle_facade),
             self.extension_credentials.clone(),
+            Arc::clone(&self.channel_connection_facade),
             caller,
         )
         .await
@@ -3886,7 +4026,13 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
         package_ref: LifecyclePackageRef,
     ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        extensions::remove_extension(self.lifecycle_facade.as_ref(), caller, package_ref).await
+        extensions::remove_extension(
+            self.lifecycle_facade.as_ref(),
+            self.channel_connection_facade.clone(),
+            caller,
+            package_ref,
+        )
+        .await
     }
 
     async fn setup_extension(
@@ -4216,8 +4362,22 @@ impl RebornServices {
         &self,
         scope: ThreadScope,
         request: WebUiListThreadsRequest,
+        caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornListThreadsResponse, RebornServicesError> {
         let visible_limit = clamp_thread_list_limit(request.limit);
+        let needs_approval = request.needs_approval;
+        if needs_approval {
+            return tokio::time::timeout(
+                NOTIFICATION_APPROVAL_QUERY_TIMEOUT,
+                self.list_automation_threads_needing_approval(
+                    caller,
+                    visible_limit,
+                    request.candidate_thread_id,
+                ),
+            )
+            .await
+            .map_err(|_| notification_approval_timeout_error())?;
+        }
         let fetch_limit = visible_limit
             .max(THREAD_LIST_FILTER_MIN_FETCH_SIZE)
             .min(THREAD_LIST_MAX_PAGE_SIZE as usize);
@@ -4249,12 +4409,12 @@ impl RebornServices {
                 })
                 .await
                 .map_err(map_thread_error)?;
-            visible_threads.extend(
-                response
-                    .threads
-                    .into_iter()
-                    .filter(|thread| !is_automation_trigger_thread(thread)),
-            );
+            for thread in response.threads {
+                if is_automation_trigger_thread(&thread) {
+                    continue;
+                }
+                visible_threads.push(thread);
+            }
             next_cursor = response.next_cursor;
             let Some(next) = next_cursor.clone() else {
                 break;
@@ -4281,6 +4441,220 @@ impl RebornServices {
             threads: visible_threads,
             next_cursor,
         })
+    }
+
+    async fn list_automation_threads_needing_approval(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        visible_limit: usize,
+        candidate_thread_id: Option<String>,
+    ) -> Result<RebornListThreadsResponse, RebornServicesError> {
+        let Some(bound_caller) = product_agent_bound_caller_from_webui(caller.clone()) else {
+            return Err(RebornServicesError::from_status(
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+                false,
+            ));
+        };
+        let automations = self
+            .automation_facade
+            .list_automations(
+                bound_caller.clone(),
+                AutomationListRequest {
+                    limit: NOTIFICATION_APPROVAL_AUTOMATION_LIMIT,
+                    run_limit: NOTIFICATION_APPROVAL_RUN_LIMIT,
+                    include_completed: true,
+                },
+            )
+            .await?;
+
+        let mut candidate_seen = HashSet::new();
+        let mut candidates = Vec::with_capacity(NOTIFICATION_APPROVAL_CANDIDATE_LIMIT);
+        for automation in &automations {
+            let title = AutomationNotificationTitle::from_name(&automation.name);
+            for run in &automation.recent_runs {
+                if let Some(thread_id) = &run.thread_id {
+                    if candidate_seen.insert(thread_id.clone()) {
+                        candidates.push(AutomationApprovalThreadCandidate {
+                            thread_id: thread_id.clone(),
+                            title: title.clone(),
+                        });
+                    }
+                    if candidates.len() >= NOTIFICATION_APPROVAL_CANDIDATE_LIMIT {
+                        break;
+                    }
+                }
+            }
+            if candidates.len() >= NOTIFICATION_APPROVAL_CANDIDATE_LIMIT {
+                break;
+            }
+        }
+
+        let mut seen = HashSet::new();
+        let mut threads = Vec::with_capacity(visible_limit);
+        if let Some(candidate_thread_id) = candidate_thread_id {
+            let thread_id = parse_thread_id_field("candidate_thread_id", candidate_thread_id)?;
+            if seen.insert(thread_id.clone()) {
+                let listed_candidate = candidates
+                    .iter()
+                    .find(|candidate| candidate.thread_id == thread_id)
+                    .cloned();
+                let record = if let Some(candidate) = listed_candidate {
+                    self.automation_run_thread_record(
+                        &caller,
+                        &bound_caller,
+                        candidate.thread_id,
+                        candidate.title,
+                    )
+                    .await?
+                } else {
+                    self.automation_run_thread_record(&caller, &bound_caller, thread_id, None)
+                        .await?
+                };
+                if let Some(record) = record {
+                    threads.push(record);
+                }
+            }
+        }
+        for candidate in candidates {
+            if threads.len() >= visible_limit {
+                break;
+            }
+            if !seen.insert(candidate.thread_id.clone()) {
+                continue;
+            }
+            let Some(record) = self
+                .automation_run_thread_record(
+                    &caller,
+                    &bound_caller,
+                    candidate.thread_id,
+                    candidate.title,
+                )
+                .await?
+            else {
+                continue;
+            };
+            threads.push(record);
+        }
+
+        Ok(RebornListThreadsResponse {
+            threads,
+            next_cursor: None,
+        })
+    }
+
+    async fn automation_run_thread_record(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        bound_caller: &ProductAgentBoundCaller,
+        thread_id: ThreadId,
+        automation_title: Option<AutomationNotificationTitle>,
+    ) -> Result<Option<SessionThreadRecord>, RebornServicesError> {
+        let Some(trigger_scope) = self
+            .automation_facade
+            .resolve_run_thread_scope(bound_caller.clone(), &thread_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        self.automation_run_thread_record_for_scope(
+            caller,
+            bound_caller,
+            thread_id,
+            trigger_scope,
+            automation_title,
+        )
+        .await
+    }
+
+    async fn automation_run_thread_record_for_scope(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        bound_caller: &ProductAgentBoundCaller,
+        thread_id: ThreadId,
+        trigger_scope: TriggerRunThreadScope,
+        title: Option<AutomationNotificationTitle>,
+    ) -> Result<Option<SessionThreadRecord>, RebornServicesError> {
+        let true_agent_id = trigger_scope
+            .agent_id
+            .clone()
+            .or_else(|| Some(bound_caller.agent_id.clone()));
+        let creator_user_id = trigger_scope.creator_user_id.clone();
+
+        let approval_turn_scope = TurnScope::new(
+            caller.tenant_id.clone(),
+            true_agent_id.clone(),
+            trigger_scope.project_id.clone(),
+            thread_id.clone(),
+        );
+        let run_actor = TurnActor::new(creator_user_id.clone());
+        if !self
+            .thread_scope_has_pending_approval(&approval_turn_scope, &run_actor)
+            .await?
+        {
+            return Ok(None);
+        }
+
+        let mut record = None;
+        for owner_user_id in [Some(creator_user_id.clone()), None] {
+            let thread_turn_scope = TurnScope::new_with_owner(
+                caller.tenant_id.clone(),
+                true_agent_id.clone(),
+                trigger_scope.project_id.clone(),
+                thread_id.clone(),
+                owner_user_id,
+            );
+            let thread_scope = thread_scope_from_turn_scope(
+                &thread_turn_scope,
+                thread_turn_scope.explicit_owner_user_id().cloned(),
+            )?;
+            match self
+                .thread_service
+                .read_thread(ThreadHistoryRequest {
+                    scope: thread_scope,
+                    thread_id: thread_turn_scope.thread_id.clone(),
+                })
+                .await
+            {
+                Ok(found) => {
+                    record = Some(found);
+                    break;
+                }
+                Err(
+                    SessionThreadError::UnknownThread { .. }
+                    | SessionThreadError::ThreadScopeMismatch { .. },
+                ) => {}
+                Err(error) => return Err(map_ownership_probe_error(error)),
+            }
+        }
+        let Some(mut record) = record else {
+            return Ok(None);
+        };
+        if record
+            .title
+            .as_ref()
+            .is_none_or(|title| title.trim().is_empty())
+            && let Some(title) = title.as_ref()
+        {
+            record.title = Some(title.as_str().to_string());
+        }
+        Ok(Some(record))
+    }
+
+    async fn thread_scope_has_pending_approval(
+        &self,
+        scope: &TurnScope,
+        actor: &TurnActor,
+    ) -> Result<bool, RebornServicesError> {
+        let pending = self
+            .approval_interactions
+            .list_pending(ListPendingApprovalsRequest {
+                scope: scope.clone(),
+                actor: actor.clone(),
+            })
+            .await
+            .map_err(|error| map_adapter_error(error.into()))?;
+        Ok(!pending.approvals.is_empty())
     }
 
     fn thread_operation_lock(&self, scope: &TurnScope) -> Arc<AsyncMutex<()>> {
@@ -5460,6 +5834,10 @@ const THREAD_LIST_DEFAULT_PAGE_SIZE: u32 = 50;
 const THREAD_LIST_MAX_PAGE_SIZE: u32 = 200;
 const THREAD_LIST_FILTER_MIN_FETCH_SIZE: usize = 50;
 const THREAD_LIST_FILTER_MAX_PAGES: usize = 20;
+const NOTIFICATION_APPROVAL_AUTOMATION_LIMIT: usize = 20;
+const NOTIFICATION_APPROVAL_RUN_LIMIT: usize = 20;
+const NOTIFICATION_APPROVAL_CANDIDATE_LIMIT: usize = 20;
+const NOTIFICATION_APPROVAL_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn clamp_timeline_limit(requested: Option<u32>) -> usize {
     let raw = requested.unwrap_or(TIMELINE_DEFAULT_PAGE_SIZE);
@@ -5484,6 +5862,10 @@ fn clamp_automation_run_limit(requested: Option<u32>) -> usize {
     // 0 is intentional: callers suppress embedded run history by passing run_limit=0.
     let clamped = raw.min(AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE);
     clamped as usize
+}
+
+fn notification_approval_timeout_error() -> RebornServicesError {
+    RebornServicesError::service_unavailable(true)
 }
 
 /// Wire shape of the opaque timeline cursor. The browser does not need
@@ -5983,6 +6365,53 @@ fn generated_thread_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The WebUI settings/tools request enum must use the exact wire strings
+    /// the operator-config storage parser accepts and the entry writer emits.
+    /// This pins the type link so the request vocabulary cannot drift from
+    /// the approvals-owned resolved-state vocabulary (audit 2026-07, 6a).
+    #[test]
+    fn settings_tool_permission_state_wire_strings_stay_linked() {
+        let cases = [
+            (SettingsToolPermissionState::Default, "default", None),
+            (
+                SettingsToolPermissionState::AlwaysAllow,
+                "always_allow",
+                Some(ToolPermissionState::AlwaysAllow),
+            ),
+            (
+                SettingsToolPermissionState::AskEachTime,
+                "ask_each_time",
+                Some(ToolPermissionState::AskEachTime),
+            ),
+            (
+                SettingsToolPermissionState::Disabled,
+                "disabled",
+                Some(ToolPermissionState::Disabled),
+            ),
+        ];
+        for (state, wire, resolved) in cases {
+            let serialized = serde_json::to_value(state).unwrap();
+            assert_eq!(serialized, serde_json::Value::String(wire.to_string()));
+            assert_eq!(
+                serde_json::from_value::<SettingsToolPermissionState>(serialized).unwrap(),
+                state
+            );
+            // Round-trips through the storage parser the facade applies on set.
+            let update =
+                parse_tool_permission_state(&serde_json::json!({ "state": wire })).unwrap();
+            match (update, resolved) {
+                (ToolPermissionUpdate::Default, None) => {}
+                (ToolPermissionUpdate::State(parsed), Some(expected)) => {
+                    assert_eq!(parsed, expected);
+                    // The resolved states serialize to the same strings the
+                    // config entry writer emits.
+                    assert_eq!(tool_permission_state_wire(expected), wire);
+                }
+                _ => panic!("wire string {wire} no longer parses to the expected update"),
+            }
+        }
+    }
 
     /// Every `ProjectServiceError` variant projects to a sanitized facade error
     /// with the expected coarse code/status, and `InvalidInput`'s field name is

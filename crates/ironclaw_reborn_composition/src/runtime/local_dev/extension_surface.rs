@@ -9,8 +9,8 @@ use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, Trust
 
 use crate::extension_lifecycle::{ActiveExtensionCapability, RebornLocalExtensionManagementPort};
 use ironclaw_first_party_extensions::{
-    EXA_MCP_HOST, NETWORK_EGRESS_LIMIT, WEB_ACCESS_EXTENSION_ID, WEB_SEARCH_CAPABILITY_ID,
-    gsuite_network_policy_for,
+    EXA_MCP_HOST, NETWORK_EGRESS_LIMIT, WEB_ACCESS_EXTENSION_ID, WEB_GET_CONTENT_CAPABILITY_ID,
+    WEB_SEARCH_CAPABILITY_ID, gsuite_network_policy_for,
 };
 use ironclaw_product_workflow::ProductWorkflowError;
 
@@ -165,9 +165,12 @@ fn extension_network_policy(capability: &ActiveExtensionCapability) -> NetworkPo
             targets.push(credential.audience.clone());
         }
     }
-    let is_web_access_search = capability.provider.as_str() == WEB_ACCESS_EXTENSION_ID
-        && capability.id.as_str() == WEB_SEARCH_CAPABILITY_ID;
-    if is_web_access_search
+    let is_web_access_exa_mcp = capability.provider.as_str() == WEB_ACCESS_EXTENSION_ID
+        && matches!(
+            capability.id.as_str(),
+            WEB_SEARCH_CAPABILITY_ID | WEB_GET_CONTENT_CAPABILITY_ID
+        );
+    if is_web_access_exa_mcp
         && !targets
             .iter()
             .any(|target| target.host_pattern == EXA_MCP_HOST)
@@ -181,7 +184,7 @@ fn extension_network_policy(capability: &ActiveExtensionCapability) -> NetworkPo
     NetworkPolicy {
         allowed_targets: targets,
         deny_private_ip_ranges: true,
-        max_egress_bytes: is_web_access_search.then_some(NETWORK_EGRESS_LIMIT),
+        max_egress_bytes: is_web_access_exa_mcp.then_some(NETWORK_EGRESS_LIMIT),
     }
 }
 
@@ -195,6 +198,30 @@ mod tests {
     fn web_access_search_gets_exa_mcp_network_target_without_credentials() {
         let capability = ActiveExtensionCapability {
             id: CapabilityId::new(WEB_SEARCH_CAPABILITY_ID).unwrap(),
+            provider: ExtensionId::new(WEB_ACCESS_EXTENSION_ID).unwrap(),
+            effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
+            default_permission: PermissionMode::Allow,
+            runtime_credentials: Vec::new(),
+        };
+
+        let policy = extension_network_policy(&capability);
+
+        assert_eq!(
+            policy.allowed_targets,
+            vec![NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: EXA_MCP_HOST.to_string(),
+                port: None,
+            }]
+        );
+        assert!(policy.deny_private_ip_ranges);
+        assert_eq!(policy.max_egress_bytes, Some(NETWORK_EGRESS_LIMIT));
+    }
+
+    #[test]
+    fn web_access_get_content_gets_exa_mcp_network_target_without_credentials() {
+        let capability = ActiveExtensionCapability {
+            id: CapabilityId::new(WEB_GET_CONTENT_CAPABILITY_ID).unwrap(),
             provider: ExtensionId::new(WEB_ACCESS_EXTENSION_ID).unwrap(),
             effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
             default_permission: PermissionMode::Allow,

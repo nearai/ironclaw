@@ -6,8 +6,8 @@ use std::sync::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    AgentId, CapabilityId, MissionId, ProjectId, ProviderToolName, ResourceScope, TenantId,
-    ThreadId, UserId,
+    AgentId, CapabilityId, DispatchInputIssueCode, MissionId, ProjectId, ProviderToolName,
+    ResourceScope, TenantId, ThreadId, UserId,
 };
 use ironclaw_loop_support::{
     EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
@@ -43,8 +43,8 @@ use ironclaw_turns::{
         AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
         AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityBatchInvocation,
         CapabilityBatchOutcome, CapabilityDenied, CapabilityDeniedReasonKind, CapabilityInputIssue,
-        CapabilityInputIssueCode, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-        CapabilitySurfaceVersion, FinalizeAssistantMessage, HostManagedLoopPromptPort,
+        CapabilityInputRef, CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion,
+        FinalizeAssistantMessage, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
         InMemoryRunProfileResolver, LoopCapabilityPort, LoopContextBundle,
         LoopContextCompactionKind, LoopContextMessage, LoopContextPort, LoopContextRequest,
@@ -2372,7 +2372,7 @@ async fn transcript_port_appends_model_observation_in_tool_result_reference_enve
         detail: ToolObservationDetail::InvalidInput {
             issues: vec![CapabilityInputIssue {
                 path: "file_path".to_string(),
-                code: CapabilityInputIssueCode::MissingRequired,
+                code: DispatchInputIssueCode::MissingRequired,
                 expected: Some("required field".to_string()),
                 received: None,
                 schema_path: Some("required".to_string()),
@@ -3272,6 +3272,49 @@ async fn model_port_rejects_malformed_tool_result_reference_content() {
         .expect_err("malformed tool result reference content should fail");
 
     assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    assert!(gateway.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn model_port_rejects_missing_explicit_tool_result_reference_before_gateway_call() {
+    let fixture = ThreadFixture::new().await;
+    let missing_tool_result_ref =
+        LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333333").unwrap();
+    let thread_service = Arc::new(StaticContextThreadService::new(ContextMessage {
+        message_id: Some(ThreadMessageId::parse("44444444-4444-4444-4444-444444444444").unwrap()),
+        summary_id: None,
+        sequence: 1,
+        kind: MessageKind::User,
+        tool_result_provider_call: None,
+        content: "newer user message still exists".to_string(),
+        image_attachments: Vec::new(),
+    }));
+    let gateway = Arc::new(RecordingGateway::reply("model says hi"));
+    let model_port = ThreadBackedLoopModelPort::new(
+        thread_service,
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    );
+    let messages = vec![LoopModelMessage {
+        role: "tool_result_reference".to_string(),
+        content_ref: missing_tool_result_ref,
+    }];
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    let error = model_port
+        .stream_model(LoopModelRequest {
+            messages,
+            surface_version: None,
+            model_preference: None,
+            capability_view: None,
+        })
+        .await
+        .expect_err("missing tool result reference should fail before model call");
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    assert_eq!(error.safe_summary, "model message reference is unavailable");
     assert!(gateway.calls.lock().unwrap().is_empty());
 }
 
@@ -4593,6 +4636,7 @@ impl LoopCapabilityPort for StaticToolDefinitionPort {
         _request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         Ok(VisibleCapabilitySurface {
+            callable_capability_ids: None,
             version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
             descriptors: Vec::new(),
         })

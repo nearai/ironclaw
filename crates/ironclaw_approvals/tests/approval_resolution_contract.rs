@@ -25,13 +25,15 @@ async fn approving_pending_dispatch_request_issues_scoped_capability_lease() {
             request_id,
             LeaseApproval {
                 issued_by: Principal::User(scope.user_id.clone()),
-                allowed_effects: vec![EffectKind::DispatchCapability],
-                mounts: Default::default(),
-                network: Default::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: Default::default(),
+                    network: Default::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await
@@ -107,18 +109,20 @@ async fn approving_pending_dispatch_request_preserves_reviewed_grant_constraints
             request_id,
             LeaseApproval {
                 issued_by: Principal::User(scope.user_id.clone()),
-                allowed_effects: vec![
-                    EffectKind::DispatchCapability,
-                    EffectKind::ReadFilesystem,
-                    EffectKind::Network,
-                    EffectKind::UseSecret,
-                ],
-                mounts: mounts.clone(),
-                network: network.clone(),
-                secrets: vec![secret.clone()],
-                resource_ceiling: Some(resource_ceiling.clone()),
-                expires_at: None,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![
+                        EffectKind::DispatchCapability,
+                        EffectKind::ReadFilesystem,
+                        EffectKind::Network,
+                        EffectKind::UseSecret,
+                    ],
+                    mounts: mounts.clone(),
+                    network: network.clone(),
+                    secrets: vec![secret.clone()],
+                    resource_ceiling: Some(resource_ceiling.clone()),
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await
@@ -159,13 +163,15 @@ async fn approving_pending_request_marks_request_approved_even_when_lease_issue_
             request_id,
             LeaseApproval {
                 issued_by: Principal::User(scope.user_id.clone()),
-                allowed_effects: vec![EffectKind::DispatchCapability],
-                mounts: Default::default(),
-                network: Default::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: Default::default(),
+                    network: Default::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await
@@ -211,13 +217,15 @@ async fn approving_pending_request_issues_no_lease_when_approval_update_fails() 
             request_id,
             LeaseApproval {
                 issued_by: Principal::User(scope.user_id.clone()),
-                allowed_effects: vec![EffectKind::DispatchCapability],
-                mounts: Default::default(),
-                network: Default::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: Default::default(),
+                    network: Default::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await
@@ -254,13 +262,15 @@ async fn approving_pending_request_issues_no_lease_when_status_was_resolved_conc
             request_id,
             LeaseApproval {
                 issued_by: Principal::User(scope.user_id.clone()),
-                allowed_effects: vec![EffectKind::DispatchCapability],
-                mounts: Default::default(),
-                network: Default::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: Default::default(),
+                    network: Default::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await
@@ -294,13 +304,15 @@ async fn lease_from_approved_request_is_resume_only_and_not_plain_authority() {
             approval.id,
             LeaseApproval {
                 issued_by: Principal::User(context.user_id.clone()),
-                allowed_effects: descriptor.effects.clone(),
-                mounts: Default::default(),
-                network: Default::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: None,
+                constraints: GrantConstraints {
+                    allowed_effects: descriptor.effects.clone(),
+                    mounts: Default::default(),
+                    network: Default::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: None,
+                },
             },
         )
         .await
@@ -340,13 +352,15 @@ async fn approving_dispatch_without_fingerprint_fails_without_lease_or_status_ch
             request_id,
             LeaseApproval {
                 issued_by: Principal::User(scope.user_id.clone()),
-                allowed_effects: vec![EffectKind::DispatchCapability],
-                mounts: Default::default(),
-                network: Default::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: Default::default(),
+                    network: Default::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await
@@ -389,13 +403,15 @@ async fn approving_pending_dispatch_request_emits_redacted_approval_audit_event(
             request_id,
             LeaseApproval {
                 issued_by: Principal::User(scope.user_id.clone()),
-                allowed_effects: vec![EffectKind::DispatchCapability],
-                mounts: Default::default(),
-                network: Default::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: Default::default(),
+                    network: Default::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await
@@ -491,13 +507,15 @@ async fn approval_audit_event_sink_failure_does_not_change_resolution_outcome() 
             request_id,
             LeaseApproval {
                 issued_by: Principal::User(scope.user_id.clone()),
-                allowed_effects: vec![EffectKind::DispatchCapability],
-                mounts: Default::default(),
-                network: Default::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: Default::default(),
+                    network: Default::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await
@@ -608,13 +626,15 @@ async fn approving_request_from_other_tenant_fails_closed() {
             request_id,
             LeaseApproval {
                 issued_by: Principal::User(tenant_b.user_id.clone()),
-                allowed_effects: vec![EffectKind::DispatchCapability],
-                mounts: Default::default(),
-                network: Default::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: None,
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: Default::default(),
+                    network: Default::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: None,
+                },
             },
         )
         .await
@@ -646,13 +666,15 @@ async fn concurrent_approve_dispatch_on_same_request_is_first_write_wins() {
 
     let lease_approval = || LeaseApproval {
         issued_by: Principal::User(scope.user_id.clone()),
-        allowed_effects: vec![EffectKind::DispatchCapability],
-        mounts: Default::default(),
-        network: Default::default(),
-        secrets: Vec::new(),
-        resource_ceiling: None,
-        expires_at: None,
-        max_invocations: Some(1),
+        constraints: GrantConstraints {
+            allowed_effects: vec![EffectKind::DispatchCapability],
+            mounts: Default::default(),
+            network: Default::default(),
+            secrets: Vec::new(),
+            resource_ceiling: None,
+            expires_at: None,
+            max_invocations: Some(1),
+        },
     };
 
     let approvals_a = approvals.clone();

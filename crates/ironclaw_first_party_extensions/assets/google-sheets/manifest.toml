@@ -2,7 +2,7 @@ schema_version = "reborn.extension_manifest.v2"
 id = "google-sheets"
 name = "Google Sheets"
 version = "0.1.0"
-description = "Google Sheets capabilities for creating, reading, writing, and formatting spreadsheets."
+description = "Google Sheets capabilities for creating, reading, writing, and formatting spreadsheets. Use Google Drive list_files to find existing spreadsheets by name/title."
 trust = "first_party_requested"
 
 [runtime]
@@ -25,7 +25,7 @@ required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
 id = "google-sheets.get_spreadsheet"
-description = "Get spreadsheet metadata."
+description = "Get spreadsheet metadata by spreadsheet ID. If the user only provided a spreadsheet name/title, search Google Drive first."
 effects = ["dispatch_capability", "network", "use_secret"]
 runtime_credentials = [
   { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"], audience = { scheme = "https", host_pattern = "sheets.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
@@ -39,7 +39,7 @@ required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
 id = "google-sheets.read_values"
-description = "Read cell values from a range."
+description = "Read cell values from a range by spreadsheet ID. If the user only provided a spreadsheet name/title, search Google Drive first."
 effects = ["dispatch_capability", "network", "use_secret"]
 runtime_credentials = [
   { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"], audience = { scheme = "https", host_pattern = "sheets.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
@@ -81,7 +81,7 @@ required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
 id = "google-sheets.append_values"
-description = "Append rows after existing data."
+description = "Append rows after existing data by spreadsheet ID. If the user only provided a spreadsheet name/title, search Google Drive first."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 runtime_credentials = [
   { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/spreadsheets"] } }, provider_scopes = ["https://www.googleapis.com/auth/spreadsheets"], audience = { scheme = "https", host_pattern = "sheets.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },

@@ -214,7 +214,13 @@ pub struct HarnessSection {
 pub struct RunnerSection {
     pub heartbeat_interval_secs: Option<u64>,
     pub poll_interval_ms: Option<u64>,
-    /// Number of concurrent turn-runner worker tasks. `None` or `0` defaults to 4. Clamped to 32.
+    /// Number of concurrent turn-runner slots (scheduler semaphore permits).
+    /// `None` (absent) → compiled default (16). `0` → unlimited (no global
+    /// throttle). Positive values are used verbatim as the scheduler-semaphore
+    /// permit count; values above `tokio::sync::Semaphore::MAX_PERMITS` are
+    /// rejected as a config error (they would otherwise panic semaphore
+    /// construction). Overridable at runtime by
+    /// `IRONCLAW_REBORN_RUNNER_WORKER_COUNT`.
     pub worker_count: Option<usize>,
     /// Max concurrent runs in `TurnStatus::Running` per (tenant_id, owner user_id). `None` or `0` = unlimited.
     pub max_concurrent_runs_per_user: Option<u32>,
@@ -1024,8 +1030,6 @@ pub fn begin_default_llm_slot_update(
 }
 
 fn acquire_update_lock(path: &Path) -> Result<fs::File, RebornConfigFileUpdateError> {
-    use fs4::FileExt as _;
-
     let lock_path = config_update_lock_path(path);
     if let Some(parent) = lock_path.parent() {
         fs::create_dir_all(parent).map_err(|source| RebornConfigFileUpdateError::Lock {
@@ -1043,7 +1047,7 @@ fn acquire_update_lock(path: &Path) -> Result<fs::File, RebornConfigFileUpdateEr
             path: lock_path.clone(),
             source,
         })?;
-    file.lock_exclusive()
+    file.lock()
         .map_err(|source| RebornConfigFileUpdateError::Lock {
             path: lock_path,
             source,
@@ -1994,10 +1998,7 @@ deployment_profile = "production"
             memory.profile_bindings[0].profile_id,
             "memory.document_store.v1"
         );
-        assert_eq!(
-            memory.profile_bindings[0].extension_id,
-            "ironclaw.memory"
-        );
+        assert_eq!(memory.profile_bindings[0].extension_id, "ironclaw.memory");
         assert_eq!(memory.admin_overrides.len(), 1);
         assert_eq!(memory.admin_overrides[0].deployment_profile, "production");
     }

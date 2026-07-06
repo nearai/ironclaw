@@ -218,13 +218,15 @@ async fn approved_github_comment_fixture() -> GitHubCommentApprovalFixture {
             fixture.approval_id,
             LeaseApproval {
                 issued_by: Principal::HostRuntime,
-                allowed_effects: github_comment_effects(),
-                mounts: MountView::default(),
-                network: NetworkPolicy::default(),
-                secrets: vec![SecretHandle::new("github_token").unwrap()],
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: github_comment_effects(),
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: vec![SecretHandle::new("github_token").unwrap()],
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await

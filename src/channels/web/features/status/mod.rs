@@ -111,6 +111,8 @@ pub(crate) async fn gateway_status_handler(
         llm_backend: active_config.llm_backend,
         llm_model: active_config.llm_model,
         enabled_channels: active_config.enabled_channels,
-        engine_v2_enabled: crate::bridge::is_engine_v2_enabled(),
+        // Engine v2 has been removed; the wire field remains (always false) so
+        // the frontend hides the former engine-v2 UI without a JS change.
+        engine_v2_enabled: false,
     })
 }

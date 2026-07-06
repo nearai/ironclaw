@@ -220,9 +220,8 @@ mod tests {
 
     #[test]
     fn explicit_native_policy_builds_a_service() {
-        let resolver = MemoryServiceResolver::from_policy(policy_with_document_store(
-            "ironclaw.memory",
-        ));
+        let resolver =
+            MemoryServiceResolver::from_policy(policy_with_document_store("ironclaw.memory"));
         assert!(
             resolver
                 .resolve_document_store(filesystem(), None)

@@ -2,6 +2,35 @@
 
 **IronClaw** is a secure personal AI assistant — user-first security, self-expanding tools, defense in depth, multi-channel access with proactive background execution.
 
+## Code Discovery — Query the Knowledge Graph First
+
+This repo can be indexed into a **codebase knowledge graph** (the `codebase-memory` MCP server) over `src/` and `crates/`. For any *where-is / who-calls / how-does-data-flow / what-does-this-touch* question, **probe the graph before reaching for `Grep`** — text search cannot see cross-crate call chains, and this codebase's real cost is cross-crate (a feature crosses `product_workflow → composition → webui_v2 → runtime → frontend`).
+
+**Where it lives:** `.codebase-memory/graph.db.zst` — a **git-ignored build artifact, not source**. One per environment, rebuilt from code. Never commit it.
+
+**Freshness (check at the start of a discovery task):** run `bash scripts/codebase-graph.sh status` — it compares the graph's indexed commit against `HEAD`. Then:
+- **Missing** → `index_repository(repo_path=".")` once to build it.
+- **Stale** → `detect_changes(since="<indexed-commit>")` for the changed symbols + blast radius, or re-run `index_repository` to fully refresh.
+- The graph is a point-in-time index — verify anything it asserts against live code before acting.
+
+**Discovery recipes (use these instead of `Grep` for code structure):**
+- Where a symbol is defined → `search_graph(name_pattern=…)`, then `get_code_snippet(qualified_name=…)`
+- Who calls X / what X calls → `trace_path(function_name=…, mode="calls")`
+- How a value flows across layers → `trace_path(mode="data_flow")`
+- Cross-crate / cross-service path (the reborn 5-layer feature flow) → `trace_path(mode="cross_service")`
+- Structure of an area → `get_architecture(…)`; graph-augmented text search → `search_code(pattern=…)`
+- Arbitrary structural queries → `query_graph(<Cypher>)`
+
+`Grep`/`Glob`/`Read` remain correct for text, config, and non-code files — and for reading a file the graph pointed you to. For *code structure*, the graph comes first.
+
+**Narrative orientation (what/why, not where):** prose docs for each subsystem live in `openwiki/` — an auto-generated wiki kept fresh by `.github/workflows/openwiki-update.yml`. For *"what does this subsystem do / how does this flow work"* questions, `Read` the relevant `openwiki/` page; use the graph for precise structure. Do not hand-edit `openwiki/` — it is regenerated. The two layers are complementary: `openwiki/` = prose map, the graph = exact index.
+
+## Where to Build — Reborn-First
+
+**New feature work targets the Reborn stack in `crates/`, not the v1 `src/` monolith.** A Reborn feature crosses `product_workflow → composition → webui_v2 → runtime/serve → frontend`; the binary entry point is `crates/ironclaw_reborn_cli` (binary name `ironclaw-reborn`), **not** `src/main.rs`. Start from the `reborn-feature` skill — it maps those layers so you wire a feature in one pass instead of layer-by-layer.
+
+`src/` is the **v1 monolith**, being retired under the roadmap's "Clean up old architecture." Maintain existing v1 behavior there when a bug requires it, but **do not build new features into `src/`** — they belong Reborn-side. The detailed `src/` layout in "Project Structure" below documents v1 for maintenance, not as the default place to add code.
+
 ## Build & Test
 
 ```bash
@@ -14,6 +43,27 @@ RUST_LOG=ironclaw=debug cargo run                            # run with logging
 
 E2E tests: see `tests/e2e/CLAUDE.md`.
 
+## Testing Discipline
+
+Two rules are non-negotiable for **all** tests:
+
+1. **Test-first.** Every new feature and every bug fix starts in the
+   tests — write or update the test that pins the behavior, watch it
+   fail for the right reason, *then* change the implementation. Red,
+   then green. (The commit-msg hook already requires a regression test
+   with every fix; this is the ordering.)
+2. **Consolidate, don't proliferate.** Extensive coverage of every code
+   path, with minimal overlap. If a test already exercises most of the
+   path, **extend it** (a case, an assertion, a scripted turn) — do not
+   stand up a redundant new "extensive" test that overloads the suite.
+   Add a new test only for a genuinely distinct scenario, and say why an
+   existing one couldn't absorb it.
+
+Where to look: hard rules (tiers, test-through-the-caller,
+regression-with-every-fix) in `.claude/rules/testing.md`; **Reborn
+integration tests** authoring guide in `tests/integration/CLAUDE.md`;
+Python/Playwright suite in `tests/e2e/CLAUDE.md`.
+
 ## Code Style
 
 - Prefer `crate::` for cross-module imports; `super::` is fine in tests and intra-module refs
@@ -24,7 +74,7 @@ E2E tests: see `tests/e2e/CLAUDE.md`.
 - Prefer strong types over strings (enums, newtypes)
 - Keep functions focused, extract helpers when logic is reused
 - Comments for non-obvious logic only
-- **Prompt templates live in files, not Rust code**: Multi-line prompt strings (mission goals, system prompts, CodeAct preambles) go in `crates/ironclaw_engine/prompts/*.md` and are loaded via `include_str!()`. Never inline large prompt templates as Rust string constants — they're hard to read, review, and iterate on. Single-line format strings are fine inline.
+- **Prompt templates live in files, not Rust code**: Multi-line prompt strings (mission goals, system prompts, preambles) go in a `prompts/*.md` file **inside the crate that owns the behavior** and are loaded via `include_str!()`. Reborn examples: `crates/ironclaw_loop_support`, `crates/ironclaw_turns`, `crates/ironclaw_skill_learning`. Never inline large prompt templates as Rust string constants — they're hard to read, review, and iterate on. Single-line format strings are fine inline.
 - **Logging levels matter for REPL/TUI**: `info!` and `warn!` output appears in the REPL and corrupts the terminal UI. Use `debug!` for internal diagnostics (trace analysis, reflection results, engine internals). Reserve `info!` for user-facing status that the REPL intentionally renders. Background tasks (reflection, trace analysis) must NEVER use `info!` — it breaks the interactive display.
 - **Test through the caller, not just the helper**: When a predicate/classifier/transform helper gates a side effect (HTTP, DB write, OAuth, UI mutation, tool execution) and has any wrapper or computed input between it and that side effect, a unit test on the helper alone is *not* sufficient regression coverage. Add a test that drives the call site — typically a `*_handler`, `factory::create_*`, or `manager::*` — at the integration tier (`cargo test --features integration`) or higher. The same applies to test mocks: if you mock a multi-arg runtime API like `window.open(url, target, features)`, the mock must capture every argument the production caller passes. See `.claude/rules/testing.md` ("Test Through the Caller, Not Just the Helper") for the full rule and the bug examples that motivated it.
 
@@ -58,17 +108,14 @@ Rules:
 
 Current ownership:
 
-- `src/bridge/auth_manager.rs`: canonical auth-flow extension-name resolver
-- `src/bridge/router.rs`: auth gate display + submit routing
-- `src/channels/web/server.rs`: pending-gate/history rehydration
+- `src/auth/extension.rs`: canonical auth-flow extension-name resolver (`resolve_auth_flow_extension_name` free fn + `AuthManager::resolve_extension_name_for_auth_flow`)
+- `src/channels/web/features/chat/mod.rs`: web auth submit routing and history rehydration (`pending_gate_extension_name` wrapper, `pending_auth` handling)
 - `crates/ironclaw_gateway/static/js/core/onboarding.js`: unified onboarding controller and configure-modal routing (previously in the monolithic `app.js`, now split — see `crates/ironclaw_gateway/src/assets.rs` for the concat order)
 
-Temporary compatibility boundary:
+Auth mode:
 
-- Web auth prompts with a gate `request_id` are the v2 path and must resolve through `/api/chat/gate/resolve`.
-- Web auth prompts without a `request_id` are legacy engine v1 `pending_auth` compatibility only.
-- Keep that compatibility isolated; do not add new features to it.
-- Once v1 auth mode is removed, delete the legacy `/api/chat/auth-token` and `/api/chat/auth-cancel` shim endpoints and the matching no-`request_id` UI branch.
+- Web auth prompts use the legacy `pending_auth` path (`/api/chat/auth-token`, `/api/chat/auth-cancel`); the user's next message is intercepted and routed to the credential store.
+- The former engine-v2 gate path (`/api/chat/gate/resolve`, `request_id`-scoped pending gates) has been removed along with engine v2.
 
 Key traits for extensibility: `Database`, `Channel`, `Tool`, `LlmProvider`, `SuccessEvaluator`, `EmbeddingProvider`, `NetworkPolicyDecider`, `Hook`, `Observer`, `Tunnel`.
 
@@ -155,7 +202,7 @@ src/
 │   ├── claude_bridge.rs # Claude Code bridge (spawns claude CLI)
 │   └── proxy_llm.rs    # LlmProvider that proxies through orchestrator
 │
-├── safety/             # Re-export shim for crates/ironclaw_safety (see Extracted Crates)
+├── safety/             # Docs-only pointer module (no re-exports; import from ironclaw_safety directly)
 │
 ├── (llm/  was extracted to crates/ironclaw_llm/ — see Extracted Crates)
 │
@@ -236,8 +283,10 @@ When modifying a module with a spec, read the spec first. Code follows spec; spe
 | `src/setup/` | `src/setup/README.md` |
 | `src/tools/` | `src/tools/README.md` |
 | `src/workspace/` | `src/workspace/README.md` |
-| `crates/ironclaw_engine/` | `crates/ironclaw_engine/CLAUDE.md` |
 | `crates/ironclaw_reborn_webui_ingress/` | `crates/ironclaw_reborn_webui_ingress/CLAUDE.md` |
+| `crates/ironclaw_reborn_identity/` | `crates/ironclaw_reborn_identity/CONTRACT.md` |
+| `tests/integration/` | `tests/integration/CLAUDE.md` |
+| `tests/support/reborn_parity_qa/` | `tests/support/reborn_parity_qa/CLAUDE.md` |
 | `tests/e2e/` | `tests/e2e/CLAUDE.md` |
 
 ## Job State Machine
@@ -295,20 +344,6 @@ incremental migration.
 See `.claude/rules/tools.md` for the full pattern, allowed exemptions,
 and migration status. The dispatcher itself lives in
 `src/tools/dispatch.rs`.
-
-## Engine v2 Per-Project Sandbox
-
-When `SANDBOX_ENABLED=true`, engine v2 routes the five filesystem/shell tools
-(`file_read`, `file_write`, `list_dir`, `apply_patch`, `shell`) for `/project/`
-paths through a per-project Docker container instead of the host filesystem.
-The host's directory at `~/.ironclaw/projects/<user_id>/<project_id>/` is bind-mounted at
-`/project/` inside the container, and a `sandbox_daemon` binary inside the
-container speaks NDJSON over `docker exec -i`.
-
-When unset, the same code path uses a host-filesystem `MountBackend` —
-behavior is unchanged. See `docs/plans/2026-04-10-engine-v2-sandbox.md`.
-
-Build the sandbox image: `docker build -f crates/Dockerfile.sandbox -t ironclaw/sandbox:dev .`
 
 ## Workspace & Memory
 

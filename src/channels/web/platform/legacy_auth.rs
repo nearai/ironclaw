@@ -27,16 +27,14 @@ pub async fn clear_auth_mode(state: &GatewayState, user_id: &str) {
     let _ = clear_auth_mode_for_thread(state, user_id, None).await;
 }
 
-/// Clear both the legacy v1 session `pending_auth` and the engine v2
-/// pending auth gate. Use this after the user has resolved the credential
-/// flow (or explicitly cancelled) and the gate is done with.
+/// Clear the legacy v1 session `pending_auth`. Use this after the user has
+/// resolved the credential flow (or explicitly cancelled).
 pub(crate) async fn clear_auth_mode_for_thread(
     state: &GatewayState,
     user_id: &str,
     thread_id: Option<&str>,
 ) -> Result<(), (StatusCode, String)> {
     clear_session_auth_mode_for_thread(state, user_id, thread_id).await?;
-    crate::bridge::clear_engine_pending_auth(user_id, thread_id).await;
     Ok(())
 }
 

@@ -666,3 +666,125 @@ async fn empty_verified_email_does_not_index_or_link() {
         "an empty verified email must not create a verified-email index"
     );
 }
+
+#[tokio::test]
+async fn resolve_or_create_keys_on_provider_instance() {
+    // The resolve path normalizes a `None` instance to "" and keys on
+    // provider_instance_id exactly like bind/lookup: the same subject with no
+    // instance, with `inst-1`, and with `inst-2` must be three distinct users.
+    // Emails are omitted so verified-email linking cannot mask the instance axis.
+    let store = store();
+    let t = tenant("t");
+    let base = || ResolveExternalIdentity {
+        tenant_id: t.clone(),
+        surface_kind: SurfaceKind::Oauth,
+        provider_kind: ProviderKind::new("google").expect("provider"),
+        provider_instance_id: None,
+        external_subject_id: ExternalSubjectId::new("sub-1").expect("subject"),
+        email: None,
+        email_verified: false,
+        display_name: None,
+    };
+    let no_instance = store.resolve_or_create(base()).await.expect("resolve none");
+    let inst_1 = store
+        .resolve_or_create(ResolveExternalIdentity {
+            provider_instance_id: Some(ProviderInstanceId::new("inst-1").expect("instance")),
+            ..base()
+        })
+        .await
+        .expect("resolve inst-1");
+    let inst_2 = store
+        .resolve_or_create(ResolveExternalIdentity {
+            provider_instance_id: Some(ProviderInstanceId::new("inst-2").expect("instance")),
+            ..base()
+        })
+        .await
+        .expect("resolve inst-2");
+    assert_ne!(no_instance.as_str(), inst_1.as_str());
+    assert_ne!(inst_1.as_str(), inst_2.as_str());
+    assert_ne!(
+        no_instance.as_str(),
+        inst_2.as_str(),
+        "the provider instance is part of the resolve identity key"
+    );
+}
+
+#[tokio::test]
+async fn corrupt_persisted_user_id_surfaces_invalid_user_id() {
+    // A persisted identity record whose `user_id` fails `UserId` validation on
+    // read-back must surface `InvalidUserId` (backend inconsistency), never be
+    // silently dropped. Drives both the `lookup` fast path and `resolve_or_create`.
+    let store = store();
+    let t = tenant("t");
+    let path =
+        identity_path(t.as_str(), SurfaceKind::Oauth, "google", "", "g-corrupt").expect("path");
+    store
+        .write_record(
+            &path,
+            &StoredExternalIdentity {
+                user_id: String::new(), // empty — rejected by UserId::new on read-back
+                email: None,
+                email_verified: false,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+            CasExpectation::Absent,
+        )
+        .await
+        .expect("seed corrupt record");
+
+    let via_lookup = store
+        .lookup(ExternalIdentityKey {
+            tenant_id: t.clone(),
+            surface_kind: SurfaceKind::Oauth,
+            provider_kind: ProviderKind::new("google").expect("provider"),
+            provider_instance_id: None,
+            external_subject_id: ExternalSubjectId::new("g-corrupt").expect("subject"),
+        })
+        .await;
+    assert!(
+        matches!(via_lookup, Err(RebornIdentityError::InvalidUserId(_))),
+        "lookup of a corrupt persisted user id must surface InvalidUserId, got {via_lookup:?}"
+    );
+
+    let via_resolve = store
+        .resolve_or_create(oauth(&t, "google", "g-corrupt", Some("a@x.com"), true))
+        .await;
+    assert!(
+        matches!(via_resolve, Err(RebornIdentityError::InvalidUserId(_))),
+        "resolve over a corrupt persisted user id must surface InvalidUserId, got {via_resolve:?}"
+    );
+}
+
+#[tokio::test]
+async fn corrupt_json_body_surfaces_backend_error() {
+    // A stored body that is not valid JSON for the record type must surface
+    // `Backend` (deserialize failure), not panic and not be swallowed.
+    let store = store();
+    let t = tenant("t");
+    let path =
+        identity_path(t.as_str(), SurfaceKind::Oauth, "google", "", "g-badjson").expect("path");
+    store
+        .filesystem
+        .put(
+            &store.scope,
+            &path,
+            Entry::bytes(b"{ this is not json".to_vec()).with_content_type(ContentType::json()),
+            CasExpectation::Absent,
+        )
+        .await
+        .expect("seed raw bytes");
+
+    let result = store
+        .lookup(ExternalIdentityKey {
+            tenant_id: t.clone(),
+            surface_kind: SurfaceKind::Oauth,
+            provider_kind: ProviderKind::new("google").expect("provider"),
+            provider_instance_id: None,
+            external_subject_id: ExternalSubjectId::new("g-badjson").expect("subject"),
+        })
+        .await;
+    assert!(
+        matches!(result, Err(RebornIdentityError::Backend(_))),
+        "a corrupt JSON body must surface a Backend error, got {result:?}"
+    );
+}

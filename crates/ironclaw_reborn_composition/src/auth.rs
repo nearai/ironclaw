@@ -25,12 +25,16 @@ use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
-use ironclaw_host_api::UserId;
+use ironclaw_host_api::{ExtensionId, UserId};
 use ironclaw_turns::{TurnRunId, TurnScope};
 
+use crate::RebornBuildError;
 use crate::manual_token_flow::{PortBackedManualTokenFlowService, RebornManualTokenFlowService};
 use crate::oauth_dcr::{DcrGateChallengeRequest, DcrSetupFlowRequest, OAuthDcrProviderRegistry};
 use crate::oauth_gate::{GoogleOAuthGateProviderRegistry, OAuthGateChallengeRequest};
+use crate::product_auth_runtime_credentials::host_managed_fallback::{
+    HostManagedCredentialFallbackRule, HostManagedRuntimeCredentialAccountSelector,
+};
 use crate::product_auth_runtime_credentials::{
     ProductAuthRuntimeCredentialAccountRefresher, ProductAuthRuntimeCredentialAccountSelector,
     RuntimeCredentialAccountRefreshPort, RuntimeCredentialAccountRefreshService,
@@ -466,6 +470,7 @@ pub struct RebornProductAuthServices {
     security_audit_sink: Option<Arc<dyn SecurityAuditSink>>,
     /// Secret store forwarded to the inline-refresh margin check (A2).
     secret_store: Arc<dyn ironclaw_secrets::SecretStore>,
+    host_managed_nearai_credential_scope: Option<AuthProductScope>,
     dcr_oauth_registry: Option<Arc<OAuthDcrProviderRegistry>>,
     oauth_gate_registry: Option<Arc<GoogleOAuthGateProviderRegistry>>,
     /// Optional read projection for WebUI/local-dev auth interactions.
@@ -512,6 +517,10 @@ impl std::fmt::Debug for RebornProductAuthServices {
             )
             .field("security_audit_sink", &self.security_audit_sink.is_some())
             .field("secret_store", &"<wired>")
+            .field(
+                "host_managed_nearai_credential_scope",
+                &self.host_managed_nearai_credential_scope.is_some(),
+            )
             .field("flow_record_source", &self.flow_record_source.is_some())
             .field("dcr_oauth_registry", &self.dcr_oauth_registry.is_some())
             .field("oauth_gate_registry", &self.oauth_gate_registry.is_some())
@@ -546,6 +555,7 @@ impl RebornProductAuthServices {
             continuation_dispatcher,
             security_audit_sink: None,
             secret_store: Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
+            host_managed_nearai_credential_scope: None,
             dcr_oauth_registry: None,
             oauth_gate_registry: None,
             flow_record_source: None,
@@ -658,12 +668,28 @@ impl RebornProductAuthServices {
     pub(crate) fn runtime_credential_account_selection_service(
         &self,
     ) -> Arc<dyn RuntimeCredentialAccountSelectionService> {
-        Arc::new(
+        let selector: Arc<dyn RuntimeCredentialAccountSelectionService> = Arc::new(
             ProductAuthRuntimeCredentialAccountSelector::new_with_visibility(
                 self.credential_account_record_source(),
                 Arc::new(crate::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy),
             ),
-        )
+        );
+        let Some(host_scope) = self.host_managed_nearai_credential_scope.clone() else {
+            return selector;
+        };
+        // The host-managed NEAR AI MCP key is the only fallback rule today;
+        // the generic `ProductAuthRuntimeCredentialAccountSelector` stays
+        // provider-agnostic and this composition layer supplies the one
+        // provider/extension pair that may fall back to it.
+        let nearai_provider =
+            AuthProviderId::new("nearai").expect("\"nearai\" is a valid AuthProviderId literal"); // safety: fixed literal, validation cannot fail
+        let nearai_requester =
+            ExtensionId::new("nearai").expect("\"nearai\" is a valid ExtensionId literal"); // safety: fixed literal, validation cannot fail
+        let fallback =
+            HostManagedCredentialFallbackRule::new(nearai_provider, nearai_requester, host_scope);
+        Arc::new(HostManagedRuntimeCredentialAccountSelector::new(
+            selector, fallback,
+        ))
     }
 
     pub(crate) fn runtime_credential_account_refresh_service(
@@ -757,6 +783,39 @@ impl RebornProductAuthServices {
     pub fn with_secret_store(mut self, store: Arc<dyn ironclaw_secrets::SecretStore>) -> Self {
         self.secret_store = store;
         self
+    }
+
+    /// Wire the host-managed NEAR AI MCP credential fallback scope.
+    ///
+    /// Consuming builder — call before wrapping the bundle in `Arc`, so
+    /// composition never depends on `Arc::get_mut` succeeding (which would
+    /// silently start failing the moment any caller clones the `Arc` first).
+    ///
+    /// `scope` must be the process's own boot-time owner scope (composition
+    /// derives it from `local_dev_nearai_mcp_owner_scope`), never a
+    /// per-request, per-thread, or per-user scope — the fallback selector
+    /// reuses it as the credential lookup target for every matching SSO
+    /// caller. This rejects a mission/thread-scoped value as a fail-closed
+    /// guard against an obviously wrong call site; it cannot prove the scope
+    /// is *the host's* rather than some specific end user's, since an
+    /// individual user's own owner-granularity scope has the identical
+    /// shape (mission/thread both `None`). That stronger guarantee only
+    /// exists by construction today: this builder must be called solely
+    /// from boot-time product-auth composition in `factory.rs`, never from
+    /// request-handling code.
+    pub(crate) fn with_host_managed_nearai_credential_scope(
+        mut self,
+        scope: AuthProductScope,
+    ) -> Result<Self, RebornBuildError> {
+        if scope.resource.mission_id.is_some() || scope.resource.thread_id.is_some() {
+            return Err(RebornBuildError::InvalidConfig {
+                reason:
+                    "host-managed NEAR AI credential scope must not carry mission/thread scoping"
+                        .to_string(),
+            });
+        }
+        self.host_managed_nearai_credential_scope = Some(scope);
+        Ok(self)
     }
 
     /// Enable WebUI/local-dev auth-flow projection source.
@@ -1586,6 +1645,51 @@ mod tests {
         assert_eq!(
             arc_data_ptr(&services.cleanup_service()),
             arc_data_ptr(&cleanup_service)
+        );
+    }
+
+    #[test]
+    fn with_host_managed_nearai_credential_scope_rejects_thread_scoped_value() {
+        let shared = Arc::new(SharedAuthTestDouble);
+        let services = RebornProductAuthServices::from_shared(
+            shared,
+            Arc::new(NoopAuthContinuationDispatcher),
+        );
+
+        let error = services
+            .with_host_managed_nearai_credential_scope(test_auth_product_scope())
+            .expect_err("thread-scoped value must not be accepted as a host-managed scope");
+
+        assert!(matches!(error, RebornBuildError::InvalidConfig { .. }));
+    }
+
+    #[test]
+    fn with_host_managed_nearai_credential_scope_accepts_owner_granularity_scope() {
+        use ironclaw_auth::AuthSurface;
+        use ironclaw_host_api::{AgentId, ResourceScope, TenantId, UserId};
+
+        let shared = Arc::new(SharedAuthTestDouble);
+        let services = RebornProductAuthServices::from_shared(
+            shared,
+            Arc::new(NoopAuthContinuationDispatcher),
+        );
+        let owner_scope = AuthProductScope::new(
+            ResourceScope {
+                tenant_id: TenantId::new("host-tenant").expect("tenant"),
+                user_id: UserId::new("host-owner").expect("user"),
+                agent_id: Some(AgentId::new("host-agent").expect("agent")),
+                project_id: None,
+                mission_id: None,
+                thread_id: None,
+                invocation_id: ironclaw_host_api::InvocationId::new(),
+            },
+            AuthSurface::Api,
+        );
+
+        assert!(
+            services
+                .with_host_managed_nearai_credential_scope(owner_scope)
+                .is_ok()
         );
     }
 

@@ -22,6 +22,7 @@ use ironclaw_loop_support::{
     LoopCapabilityPortFactory, LoopCapabilityResultWriter, loop_driver_execution_extension_id,
 };
 use ironclaw_product_workflow::{OutboundPreferencesProductFacade, ProjectService};
+use ironclaw_reborn::thread_scope::ThreadScopeResolver;
 
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_threads::{
@@ -62,17 +63,26 @@ mod surface_disclosure;
 mod synthetic_capability;
 
 #[cfg(test)]
-pub(crate) use crate::outbound_delivery_capability_surface::{
+pub(crate) use crate::outbound::{
     OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
 };
 use extension_surface::{LocalDevExtensionSurface, LocalDevExtensionSurfaceSource};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use project_create::PROJECT_CREATE_CAPABILITY_ID;
 use refreshing_capability_port::{
     RefreshingLocalDevCapabilityPortConfig, create_refreshing_local_dev_capability_port,
 };
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use skill_activation::SKILL_ACTIVATE_CAPABILITY_ID;
+
+/// Test-only bridges (E-PROJ / E-SKILL seams), co-located with the capability
+/// each wraps and re-exported here for the `runtime` caller.
+#[cfg(feature = "test-support")]
+pub(super) use outbound_delivery::wrap_outbound_delivery_capabilities_for_test;
+#[cfg(feature = "test-support")]
+pub(super) use project_create::wrap_project_create_capability_for_test;
+#[cfg(feature = "test-support")]
+pub(super) use skill_activation::wrap_skill_activation_capability_for_test;
 
 pub(super) struct LocalDevCapabilityWiring {
     pub(super) capability_factory: Arc<dyn LoopCapabilityPortFactory>,
@@ -323,6 +333,7 @@ impl LocalDevCapabilityIo {
         run_context: &LoopRunContext,
         invocation_id: InvocationId,
         capability_id: &CapabilityId,
+        status: CapabilityDisplayPreviewStatus,
     ) -> Option<ThreadMessageId> {
         let Some(durable_previews) = &self.durable_previews else {
             return None;
@@ -339,7 +350,7 @@ impl LocalDevCapabilityIo {
             match CapabilityDisplayPreviewEnvelope::new(CapabilityDisplayPreviewEnvelopeInput {
                 invocation_id,
                 capability_id: capability_id.clone(),
-                status: CapabilityDisplayPreviewStatus::Completed,
+                status,
                 title: record.title,
                 subtitle: record.subtitle,
                 input_summary: record.input_summary,
@@ -363,14 +374,15 @@ impl LocalDevCapabilityIo {
                     return None;
                 }
             };
+        let thread_scope = ThreadScopeResolver::resolve_for_turn(
+            &durable_previews.thread_scope,
+            &run_context.scope,
+            run_context.actor(),
+        );
         let message = match durable_previews
             .thread_service
             .append_capability_display_preview(AppendCapabilityDisplayPreviewRequest {
-                scope: ironclaw_reborn::thread_scope::ThreadScopeResolver::resolve_for_turn(
-                    &durable_previews.thread_scope,
-                    &run_context.scope,
-                    run_context.actor(),
-                ),
+                scope: thread_scope,
                 thread_id: run_context.thread_id.clone(),
                 turn_run_id: run_context.run_id.to_string(),
                 preview,
@@ -617,7 +629,12 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
             }
         }
         if let Some(message_id) = self
-            .try_append_durable_display_preview(run_context, invocation_id, capability_id)
+            .try_append_durable_display_preview(
+                run_context,
+                invocation_id,
+                capability_id,
+                CapabilityDisplayPreviewStatus::Completed,
+            )
             .await
         {
             self.display_previews
@@ -638,6 +655,36 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
     ) {
         self.display_previews
             .record_running_invocation(invocation_id, input_ref);
+    }
+
+    async fn stage_capability_failure_preview(
+        &self,
+        run_context: &LoopRunContext,
+        invocation_id: InvocationId,
+        capability_id: &CapabilityId,
+        summary: &str,
+    ) {
+        self.display_previews.record_failure_preview(
+            &run_context.run_id.to_string(),
+            invocation_id,
+            capability_id,
+            summary,
+        );
+        // Persist the failure preview to the durable timeline (status Failed)
+        // so the detail survives refresh/replay, mirroring the success path in
+        // `write_capability_result`.
+        if let Some(message_id) = self
+            .try_append_durable_display_preview(
+                run_context,
+                invocation_id,
+                capability_id,
+                CapabilityDisplayPreviewStatus::Failed,
+            )
+            .await
+        {
+            self.display_previews
+                .attach_timeline_message_id(invocation_id, message_id);
+        }
     }
 
     async fn update_capability_result(

@@ -13,7 +13,6 @@
 //! |--------|------|---------|
 //! | POST | `/api/chat/send` | [`chat_send_handler`] |
 //! | POST | `/api/chat/approval` | [`chat_approval_handler`] |
-//! | POST | `/api/chat/gate/resolve` | [`chat_gate_resolve_handler`] |
 //! | POST | `/api/chat/auth-token` | [`chat_auth_token_handler`] (legacy v1 shim) |
 //! | POST | `/api/chat/auth-cancel` | [`chat_auth_cancel_handler`] (legacy v1 shim) |
 //! | GET | `/api/chat/ws` | [`chat_ws_handler`] |
@@ -34,13 +33,10 @@
 //!   provisioning, cancellations) — migrated into platform in stage 4b.
 //! - [`crate::channels::web::platform::legacy_auth`] for the
 //!   pre-gate `pending_auth` compatibility path — migrated in stage 4b.
-//! - [`crate::bridge`] for the engine v2 pending-gate store and for
-//!   the canonical auth-flow identity resolver
-//!   (`auth_manager::resolve_auth_flow_extension_name`). The `CLAUDE.md`
-//!   "Extension/Auth Invariants" rule requires every gate-display /
-//!   resume path to go through this single resolver; the slice's
-//!   [`pending_gate_extension_name`] helper is the one wrapper, audited
-//!   by check #8 in `scripts/pre-commit-safety.sh`.
+//! - [`crate::auth::extension::resolve_auth_flow_extension_name`] for the
+//!   canonical auth-flow identity resolver. The `CLAUDE.md`
+//!   "Extension/Auth Invariants" rule requires every auth-display / resume
+//!   path to go through this single resolver.
 //!
 //! # In-progress reconciliation
 //!
@@ -67,9 +63,9 @@ use uuid::Uuid;
 use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::platform::state::GatewayState;
 use crate::channels::web::types::{
-    ActionResponse, ApprovalRequest, GateResolutionPayload, GateResolveRequest, HistoryResponse,
-    InProgressInfo, PendingGateInfo, SendMessageRequest, SendMessageResponse, ThreadInfo,
-    ThreadListResponse, ToolCallInfo, TurnInfo,
+    ActionResponse, ApprovalRequest, HistoryResponse, InProgressInfo, PendingGateInfo,
+    SendMessageRequest, SendMessageResponse, ThreadInfo, ThreadListResponse, ToolCallInfo,
+    TurnInfo,
 };
 use crate::channels::web::util::{
     build_turns_from_db_messages, collect_generated_images_from_tool_results,
@@ -187,74 +183,6 @@ pub(crate) async fn chat_approval_handler(
         )
     })?;
 
-    // Inline fast-path: when an Approval gate parks the live engine VM
-    // via `BridgeGateController::pause`, the per-user agent loop is
-    // blocked at `handle_message` awaiting the bridge call, so an
-    // ExecApproval submission posted to msg_tx would queue indefinitely
-    // behind the parked execution. Bypass the mpsc and call into the
-    // gate controller's in-memory delivery channel directly. On
-    // `NoLiveVm` we fall through to the legacy mpsc path so engine v1
-    // approvals (and any post-restart Approval gates without a parked
-    // future) still resolve correctly.
-    //
-    // The fast path looks the gate up by `request_id` rather than by
-    // the wire `thread_id`: web's `req.thread_id` is the channel-visible
-    // identifier (the per-conversation UUID returned by
-    // `/api/chat/thread/new`) and is recorded on the pending gate as
-    // `scope_thread_id`, not as the internal engine `ThreadId` that
-    // keys `PendingGateStore`. Mixing them up would miss every gate
-    // whose channel scope differs from its engine thread.
-    let resolution = if approved {
-        ironclaw_engine::GateResolution::Approved { always }
-    } else {
-        ironclaw_engine::GateResolution::Denied { reason: None }
-    };
-    // Match the legacy mpsc path's settings precedence (cache → raw DB)
-    // so an `action="always"` approval still persists
-    // `tool_permissions.<tool>=always_allow` whenever any DB-backed
-    // SettingsStore is configured. Falling back to the raw `state.store`
-    // covers gateways that wire a database without the cache layer.
-    let settings_store =
-        crate::channels::web::features::settings::resolve_settings_store(&state).ok();
-    match crate::bridge::try_resolve_inline_approval_gate(
-        &user.user_id,
-        "gateway",
-        request_id,
-        resolution,
-        settings_store,
-    )
-    .await
-    {
-        Ok(crate::bridge::InlineGateOutcome::Delivered) => {
-            return Ok((
-                StatusCode::ACCEPTED,
-                Json(SendMessageResponse {
-                    message_id: Uuid::new_v4(),
-                    status: "accepted",
-                }),
-            ));
-        }
-        Ok(crate::bridge::InlineGateOutcome::NoLiveVm) => {
-            // Fall through to the legacy mpsc dispatch below.
-        }
-        Err(e) => {
-            // Map typed verification failures to specific 4xx /
-            // 5xx codes. Matching on the variant — not a substring
-            // of the rendered message — keeps the HTTP contract
-            // tied to the typed surface so a future change to the
-            // error message can't silently flip a 403 → 500.
-            use crate::bridge::InlineGateError;
-            let status = match &e {
-                InlineGateError::ChannelMismatch { .. } | InlineGateError::Unauthorized => {
-                    StatusCode::FORBIDDEN
-                }
-                InlineGateError::Stale | InlineGateError::Expired => StatusCode::CONFLICT,
-                InlineGateError::Other(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            };
-            return Err((status, e.to_string()));
-        }
-    }
-
     // Build a structured ExecApproval submission as JSON, sent through the
     // existing message pipeline so the agent loop picks it up.
     let approval = crate::agent::submission::Submission::ExecApproval {
@@ -299,148 +227,6 @@ pub(crate) async fn chat_approval_handler(
             status: "accepted",
         }),
     ))
-}
-
-pub(crate) async fn chat_gate_resolve_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-    Json(req): Json<GateResolveRequest>,
-) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    // Half-2 of #3133: a paused background mission may be waiting on
-    // this same `request_id`. After the foreground gate is resolved we
-    // fan the disposition out to the mission auto-resume path so a
-    // paused mission re-fires (Approved / CredentialProvided) or gets
-    // marked Failed (Denied / Cancelled). For OAuth flows the
-    // credential-write path also triggers
-    // `resume_paused_missions_for_credential` from the OAuth callback
-    // handler — both hooks landing on the same mission are idempotent
-    // since `resume_paused_for_request_id` and
-    // `resume_paused_for_credential` re-check `paused_gate` atomically.
-    // Best-effort dispatch — failures inside the helper are logged and
-    // never surfaced as a gate-resolve error.
-    // Validate the request id once up front so every arm — including
-    // the Approved / Denied paths that delegate to chat_approval_handler
-    // — surfaces a uniform 400 on malformed UUIDs, and the mission
-    // auto-resume hook below isn't silently skipped on bad input.
-    let gate_request_id = Uuid::parse_str(&req.request_id).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            "Invalid request_id (expected UUID)".to_string(),
-        )
-    })?;
-    let mission_outcome = match req.resolution {
-        GateResolutionPayload::Approved { .. }
-        | GateResolutionPayload::CredentialProvided { .. } => {
-            Some(ironclaw_engine::GateResolutionOutcome::Approved)
-        }
-        GateResolutionPayload::Denied => Some(ironclaw_engine::GateResolutionOutcome::Denied),
-        GateResolutionPayload::Cancelled => Some(ironclaw_engine::GateResolutionOutcome::Cancelled),
-    };
-    let mission_resume = mission_outcome.map(|outcome| (outcome, gate_request_id));
-
-    let response: Result<Json<ActionResponse>, (StatusCode, String)> = match req.resolution {
-        GateResolutionPayload::Approved { always } => {
-            let action = if always { "always" } else { "approve" }.to_string();
-            let _ = chat_approval_handler(
-                State(state.clone()),
-                AuthenticatedUser(user.clone()),
-                Json(ApprovalRequest {
-                    request_id: req.request_id.clone(),
-                    action,
-                    thread_id: req.thread_id.clone(),
-                }),
-            )
-            .await?;
-            Ok(Json(ActionResponse::ok("Gate resolution accepted.")))
-        }
-        GateResolutionPayload::Denied => {
-            let _ = chat_approval_handler(
-                State(state.clone()),
-                AuthenticatedUser(user.clone()),
-                Json(ApprovalRequest {
-                    request_id: req.request_id.clone(),
-                    action: "deny".into(),
-                    thread_id: req.thread_id.clone(),
-                }),
-            )
-            .await?;
-            Ok(Json(ActionResponse::ok("Gate resolution accepted.")))
-        }
-        GateResolutionPayload::CredentialProvided { token } => {
-            let thread_id = req.thread_id.ok_or((
-                StatusCode::BAD_REQUEST,
-                "thread_id is required for credential resolution".to_string(),
-            ))?;
-            let submission = crate::agent::submission::Submission::GateAuthResolution {
-                request_id: gate_request_id,
-                resolution: crate::agent::submission::AuthGateResolution::CredentialProvided {
-                    token,
-                },
-            };
-            // Use a structured submission instead of replaying the token as a
-            // normal user message. The parser handles this before BeforeInbound
-            // hooks, and the bridge resolves the exact gate `request_id`.
-            crate::channels::web::platform::engine_dispatch::dispatch_engine_submission(
-                &state,
-                &user.user_id,
-                &thread_id,
-                submission,
-            )
-            .await?;
-            Ok(Json(ActionResponse::ok("Credential submitted.")))
-        }
-        GateResolutionPayload::Cancelled => {
-            // Mission-only gates have no foreground `thread_id` — the
-            // gate is owned by a background mission's child thread, and
-            // the gate-card UI doesn't surface a `thread_id` in the
-            // resolution payload. For foreground inline-await gates,
-            // dispatch the structured cancellation so the parked VM
-            // unwinds promptly. The mission auto-resume path
-            // (`resume_paused_missions_for_gate_request`, fired below)
-            // independently carries the Cancelled outcome to the
-            // mission state machine.
-            //
-            // If the client omits `thread_id` for a foreground gate
-            // (regression from PR #3366 review: gate-card UI without
-            // foreground thread context), recover the owning thread
-            // from `PendingGateStore` so the parked VM is not stranded.
-            // Lookup is scoped to the requesting user via the store's
-            // own ownership check.
-            let dispatch_thread_id = match req.thread_id.clone() {
-                Some(t) => Some(t),
-                None => {
-                    crate::bridge::get_pending_gate_by_request_id(&user.user_id, gate_request_id)
-                        .await
-                        .map(|gate| gate.thread_id)
-                }
-            };
-            if let Some(thread_id) = dispatch_thread_id {
-                let submission = crate::agent::submission::Submission::GateAuthResolution {
-                    request_id: gate_request_id,
-                    resolution: crate::agent::submission::AuthGateResolution::Cancelled,
-                };
-                crate::channels::web::platform::engine_dispatch::dispatch_engine_submission(
-                    &state,
-                    &user.user_id,
-                    &thread_id,
-                    submission,
-                )
-                .await?;
-            }
-            Ok(Json(ActionResponse::ok("Gate cancelled.")))
-        }
-    };
-
-    if let Some((outcome, gate_request_id)) = mission_resume {
-        let _ = crate::bridge::resume_paused_missions_for_gate_request(
-            &user.user_id,
-            gate_request_id,
-            outcome,
-        )
-        .await;
-    }
-
-    response
 }
 
 pub(crate) async fn chat_auth_token_handler(
@@ -616,12 +402,6 @@ pub(crate) async fn chat_history_handler(
         if !owned && sess.threads.contains_key(&thread_id) {
             owned = true;
         }
-        if !owned
-            && let Ok(Some(_)) =
-                crate::bridge::get_engine_thread(&thread_id.to_string(), &user.user_id).await
-        {
-            owned = true;
-        }
         if !owned {
             return Err((StatusCode::NOT_FOUND, "Thread not found".to_string()));
         }
@@ -716,34 +496,6 @@ pub(crate) async fn chat_history_handler(
                 in_progress,
             }));
         }
-    }
-
-    // Engine v2 fallback: an engine thread owns its own messages and does not
-    // always dual-write them into the v1 conversation table (the assistant
-    // flow writes into the *assistant* conversation id, so deep-linking
-    // by engine thread id gets a v1 miss). Surface them here so
-    // `#/chat/<engine-thread-id>` renders the thread instead of going empty.
-    if let Ok(Some(detail)) =
-        crate::bridge::get_engine_thread(&thread_id.to_string(), &user.user_id).await
-    {
-        let synthetic: Vec<crate::history::ConversationMessage> = detail
-            .messages
-            .iter()
-            .enumerate()
-            .filter_map(|(index, entry)| engine_history_entry_to_message(thread_id, index, entry))
-            .collect();
-        let oldest_timestamp = synthetic.first().map(|m| m.created_at.to_rfc3339());
-        let mut turns = build_turns_from_db_messages(&synthetic);
-        enforce_generated_image_history_budget(&mut turns);
-        return Ok(Json(HistoryResponse {
-            thread_id,
-            turns,
-            has_more: false,
-            oldest_timestamp,
-            channel: Some("engine".to_string()),
-            pending_gate: history_pending_gate_info(&state, &user.user_id, thread_scope).await,
-            in_progress: None,
-        }));
     }
 
     // Empty thread (just created, no messages yet)
@@ -1004,143 +756,15 @@ pub(crate) fn is_local_origin(origin: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "[::1]")
 }
 
-pub(crate) async fn pending_gate_extension_name(
-    state: &GatewayState,
-    user_id: &str,
-    tool_name: &str,
-    parameters: &str,
-    resume_kind: &ironclaw_engine::ResumeKind,
-) -> Option<ironclaw_common::ExtensionName> {
-    let ironclaw_engine::ResumeKind::Authentication {
-        credential_name, ..
-    } = resume_kind
-    else {
-        return None;
-    };
-
-    let parsed_parameters =
-        serde_json::from_str::<serde_json::Value>(parameters).unwrap_or(serde_json::Value::Null);
-
-    // Both the "auth manager present" and "bare test harness" paths
-    // delegate to the single canonical resolver (see
-    // `src/bridge/auth_manager.rs::resolve_auth_flow_extension_name`) so
-    // the four branches stay aligned. Without this delegation the wrapper
-    // would drift — check #8 in `scripts/pre-commit-safety.sh` and the
-    // "one resolver" rule in `src/bridge/CLAUDE.md` exist to prevent
-    // exactly that drift.
-    Some(
-        crate::auth::extension::resolve_auth_flow_extension_name(
-            tool_name,
-            &parsed_parameters,
-            credential_name.as_str(),
-            user_id,
-            state.tool_registry.as_deref(),
-            state.extension_manager.as_deref(),
-        )
-        .await,
-    )
-}
-
-fn stable_engine_history_message_id(
-    thread_id: Uuid,
-    index: usize,
-    role: &str,
-    timestamp: &chrono::DateTime<chrono::Utc>,
-    content: &str,
-) -> Uuid {
-    let seed = format!(
-        "engine-v2-history\x1f{thread_id}\x1f{index}\x1f{role}\x1f{}\x1f{content}",
-        timestamp.to_rfc3339()
-    );
-    Uuid::new_v5(&Uuid::NAMESPACE_OID, seed.as_bytes())
-}
-
-fn engine_history_entry_to_message(
-    thread_id: Uuid,
-    index: usize,
-    entry: &serde_json::Value,
-) -> Option<crate::history::ConversationMessage> {
-    let role_raw = entry.get("role").and_then(|v| v.as_str())?;
-    let role = match role_raw {
-        "User" => "user",
-        "Assistant" => "assistant",
-        _ => return None,
-    };
-    let Some(timestamp_raw) = entry.get("timestamp").and_then(|v| v.as_str()) else {
-        tracing::warn!(
-            thread_id = %thread_id,
-            index,
-            "Skipping engine v2 history message without a valid timestamp"
-        );
-        return None;
-    };
-    let timestamp = match chrono::DateTime::parse_from_rfc3339(timestamp_raw) {
-        Ok(dt) => dt.with_timezone(&chrono::Utc),
-        Err(error) => {
-            tracing::warn!(
-                thread_id = %thread_id,
-                index,
-                timestamp = timestamp_raw,
-                %error,
-                "Skipping engine v2 history message with malformed timestamp"
-            );
-            return None;
-        }
-    };
-    let content = entry
-        .get("content")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    Some(crate::history::ConversationMessage {
-        id: stable_engine_history_message_id(thread_id, index, role, &timestamp, &content),
-        role: role.to_string(),
-        content,
-        created_at: timestamp,
-    })
-}
-
-async fn engine_pending_gate_info(
-    state: &GatewayState,
-    user_id: &str,
-    thread_id: Option<&str>,
-) -> Option<PendingGateInfo> {
-    let pending = crate::bridge::get_engine_pending_gate(user_id, thread_id)
-        .await
-        .ok()??;
-    let extension_name = pending_gate_extension_name(
-        state,
-        user_id,
-        &pending.tool_name,
-        &pending.parameters,
-        &pending.resume_kind,
-    )
-    .await;
-    Some(PendingGateInfo {
-        request_id: pending.request_id,
-        thread_id: pending.thread_id.to_string(),
-        gate_name: pending.gate_name,
-        tool_name: pending.tool_name,
-        description: pending.description,
-        parameters: pending.parameters,
-        extension_name,
-        resume_kind: serde_json::to_value(pending.resume_kind).unwrap_or_default(),
-    })
-}
-
 async fn history_pending_gate_info(
-    state: &GatewayState,
-    user_id: &str,
-    thread_id: Option<&str>,
+    _state: &GatewayState,
+    _user_id: &str,
+    _thread_id: Option<&str>,
 ) -> Option<PendingGateInfo> {
-    if thread_id.is_some() {
-        // Thread-scoped pending gates are authoritative once the client sends a
-        // thread_id. The unscoped fallback only exists for legacy callers that
-        // do not know which thread owns the gate yet.
-        return engine_pending_gate_info(state, user_id, thread_id).await;
-    }
-    engine_pending_gate_info(state, user_id, None).await
+    // Engine v2 pending gates have been removed. v1 approvals surface through
+    // the in-memory `approval_needed` path, not a persisted pending-gate store,
+    // so there is never a pending gate to hydrate into history here.
+    None
 }
 
 fn turn_info_from_in_memory_turn(t: &crate::agent::session::Turn) -> TurnInfo {
@@ -1380,7 +1004,6 @@ mod tests {
 
     use axum::{
         Router,
-        extract::{Query, State},
         http::StatusCode,
         routing::{get, post},
     };
@@ -1391,8 +1014,7 @@ mod tests {
     use crate::channels::web::auth::UserIdentity;
     use crate::channels::web::features::chat::{
         IN_PROGRESS_STALE_AFTER_MINUTES, chat_approval_handler, chat_auth_cancel_handler,
-        chat_auth_token_handler, chat_gate_resolve_handler, chat_history_handler,
-        pending_gate_extension_name,
+        chat_auth_token_handler, chat_history_handler,
     };
     use crate::db::Database;
 
@@ -1402,45 +1024,7 @@ mod tests {
     };
     use crate::channels::web::types::*;
 
-    use crate::testing::credentials::TEST_GATEWAY_CRYPTO_KEY;
-    use crate::tools::{Tool, ToolError, ToolOutput, ToolRegistry};
-
     use super::*;
-
-    #[test]
-    fn test_engine_history_entry_skips_malformed_timestamp() {
-        let thread_id = Uuid::new_v4();
-        let entry = serde_json::json!({
-            "role": "User",
-            "content": "hello",
-            "timestamp": "not-a-timestamp",
-        });
-
-        let message = engine_history_entry_to_message(thread_id, 0, &entry);
-
-        assert!(message.is_none());
-    }
-
-    #[test]
-    fn test_engine_history_entry_uses_stable_id() {
-        let thread_id = Uuid::new_v4();
-        let entry = serde_json::json!({
-            "role": "Assistant",
-            "content": "stable response",
-            "timestamp": "2026-04-17T09:30:00Z",
-        });
-
-        let first = engine_history_entry_to_message(thread_id, 3, &entry).expect("first message");
-        let second = engine_history_entry_to_message(thread_id, 3, &entry).expect("second message");
-        let shifted =
-            engine_history_entry_to_message(thread_id, 4, &entry).expect("shifted message");
-
-        assert_eq!(first.id, second.id);
-        assert_ne!(first.id, shifted.id);
-        assert_eq!(first.role, "assistant");
-        assert_eq!(first.content, "stable response");
-        assert_eq!(first.created_at.to_rfc3339(), "2026-04-17T09:30:00+00:00");
-    }
 
     #[test]
     fn test_in_memory_turn_info_unwraps_wrapped_tool_error_for_display() {
@@ -2218,97 +1802,6 @@ mod tests {
     }
 
     #[cfg(feature = "libsql")]
-    #[tokio::test]
-    async fn test_chat_threads_handler_hides_engine_threads_and_keeps_conversation_titles() {
-        let _lock = crate::bridge::test_support::ENGINE_STATE_TEST_LOCK
-            .lock()
-            .await;
-        crate::bridge::test_support::clear_engine_state().await;
-
-        let project_id =
-            crate::bridge::test_support::install_engine_state_with_threads(Vec::new()).await;
-
-        let mut foreground_thread = ironclaw_engine::Thread::new(
-            "assistant hello",
-            ironclaw_engine::ThreadType::Foreground,
-            project_id,
-            "alice",
-            ironclaw_engine::ThreadConfig::default(),
-        );
-        foreground_thread
-            .messages
-            .push(ironclaw_engine::ThreadMessage::user("hello"));
-        let foreground_thread_id = foreground_thread.id.0;
-
-        crate::bridge::test_support::install_engine_state_with_threads(vec![foreground_thread])
-            .await;
-
-        let (db, _tmp) = crate::testing::test_db().await;
-        let assistant_id = db
-            .get_or_create_assistant_conversation("alice", "gateway")
-            .await
-            .expect("assistant conversation");
-        db.add_conversation_message(assistant_id, "user", "first assistant ask")
-            .await
-            .expect("seed assistant conversation");
-
-        let channel_thread_id = db
-            .create_conversation("telegram", "alice", None)
-            .await
-            .expect("create telegram conversation");
-        db.add_conversation_message(channel_thread_id, "user", "ping")
-            .await
-            .expect("seed telegram conversation");
-
-        let session_manager = Arc::new(SessionManager::new());
-        let state =
-            test_gateway_state_with_store_and_session_manager(Arc::clone(&db), session_manager);
-
-        let response = chat_threads_handler(
-            axum::extract::State(state),
-            crate::channels::web::auth::AuthenticatedUser(UserIdentity {
-                user_id: "alice".to_string(),
-                role: "member".to_string(),
-                workspace_read_scopes: Vec::new(),
-            }),
-        )
-        .await
-        .expect("handler ok");
-
-        assert_eq!(
-            response
-                .assistant_thread
-                .as_ref()
-                .and_then(|thread| thread.title.as_deref()),
-            Some("first assistant ask"),
-            "assistant conversation should carry the first user message as its title"
-        );
-        assert!(
-            response.threads.iter().any(|thread| {
-                thread.id == channel_thread_id
-                    && thread.channel.as_deref() == Some("telegram")
-                    && thread.title.as_deref() == Some("ping")
-            }),
-            "chat sidebar must keep persisted channel conversations"
-        );
-        assert!(
-            response
-                .threads
-                .iter()
-                .all(|thread| thread.id != foreground_thread_id),
-            "chat sidebar must not surface separate engine execution threads"
-        );
-        assert!(
-            response
-                .threads
-                .iter()
-                .all(|thread| thread.channel.as_deref() != Some("engine")),
-            "chat sidebar rows should stay conversation-based rather than engine-thread-based"
-        );
-
-        crate::bridge::test_support::clear_engine_state().await;
-    }
-
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn test_chat_new_thread_handler_persists_to_db_and_session() {
@@ -2697,315 +2190,6 @@ mod tests {
         assert_eq!(std::str::from_utf8(&body).unwrap_or(""), "Database error");
     }
 
-    fn history_request(
-        state: Arc<GatewayState>,
-        user_id: &str,
-        thread_id: Uuid,
-    ) -> (
-        State<Arc<GatewayState>>,
-        AuthenticatedUser,
-        Query<HistoryQuery>,
-    ) {
-        (
-            State(state),
-            AuthenticatedUser(UserIdentity {
-                user_id: user_id.to_string(),
-                role: "admin".to_string(),
-                workspace_read_scopes: Vec::new(),
-            }),
-            Query(HistoryQuery {
-                thread_id: Some(thread_id.to_string()),
-                limit: None,
-                before: None,
-            }),
-        )
-    }
-
-    #[tokio::test]
-    async fn test_chat_history_returns_engine_v2_messages_for_owner() {
-        let _lock = crate::bridge::test_support::ENGINE_STATE_TEST_LOCK
-            .lock()
-            .await;
-        crate::bridge::test_support::clear_engine_state().await;
-
-        let project_id =
-            crate::bridge::test_support::install_engine_state_with_threads(Vec::new()).await;
-        let mut thread = ironclaw_engine::Thread::new(
-            "demo goal",
-            ironclaw_engine::ThreadType::Foreground,
-            project_id,
-            "alice",
-            ironclaw_engine::ThreadConfig::default(),
-        );
-        thread
-            .messages
-            .push(ironclaw_engine::ThreadMessage::user("hello engine"));
-        thread
-            .messages
-            .push(ironclaw_engine::ThreadMessage::assistant("hi back"));
-        let thread_uuid = thread.id.0;
-        crate::bridge::test_support::install_engine_state_with_threads(vec![thread]).await;
-
-        let mut state = test_gateway_state_with_dependencies(None, None, None, None);
-        Arc::get_mut(&mut state)
-            .expect("state should be uniquely owned")
-            .session_manager = Some(Arc::new(SessionManager::new()));
-
-        let (s, u, q) = history_request(state, "alice", thread_uuid);
-        let response = chat_history_handler(s, u, q).await.expect("history");
-
-        assert_eq!(response.thread_id, thread_uuid);
-        assert_eq!(
-            response.turns.len(),
-            1,
-            "one user+assistant pair collapses into a single turn"
-        );
-        let turn = &response.turns[0];
-        assert_eq!(turn.user_input, "hello engine");
-        assert_eq!(turn.response.as_deref(), Some("hi back"));
-        assert_eq!(response.channel.as_deref(), Some("engine"));
-        assert!(!response.has_more);
-
-        crate::bridge::test_support::clear_engine_state().await;
-    }
-
-    #[tokio::test]
-    async fn test_chat_history_returns_engine_channel_hint_without_renderable_messages() {
-        let _lock = crate::bridge::test_support::ENGINE_STATE_TEST_LOCK
-            .lock()
-            .await;
-        crate::bridge::test_support::clear_engine_state().await;
-
-        let project_id =
-            crate::bridge::test_support::install_engine_state_with_threads(Vec::new()).await;
-        let thread = ironclaw_engine::Thread::new(
-            "empty engine thread",
-            ironclaw_engine::ThreadType::Foreground,
-            project_id,
-            "alice",
-            ironclaw_engine::ThreadConfig::default(),
-        );
-        let thread_uuid = thread.id.0;
-        crate::bridge::test_support::install_engine_state_with_threads(vec![thread]).await;
-
-        let mut state = test_gateway_state_with_dependencies(None, None, None, None);
-        Arc::get_mut(&mut state)
-            .expect("state should be uniquely owned")
-            .session_manager = Some(Arc::new(SessionManager::new()));
-
-        let (s, u, q) = history_request(state, "alice", thread_uuid);
-        let response = chat_history_handler(s, u, q).await.expect("history");
-
-        assert_eq!(response.thread_id, thread_uuid);
-        assert!(response.turns.is_empty());
-        assert_eq!(response.channel.as_deref(), Some("engine"));
-
-        crate::bridge::test_support::clear_engine_state().await;
-    }
-
-    #[tokio::test]
-    async fn test_chat_history_returns_404_for_cross_user_engine_thread() {
-        let _lock = crate::bridge::test_support::ENGINE_STATE_TEST_LOCK
-            .lock()
-            .await;
-        crate::bridge::test_support::clear_engine_state().await;
-
-        let project_id =
-            crate::bridge::test_support::install_engine_state_with_threads(Vec::new()).await;
-        let mut thread = ironclaw_engine::Thread::new(
-            "bob's secret",
-            ironclaw_engine::ThreadType::Foreground,
-            project_id,
-            "bob",
-            ironclaw_engine::ThreadConfig::default(),
-        );
-        thread
-            .messages
-            .push(ironclaw_engine::ThreadMessage::assistant("private reply"));
-        let thread_uuid = thread.id.0;
-        crate::bridge::test_support::install_engine_state_with_threads(vec![thread]).await;
-
-        let mut state = test_gateway_state_with_dependencies(None, None, None, None);
-        Arc::get_mut(&mut state)
-            .expect("state should be uniquely owned")
-            .session_manager = Some(Arc::new(SessionManager::new()));
-
-        let (s, u, q) = history_request(state, "alice", thread_uuid);
-        let result = chat_history_handler(s, u, q).await;
-
-        match result {
-            Err((status, _)) => assert_eq!(status, StatusCode::NOT_FOUND),
-            Ok(resp) => panic!(
-                "alice must not see bob's engine thread but got {} turns",
-                resp.turns.len()
-            ),
-        }
-
-        crate::bridge::test_support::clear_engine_state().await;
-    }
-
-    #[tokio::test]
-    async fn test_chat_history_accepts_session_owned_thread_without_db() {
-        let _lock = crate::bridge::test_support::ENGINE_STATE_TEST_LOCK
-            .lock()
-            .await;
-        // Ensure neither engine state nor v1 DB can claim ownership — the
-        // only remaining source must be the in-memory v1 session, which
-        // this test exercises.
-        crate::bridge::test_support::clear_engine_state().await;
-
-        let session_manager = Arc::new(SessionManager::new());
-        let thread_uuid = Uuid::new_v4();
-        {
-            let session = session_manager.get_or_create_session("alice").await;
-            let mut sess = session.lock().await;
-            let thread = sess.create_thread_with_id(thread_uuid, Some("web"));
-            thread.start_turn("from session");
-            thread.conclude_turn(crate::agent::session::TurnOutcome::Completed(
-                "session reply".to_string(),
-            ));
-        }
-
-        let mut state = test_gateway_state_with_dependencies(None, None, None, None);
-        Arc::get_mut(&mut state)
-            .expect("state should be uniquely owned")
-            .session_manager = Some(session_manager);
-
-        let (s, u, q) = history_request(state, "alice", thread_uuid);
-        let response = chat_history_handler(s, u, q).await.expect("history");
-
-        assert_eq!(response.thread_id, thread_uuid);
-        assert_eq!(response.turns.len(), 1);
-        assert_eq!(response.turns[0].user_input, "from session");
-        assert_eq!(response.turns[0].response.as_deref(), Some("session reply"));
-    }
-
-    fn test_auth_manager(
-        tool_registry: Option<Arc<ToolRegistry>>,
-    ) -> Arc<crate::auth::extension::AuthManager> {
-        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
-            Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
-                crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
-                    TEST_GATEWAY_CRYPTO_KEY.to_string(),
-                ))
-                .expect("crypto"),
-            )));
-        Arc::new(crate::auth::extension::AuthManager::new(
-            secrets,
-            None,
-            None,
-            tool_registry,
-        ))
-    }
-
-    #[tokio::test]
-    async fn pending_gate_extension_name_uses_install_parameters_for_post_install_auth() {
-        let registry = Arc::new(ToolRegistry::new());
-        let mut state = test_gateway_state(None);
-        let state_mut = Arc::get_mut(&mut state).expect("test state must be uniquely owned");
-        state_mut.tool_registry = Some(Arc::clone(&registry));
-        state_mut.auth_manager = Some(test_auth_manager(Some(Arc::clone(&registry))));
-
-        let extension_name = pending_gate_extension_name(
-            state_mut,
-            "test-user",
-            "tool_install",
-            r#"{"name":"telegram"}"#,
-            &ironclaw_engine::ResumeKind::Authentication {
-                credential_name: ironclaw_common::CredentialName::new("telegram_bot_token")
-                    .unwrap(),
-                instructions: "paste token".to_string(),
-                auth_url: None,
-            },
-        )
-        .await;
-
-        assert_eq!(
-            extension_name.as_ref().map(|n| n.as_str()),
-            Some("telegram")
-        );
-    }
-
-    #[tokio::test]
-    async fn pending_gate_extension_name_uses_install_parameters_for_hyphenated_install_tool() {
-        let state = test_gateway_state(None);
-
-        let extension_name = pending_gate_extension_name(
-            &state,
-            "test-user",
-            "tool-install",
-            r#"{"name":"telegram"}"#,
-            &ironclaw_engine::ResumeKind::Authentication {
-                credential_name: ironclaw_common::CredentialName::from_trusted(
-                    "telegram_bot_token".into(),
-                ),
-                instructions: "paste token".to_string(),
-                auth_url: None,
-            },
-        )
-        .await;
-
-        assert_eq!(
-            extension_name.as_ref().map(|n| n.as_str()),
-            Some("telegram")
-        );
-    }
-
-    #[tokio::test]
-    async fn pending_gate_extension_name_falls_back_to_provider_extension() {
-        struct ProviderTool;
-
-        #[async_trait::async_trait]
-        impl Tool for ProviderTool {
-            fn name(&self) -> &str {
-                "notion_search"
-            }
-
-            fn description(&self) -> &str {
-                "provider tool"
-            }
-
-            fn parameters_schema(&self) -> serde_json::Value {
-                serde_json::json!({})
-            }
-
-            fn provider_extension(&self) -> Option<&str> {
-                Some("notion")
-            }
-
-            async fn execute(
-                &self,
-                _params: serde_json::Value,
-                _ctx: &crate::context::JobContext,
-            ) -> Result<ToolOutput, ToolError> {
-                unreachable!()
-            }
-        }
-
-        let registry = Arc::new(ToolRegistry::new());
-        registry.register(Arc::new(ProviderTool)).await;
-
-        let mut state = test_gateway_state(None);
-        let state_mut = Arc::get_mut(&mut state).expect("test state must be uniquely owned");
-        state_mut.tool_registry = Some(Arc::clone(&registry));
-        state_mut.auth_manager = Some(test_auth_manager(Some(Arc::clone(&registry))));
-
-        let extension_name = pending_gate_extension_name(
-            state_mut,
-            "test-user",
-            "notion_search",
-            "{}",
-            &ironclaw_engine::ResumeKind::Authentication {
-                credential_name: ironclaw_common::CredentialName::new("notion_token").unwrap(),
-                instructions: "paste token".to_string(),
-                auth_url: None,
-            },
-        )
-        .await;
-
-        assert_eq!(extension_name.as_ref().map(|n| n.as_str()), Some("notion"));
-    }
-
     #[tokio::test]
     async fn test_chat_approval_handler_preserves_user_scoped_metadata() {
         use axum::body::Body;
@@ -3203,70 +2387,6 @@ mod tests {
                     == Some("notion")
             }),
             "other thread auth mode should remain intact"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_chat_gate_resolve_handler_credential_submission_uses_structured_gate_resolution()
-    {
-        use axum::body::Body;
-        use tower::ServiceExt;
-
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        let state = test_gateway_state(None);
-        *state.msg_tx.write().await = Some(tx);
-
-        let app = Router::new()
-            .route("/api/chat/gate/resolve", post(chat_gate_resolve_handler))
-            .with_state(state);
-
-        let request_id = Uuid::new_v4();
-        let mut req = axum::http::Request::builder()
-            .method("POST")
-            .uri("/api/chat/gate/resolve")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                serde_json::json!({
-                    "request_id": request_id,
-                    "thread_id": "gateway-thread-auth",
-                    "resolution": "credential_provided",
-                    "token": "secret-token",
-                })
-                .to_string(),
-            ))
-            .expect("request");
-        req.extensions_mut().insert(UserIdentity {
-            user_id: "member-1".to_string(),
-            role: "member".to_string(),
-            workspace_read_scopes: Vec::new(),
-        });
-
-        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
-            .await
-            .expect("response");
-        assert_eq!(resp.status(), StatusCode::OK);
-
-        let incoming = rx.recv().await.expect("forwarded gate resolution");
-        let submission = incoming
-            .structured_submission
-            .clone()
-            .expect("structured submission sideband");
-        assert!(matches!(
-            submission,
-            crate::agent::submission::Submission::GateAuthResolution {
-                request_id: rid,
-                resolution: crate::agent::submission::AuthGateResolution::CredentialProvided { token }
-            } if rid == request_id && token == "secret-token"
-        ));
-        assert_eq!(incoming.content, "[structured auth gate resolution]");
-        assert_ne!(incoming.content, "secret-token");
-        assert_eq!(
-            incoming.thread_id.as_ref().map(|t| t.as_str()),
-            Some("gateway-thread-auth")
-        );
-        assert_eq!(
-            incoming.metadata.get("thread_id").and_then(|v| v.as_str()),
-            Some("gateway-thread-auth")
         );
     }
 

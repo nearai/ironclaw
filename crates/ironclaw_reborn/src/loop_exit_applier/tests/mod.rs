@@ -1,23 +1,29 @@
 use std::sync::Arc;
 
-use ironclaw_host_api::{AgentId, ApprovalRequestId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{AgentId, ApprovalRequestId, CapabilityId, TenantId, ThreadId, UserId};
+use ironclaw_loop_support::{
+    AwaitedChildSetRecord, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, SpawnSubagentMode,
+    SubagentGateResolutionStore, SubagentKindId,
+};
 use ironclaw_threads::{
     AppendAssistantDraftRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
     MessageKind, MessageStatus, SessionThreadService, ThreadHistoryRequest, ThreadMessageId,
     ThreadMessageRecord, ThreadScope, ToolResultSafeSummary,
 };
 use ironclaw_turns::{
-    CheckpointStateStore, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, LoopBlocked,
-    LoopBlockedKind, LoopCheckpointKind, LoopCheckpointStore, LoopCompleted, LoopCompletionKind,
-    LoopExit, LoopFailed, LoopFailureKind, LoopGateRef, LoopMessageRef, LoopResultRef,
-    PutCheckpointStateRequest, PutLoopCheckpointRequest, TurnActor, TurnCheckpointId, TurnError,
-    TurnId, TurnRunId, TurnScope, TurnStateStore, TurnStatus,
+    CheckpointStateStore, GateRef, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
+    LoopBlocked, LoopBlockedKind, LoopCheckpointKind, LoopCheckpointStateRef, LoopCheckpointStore,
+    LoopCompleted, LoopCompletionKind, LoopExit, LoopFailed, LoopFailureKind, LoopGateRef,
+    LoopMessageRef, LoopResultRef, PutCheckpointStateRequest, PutLoopCheckpointRequest, TurnActor,
+    TurnCheckpointId, TurnError, TurnId, TurnRunId, TurnScope, TurnStateStore, TurnStatus,
+    run_profile::LoopRunContext,
 };
 
 use super::{
-    ApprovalGateEvidenceStore, BlockedEvidenceRequest, CompletionEvidenceRequest,
-    FailureEvidenceRequest, InMemoryLoopExitEvidencePort, LoopExitApplier, LoopExitEvidencePort,
-    ThreadCheckpointLoopExitEvidencePort, verify_tool_result_ref,
+    ApprovalGateEvidenceStore, AwaitDependentRunEvidenceStore, BlockedEvidenceRequest,
+    CompletionEvidenceRequest, FailureEvidenceRequest, InMemoryLoopExitEvidencePort,
+    LoopExitApplier, LoopExitEvidencePort, ThreadCheckpointLoopExitEvidencePort,
+    verify_tool_result_ref,
 };
 
 mod support;
@@ -243,6 +249,7 @@ async fn thread_checkpoint_evidence_accepts_durable_cancel_requested_run() {
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(StaticTurnStateStore::new(observed_state)),
         Arc::new(PanicLoopCheckpointStore),
+        empty_await_dependent_run_evidence(),
     ));
     let applier = Arc::new(LoopExitApplier::new(transition.clone(), evidence));
     let exit = LoopExit::Cancelled(ironclaw_turns::LoopCancelled {
@@ -268,6 +275,7 @@ async fn thread_checkpoint_evidence_accepts_durable_cancelled_run() {
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(StaticTurnStateStore::new(observed_state)),
         Arc::new(PanicLoopCheckpointStore),
+        empty_await_dependent_run_evidence(),
     ));
     let applier = Arc::new(LoopExitApplier::new(transition.clone(), evidence));
     let exit = LoopExit::Cancelled(ironclaw_turns::LoopCancelled {
@@ -415,6 +423,7 @@ async fn thread_checkpoint_evidence_accepts_result_refs_with_durable_reply_ref()
         thread_service,
         Arc::new(ironclaw_turns::InMemoryTurnStateStore::default()) as Arc<dyn TurnStateStore>,
         Arc::new(PanicLoopCheckpointStore),
+        empty_await_dependent_run_evidence(),
         thread_scope,
     );
     let message_ref =
@@ -505,6 +514,7 @@ async fn completion_evidence_reads_thread_under_the_run_caller_owner() {
         thread_service,
         Arc::new(StaticTurnStateStore::new(run_state)) as Arc<dyn TurnStateStore>,
         Arc::new(PanicLoopCheckpointStore),
+        empty_await_dependent_run_evidence(),
         base_scope,
     );
 
@@ -555,6 +565,7 @@ async fn thread_checkpoint_evidence_rejects_missing_result_ref_records() {
         thread_service,
         Arc::new(ironclaw_turns::InMemoryTurnStateStore::default()) as Arc<dyn TurnStateStore>,
         Arc::new(PanicLoopCheckpointStore),
+        empty_await_dependent_run_evidence(),
         thread_scope,
     );
     let run_id = TurnRunId::new();
@@ -614,6 +625,7 @@ async fn thread_checkpoint_evidence_accepts_result_only_completion_with_durable_
         thread_service,
         Arc::new(ironclaw_turns::InMemoryTurnStateStore::default()) as Arc<dyn TurnStateStore>,
         Arc::new(PanicLoopCheckpointStore),
+        empty_await_dependent_run_evidence(),
         thread_scope,
     );
 
@@ -678,6 +690,7 @@ async fn thread_checkpoint_evidence_rejects_tool_result_message_as_reply_ref() {
         thread_service,
         Arc::new(ironclaw_turns::InMemoryTurnStateStore::default()) as Arc<dyn TurnStateStore>,
         Arc::new(PanicLoopCheckpointStore),
+        empty_await_dependent_run_evidence(),
         thread_scope,
     );
     let reply_message_ref = LoopMessageRef::new(format!("msg:{}", tool_result_message.message_id))
@@ -748,6 +761,7 @@ async fn thread_checkpoint_evidence_isolates_same_result_ref_across_runs() {
         thread_service,
         Arc::new(ironclaw_turns::InMemoryTurnStateStore::default()) as Arc<dyn TurnStateStore>,
         Arc::new(PanicLoopCheckpointStore),
+        empty_await_dependent_run_evidence(),
         thread_scope,
     );
 
@@ -865,6 +879,7 @@ async fn thread_checkpoint_evidence_rejects_wrong_run_and_malformed_result_ref_r
         thread_service,
         Arc::new(ironclaw_turns::InMemoryTurnStateStore::default()) as Arc<dyn TurnStateStore>,
         Arc::new(PanicLoopCheckpointStore),
+        empty_await_dependent_run_evidence(),
         thread_scope,
     );
 
@@ -907,6 +922,38 @@ async fn applier_rejects_agentless_transcript_evidence_before_transition() {
 
     assert!(matches!(err, TurnError::InvalidRequest { .. }));
     assert_eq!(transition.apply_count(), 0);
+}
+
+#[tokio::test]
+async fn external_tool_blocked_exit_with_durable_checkpoint_maps_to_blocked_external_tool() {
+    let claimed = claimed_run();
+    let checkpoint_id = TurnCheckpointId::new();
+    let state_ref =
+        ironclaw_turns::LoopCheckpointStateRef::new("checkpoint:external-tool-blocked-state")
+            .expect("valid state ref");
+    let gate_ref = LoopGateRef::new("gate:test").expect("valid gate ref");
+    let checkpoint = loop_checkpoint_record_with_gate(
+        &claimed,
+        checkpoint_id,
+        state_ref.clone(),
+        LoopCheckpointKind::BeforeBlock,
+        Some(gate_ref),
+    );
+    let transition = Arc::new(RecordingTransitionPort::new());
+    let evidence = Arc::new(text_checkpoint_evidence(Arc::new(
+        StaticLoopCheckpointStore::new(checkpoint),
+    )));
+    let applier = Arc::new(LoopExitApplier::new(transition.clone(), evidence));
+    let exit =
+        blocked_exit_with_checkpoint(LoopBlockedKind::ExternalTool, checkpoint_id, state_ref);
+
+    let state = applier.apply(&claimed, exit).await.expect("applied");
+
+    assert_eq!(state.status, TurnStatus::BlockedExternalTool);
+    assert_eq!(
+        state.gate_ref.as_ref().map(|gate_ref| gate_ref.as_str()),
+        Some("gate:test")
+    );
 }
 
 #[tokio::test]
@@ -958,6 +1005,7 @@ async fn thread_checkpoint_evidence_rejects_stored_thread_scope_mismatch() {
         thread_service,
         Arc::new(ironclaw_turns::InMemoryTurnStateStore::default()) as Arc<dyn TurnStateStore>,
         Arc::new(PanicLoopCheckpointStore),
+        empty_await_dependent_run_evidence(),
         stored_scope,
     );
     let message_ref =
@@ -995,6 +1043,28 @@ async fn thread_checkpoint_evidence_does_not_read_checkpoint_for_blocked_claims(
         })
         .await
         .expect("blocked evidence should fail closed without checkpoint I/O");
+
+    assert!(!verified);
+}
+
+#[tokio::test]
+async fn thread_checkpoint_evidence_rejects_await_dependent_run_without_awaited_child_gate() {
+    let evidence = text_checkpoint_evidence(Arc::new(PanicLoopCheckpointStore));
+    let claimed = claimed_run();
+    let exit = blocked_exit(LoopBlockedKind::AwaitDependentRun);
+    let LoopExit::Blocked(blocked) = &exit else {
+        unreachable!("blocked helper returns blocked exit")
+    };
+
+    let verified = evidence
+        .verify_blocked_evidence(BlockedEvidenceRequest {
+            scope: &claimed.state.scope,
+            turn_id: claimed.state.turn_id,
+            run_id: claimed.state.run_id,
+            blocked,
+        })
+        .await
+        .expect("await-child evidence should fail closed without checkpoint I/O");
 
     assert!(!verified);
 }
@@ -1044,6 +1114,189 @@ async fn thread_checkpoint_evidence_verifies_pending_approval_blocked_checkpoint
         .expect("approval blocked evidence should verify through pending approval");
 
     assert!(verified);
+}
+
+#[tokio::test]
+async fn thread_checkpoint_evidence_verifies_awaited_child_blocked_checkpoint() {
+    let claimed = claimed_run();
+    let checkpoint_id = TurnCheckpointId::new();
+    let state_ref =
+        ironclaw_turns::LoopCheckpointStateRef::new("checkpoint:await-child-blocked-state")
+            .expect("valid state ref");
+    let child_run_id = TurnRunId::new();
+    let child_thread_id = ThreadId::new("child-thread").expect("child thread");
+    let gate_ref =
+        LoopGateRef::new(format!("gate:subagent-{child_run_id}")).expect("valid gate ref");
+    let checkpoint = loop_checkpoint_record_with_gate(
+        &claimed,
+        checkpoint_id,
+        state_ref.clone(),
+        LoopCheckpointKind::BeforeBlock,
+        Some(gate_ref.clone()),
+    );
+    let gate_store =
+        Arc::new(crate::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new());
+    gate_store
+        .record_awaited_child(AwaitedChildSetRecord {
+            gate_ref: GateRef::new(gate_ref.as_str()).expect("gate ref"),
+            parent_run_context: LoopRunContext::new(
+                claimed.state.scope.clone(),
+                claimed.state.turn_id,
+                claimed.state.run_id,
+                claimed.resolved_run_profile.clone(),
+            ),
+            tree_root_run_id: claimed.state.run_id,
+            child_scope: TurnScope::new(
+                claimed.state.scope.tenant_id.clone(),
+                claimed.state.scope.agent_id.clone(),
+                claimed.state.scope.project_id.clone(),
+                child_thread_id.clone(),
+            ),
+            child_run_id,
+            child_thread_id,
+            source_binding_ref: ironclaw_turns::SourceBindingRef::new("subagent-source:evidence")
+                .expect("source binding"),
+            reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
+                "subagent-reply:evidence",
+            )
+            .expect("reply binding"),
+            subagent_kind: SubagentKindId::new("general").expect("subagent kind"),
+            spawn_capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
+                .expect("spawn capability"),
+            result_ref: LoopResultRef::new("result:subagent.evidence").expect("result ref"),
+            mode: SpawnSubagentMode::Blocking,
+        })
+        .await
+        .expect("awaited child recorded");
+    let await_evidence: Arc<dyn AwaitDependentRunEvidenceStore> = gate_store;
+    let evidence = ThreadCheckpointLoopExitEvidencePort::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(StaticTurnStateStore::new(claimed.state.clone())),
+        Arc::new(StaticLoopCheckpointStore::new(checkpoint)),
+        await_evidence,
+    );
+    let expected_gate_ref = gate_ref.as_str().to_string();
+    let exit = LoopExit::Blocked(LoopBlocked {
+        kind: LoopBlockedKind::AwaitDependentRun,
+        blocked_activity_id: None,
+        gate_ref,
+        credential_requirements: Vec::new(),
+        checkpoint_id,
+        state_ref,
+        exit_id: test_exit_id(),
+    });
+    let LoopExit::Blocked(blocked) = &exit else {
+        unreachable!("blocked exit")
+    };
+    let verified = evidence
+        .verify_blocked_evidence(BlockedEvidenceRequest {
+            scope: &claimed.state.scope,
+            turn_id: claimed.state.turn_id,
+            run_id: claimed.state.run_id,
+            blocked,
+        })
+        .await
+        .expect("await-child blocked evidence should verify through awaited child gate");
+    assert!(verified);
+
+    let transition = Arc::new(RecordingTransitionPort::new());
+    let applier = LoopExitApplier::new(transition.clone(), Arc::new(evidence));
+    let state = applier.apply(&claimed, exit).await.expect("applied");
+
+    assert_eq!(state.status, TurnStatus::BlockedDependentRun);
+    assert_eq!(
+        state.gate_ref.as_ref().map(|gate_ref| gate_ref.as_str()),
+        Some(expected_gate_ref.as_str())
+    );
+    assert_eq!(transition.apply_count(), 1);
+}
+
+#[tokio::test]
+async fn thread_checkpoint_evidence_rejects_background_child_gate_for_await_dependent_run() {
+    let claimed = claimed_run();
+    let checkpoint_id = TurnCheckpointId::new();
+    let state_ref =
+        ironclaw_turns::LoopCheckpointStateRef::new("checkpoint:await-child-background-state")
+            .expect("valid state ref");
+    let child_run_id = TurnRunId::new();
+    let child_thread_id = ThreadId::new("background-child-thread").expect("child thread");
+    let gate_ref =
+        LoopGateRef::new(format!("gate:subagent-{child_run_id}")).expect("valid gate ref");
+    let checkpoint = loop_checkpoint_record_with_gate(
+        &claimed,
+        checkpoint_id,
+        state_ref.clone(),
+        LoopCheckpointKind::BeforeBlock,
+        Some(gate_ref.clone()),
+    );
+    let gate_store =
+        Arc::new(crate::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new());
+    gate_store
+        .record_awaited_child(AwaitedChildSetRecord {
+            gate_ref: GateRef::new(gate_ref.as_str()).expect("gate ref"),
+            parent_run_context: LoopRunContext::new(
+                claimed.state.scope.clone(),
+                claimed.state.turn_id,
+                claimed.state.run_id,
+                claimed.resolved_run_profile.clone(),
+            ),
+            tree_root_run_id: claimed.state.run_id,
+            child_scope: TurnScope::new(
+                claimed.state.scope.tenant_id.clone(),
+                claimed.state.scope.agent_id.clone(),
+                claimed.state.scope.project_id.clone(),
+                child_thread_id.clone(),
+            ),
+            child_run_id,
+            child_thread_id,
+            source_binding_ref: ironclaw_turns::SourceBindingRef::new(
+                "subagent-source:background-evidence",
+            )
+            .expect("source binding"),
+            reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
+                "subagent-reply:background-evidence",
+            )
+            .expect("reply binding"),
+            subagent_kind: SubagentKindId::new("general").expect("subagent kind"),
+            spawn_capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
+                .expect("spawn capability"),
+            result_ref: LoopResultRef::new("result:subagent.background-evidence")
+                .expect("result ref"),
+            mode: SpawnSubagentMode::Background,
+        })
+        .await
+        .expect("awaited child recorded");
+    let await_evidence: Arc<dyn AwaitDependentRunEvidenceStore> = gate_store;
+    let evidence = ThreadCheckpointLoopExitEvidencePort::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(StaticTurnStateStore::new(claimed.state.clone())),
+        Arc::new(StaticLoopCheckpointStore::new(checkpoint)),
+        await_evidence,
+    );
+    let exit = LoopExit::Blocked(LoopBlocked {
+        kind: LoopBlockedKind::AwaitDependentRun,
+        blocked_activity_id: None,
+        gate_ref,
+        credential_requirements: Vec::new(),
+        checkpoint_id,
+        state_ref,
+        exit_id: test_exit_id(),
+    });
+    let LoopExit::Blocked(blocked) = &exit else {
+        unreachable!("blocked exit")
+    };
+
+    let verified = evidence
+        .verify_blocked_evidence(BlockedEvidenceRequest {
+            scope: &claimed.state.scope,
+            turn_id: claimed.state.turn_id,
+            run_id: claimed.state.run_id,
+            blocked,
+        })
+        .await
+        .expect("background child gates should fail closed before checkpoint evidence is trusted");
+
+    assert!(!verified);
 }
 
 #[tokio::test]
@@ -1289,6 +1542,114 @@ async fn loop_exit_applier_accepts_thread_checkpoint_failure_evidence() {
     assert_eq!(state.status, TurnStatus::Failed);
     assert_eq!(state.failure.expect("failure").category(), "model_error");
     assert_eq!(transition.raw_failure_texts(), vec!["model_error"]);
+}
+
+#[tokio::test]
+async fn loop_exit_applier_accepts_run_scoped_failure_checkpoint_ref_and_rejects_cross_run_reuse() {
+    let claimed = claimed_run();
+    let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
+    let loop_checkpoint_store = Arc::new(InMemoryLoopCheckpointStore::default());
+    let mut loop_state = ironclaw_agent_loop::state::LoopExecutionState::initial_for_run(
+        &ironclaw_agent_loop::test_support::test_run_context("applier-run-scoped-failure"),
+    );
+    loop_state
+        .recent_failure_kinds
+        .push(LoopFailureKind::ModelError);
+    let payload = serde_json::to_vec(&loop_state).expect("state payload serializes");
+    let state_record = checkpoint_state_store
+        .put_checkpoint_state(PutCheckpointStateRequest::new(
+            claimed.state.scope.clone(),
+            claimed.state.turn_id,
+            claimed.state.run_id,
+            claimed.resolved_run_profile.checkpoint_schema_id.clone(),
+            claimed.resolved_run_profile.checkpoint_schema_version,
+            LoopCheckpointKind::Final,
+            payload,
+        ))
+        .await
+        .expect("checkpoint state");
+    let token = state_record
+        .state_ref
+        .as_str()
+        .strip_prefix("checkpoint:")
+        .expect("store ref token");
+    let run_scoped_ref =
+        LoopCheckpointStateRef::new(format!("checkpoint:{}:{token}", claimed.state.run_id))
+            .expect("run-scoped checkpoint ref");
+    let accepted_checkpoint = loop_checkpoint_store
+        .put_loop_checkpoint(PutLoopCheckpointRequest {
+            scope: claimed.state.scope.clone(),
+            turn_id: claimed.state.turn_id,
+            run_id: claimed.state.run_id,
+            state_ref: run_scoped_ref,
+            schema_id: claimed.resolved_run_profile.checkpoint_schema_id.clone(),
+            schema_version: claimed.resolved_run_profile.checkpoint_schema_version,
+            kind: LoopCheckpointKind::Final,
+            gate_ref: None,
+        })
+        .await
+        .expect("loop checkpoint");
+    let foreign_run_id = TurnRunId::new();
+    let foreign_scoped_ref =
+        LoopCheckpointStateRef::new(format!("checkpoint:{foreign_run_id}:{token}"))
+            .expect("foreign run-scoped checkpoint ref");
+    let rejected_checkpoint = loop_checkpoint_store
+        .put_loop_checkpoint(PutLoopCheckpointRequest {
+            scope: claimed.state.scope.clone(),
+            turn_id: claimed.state.turn_id,
+            run_id: claimed.state.run_id,
+            state_ref: foreign_scoped_ref,
+            schema_id: claimed.resolved_run_profile.checkpoint_schema_id.clone(),
+            schema_version: claimed.resolved_run_profile.checkpoint_schema_version,
+            kind: LoopCheckpointKind::Final,
+            gate_ref: None,
+        })
+        .await
+        .expect("foreign loop checkpoint");
+    let evidence = text_checkpoint_evidence(loop_checkpoint_store.clone())
+        .with_checkpoint_state_store(checkpoint_state_store.clone());
+    let transition = Arc::new(RecordingTransitionPort::new());
+    let applier = LoopExitApplier::new(transition.clone(), Arc::new(evidence));
+    let accepted = applier
+        .apply(
+            &claimed,
+            LoopExit::Failed(LoopFailed {
+                reason_kind: LoopFailureKind::ModelError,
+                checkpoint_id: Some(accepted_checkpoint.checkpoint_id),
+                usage_summary_ref: None,
+                diagnostic_ref: None,
+                exit_id: test_exit_id(),
+            }),
+        )
+        .await
+        .expect("accepted checkpoint applied");
+
+    assert_eq!(accepted.status, TurnStatus::Failed);
+    assert_eq!(accepted.failure.expect("failure").category(), "model_error");
+
+    let evidence = text_checkpoint_evidence(loop_checkpoint_store)
+        .with_checkpoint_state_store(checkpoint_state_store);
+    let transition = Arc::new(RecordingTransitionPort::new());
+    let applier = LoopExitApplier::new(transition.clone(), Arc::new(evidence));
+    let rejected = applier
+        .apply(
+            &claimed,
+            LoopExit::Failed(LoopFailed {
+                reason_kind: LoopFailureKind::ModelError,
+                checkpoint_id: Some(rejected_checkpoint.checkpoint_id),
+                usage_summary_ref: None,
+                diagnostic_ref: None,
+                exit_id: test_exit_id(),
+            }),
+        )
+        .await
+        .expect("rejected checkpoint applied as protocol violation");
+
+    assert_eq!(rejected.status, TurnStatus::Failed);
+    assert_eq!(
+        rejected.failure.expect("failure").category(),
+        "driver_protocol_violation"
+    );
 }
 
 #[tokio::test]

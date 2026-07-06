@@ -53,6 +53,11 @@ mod router;
 mod schema;
 #[cfg(feature = "webui-v2-beta")]
 mod sse_capacity;
+// Browser SPA asset bundle folded in from the former `ironclaw_webui_v2_static`
+// crate: the JSON route surface and the static bytes it drives now ship from one
+// crate behind the single `webui-v2-beta` feature.
+#[cfg(feature = "webui-v2-beta")]
+pub mod static_assets;
 
 #[allow(deprecated)]
 pub use descriptors::is_webui_v2_llm_config_route_id;
@@ -121,5 +126,10 @@ pub use router::{
 };
 #[cfg(feature = "webui-v2-beta")]
 pub use schema::{WebChatV2Event, WebChatV2EventFrame};
+// Re-export the static-bundle router factory at the crate root so host
+// composition keeps calling `ironclaw_webui_v2::mount_at_prefix(...)` (formerly
+// `ironclaw_webui_v2_static::mount_at_prefix`).
 #[cfg(feature = "webui-v2-beta")]
 pub use sse_capacity::DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER;
+#[cfg(feature = "webui-v2-beta")]
+pub use static_assets::{mount_at_prefix, serve_root, serve_wildcard, static_router};

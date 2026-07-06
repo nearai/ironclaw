@@ -46,7 +46,7 @@ See `src/db/CLAUDE.md` for full schema, dialect differences, and libSQL limitati
 5. Add migration if needed:
    - PostgreSQL: new `migrations/VN__description.sql`
    - libSQL: add entry to `INCREMENTAL_MIGRATIONS` in `libsql_migrations.rs`
-   - **Version numbering**: always number after the highest version on `staging`/`main` — those migrations may already be in production. Check with `git ls-tree origin/staging migrations/` and staging's `INCREMENTAL_MIGRATIONS`. Never reuse or insert before an existing version.
+   - **Version numbering**: always number after the highest version on `main` — those migrations may already be in production. Check with `git ls-tree origin/main migrations/` and main's `INCREMENTAL_MIGRATIONS`. Never reuse or insert before an existing version.
 6. Test feature isolation:
    ```bash
    cargo check                                          # postgres (default)
@@ -81,6 +81,8 @@ Don't just translate `CREATE TABLE`. Also check:
 ## Transaction Safety
 
 Multi-step operations (INSERT+INSERT, UPDATE+DELETE, read-modify-write) MUST be wrapped in a transaction. Ask: "If this crashes between step N and N+1, is the database consistent?" If not, wrap in a transaction. Applies to both backends.
+
+For the `RootFilesystem`/`ScopedFilesystem` mount plane, a filesystem read-modify-write MUST go through `ironclaw_filesystem::cas_update` (the one shared bounded-CAS-retry helper). Never wrap it in a per-record `tokio::sync::Mutex` held across the backend `.await` — it is a redundant serializer over a backend that already does versioned CAS and convoys/wedges the runtime under burst. See `crates/ironclaw_filesystem/CLAUDE.md` invariant 2 and `docs/plans/2026-06-25-cas-migration.md`.
 
 ## libSQL Connection Model
 

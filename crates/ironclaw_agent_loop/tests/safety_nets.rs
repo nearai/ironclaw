@@ -11,7 +11,7 @@ use ironclaw_agent_loop::{
 };
 use ironclaw_turns::{
     LoopExit, LoopFailureKind,
-    run_profile::{ContentDigest, LoopRunInfoPort},
+    run_profile::{AgentLoopHostErrorKind, ContentDigest, LoopRunInfoPort},
 };
 
 #[tokio::test]
@@ -386,6 +386,83 @@ async fn repeated_failure_kind_does_not_trigger_no_progress_escape() {
     assert!(
         host.model_call_count() > 3,
         "coarse repeated failure kinds must not stop the run at the old threshold"
+    );
+}
+
+#[tokio::test]
+async fn chaos_repeated_model_service_drops_report_model_error() {
+    let script = ScenarioScript {
+        model_responses: (0..8)
+            .map(|_| ScriptedModelResponse::Error {
+                kind: AgentLoopHostErrorKind::Unavailable,
+            })
+            .collect(),
+        capability_outcomes: VecDeque::new(),
+        single_call_retry_outcomes: VecDeque::new(),
+        pending_inputs: VecDeque::new(),
+    };
+    let (host, _) = MockAgentLoopDriverHost::builder().script(script).build();
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&families::default(), &host, state)
+        .await
+        .expect("loop execution should produce controlled failed exit");
+
+    match exit {
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::ModelError);
+            assert!(failed.checkpoint_id.is_some());
+        }
+        other => panic!("expected model-error failed exit, got {other:?}"),
+    }
+    assert!(
+        host.model_call_count() >= 3,
+        "model recovery should retry before returning a controlled failure"
+    );
+    assert!(host.finalized_assistant_messages().is_empty());
+}
+
+#[tokio::test]
+async fn invalid_model_output_is_retried_before_accepting_next_valid_reply() {
+    let script = ScenarioScript {
+        model_responses: VecDeque::from([
+            ScriptedModelResponse::ErrorWithSummary {
+                kind: AgentLoopHostErrorKind::Unavailable,
+                safe_summary: "model output was structurally invalid",
+            },
+            ScriptedModelResponse::Reply {
+                text: "recovered after invalid model output".to_string(),
+            },
+        ]),
+        capability_outcomes: VecDeque::new(),
+        single_call_retry_outcomes: VecDeque::new(),
+        pending_inputs: VecDeque::new(),
+    };
+    let (host, _) = MockAgentLoopDriverHost::builder().script(script).build();
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&families::default(), &host, state)
+        .await
+        .expect("loop execution should recover from retryable invalid model output");
+
+    match exit {
+        LoopExit::Completed(completed) => {
+            assert_eq!(completed.reply_message_refs.len(), 1);
+            assert!(completed.final_checkpoint_id.is_some());
+        }
+        other => panic!("expected completion after retrying invalid model output, got {other:?}"),
+    }
+    assert_eq!(host.model_call_count(), 2);
+    assert_eq!(
+        host.finalized_assistant_messages(),
+        vec!["recovered after invalid model output"]
+    );
+    assert_eq!(
+        host.prompt_requests().len(),
+        2,
+        "model recovery must rebuild the prompt before retrying"
     );
 }
 

@@ -8,7 +8,7 @@ use ironclaw_host_api::{
     CapabilityDisplayOutputPreview, CapabilityId, CapabilitySet, CorrelationId,
     DispatchFailureDetail, DispatchInputIssue, DispatchInputIssueCode, EffectKind,
     ExecutionContext, ExtensionId, InvocationId, MountView, Principal, ProviderToolName,
-    ResourceEstimate, RuntimeKind, sha256_digest_token,
+    ResourceEstimate, RuntimeDispatchErrorKind, RuntimeKind, sha256_digest_token,
 };
 use ironclaw_host_runtime::{
     CapabilityFailureDisposition, HostRuntime, HostRuntimeError, IdempotencyKey,
@@ -23,13 +23,13 @@ use ironclaw_turns::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
         CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailure,
-        CapabilityFailureDetail, CapabilityFailureKind, CapabilityInputIssue,
-        CapabilityInputIssueCode, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-        CapabilityResultMessage, CapabilityResumeToken, ConcurrencyHint, ContentDigest,
-        LoopCapabilityPort, LoopHostMilestone, LoopHostMilestoneKind, LoopHostMilestoneSink,
-        LoopProcessRef, LoopRunContext, LoopSafeSummary, ProcessHandleSummary, ProviderToolCall,
-        ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
-        RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        CapabilityFailureDetail, CapabilityFailureKind, CapabilityInputIssue, CapabilityInputRef,
+        CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, CapabilityResumeToken,
+        ConcurrencyHint, ContentDigest, LoopCapabilityPort, LoopHostMilestone,
+        LoopHostMilestoneKind, LoopHostMilestoneSink, LoopProcessRef, LoopRunContext,
+        LoopSafeSummary, ProcessHandleSummary, ProviderToolCall, ProviderToolCallCapabilityIds,
+        ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 use serde_json::Value;
@@ -260,6 +260,202 @@ pub trait LoopCapabilityResultWriter: Send + Sync {
         _input_ref: &CapabilityInputRef,
     ) {
     }
+
+    /// Stage a display preview for a FAILED capability invocation so the UI can
+    /// render the specific failure detail (e.g. invalid-input field issues)
+    /// instead of only the bare error kind. `summary` is a bounded,
+    /// host-authored string (see `capability_failure_display_summary`).
+    /// Default no-op: only writers that own a display-preview store implement
+    /// it. Async so implementers can durably persist the failure preview the
+    /// same way `write_capability_result` persists success previews.
+    async fn stage_capability_failure_preview(
+        &self,
+        _run_context: &LoopRunContext,
+        _invocation_id: InvocationId,
+        _capability_id: &CapabilityId,
+        _summary: &str,
+    ) {
+    }
+}
+
+/// Maximum number of input issues rendered into a failure display preview.
+const CAPABILITY_FAILURE_PREVIEW_MAX_ISSUES: usize = 5;
+/// Byte budget for the rendered failure summary. Stays well under the display
+/// preview's own `CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES` (2 KiB) cap.
+const CAPABILITY_FAILURE_PREVIEW_MAX_BYTES: usize = 1024;
+
+/// Generic placeholder summaries assigned when a failure carries no
+/// host-authored message. Surfacing these adds nothing over the bare error
+/// kind, so they are filtered out (`runtime_failure_to_loop` /
+/// `runtime_model_visible_failure_to_loop`).
+const GENERIC_CAPABILITY_FAILURE_SUMMARIES: [&str; 2] = [
+    "capability invocation failed",
+    "capability authorization denied",
+];
+
+/// Render a bounded, host-authored display summary for a failed capability so
+/// the per-tool UI preview shows the actual reason instead of the bare error
+/// kind.
+///
+/// Preference order:
+/// 1. Structured `InvalidInput` field issues, when present — these carry the
+///    most actionable per-field detail. Only schema-derived fields (`path`,
+///    `code`, `expected`) are interpolated; `received` echoes raw tool input
+///    and is deliberately omitted from any display surface.
+/// 2. Otherwise the failure's host-authored `safe_summary` (e.g. a builtin's
+///    `"invalid JSON: ..."` message), unless it is one of the generic
+///    placeholders that say nothing the kind doesn't.
+///
+/// Returns `None` when neither is available, so the projection keeps its
+/// existing `tool failed: <kind>` fallback.
+fn capability_failure_display_summary(failure: &CapabilityFailure) -> Option<String> {
+    if let Some(CapabilityFailureDetail::InvalidInput { issues }) = failure.detail.as_ref()
+        && !issues.is_empty()
+    {
+        let rendered = issues
+            .iter()
+            .take(CAPABILITY_FAILURE_PREVIEW_MAX_ISSUES)
+            .filter_map(render_capability_input_issue)
+            .collect::<Vec<_>>()
+            .join("; ");
+        if !rendered.is_empty() {
+            let mut summary = format!("Invalid input: {rendered}");
+            if issues.len() > CAPABILITY_FAILURE_PREVIEW_MAX_ISSUES {
+                let extra = issues.len() - CAPABILITY_FAILURE_PREVIEW_MAX_ISSUES;
+                summary.push_str(&format!(" (+{extra} more)"));
+            }
+            return Some(
+                ironclaw_host_api::truncate_capability_display_text(
+                    &summary,
+                    CAPABILITY_FAILURE_PREVIEW_MAX_BYTES,
+                )
+                .text,
+            );
+        }
+    }
+
+    let summary = failure.safe_summary.trim();
+    if summary.is_empty() || GENERIC_CAPABILITY_FAILURE_SUMMARIES.contains(&summary) {
+        return None;
+    }
+    Some(
+        ironclaw_host_api::truncate_capability_display_text(
+            summary,
+            CAPABILITY_FAILURE_PREVIEW_MAX_BYTES,
+        )
+        .text,
+    )
+}
+
+const CAPABILITY_INPUT_ISSUE_FIELD_MAX_BYTES: usize = 160;
+
+fn render_capability_input_issue(issue: &CapabilityInputIssue) -> Option<String> {
+    let code = match issue.code {
+        DispatchInputIssueCode::MissingRequired => "missing required field",
+        DispatchInputIssueCode::UnexpectedField => "unexpected field",
+        DispatchInputIssueCode::TypeMismatch => "type mismatch",
+        DispatchInputIssueCode::InvalidValue => "invalid value",
+    };
+    let path = capability_input_issue_display_text(&issue.path)?;
+    match issue
+        .expected
+        .as_deref()
+        .and_then(capability_input_issue_display_text)
+    {
+        Some(expected) if !expected.is_empty() => {
+            Some(format!("{path} — {code} (expected {expected})"))
+        }
+        _ => Some(format!("{path} — {code}")),
+    }
+}
+
+fn capability_input_issue_display_text(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.chars().any(|character| {
+            character == '\0'
+                || character.is_control()
+                || !character.is_ascii()
+                || matches!(
+                    character,
+                    '{' | '}' | '[' | ']' | '`' | '<' | '>' | '/' | '\\'
+                )
+        })
+        || contains_capability_input_issue_sensitive_marker(trimmed)
+    {
+        return None;
+    }
+    Some(
+        ironclaw_host_api::truncate_capability_display_text(
+            trimmed,
+            CAPABILITY_INPUT_ISSUE_FIELD_MAX_BYTES,
+        )
+        .text,
+    )
+}
+
+fn contains_capability_input_issue_sensitive_marker(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let normalized = lower
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect::<String>();
+    for forbidden in [
+        "accesstoken",
+        "apikey",
+        "authtoken",
+        "authorization",
+        "bearer",
+        "password",
+        "passwd",
+        "secret",
+        "toolinput",
+    ] {
+        if normalized.contains(forbidden) {
+            return true;
+        }
+    }
+    for forbidden in [
+        "access token",
+        "access_token",
+        "api key",
+        "api_key",
+        "apikey",
+        "authorization",
+        "bearer",
+        "password",
+        "passwd",
+        "secret",
+        "tool input",
+        "tool_input",
+    ] {
+        if lower.contains(forbidden) {
+            return true;
+        }
+    }
+    lower
+        .split(|character: char| {
+            !character.is_ascii_alphanumeric() && !matches!(character, '-' | '_' | '.')
+        })
+        .any(|token| {
+            [
+                "sk-",
+                "sk-ant-",
+                "ghp_",
+                "github_pat_",
+                "gho_",
+                "ghu_",
+                "ghs_",
+                "ghr_",
+                "glpat-",
+                "gcp-",
+                "ya29.",
+                "aiza",
+            ]
+            .iter()
+            .any(|prefix| token.starts_with(prefix))
+                || (token.len() >= 16 && (token.starts_with("akia") || token.starts_with("asia")))
+        })
 }
 
 pub struct CapabilityResultWrite<'a> {
@@ -1433,6 +1629,9 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         Ok(VisibleCapabilitySurface {
             version,
             descriptors,
+            // Empty = "callable == advertised". A disclosure decorator that narrows
+            // the advertised set populates this with the wider reachable catalog.
+            callable_capability_ids: None,
         })
     }
 
@@ -1809,6 +2008,9 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                     provider: Some(provider),
                     runtime: Some(runtime),
                     reason_kind: capability_failure_kind(host_error.kind.as_str())?,
+                    // Host/infra fault, not a model-visible tool error: keep the
+                    // detail server-side, surface only the kind.
+                    safe_summary: None,
                 };
                 guard.commit();
                 return self
@@ -2435,7 +2637,27 @@ async fn runtime_outcome_to_loop(
                 safe_summary: "capability spawned background work".to_string(),
             })
         }
-        RuntimeCapabilityOutcome::Failed(failure) => runtime_failure_to_loop(failure)?,
+        RuntimeCapabilityOutcome::Failed(failure) => {
+            let capability_id = failure.capability_id.clone();
+            let outcome = runtime_failure_to_loop(failure)?;
+            // Surface actionable failure detail (e.g. invalid-input field
+            // issues) to the per-tool UI preview by staging a display-preview
+            // record. Without this the projection falls back to the bare error
+            // kind. The model-visible observation is unaffected.
+            if let CapabilityOutcome::Failed(ref cap_failure) = outcome
+                && let Some(summary) = capability_failure_display_summary(cap_failure)
+            {
+                result_writer
+                    .stage_capability_failure_preview(
+                        run_context,
+                        conversion.invocation_id,
+                        &capability_id,
+                        &summary,
+                    )
+                    .await;
+            }
+            outcome
+        }
         RuntimeCapabilityOutcome::Unknown(unknown) => {
             CapabilityOutcome::Failed(CapabilityFailure {
                 error_kind: capability_failure_kind(unknown.kind)?,
@@ -2466,12 +2688,17 @@ fn runtime_terminal_milestone(
             })
         }
         RuntimeCapabilityOutcome::Failed(failure) => {
+            let safe_summary = runtime_failure_loop_safe_summary(failure);
             Some(LoopHostMilestoneKind::CapabilityFailed {
                 activity_id,
                 capability_id: failure.capability_id.clone(),
                 provider: Some(provider),
                 runtime: Some(runtime),
                 reason_kind: runtime_failure_kind_to_loop(failure.kind)?,
+                // Sanitized, host-authored message (e.g. "invalid JSON: ...")
+                // so the live per-tool UI card shows the real reason, not just
+                // the bare error kind.
+                safe_summary,
             })
         }
         RuntimeCapabilityOutcome::Unknown(unknown) => {
@@ -2481,6 +2708,7 @@ fn runtime_terminal_milestone(
                 provider: Some(provider),
                 runtime: Some(runtime),
                 reason_kind: capability_failure_kind(unknown.kind.clone())?,
+                safe_summary: None,
             })
         }
         RuntimeCapabilityOutcome::ApprovalRequired(_)
@@ -2550,19 +2778,10 @@ fn dispatch_failure_detail_to_loop(detail: DispatchFailureDetail) -> CapabilityF
 fn dispatch_input_issue_to_loop(issue: DispatchInputIssue) -> CapabilityInputIssue {
     CapabilityInputIssue {
         path: issue.path,
-        code: dispatch_input_issue_code_to_loop(issue.code),
+        code: issue.code,
         expected: issue.expected,
         received: issue.received,
         schema_path: issue.schema_path,
-    }
-}
-
-fn dispatch_input_issue_code_to_loop(code: DispatchInputIssueCode) -> CapabilityInputIssueCode {
-    match code {
-        DispatchInputIssueCode::MissingRequired => CapabilityInputIssueCode::MissingRequired,
-        DispatchInputIssueCode::UnexpectedField => CapabilityInputIssueCode::UnexpectedField,
-        DispatchInputIssueCode::TypeMismatch => CapabilityInputIssueCode::TypeMismatch,
-        DispatchInputIssueCode::InvalidValue => CapabilityInputIssueCode::InvalidValue,
     }
 }
 
@@ -2689,11 +2908,47 @@ fn runtime_failure_safe_summary(
     failure: &RuntimeCapabilityFailure,
     fallback: &'static str,
 ) -> String {
+    let fallback = runtime_failure_fallback_summary(failure.kind, fallback);
     failure
         .safe_summary()
         .and_then(|summary| LoopSafeSummary::new(summary).ok())
         .map(|summary| summary.to_string())
         .unwrap_or_else(|| fallback.to_string())
+}
+
+fn runtime_failure_loop_safe_summary(
+    failure: &RuntimeCapabilityFailure,
+) -> Option<LoopSafeSummary> {
+    match failure.safe_summary() {
+        Some(summary) => {
+            if let Ok(summary) = LoopSafeSummary::new(summary.clone()) {
+                return Some(summary);
+            }
+            if matches!(failure.kind, RuntimeFailureKind::InvalidInput) {
+                return Some(runtime_input_encode_summary());
+            }
+            Some(LoopSafeSummary::capability_failure_summary(summary))
+        }
+        None if matches!(failure.kind, RuntimeFailureKind::InvalidInput) => {
+            Some(runtime_input_encode_summary())
+        }
+        None => None,
+    }
+}
+
+fn runtime_failure_fallback_summary(
+    kind: RuntimeFailureKind,
+    fallback: &'static str,
+) -> &'static str {
+    if matches!(kind, RuntimeFailureKind::InvalidInput) {
+        RuntimeDispatchErrorKind::InputEncode.human_summary()
+    } else {
+        fallback
+    }
+}
+
+fn runtime_input_encode_summary() -> LoopSafeSummary {
+    LoopSafeSummary::tool_input_could_not_be_encoded()
 }
 
 fn loop_gate_ref(kind: &str, id: String) -> Result<LoopGateRef, AgentLoopHostError> {
@@ -3027,7 +3282,20 @@ mod tests {
             invalid_input,
             CapabilityOutcome::Failed(failure)
                 if failure.error_kind == CapabilityFailureKind::InvalidInput
-                    && failure.safe_summary == "capability invocation failed"
+                    && failure.safe_summary == RuntimeDispatchErrorKind::InputEncode.human_summary()
+        ));
+
+        let unsafe_invalid_input = runtime_failure_to_loop(RuntimeCapabilityFailure::new(
+            capability_id.clone(),
+            RuntimeFailureKind::InvalidInput,
+            Some("invalid JSON: expected value near {invalid".to_string()),
+        ))
+        .expect("convert unsafe invalid input runtime summary");
+        assert!(matches!(
+            unsafe_invalid_input,
+            CapabilityOutcome::Failed(failure)
+                if failure.error_kind == CapabilityFailureKind::InvalidInput
+                    && failure.safe_summary == RuntimeDispatchErrorKind::InputEncode.human_summary()
         ));
 
         let issue =
@@ -3054,9 +3322,9 @@ mod tests {
                 ..
             }) if issues.len() == 2
                 && issues[0].path == "schedule.kind"
-                && issues[0].code == CapabilityInputIssueCode::MissingRequired
+                && issues[0].code == DispatchInputIssueCode::MissingRequired
                 && issues[1].path == "schedule.timezone"
-                && issues[1].code == CapabilityInputIssueCode::InvalidValue
+                && issues[1].code == DispatchInputIssueCode::InvalidValue
         ));
 
         let denied = runtime_failure_to_loop(RuntimeCapabilityFailure::new(
@@ -3138,6 +3406,121 @@ mod tests {
                 if failure.error_kind == CapabilityFailureKind::Transient
                     && failure.safe_summary == "temporary outage"
         ));
+    }
+
+    #[test]
+    fn capability_failure_display_summary_renders_invalid_input_issues() {
+        let failure = CapabilityFailure {
+            error_kind: CapabilityFailureKind::InvalidInput,
+            safe_summary: "tool input failed validation".to_string(),
+            detail: Some(CapabilityFailureDetail::InvalidInput {
+                issues: vec![
+                    CapabilityInputIssue {
+                        path: "schedule.kind".to_string(),
+                        code: DispatchInputIssueCode::MissingRequired,
+                        expected: Some("cron or once".to_string()),
+                        received: Some("super-secret-raw-value".to_string()),
+                        schema_path: None,
+                    },
+                    CapabilityInputIssue {
+                        path: "schedule.timezone".to_string(),
+                        code: DispatchInputIssueCode::InvalidValue,
+                        expected: None,
+                        received: None,
+                        schema_path: None,
+                    },
+                ],
+            }),
+        };
+        let summary =
+            capability_failure_display_summary(&failure).expect("invalid input renders a summary");
+        assert!(summary.starts_with("Invalid input:"));
+        assert!(summary.contains("schedule.kind — missing required field (expected cron or once)"));
+        assert!(summary.contains("schedule.timezone — invalid value"));
+        // `received` echoes raw tool input and must never reach a display surface.
+        assert!(!summary.contains("super-secret-raw-value"));
+    }
+
+    #[test]
+    fn capability_failure_display_summary_uses_safe_summary_without_issues() {
+        // The `json` builtin reports invalid_input with a descriptive message
+        // but no structured issues; that message must reach the preview.
+        let failure = CapabilityFailure {
+            error_kind: CapabilityFailureKind::InvalidInput,
+            safe_summary: "invalid JSON: expected value at line 1 column 1".to_string(),
+            detail: None,
+        };
+        assert_eq!(
+            capability_failure_display_summary(&failure).as_deref(),
+            Some("invalid JSON: expected value at line 1 column 1")
+        );
+    }
+
+    #[test]
+    fn capability_failure_display_summary_skips_unsafe_input_issue_fields() {
+        let failure = CapabilityFailure {
+            error_kind: CapabilityFailureKind::InvalidInput,
+            safe_summary: "input schema validation failed".to_string(),
+            detail: Some(CapabilityFailureDetail::InvalidInput {
+                issues: vec![CapabilityInputIssue {
+                    path: "payload</script>".to_string(),
+                    code: DispatchInputIssueCode::InvalidValue,
+                    expected: Some("safe".to_string()),
+                    received: None,
+                    schema_path: None,
+                }],
+            }),
+        };
+
+        assert_eq!(
+            capability_failure_display_summary(&failure).as_deref(),
+            Some("input schema validation failed")
+        );
+    }
+
+    #[test]
+    fn capability_failure_display_summary_skips_sensitive_input_issue_fields() {
+        let failure = CapabilityFailure {
+            error_kind: CapabilityFailureKind::InvalidInput,
+            safe_summary: "input schema validation failed".to_string(),
+            detail: Some(CapabilityFailureDetail::InvalidInput {
+                issues: vec![CapabilityInputIssue {
+                    path: "secret_api_key".to_string(),
+                    code: DispatchInputIssueCode::TypeMismatch,
+                    expected: Some("password string".to_string()),
+                    received: None,
+                    schema_path: None,
+                }],
+            }),
+        };
+
+        assert_eq!(
+            capability_failure_display_summary(&failure).as_deref(),
+            Some("input schema validation failed")
+        );
+    }
+
+    #[test]
+    fn capability_input_issue_display_text_rejects_sensitive_marker_variants() {
+        for value in [
+            "x-api-key",
+            "accessToken",
+            "auth_token",
+            "toolInput",
+            "secret_api_key",
+        ] {
+            assert_eq!(capability_input_issue_display_text(value), None, "{value}");
+        }
+    }
+
+    #[test]
+    fn capability_failure_display_summary_is_none_for_generic_placeholder() {
+        let failure = CapabilityFailure {
+            error_kind: CapabilityFailureKind::Backend,
+            safe_summary: "capability invocation failed".to_string(),
+            detail: None,
+        };
+        assert!(capability_failure_display_summary(&failure).is_none());
     }
 
     #[test]
@@ -4404,10 +4787,31 @@ mod tests {
                 RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure {
                     capability_id: CapabilityId::new("demo.echo").expect("valid capability id"),
                     kind: RuntimeFailureKind::InvalidInput,
-                    message: Some("invalid input".to_string()),
+                    message: Some("invalid JSON: expected value at line 1 column 1".to_string()),
                     detail: None,
                 }),
                 CapabilityFailureKind::InvalidInput,
+                Some("invalid JSON: expected value at line 1 column 1"),
+            ),
+            (
+                RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure {
+                    capability_id: CapabilityId::new("demo.echo").expect("valid capability id"),
+                    kind: RuntimeFailureKind::InvalidInput,
+                    message: Some("invalid JSON: expected value near {invalid".to_string()),
+                    detail: None,
+                }),
+                CapabilityFailureKind::InvalidInput,
+                Some(RuntimeDispatchErrorKind::InputEncode.human_summary()),
+            ),
+            (
+                RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure {
+                    capability_id: CapabilityId::new("demo.echo").expect("valid capability id"),
+                    kind: RuntimeFailureKind::InvalidInput,
+                    message: None,
+                    detail: None,
+                }),
+                CapabilityFailureKind::InvalidInput,
+                Some(RuntimeDispatchErrorKind::InputEncode.human_summary()),
             ),
             (
                 RuntimeCapabilityOutcome::Unknown(RuntimeCapabilityUnknown {
@@ -4416,10 +4820,11 @@ mod tests {
                     message: Some("custom failure".to_string()),
                 }),
                 capability_failure_kind("custom_failure").expect("valid custom failure kind"),
+                None,
             ),
         ];
 
-        for (outcome, expected_kind) in cases {
+        for (outcome, expected_kind, expected_summary) in cases {
             let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
             let provider_id = ExtensionId::new("demo").expect("valid provider id");
             let milestone_sink =
@@ -4457,6 +4862,14 @@ mod tests {
                     ..
                 } if actual == &capability_id && provider == &provider_id && reason_kind == &expected_kind
             ));
+            let actual_summary = match &milestones[1].kind {
+                ironclaw_turns::run_profile::LoopHostMilestoneKind::CapabilityFailed {
+                    safe_summary,
+                    ..
+                } => safe_summary.as_ref().map(|summary| summary.as_str()),
+                _ => unreachable!("milestone kind was asserted above"),
+            };
+            assert_eq!(actual_summary, expected_summary);
         }
     }
 
@@ -4848,6 +5261,77 @@ mod tests {
             .expect("requested registered activity should dispatch");
 
         assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
+        assert_eq!(runtime.take_requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn provider_tool_call_registration_accepts_password_and_traceback_reasoning_text() {
+        // W4-PROVIDER-VALIDATE (#5001 caller gap): the crude
+        // `SENSITIVE_PROVIDER_TEXT_MARKERS` substring scan on provider
+        // reasoning/response_reasoning/signature text was removed in favor of
+        // the entropy-based `LeakDetector` (#5001, PinchBench bucket D) --
+        // bare English words like "password"/"traceback" in legitimate
+        // analysis reasoning must be ACCEPTED, not rejected (the old scan
+        // false-positived on exactly this kind of text and drove
+        // retry/give-up loops). `capability_port/provider_validation.rs`'s
+        // own unit test pins this at the private free-function level
+        // (`validate_provider_tool_call` called directly); this drives it
+        // through the REAL production caller instead --
+        // `LoopCapabilityPort::validate_provider_tool_call` /
+        // `register_provider_tool_call` / `invoke_capability` on
+        // `HostRuntimeLoopCapabilityPort`, the same port the agent loop
+        // calls -- per the test-through-the-caller rule.
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+            capability_id.clone(),
+            provider_id.clone(),
+        )]));
+        let port = runtime_capability_port(
+            &capability_id,
+            &provider_id,
+            runtime.clone(),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+            "thread-provider-password-traceback",
+        )
+        .await;
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+
+        let mut call = provider_tool_call();
+        call.response_reasoning = Some(
+            "provider error included a traceback; the user's password had expired".to_string(),
+        );
+        call.reasoning =
+            Some("checked the traceback output for a leaked password field".to_string());
+        call.signature = Some("password-traceback-review".to_string());
+
+        port.validate_provider_tool_call(&call)
+            .expect("password/traceback reasoning text must be accepted, not rejected (#5001)");
+        let candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
+            .await
+            .expect("password/traceback reasoning text must register, not be staged as a failure");
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                activity_id: candidate.activity_id,
+                surface_version: surface.version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("accepted call should dispatch, not error");
+        assert!(
+            matches!(outcome, CapabilityOutcome::Completed(_)),
+            "expected a real Completed dispatch (proving the call was genuinely accepted, not \
+             silently downgraded to a model-visible failure), got {outcome:?}"
+        );
         assert_eq!(runtime.take_requests().len(), 1);
     }
 
@@ -6335,10 +6819,7 @@ mod tests {
         };
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].path, "message");
-        assert_eq!(
-            issues[0].code,
-            ironclaw_turns::run_profile::CapabilityInputIssueCode::MissingRequired
-        );
+        assert_eq!(issues[0].code, DispatchInputIssueCode::MissingRequired);
         assert_eq!(issues[0].expected.as_deref(), Some("required field"));
         assert!(
             runtime.take_requests().is_empty(),
@@ -6429,8 +6910,7 @@ mod tests {
         assert!(
             issues.iter().any(|issue| {
                 issue.path == "message"
-                    && issue.code
-                        == ironclaw_turns::run_profile::CapabilityInputIssueCode::TypeMismatch
+                    && issue.code == DispatchInputIssueCode::TypeMismatch
                     && issue.expected.as_deref() == Some("string")
                     && issue.received.as_deref() == Some("integer")
             }),
@@ -6524,9 +7004,7 @@ mod tests {
         };
         assert!(
             issues.iter().any(|issue| {
-                issue.path == "unexpected"
-                    && issue.code
-                        == ironclaw_turns::run_profile::CapabilityInputIssueCode::UnexpectedField
+                issue.path == "unexpected" && issue.code == DispatchInputIssueCode::UnexpectedField
             }),
             "unexpected field issue should identify the field to remove"
         );

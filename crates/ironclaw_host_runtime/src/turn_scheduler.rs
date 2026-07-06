@@ -5,6 +5,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use futures_util::FutureExt;
+use ironclaw_observability::live_latency_started_at;
 use ironclaw_turns::{
     SanitizedFailure, TurnError, TurnLeaseToken, TurnRunId, TurnRunWake, TurnRunWakeNotifier,
     TurnRunWakeNotifyError, TurnRunnerId, TurnScope,
@@ -22,12 +23,19 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tracing::debug;
 
+mod executor_task;
+mod latency;
+use self::executor_task::ExecutorTaskOutcome;
+
 #[derive(Debug, Clone)]
 pub struct TurnRunSchedulerConfig {
     max_concurrent_runs: usize,
     poll_interval: Duration,
     lease_recovery_interval: Duration,
     runner_heartbeat_interval: Duration,
+    max_consecutive_heartbeat_failures: usize,
+    terminal_failure_record_attempts: usize,
+    terminal_failure_record_backoff: Duration,
     claim_error_backoff: Duration,
     wake_channel_capacity: usize,
 }
@@ -39,6 +47,9 @@ impl Default for TurnRunSchedulerConfig {
             poll_interval: Duration::from_secs(5),
             lease_recovery_interval: Duration::from_secs(10),
             runner_heartbeat_interval: Duration::from_secs(30),
+            max_consecutive_heartbeat_failures: 3,
+            terminal_failure_record_attempts: 3,
+            terminal_failure_record_backoff: Duration::from_millis(100),
             claim_error_backoff: Duration::from_secs(1),
             wake_channel_capacity: 128,
         }
@@ -70,6 +81,18 @@ impl TurnRunSchedulerConfig {
         self.runner_heartbeat_interval
     }
 
+    pub fn max_consecutive_heartbeat_failures(&self) -> usize {
+        self.max_consecutive_heartbeat_failures
+    }
+
+    pub fn terminal_failure_record_attempts(&self) -> usize {
+        self.terminal_failure_record_attempts
+    }
+
+    pub fn terminal_failure_record_backoff(&self) -> Duration {
+        self.terminal_failure_record_backoff
+    }
+
     pub fn claim_error_backoff(&self) -> Duration {
         self.claim_error_backoff
     }
@@ -98,6 +121,30 @@ impl TurnRunSchedulerConfig {
         self
     }
 
+    pub fn with_max_consecutive_heartbeat_failures(
+        mut self,
+        max_consecutive_heartbeat_failures: usize,
+    ) -> Self {
+        self.max_consecutive_heartbeat_failures = max_consecutive_heartbeat_failures.max(1);
+        self
+    }
+
+    pub fn with_terminal_failure_record_attempts(
+        mut self,
+        terminal_failure_record_attempts: usize,
+    ) -> Self {
+        self.terminal_failure_record_attempts = terminal_failure_record_attempts.max(1);
+        self
+    }
+
+    pub fn with_terminal_failure_record_backoff(
+        mut self,
+        terminal_failure_record_backoff: Duration,
+    ) -> Self {
+        self.terminal_failure_record_backoff = non_zero_duration(terminal_failure_record_backoff);
+        self
+    }
+
     pub fn with_claim_error_backoff(mut self, claim_error_backoff: Duration) -> Self {
         self.claim_error_backoff = non_zero_duration(claim_error_backoff);
         self
@@ -116,9 +163,7 @@ pub struct TurnRunExecutorError {
 
 impl TurnRunExecutorError {
     pub fn new(failure_category: impl Into<String>) -> Result<Self, String> {
-        Ok(Self {
-            failure: SanitizedFailure::new(failure_category)?,
-        })
+        SanitizedFailure::new(failure_category).map(|failure| Self { failure })
     }
 
     pub fn failure(&self) -> &SanitizedFailure {
@@ -261,9 +306,14 @@ impl fmt::Debug for SchedulerTurnRunWakeNotifier {
 
 impl TurnRunWakeNotifier for SchedulerTurnRunWakeNotifier {
     fn notify_queued_run(&self, wake: TurnRunWake) -> Result<(), TurnRunWakeNotifyError> {
-        self.command_tx
+        let started_at = live_latency_started_at();
+        let trace_fields = latency::run_fields_from_wake(started_at, &wake);
+        let result = self
+            .command_tx
             .try_send(SchedulerCommand::Wake(wake))
-            .map_err(|_| TurnRunWakeNotifyError::DeliveryUnavailable)
+            .map_err(|_| TurnRunWakeNotifyError::DeliveryUnavailable);
+        latency::notify_queued_run_result(trace_fields.as_ref(), started_at, &result);
+        result
     }
 }
 
@@ -552,6 +602,8 @@ async fn drain_queued_runs(
         let Ok(permit) = Arc::clone(&context.semaphore).try_acquire_owned() else {
             return false;
         };
+        let claim_started_at = live_latency_started_at();
+        let scope_filter_fields = latency::scope_fields(claim_started_at, scope_filter.as_ref());
         let claim = context
             .transitions
             .claim_next_run(ClaimRunRequest {
@@ -560,6 +612,7 @@ async fn drain_queued_runs(
                 scope_filter: scope_filter.clone(),
             })
             .await;
+        latency::claim_next_run_result(scope_filter_fields.as_ref(), claim_started_at, &claim);
         match claim {
             Ok(Some(claimed)) => {
                 let run_id = claimed.state.run_id;
@@ -571,13 +624,25 @@ async fn drain_queued_runs(
                         lease_token: claimed.lease_token,
                     },
                 );
+                let task_config = ExecutorTaskConfig {
+                    runner_heartbeat_interval: context.config.runner_heartbeat_interval(),
+                    max_consecutive_heartbeat_failures: context
+                        .config
+                        .max_consecutive_heartbeat_failures(),
+                    terminal_failure_record_attempts: context
+                        .config
+                        .terminal_failure_record_attempts(),
+                    terminal_failure_record_backoff: context
+                        .config
+                        .terminal_failure_record_backoff(),
+                };
                 spawn_executor_task(
                     claimed,
                     Arc::clone(&context.transitions),
                     Arc::clone(&context.executor),
                     context.command_tx.clone(),
                     permit,
-                    context.config.runner_heartbeat_interval(),
+                    task_config,
                     executor_tasks,
                 );
             }
@@ -590,9 +655,12 @@ async fn drain_queued_runs(
     }
 }
 
-enum ExecutorTaskOutcome {
-    Completed,
-    TerminalFailure(Option<SanitizedFailure>),
+#[derive(Clone, Copy)]
+struct ExecutorTaskConfig {
+    runner_heartbeat_interval: Duration,
+    max_consecutive_heartbeat_failures: usize,
+    terminal_failure_record_attempts: usize,
+    terminal_failure_record_backoff: Duration,
 }
 
 fn spawn_executor_task(
@@ -601,7 +669,7 @@ fn spawn_executor_task(
     executor: Arc<dyn TurnRunExecutor>,
     command_tx: mpsc::Sender<SchedulerCommand>,
     permit: tokio::sync::OwnedSemaphorePermit,
-    runner_heartbeat_interval: Duration,
+    task_config: ExecutorTaskConfig,
     executor_tasks: &mut JoinSet<TurnRunId>,
 ) {
     // Tag every tracing event emitted while this run executes with its
@@ -619,7 +687,7 @@ fn spawn_executor_task(
     // the event self-contained and allows test layers to find them without
     // relying on span registration timing (which can be racy under parallel
     // test execution when using `tracing::dispatcher::set_default`).
-    let recovery_thread_id = claimed.state.scope.thread_id.clone();
+    let recovery_scope = claimed.state.scope.clone();
     let recovery_run_id_for_start = claimed.state.run_id;
     executor_tasks.spawn(
         async move {
@@ -627,11 +695,12 @@ fn spawn_executor_task(
             let recovery_runner_id = claimed.runner_id;
             let recovery_lease_token = claimed.lease_token;
             tracing::debug!(
-                thread_id = %recovery_thread_id,
+                thread_id = %recovery_scope.thread_id,
                 run_id = %recovery_run_id_for_start,
                 "turn run started",
             );
-            let mut heartbeat_tick = interval(runner_heartbeat_interval);
+            let executor_started_at = live_latency_started_at();
+            let mut heartbeat_tick = interval(task_config.runner_heartbeat_interval);
             heartbeat_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
             // Consume the immediate first tick so the heartbeat loop never fires
             // at t=0. The run's lease was just issued and valid; a t=0 heartbeat
@@ -644,19 +713,17 @@ fn spawn_executor_task(
                     .catch_unwind();
             tokio::pin!(executor_result);
             let mut heartbeats = InFlightHeartbeat::new();
+            let mut consecutive_heartbeat_failures = 0usize;
             let outcome = loop {
                 tokio::select! {
                     biased;
                     result = &mut executor_result => {
-                        break match result {
-                            Ok(Ok(())) => ExecutorTaskOutcome::Completed,
-                            Ok(Err(error)) => ExecutorTaskOutcome::TerminalFailure(Some(
-                                error.failure().clone(),
-                            )),
-                            Err(_) => ExecutorTaskOutcome::TerminalFailure(scheduler_failure(
-                                "scheduler_executor_panic",
-                            )),
-                        };
+                        break executor_task::result_to_outcome(
+                            &recovery_scope,
+                            recovery_run_id,
+                            executor_started_at,
+                            result,
+                        );
                     }
                     _ = heartbeat_tick.tick(), if heartbeats.is_idle() => {
                         heartbeats.spawn(
@@ -664,11 +731,36 @@ fn spawn_executor_task(
                             recovery_run_id,
                             recovery_runner_id,
                             recovery_lease_token,
-                            runner_heartbeat_interval,
+                            task_config.runner_heartbeat_interval,
                         );
                     }
                     Some(heartbeat) = heartbeats.join(), if heartbeats.is_running() => {
-                        if !heartbeat_succeeded(heartbeat) {
+                        match heartbeat_outcome(heartbeat) {
+                            HeartbeatOutcome::Succeeded => {
+                                consecutive_heartbeat_failures = 0;
+                            }
+                            HeartbeatOutcome::Failed => {
+                                consecutive_heartbeat_failures =
+                                    consecutive_heartbeat_failures.saturating_add(1);
+                                debug!(
+                                    run_id = %recovery_run_id,
+                                    consecutive_heartbeat_failures,
+                                    max_consecutive_heartbeat_failures = task_config.max_consecutive_heartbeat_failures,
+                                    "turn run scheduler heartbeat failed"
+                                );
+                            }
+                            HeartbeatOutcome::TimedOut => {
+                                debug!(
+                                    run_id = %recovery_run_id,
+                                    consecutive_heartbeat_failures,
+                                    max_consecutive_heartbeat_failures = task_config.max_consecutive_heartbeat_failures,
+                                    "turn run scheduler heartbeat timed out; preserving executor while store is slow"
+                                );
+                            }
+                        }
+                        if consecutive_heartbeat_failures
+                            >= task_config.max_consecutive_heartbeat_failures
+                        {
                             break ExecutorTaskOutcome::TerminalFailure(scheduler_failure(
                                 "scheduler_heartbeat_failed",
                             ));
@@ -681,14 +773,37 @@ fn spawn_executor_task(
             match outcome {
                 ExecutorTaskOutcome::Completed => {}
                 ExecutorTaskOutcome::TerminalFailure(Some(failure)) => {
-                    record_terminal_failure(
+                    if let Err(error) = record_terminal_failure(
                         Arc::clone(&transitions),
                         recovery_run_id,
                         recovery_runner_id,
                         recovery_lease_token,
                         failure,
+                        task_config.terminal_failure_record_attempts,
+                        task_config.terminal_failure_record_backoff,
                     )
-                    .await;
+                    .await
+                    {
+                        debug!(
+                            error = %error,
+                            run_id = %recovery_run_id,
+                            "turn run scheduler terminal failure recording exhausted; relinquishing claimed run"
+                        );
+                        if let Err(relinquish_error) = transitions
+                            .relinquish_run(RelinquishRunRequest {
+                                run_id: recovery_run_id,
+                                runner_id: recovery_runner_id,
+                                lease_token: recovery_lease_token,
+                            })
+                            .await
+                        {
+                            debug!(
+                                error = %relinquish_error,
+                                run_id = %recovery_run_id,
+                                "turn run scheduler failed to relinquish run after terminal failure recording error"
+                            );
+                        }
+                    }
                 }
                 ExecutorTaskOutcome::TerminalFailure(None) => {
                     debug!("turn run scheduler could not sanitize terminal failure category");
@@ -706,7 +821,7 @@ fn spawn_executor_task(
 }
 
 struct InFlightHeartbeat {
-    task: Option<JoinHandle<bool>>,
+    task: Option<JoinHandle<HeartbeatOutcome>>,
 }
 
 impl InFlightHeartbeat {
@@ -738,7 +853,7 @@ impl InFlightHeartbeat {
         }));
     }
 
-    async fn join(&mut self) -> Option<Result<bool, tokio::task::JoinError>> {
+    async fn join(&mut self) -> Option<Result<HeartbeatOutcome, tokio::task::JoinError>> {
         let task = self.task.as_mut()?;
         let result = task.await;
         self.task = None;
@@ -752,8 +867,24 @@ impl InFlightHeartbeat {
     }
 }
 
-fn heartbeat_succeeded(result: Result<bool, tokio::task::JoinError>) -> bool {
-    matches!(result, Ok(true))
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HeartbeatOutcome {
+    Succeeded,
+    Failed,
+    TimedOut,
+}
+
+fn heartbeat_outcome(result: Result<HeartbeatOutcome, tokio::task::JoinError>) -> HeartbeatOutcome {
+    match result {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            debug!(
+                error = %error,
+                "turn run scheduler heartbeat task join failed"
+            );
+            HeartbeatOutcome::Failed
+        }
+    }
 }
 
 async fn heartbeat_claimed_run(
@@ -762,7 +893,7 @@ async fn heartbeat_claimed_run(
     runner_id: ironclaw_turns::TurnRunnerId,
     lease_token: ironclaw_turns::TurnLeaseToken,
     timeout_after: Duration,
-) -> bool {
+) -> HeartbeatOutcome {
     let heartbeat = transitions.heartbeat(HeartbeatRequest {
         run_id,
         runner_id,
@@ -770,10 +901,10 @@ async fn heartbeat_claimed_run(
     });
     let result = tokio::time::timeout(timeout_after, heartbeat).await;
     match result {
-        Ok(Ok(_)) => true,
+        Ok(Ok(_)) => HeartbeatOutcome::Succeeded,
         Ok(Err(error)) => {
             debug!(error = %error, "turn run scheduler heartbeat failed");
-            false
+            HeartbeatOutcome::Failed
         }
         Err(_) => {
             debug!(
@@ -781,7 +912,7 @@ async fn heartbeat_claimed_run(
                 timeout_after = ?timeout_after,
                 "turn run scheduler heartbeat timed out"
             );
-            false
+            HeartbeatOutcome::TimedOut
         }
     }
 }
@@ -792,18 +923,37 @@ async fn record_terminal_failure(
     runner_id: ironclaw_turns::TurnRunnerId,
     lease_token: ironclaw_turns::TurnLeaseToken,
     failure: SanitizedFailure,
-) {
-    let result = transitions
-        .record_runner_failure(RecordRunnerFailureRequest {
-            run_id,
-            runner_id,
-            lease_token,
-            failure,
-        })
-        .await;
-    if let Err(error) = result {
-        debug!(error = %error, "turn run scheduler terminal failure transition failed");
+    max_attempts: usize,
+    retry_backoff: Duration,
+) -> Result<(), TurnError> {
+    for attempt in 1..=max_attempts {
+        let result = transitions
+            .record_runner_failure(RecordRunnerFailureRequest {
+                run_id,
+                runner_id,
+                lease_token,
+                failure: failure.clone(),
+            })
+            .await;
+        match result {
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                let retryable = matches!(error, TurnError::Unavailable { .. });
+                debug!(
+                    error = %error,
+                    attempt,
+                    max_attempts,
+                    retryable,
+                    "turn run scheduler terminal failure transition failed"
+                );
+                if !retryable || attempt == max_attempts {
+                    return Err(error);
+                }
+            }
+        }
+        tokio::time::sleep(retry_backoff).await;
     }
+    Ok(())
 }
 
 fn scheduler_failure(category: &'static str) -> Option<SanitizedFailure> {
@@ -828,8 +978,25 @@ async fn recover_expired_leases(transitions: Arc<dyn TurnRunTransitionPort>) {
             scope_filter: None,
         })
         .await;
-    if let Err(error) = result {
-        debug!(error = %error, "turn run scheduler lease recovery failed");
+    match result {
+        Ok(response) => {
+            for state in response.recovered {
+                debug!(
+                    thread_id = %state.scope.thread_id,
+                    run_id = %state.run_id,
+                    status = ?state.status,
+                    failure_category = %state
+                        .failure
+                        .as_ref()
+                        .map(|failure| failure.category())
+                        .unwrap_or("unknown"),
+                    "turn run scheduler recovered expired lease"
+                );
+            }
+        }
+        Err(error) => {
+            debug!(error = %error, "turn run scheduler lease recovery failed");
+        }
     }
 }
 

@@ -55,12 +55,19 @@ trace_*.json
 .claude/settings.local.json
 .worktrees/
 .ironclaw/
+
+# De-slop loop ledger + local loop scratch (.claude/commands/deslop-reborn.md)
+.work/
 .review/
 
 # Local-dev workspace artifacts: the WebChat v2 attachment lander writes
 # uploaded files under a project workspace; when `serve` runs from the repo
 # root they land in ./attachments/. These are user uploads, never source.
 /attachments/
+
+# Generated WebUI v2 bundle. Cargo builds and embeds this from OUT_DIR when
+# `webui-v2-beta` is enabled; the reviewable source lives under static/js/.
+/crates/ironclaw_webui_v2_static/static/dist/
 
 # Python cache
 __pycache__/
@@ -78,3 +85,8 @@ tests/fixtures/llm_traces/live/*.log
 # Local test artifacts
 .anvil/
 .codegraph/
+
+# codebase-memory knowledge graph — build artifact, not source.
+# Rebuilt from code via the codebase-memory MCP; per-environment, never committed.
+# See CLAUDE.md -> "Code Discovery".
+.codebase-memory/

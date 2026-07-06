@@ -1,6 +1,5 @@
 use std::net::IpAddr;
 
-use async_trait::async_trait;
 use ironclaw_host_api::{NetworkPolicy, NetworkTarget, NetworkTargetPattern, ResourceScope};
 use thiserror::Error;
 
@@ -52,14 +51,6 @@ impl NetworkPolicyError {
     }
 }
 
-/// Scoped network policy evaluation contract.
-#[async_trait]
-pub trait NetworkPolicyEnforcer: Send + Sync {
-    /// Authorizes one scoped network request without performing I/O.
-    async fn authorize(&self, request: NetworkRequest)
-    -> Result<NetworkPermit, NetworkPolicyError>;
-}
-
 /// Static policy enforcer for contract tests and composition scaffolding.
 #[derive(Debug, Clone)]
 pub struct StaticNetworkPolicyEnforcer {
@@ -81,11 +72,9 @@ impl StaticNetworkPolicyEnforcer {
     ) -> Result<NetworkPermit, NetworkPolicyError> {
         authorize_static_policy(&self.policy, request)
     }
-}
 
-#[async_trait]
-impl NetworkPolicyEnforcer for StaticNetworkPolicyEnforcer {
-    async fn authorize(
+    /// Authorizes one scoped network request without performing I/O.
+    pub async fn authorize(
         &self,
         request: NetworkRequest,
     ) -> Result<NetworkPermit, NetworkPolicyError> {

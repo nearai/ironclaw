@@ -116,5 +116,12 @@ pub use schema::{
 };
 pub use setup::{WasmChannelSetup, inject_channel_credentials, setup_wasm_channels};
 pub(crate) use setup::{is_reserved_wasm_channel_name, owner_id_from_capabilities};
+// Read-side store types, exposed for the v1→Reborn migration tool
+// (`ironclaw_reborn_migration`) which enumerates installed channels.
+#[cfg(feature = "libsql")]
+pub use storage::LibSqlWasmChannelStore;
+#[cfg(feature = "postgres")]
+pub use storage::PostgresWasmChannelStore;
+pub use storage::{StoredWasmChannel, WasmChannelStore};
 pub(crate) use telegram_host_config::{TELEGRAM_CHANNEL_NAME, bot_username_setting_key};
 pub use wrapper::{HttpResponse, SharedWasmChannel, WasmChannel};
