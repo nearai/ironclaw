@@ -17,9 +17,10 @@
 //! `harness/profiles/*.rs` domain's `capability_ids` — read from that
 //! domain's REAL `ToolsProfile`/harness constructor, never a hand-copied
 //! table — is a subset of production's real capability surface
-//! (`builtin_first_party_package()` + the github/bundled-extension
-//! manifest-derived id sets), modulo a skip-list of deliberately synthetic
-//! local-dev-only ids. See `production_capability_surface()`'s doc for one
+//! (`builtin_first_party_package()` + `native_memory_first_party_package()` +
+//! the github/bundled-extension manifest-derived id sets), modulo a skip-list
+//! of deliberately synthetic local-dev-only ids. See
+//! `production_capability_surface()`'s doc for one
 //! known, deliberately-excluded gap (the extension-lifecycle ids) that is
 //! visibility-blocked rather than papered over.
 
@@ -284,9 +285,10 @@ const SYNTHETIC_CAPABILITY_SKIP_LIST: &[(&str, &str)] = &[
     ),
 ];
 
-/// The production capability surface: `builtin_first_party_package()`'s
-/// declared capabilities, unioned with two independently production-derived
-/// sources — the github extension's real manifest-derived ids
+/// The production capability surface: the always-on first-party packages
+/// (`builtin_first_party_package()` and the sibling
+/// `native_memory_first_party_package()`), unioned with two independently
+/// production-derived sources — the github extension's real manifest-derived ids
 /// (`github_support::capability_ids()`) and every OTHER bundled extension's
 /// real manifest-derived ids
 /// (`extension_surface::bundled_extension_manifest_capability_ids()`) — both
@@ -316,6 +318,14 @@ fn production_capability_surface() -> HashSet<String> {
         .iter()
         .map(|capability| capability.id.as_str().to_string())
         .collect();
+    surface.extend(
+        ironclaw_host_runtime::native_memory_first_party_package()
+            .expect("native memory first-party package parses")
+            .manifest
+            .capabilities
+            .iter()
+            .map(|capability| capability.id.as_str().to_string()),
+    );
     surface.extend(
         reborn_support::github::capability_ids()
             .expect("github extension manifest parses")

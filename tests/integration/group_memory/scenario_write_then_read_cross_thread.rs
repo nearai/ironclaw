@@ -7,6 +7,7 @@
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
+use ironclaw_host_runtime::{MEMORY_READ_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID};
 use serde_json::json;
 
 pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
@@ -16,7 +17,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .thread("conv-memory-writer")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.memory_write",
+                MEMORY_WRITE_CAPABILITY_ID,
                 json!({
                     "target": "memory",
                     "content": "the launch code is plum-42",
@@ -28,7 +29,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .build()
         .await?;
     writer.submit_turn("remember the code").await?;
-    writer.assert_tool_invoked("builtin.memory_write").await?;
+    writer
+        .assert_tool_invoked(MEMORY_WRITE_CAPABILITY_ID)
+        .await?;
 
     // ── Thread B: reader (DIFFERENT conversation, SAME shared store) ────────
     // A distinct `conversation_id` produces a distinct thread/binding, but the
@@ -37,13 +40,15 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let reader = g
         .thread("conv-memory-reader")
         .script([
-            RebornScriptedReply::tool_call("builtin.memory_read", json!({"path": "MEMORY.md"})),
+            RebornScriptedReply::tool_call(MEMORY_READ_CAPABILITY_ID, json!({"path": "MEMORY.md"})),
             RebornScriptedReply::text("recalled"),
         ])
         .build()
         .await?;
     reader.submit_turn("what was the code").await?;
-    reader.assert_tool_invoked("builtin.memory_read").await?;
+    reader
+        .assert_tool_invoked(MEMORY_READ_CAPABILITY_ID)
+        .await?;
     // The tool result JSON includes `"content": "the launch code is plum-42"`;
     // asserting on the marker proves thread B reads thread A's write.
     reader.assert_tool_result_contains("plum-42").await?;

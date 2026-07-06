@@ -20,8 +20,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     BUILTIN_FIRST_PARTY_PROVIDER, CapabilitySurfaceVersion as HostRuntimeCapabilitySurfaceVersion,
-    HostRuntime, HostRuntimeServices, RuntimeProcessPort, builtin_first_party_handlers,
-    builtin_first_party_package,
+    HostRuntime, HostRuntimeServices, NATIVE_MEMORY_FIRST_PARTY_PROVIDER, RuntimeProcessPort,
+    builtin_first_party_handlers, builtin_first_party_package, native_memory_first_party_package,
 };
 use ironclaw_network::{PolicyNetworkHttpEgress, ReqwestNetworkTransport};
 use ironclaw_resources::InMemoryResourceGovernor;
@@ -42,6 +42,7 @@ pub(crate) fn local_dev_host_runtime_with_http_egress(
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
     let mut registry = ExtensionRegistry::new();
     registry.insert(builtin_first_party_package()?)?;
+    registry.insert(native_memory_first_party_package()?)?;
     local_dev_host_runtime_with_registry_and_runtime_http_egress(
         storage_root,
         registry,
@@ -136,6 +137,7 @@ pub(crate) fn local_dev_host_runtime_with_live_http_egress(
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
     let mut registry = ExtensionRegistry::new();
     registry.insert(builtin_first_party_package()?)?;
+    registry.insert(native_memory_first_party_package()?)?;
 
     let services = HostRuntimeServices::new(
         Arc::new(registry),
@@ -299,23 +301,33 @@ pub(crate) fn local_dev_mount_descriptor(
 
 pub(crate) fn first_party_trust_policy() -> HarnessResult<HostTrustPolicy> {
     Ok(HostTrustPolicy::new(vec![Box::new(
-        AdminConfig::with_entries(vec![AdminEntry::for_local_manifest(
-            PackageId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
-            "/system/extensions/builtin/manifest.toml".to_string(),
-            None,
-            HostTrustAssignment::first_party(),
-            vec![
-                EffectKind::DispatchCapability,
-                EffectKind::ReadFilesystem,
-                EffectKind::WriteFilesystem,
-                EffectKind::DeleteFilesystem,
-                EffectKind::Network,
-                EffectKind::SpawnProcess,
-                EffectKind::ExecuteCode,
-                EffectKind::ExternalWrite,
-            ],
-            None,
-        )]),
+        AdminConfig::with_entries(vec![
+            AdminEntry::for_local_manifest(
+                PackageId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+                "/system/extensions/builtin/manifest.toml".to_string(),
+                None,
+                HostTrustAssignment::first_party(),
+                vec![
+                    EffectKind::DispatchCapability,
+                    EffectKind::ReadFilesystem,
+                    EffectKind::WriteFilesystem,
+                    EffectKind::DeleteFilesystem,
+                    EffectKind::Network,
+                    EffectKind::SpawnProcess,
+                    EffectKind::ExecuteCode,
+                    EffectKind::ExternalWrite,
+                ],
+                None,
+            ),
+            AdminEntry::for_local_manifest(
+                PackageId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER)?,
+                "/system/extensions/ironclaw.memory/manifest.toml".to_string(),
+                None,
+                HostTrustAssignment::first_party(),
+                vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+                None,
+            ),
+        ]),
     )])?)
 }
 

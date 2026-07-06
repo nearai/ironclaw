@@ -17,6 +17,7 @@
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
+use ironclaw_host_runtime::{MEMORY_SEARCH_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID};
 use serde_json::json;
 
 /// Distinctive marker only actor A ever writes.
@@ -28,7 +29,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .thread("conv-mem-iso-a-write")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.memory_write",
+                MEMORY_WRITE_CAPABILITY_ID,
                 json!({
                     "target": "memory",
                     "content": format!("remember the private launch codename {MARKER}"),
@@ -42,7 +43,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     a.submit_turn("remember my secret codename")
         .await
         .map_err(|e| format!("[A write submit] {e}"))?;
-    a.assert_tool_invoked("builtin.memory_write")
+    a.assert_tool_invoked(MEMORY_WRITE_CAPABILITY_ID)
         .await
         .map_err(|e| format!("[A write invoked] {e}"))?;
 
@@ -52,7 +53,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .with_actor_id("reborn-actor-b")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.memory_search",
+                MEMORY_SEARCH_CAPABILITY_ID,
                 json!({ "query": "private launch codename" }),
             ),
             RebornScriptedReply::text("searched"),
@@ -67,7 +68,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     b.submit_turn("find the launch codename")
         .await
         .map_err(|e| format!("[B search submit] {e}"))?;
-    b.assert_tool_invoked("builtin.memory_search")
+    b.assert_tool_invoked(MEMORY_SEARCH_CAPABILITY_ID)
         .await
         .map_err(|e| format!("[B search invoked] {e}"))?;
     // ISOLATION: B's search over its OWN owner subtree finds nothing of A's.
@@ -84,7 +85,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .thread("conv-mem-iso-a-read")
         .script([
             RebornScriptedReply::tool_call(
-                "builtin.memory_search",
+                MEMORY_SEARCH_CAPABILITY_ID,
                 json!({ "query": "private launch codename" }),
             ),
             RebornScriptedReply::text("recalled"),
@@ -95,6 +96,10 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .submit_turn("what was my codename")
         .await
         .map_err(|e| format!("[A read submit] {e}"))?;
+    a_reader
+        .assert_tool_invoked(MEMORY_SEARCH_CAPABILITY_ID)
+        .await
+        .map_err(|e| format!("[A read invoked] {e}"))?;
     a_reader
         .assert_tool_result_contains(MARKER)
         .await
