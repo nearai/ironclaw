@@ -10,22 +10,9 @@ export const SETTINGS_TABS = [
   { id: "language", labelKey: "settings.language", icon: "globe" },
 ];
 
-export const INFERENCE_FIELDS = [
-  {
-    groupKey: "settings.group.embeddings",
-    fields: [
-      { key: "embeddings.enabled", labelKey: "settings.field.embeddingsEnabled", descKey: "settings.field.embeddingsEnabledDesc", type: "boolean" },
-      { key: "embeddings.provider", labelKey: "settings.field.embeddingsProvider", descKey: "settings.field.embeddingsProviderDesc", type: "select", options: ["openai", "nearai"] },
-      { key: "embeddings.model", labelKey: "settings.field.embeddingsModel", descKey: "settings.field.embeddingsModelDesc", type: "text" },
-    ],
-  },
-  {
-    groupKey: "settings.group.sampling",
-    fields: [
-      { key: "temperature", labelKey: "settings.field.temperature", descKey: "settings.field.temperatureDesc", type: "float", min: 0, max: 2, step: 0.1 },
-    ],
-  },
-];
+// Inference settings use dedicated LLM endpoints. Keep this schema empty until
+// any operator-config-backed keys are accepted by the Reborn config API.
+export const INFERENCE_FIELDS = [];
 
 export const AGENT_FIELDS = [
   {
