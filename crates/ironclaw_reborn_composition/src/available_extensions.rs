@@ -574,12 +574,7 @@ fn gmail_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
 
 #[cfg(feature = "slack-v2-host-beta")]
 fn slack_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package(
-        SLACK_EXTENSION_ID,
-        "Slack",
-        SLACK_MANIFEST,
-        slack_assets(),
-    )
+    bundled_extension_package(SLACK_EXTENSION_ID, "Slack", SLACK_MANIFEST, slack_assets())
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
