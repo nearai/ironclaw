@@ -1,6 +1,7 @@
 import { React } from "../../../lib/html.js";
 import { gateFromEvent, gateFromProjectionGate } from "./gates.js";
 import {
+  isTerminalToolStatus,
   toolCardFromActivity,
   toolCardFromPreview,
 } from "./history-messages.js";
