@@ -611,6 +611,26 @@ impl RebornServices {
         Some(Arc::clone(&local_runtime.project_service))
     }
 
+    /// Single owner of the `ProjectScopedAttachmentReader` construction recipe
+    /// over `local_runtime.workspace_filesystem` (mirrors the
+    /// `read_write_workspace_filesystem` "single owner" pattern above). The
+    /// concrete reader implements both `LoopAttachmentReadPort` and
+    /// `InboundAttachmentReader`, so callers cast the same `Arc` into whichever
+    /// trait object they need instead of re-deriving the recipe. Test-support
+    /// only; zero bytes shipped in production builds.
+    #[cfg(feature = "test-support")]
+    fn local_dev_workspace_attachment_reader_for_test(
+        &self,
+    ) -> Option<Arc<crate::support::fs::ProjectScopedAttachmentReader<LocalDevRootFilesystem>>>
+    {
+        let local_runtime = self.local_runtime.as_ref()?;
+        Some(Arc::new(
+            crate::support::fs::ProjectScopedAttachmentReader::new(Arc::clone(
+                &local_runtime.workspace_filesystem,
+            )),
+        ))
+    }
+
     /// Test-support access to the attachment read port + inbound lander backing
     /// the C-ATTACH seam. The read port is built over `local_runtime.workspace_filesystem`,
     /// exactly like production's `attachment_read_port` (`runtime.rs` ~line 3328) —
@@ -625,12 +645,11 @@ impl RebornServices {
     /// production-profile compositions without a local-dev runtime.
     #[cfg(feature = "test-support")]
     pub fn local_dev_attachment_test_support_for_test(&self) -> Option<AttachmentTestSupport> {
-        let local_runtime = self.local_runtime.as_ref()?;
+        let read_port = self.local_dev_workspace_attachment_reader_for_test()?
+            as Arc<dyn ironclaw_loop_support::LoopAttachmentReadPort>;
         let read_write_workspace_filesystem = self.read_write_workspace_filesystem()?;
         Some(AttachmentTestSupport {
-            read_port: Arc::new(crate::support::fs::ProjectScopedAttachmentReader::new(
-                Arc::clone(&local_runtime.workspace_filesystem),
-            )),
+            read_port,
             lander: Arc::new(crate::support::fs::ProjectScopedAttachmentLander::new(
                 read_write_workspace_filesystem,
             )),
@@ -665,6 +684,36 @@ impl RebornServices {
         let policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore> =
             local_runtime.persistent_approval_policies.clone();
         Some(policies)
+    }
+
+    /// SAME live trigger repository `local_dev_trigger_repository` builds and
+    /// capability dispatch uses (the `trigger_repository` binding in
+    /// `build_local_runtime`, above) — not a fresh reopen. Contrast
+    /// [`open_local_dev_trigger_repository_for_test`] (independent reopened
+    /// repo, for persistence/reopen tests). Backs the cold-LIST scenario
+    /// (W5-WEBUI-API-1 Enabler B.1). Test-support only; zero bytes shipped in
+    /// production builds. `None` w/o local-dev runtime.
+    #[cfg(feature = "test-support")]
+    pub fn local_dev_shared_trigger_repository_for_test(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_triggers::TriggerRepository>> {
+        let local_runtime = self.local_runtime.as_ref()?;
+        Some(Arc::clone(&local_runtime.trigger_repository))
+    }
+
+    /// WebUI-facing `InboundAttachmentReader` view over the local-dev
+    /// workspace filesystem, mirroring production's `webui.rs`
+    /// (`ProjectScopedAttachmentReader` construction at `webui.rs` ~line 153).
+    /// Shares [`Self::local_dev_workspace_attachment_reader_for_test`]'s
+    /// construction recipe with [`Self::local_dev_attachment_test_support_for_test`]
+    /// rather than re-deriving it. Test-support only; zero bytes shipped in
+    /// production builds. `None` w/o a local-dev runtime.
+    #[cfg(feature = "test-support")]
+    pub fn local_dev_inbound_attachment_reader_for_test(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_product_workflow::InboundAttachmentReader>> {
+        Some(self.local_dev_workspace_attachment_reader_for_test()?
+            as Arc<dyn ironclaw_product_workflow::InboundAttachmentReader>)
     }
 
     /// C-JOURNEY: publish a bundled first-party WASM extension package (e.g.
@@ -2754,6 +2803,47 @@ pub(crate) async fn open_local_dev_approval_request_store_for_test(
     mount_default_local_dev_database_roots(storage_root, &mut composite).await?;
     let scoped = crate::wrap_scoped(Arc::new(composite));
     Ok(Arc::new(FilesystemApprovalRequestStore::new(scoped)))
+}
+
+/// Test-only (W5-WEBUI-API-1 seam): open FRESH, independent
+/// [`ironclaw_approvals::ToolPermissionOverrideStore`] /
+/// [`ironclaw_approvals::AutoApproveSettingStore`] /
+/// [`ironclaw_approvals::PersistentApprovalPolicyStore`] handles at an
+/// existing local-dev `storage_root`, paralleling
+/// [`open_local_dev_approval_request_store_for_test`] (same on-disk root;
+/// sibling capability stores). Reuses [`mount_default_local_dev_database_roots`]
+/// plus the production [`crate::wrap_scoped`] so the reopen mounts and scopes
+/// the SAME way `build_local_dev_store_graph` does when it first builds
+/// `tool_permission_overrides` / `auto_approve_settings` /
+/// `persistent_approval_policies` (above) — the reopen path never drifts from
+/// production. Tests only; zero bytes in production builds.
+#[cfg(all(feature = "test-support", feature = "libsql"))]
+pub(crate) async fn open_local_dev_approval_settings_stores_for_test(
+    storage_root: &Path,
+) -> Result<
+    (
+        Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore>,
+        Arc<dyn ironclaw_approvals::AutoApproveSettingStore>,
+        Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore>,
+    ),
+    RebornBuildError,
+> {
+    let mut composite = CompositeRootFilesystem::new();
+    mount_default_local_dev_database_roots(storage_root, &mut composite).await?;
+    let scoped = crate::wrap_scoped(Arc::new(composite));
+    let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
+        Arc::new(LocalDevToolPermissionOverrideStore::new(Arc::clone(
+            &scoped,
+        )));
+    let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
+        Arc::new(LocalDevAutoApproveSettingStore::new(Arc::clone(&scoped)));
+    let persistent_approval_policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore> =
+        Arc::new(FilesystemPersistentApprovalPolicyStore::new(scoped));
+    Ok((
+        tool_permission_overrides,
+        auto_approve_settings,
+        persistent_approval_policies,
+    ))
 }
 
 /// Test-only (C-DURABLE seam): open a FRESH, independent
