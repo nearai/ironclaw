@@ -65,8 +65,8 @@ async fn extensions_group_e2e() {
     );
 
     // Scenario 5: a model call to a not-installed extension capability is
-    // filtered-surface denied until real install+activate publishes it. Uses
-    // "gmail" (untouched by Scenarios 1-4) to stay self-contained.
+    // rejected fail-closed at the model gateway until real install+activate
+    // publishes it. Uses "gmail" (untouched by Scenarios 1-4).
     report.record(
         "uninstalled_tool_call_denied_until_activated",
         scenario_uninstalled_tool_call_denied_until_activated::run(&g).await,

@@ -28,9 +28,10 @@ pub(crate) fn extension_lifecycle_tools_profile() -> HarnessResult<ToolsProfile>
     // Hermetic guard: without a test egress, `build_local_runtime` defaults to
     // a REAL `ReqwestNetworkTransport`, and this profile's scenarios dispatch a
     // bundled extension capability post-activation, which crosses HTTP.
-    let network_egress: Arc<dyn NetworkHttpEgress> = Arc::new(
-        RecordingNetworkHttpEgress::with_body(br#"{"messages":[],"resultSizeEstimate":0}"#.to_vec()),
-    );
+    let network_egress: Arc<dyn NetworkHttpEgress> =
+        Arc::new(RecordingNetworkHttpEgress::with_body(
+            br#"{"messages":[],"resultSizeEstimate":0}"#.to_vec(),
+        ));
     Ok(ToolsProfile {
         capability_ids,
         effect_kinds: local_dev_all_effects(),
@@ -151,8 +152,8 @@ pub(crate) fn extension_visibility_probe_tools_profile() -> HarnessResult<ToolsP
     })
 }
 
-pub(crate) async fn extension_visibility_probe_tools()
--> HarnessResult<HostRuntimeCapabilityHarness> {
+pub(crate) async fn extension_visibility_probe_tools() -> HarnessResult<HostRuntimeCapabilityHarness>
+{
     extension_visibility_probe_tools_profile()?.build().await
 }
 

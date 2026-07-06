@@ -30,7 +30,7 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::{
     InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
-    RuntimeHttpEgressRequest, VirtualPath,
+    RuntimeHttpEgressRequest, UserId, VirtualPath,
 };
 use ironclaw_llm::Role;
 use ironclaw_network::NetworkHttpRequest;
@@ -1217,15 +1217,7 @@ impl RebornIntegrationHarness {
         // resolver's `account_visible_from_runtime_scope` check matches all
         // four, so a differently-scoped seed would leave the run stuck at
         // `BlockedAuth` forever.
-        let scope = ResourceScope {
-            tenant_id: self.turn_scope.tenant_id.clone(),
-            user_id: self.binding.actor_user_id.clone(),
-            agent_id: self.turn_scope.agent_id.clone(),
-            project_id: self.turn_scope.project_id.clone(),
-            mission_id: None,
-            thread_id: None,
-            invocation_id: InvocationId::new(),
-        };
+        let scope = self.run_resource_scope_for_user(self.binding.actor_user_id.clone());
         harness.seed_github_credential_account(&scope).await?;
         self.resume_run(
             run_id,
@@ -1256,18 +1248,27 @@ impl RebornIntegrationHarness {
                 );
             }
         };
-        let scope = ResourceScope {
+        let scope = self.run_resource_scope_for_user(harness.capability_user_id().clone());
+        harness
+            .seed_credential_account_with_material(&scope, provider, label, provider_scopes)
+            .await
+    }
+
+    /// This thread's run `(tenant, agent, project)` scope with `user_id` as
+    /// the owner — the exact four fields dispatch-time credential-account
+    /// selection matches. Which user is correct depends on the caller: the
+    /// binding actor for user-aligned groups, the capability dispatch user
+    /// otherwise.
+    fn run_resource_scope_for_user(&self, user_id: UserId) -> ResourceScope {
+        ResourceScope {
             tenant_id: self.turn_scope.tenant_id.clone(),
-            user_id: harness.capability_user_id().clone(),
+            user_id,
             agent_id: self.turn_scope.agent_id.clone(),
             project_id: self.turn_scope.project_id.clone(),
             mission_id: None,
             thread_id: None,
             invocation_id: InvocationId::new(),
-        };
-        harness
-            .seed_credential_account_with_material(&scope, provider, label, provider_scopes)
-            .await
+        }
     }
 
     /// Flip the per-`(tenant, user)` auto-approve toggle back ON for the run's

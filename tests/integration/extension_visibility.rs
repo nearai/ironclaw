@@ -39,9 +39,10 @@ async fn host_internal_capability_is_hidden_from_the_model_and_uncallable() {
         .await
         .expect("thread builds");
 
-    harness.submit_turn("audit something").await.expect(
-        "turn completes: the rejected hidden-capability call recovers via a model retry",
-    );
+    harness
+        .submit_turn("audit something")
+        .await
+        .expect("turn completes: the rejected hidden-capability call recovers via a model retry");
 
     // Disclosure seam: the model-visible sibling IS advertised (non-vacuity —
     // the package is published and granted), the host_internal one is NOT.

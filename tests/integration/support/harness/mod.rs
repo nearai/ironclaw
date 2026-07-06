@@ -24,8 +24,8 @@ use std::{
 use super::{filesystem::BlockingTurnStatePutFilesystem, product_workflow::resource_scope};
 use ironclaw_approvals::{ApprovalResolver, AutoApproveSettingInput, DenyApproval, LeaseApproval};
 use ironclaw_auth::{
-    AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
-    CredentialAccountStatus, CredentialOwnership, NewCredentialAccount, ProviderScope,
+    AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
+    CredentialOwnership, NewCredentialAccount, ProviderScope,
 };
 use ironclaw_filesystem::{
     BackendKind, CompositeRootFilesystem, ContentKind, InMemoryBackend, IndexPolicy,

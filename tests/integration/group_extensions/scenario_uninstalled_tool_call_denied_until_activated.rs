@@ -8,9 +8,9 @@
 //! dispatches. Grants alone must never make an unpublished extension
 //! capability callable; only activation-time registry publication may.
 //!
-//! Uses "gmail" (untouched by scenarios 1-4; its google credential account is
-//! seeded by the profile, so activation passes the credential gate without
-//! raising an auth gate).
+//! Uses "gmail" (untouched by scenarios 1-4). Activation's credential gate
+//! and turn 2's dispatch-time staging pass via the google account this
+//! scenario seeds under the capability dispatch scope.
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
@@ -38,9 +38,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .await
         .is_ok()
     {
-        return Err(
-            "uninstalled extension capability must never reach the capability port".into(),
-        );
+        return Err("uninstalled extension capability must never reach the capability port".into());
     }
     // The reply is script entry 2 — proof the rejection triggered a recovery
     // model retry (a second model call in the same turn) rather than wedging
