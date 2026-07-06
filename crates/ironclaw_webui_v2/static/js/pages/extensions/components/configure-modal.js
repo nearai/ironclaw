@@ -179,7 +179,8 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
           <${Button}
             variant="primary"
             onClick=${submitPairing}
-            disabled=${pairingMutation.isPending || !pairingCode.trim()}
+            loading=${pairingMutation.isPending}
+            disabled=${!pairingCode.trim()}
           >
             ${pairingMutation.isPending ? t("common.saving") : t("pairing.connect")}
           <//>
@@ -281,9 +282,8 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
                       <${Button}
                         variant=${secret.provided ? "secondary" : "primary"}
                         onClick=${() => handleOauth(secret)}
-                        disabled=${oauthBusy}
+                        loading=${oauthBusy}
                       >
-                        ${oauthBusy && spinnerGlyph()}
                         ${oauthBusy
                           ? t("extensions.opening")
                           : secret.provided
@@ -415,32 +415,13 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
         <${Button}
           variant=${canActivate ? "secondary" : "primary"}
           onClick=${handleSubmit}
-          disabled=${submitMutation.isPending}
+          loading=${submitMutation.isPending}
         >
           ${submitMutation.isPending ? t("common.saving") : t("common.save")}
         <//>
         `}
       </div>
     <//>
-  `;
-}
-
-function spinnerGlyph() {
-  return html`
-    <svg
-      className="h-3.5 w-3.5 v2-spin text-current"
-      viewBox="0 0 24 24"
-      fill="none"
-      role="status"
-      aria-label="Connecting"
-    >
-      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-      <path
-        className="opacity-75"
-        fill="currentColor"
-        d="M4 12a8 8 0 0 1 8-8v4a4 4 0 0 0-4 4H4z"
-      />
-    </svg>
   `;
 }
 

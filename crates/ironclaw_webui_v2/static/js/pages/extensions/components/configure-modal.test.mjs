@@ -440,7 +440,9 @@ test("ConfigureModal keeps Slack OAuth visibly loading while waiting for authori
   });
 
   const body = JSON.stringify(rendered);
-  assert.match(body, /v2-spin/);
+  // The shared Button owns the spinner via `loading`; the "opening" label +
+  // the loading prop are what make the OAuth button visibly busy.
+  assert.match(body, /,true,"extensions\.opening"/);
   assert.match(body, /extensions\.opening/);
   assert.doesNotMatch(body, /extensions\.authorize/);
 });

@@ -9,10 +9,13 @@
  *   variant   "primary" | "outline" | "secondary" | "ghost" | "danger"
  *   size      "sm" | "md" (default) | "lg" | "icon" | "icon-sm"
  *   fullWidth boolean
+ *   loading   boolean — shows an inline spinner, disables the button, sets
+ *             aria-busy. The label stays visible so the button keeps its width.
+ *   disabled  boolean
  *   as        "button" | "a" (renders anchor; pass href via ...props)
  *   className string — for layout/spacing overrides (margin, width, etc.)
  *   children
- *   ...rest   forwarded to the element (type, disabled, onClick, href, …)
+ *   ...rest   forwarded to the element (type, onClick, href, …)
  */
 import { html } from "../lib/html.js";
 import { cn } from "../utils/cn.js";
@@ -66,6 +69,39 @@ const VARIANTS = {
     "hover:bg-[rgba(217,101,116,0.08)] active:bg-[rgba(217,101,116,0.14)]",
 };
 
+/* ── Loading spinner ───────────────────────────────────────────────── */
+// Stroke-based ring + rounded arc (cleaner than a filled quarter-glyph),
+// sized to sit inline with the label. `v2-spin` is a 0.8s linear rotation
+// that is suppressed under prefers-reduced-motion.
+
+function Spinner() {
+  return html`
+    <svg
+      className="v2-spin h-4 w-4 shrink-0"
+      viewBox="0 0 24 24"
+      fill="none"
+      role="status"
+      aria-label="Loading"
+    >
+      <circle
+        cx="12"
+        cy="12"
+        r="9"
+        stroke="currentColor"
+        strokeWidth="2.5"
+        className="opacity-25"
+      />
+      <path
+        d="M21 12a9 9 0 0 0-9-9"
+        stroke="currentColor"
+        strokeWidth="2.5"
+        strokeLinecap="round"
+        className="opacity-90"
+      />
+    </svg>
+  `;
+}
+
 /* ── Component ─────────────────────────────────────────────────────── */
 
 export function Button({
@@ -74,11 +110,14 @@ export function Button({
   variant = "primary",
   size = "md",
   fullWidth = false,
+  loading = false,
+  disabled = false,
   as: Tag = "button",
   ...rest
 }) {
   const sizeClass  = SIZES[size] ?? SIZES.md;
   const fullClass  = fullWidth ? "w-full" : "";
+  const isDisabled = disabled || loading;
 
   /* ── Primary: gradient + hover overlay ──────────────────────────── */
   if (variant === "primary") {
@@ -96,6 +135,8 @@ export function Button({
           "hover:shadow-[0_24px_24px_-20px_rgba(76,167,230,0.55)]",
           className
         )}
+        disabled=${isDisabled}
+        aria-busy=${loading || undefined}
         ...${rest}
       >
         <span
@@ -104,6 +145,7 @@ export function Button({
           className="pointer-events-none absolute inset-0 opacity-0 group-hover:opacity-100"
         />
         <span className="relative z-10 flex items-center gap-2">
+          ${loading && html`<${Spinner} />`}
           ${children}
         </span>
       <//>
@@ -116,9 +158,16 @@ export function Button({
   return html`
     <${Tag}
       className=${cn(BASE, sizeClass, fullClass, variantClass, className)}
+      disabled=${isDisabled}
+      aria-busy=${loading || undefined}
       ...${rest}
     >
-      ${children}
+      ${loading
+        ? html`<span className="inline-flex items-center gap-2">
+            <${Spinner} />
+            ${children}
+          </span>`
+        : children}
     <//>
   `;
 }
