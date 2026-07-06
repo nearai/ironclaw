@@ -549,7 +549,8 @@ mod tests {
         assert_eq!(
             result,
             Err(AgentLoopDriverError::Failed {
-                reason_kind: "interrupted_unexpectedly".to_string()
+                reason_kind: "interrupted_unexpectedly".to_string(),
+                detail: None,
             })
         );
         assert_eq!(
