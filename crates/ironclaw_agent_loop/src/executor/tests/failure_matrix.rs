@@ -3,11 +3,12 @@ use super::{
     CanonicalAgentLoopExecutor, CapabilityFailureKind, CapabilityOutcome, CapabilityResultMessage,
     CheckpointKind, DefaultCompactionStrategy, FixedReplyAdmissionPolicy, GateOutcome, HostStage,
     LoopCheckpointKind, LoopCompactionError, LoopExecutionState, LoopExit, LoopFailureKind,
-    LoopGateRef, LoopResultRef, LoopRunInfoPort, LoopSafeSummary, MockHost,
-    active_task_preserving_compaction_index, calls_response, empty_gate_state,
-    family_with_compaction_strategy, family_with_gate_outcome, family_with_iteration_limit,
-    family_with_reply_admission, final_staged_state, reply_response, reply_response_with_text,
+    LoopGateRef, LoopResultRef, LoopSafeSummary, MockHost, active_task_preserving_compaction_index,
+    calls_response, empty_gate_state, family_with_compaction_strategy, family_with_gate_outcome,
+    family_with_iteration_limit, family_with_reply_admission, final_staged_state, reply_response,
+    reply_response_with_text,
 };
+use ironclaw_turns::run_profile::LoopRunInfoPort;
 
 #[derive(Clone, Copy)]
 struct MatrixRow {
@@ -205,12 +206,32 @@ const ROWS: &[MatrixRow] = &[
     },
 ];
 
-#[tokio::test]
-async fn executor_layer_failure_matrix() {
-    for row in ROWS {
-        let observed = run_setup(row.setup).await;
-        assert_expected_terminal(row, &observed);
-    }
+macro_rules! matrix_row_test {
+    ($name:ident, $row_index:expr) => {
+        #[tokio::test]
+        async fn $name() {
+            run_matrix_row(&ROWS[$row_index]).await;
+        }
+    };
+}
+
+matrix_row_test!(matrix_model_error_exhausting_retries, 0);
+matrix_row_test!(matrix_capability_protocol_error_permanent, 1);
+matrix_row_test!(matrix_capability_invalid_input_recovers, 2);
+matrix_row_test!(matrix_capability_invalid_output_recovers, 3);
+matrix_row_test!(matrix_iteration_limit, 4);
+matrix_row_test!(matrix_invalid_model_output, 5);
+matrix_row_test!(matrix_driver_bug_approval_skip_diverges, 6);
+matrix_row_test!(matrix_no_progress_detected, 7);
+matrix_row_test!(matrix_policy_denied_outcome_diverges, 8);
+matrix_row_test!(matrix_capability_policy_denied_recovers, 9);
+matrix_row_test!(matrix_compaction_unavailable, 10);
+matrix_row_test!(matrix_transcript_write_failed, 11);
+matrix_row_test!(matrix_checkpoint_rejected, 12);
+
+async fn run_matrix_row(row: &MatrixRow) {
+    let observed = run_setup(row.setup).await;
+    assert_expected_terminal(row, &observed);
 }
 
 async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
