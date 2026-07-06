@@ -54,15 +54,18 @@
 # deny.toml exception-add pattern, applied to coverage floors.
 
 [global]
-enforce = false
-# Captured from the first green main coverage-report run at 073cc3d6b (#5658
-# merge, before #5656's ~42k-line denominator shift lands) — see
-# docs/reborn/reborn-backend-coverage-roadmap.md W5-RATCHET / nearai/ironclaw#5638.
-floor_percent = 85.35
+enforce = true
+# Recaptured from the first green main coverage-report run AFTER #5656 merged
+# (slack-v2-host-beta onto the int-tier lane): run 28817755166 at 28da8bd13,
+# aggregate 273132 / 320188 = 85.30%. Denominator moved only +246 lines vs the
+# prior 073cc3d6b capture — the slack-v2-host-beta sources already lived in
+# ironclaw_reborn_composition's counted set; #5656 mostly added numerator via
+# the new pairing suites. See nearai/ironclaw#5638 / #5718.
+floor_percent = 85.3
 tolerance_percent = 0.5
-captured_total_lines = 319942
+captured_total_lines = 320188
 captured_date = "2026-07-06"
-captured_from = "073cc3d6b"
+captured_from = "28da8bd13"
 
 # No [[crate]] entries at initial landing — opt-in, added as owners choose to
 # ratchet a crate they care about (e.g. ironclaw_reborn_composition,
