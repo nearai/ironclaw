@@ -713,13 +713,15 @@ async fn approve_dispatch_for_services(
             approval_request_id,
             LeaseApproval {
                 issued_by: Principal::HostRuntime,
-                allowed_effects: vec![EffectKind::DispatchCapability],
-                mounts: MountView::default(),
-                network: NetworkPolicy::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await

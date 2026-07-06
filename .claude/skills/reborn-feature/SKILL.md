@@ -87,7 +87,7 @@ For a feature with N endpoints, expect to touch (in dependency order):
 | HTTP | `ironclaw_webui_v2` | route constants + pattern + `*_descriptor()` (use `read_policy`/`mutation_policy`) + add to `webui_v2_routes()`; thin handler over `state.services()`; mount in `router.rs`; **update `tests/webui_v2_descriptors_contract.rs`** (it locks the table) |
 | Wiring | `ironclaw_reborn_composition` + `ironclaw_reborn_cli` | thread inputs through `RebornRuntimeInput`/`RebornRuntime`; attach in `build_webui_services`; pass from `serve.rs` |
 | Frontend | `ironclaw_webui_v2_static` | call endpoints via `apiFetch` in `static/js/pages/*/lib/*-api.js`; consume in hooks. No build step — `node --check <file>.js` to syntax-check |
-| Tests | `tests/support/reborn/` + crate tests | for whole-turn behavior, add a scripted-model harness case (see `tests/support/reborn/CLAUDE.md` — mock only at the vendor-SDK seam); facade changes extend `crates/ironclaw_product_workflow/tests/reborn_services_contract.rs`, and handler changes extend `crates/ironclaw_webui_v2/tests/webui_v2_handlers_contract.rs` |
+| Tests | `tests/integration/` + crate tests | for whole-turn behavior, add a scripted-model harness case (see `tests/integration/CLAUDE.md` — mock only at the vendor-SDK seam); facade changes extend `crates/ironclaw_product_workflow/tests/reborn_services_contract.rs`, and handler changes extend `crates/ironclaw_webui_v2/tests/webui_v2_handlers_contract.rs` |
 
 ## Boundary rules (the guardrails that will reject your PR)
 

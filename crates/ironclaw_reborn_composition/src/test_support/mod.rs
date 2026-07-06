@@ -22,19 +22,28 @@
 //!    without duplicating the wiring logic.
 //! 4. [`project_create`] — `project_create` synthetic-capability test support
 //!    (E-PROJ seam).
-//! 5. [`durable`] — extension-installation durable-store test support
-//!    (E-DURABLE seam).
+//! 5. [`durable`] — extension-installation, approval-request, and trigger
+//!    durable-store test support (E-DURABLE / C-DURABLE seam).
 //! 6. [`skill_activation`] — `skill_activate` synthetic-capability test
 //!    support (E-SKILL seam).
 //! 7. [`user_profile`] — `HostUserProfileSource` test support (E-PROFILE
 //!    seam).
+//! 8. [`trigger_materializer`] — `materialize_trigger_prompt_for_test`, the
+//!    single production-owned trusted-trigger prompt materializer entry
+//!    point for the integration-test harness (E-TRIGGERED-SUBMIT seam).
+//! 9. [`trace_capture`] — `trace_capture_turn_event_sink_for_test`, the
+//!    production `TraceCaptureTurnEventSink` factory for the integration-test
+//!    harness (C-TRACECAP seam).
 
 mod budget_gateway;
 mod durable;
 mod local_dev_boot;
 mod oauth_product_auth;
+mod outbound_delivery;
 mod project_create;
 mod skill_activation;
+mod trace_capture;
+mod trigger_materializer;
 mod user_profile;
 
 pub use budget_gateway::{
@@ -42,6 +51,10 @@ pub use budget_gateway::{
 };
 #[cfg(feature = "test-support")]
 pub use durable::open_local_dev_extension_installation_store_for_test;
+#[cfg(all(feature = "test-support", feature = "libsql"))]
+pub use durable::{
+    open_local_dev_approval_request_store_for_test, open_local_dev_trigger_repository_for_test,
+};
 pub use local_dev_boot::LOCAL_DEV_DB_FILENAME;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use local_dev_boot::build_local_dev_secret_store_for_test;
@@ -56,11 +69,20 @@ pub use oauth_product_auth::{
     OAuthProductAuthTestBundle, ScriptedOAuthTokenEgress, build_oauth_product_auth_for_test,
 };
 #[cfg(feature = "test-support")]
+pub use outbound_delivery::{
+    OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
+    OutboundDeliveryCapabilityTestParts, wrap_outbound_delivery_capabilities_for_test,
+};
+#[cfg(feature = "test-support")]
 pub use project_create::{PROJECT_CREATE_CAPABILITY_ID, wrap_project_create_capability_for_test};
 #[cfg(feature = "test-support")]
 pub use skill_activation::{
     SKILL_ACTIVATE_CAPABILITY_ID, SkillActivationTestSource,
     build_local_dev_skill_context_source_for_test, wrap_skill_activation_capability_for_test,
 };
+#[cfg(feature = "test-support")]
+pub use trace_capture::trace_capture_turn_event_sink_for_test;
+#[cfg(feature = "test-support")]
+pub use trigger_materializer::materialize_trigger_prompt_for_test;
 #[cfg(feature = "test-support")]
 pub use user_profile::build_user_profile_source_for_test;

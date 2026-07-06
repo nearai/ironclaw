@@ -14,6 +14,7 @@ import { ConnectionStatus } from "./components/connection-status.js";
 import { EmptyState } from "./components/empty-state.js";
 import { KeyboardShortcuts } from "./components/keyboard-shortcuts.js";
 import { MessageList } from "./components/message-list.js";
+import { OnboardingPairingCard } from "./components/onboarding-pairing-card.js";
 import { RecoveryNotice } from "./components/recovery-notice.js";
 import { SuggestionChips } from "./components/suggestion-chips.js";
 import { TypingIndicator } from "./components/typing-indicator.js";
@@ -34,6 +35,30 @@ import { buildScopedLogsPath } from "../logs/lib/logs-data.js";
  * is intentionally not instrumented; revisit this constant (not add
  * telemetry) if slow links make the re-flicker noticeable. */
 const THREAD_STATE_CLEAR_GRACE_MS = 1500;
+
+// A channel-pairing gate rides the auth rail as a `manual_token` challenge that
+// also carries a `connection` requirement. The pairing card reads an
+// `onboarding`-shaped object, so map the gate's connection context onto it.
+function onboardingFromGate(gate) {
+  const connection = gate?.connection;
+  if (!connection) return null;
+  return {
+    extensionName: connection.channel,
+    strategy: connection.strategy || null,
+    instructions: connection.instructions || null,
+    inputPlaceholder: connection.inputPlaceholder || null,
+    submitLabel: connection.submitLabel || null,
+    errorMessage: connection.errorMessage || null,
+  };
+}
+
+function isChannelPairingGate(gate) {
+  return (
+    gate?.kind === "auth_required" &&
+    gate?.challengeKind === "manual_token" &&
+    Boolean(gate?.connection)
+  );
+}
 
 export function Chat({
   threads,
@@ -67,6 +92,7 @@ export function Chat({
     loadMore,
     setSuggestions,
     submitAuthToken,
+    submitChannelConnectionPairing,
   } = useChat(activeThreadId);
 
   const activeThread = React.useMemo(
@@ -78,18 +104,20 @@ export function Chat({
     [gatewayStatus, activeThread]
   );
   const activeThreadHasGate = Boolean(activeThreadId) && Boolean(pendingGate);
+  const activeThreadHasPairingGate =
+    activeThreadHasGate && isChannelPairingGate(pendingGate);
   const activeThreadIsProcessing = Boolean(activeThreadId) && isProcessing;
   const hasMessages =
-    messages.length > 0 ||
-    activeThreadIsProcessing ||
-    activeThreadHasGate;
+    messages.length > 0 || activeThreadIsProcessing || activeThreadHasGate;
   // Don't show the landing composer when history failed to load — show the
   // error banner instead so the user is not misled into thinking the thread
   // is empty.
   const showLanding = !historyLoading && !hasMessages && !historyLoadError;
-  const approvalSubmitWarning = activeThreadHasGate
-    ? "Resolve the approval request before sending another message."
-    : "";
+  const approvalSubmitWarning = activeThreadHasPairingGate
+    ? "Finish connecting the channel before sending another message."
+    : activeThreadHasGate
+      ? "Resolve the approval request before sending another message."
+      : "";
   const composerSendDisabled =
     activeThreadHasGate ||
     (activeThreadIsProcessing && !activeThreadHasGate) ||
@@ -155,13 +183,12 @@ export function Chat({
   /* Mirror the active thread's lifecycle into the per-thread state store
    * so the sidebar row reflects what's happening on the open thread:
    *
-   *   pendingGate                   → NEEDS_ATTENTION (amber)
-   *   isProcessing && !pendingGate  → RUNNING (green)
-   *   neither                       → clear (idle)
+   *   pendingGate (approval, auth, or channel pairing) → NEEDS_ATTENTION (amber)
+   *   isProcessing without a gate                       → RUNNING (green)
+   *   neither                                         → clear (idle)
    *
-   * Priority is pendingGate-first because a gate logically subsumes
-   * processing — the run is paused waiting on the user, not actively
-   * working.
+   * Priority is user-action-first because a gate logically subsumes processing
+   * — the run is paused waiting on the user, not actively working.
    *
    * Invariant: useChat resets pendingGate (and isProcessing reaches a
    * fresh value) on threadId change via the thread-reset effect in
@@ -267,7 +294,9 @@ export function Chat({
                 onRecover=${recoverHistory}
               />
             `}
-            ${activeThreadIsProcessing && !activeThreadHasGate && html`<${TypingIndicator} />`}
+            ${activeThreadIsProcessing &&
+            !activeThreadHasGate &&
+            html`<${TypingIndicator} />`}
             ${pendingGate &&
             (pendingGate.kind === "auth_required"
               ? (pendingGate.challengeKind === "oauth_url"
@@ -279,14 +308,22 @@ export function Chat({
                   />
                 `
                 : pendingGate.challengeKind === "manual_token"
-                  ? html`
+                  ? (isChannelPairingGate(pendingGate)
+                    ? html`
+                  <${OnboardingPairingCard}
+                    onboarding=${onboardingFromGate(pendingGate)}
+                    onSubmit=${submitChannelConnectionPairing}
+                    onCancel=${handleCancelRun}
+                  />
+                `
+                    : html`
                   <${AuthTokenCard}
                     gate=${pendingGate}
                     onSubmit=${submitAuthToken}
                     onCancel=${() =>
                       approve(pendingGate.requestId, "cancel", pendingGate.kind)}
                   />
-                `
+                `)
                   : html`
                   <${AuthGenericCard}
                     gate=${pendingGate}

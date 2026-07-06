@@ -86,6 +86,7 @@ pub fn render_reborn_extension_lifecycle_response(
         Some(LifecycleProductPayload::ExtensionActivate {
             activated,
             visible_capability_ids,
+            ..
         }) => {
             push_line(&mut output, format_args!("activated: {activated}"));
             render_string_array(&mut output, visible_capability_ids, "visible_capability");
@@ -293,6 +294,7 @@ mod tests {
         let Some(LifecycleProductPayload::ExtensionActivate {
             activated,
             visible_capability_ids,
+            ..
         }) = activate.payload
         else {
             panic!("expected extension activation payload");

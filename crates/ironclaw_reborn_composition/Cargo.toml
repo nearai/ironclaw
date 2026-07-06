@@ -44,6 +44,10 @@ root-llm-provider = [
 # test-support` (plus whatever feature surface the test crate also
 # requires, e.g. `webui-v2-beta`).
 test-support = ["ironclaw_host_runtime/test-support"]
+# Expose the narrow `extension_installation_store_for_migration` accessor for
+# the v1→Reborn migration tool (`ironclaw_reborn_migration`). Ships zero bytes in
+# a default production binary; mirrors the `test-support` substrate seams.
+migration-support = []
 # Compose the Reborn WebChat v2 HTTP gateway in this crate. Off by
 # default; turning this on pulls in the v2 route crate plus the axum /
 # tower-http middleware stack used by the `webui_serve` module. The

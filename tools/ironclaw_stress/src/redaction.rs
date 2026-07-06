@@ -4,6 +4,7 @@ pub(crate) fn redact_libsql_path(_path: &Path) -> String {
     "libsql://<redacted-local-path>".to_string()
 }
 
+#[cfg(any(feature = "postgres", test))]
 pub(crate) fn redact_postgres_url(url: &str) -> String {
     if let Some(redacted) = redact_postgres_uri(url, "postgres://") {
         return redacted;
@@ -17,6 +18,7 @@ pub(crate) fn redact_postgres_url(url: &str) -> String {
     "postgres://<redacted>".to_string()
 }
 
+#[cfg(any(feature = "postgres", test))]
 fn redact_postgres_uri(url: &str, scheme: &str) -> Option<String> {
     let rest = url.strip_prefix(scheme)?;
     let redacted_rest = match rest.find('@') {
@@ -26,6 +28,7 @@ fn redact_postgres_uri(url: &str, scheme: &str) -> Option<String> {
     Some(format!("{scheme}{redacted_rest}"))
 }
 
+#[cfg(any(feature = "postgres", test))]
 fn redact_uri_password_query(rest: &str) -> String {
     let Some((prefix, query)) = rest.split_once('?') else {
         return rest.to_string();
@@ -45,6 +48,7 @@ fn redact_uri_password_query(rest: &str) -> String {
     format!("{prefix}?{redacted_query}")
 }
 
+#[cfg(any(feature = "postgres", test))]
 fn redact_postgres_key_value_config(config: &str) -> Option<String> {
     let mut saw_assignment = false;
     let parts = config

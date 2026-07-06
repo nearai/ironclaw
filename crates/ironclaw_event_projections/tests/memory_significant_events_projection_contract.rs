@@ -1,14 +1,14 @@
 use std::{fs, path::Path, sync::Arc};
 
 use ironclaw_event_projections::{
-    AuditProjectionRequest, AuditProjectionService, AuditProjectionStage, DurableMemoryAuditSink,
-    ProjectionScope, ReplayAuditProjectionService,
+    AuditProjectionRequest, AuditProjectionService, DurableMemoryAuditSink, ProjectionScope,
+    ReplayAuditProjectionService,
 };
 use ironclaw_events::{AuditSink, DurableAuditSink};
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem};
 use ironclaw_host_api::{
-    AgentId, CorrelationId, InvocationId, MissionId, ProjectId, ResourceScope, TenantId, ThreadId,
-    UserId, VirtualPath,
+    AgentId, AuditStage, CorrelationId, InvocationId, MissionId, ProjectId, ResourceScope,
+    TenantId, ThreadId, UserId, VirtualPath,
 };
 use ironclaw_memory_native::{
     ChunkingMemoryDocumentIndexer, FilesystemMemoryDocumentRepository,
@@ -113,7 +113,7 @@ async fn memory_write_index_and_search_project_metadata_only_from_jsonl_audit_lo
         ]
     );
     for entry in &snapshot.entries {
-        assert_eq!(entry.stage, AuditProjectionStage::After);
+        assert_eq!(entry.stage, AuditStage::After);
         assert_eq!(entry.action_target, None);
         assert_eq!(entry.decision_kind, "memory_event_recorded");
     }

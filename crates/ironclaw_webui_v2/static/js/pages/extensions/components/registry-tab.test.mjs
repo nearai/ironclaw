@@ -6,8 +6,16 @@ import vm from "node:vm";
 function registryTabSourceForTest() {
   const source = readFileSync(new URL("./registry-tab.js", import.meta.url), "utf8");
   const lines = [];
+  let skippingImport = false;
   for (const line of source.split("\n")) {
-    if (line.startsWith("import ")) continue;
+    if (!skippingImport && line.startsWith("import ")) {
+      skippingImport = !line.trimEnd().endsWith(";");
+      continue;
+    }
+    if (skippingImport) {
+      skippingImport = !line.trimEnd().endsWith(";");
+      continue;
+    }
     lines.push(line.replace(/^export function /, "function "));
   }
   return `${lines.join("\n")}\nglobalThis.__testExports = { RegistryTab };`;
@@ -104,6 +112,7 @@ test("RegistryTab renders only real installed extensions with management actions
     onActivate: () => {},
     onConfigure: () => {},
     onRemove: () => {},
+    connectableChannels: [],
     isBusy: false,
   });
 
@@ -146,6 +155,7 @@ test("RegistryTab searches installed entries using registry metadata", () => {
       onActivate: () => {},
       onConfigure: () => {},
       onRemove: () => {},
+      connectableChannels: [],
       isBusy: false,
     },
     "calendar",

@@ -2,27 +2,29 @@
 set -euo pipefail
 
 # Reborn shared-persistence "group" suites are subdirectory `[[test]]` binaries
-# (tests/reborn_group_*/main.rs). Unlike the single-file reborn_*.rs root tests,
-# each spins up one runtime and drives several tenants' shared libsql-backed
-# stores across threads, so they run in a dedicated low-contention job instead
-# of the modulo-partitioned root runner. `--features libsql` is explicit so the
-# group binaries exercise the libsql-backed shared store independently of any
-# future change to the default feature set.
+# (tests/integration/group_*/main.rs, `[[test]]` name reborn_group_<x>). Unlike
+# the single-file reborn_integration_*.rs suites, each spins up one runtime and
+# drives several tenants' shared libsql-backed stores across threads, so they
+# run in a dedicated low-contention job instead of the modulo-partitioned
+# integration runner. `--features libsql` is explicit so the group binaries
+# exercise the libsql-backed shared store independently of any future change to
+# the default feature set.
 
 test_timeout="${REBORN_GROUP_TEST_TIMEOUT:-28m}"
 
-# The `[[test]]` `name` field equals the directory basename, so emit the
-# directory path and let the `s#^tests/##` rewrite turn it into the Cargo test
-# name (e.g. tests/reborn_group_memory -> reborn_group_memory). The `sh -c`
-# predicate skips a half-scaffolded group dir (no main.rs yet) — returning false
-# from `-exec` just filters that dir, it does NOT make `find` exit non-zero, so
-# no `|| true` is needed; genuine `find` failures stay visible under `set -e`.
+# The directory basename is `group_<x>`; the `[[test]]` `name` field is
+# `reborn_group_<x>` (see Cargo.toml) — the two differ by the `reborn_` prefix,
+# so rewrite it explicitly rather than assuming dir basename == test name (e.g.
+# tests/integration/group_memory -> reborn_group_memory). The `sh -c` predicate
+# skips a half-scaffolded group dir (no main.rs yet) — returning false from
+# `-exec` just filters that dir, it does NOT make `find` exit non-zero, so no
+# `|| true` is needed; genuine `find` failures stay visible under `set -e`.
 # `sh -c` (not a bare `{}/main.rs`) avoids POSIX implementation-defined `{}`
 # substring substitution so discovery is portable across GNU/BSD find.
 mapfile -t test_names < <(
-  find tests -mindepth 1 -maxdepth 1 -type d -name 'reborn_group_*' \
+  find tests/integration -mindepth 1 -maxdepth 1 -type d -name 'group_*' \
     -exec sh -c 'test -f "$1/main.rs"' _ {} ';' -print \
-    | sed -E 's#^tests/##' \
+    | sed -E 's#^tests/integration/group_#reborn_group_#' \
     | LC_ALL=C sort
 )
 

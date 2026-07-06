@@ -16,13 +16,16 @@ use std::{
 
 use async_trait::async_trait;
 use futures_util::FutureExt as _;
-use ironclaw_extensions::{ExtensionPackage, ExtensionRuntime};
+use ironclaw_extensions::{
+    ExtensionPackage, ExtensionRuntime, HostedMcpDiscoveredTool, HostedMcpDiscoveredToolAnnotations,
+};
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, NetworkMethod, NetworkPolicy, ResourceEstimate, ResourceReservation,
-    ResourceReservationId, ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement,
-    RuntimeCredentialInjection, RuntimeCredentialRequirement, RuntimeCredentialRequirementSource,
-    RuntimeCredentialSource, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-    RuntimeHttpEgressResponse, RuntimeKind, SecretHandle,
+    CapabilityHostHttpRequest, CapabilityHostResult, CapabilityId, ExtensionId, NetworkMethod,
+    NetworkPolicy, ResourceEstimate, ResourceReservation, ResourceReservationId, ResourceScope,
+    ResourceUsage, RuntimeCredentialAuthRequirement, RuntimeCredentialInjection,
+    RuntimeCredentialRequirement, RuntimeCredentialRequirementSource, RuntimeCredentialSource,
+    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressResponse, RuntimeKind,
+    SecretHandle,
 };
 use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt};
 use serde_json::Value;
@@ -114,27 +117,14 @@ impl McpClientOutput {
     }
 }
 
-/// MCP tool descriptor discovered from a hosted server's `tools/list` result.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct McpDiscoveredTool {
-    pub name: String,
-    pub description: String,
-    pub input_schema: Value,
-    pub annotations: McpDiscoveredToolAnnotations,
-}
-
-/// MCP tool behavior hints returned by `tools/list`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct McpDiscoveredToolAnnotations {
-    pub destructive_hint: bool,
-    pub side_effects_hint: bool,
-    pub read_only_hint: bool,
-}
-
 /// Result of a hosted MCP schema-discovery pass.
+///
+/// Discovered tools use the extension-domain [`HostedMcpDiscoveredTool`] shape
+/// directly: `ironclaw_mcp` parses `tools/list` into the same descriptor the
+/// extension domain consumes, so there is no separate MCP-local mirror.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpToolDiscoveryOutput {
-    pub tools: Vec<McpDiscoveredTool>,
+    pub tools: Vec<HostedMcpDiscoveredTool>,
     pub usage: ResourceUsage,
 }
 
@@ -193,34 +183,11 @@ impl From<String> for McpClientError {
     }
 }
 
-/// Parsed MCP capability result.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct McpCapabilityResult {
-    pub output: Value,
-    pub reservation_id: ResourceReservationId,
-    pub usage: ResourceUsage,
-    pub output_bytes: u64,
-}
-
 /// Full resource-governed MCP execution result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpExecutionResult {
-    pub result: McpCapabilityResult,
+    pub result: CapabilityHostResult,
     pub receipt: ResourceReceipt,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct McpHostHttpRequest {
-    pub scope: ResourceScope,
-    pub capability_id: CapabilityId,
-    pub method: ironclaw_host_api::NetworkMethod,
-    pub url: String,
-    pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
-    pub network_policy: ironclaw_host_api::NetworkPolicy,
-    pub credential_injections: Vec<ironclaw_host_api::RuntimeCredentialInjection>,
-    pub response_body_limit: Option<u64>,
-    pub timeout_ms: Option<u32>,
 }
 
 pub type McpHostHttpResponse = RuntimeHttpEgressResponse;
@@ -246,22 +213,12 @@ where
 
     pub async fn request(
         &self,
-        request: McpHostHttpRequest,
+        request: CapabilityHostHttpRequest,
     ) -> Result<McpHostHttpResponse, McpHostHttpError> {
-        AssertUnwindSafe(self.egress.execute(RuntimeHttpEgressRequest {
-            runtime: RuntimeKind::Mcp,
-            scope: request.scope,
-            capability_id: request.capability_id,
-            method: request.method,
-            url: request.url,
-            headers: request.headers,
-            body: request.body,
-            network_policy: request.network_policy,
-            credential_injections: request.credential_injections,
-            response_body_limit: request.response_body_limit,
-            save_body_to: None,
-            timeout_ms: request.timeout_ms,
-        }))
+        AssertUnwindSafe(
+            self.egress
+                .execute(request.into_runtime_request(RuntimeKind::Mcp)),
+        )
         .catch_unwind()
         .await
         .map_err(|_| McpHostHttpError::Egress {
@@ -281,7 +238,7 @@ fn mcp_http_error(error: RuntimeHttpEgressError) -> McpHostHttpError {
 pub trait McpHostHttp: Send + Sync {
     async fn request(
         &self,
-        request: McpHostHttpRequest,
+        request: CapabilityHostHttpRequest,
     ) -> Result<McpHostHttpResponse, McpHostHttpError>;
 }
 
@@ -292,7 +249,7 @@ where
 {
     async fn request(
         &self,
-        request: McpHostHttpRequest,
+        request: CapabilityHostHttpRequest,
     ) -> Result<McpHostHttpResponse, McpHostHttpError> {
         McpRuntimeHttpAdapter::request(self, request).await
     }
@@ -305,7 +262,7 @@ where
 {
     async fn request(
         &self,
-        request: McpHostHttpRequest,
+        request: CapabilityHostHttpRequest,
     ) -> Result<McpHostHttpResponse, McpHostHttpError> {
         self.as_ref().request(request).await
     }
@@ -556,7 +513,7 @@ where
             .credential_injections(planned.plan.credential_injections)?;
         let response = self
             .http
-            .request(McpHostHttpRequest {
+            .request(CapabilityHostHttpRequest {
                 scope: request.scope.clone(),
                 capability_id: request.capability_id.clone(),
                 method: NetworkMethod::Post,
@@ -1025,7 +982,7 @@ fn parse_mcp_json_rpc_value(
     })
 }
 
-fn parse_tools_list_result(value: &Value) -> Result<Vec<McpDiscoveredTool>, String> {
+fn parse_tools_list_result(value: &Value) -> Result<Vec<HostedMcpDiscoveredTool>, String> {
     const MAX_DISCOVERED_TOOLS: usize = 128;
     const MAX_TOOL_NAME_BYTES: usize = 128;
     const MAX_TOOL_DESCRIPTION_BYTES: usize = 2048;
@@ -1075,7 +1032,7 @@ fn parse_tools_list_result(value: &Value) -> Result<Vec<McpDiscoveredTool>, Stri
                 return Err(response_error());
             }
             let annotations = parse_tool_annotations(tool.get("annotations"))?;
-            Ok(McpDiscoveredTool {
+            Ok(HostedMcpDiscoveredTool {
                 name: name.to_string(),
                 description: description.to_string(),
                 input_schema,
@@ -1149,12 +1106,14 @@ fn is_unsupported_description_char(value: char) -> bool {
     value.is_control() && !matches!(value, '\n' | '\r' | '\t')
 }
 
-fn parse_tool_annotations(value: Option<&Value>) -> Result<McpDiscoveredToolAnnotations, String> {
+fn parse_tool_annotations(
+    value: Option<&Value>,
+) -> Result<HostedMcpDiscoveredToolAnnotations, String> {
     let Some(value) = value else {
-        return Ok(McpDiscoveredToolAnnotations::default());
+        return Ok(HostedMcpDiscoveredToolAnnotations::default());
     };
     let object = value.as_object().ok_or_else(response_error)?;
-    Ok(McpDiscoveredToolAnnotations {
+    Ok(HostedMcpDiscoveredToolAnnotations {
         destructive_hint: object
             .get("destructiveHint")
             .and_then(Value::as_bool)
@@ -1359,7 +1318,7 @@ where
         }
         let receipt = governor.reconcile(reservation.id, usage.clone())?;
         Ok(McpExecutionResult {
-            result: McpCapabilityResult {
+            result: CapabilityHostResult {
                 output: output.output,
                 reservation_id: reservation.id,
                 usage,
@@ -1680,6 +1639,116 @@ mod tests {
 
         assert_eq!(response.result, Some(json!({"ok": true})));
         assert!(!response.error);
+    }
+
+    /// Build an `McpHostHttpResponse` with a caller-chosen `content-type` and
+    /// raw body bytes — the two inputs `parse_mcp_response` sniffs to pick the
+    /// SSE vs plain-JSON branch. Fixtures below are hand-authored (there are no
+    /// live-captured MCP response bodies under `tests/fixtures/`), but their
+    /// framings mirror what a spec-compliant Streamable-HTTP MCP server emits.
+    fn mcp_response(content_type: &str, body: &[u8]) -> McpHostHttpResponse {
+        McpHostHttpResponse {
+            status: 200,
+            headers: vec![("content-type".to_string(), content_type.to_string())],
+            body: body.to_vec(),
+            saved_body: None,
+            request_bytes: 0,
+            response_bytes: body.len() as u64,
+            redaction_applied: false,
+        }
+    }
+
+    /// Format matrix for the single `parse_mcp_response` dispatch that every
+    /// JSON-RPC leg (`initialize`/`tools/list`/`tools/call`) funnels through.
+    /// The client advertises `Accept: application/json, text/event-stream`
+    /// (two content types), so the parser must accept BOTH framings for the
+    /// same logical response — this pins that parity at the dispatch entry
+    /// point, not just at `parse_mcp_sse_response` (already covered above).
+    #[test]
+    fn parse_mcp_response_accepts_both_advertised_framings() {
+        let id = Some(7u64);
+        let ok_body = br#"{"jsonrpc":"2.0","id":7,"result":{"ok":true}}"#;
+
+        // Plain JSON framing (content-type application/json).
+        let json = parse_mcp_response(&mcp_response("application/json", ok_body), id)
+            .expect("plain JSON framing parses");
+        assert_eq!(json.result, Some(json!({"ok": true})));
+        assert!(!json.error);
+
+        // SSE single-event framing (content-type text/event-stream).
+        let sse_single = parse_mcp_response(
+            &mcp_response(
+                "text/event-stream",
+                b"event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"ok\":true}}\n\n",
+            ),
+            id,
+        )
+        .expect("SSE single-event framing parses");
+        assert_eq!(sse_single.result, Some(json!({"ok": true})));
+
+        // SSE multi-event framing with a leading keepalive ping — the real
+        // frame ordering a streaming server emits.
+        let sse_multi = parse_mcp_response(
+            &mcp_response(
+                "text/event-stream; charset=utf-8",
+                b"event: ping\ndata:\n\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"ok\":true}}\n\n",
+            ),
+            id,
+        )
+        .expect("SSE multi-event framing parses past the keepalive");
+        assert_eq!(sse_multi.result, Some(json!({"ok": true})));
+    }
+
+    /// Error-object framing (a JSON-RPC `error` member) is surfaced as
+    /// `error == true` — in BOTH framings — rather than mis-parsed as success
+    /// or dropped. This is the recoverable, model-visible tool-error leg.
+    #[test]
+    fn parse_mcp_response_flags_error_object_in_both_framings() {
+        let id = Some(3u64);
+        let json_err = parse_mcp_response(
+            &mcp_response(
+                "application/json",
+                br#"{"jsonrpc":"2.0","id":3,"error":{"code":-32602,"message":"bad"}}"#,
+            ),
+            id,
+        )
+        .expect("JSON error-object is a valid response, not a parse failure");
+        assert!(json_err.error, "plain-JSON error object flags error");
+        assert_eq!(json_err.result, None, "error object carries no result");
+
+        let sse_err = parse_mcp_response(
+            &mcp_response(
+                "text/event-stream",
+                b"event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":3,\"error\":{\"code\":-32602,\"message\":\"bad\"}}\n\n",
+            ),
+            id,
+        )
+        .expect("SSE error-object is a valid response, not a parse failure");
+        assert!(sse_err.error, "SSE-framed error object flags error");
+        assert_eq!(sse_err.result, None, "error object carries no result");
+    }
+
+    /// Empty / malformed bodies are rejected in both framings (mutation guard:
+    /// a parser that returned an empty-`result` success here would flip these
+    /// `Err`s to `Ok`). An empty plain-JSON body has no JSON value; an SSE body
+    /// with only keepalives has no `data:` payload carrying the expected id.
+    #[test]
+    fn parse_mcp_response_rejects_empty_bodies_in_both_framings() {
+        let id = Some(9u64);
+        assert_eq!(
+            parse_mcp_response(&mcp_response("application/json", b""), id).unwrap_err(),
+            "response_error",
+            "empty plain-JSON body must not parse as a success"
+        );
+        assert_eq!(
+            parse_mcp_response(
+                &mcp_response("text/event-stream", b"event: ping\ndata:\n\n"),
+                id,
+            )
+            .unwrap_err(),
+            "response_error",
+            "SSE body with only keepalives (no id-matching data) must not parse"
+        );
     }
 
     fn valid_tool(name: &str, input_schema: Value) -> Value {

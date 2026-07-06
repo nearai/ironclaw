@@ -144,7 +144,6 @@ mod live_tests {
     #[cfg_attr(not(feature = "replay"), ignore)]
     async fn zizmor_scan_v2() {
         let harness = LiveTestHarnessBuilder::new("zizmor_scan_v2")
-            .with_engine_v2(true)
             .with_max_tool_iterations(40)
             .build()
             .await;
@@ -254,7 +253,6 @@ mod live_tests {
         use ironclaw::channels::StatusUpdate;
 
         let harness = LiveTestHarnessBuilder::new("drive_auth_gate_roundtrip")
-            .with_engine_v2(true)
             .with_max_tool_iterations(20)
             .with_auto_approve_tools(true)
             // Seed the real Google OAuth credentials from the
@@ -667,7 +665,6 @@ mod live_tests {
         use ironclaw::channels::StatusUpdate;
 
         let harness = LiveTestHarnessBuilder::new("drive_transparent_oauth_refresh")
-            .with_engine_v2(true)
             .with_max_tool_iterations(20)
             .with_auto_approve_tools(true)
             .with_secrets([

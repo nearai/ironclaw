@@ -17,7 +17,7 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_turns::ReplyTargetBindingRef;
 
-use crate::outbound_preferences::{OutboundDeliveryTargetEntry, OutboundDeliveryTargetProvider};
+use crate::outbound::{OutboundDeliveryTargetEntry, OutboundDeliveryTargetProvider};
 
 /// Stable target id clients submit to select the default WebUI thread.
 pub(crate) const WEBUI_DEFAULT_THREAD_TARGET_ID: &str = "webui:default-thread";
@@ -101,7 +101,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::outbound_preferences::RebornOutboundPreferencesFacade;
+    use crate::outbound::RebornOutboundPreferencesFacade;
 
     fn caller() -> WebUiAuthenticatedCaller {
         WebUiAuthenticatedCaller::new(

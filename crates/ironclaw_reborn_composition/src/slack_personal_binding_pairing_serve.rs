@@ -1,6 +1,7 @@
 //! WebUI route composition for Slack personal binding pairing-code redemption.
 
 use std::num::{NonZeroU32, NonZeroU64};
+use std::sync::Arc;
 
 use axum::{
     Json, Router,
@@ -16,7 +17,10 @@ use ironclaw_host_api::ingress::{
     IngressScopeSource, ListenerClass, RateLimitPolicy, RateLimitScope, StreamingMode,
     WebSocketOriginPolicy,
 };
-use ironclaw_product_workflow::WebUiAuthenticatedCaller;
+use ironclaw_product_workflow::{
+    ChannelConnectionResumeScope, ChannelConnectionResumeService, ResumeChannelConnectionRequest,
+    WebUiAuthenticatedCaller,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::slack_personal_binding::SlackPersonalBindingPrincipal;
@@ -28,20 +32,40 @@ use crate::slack_personal_binding_pairing::{
 pub const WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH: &str =
     "/api/webchat/v2/extensions/pairing/redeem";
 
+/// Canonical connectable-channel id the Slack activation gate keys on. The
+/// browser may send the `slack`/`slack_v2`/`slack-v2` aliases, but the parked
+/// `ChannelPairing` gate always carries `slack`, so resume is driven by this
+/// canonical id regardless of the alias the caller used.
+const SLACK_CONNECTION_CHANNEL: &str = "slack";
+
 const SLACK_PERSONAL_BINDING_PAIRING_REDEEM_ROUTE_ID: &str = "webui.v2.extensions.pairing.redeem";
 const SLACK_PERSONAL_BINDING_PAIRING_BODY_LIMIT_BYTES: NonZeroU64 =
     NonZeroU64::new(16 * 1024).unwrap(); // safety: 16 KiB is non-zero.
 const SLACK_PERSONAL_BINDING_PAIRING_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(20).unwrap(); // safety: 20 is non-zero.
 const SLACK_PERSONAL_BINDING_PAIRING_RATE_WINDOW_SECONDS: NonZeroU32 = NonZeroU32::new(60).unwrap(); // safety: 60 is non-zero.
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SlackPersonalBindingPairingRouteConfig {
     pairing_service: SlackPersonalBindingPairingService,
+    /// Channel-connection gate resume. Redeeming a pairing code continues every
+    /// run the caller has parked on this channel's connection gate (V2 of the
+    /// channel-connection gate; supersedes the browser's fake "Slack is
+    /// connected, continue" message). Required, not optional: production Slack
+    /// host-beta always wires it, so an `Option` here would be the optional-Arc
+    /// smell from `.claude/rules/architecture.md` (production always sets it,
+    /// only tests skip it). Tests pass a no-op fake.
+    channel_connection_resume: Arc<dyn ChannelConnectionResumeService>,
 }
 
 impl SlackPersonalBindingPairingRouteConfig {
-    pub fn new(pairing_service: SlackPersonalBindingPairingService) -> Self {
-        Self { pairing_service }
+    pub fn new(
+        pairing_service: SlackPersonalBindingPairingService,
+        channel_connection_resume: Arc<dyn ChannelConnectionResumeService>,
+    ) -> Self {
+        Self {
+            pairing_service,
+            channel_connection_resume,
+        }
     }
 }
 
@@ -110,6 +134,14 @@ struct SlackPersonalBindingPairingRedeemRequest {
 pub struct SlackPersonalBindingPairingRedeemResponse {
     pub provider: String,
     pub provider_user_id: String,
+    /// Number of parked runs this redeem continued on the channel-connection
+    /// gate. `0` legitimately means "nothing was parked" (e.g. connecting from
+    /// the Extensions page with no blocked chat).
+    pub resumed_run_count: usize,
+    /// `true` when the identity bound durably but the follow-up resume faulted.
+    /// The connection still succeeded; the caller can retry to continue any
+    /// still-parked chats. Reported (not dropped) so the UI can surface it.
+    pub resume_error: bool,
 }
 
 async fn slack_personal_binding_pairing_redeem_handler(
@@ -120,19 +152,51 @@ async fn slack_personal_binding_pairing_redeem_handler(
 {
     validate_pairing_channel(&request.channel)?;
     let code = SlackPersonalBindingPairingCode::new(request.code)?;
+    // Bind the caller's channel identity FIRST: the resume below re-dispatches
+    // each parked `extension_activate`, which re-checks the per-caller channel
+    // connection — so the binding must already be durable before resume runs.
     let binding = config
         .pairing_service
         .redeem_challenge(
             SlackPersonalBindingPrincipal {
-                tenant_id: caller.tenant_id,
-                user_id: caller.user_id,
+                tenant_id: caller.tenant_id.clone(),
+                user_id: caller.user_id.clone(),
             },
             code,
         )
         .await?;
+    // Continue every run this caller has parked on the Slack connection gate.
+    // Best-effort by design: the identity binding above is already durable, so
+    // the *connection* has succeeded. A resume fault must NOT fail the redeem —
+    // returning 503 here would leave the caller connected yet staring at a
+    // "pairing failed" error, with a code that is now consumed and rejected on
+    // retry. Surface the fault in the logs and the response body instead of
+    // dropping it (error-handling.md: fail loud, never silent).
+    let (resumed_run_count, resume_error) = match config
+        .channel_connection_resume
+        .resume_channel_connection(ResumeChannelConnectionRequest {
+            scope: ChannelConnectionResumeScope {
+                tenant_id: caller.tenant_id,
+                user_id: caller.user_id,
+            },
+            channel: SLACK_CONNECTION_CHANNEL.to_string(),
+        })
+        .await
+    {
+        Ok(response) => (response.resumed_runs.len(), false),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "channel-connection resume after Slack pairing redeem failed; identity binding is durable so the connection stands"
+            );
+            (0, true)
+        }
+    };
     Ok(Json(SlackPersonalBindingPairingRedeemResponse {
         provider: binding.provider.to_string(),
         provider_user_id: binding.provider_user_id.to_string(),
+        resumed_run_count,
+        resume_error,
     }))
 }
 
@@ -179,7 +243,10 @@ impl From<SlackPersonalBindingPairingError> for SlackPersonalBindingPairingRoute
 impl IntoResponse for SlackPersonalBindingPairingRouteError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
-            Self::BadRequest => (StatusCode::BAD_REQUEST, "Invalid or expired pairing code."),
+            Self::BadRequest => (
+                StatusCode::BAD_REQUEST,
+                "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one.",
+            ),
             Self::Unavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Slack pairing service is unavailable.",
@@ -197,6 +264,7 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use ironclaw_host_api::{TenantId, UserId};
     use ironclaw_product_adapters::AdapterInstallationId;
+    use ironclaw_product_workflow::{ProductWorkflowError, ResumeChannelConnectionResponse};
     use tower::ServiceExt;
 
     use super::*;
@@ -248,6 +316,20 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        // Deliverable: an invalid/expired code must steer the user back to
+        // `/pair` (the only self-service recovery surface). The web pairing
+        // card renders this JSON `error` body verbatim, so the `/pair`
+        // instruction has to live in the route response, not only in the
+        // descriptor/i18n fallback copy.
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let message = body["error"].as_str().unwrap();
+        assert_eq!(
+            message, "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one.",
+            "invalid-code redeem error must match the caller-facing recovery copy"
+        );
     }
 
     #[tokio::test]
@@ -346,6 +428,7 @@ mod tests {
         );
         slack_personal_binding_pairing_route_mount(SlackPersonalBindingPairingRouteConfig::new(
             pairing,
+            Arc::new(NoopResume),
         ))
     }
 
@@ -367,6 +450,217 @@ mod tests {
 
     fn installation(value: &str) -> AdapterInstallationId {
         AdapterInstallationId::new(value).unwrap()
+    }
+
+    /// Records each resume request plus the binding-store state captured at call
+    /// time, so a test can assert the identity was already bound before resume
+    /// ran (bind-then-resume ordering).
+    struct RecordingResume {
+        binding_store: Arc<RecordingBindingStore>,
+        calls: Mutex<Vec<RecordedResume>>,
+    }
+
+    struct RecordedResume {
+        channel: String,
+        tenant_id: TenantId,
+        user_id: UserId,
+        bound_user_ids_at_call: Vec<String>,
+    }
+
+    impl RecordingResume {
+        fn new(binding_store: Arc<RecordingBindingStore>) -> Self {
+            Self {
+                binding_store,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> std::sync::MutexGuard<'_, Vec<RecordedResume>> {
+            self.calls.lock().unwrap()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ChannelConnectionResumeService for RecordingResume {
+        async fn resume_channel_connection(
+            &self,
+            request: ResumeChannelConnectionRequest,
+        ) -> Result<ResumeChannelConnectionResponse, ProductWorkflowError> {
+            self.calls().push(RecordedResume {
+                channel: request.channel,
+                tenant_id: request.scope.tenant_id,
+                user_id: request.scope.user_id,
+                bound_user_ids_at_call: self.binding_store.bound_user_ids(),
+            });
+            Ok(ResumeChannelConnectionResponse {
+                resumed_runs: Vec::new(),
+            })
+        }
+    }
+
+    /// Resume that always faults, to drive the bind-succeeds/resume-fails path.
+    struct FailingResume;
+
+    #[async_trait::async_trait]
+    impl ChannelConnectionResumeService for FailingResume {
+        async fn resume_channel_connection(
+            &self,
+            _request: ResumeChannelConnectionRequest,
+        ) -> Result<ResumeChannelConnectionResponse, ProductWorkflowError> {
+            Err(ProductWorkflowError::Transient {
+                reason: "resume backend unavailable".to_string(),
+            })
+        }
+    }
+
+    /// No-op resume for routes/tests that don't exercise resume behavior.
+    struct NoopResume;
+
+    #[async_trait::async_trait]
+    impl ChannelConnectionResumeService for NoopResume {
+        async fn resume_channel_connection(
+            &self,
+            _request: ResumeChannelConnectionRequest,
+        ) -> Result<ResumeChannelConnectionResponse, ProductWorkflowError> {
+            Ok(ResumeChannelConnectionResponse {
+                resumed_runs: Vec::new(),
+            })
+        }
+    }
+
+    fn route_mount_with_resume(
+        binding_store: Arc<RecordingBindingStore>,
+        challenge_store: Arc<dyn SlackPersonalBindingPairingChallengeStore>,
+        resume: Arc<dyn ChannelConnectionResumeService>,
+    ) -> SlackPersonalBindingPairingRouteMount {
+        let pairing = SlackPersonalBindingPairingService::new(
+            SlackPersonalUserBindingService::new(
+                [SlackPersonalBindingInstallation {
+                    tenant_id: TenantId::new("tenant-a").unwrap(),
+                    installation_id: installation("install-a"),
+                    selector: SlackInstallationSelector::app_team("A-app", "T-team"),
+                }],
+                binding_store,
+            ),
+            challenge_store,
+            Arc::new(NoopNotifier),
+        );
+        slack_personal_binding_pairing_route_mount(SlackPersonalBindingPairingRouteConfig::new(
+            pairing, resume,
+        ))
+    }
+
+    #[tokio::test]
+    async fn redeem_binds_then_resumes_channel_connection() {
+        let binding_store = Arc::new(RecordingBindingStore::default());
+        let resume = Arc::new(RecordingResume::new(binding_store.clone()));
+        let mount = route_mount_with_resume(
+            binding_store.clone(),
+            Arc::new(StaticChallengeStore::found()),
+            resume.clone(),
+        );
+
+        // The browser sent the `slack_v2` alias; resume must still target the
+        // canonical `slack` channel the activation gate keys on.
+        let response = mount
+            .protected
+            .oneshot(redeem_request(
+                "tenant-a",
+                r#"{"channel":"slack_v2","code":"abc12345"}"#,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(binding_store.bound_user_ids(), vec!["user:alice"]);
+
+        let calls = resume.calls();
+        assert_eq!(calls.len(), 1, "a successful redeem resumes exactly once");
+        assert_eq!(
+            calls[0].channel, "slack",
+            "resume targets the canonical slack channel, not the wire alias"
+        );
+        assert_eq!(calls[0].user_id.as_str(), "user:alice");
+        assert_eq!(calls[0].tenant_id.as_str(), "tenant-a");
+        assert_eq!(
+            calls[0].bound_user_ids_at_call,
+            vec!["user:alice".to_string()],
+            "identity must be bound before the resume runs"
+        );
+    }
+
+    #[tokio::test]
+    async fn redeem_failure_does_not_resume() {
+        let binding_store = Arc::new(RecordingBindingStore::default());
+        let resume = Arc::new(RecordingResume::new(binding_store.clone()));
+        let mount = route_mount_with_resume(
+            binding_store,
+            Arc::new(StaticChallengeStore::missing()),
+            resume.clone(),
+        );
+
+        let response = mount
+            .protected
+            .oneshot(redeem_request(
+                "tenant-a",
+                r#"{"channel":"slack","code":"abc12345"}"#,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            resume.calls().is_empty(),
+            "resume must not run when the pairing bind fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn redeem_succeeds_when_bind_is_durable_but_resume_faults() {
+        // The identity binding is durable before resume runs, so a resume fault
+        // must not fail the redeem (returning 503 would strand the caller: they
+        // are connected, but the code is consumed and a retry hits the
+        // invalid/expired path). The connection succeeds; the fault is reported
+        // in the body, not dropped.
+        let binding_store = Arc::new(RecordingBindingStore::default());
+        let mount = route_mount_with_resume(
+            binding_store.clone(),
+            Arc::new(StaticChallengeStore::found()),
+            Arc::new(FailingResume),
+        );
+
+        let response = mount
+            .protected
+            .oneshot(redeem_request(
+                "tenant-a",
+                r#"{"channel":"slack","code":"abc12345"}"#,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "a durable bind must report success even when resume faults"
+        );
+        assert_eq!(
+            binding_store.bound_user_ids(),
+            vec!["user:alice"],
+            "the identity binding is durable regardless of the resume fault"
+        );
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body["resume_error"], true,
+            "the resume fault must be reported to the caller, not silently dropped"
+        );
+        assert_eq!(
+            body["resumed_run_count"], 0,
+            "no runs were continued when resume faulted"
+        );
     }
 
     #[derive(Default)]

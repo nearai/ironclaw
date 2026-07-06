@@ -58,7 +58,7 @@ pub struct BudgetApprovalGate {
     pub status: BudgetGateStatus,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BudgetGateStatus {
     Pending,
@@ -74,6 +74,86 @@ pub enum BudgetGateStatus {
     Expired {
         at: DateTime<Utc>,
     },
+}
+
+/// Wire decoder for the externally persisted budget-gate status shape.
+///
+/// Keep this in lockstep with [`BudgetGateStatus`] variants: each terminal
+/// state has required fields, and variants must reject fields owned by other
+/// states so durable snapshots cannot silently drift across releases. The
+/// persisted wire shapes accepted here are pinned by decode tests below; audit
+/// existing snapshots before tightening or renaming those fields.
+impl<'de> Deserialize<'de> for BudgetGateStatus {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum StatusKind {
+            Pending,
+            Approved,
+            Cancelled,
+            Expired,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct StatusWire {
+            kind: StatusKind,
+            #[serde(default)]
+            increased_limit: Option<ResourceLimits>,
+            #[serde(default)]
+            by: Option<UserId>,
+            #[serde(default)]
+            at: Option<DateTime<Utc>>,
+        }
+
+        fn required<T, E>(value: Option<T>, field: &'static str) -> Result<T, E>
+        where
+            E: serde::de::Error,
+        {
+            value.ok_or_else(|| E::missing_field(field))
+        }
+
+        let wire = StatusWire::deserialize(deserializer)?;
+        match wire.kind {
+            StatusKind::Pending => {
+                if wire.increased_limit.is_some() || wire.by.is_some() || wire.at.is_some() {
+                    return Err(serde::de::Error::custom(
+                        "pending budget gate status must not include terminal fields",
+                    ));
+                }
+                Ok(Self::Pending)
+            }
+            StatusKind::Approved => Ok(Self::Approved {
+                increased_limit: required(wire.increased_limit, "increased_limit")?,
+                by: required(wire.by, "by")?,
+                at: required(wire.at, "at")?,
+            }),
+            StatusKind::Cancelled => {
+                if wire.increased_limit.is_some() {
+                    return Err(serde::de::Error::custom(
+                        "cancelled budget gate status must not include increased_limit",
+                    ));
+                }
+                Ok(Self::Cancelled {
+                    by: required(wire.by, "by")?,
+                    at: required(wire.at, "at")?,
+                })
+            }
+            StatusKind::Expired => {
+                if wire.increased_limit.is_some() || wire.by.is_some() {
+                    return Err(serde::de::Error::custom(
+                        "expired budget gate status must not include approval fields",
+                    ));
+                }
+                Ok(Self::Expired {
+                    at: required(wire.at, "at")?,
+                })
+            }
+        }
+    }
 }
 
 impl BudgetGateStatus {
@@ -309,6 +389,128 @@ mod tests {
             resolved.status,
             BudgetGateStatus::Approved { ref by, .. } if by == &user
         ));
+    }
+
+    #[test]
+    fn approved_status_decodes_with_numeric_thresholds() {
+        let raw = r#"{
+            "kind": "approved",
+            "increased_limit": {
+                "max_usd": "1000.00",
+                "max_input_tokens": null,
+                "max_output_tokens": null,
+                "max_wall_clock_ms": null,
+                "max_output_bytes": null,
+                "max_network_egress_bytes": null,
+                "max_process_count": null,
+                "max_concurrency_slots": null,
+                "period": { "kind": "rolling24h" },
+                "thresholds": {
+                    "warn_at": 1.0,
+                    "pause_at": 1.0
+                }
+            },
+            "by": "alice",
+            "at": "2026-07-03T14:18:49.505189Z"
+        }"#;
+
+        let status: BudgetGateStatus = serde_json::from_str(raw).unwrap();
+
+        assert!(matches!(
+            status,
+            BudgetGateStatus::Approved {
+                increased_limit: ResourceLimits {
+                    max_usd: Some(limit),
+                    thresholds,
+                    ..
+                },
+                ..
+            } if limit == Decimal::from(1000)
+                && thresholds.warn_at == 1.0
+                && thresholds.pause_at == 1.0
+        ));
+    }
+
+    #[test]
+    fn status_decode_accepts_persisted_wire_shapes() {
+        let persisted_shapes = [
+            serde_json::json!({
+                "kind": "pending"
+            }),
+            serde_json::json!({
+                "kind": "cancelled",
+                "by": "alice",
+                "at": "2026-07-03T14:18:49.505189Z"
+            }),
+            serde_json::json!({
+                "kind": "expired",
+                "at": "2026-07-03T14:18:49.505189Z"
+            }),
+        ];
+
+        for raw in persisted_shapes {
+            serde_json::from_value::<BudgetGateStatus>(raw).unwrap();
+        }
+    }
+
+    #[test]
+    fn status_decode_rejects_invalid_field_combinations() {
+        let valid_limit = serde_json::json!({
+            "max_usd": "1000.00",
+            "max_input_tokens": null,
+            "max_output_tokens": null,
+            "max_wall_clock_ms": null,
+            "max_output_bytes": null,
+            "max_network_egress_bytes": null,
+            "max_process_count": null,
+            "max_concurrency_slots": null,
+            "period": { "kind": "rolling24h" },
+            "thresholds": {
+                "warn_at": 1.0,
+                "pause_at": 1.0
+            }
+        });
+        let cases = [
+            (
+                "pending status with terminal fields",
+                serde_json::json!({
+                    "kind": "pending",
+                    "by": "alice"
+                }),
+            ),
+            (
+                "approved status missing required actor",
+                serde_json::json!({
+                    "kind": "approved",
+                    "increased_limit": valid_limit.clone(),
+                    "at": "2026-07-03T14:18:49.505189Z"
+                }),
+            ),
+            (
+                "cancelled status with increased limit",
+                serde_json::json!({
+                    "kind": "cancelled",
+                    "increased_limit": valid_limit.clone(),
+                    "by": "alice",
+                    "at": "2026-07-03T14:18:49.505189Z"
+                }),
+            ),
+            (
+                "expired status with approval fields",
+                serde_json::json!({
+                    "kind": "expired",
+                    "by": "alice",
+                    "at": "2026-07-03T14:18:49.505189Z"
+                }),
+            ),
+        ];
+
+        for (label, raw) in cases {
+            assert!(
+                serde_json::from_value::<BudgetGateStatus>(raw).is_err(),
+                "{label} must be rejected"
+            );
+        }
     }
 
     #[test]

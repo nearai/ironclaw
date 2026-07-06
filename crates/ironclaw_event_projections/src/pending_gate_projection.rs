@@ -17,30 +17,6 @@ use crate::{MissingMetadataField, ProjectionError};
 /// this read model cannot collide with other turn-event consumers.
 pub const PENDING_GATE_PROJECTION_CONSUMER_ID: &str = "pending_gate_projection.v1";
 
-/// Pending gate category projected from a blocked turn lifecycle event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum PendingGateKind {
-    Approval,
-    Auth,
-    Resource,
-    AwaitDependentRun,
-    ExternalTool,
-}
-
-impl From<TurnBlockedGateKind> for PendingGateKind {
-    fn from(kind: TurnBlockedGateKind) -> Self {
-        match kind {
-            TurnBlockedGateKind::Approval => Self::Approval,
-            TurnBlockedGateKind::Auth => Self::Auth,
-            TurnBlockedGateKind::Resource => Self::Resource,
-            TurnBlockedGateKind::AwaitDependentRun => Self::AwaitDependentRun,
-            TurnBlockedGateKind::ExternalTool => Self::ExternalTool,
-        }
-    }
-}
-
 /// Identity key for one projected pending gate row.
 ///
 /// The key is scoped by tenant, optional agent/project, owner, thread, and run
@@ -71,7 +47,7 @@ pub struct PendingGateProjectionRow {
     /// blocked event cannot resurrect a gate that live delivery already
     /// removed with a newer terminal/resume event.
     pub source_cursor: TurnEventCursor,
-    pub gate_kind: PendingGateKind,
+    pub gate_kind: TurnBlockedGateKind,
     pub gate_ref: GateRef,
     pub blocked_at: Timestamp,
 }
@@ -349,7 +325,7 @@ fn row_from_blocked_event(
     Ok(PendingGateProjectionRow {
         key: key_from_lifecycle_event(event)?,
         source_cursor: event.cursor,
-        gate_kind: blocked_gate.gate_kind.into(),
+        gate_kind: blocked_gate.gate_kind,
         gate_ref: blocked_gate.gate_ref.clone(),
         blocked_at,
     })

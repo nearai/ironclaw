@@ -36,7 +36,6 @@ use crate::channels::web::platform::legacy_auth::{
 };
 use crate::channels::web::platform::state::{GatewayState, rate_limit_key_from_headers};
 use crate::channels::web::types::AppEvent;
-use crate::channels::web::util::web_incoming_message;
 use crate::extensions::naming::extension_name_candidates;
 use crate::secrets::SecretConsumeResult;
 
@@ -292,25 +291,8 @@ pub(crate) async fn oauth_callback_handler(
                     },
                 );
             }
-            // Discard the pending engine auth gate that was waiting on
-            // *this* OAuth flow (matched by credential name). Without this
-            // the engine sits paused forever (#3320). Scoping by
-            // credential keeps the cleanup from nuking unrelated auth
-            // gates the user may have open in parallel — see PR review
-            // on #3381. The bridge helper takes the credential as `&str`
-            // and parses it backend-side, so the web layer keeps its
-            // string-typed boundary intact.
-            crate::bridge::clear_engine_pending_auth_for_credential(
-                &flow.user_id,
-                &flow.secret_name,
-            )
-            .await;
-            // Legacy v1 session cleanup: drop `pending_auth` so the next
-            // user message goes through to the LLM rather than being
-            // intercepted as a token. Use `clear_session_auth_mode_for_thread`
-            // (not the broader `clear_auth_mode`) because the latter would
-            // re-call the unscoped engine cleanup and undo the credential
-            // scoping above.
+            // Drop `pending_auth` so the next user message goes through to
+            // the LLM rather than being intercepted as a token.
             let _ = clear_session_auth_mode_for_thread(&state, &flow.user_id, None).await;
         }
 
@@ -427,16 +409,8 @@ pub(crate) async fn oauth_callback_handler(
             );
         }
         // Expiry is a terminal failure path just like provider-error and
-        // exchange-failure: discard the engine pending auth gate so the
-        // conversation isn't blocked on a callback that will never arrive
-        // (#3320). Scoped to this flow's credential so unrelated auth
-        // gates the user has open in parallel survive — review feedback
-        // on #3381. Use `clear_session_auth_mode_for_thread` for the
-        // legacy v1 cleanup; the broader `clear_auth_mode` helper would
-        // re-call `clear_engine_pending_auth(user, None)` and undo the
-        // credential scoping we just applied.
-        crate::bridge::clear_engine_pending_auth_for_credential(&flow.user_id, &flow.secret_name)
-            .await;
+        // exchange-failure: drop `pending_auth` so the conversation isn't
+        // blocked on a callback that will never arrive.
         let _ = clear_session_auth_mode_for_thread(&state, &flow.user_id, None).await;
         return oauth_error_page(&flow.display_name);
     }
@@ -587,11 +561,6 @@ pub(crate) async fn oauth_callback_handler(
                 error = %e,
                 "OAuth failed via gateway callback"
             );
-            crate::bridge::clear_engine_pending_auth_for_credential(
-                &flow.user_id,
-                &flow.secret_name,
-            )
-            .await;
         }
     }
 
@@ -653,7 +622,6 @@ pub(crate) async fn oauth_callback_handler(
     };
 
     // Broadcast event to notify the web UI
-    let extension_name = flow.extension_name.clone();
     if let Some(ref sse) = flow.sse_manager {
         sse.broadcast_for_user(
             &flow.user_id,
@@ -673,118 +641,6 @@ pub(crate) async fn oauth_callback_handler(
                 thread_id: None,
             },
         );
-    }
-
-    if success {
-        // Half-2 of #3133, two-pronged auto-resume:
-        //
-        // 1. Wake any Tier 0 / Tier 1 inline-await VMs parked on this
-        //    credential. The CodeAct VM (mission's child thread, in
-        //    the bug-shape #3133 reported) keeps its full state across
-        //    the OAuth round-trip; on Approved it retries the original
-        //    action and continues without unwinding.
-        // 2. Auto-resume any paused background missions whose
-        //    `paused_gate` matches this credential. This handles the
-        //    case where the mission's child thread already finished
-        //    (Tier 0 unwind, or Tier 1 hit MaxIterations) before
-        //    OAuth completed.
-        // Both are best-effort — failures are logged inside the bridge
-        // helpers and never block the OAuth landing page.
-        let inline_woken =
-            crate::bridge::resolve_inline_gates_for_credential(&flow.user_id, &flow.secret_name)
-                .await;
-        let _ =
-            crate::bridge::resume_paused_missions_for_credential(&flow.user_id, &flow.secret_name)
-                .await;
-
-        // #3533: when the inline-await path already woke a parked
-        // waiter, the engine is already retrying the action that was
-        // blocked on this credential. Sending an `ExternalCallback`
-        // submission down the agent loop in addition to that is
-        // redundant and causes "thread already running" races against
-        // the in-flight retry (and re-dispatches `tool_install` a
-        // second time when the mock LLM pattern-matches the user
-        // turn). Skip the external-callback re-entry in that case;
-        // it stays in place for paths where no inline waiter exists
-        // (mission's child thread already finished, or Tier 0 unwound
-        // before OAuth landed).
-        let skip_external_callback = inline_woken > 0;
-
-        if !skip_external_callback {
-            match crate::bridge::resolve_engine_auth_callback(&flow.user_id, &flow.secret_name)
-                .await
-            {
-                Ok(crate::bridge::AuthCallbackContinuation::ResolveGateExternal {
-                    channel,
-                    thread_scope,
-                    request_id,
-                }) => {
-                    if let Some(tx) = state.msg_tx.read().await.as_ref().cloned() {
-                        let callback = crate::agent::submission::Submission::ExternalCallback {
-                            request_id,
-                            payload: None,
-                        };
-                        match serde_json::to_string(&callback) {
-                            Ok(content) => {
-                                let msg = web_incoming_message(
-                                    &channel,
-                                    &flow.user_id,
-                                    content,
-                                    thread_scope.as_deref(),
-                                );
-                                if let Err(e) = tx.send(msg).await {
-                                    tracing::warn!(
-                                        extension = %extension_name,
-                                        user_id = %flow.user_id,
-                                        error = %e,
-                                        "Failed to resolve pending engine auth gate after OAuth callback"
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    extension = %extension_name,
-                                    user_id = %flow.user_id,
-                                    error = %e,
-                                    "Failed to serialize external callback submission"
-                                );
-                            }
-                        }
-                    }
-                }
-                Ok(crate::bridge::AuthCallbackContinuation::ReplayMessage {
-                    channel,
-                    thread_scope,
-                    content,
-                }) => {
-                    if let Some(tx) = state.msg_tx.read().await.as_ref().cloned() {
-                        let msg = web_incoming_message(
-                            &channel,
-                            &flow.user_id,
-                            content,
-                            thread_scope.as_deref(),
-                        );
-                        if let Err(e) = tx.send(msg).await {
-                            tracing::warn!(
-                                extension = %extension_name,
-                                user_id = %flow.user_id,
-                                error = %e,
-                                "Failed to replay pending engine auth request after OAuth callback"
-                            );
-                        }
-                    }
-                }
-                Ok(crate::bridge::AuthCallbackContinuation::None) => {}
-                Err(e) => {
-                    tracing::warn!(
-                        extension = %extension_name,
-                        user_id = %flow.user_id,
-                        error = %e,
-                        "Failed to resume pending engine auth gate after OAuth callback"
-                    );
-                }
-            }
-        }
     }
 
     let html = oauth::landing_html(&flow.display_name, success);
