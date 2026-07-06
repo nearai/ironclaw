@@ -299,6 +299,7 @@ function normalizeAutomation(automation, t, locale) {
     recent_runs: recentRuns,
     has_running_run: recentRuns.some((run) => run.status === "running"),
     has_failed_runs: recentRuns.some((run) => run.status === "error"),
+    latest_unattached_run_thread_timestamp: latestUnattachedRunThreadTimestamp(recentRuns),
   };
 
   return {
@@ -363,6 +364,16 @@ function normalizeRuns(runs, t, locale) {
 function normalizeRunStatus(status) {
   if (status === "ok" || status === "error" || status === "running") return status;
   return "unknown";
+}
+
+function latestUnattachedRunThreadTimestamp(runs) {
+  let latest = null;
+  for (const run of runs) {
+    if (!run?.run_id || run.thread_id) continue;
+    if (!Number.isFinite(run.timestamp)) continue;
+    latest = latest == null ? run.timestamp : Math.max(latest, run.timestamp);
+  }
+  return latest;
 }
 
 // Count recent runs by status so the UI can show a "how many" summary instead

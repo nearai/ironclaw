@@ -6,9 +6,8 @@
 //! `REBORN_SLACK_ENABLED`) and supplies a preconfigured native adapter runner.
 
 use std::future::Future;
-use std::num::{NonZeroU32, NonZeroU64};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use axum::{
     Json, Router,
@@ -19,12 +18,7 @@ use axum::{
     routing::post,
 };
 use ironclaw_host_api::NetworkMethod;
-use ironclaw_host_api::ingress::{
-    AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
-    IngressAuthScheme, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor,
-    IngressScopeSource, ListenerClass, RateLimitPolicy, RateLimitScope, StreamingMode,
-    WebSocketOriginPolicy,
-};
+use ironclaw_host_api::ingress::IngressRouteDescriptor;
 use ironclaw_product_adapters::ProtocolAuthEvidence;
 use ironclaw_wasm_product_adapters::{
     ImmediateAckWorkflowObserver, NativeProductAdapterRunner, RunnerError, WebhookProcessOutcome,
@@ -48,9 +42,6 @@ mod handler_tests;
 
 pub const SLACK_EVENTS_PATH: &str = "/webhooks/slack/events";
 const SLACK_EVENTS_ROUTE_ID: &str = "slack.events";
-const SLACK_EVENTS_BODY_LIMIT_BYTES: NonZeroU64 = NonZeroU64::new(1024 * 1024).unwrap(); // safety: 1 MiB is a non-zero literal.
-const SLACK_EVENTS_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(12_000).unwrap(); // safety: 12,000 requests is a non-zero literal.
-const SLACK_EVENTS_RATE_WINDOW_SECONDS: NonZeroU32 = NonZeroU32::new(60).unwrap(); // safety: 60 seconds is a non-zero literal.
 
 pub trait SlackEventsWebhookDispatcher: Send + Sync {
     fn verify_webhook_auth(
@@ -213,54 +204,74 @@ impl std::fmt::Debug for SlackEventsRouteState {
 }
 
 pub fn slack_events_route_mount(state: SlackEventsRouteState) -> PublicRouteMount {
+    let descriptor = SLACK_INGRESS_DESCRIPTORS.events.clone();
     PublicRouteMount::new(
         Router::new()
-            .route(SLACK_EVENTS_PATH, post(slack_events_handler))
+            .route(
+                descriptor.route_pattern().as_str(),
+                post(slack_events_handler),
+            )
             .with_state(state.clone()),
-        slack_events_route_descriptors(),
+        vec![descriptor],
     )
     .with_drain(Arc::new(state))
 }
 
 pub fn slack_events_route_descriptors() -> Vec<IngressRouteDescriptor> {
-    let descriptor = IngressRouteDescriptor::new(
-        SLACK_EVENTS_ROUTE_ID,
-        NetworkMethod::Post,
-        SLACK_EVENTS_PATH,
-        slack_events_policy(),
-    )
-    .expect("Slack events route descriptor must validate at startup"); // safety: route id/path are crate-local literals and policy is built by sibling helper.
-    vec![descriptor]
+    vec![SLACK_INGRESS_DESCRIPTORS.events.clone()]
 }
 
-fn slack_events_policy() -> IngressPolicy {
-    IngressPolicy::new(IngressPolicyParts {
-        listener_class: ListenerClass::PublicWebhook,
-        auth: IngressAuthPolicy::Required {
-            schemes: vec![IngressAuthScheme::WebhookSignature],
-        },
-        scope_source: IngressScopeSource::HostResolved,
-        body_limit: BodyLimitPolicy::Limited {
-            max_bytes: SLACK_EVENTS_BODY_LIMIT_BYTES,
-        },
-        rate_limit: RateLimitPolicy::Limited {
-            // Coarse pre-auth abuse guard. Keep this well above the
-            // per-installation quota below: the route-level service adds a
-            // second post-verification bucket keyed by the resolved Slack
-            // tenant/installation, because Slack events can arrive from shared
-            // Slack egress pools and one workspace must not consume the budget
-            // for every tenant.
-            scope: RateLimitScope::Global,
-            max_requests: SLACK_EVENTS_MAX_REQUESTS,
-            window_seconds: SLACK_EVENTS_RATE_WINDOW_SECONDS,
-        },
-        cors: CorsPolicy::NotApplicable,
-        websocket_origin: WebSocketOriginPolicy::NotApplicable,
-        streaming: StreamingMode::None,
-        audit: AuditTraceClass::PublicCallback,
-        effect_path: AllowedEffectPath::ProductWorkflow,
-    })
-    .expect("Slack events ingress policy must validate") // safety: policy combines validated constants and host-resolved webhook-signature scope.
+/// Both Slack host-ingress route descriptors, projected from the bundled Slack
+/// extension manifest in a single parse on first use (the manifest is a
+/// compile-time constant, so the projection is deterministic and cached for
+/// the process lifetime).
+///
+/// The routes' path/method/policy are declared as data in
+/// `assets/slack/manifest.toml` (`[[product_adapter.inbound.host_ingress]]`)
+/// and validated by `ironclaw_host_api` (incl. the fail-closed floor that a
+/// `public_webhook` listener must require `webhook_signature`) plus
+/// `ironclaw_product_adapter_registry` (ingress credential coherence). Only the
+/// declarative descriptors live in the manifest — the axum handlers and the
+/// HMAC verifier stay in this module, and the mount functions build their
+/// routes from these descriptors so what axum mounts cannot drift from what
+/// the manifest declares. Panics if the bundled manifest does not declare a
+/// route or declares it with a non-POST method: `SLACK_MANIFEST` is a
+/// compile-time constant, so either is a build-time invariant violation,
+/// surfaced at startup.
+static SLACK_INGRESS_DESCRIPTORS: LazyLock<SlackIngressDescriptors> = LazyLock::new(|| {
+    let descriptors = crate::host_ingress::bundled_host_ingress_descriptors(
+        crate::available_extensions::slack_manifest_toml(),
+    )
+    .unwrap_or_else(|error| {
+        panic!("bundled Slack manifest must project host-ingress routes: {error}")
+    });
+    SlackIngressDescriptors {
+        events: bundled_slack_post_descriptor(&descriptors, SLACK_EVENTS_ROUTE_ID),
+    }
+});
+
+struct SlackIngressDescriptors {
+    events: IngressRouteDescriptor,
+}
+
+fn bundled_slack_post_descriptor(
+    descriptors: &[IngressRouteDescriptor],
+    route_id: &str,
+) -> IngressRouteDescriptor {
+    let descriptor = crate::host_ingress::descriptor_for_route(descriptors, route_id)
+        .unwrap_or_else(|error| {
+            panic!("bundled Slack manifest must declare host-ingress route {route_id}: {error}")
+        });
+    // The mount functions wire their handlers with `post(...)`; fail closed at
+    // projection time if the manifest ever declares another method.
+    if descriptor.method() != NetworkMethod::Post {
+        panic!(
+            "bundled Slack manifest declares host-ingress route {route_id} with method {}, \
+             but the serve layer mounts POST handlers",
+            descriptor.method()
+        );
+    }
+    descriptor
 }
 
 async fn slack_events_handler(
@@ -414,6 +425,48 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+    use ironclaw_host_api::NetworkMethod;
+    use ironclaw_host_api::ingress::{
+        AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
+        IngressAuthScheme, IngressPolicy, IngressPolicyParts, IngressScopeSource, ListenerClass,
+        RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
+    };
+    use std::num::{NonZeroU32, NonZeroU64};
+
+    /// Rebuild the pre-migration Slack ingress descriptor literal, so the
+    /// manifest-projected descriptor can be asserted equal to it
+    /// (behavior-preserving migration guard). `window_seconds` is 60 for both
+    /// Slack routes.
+    fn expected_slack_descriptor(
+        route_id: &str,
+        path: &str,
+        body_limit: NonZeroU64,
+        max_requests: NonZeroU32,
+    ) -> IngressRouteDescriptor {
+        let policy = IngressPolicy::new(IngressPolicyParts {
+            listener_class: ListenerClass::PublicWebhook,
+            auth: IngressAuthPolicy::Required {
+                schemes: vec![IngressAuthScheme::WebhookSignature],
+            },
+            scope_source: IngressScopeSource::HostResolved,
+            body_limit: BodyLimitPolicy::Limited {
+                max_bytes: body_limit,
+            },
+            rate_limit: RateLimitPolicy::Limited {
+                scope: RateLimitScope::Global,
+                max_requests,
+                window_seconds: NonZeroU32::new(60).expect("nonzero"),
+            },
+            cors: CorsPolicy::NotApplicable,
+            websocket_origin: WebSocketOriginPolicy::NotApplicable,
+            streaming: StreamingMode::None,
+            audit: AuditTraceClass::PublicCallback,
+            effect_path: AllowedEffectPath::ProductWorkflow,
+        })
+        .expect("policy validates");
+        IngressRouteDescriptor::new(route_id, NetworkMethod::Post, path, policy)
+            .expect("descriptor validates")
+    }
 
     #[derive(Clone)]
     struct FakeSlackDispatcher {
@@ -860,28 +913,21 @@ mod tests {
     }
 
     #[test]
-    fn slack_events_route_uses_limited_body_policy() {
-        let descriptors = slack_events_route_descriptors();
-        let [descriptor] = descriptors.as_slice() else {
-            panic!("expected exactly one Slack Events route descriptor")
-        };
-        let BodyLimitPolicy::Limited { max_bytes } = descriptor.policy().body_limit() else {
-            panic!("Slack Events route should have a body limit")
-        };
-
-        assert_eq!(max_bytes, SLACK_EVENTS_BODY_LIMIT_BYTES);
+    fn slack_events_route_descriptor_matches_manifest_projection() {
+        // Behavior-preserving migration guard: the Slack events descriptor
+        // projected from the bundled manifest's `[[host_ingress]]` declaration
+        // equals the pre-migration Rust literal (1 MiB body, 12k req / 60s,
+        // public_webhook + webhook_signature). This is the load-bearing example
+        // that the manifest-driven ingress contract is real and used.
+        assert_eq!(
+            slack_events_route_descriptors(),
+            vec![expected_slack_descriptor(
+                SLACK_EVENTS_ROUTE_ID,
+                SLACK_EVENTS_PATH,
+                NonZeroU64::new(1024 * 1024).expect("nonzero"),
+                NonZeroU32::new(12_000).expect("nonzero"),
+            )]
+        );
     }
 
-    #[test]
-    fn slack_events_route_uses_global_rate_limit_scope() {
-        let descriptors = slack_events_route_descriptors();
-        let [descriptor] = descriptors.as_slice() else {
-            panic!("expected exactly one Slack Events route descriptor")
-        };
-        let RateLimitPolicy::Limited { scope, .. } = descriptor.policy().rate_limit() else {
-            panic!("Slack Events route should be rate limited")
-        };
-
-        assert_eq!(*scope, RateLimitScope::Global);
-    }
 }
