@@ -28,6 +28,40 @@ use super::super::{
     memory_mounts, qa_smoke_mounts,
 };
 
+/// Real capability ids `qa_smoke_tools` registers on the built harness — a
+/// single source shared with the wiring-parity capability-id subset check
+/// (`tests/integration/wiring_parity.rs`) instead of a second
+/// hand-transcribed copy of this list.
+pub(crate) fn qa_smoke_tools_capability_ids() -> HarnessResult<Vec<CapabilityId>> {
+    Ok(vec![
+        CapabilityId::new(ECHO_CAPABILITY_ID)?,
+        CapabilityId::new(TIME_CAPABILITY_ID)?,
+        CapabilityId::new(JSON_CAPABILITY_ID)?,
+        CapabilityId::new(HTTP_CAPABILITY_ID)?,
+        CapabilityId::new(HTTP_SAVE_CAPABILITY_ID)?,
+        CapabilityId::new(MEMORY_SEARCH_CAPABILITY_ID)?,
+        CapabilityId::new(MEMORY_WRITE_CAPABILITY_ID)?,
+        CapabilityId::new(MEMORY_READ_CAPABILITY_ID)?,
+        CapabilityId::new(MEMORY_TREE_CAPABILITY_ID)?,
+        CapabilityId::new(READ_FILE_CAPABILITY_ID)?,
+        CapabilityId::new(WRITE_FILE_CAPABILITY_ID)?,
+        CapabilityId::new(LIST_DIR_CAPABILITY_ID)?,
+        CapabilityId::new(GLOB_CAPABILITY_ID)?,
+        CapabilityId::new(GREP_CAPABILITY_ID)?,
+        CapabilityId::new(APPLY_PATCH_CAPABILITY_ID)?,
+        CapabilityId::new(SHELL_CAPABILITY_ID)?,
+        CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID)?,
+        CapabilityId::new(SKILL_LIST_CAPABILITY_ID)?,
+        CapabilityId::new(SKILL_INSTALL_CAPABILITY_ID)?,
+        CapabilityId::new(SKILL_REMOVE_CAPABILITY_ID)?,
+        CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID)?,
+        CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID)?,
+        CapabilityId::new(TRIGGER_PAUSE_CAPABILITY_ID)?,
+        CapabilityId::new(TRIGGER_RESUME_CAPABILITY_ID)?,
+        CapabilityId::new(TRIGGER_REMOVE_CAPABILITY_ID)?,
+    ])
+}
+
 pub(crate) async fn qa_smoke_tools() -> HarnessResult<HostRuntimeCapabilityHarness> {
     let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
     std::fs::create_dir_all(storage_root.join("skills"))?;
@@ -63,33 +97,7 @@ pub(crate) async fn qa_smoke_tools() -> HarnessResult<HostRuntimeCapabilityHarne
             .cloned()
             .map(|capability_id| (capability_id, memory_mounts.clone()))
             .collect(),
-        capability_ids: vec![
-            CapabilityId::new(ECHO_CAPABILITY_ID)?,
-            CapabilityId::new(TIME_CAPABILITY_ID)?,
-            CapabilityId::new(JSON_CAPABILITY_ID)?,
-            CapabilityId::new(HTTP_CAPABILITY_ID)?,
-            CapabilityId::new(HTTP_SAVE_CAPABILITY_ID)?,
-            CapabilityId::new(MEMORY_SEARCH_CAPABILITY_ID)?,
-            CapabilityId::new(MEMORY_WRITE_CAPABILITY_ID)?,
-            CapabilityId::new(MEMORY_READ_CAPABILITY_ID)?,
-            CapabilityId::new(MEMORY_TREE_CAPABILITY_ID)?,
-            CapabilityId::new(READ_FILE_CAPABILITY_ID)?,
-            CapabilityId::new(WRITE_FILE_CAPABILITY_ID)?,
-            CapabilityId::new(LIST_DIR_CAPABILITY_ID)?,
-            CapabilityId::new(GLOB_CAPABILITY_ID)?,
-            CapabilityId::new(GREP_CAPABILITY_ID)?,
-            CapabilityId::new(APPLY_PATCH_CAPABILITY_ID)?,
-            CapabilityId::new(SHELL_CAPABILITY_ID)?,
-            CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID)?,
-            CapabilityId::new(SKILL_LIST_CAPABILITY_ID)?,
-            CapabilityId::new(SKILL_INSTALL_CAPABILITY_ID)?,
-            CapabilityId::new(SKILL_REMOVE_CAPABILITY_ID)?,
-            CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID)?,
-            CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID)?,
-            CapabilityId::new(TRIGGER_PAUSE_CAPABILITY_ID)?,
-            CapabilityId::new(TRIGGER_RESUME_CAPABILITY_ID)?,
-            CapabilityId::new(TRIGGER_REMOVE_CAPABILITY_ID)?,
-        ],
+        capability_ids: qa_smoke_tools_capability_ids()?,
         runtime_kind: RuntimeKind::FirstParty,
         effect_kinds: vec![
             EffectKind::DispatchCapability,

@@ -141,6 +141,30 @@ pub(crate) async fn core_builtin_tools_default() -> HarnessResult<HostRuntimeCap
     core_builtin_tools(CoreBuiltinOptions::default()).await
 }
 
+/// Real capability ids `core_builtin_tools_from_runtime` registers on the
+/// built harness — a single source shared with the wiring-parity
+/// capability-id subset check (`tests/integration/wiring_parity.rs`) instead
+/// of a second hand-transcribed copy of this list.
+pub(crate) fn core_builtin_tools_capability_ids() -> HarnessResult<Vec<CapabilityId>> {
+    Ok(vec![
+        CapabilityId::new(TIME_CAPABILITY_ID)?,
+        CapabilityId::new(JSON_CAPABILITY_ID)?,
+        CapabilityId::new(HTTP_CAPABILITY_ID)?,
+        CapabilityId::new(HTTP_SAVE_CAPABILITY_ID)?,
+        CapabilityId::new(MEMORY_SEARCH_CAPABILITY_ID)?,
+        CapabilityId::new(MEMORY_WRITE_CAPABILITY_ID)?,
+        CapabilityId::new(MEMORY_READ_CAPABILITY_ID)?,
+        CapabilityId::new(MEMORY_TREE_CAPABILITY_ID)?,
+        CapabilityId::new(PROFILE_SET_CAPABILITY_ID)?,
+        CapabilityId::new(READ_FILE_CAPABILITY_ID)?,
+        CapabilityId::new(APPLY_PATCH_CAPABILITY_ID)?,
+        // `builtin.shell` on the surface so scripted shell calls route
+        // through the process port (recording by default, live via
+        // `.with_live_shell()`).
+        CapabilityId::new(SHELL_CAPABILITY_ID)?,
+    ])
+}
+
 fn core_builtin_tools_from_runtime(
     root: Arc<tempfile::TempDir>,
     workspace_root: PathBuf,
@@ -174,23 +198,7 @@ fn core_builtin_tools_from_runtime(
             .cloned()
             .map(|capability_id| (capability_id, memory_mounts.clone()))
             .collect(),
-        capability_ids: vec![
-            CapabilityId::new(TIME_CAPABILITY_ID)?,
-            CapabilityId::new(JSON_CAPABILITY_ID)?,
-            CapabilityId::new(HTTP_CAPABILITY_ID)?,
-            CapabilityId::new(HTTP_SAVE_CAPABILITY_ID)?,
-            CapabilityId::new(MEMORY_SEARCH_CAPABILITY_ID)?,
-            CapabilityId::new(MEMORY_WRITE_CAPABILITY_ID)?,
-            CapabilityId::new(MEMORY_READ_CAPABILITY_ID)?,
-            CapabilityId::new(MEMORY_TREE_CAPABILITY_ID)?,
-            CapabilityId::new(PROFILE_SET_CAPABILITY_ID)?,
-            CapabilityId::new(READ_FILE_CAPABILITY_ID)?,
-            CapabilityId::new(APPLY_PATCH_CAPABILITY_ID)?,
-            // `builtin.shell` on the surface so scripted shell calls route
-            // through the process port (recording by default, live via
-            // `.with_live_shell()`).
-            CapabilityId::new(SHELL_CAPABILITY_ID)?,
-        ],
+        capability_ids: core_builtin_tools_capability_ids()?,
         runtime_kind: RuntimeKind::FirstParty,
         effect_kinds: vec![
             EffectKind::DispatchCapability,
