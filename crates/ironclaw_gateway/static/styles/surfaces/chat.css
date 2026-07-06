@@ -1447,7 +1447,6 @@
 .thread-item.active {
   background: var(--bg-tertiary);
   color: var(--accent);
-  border-left: 2px solid var(--accent);
 }
 
 .thread-label {

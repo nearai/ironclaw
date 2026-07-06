@@ -253,14 +253,10 @@
   white-space: nowrap;
 }
 
-/* Tree-guide rule beside the chats (an ↳ without the arrowhead). */
 .sidebar-threads .thread-list {
   flex: 1;
   overflow-y: auto;
   padding-bottom: 8px;
-  margin-left: 14px;
-  padding-left: 8px;
-  border-left: 1px solid var(--border);
 }
 
 /* ── Footer (utilities + account) — borderless, quiet ── */
