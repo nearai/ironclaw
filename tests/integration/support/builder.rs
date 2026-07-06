@@ -747,7 +747,7 @@ impl RebornIntegrationHarness {
     /// `deny_auth_gate`'s direct coordinator resume.
     pub async fn submit_auth_resolution(
         &self,
-        auth_request_ref: &str,
+        gate_ref: &GateRef,
         result: ironclaw_product_adapters::AuthResolutionResult,
     ) -> HarnessResult<ProductInboundAck> {
         let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
@@ -755,7 +755,7 @@ impl RebornIntegrationHarness {
             &event_id,
             &self.actor_id,
             &self.conversation_id,
-            auth_request_ref,
+            gate_ref.as_str(),
             result,
         )?;
         Ok(self.workflow.submit_inbound(envelope).await?)
