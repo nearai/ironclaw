@@ -454,6 +454,13 @@ capture "${summary_sh}" --zero-crates "${fixtures_dir}/a2_empty.lcov" "${empty_e
 assert_exit_code "B3: empty lcov --zero-crates exits 0" 0 "${CAP_RC}"
 assert_eq "B3: empty lcov --zero-crates emits nothing" "" "${CAP_OUT}"
 
+# B4: a whole-crate `crate =` exemption drops its zero-covered crate from
+# --zero-crates too, not just from the report-mode table (A10 only covers
+# report mode; reuses that fixture — ironclaw_embeddings is 0/10, exempted).
+capture "${summary_sh}" --zero-crates "${fixtures_dir}/a10_two_crates.lcov" "${fixtures_dir}/a10_crate_exemption.toml"
+assert_exit_code "B4: --zero-crates with a whole-crate exemption exits 0" 0 "${CAP_RC}"
+assert_eq "B4: exempted zero-covered crate is excluded from --zero-crates output" "" "${CAP_OUT}"
+
 # ---------------------------------------------------------------------------
 # C. reborn-coverage-comment.sh (sticky PR comment upsert via a fake `gh`)
 # ---------------------------------------------------------------------------
@@ -693,6 +700,27 @@ if [ -f "${c8_log}" ]; then
   report_fail "C8: fake gh did not record a mutation (guard fires before gh use)"
 else
   report_pass "C8: fake gh did not record a mutation (guard fires before gh use)"
+fi
+
+# C9: a zero-covered crate excluded by a whole-crate exemption must not surface
+# in the sticky comment's 0-coverage callout (reuses the A10/B4 fixture pair —
+# ironclaw_embeddings is 0/10 but exempted, ironclaw_reborn is 5/10 not zero).
+c9_log="${tmp_root}/c9-gh.log"
+capture env \
+  GH_TOKEN="fake-token" \
+  GITHUB_REPOSITORY="${gh_repo}" \
+  PR_NUMBER="${gh_pr}" \
+  PATH="${gh_bin_dir}:${PATH}" \
+  FAKE_GH_COMMENTS_JSON="${fixtures_dir}/c1_comments_empty.json" \
+  FAKE_GH_LOG="${c9_log}" \
+  "${comment_sh}" "${fixtures_dir}/a10_two_crates.lcov" "${fixtures_dir}/a10_crate_exemption.toml"
+assert_exit_code "C9: comment script exits 0 (zero-covered crate whole-crate-exempted)" 0 "${CAP_RC}"
+if [ -f "${c9_log}" ]; then
+  c9_body="$(sed -n '/^BODY_START$/,/^BODY_END$/p' "${c9_log}" | sed '1d;$d')"
+  assert_not_contains "C9: sticky comment omits the 0-coverage callout for the exempted crate" \
+    "${c9_body}" "0 int-tier coverage"
+else
+  report_fail "C9: fake gh did not record a mutation"
 fi
 
 # ---------------------------------------------------------------------------

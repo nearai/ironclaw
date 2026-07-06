@@ -294,15 +294,19 @@ jobs:
             feature_flags="$(scripts/ci/package-feature-flags.sh "$package")"
             echo "::group::cargo llvm-cov -p ${package} ${feature_flags} test"
 
+            # Scoped to this invocation only (never `export`) so it can't leak
+            # onto later packages in the same bucket iteration if
+            # composition-core ever stops being single-package.
+            incremental_env=()
             if [ "$package" = "ironclaw_reborn_composition" ]; then
               echo "Disabling incremental compilation for ironclaw_reborn_composition to keep runner disk usage bounded."
-              export CARGO_INCREMENTAL=0
+              incremental_env=(env CARGO_INCREMENTAL=0)
             fi
 
             # One combined test+lcov invocation, not the two-step `--no-report test` + `report` shape (report has no --workspace/-p, only reports the root package).
             # shellcheck disable=SC2086 # feature_flags intentionally expands to zero or more Cargo args.
             timeout --signal=INT --kill-after=30s 40m \
-              cargo llvm-cov -p "$package" ${feature_flags} --all-targets \
+              "${incremental_env[@]}" cargo llvm-cov -p "$package" ${feature_flags} --all-targets \
                 --lcov --output-path "coverage/${package}.lcov" \
                 test -- --nocapture
             echo "::endgroup::"
