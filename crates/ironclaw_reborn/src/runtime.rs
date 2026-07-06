@@ -677,13 +677,24 @@ where
     let mut capability_factory_builder =
         DecoratingLoopCapabilityPortFactory::new(parts.capability_factory)
             .with_decorator(spawn_decorator);
+    // Built before the disclosure decorator: #5712 threads the SAME resolver
+    // instance into it so tool_search/tool_describe results are narrowed by
+    // the same allow-set the profile filter enforces.
+    let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
+        Arc::new(SubagentCapabilitySurfaceResolver::new(
+            parts.capability_surface_resolver,
+            Arc::clone(&subagent_prompt_source),
+        ));
     if parts.config.tool_disclosure.is_bridged() {
         tracing::debug!(
             target: "ironclaw::reborn::runtime",
             "reborn tool disclosure decorator wired (bridged)"
         );
         capability_factory_builder = capability_factory_builder.with_decorator(Arc::new(
-            ToolDisclosureCapabilityDecorator::new(Arc::clone(&parts.capability_result_writer)),
+            ToolDisclosureCapabilityDecorator::new(
+                Arc::clone(&parts.capability_result_writer),
+                Arc::clone(&capability_surface_resolver),
+            ),
         ));
     }
     // TEMP(disable-spawn-subagents): explicit composition decision to remove the
@@ -728,11 +739,6 @@ where
     ));
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
         Arc::new(capability_factory_builder);
-    let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
-        Arc::new(SubagentCapabilitySurfaceResolver::new(
-            parts.capability_surface_resolver,
-            Arc::clone(&subagent_prompt_source),
-        ));
     let safety_context = parts
         .safety_context
         .unwrap_or_else(local_development_noop_safety_context);

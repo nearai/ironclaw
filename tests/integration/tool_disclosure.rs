@@ -229,3 +229,115 @@ async fn narrowed_allow_set_still_denies_non_allowlisted_tool_through_deferral()
         .await
         .expect("a non-allowlisted underlying tool must never reach dispatch");
 }
+
+/// #5712: tool_search RESULTS are narrowed by the caller's allow-set — the
+/// bridge port's catalog is built below the profile filter, so without
+/// result filtering a narrowed profile reads every capability's metadata.
+#[tokio::test]
+async fn narrowed_allow_set_filters_tool_search_results() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_bridged()
+        .with_github_issue_tools()
+        .with_narrowed_capability_allow_set_for_bridged_test(["github.get_repo"])
+        .script([
+            RebornScriptedReply::tool_call(
+                "tool_search",
+                serde_json::json!({"query": "repo", "limit": 20}),
+            ),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("narrowed bridged-disclosure harness builds");
+
+    harness
+        .submit_turn("find repo tools")
+        .await
+        .expect("turn completes");
+
+    let output = harness
+        .tool_result_output("ironclaw.tool_search")
+        .await
+        .expect("tool_search result recorded");
+    let results = output["results"].as_array().expect("results is an array");
+    assert!(
+        !results.is_empty(),
+        "query must still match the allowlisted github.get_repo"
+    );
+    for result in results {
+        assert_eq!(
+            result["capability_id"].as_str(),
+            Some("github.get_repo"),
+            "non-allowlisted capability metadata leaked into tool_search results: {result}"
+        );
+    }
+}
+
+/// #5712: tool_describe of a non-allowlisted id reads as unknown — same
+/// message as a nonexistent name, so existence itself is not disclosed.
+#[tokio::test]
+async fn narrowed_allow_set_denies_tool_describe_of_non_allowlisted_id() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_bridged()
+        .with_github_issue_tools()
+        .with_narrowed_capability_allow_set_for_bridged_test(["github.get_repo"])
+        .script([
+            RebornScriptedReply::tool_call(
+                "tool_describe",
+                serde_json::json!({"name": "github.list_issues"}),
+            ),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("narrowed bridged-disclosure harness builds");
+
+    harness
+        .submit_turn("describe list_issues")
+        .await
+        .expect("turn completes");
+
+    harness
+        .assert_tool_error_summary_contains("tool_describe target is unknown")
+        .await
+        .expect("a non-allowlisted tool_describe target must read as unknown, not return schema");
+}
+
+/// #5712 control: an unnarrowed (All) caller keeps the full search catalog —
+/// proves the result filter discriminates on the allow-set, not the query.
+#[tokio::test]
+async fn unnarrowed_allow_set_keeps_full_tool_search_catalog() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_bridged()
+        .with_github_issue_tools()
+        .script([
+            RebornScriptedReply::tool_call(
+                "tool_search",
+                serde_json::json!({"query": "repo", "limit": 20}),
+            ),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("bridged-disclosure harness builds");
+
+    harness
+        .submit_turn("find repo tools")
+        .await
+        .expect("turn completes");
+
+    let output = harness
+        .tool_result_output("ironclaw.tool_search")
+        .await
+        .expect("tool_search result recorded");
+    let ids: std::collections::BTreeSet<&str> = output["results"]
+        .as_array()
+        .expect("results is an array")
+        .iter()
+        .filter_map(|result| result["capability_id"].as_str())
+        .collect();
+    assert!(
+        ids.len() > 1,
+        "an All allow-set must surface the full catalog's matches, got only {ids:?}"
+    );
+}

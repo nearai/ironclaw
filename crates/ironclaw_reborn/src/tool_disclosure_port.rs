@@ -8,7 +8,8 @@ use ironclaw_host_api::{
     AgentId, CapabilityId, InvocationId, ProjectId, ProviderToolName, TenantId, ThreadId,
 };
 use ironclaw_loop_support::{
-    CapabilityResultWrite, LoopCapabilityPortDecorator, LoopCapabilityResultWriter,
+    CapabilityAllowSet, CapabilityResultWrite, CapabilitySurfaceProfileResolver,
+    LoopCapabilityPortDecorator, LoopCapabilityResultWriter,
 };
 use ironclaw_turns::{
     CapabilityActivityId, TurnId,
@@ -54,14 +55,23 @@ pub(crate) struct ToolDisclosureCapabilityDecorator {
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     promoted_by_scope: Arc<Mutex<HashMap<PromotionScopeKey, PromotedSet>>>,
     caps: DisclosureCaps,
+    /// #5712: same resolver the composition root uses for
+    /// `CapabilitySurfaceProfileFilter`'s allow-set — re-resolved lazily by
+    /// `invoke_tool_search`/`invoke_tool_describe` to narrow disclosed
+    /// metadata, since this decorator sits *inside* the profile filter.
+    surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver>,
 }
 
 impl ToolDisclosureCapabilityDecorator {
-    pub(crate) fn new(result_writer: Arc<dyn LoopCapabilityResultWriter>) -> Self {
+    pub(crate) fn new(
+        result_writer: Arc<dyn LoopCapabilityResultWriter>,
+        surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver>,
+    ) -> Self {
         Self {
             result_writer,
             promoted_by_scope: Arc::new(Mutex::new(HashMap::new())),
             caps: DisclosureCaps::default(),
+            surface_resolver,
         }
     }
 }
@@ -78,6 +88,7 @@ impl LoopCapabilityPortDecorator for ToolDisclosureCapabilityDecorator {
             result_writer: Arc::clone(&self.result_writer),
             promoted_by_scope: Arc::clone(&self.promoted_by_scope),
             caps: self.caps,
+            surface_resolver: Arc::clone(&self.surface_resolver),
             turn_state: Mutex::new(None),
             bridge_inputs: Mutex::new(BTreeMap::new()),
             tool_call_target_inputs: Mutex::new(BTreeMap::new()),
@@ -91,6 +102,7 @@ struct ToolDisclosureCapabilityPort {
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     promoted_by_scope: Arc<Mutex<HashMap<PromotionScopeKey, PromotedSet>>>,
     caps: DisclosureCaps,
+    surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver>,
     turn_state: Mutex<Option<ToolDisclosureTurnState>>,
     bridge_inputs: Mutex<BTreeMap<String, BridgeInvocation>>,
     tool_call_target_inputs: Mutex<BTreeMap<String, CapabilityId>>,
@@ -563,6 +575,20 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
 }
 
 impl ToolDisclosureCapabilityPort {
+    /// #5712: the caller's effective allow-set, for narrowing disclosed
+    /// metadata. MUST be awaited before `turn_state()` locks its sync mutex.
+    async fn resolved_allow_set(&self) -> Result<CapabilityAllowSet, AgentLoopHostError> {
+        self.surface_resolver
+            .resolve(&self.run_context)
+            .await
+            .map_err(|error| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Internal,
+                    format!("capability surface resolution failed: {error}"),
+                )
+            })
+    }
+
     fn turn_state(
         &self,
     ) -> Result<MutexGuard<'_, Option<ToolDisclosureTurnState>>, AgentLoopHostError> {
@@ -923,12 +949,13 @@ impl ToolDisclosureCapabilityPort {
             .and_then(|value| usize::try_from(value).ok())
             .unwrap_or(10)
             .clamp(1, 50);
+        let allow_set = self.resolved_allow_set().await?;
         let output = {
             let mut guard = self.turn_state()?;
             let Some(state) = guard.as_mut() else {
                 return Ok(failed_invalid_input("tool catalog is unavailable"));
             };
-            let names = tool_search_rank(&state.catalog, query, limit);
+            let names = tool_search_rank(&state.catalog, query, limit, |id| allow_set.permits(id));
             let mut results = Vec::new();
             for name in names {
                 state.disclosed_names.insert(name.clone());
@@ -963,6 +990,7 @@ impl ToolDisclosureCapabilityPort {
                 "tool_describe target must not be a bridge",
             ));
         }
+        let allow_set = self.resolved_allow_set().await?;
         let output = {
             let mut guard = self.turn_state()?;
             let Some(state) = guard.as_mut() else {
@@ -971,6 +999,11 @@ impl ToolDisclosureCapabilityPort {
             let Some(result) = state.catalog.search_result(name) else {
                 return Ok(failed_invalid_input("tool_describe target is unknown"));
             };
+            // #5712: same message as a truly unknown name — a narrowed profile
+            // must not learn that a non-allowlisted tool exists.
+            if !allow_set.permits(&result.capability_id) {
+                return Ok(failed_invalid_input("tool_describe target is unknown"));
+            }
             state.disclosed_names.insert(name.to_string());
             json!({
                 "name": result.name,
@@ -3071,6 +3104,20 @@ mod tests {
         }
     }
 
+    /// Unnarrowed resolver stub — unit tests here exercise disclosure
+    /// mechanics, not profile narrowing (that's the integration tier).
+    struct AllowAllSurfaceResolver;
+
+    #[async_trait]
+    impl CapabilitySurfaceProfileResolver for AllowAllSurfaceResolver {
+        async fn resolve(
+            &self,
+            _run_context: &LoopRunContext,
+        ) -> Result<CapabilityAllowSet, ironclaw_loop_support::CapabilityResolveError> {
+            Ok(CapabilityAllowSet::All)
+        }
+    }
+
     fn disclosure_port(
         inner: Arc<dyn LoopCapabilityPort>,
         run_context: LoopRunContext,
@@ -3086,6 +3133,7 @@ mod tests {
                 max_tools: 5,
                 ctx_limit: None,
             },
+            surface_resolver: Arc::new(AllowAllSurfaceResolver),
             turn_state: Mutex::new(None),
             bridge_inputs: Mutex::new(BTreeMap::new()),
             tool_call_target_inputs: Mutex::new(BTreeMap::new()),

@@ -1,6 +1,7 @@
 //! Runtime-wiring setters for [`RebornIntegrationGroupBuilder`] — `storage`,
 //! `safety_context`, `with_turn_event_sink`, `with_trace_capture`,
-//! `with_tool_disclosure_bridged`, `with_tool_disclosure_off`, `budget_accounting`,
+//! `with_tool_disclosure_bridged`, `with_tool_disclosure_off`,
+//! `with_narrowed_capability_allow_set_for_bridged_test`, `budget_accounting`,
 //! `communication_context_provider`, `hook_dispatcher_builder_factory`.
 //! Private child module of `group.rs` (owns the struct + `build_base`/
 //! `into_group`), so it reaches the builder's private fields at module-

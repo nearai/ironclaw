@@ -606,10 +606,14 @@ pub(crate) fn select_active_set(
     }
 }
 
+/// `permits` narrows results to the caller's capability allow-set (#5712) —
+/// applied before `.take(limit)` so limit counts against the caller's own
+/// visible candidate set, not the full catalog.
 pub(crate) fn tool_search_rank(
     catalog: &CapabilityCatalog,
     query: &str,
     limit: usize,
+    permits: impl Fn(&CapabilityId) -> bool,
 ) -> Vec<String> {
     if limit == 0 {
         return Vec::new();
@@ -630,7 +634,7 @@ pub(crate) fn tool_search_rank(
         .iter()
         .filter_map(|entry| {
             let score = score_tool_entry(entry, &query_terms);
-            if score > 0 {
+            if score > 0 && permits(&entry.definition.capability_id) {
                 Some((entry.definition.name.to_string(), score))
             } else {
                 None
@@ -1553,10 +1557,18 @@ mod tests {
         let catalog = CapabilityCatalog::new(&definitions, &[]);
 
         assert_eq!(
-            tool_search_rank(&catalog, "search issue", 2),
+            tool_search_rank(&catalog, "search issue", 2, |_| true),
             vec!["github_issue_search"]
         );
-        assert_eq!(tool_search_rank(&catalog, "read", 2), vec!["read_file"]);
+        assert_eq!(
+            tool_search_rank(&catalog, "read", 2, |_| true),
+            vec!["read_file"]
+        );
+        // #5712: a non-permitting allow-set filters a scoring match out.
+        assert_eq!(
+            tool_search_rank(&catalog, "read", 2, |_| false),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
