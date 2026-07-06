@@ -193,6 +193,7 @@ registerPack("ja", {
   "authGate.openAuthorization": "{provider} 認証を開きます",
   "authGate.reopenAuthorization": "{provider} 認証を再度開きます",
   "authGate.oauthWaiting": "認証が完了するまで待機しています... アクセスを承認したら、ポップアップ タブを閉じることができます。",
+  "authGate.authorizing": "{provider} を待機中…",
   "authGate.expiresAt": "有効期限",
   "authGate.oauthProviderFallback": "プロバイダー",
   "authGate.serviceUnavailable": "サービスを利用できません",

@@ -193,6 +193,7 @@ registerPack("hi", {
   "authGate.openAuthorization": "{provider} प्राधिकरण खोलें",
   "authGate.reopenAuthorization": "{provider} प्राधिकरण को फिर से खोलें",
   "authGate.oauthWaiting": "प्राधिकरण पूरा होने की प्रतीक्षा कर रहा है... एक बार पहुंच स्वीकृत हो जाने के बाद आप पॉपअप टैब बंद कर सकते हैं।",
+  "authGate.authorizing": "{provider} की प्रतीक्षा…",
   "authGate.expiresAt": "समाप्त हो रहा है",
   "authGate.oauthProviderFallback": "प्रदाता",
   "authGate.serviceUnavailable": "सेवा उपलब्ध नहीं है",

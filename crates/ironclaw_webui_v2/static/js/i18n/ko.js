@@ -193,6 +193,7 @@ registerPack("ko", {
   "authGate.openAuthorization": "{provider} 승인 열기",
   "authGate.reopenAuthorization": "{provider} 승인 다시 열기",
   "authGate.oauthWaiting": "승인이 완료되기를 기다리는 중… 액세스를 승인한 후 팝업 탭을 닫을 수 있습니다.",
+  "authGate.authorizing": "{provider} 대기 중…",
   "authGate.expiresAt": "만료",
   "authGate.oauthProviderFallback": "공급자",
   "authGate.serviceUnavailable": "서비스를 사용할 수 없습니다",

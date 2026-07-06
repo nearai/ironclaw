@@ -193,6 +193,7 @@ registerPack("uk", {
   "authGate.openAuthorization": "Відкрити авторизацію {provider}",
   "authGate.reopenAuthorization": "Повторно відкрити авторизацію {provider}",
   "authGate.oauthWaiting": "Очікування завершення авторизації… Ви можете закрити спливаючу вкладку, коли схвалите доступ.",
+  "authGate.authorizing": "Очікування {provider}…",
   "authGate.expiresAt": "Термін дії закінчується",
   "authGate.oauthProviderFallback": "постачальник",
   "authGate.serviceUnavailable": "Сервіс недоступний",

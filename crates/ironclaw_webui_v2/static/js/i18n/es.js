@@ -193,6 +193,7 @@ registerPack("es", {
   "authGate.openAuthorization": "Abrir autorización {provider}",
   "authGate.reopenAuthorization": "Reabrir autorización {provider}",
   "authGate.oauthWaiting": "Esperando a que se complete la autorización... Puede cerrar la pestaña emergente una vez que haya aprobado el acceso.",
+  "authGate.authorizing": "Esperando a {provider}…",
   "authGate.expiresAt": "Caduca",
   "authGate.oauthProviderFallback": "el proveedor",
   "authGate.serviceUnavailable": "Servicio no disponible",

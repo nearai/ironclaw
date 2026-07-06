@@ -193,6 +193,7 @@ registerPack("pt-BR", {
   "authGate.openAuthorization": "Abrir autorização {provider}",
   "authGate.reopenAuthorization": "Reabrir autorização {provider}",
   "authGate.oauthWaiting": "Aguardando a conclusão da autorização… Você pode fechar a guia pop-up depois de aprovar o acesso.",
+  "authGate.authorizing": "Aguardando {provider}…",
   "authGate.expiresAt": "Expira",
   "authGate.oauthProviderFallback": "o provedor",
   "authGate.serviceUnavailable": "Serviço indisponível",

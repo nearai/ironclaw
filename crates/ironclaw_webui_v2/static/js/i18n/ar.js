@@ -193,6 +193,7 @@ registerPack("ar", {
   "authGate.openAuthorization": "فتح تفويض {provider}",
   "authGate.reopenAuthorization": "أعد فتح ترخيص {provider}",
   "authGate.oauthWaiting": "في انتظار اكتمال التفويض... يمكنك إغلاق علامة التبويب المنبثقة بمجرد الموافقة على الوصول.",
+  "authGate.authorizing": "في انتظار {provider}…",
   "authGate.expiresAt": "انتهاء الصلاحية",
   "authGate.oauthProviderFallback": "الموفر",
   "authGate.serviceUnavailable": "الخدمة غير متوفرة",

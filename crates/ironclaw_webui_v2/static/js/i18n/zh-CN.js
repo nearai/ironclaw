@@ -193,6 +193,7 @@ registerPack("zh-CN", {
   "authGate.openAuthorization": "打开 {provider} 授权",
   "authGate.reopenAuthorization": "重新打开 {provider} 授权",
   "authGate.oauthWaiting": "等待授权完成… 如果您已批准访问，请关闭此弹出标签页。",
+  "authGate.authorizing": "正在等待 {provider}…",
   "authGate.expiresAt": "过期时间",
   "authGate.oauthProviderFallback": "该提供商",
   "authGate.serviceUnavailable": "服务不可用",

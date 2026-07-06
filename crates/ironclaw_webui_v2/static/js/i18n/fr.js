@@ -193,6 +193,7 @@ registerPack("fr", {
   "authGate.openAuthorization": "Ouvrir l'autorisation {provider}",
   "authGate.reopenAuthorization": "Réouvrir l'autorisation {provider}",
   "authGate.oauthWaiting": "En attente de la fin de l'autorisation… Vous pouvez fermer l'onglet contextuel une fois que vous avez approuvé l'accès.",
+  "authGate.authorizing": "En attente de {provider}…",
   "authGate.expiresAt": "Expire",
   "authGate.oauthProviderFallback": "le fournisseur",
   "authGate.serviceUnavailable": "Service indisponible",
