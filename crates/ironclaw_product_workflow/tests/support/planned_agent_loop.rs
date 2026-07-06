@@ -286,6 +286,9 @@ impl ProductLiveAgentLoopHarness {
         let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> =
             Arc::new(ProductLiveCapabilityIo::default());
         let turn_state_for_runtime: Arc<dyn RuntimeTurnStateStore> = turn_store.clone();
+        let subagent_gate_store = Arc::new(
+            ironclaw_reborn::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new(),
+        );
         let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
             attachment_read_port: None,
             turn_state: turn_state_for_runtime,
@@ -301,10 +304,7 @@ impl ProductLiveAgentLoopHarness {
             subagent_goal_store: Arc::new(
                 ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new(),
             ),
-            subagent_gate_store: Arc::new(
-                ironclaw_reborn::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new(
-                ),
-            ),
+            subagent_gate_store: subagent_gate_store.clone(),
             subagent_definition_resolver: Arc::new(
                 ironclaw_reborn::subagent::flavors::StaticSubagentDefinitionResolver,
             ),
@@ -317,6 +317,7 @@ impl ProductLiveAgentLoopHarness {
                     Arc::new(thread_service.clone()),
                     Arc::clone(&turn_store) as Arc<dyn TurnStateStore>,
                     checkpoint_store,
+                    subagent_gate_store,
                     thread_scope.clone(),
                 )
                 .with_cancellation_factory(cancellation_factory.clone()),

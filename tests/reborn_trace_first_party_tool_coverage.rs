@@ -1,5 +1,8 @@
 #[allow(dead_code)]
-#[path = "support/reborn/mod.rs"]
+#[path = "support/reborn_parity_qa/mod.rs"]
+mod parity_qa_support;
+#[allow(dead_code)]
+#[path = "integration/support/mod.rs"]
 mod reborn_support;
 mod support;
 
@@ -21,8 +24,8 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_loop_support::{HostManagedModelMessageRole, HostManagedModelResponse};
 use ironclaw_turns::{TurnStatus, run_profile::LoopHostMilestoneKind};
-use reborn_support::{
-    harness::{HarnessWaitConfig, RebornBinaryE2EHarness, assert_milestone_order},
+use parity_qa_support::{
+    binary_e2e::{HarnessWaitConfig, RebornBinaryE2EHarness, assert_milestone_order},
     model_replay::{
         RebornModelReplayStep, RebornScriptedProviderToolCall, RebornTraceReplayModelGateway,
     },
@@ -176,7 +179,7 @@ async fn reborn_trace_process_first_party_tools_parity() {
 }
 
 #[tokio::test]
-#[ignore = "TEMP(disable-spawn-subagents): spawn_subagent temporarily disabled via capability deny filter; re-enable by emptying DISABLED_CAPABILITY_IDS"]
+#[ignore = "TEMP(disable-spawn-subagents): spawn_subagent temporarily disabled via capability deny filter; re-enable by clearing runtime disabled_capability_ids"]
 async fn reborn_trace_spawn_subagent_is_surface_text_and_structured_tool() {
     let spawn_subagent =
         CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID).expect("valid capability id");

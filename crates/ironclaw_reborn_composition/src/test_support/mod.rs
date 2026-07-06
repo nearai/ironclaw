@@ -28,6 +28,12 @@
 //!    support (E-SKILL seam).
 //! 7. [`user_profile`] — `HostUserProfileSource` test support (E-PROFILE
 //!    seam).
+//! 8. [`trigger_materializer`] — `materialize_trigger_prompt_for_test`, the
+//!    single production-owned trusted-trigger prompt materializer entry
+//!    point for the integration-test harness (E-TRIGGERED-SUBMIT seam).
+//! 9. [`trace_capture`] — `trace_capture_turn_event_sink_for_test`, the
+//!    production `TraceCaptureTurnEventSink` factory for the integration-test
+//!    harness (C-TRACECAP seam).
 
 mod budget_gateway;
 mod durable;
@@ -36,6 +42,8 @@ mod oauth_product_auth;
 mod outbound_delivery;
 mod project_create;
 mod skill_activation;
+mod trace_capture;
+mod trigger_materializer;
 mod user_profile;
 
 pub use budget_gateway::{
@@ -72,5 +80,9 @@ pub use skill_activation::{
     SKILL_ACTIVATE_CAPABILITY_ID, SkillActivationTestSource,
     build_local_dev_skill_context_source_for_test, wrap_skill_activation_capability_for_test,
 };
+#[cfg(feature = "test-support")]
+pub use trace_capture::trace_capture_turn_event_sink_for_test;
+#[cfg(feature = "test-support")]
+pub use trigger_materializer::materialize_trigger_prompt_for_test;
 #[cfg(feature = "test-support")]
 pub use user_profile::build_user_profile_source_for_test;

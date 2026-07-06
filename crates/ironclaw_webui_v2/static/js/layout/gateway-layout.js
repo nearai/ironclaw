@@ -4,6 +4,10 @@ import { useGatewayStatus } from "../hooks/useGatewayStatus.js";
 import { useNotifications } from "../hooks/useNotifications.js";
 import { useLlmProviders } from "../pages/settings/hooks/useLlmProviders.js";
 import { shouldRouteToOnboarding } from "../lib/onboarding-gate.js";
+import {
+  activeRouteThreadIdFromPath,
+  routeSynchronizedThreadsState,
+} from "../lib/sidebar-active-thread.js";
 import { useSidebar } from "../hooks/useSidebar.js";
 import { html } from "../lib/html.js";
 import { useT } from "../lib/i18n.js";
@@ -30,11 +34,19 @@ export function GatewayLayout({
   const { theme, toggleTheme } = useInterfaceTheme();
   const statusQuery = useGatewayStatus(token);
   const threadsState = useThreads();
+  const location = useLocation();
+  const activeRouteThreadId = React.useMemo(
+    () => activeRouteThreadIdFromPath(location.pathname),
+    [location.pathname]
+  );
+  const routeThreadsState = React.useMemo(
+    () => routeSynchronizedThreadsState(threadsState, location.pathname),
+    [threadsState, location.pathname]
+  );
   const notificationsState = useNotifications({
     profile,
     enabled: Boolean(token),
-    activeThreadId: threadsState.activeThreadId,
-    threads: threadsState.threads,
+    activeThreadId: activeRouteThreadId,
   });
   const sidebar = useSidebar({
     onNewChat: () => threadsState.setActiveThreadId(null),
@@ -46,7 +58,6 @@ export function GatewayLayout({
   // reachable so they can configure there too; /welcome itself is exempt to
   // avoid a redirect loop. Defaults are not treated as "configured" — the gate
   // keys off the honest `hasActiveProvider` (a persisted selection).
-  const location = useLocation();
   const navigate = useNavigate();
   const llmProviders = useLlmProviders({
     settings: {},
@@ -83,7 +94,7 @@ export function GatewayLayout({
 
   const handleDeleteThread = React.useCallback(
     async (threadId) => {
-      const wasActive = threadsState.activeThreadId === threadId;
+      const wasActive = activeRouteThreadId === threadId;
       try {
         await threadsState.deleteThread(threadId);
         if (wasActive) {
@@ -94,7 +105,7 @@ export function GatewayLayout({
         toast(deleteThreadErrorMessage(error, t), { tone: "error" });
       }
     },
-    [navigate, threadsState, t]
+    [activeRouteThreadId, navigate, threadsState, t]
   );
   if (needsOnboarding && !onboardingExempt) {
     return html`<${Navigate} to="/welcome" replace />`;
@@ -119,7 +130,7 @@ export function GatewayLayout({
       >
         <${Sidebar}
           id="gateway-sidebar"
-          threadsState=${threadsState}
+          threadsState=${routeThreadsState}
           theme=${theme}
           toggleTheme=${toggleTheme}
           profile=${profile}
@@ -135,7 +146,7 @@ export function GatewayLayout({
 
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <${PageHeader}
-          threadsState=${threadsState}
+          threadsState=${routeThreadsState}
           notificationsState=${notificationsState}
           onToggleSidebar=${sidebar.toggle}
           sidebarOpen=${sidebar.currentOpen}
@@ -161,7 +172,7 @@ export function GatewayLayout({
               isChecking,
               isAdmin,
               globalAutoApproveEnabled,
-              threadsState,
+              threadsState: routeThreadsState,
             }}
           />
         </main>

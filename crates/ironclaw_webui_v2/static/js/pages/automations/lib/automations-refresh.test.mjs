@@ -6,6 +6,7 @@ import {
   AUTOMATIONS_DUE_GRACE_MS,
   AUTOMATIONS_OVERDUE_REFETCH_MS,
   AUTOMATIONS_RUNNING_REFETCH_MS,
+  AUTOMATIONS_THREAD_ATTACHMENT_REFETCH_WINDOW_MS,
   nextAutomationsRefetchDelay,
 } from "./automations-refresh.js";
 
@@ -72,6 +73,52 @@ test("nextAutomationsRefetchDelay follows running runs even when the automation 
       10_000,
     ),
     AUTOMATIONS_RUNNING_REFETCH_MS,
+  );
+});
+
+test("nextAutomationsRefetchDelay follows recent runs waiting for thread attachment", () => {
+  assert.equal(
+    nextAutomationsRefetchDelay(
+      [
+        {
+          state: "paused",
+          latest_unattached_run_thread_timestamp: 9_000,
+        },
+      ],
+      10_000,
+    ),
+    AUTOMATIONS_RUNNING_REFETCH_MS,
+  );
+});
+
+test("nextAutomationsRefetchDelay stops following old unattached run threads", () => {
+  assert.equal(
+    nextAutomationsRefetchDelay(
+      [
+        {
+          state: "paused",
+          latest_unattached_run_thread_timestamp:
+            10_000 - AUTOMATIONS_THREAD_ATTACHMENT_REFETCH_WINDOW_MS - 1,
+        },
+      ],
+      10_000,
+    ),
+    null,
+  );
+});
+
+test("nextAutomationsRefetchDelay stops following future unattached run threads", () => {
+  assert.equal(
+    nextAutomationsRefetchDelay(
+      [
+        {
+          state: "paused",
+          latest_unattached_run_thread_timestamp: 10_001,
+        },
+      ],
+      10_000,
+    ),
+    null,
   );
 });
 

@@ -1,5 +1,8 @@
 #[allow(dead_code)]
-#[path = "support/reborn/mod.rs"]
+#[path = "support/reborn_parity_qa/mod.rs"]
+mod parity_qa_support;
+#[allow(dead_code)]
+#[path = "integration/support/mod.rs"]
 mod reborn_support;
 mod support;
 
@@ -15,11 +18,9 @@ use ironclaw_turns::{
     LoopMessageRef, TurnStatus,
     run_profile::{LoopRunContext, PromptMode},
 };
-use reborn_support::harness::{
-    RebornBinaryE2EHarness, RebornHarnessSharedStorage, RecordingTestCapabilityPort,
-    test_product_scope,
-};
-use reborn_support::model_replay::RebornTraceReplayModelGateway;
+use parity_qa_support::binary_e2e::{RebornBinaryE2EHarness, RebornHarnessSharedStorage};
+use parity_qa_support::model_replay::RebornTraceReplayModelGateway;
+use reborn_support::harness::{RecordingTestCapabilityPort, test_product_scope};
 use tokio::sync::{RwLock, watch};
 
 const PROJECT_ALPHA_IDENTITY: &str = "Alice project alpha identity: carries amber notebook.";
@@ -175,7 +176,7 @@ struct ProjectIdentityKey {
 }
 
 impl ProjectIdentityKey {
-    fn from_turn(turn: &reborn_support::harness::SubmittedTurn) -> Self {
+    fn from_turn(turn: &parity_qa_support::binary_e2e::SubmittedTurn) -> Self {
         Self {
             tenant_id: turn.scope.tenant_id.as_str().to_string(),
             user_id: turn.actor.user_id.as_str().to_string(),
