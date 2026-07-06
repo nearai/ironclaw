@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Invocation context the host passes alongside params. The host selects the
-/// operation via the capability id (e.g. `slack_user.search_messages`); the
+/// operation via the capability id (e.g. `slack.search_messages`); the
 /// action is NOT carried in the params object.
 #[derive(Debug, Deserialize)]
 pub(crate) struct ToolContext {

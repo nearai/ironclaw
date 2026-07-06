@@ -216,7 +216,7 @@ impl SlackChannelSetupActivation for DynamicSlackChannelSetupActivation {
     async fn activate_slack_channel_after_setup_save(
         &self,
     ) -> Result<(), SlackChannelSetupActivationError> {
-        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack")
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack_bot")
             .map_err(slack_setup_activation_error)?;
         let projection = self
             .extension_management

@@ -19,7 +19,7 @@ use ironclaw_product_workflow::{
 
 use crate::{
     RebornProductAuthServices, SlackHostBetaMounts,
-    available_extensions::SLACK_EXTENSION_ID,
+    available_extensions::SLACK_BOT_EXTENSION_ID,
     slack_actor_identity::{RebornUserIdentityLookup, SLACK_IDENTITY_PROVIDER},
     slack_host_beta::{SlackPersonalConnectionScope, SlackPersonalConnectionScopeResolver},
     slack_outbound_targets::SlackPersonalDmTargetStore,
@@ -201,7 +201,7 @@ fn personal_credential_cleanup_request(
             },
             AuthSurface::Callback,
         ),
-        extension_id: ExtensionId::new(SLACK_EXTENSION_ID)
+        extension_id: ExtensionId::new(SLACK_BOT_EXTENSION_ID)
             .map_err(|error| RebornServicesError::internal_from(error.to_string()))?,
         provider: Some(
             AuthProviderId::new(SLACK_PERSONAL_PROVIDER_ID)
@@ -315,7 +315,7 @@ mod tests {
             1,
             "disconnect must issue exactly one credential cleanup"
         );
-        assert_eq!(cleanup_requests[0].extension_id.as_str(), "slack");
+        assert_eq!(cleanup_requests[0].extension_id.as_str(), "slack_bot");
         assert_eq!(
             cleanup_requests[0].provider.as_ref().map(|p| p.as_str()),
             Some(SLACK_PERSONAL_PROVIDER_ID),

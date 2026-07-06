@@ -6,7 +6,7 @@ use crate::auth::OAuthProviderIdentityCheck;
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::auth::OAuthProviderIdentityCheckFuture;
 #[cfg(feature = "slack-v2-host-beta")]
-use crate::available_extensions::{SLACK_EXTENSION_ID, slack_personal_oauth_setup_scopes};
+use crate::available_extensions::{SLACK_BOT_EXTENSION_ID, slack_personal_oauth_setup_scopes};
 use crate::oauth_dcr::DcrOAuthCallbackState;
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::slack_personal_binding::{
@@ -205,7 +205,7 @@ async fn start_slack_personal_oauth_flow(
     }
 
     let (client_id, redirect_uri) = state.slack_personal_oauth_credentials().await?;
-    if requester_extension.as_str() != SLACK_EXTENSION_ID {
+    if requester_extension.as_str() != SLACK_BOT_EXTENSION_ID {
         return Err(ProductAuthRouteFailure::invalid_request());
     }
     // The provider id and scope list are compile-time constants: a failure
@@ -1731,7 +1731,7 @@ mod tests {
                 None,
                 None,
             )),
-            Path("slack".to_string()),
+            Path("slack_bot".to_string()),
             Json(ExtensionOAuthStartRequest {
                 provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
                 account_label: "personal slack".to_string(),
@@ -1857,7 +1857,7 @@ mod tests {
                 None,
                 None,
             )),
-            Path("slack".to_string()),
+            Path("slack_bot".to_string()),
             Json(ExtensionOAuthStartRequest {
                 provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
                 account_label: "personal slack".to_string(),
@@ -1982,7 +1982,7 @@ mod tests {
                 None,
                 None,
             )),
-            Path("slack".to_string()),
+            Path("slack_bot".to_string()),
             Json(ExtensionOAuthStartRequest {
                 provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
                 account_label: "personal slack".to_string(),
@@ -2098,7 +2098,7 @@ mod tests {
                 None,
                 None,
             )),
-            Path("slack".to_string()),
+            Path("slack_bot".to_string()),
             Json(ExtensionOAuthStartRequest {
                 provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
                 account_label: "personal slack".to_string(),
@@ -2445,7 +2445,7 @@ mod tests {
                 None,
                 None,
             )),
-            Path("slack".to_string()),
+            Path("slack_bot".to_string()),
             Json(ExtensionOAuthStartRequest {
                 provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
                 account_label: "personal slack".to_string(),

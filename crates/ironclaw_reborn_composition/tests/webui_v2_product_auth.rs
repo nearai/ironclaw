@@ -1982,7 +1982,7 @@ mod slack_personal_oauth_serve {
     async fn slack_personal_oauth_start_serves_through_composed_router() {
         let app = build_app_with_slack_personal_oauth().await;
 
-        let response = post_extension_oauth_start(&app, "slack", slack_oauth_start_body()).await;
+        let response = post_extension_oauth_start(&app, "slack_bot", slack_oauth_start_body()).await;
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = read_body_string(response).await;
@@ -2009,7 +2009,7 @@ mod slack_personal_oauth_serve {
         // block would produce.
         let (app, _) = build_app_with_product_auth();
 
-        let response = post_extension_oauth_start(&app, "slack", slack_oauth_start_body()).await;
+        let response = post_extension_oauth_start(&app, "slack_bot", slack_oauth_start_body()).await;
 
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = read_body_string(response).await;

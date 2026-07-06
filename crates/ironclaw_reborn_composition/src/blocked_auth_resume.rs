@@ -330,7 +330,7 @@ mod tests {
             provider: RuntimeCredentialAccountProviderId::new("slack_personal")
                 .expect("provider id"),
             setup: RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
-            requester_extension: ExtensionId::new("slack_user").expect("extension id"),
+            requester_extension: ExtensionId::new("slack").expect("extension id"),
             provider_scopes: Vec::new(),
         }
     }

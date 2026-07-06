@@ -144,9 +144,9 @@ use ironclaw_turns::{InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore};
 
 use crate::RebornProductAuthServicePorts;
 #[cfg(feature = "slack-v2-host-beta")]
-use crate::available_extensions::slack_manifest_digest;
+use crate::available_extensions::slack_bot_manifest_digest;
 #[cfg(feature = "slack-v2-host-beta")]
-use crate::available_extensions::slack_user_manifest_digest;
+use crate::available_extensions::slack_manifest_digest;
 use crate::default_system_prompt::seed_default_system_prompt;
 use crate::input::{RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
@@ -3620,22 +3620,22 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
     ];
     #[cfg(feature = "slack-v2-host-beta")]
     entries.push(AdminEntry::for_local_manifest(
-        PackageId::new("slack").map_err(|error| RebornBuildError::InvalidConfig {
+        PackageId::new("slack_bot").map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("Slack first-party package id is invalid: {error}"),
         })?,
-        "/system/extensions/slack/manifest.toml".to_string(),
-        Some(slack_manifest_digest()),
+        "/system/extensions/slack_bot/manifest.toml".to_string(),
+        Some(slack_bot_manifest_digest()),
         HostTrustAssignment::first_party(),
         Vec::new(),
         None,
     ));
     #[cfg(feature = "slack-v2-host-beta")]
     entries.push(AdminEntry::for_local_manifest(
-        PackageId::new("slack_user").map_err(|error| RebornBuildError::InvalidConfig {
+        PackageId::new("slack").map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("Slack personal first-party package id is invalid: {error}"),
         })?,
-        "/system/extensions/slack_user/manifest.toml".to_string(),
-        Some(slack_user_manifest_digest()),
+        "/system/extensions/slack/manifest.toml".to_string(),
+        Some(slack_manifest_digest()),
         HostTrustAssignment::first_party(),
         gsuite_allowed_effects(),
         None,
@@ -7194,7 +7194,7 @@ mod tests {
         digest: Option<String>,
     ) -> ironclaw_host_api::PackageIdentity {
         ironclaw_host_api::PackageIdentity::new(
-            ironclaw_host_api::PackageId::new("slack").expect("slack package id"),
+            ironclaw_host_api::PackageId::new("slack_bot").expect("slack package id"),
             ironclaw_host_api::PackageSource::LocalManifest {
                 path: manifest_path.to_string(),
             },
@@ -7207,13 +7207,13 @@ mod tests {
     #[test]
     fn builtin_first_party_trust_policy_includes_slack_local_manifest_entry() {
         let policy = builtin_first_party_trust_policy().expect("trust policy");
-        let expected_digest = slack_manifest_digest();
+        let expected_digest = slack_bot_manifest_digest();
 
         let matching = ironclaw_trust::TrustPolicy::evaluate(
             &policy,
             &ironclaw_trust::TrustPolicyInput {
                 identity: slack_identity(
-                    "/system/extensions/slack/manifest.toml",
+                    "/system/extensions/slack_bot/manifest.toml",
                     Some(expected_digest.clone()),
                 ),
                 requested_trust: ironclaw_host_api::RequestedTrustClass::FirstPartyRequested,
@@ -7232,7 +7232,7 @@ mod tests {
             &policy,
             &ironclaw_trust::TrustPolicyInput {
                 identity: slack_identity(
-                    "/system/extensions/slack/manifest.toml",
+                    "/system/extensions/slack_bot/manifest.toml",
                     Some(
                         "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
                             .to_string(),
@@ -7254,7 +7254,7 @@ mod tests {
             &policy,
             &ironclaw_trust::TrustPolicyInput {
                 identity: slack_identity(
-                    "/system/extensions/slack/other-manifest.toml",
+                    "/system/extensions/slack_bot/other-manifest.toml",
                     Some(expected_digest),
                 ),
                 requested_trust: ironclaw_host_api::RequestedTrustClass::FirstPartyRequested,

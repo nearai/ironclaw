@@ -2357,7 +2357,7 @@ mod tests {
         )
         .expect("webui bundle");
         let caller = operator_caller();
-        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack")
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack_bot")
             .expect("valid slack package ref");
 
         bundle
@@ -2373,7 +2373,7 @@ mod tests {
         let slack = response
             .extensions
             .iter()
-            .find(|extension| extension.package_ref.id.as_str() == "slack")
+            .find(|extension| extension.package_ref.id.as_str() == "slack_bot")
             .expect("Slack extension is listed");
 
         assert_eq!(slack.kind, "channel");
@@ -2403,7 +2403,7 @@ mod tests {
         )
         .expect("webui bundle");
         let caller = operator_caller();
-        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack")
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack_bot")
             .expect("valid slack package ref");
 
         bundle
@@ -2419,7 +2419,7 @@ mod tests {
         let slack_before_setup = before_setup
             .extensions
             .iter()
-            .find(|extension| extension.package_ref.id.as_str() == "slack")
+            .find(|extension| extension.package_ref.id.as_str() == "slack_bot")
             .expect("Slack extension is listed before setup");
         assert!(
             !slack_before_setup.active,
@@ -2459,7 +2459,7 @@ mod tests {
         let slack = extensions
             .extensions
             .iter()
-            .find(|extension| extension.package_ref.id.as_str() == "slack")
+            .find(|extension| extension.package_ref.id.as_str() == "slack_bot")
             .expect("Slack extension is listed");
         assert!(
             slack.active,

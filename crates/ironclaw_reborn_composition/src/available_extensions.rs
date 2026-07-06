@@ -50,11 +50,11 @@ const GOOGLE_SHEETS_WASM_MODULE: &[u8] = include_bytes!(
     "../../ironclaw_first_party_extensions/assets/google-sheets/wasm/google_sheets_tool.wasm"
 );
 #[cfg(feature = "slack-v2-host-beta")]
-const SLACK_USER_MANIFEST: &str =
-    include_str!("../../ironclaw_first_party_extensions/assets/slack_user/manifest.toml");
+const SLACK_MANIFEST: &str =
+    include_str!("../../ironclaw_first_party_extensions/assets/slack/manifest.toml");
 #[cfg(feature = "slack-v2-host-beta")]
-const SLACK_USER_WASM_MODULE: &[u8] = include_bytes!(
-    "../../ironclaw_first_party_extensions/assets/slack_user/wasm/slack_user_tool.wasm"
+const SLACK_WASM_MODULE: &[u8] = include_bytes!(
+    "../../ironclaw_first_party_extensions/assets/slack/wasm/slack_user_tool.wasm"
 );
 const GOOGLE_SLIDES_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/google-slides/manifest.toml");
@@ -70,13 +70,13 @@ const WEB_ACCESS_MANIFEST: &str =
 const NEARAI_MCP_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/nearai-mcp/manifest.toml");
 #[cfg(feature = "slack-v2-host-beta")]
-const SLACK_MANIFEST: &str =
-    include_str!("../../ironclaw_first_party_extensions/assets/slack/manifest.toml");
+const SLACK_BOT_MANIFEST: &str =
+    include_str!("../../ironclaw_first_party_extensions/assets/slack_bot/manifest.toml");
 const NEARAI_EXTENSION_ID: &str = HostManagedCredentialExtension::NearAi.id();
 #[cfg(feature = "slack-v2-host-beta")]
-pub(crate) const SLACK_EXTENSION_ID: &str = "slack";
+pub(crate) const SLACK_BOT_EXTENSION_ID: &str = "slack_bot";
 #[cfg(feature = "slack-v2-host-beta")]
-pub(crate) const SLACK_USER_EXTENSION_ID: &str = "slack_user";
+pub(crate) const SLACK_EXTENSION_ID: &str = "slack";
 #[cfg(feature = "slack-v2-host-beta")]
 const SLACK_PERSONAL_OAUTH_REQUIREMENT_NAME: &str = "slack_personal_oauth";
 #[cfg(feature = "slack-v2-host-beta")]
@@ -208,7 +208,7 @@ fn onboarding(package_ref: &LifecyclePackageRef) -> Option<LifecycleExtensionOnb
             "After authorization completes, activate Gmail to publish its tools.",
         )),
         #[cfg(feature = "slack-v2-host-beta")]
-        "slack" => Some(onboarding_message(
+        "slack_bot" => Some(onboarding_message(
             "Slack needs OAuth authorization before the Slack bot can recognize your DMs.",
             Some("Authorize the Slack account you will use to DM IronClaw."),
             None,
@@ -271,7 +271,7 @@ fn credential_requirements(
         return Vec::new();
     }
     #[cfg(feature = "slack-v2-host-beta")]
-    if is_slack_extension_package(&package.package_ref) {
+    if is_slack_bot_extension_package(&package.package_ref) {
         return slack_personal_oauth_credential_requirements();
     }
 
@@ -322,9 +322,9 @@ fn credential_requirements(
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
-fn is_slack_extension_package(package_ref: &LifecyclePackageRef) -> bool {
+fn is_slack_bot_extension_package(package_ref: &LifecyclePackageRef) -> bool {
     package_ref.kind == LifecyclePackageKind::Extension
-        && package_ref.id.as_str() == SLACK_EXTENSION_ID
+        && package_ref.id.as_str() == SLACK_BOT_EXTENSION_ID
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
@@ -392,9 +392,9 @@ impl AvailableExtensionCatalog {
             gmail_package()?,
         ];
         #[cfg(feature = "slack-v2-host-beta")]
-        packages.push(slack_package()?);
+        packages.push(slack_bot_package()?);
         #[cfg(feature = "slack-v2-host-beta")]
-        packages.push(slack_user_package()?);
+        packages.push(slack_package()?);
         Ok(Self::from_packages(packages))
     }
 
@@ -576,18 +576,18 @@ fn gmail_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
-fn slack_user_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+fn slack_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     bundled_extension_package(
-        SLACK_USER_EXTENSION_ID,
+        SLACK_EXTENSION_ID,
         "Slack (personal)",
-        SLACK_USER_MANIFEST,
-        slack_user_assets(),
+        SLACK_MANIFEST,
+        slack_assets(),
     )
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
-fn slack_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package("slack", "Slack", SLACK_MANIFEST, slack_assets())
+fn slack_bot_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    bundled_extension_package("slack_bot", "Slack", SLACK_BOT_MANIFEST, slack_bot_assets())
 }
 
 pub(crate) fn google_calendar_manifest_digest() -> String {
@@ -607,24 +607,24 @@ pub(crate) fn google_sheets_manifest_digest() -> String {
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
-pub(crate) fn slack_user_manifest_digest() -> String {
-    sha256_digest_token(SLACK_USER_MANIFEST.as_bytes())
+pub(crate) fn slack_manifest_digest() -> String {
+    sha256_digest_token(SLACK_MANIFEST.as_bytes())
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
-pub(crate) fn slack_user_package_ref() -> Result<LifecyclePackageRef, ProductWorkflowError> {
-    LifecyclePackageRef::new(LifecyclePackageKind::Extension, SLACK_USER_EXTENSION_ID)
+pub(crate) fn slack_package_ref() -> Result<LifecyclePackageRef, ProductWorkflowError> {
+    LifecyclePackageRef::new(LifecyclePackageKind::Extension, SLACK_EXTENSION_ID)
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
-pub(crate) fn is_public_slack_package_ref(package_ref: &LifecyclePackageRef) -> bool {
-    is_slack_extension_package(package_ref)
+pub(crate) fn is_public_slack_bot_package_ref(package_ref: &LifecyclePackageRef) -> bool {
+    is_slack_bot_extension_package(package_ref)
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) fn is_internal_extension_package_ref(package_ref: &LifecyclePackageRef) -> bool {
     package_ref.kind == LifecyclePackageKind::Extension
-        && package_ref.id.as_str() == SLACK_USER_EXTENSION_ID
+        && package_ref.id.as_str() == SLACK_EXTENSION_ID
 }
 
 #[cfg(not(feature = "slack-v2-host-beta"))]
@@ -649,8 +649,8 @@ pub(crate) fn web_access_manifest_digest() -> String {
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
-pub(crate) fn slack_manifest_digest() -> String {
-    sha256_digest_token(SLACK_MANIFEST.as_bytes())
+pub(crate) fn slack_bot_manifest_digest() -> String {
+    sha256_digest_token(SLACK_BOT_MANIFEST.as_bytes())
 }
 
 pub(crate) fn nearai_mcp_manifest_toml_for_config(
@@ -1346,20 +1346,53 @@ fn google_sheets_assets() -> Vec<AvailableExtensionAsset> {
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
-fn slack_user_assets() -> Vec<AvailableExtensionAsset> {
-    google_wasm_assets!(
-        "slack_user",
-        SLACK_USER_MANIFEST,
-        "slack_user_tool.wasm",
-        SLACK_USER_WASM_MODULE,
-        [
-            "search_messages",
-            "list_conversations",
-            "get_conversation_history",
-            "get_user_info",
-            "send_message"
-        ]
-    )
+fn slack_assets() -> Vec<AvailableExtensionAsset> {
+    // The tool's asset subtree keeps its `slack_user` schema/prompt directory
+    // names and the `slack_user_tool.wasm` binary name even though the
+    // extension id is now `slack`; only the top-level asset dir moved to
+    // `assets/slack`. So this can't use `google_wasm_assets!` (which ties the
+    // outer dir, the inner dir, and the mounted virtual path to a single id) —
+    // the source dir is `slack` while the inner dir and mounted paths stay
+    // `slack_user`. Spell the assets out.
+    macro_rules! slack_schema_asset {
+        ($path:literal) => {
+            bytes_asset(
+                concat!("schemas/slack_user/", $path),
+                include_bytes!(concat!(
+                    "../../ironclaw_first_party_extensions/assets/slack/schemas/slack_user/",
+                    $path
+                )),
+            )
+        };
+    }
+    macro_rules! slack_prompt_asset {
+        ($operation:literal) => {
+            bytes_asset(
+                concat!("prompts/slack_user/", $operation, ".md"),
+                include_bytes!(concat!(
+                    "../../ironclaw_first_party_extensions/assets/slack/prompts/slack_user/",
+                    $operation,
+                    ".md"
+                )),
+            )
+        };
+    }
+
+    vec![
+        bytes_asset("manifest.toml", SLACK_MANIFEST.as_bytes()),
+        slack_schema_asset!("raw_output.v1.json"),
+        slack_schema_asset!("search_messages.input.v1.json"),
+        slack_prompt_asset!("search_messages"),
+        slack_schema_asset!("list_conversations.input.v1.json"),
+        slack_prompt_asset!("list_conversations"),
+        slack_schema_asset!("get_conversation_history.input.v1.json"),
+        slack_prompt_asset!("get_conversation_history"),
+        slack_schema_asset!("get_user_info.input.v1.json"),
+        slack_prompt_asset!("get_user_info"),
+        slack_schema_asset!("send_message.input.v1.json"),
+        slack_prompt_asset!("send_message"),
+        bytes_asset("wasm/slack_user_tool.wasm", SLACK_WASM_MODULE),
+    ]
 }
 
 fn google_slides_assets() -> Vec<AvailableExtensionAsset> {
@@ -1502,8 +1535,8 @@ fn gmail_assets() -> Vec<AvailableExtensionAsset> {
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
-fn slack_assets() -> Vec<AvailableExtensionAsset> {
-    vec![bytes_asset("manifest.toml", SLACK_MANIFEST.as_bytes())]
+fn slack_bot_assets() -> Vec<AvailableExtensionAsset> {
+    vec![bytes_asset("manifest.toml", SLACK_BOT_MANIFEST.as_bytes())]
 }
 
 fn bytes_asset(path: &str, bytes: &[u8]) -> AvailableExtensionAsset {
@@ -1682,7 +1715,7 @@ where
 fn reserved_host_bundled_extension_id(extension_id: &ExtensionId) -> bool {
     matches!(
         extension_id.as_str(),
-        "github" | "notion" | "web-access" | "slack" | NEARAI_EXTENSION_ID
+        "github" | "notion" | "web-access" | "slack_bot" | NEARAI_EXTENSION_ID
     ) || is_gsuite_extension_id(extension_id)
 }
 
@@ -1964,7 +1997,7 @@ mod tests {
                 "Google Calendar needs Google OAuth authorization",
             ),
             #[cfg(feature = "slack-v2-host-beta")]
-            ("slack", "Slack needs OAuth authorization"),
+            ("slack_bot", "Slack needs OAuth authorization"),
             ("notion", "Notion needs OAuth authorization"),
             #[cfg(feature = "root-llm-provider")]
             (
@@ -2012,7 +2045,7 @@ mod tests {
                         }),
                     "{extension_id} configure next step should describe post-authorization activation"
                 );
-            } else if extension_id == "slack" {
+            } else if extension_id == "slack_bot" {
                 assert!(
                     onboarding
                         .credential_instructions
@@ -2171,7 +2204,7 @@ mod tests {
 
         assert_eq!(
             slack_results,
-            vec!["slack".to_string()],
+            vec!["slack_bot".to_string()],
             "the Slack user-tool package is internal plumbing and must not be a second user-visible extension"
         );
     }
@@ -2181,7 +2214,7 @@ mod tests {
     fn bundled_slack_projects_personal_oauth_setup_for_entrypoint_identity_and_tools() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
         let package_ref =
-            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").unwrap();
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack_bot").unwrap();
         let summary = catalog.resolve(&package_ref).unwrap().summary();
 
         assert_eq!(summary.credential_requirements.len(), 1);
@@ -2333,13 +2366,13 @@ mod tests {
 
     #[cfg(feature = "slack-v2-host-beta")]
     #[test]
-    fn bundled_slack_package_declares_product_adapter_channel_surface() {
+    fn bundled_slack_bot_package_declares_product_adapter_channel_surface() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
         let package_ref =
-            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").unwrap();
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack_bot").unwrap();
         let package = catalog.resolve(&package_ref).unwrap();
 
-        assert_eq!(package.package.manifest.id.as_str(), "slack");
+        assert_eq!(package.package.manifest.id.as_str(), "slack_bot");
         assert!(matches!(
             package.package.manifest.runtime,
             ExtensionRuntime::FirstParty { ref service } if service == "slack_v2_host_beta"
@@ -2456,7 +2489,7 @@ handle = "web_token"
         assert!(google_slides_manifest_digest().starts_with("sha256:"));
         assert!(gmail_manifest_digest().starts_with("sha256:"));
         #[cfg(feature = "slack-v2-host-beta")]
-        assert!(slack_manifest_digest().starts_with("sha256:"));
+        assert!(slack_bot_manifest_digest().starts_with("sha256:"));
     }
 
     #[test]
@@ -2636,8 +2669,8 @@ handle = "web_token"
         .await
         .unwrap();
         fs.write_file(
-            &VirtualPath::new("/system/extensions/slack/manifest.toml").unwrap(),
-            b"not parsed because slack is host-bundled",
+            &VirtualPath::new("/system/extensions/slack_bot/manifest.toml").unwrap(),
+            b"not parsed because slack_bot is host-bundled",
         )
         .await
         .unwrap();
@@ -2650,7 +2683,7 @@ handle = "web_token"
         .unwrap();
 
         assert_eq!(catalog.search("").count(), 0);
-        assert_eq!(catalog.search("slack").count(), 0);
+        assert_eq!(catalog.search("slack_bot").count(), 0);
     }
 
     #[tokio::test]

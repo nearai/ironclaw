@@ -999,7 +999,7 @@ async fn host_runtime_services_missing_github_runtime_secret_blocks_on_auth() {
 /// store -> staged injection -> recorded egress).
 #[tokio::test]
 async fn host_runtime_services_injects_personal_xoxp_token_for_slack_user_search_capability() {
-    let capability_id = CapabilityId::new("slack_user.search_messages").unwrap();
+    let capability_id = CapabilityId::new("slack.search_messages").unwrap();
     let scope = sample_scope(InvocationId::new());
     // A per-user *personal* Slack token, shaped like a real `xoxp-` user token
     // so a regression that swapped in a bot (`xoxb-`) token changes the bytes.
@@ -1026,7 +1026,7 @@ async fn host_runtime_services_injects_personal_xoxp_token_for_slack_user_search
                     scopes: slack_user_scopes(),
                 },
                 provider_scopes: slack_user_scopes(),
-                requester_extension: ExtensionId::new("slack_user").unwrap(),
+                requester_extension: ExtensionId::new("slack").unwrap(),
             },
         ])),
         ProcessServices::in_memory(),
@@ -1109,7 +1109,7 @@ async fn host_runtime_services_injects_personal_xoxp_token_for_slack_user_search
 /// slack.com egress happens.
 #[tokio::test]
 async fn host_runtime_services_missing_slack_personal_account_blocks_slack_user_on_auth() {
-    let capability_id = CapabilityId::new("slack_user.search_messages").unwrap();
+    let capability_id = CapabilityId::new("slack.search_messages").unwrap();
     let scope = sample_scope(InvocationId::new());
     let policy = slack_policy();
     let network = RecordingNetworkHttpEgress::with_body(
@@ -1132,7 +1132,7 @@ async fn host_runtime_services_missing_slack_personal_account_blocks_slack_user_
                     scopes: slack_user_scopes(),
                 },
                 provider_scopes: slack_user_scopes(),
-                requester_extension: ExtensionId::new("slack_user").unwrap(),
+                requester_extension: ExtensionId::new("slack").unwrap(),
             },
         ])),
         ProcessServices::in_memory(),
@@ -2019,7 +2019,7 @@ impl RuntimeCredentialAccountResolver for FixedSlackRuntimeCredentialAccountReso
         request: RuntimeCredentialAccountRequest<'_>,
     ) -> Result<RuntimeCredentialAccessSecret, CredentialStageError> {
         assert_eq!(request.provider.as_str(), "slack_personal");
-        assert_eq!(request.requester_extension.as_str(), "slack_user");
+        assert_eq!(request.requester_extension.as_str(), "slack");
         assert_eq!(request.provider_scopes, self.expected_scopes.as_slice());
         self.result
             .clone()
@@ -2040,7 +2040,7 @@ fn registry_with_slack_user_package() -> ExtensionRegistry {
     .unwrap();
     let package = ExtensionPackage::from_manifest(
         manifest,
-        VirtualPath::new("/system/extensions/slack_user").unwrap(),
+        VirtualPath::new("/system/extensions/slack").unwrap(),
     )
     .unwrap();
     let mut registry = ExtensionRegistry::new();
@@ -2062,7 +2062,7 @@ fn filesystem_with_slack_user_package() -> LocalFilesystem {
 fn slack_user_asset_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("crates/ironclaw_first_party_extensions/assets/slack_user")
+        .join("crates/ironclaw_first_party_extensions/assets/slack")
 }
 
 fn slack_policy() -> NetworkPolicy {
@@ -2078,7 +2078,7 @@ fn slack_policy() -> NetworkPolicy {
 }
 
 /// The personal-token OAuth scopes the `slack_user` manifest requests. Kept in
-/// lockstep with `assets/slack_user/manifest.toml` so the injected credential's
+/// lockstep with `assets/slack/manifest.toml` so the injected credential's
 /// scope set matches production.
 fn slack_user_scopes() -> Vec<String> {
     [
@@ -2102,8 +2102,8 @@ fn slack_user_scopes() -> Vec<String> {
 fn slack_user_first_party_trust_policy() -> HostTrustPolicy {
     HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries(vec![
         AdminEntry::for_local_manifest(
-            PackageId::new("slack_user").unwrap(),
-            "/system/extensions/slack_user/manifest.toml".to_string(),
+            PackageId::new("slack").unwrap(),
+            "/system/extensions/slack/manifest.toml".to_string(),
             None,
             HostTrustAssignment::first_party(),
             vec![

@@ -128,18 +128,18 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
     Ok(result)
 }
 
-/// Map a capability id (e.g. `slack_user.search_messages`) to the serde action
+/// Map a capability id (e.g. `slack.search_messages`) to the serde action
 /// tag the params enum expects.
 fn action_from_context(context: Option<&str>) -> Result<&'static str, String> {
     let context = context.ok_or_else(|| "missing_invocation_context".to_string())?;
     let context: ToolContext =
         serde_json::from_str(context).map_err(|_| "invalid_invocation_context".to_string())?;
     match context.capability_id.as_str() {
-        "slack_user.search_messages" => Ok("search_messages"),
-        "slack_user.list_conversations" => Ok("list_conversations"),
-        "slack_user.get_conversation_history" => Ok("get_conversation_history"),
-        "slack_user.get_user_info" => Ok("get_user_info"),
-        "slack_user.send_message" => Ok("send_message"),
+        "slack.search_messages" => Ok("search_messages"),
+        "slack.list_conversations" => Ok("list_conversations"),
+        "slack.get_conversation_history" => Ok("get_conversation_history"),
+        "slack.get_user_info" => Ok("get_user_info"),
+        "slack.send_message" => Ok("send_message"),
         _ => Err("unsupported_slack_user_capability".to_string()),
     }
 }

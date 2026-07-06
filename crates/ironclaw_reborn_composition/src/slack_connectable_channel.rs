@@ -214,7 +214,7 @@ mod tests {
         // Enforce that invariant here so the two copies can never silently drift.
         let descriptor = slack_oauth_connectable_channel();
         let requirement =
-            crate::extension_lifecycle::channel_connection_requirement("slack", "Slack");
+            crate::extension_lifecycle::channel_connection_requirement("slack_bot", "Slack");
 
         assert_eq!(requirement.channel, descriptor.channel);
         assert_eq!(requirement.instructions, descriptor.action.instructions);
