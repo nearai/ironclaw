@@ -337,8 +337,9 @@ impl PerSurfaceCapabilityDenyDecorator {
     }
 }
 
+#[async_trait]
 impl LoopCapabilityPortDecorator for PerSurfaceCapabilityDenyDecorator {
-    fn decorate(
+    async fn decorate(
         &self,
         run_context: &LoopRunContext,
         inner: Arc<dyn LoopCapabilityPort>,
@@ -2112,10 +2113,12 @@ mod tests {
         let decorator =
             PerSurfaceCapabilityDenyDecorator::new(vec![capability_id("demo.b")], Vec::new());
 
-        let decorated = decorator.decorate(
-            &run_context_with_capability_surface_profile_id("any_surface"),
-            Arc::clone(&inner),
-        );
+        let decorated = decorator
+            .decorate(
+                &run_context_with_capability_surface_profile_id("any_surface"),
+                Arc::clone(&inner),
+            )
+            .await;
 
         let ids = visible_ids(&decorated).await;
         assert_eq!(ids, vec!["demo.a", "demo.c"]);
@@ -2132,16 +2135,20 @@ mod tests {
             )],
         );
 
-        let matching = decorator.decorate(
-            &run_context_with_capability_surface_profile_id("surface_a"),
-            Arc::clone(&inner),
-        );
+        let matching = decorator
+            .decorate(
+                &run_context_with_capability_surface_profile_id("surface_a"),
+                Arc::clone(&inner),
+            )
+            .await;
         assert_eq!(visible_ids(&matching).await, vec!["demo.a"]);
 
-        let non_matching = decorator.decorate(
-            &run_context_with_capability_surface_profile_id("surface_b"),
-            Arc::clone(&inner),
-        );
+        let non_matching = decorator
+            .decorate(
+                &run_context_with_capability_surface_profile_id("surface_b"),
+                Arc::clone(&inner),
+            )
+            .await;
         assert_eq!(visible_ids(&non_matching).await, vec!["demo.a", "demo.b"]);
     }
 
@@ -2159,10 +2166,12 @@ mod tests {
         // Non-matching profile and empty global deny list: no filtering
         // applies, so decorate() must return the exact same Arc instance
         // (no CapabilitySurfaceDenyFilter wrapper allocated).
-        let decorated = decorator.decorate(
-            &run_context_with_capability_surface_profile_id("surface_b"),
-            Arc::clone(&inner),
-        );
+        let decorated = decorator
+            .decorate(
+                &run_context_with_capability_surface_profile_id("surface_b"),
+                Arc::clone(&inner),
+            )
+            .await;
         assert!(
             Arc::ptr_eq(&inner, &decorated),
             "expected the exact inner Arc to be returned unchanged"
@@ -2191,10 +2200,12 @@ mod tests {
             ],
         );
 
-        let decorated = decorator.decorate(
-            &run_context_with_capability_surface_profile_id("surface_b"),
-            Arc::clone(&inner),
-        );
+        let decorated = decorator
+            .decorate(
+                &run_context_with_capability_surface_profile_id("surface_b"),
+                Arc::clone(&inner),
+            )
+            .await;
 
         let ids = visible_ids(&decorated).await;
         assert_eq!(ids, vec!["demo.a", "demo.c"]);

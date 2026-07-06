@@ -287,6 +287,44 @@ impl RebornIntegrationHarness {
         Err(format!("no captured tool definition named {name:?}; saw {seen:?}").into())
     }
 
+    /// Assert the captured `tools` argument's definition named `name` has a
+    /// `description` field that does NOT contain `needle`, on every request
+    /// where that definition appears. Complements
+    /// [`assert_model_tools_contains`]/[`assert_model_tools_excludes`] (which
+    /// only ever check tool *names*): the bridge tool_search's own advertised
+    /// description doubles as an always-on catalog index of discoverable tool
+    /// names (see `catalog_index_tool_search_description`), so under a
+    /// narrowed capability allow-set that index text — not just tool_search's
+    /// RESULTS — must not leak a non-allowlisted tool's name.
+    ///
+    /// Errors if `name` is never found (nothing to assert the exclusion
+    /// against) — callers should pair this with `assert_model_tools_contains`.
+    pub async fn assert_model_tool_description_excludes(
+        &self,
+        name: &str,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        let definitions = self.scripted_llm.captured_tool_definitions();
+        let mut found = false;
+        for definition in definitions.iter().flatten() {
+            if definition.name != name {
+                continue;
+            }
+            found = true;
+            if definition.description.contains(needle) {
+                return Err(format!(
+                    "tool {name:?} description unexpectedly contains {needle:?}: {}",
+                    definition.description
+                )
+                .into());
+            }
+        }
+        if !found {
+            return Err(format!("no captured tool definition named {name:?}").into());
+        }
+        Ok(())
+    }
+
     /// Inverse of [`assert_model_tools_contains`]: assert NO captured `tools`
     /// argument contains a definition named `name`. Paired with the positive
     /// assertion to prove disclosure mode *replaces* the tool surface rather

@@ -865,8 +865,9 @@ impl SubagentSpawnCapabilityDecorator {
     }
 }
 
+#[async_trait::async_trait]
 impl LoopCapabilityPortDecorator for SubagentSpawnCapabilityDecorator {
-    fn decorate(
+    async fn decorate(
         &self,
         run_context: &LoopRunContext,
         inner: Arc<dyn LoopCapabilityPort>,
@@ -1070,8 +1071,9 @@ mod tests {
         log: Arc<Mutex<Vec<&'static str>>>,
     }
 
+    #[async_trait]
     impl LoopCapabilityPortDecorator for LoggingDecorator {
-        fn decorate(
+        async fn decorate(
             &self,
             _run_context: &LoopRunContext,
             inner: Arc<dyn LoopCapabilityPort>,
@@ -1193,8 +1195,9 @@ mod tests {
         decorate_calls: Arc<AtomicUsize>,
     }
 
+    #[async_trait]
     impl LoopCapabilityPortDecorator for NoopDecorator {
-        fn decorate(
+        async fn decorate(
             &self,
             _run_context: &LoopRunContext,
             inner: Arc<dyn LoopCapabilityPort>,

@@ -230,6 +230,38 @@ async fn narrowed_allow_set_still_denies_non_allowlisted_tool_through_deferral()
         .expect("a non-allowlisted underlying tool must never reach dispatch");
 }
 
+/// #5659-w6 follow-up: the tool_search bridge's own advertised *description*
+/// (the always-on catalog index of discoverable tool names, see
+/// `catalog_index_tool_search_description`) must be narrowed by the caller's
+/// allow-set too — not just tool_search RESULTS and tool_describe (#5712).
+/// The bridge id is host-exempt from the outer `CapabilitySurfaceProfileFilter`
+/// (#5647) so nothing else strips a leaked name out of that description text.
+#[tokio::test]
+async fn bridged_mode_tool_search_description_is_narrowed_by_allow_set() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_bridged()
+        .with_github_issue_tools()
+        .with_narrowed_capability_allow_set_for_bridged_test(["github.get_repo"])
+        .script([RebornScriptedReply::text("done")])
+        .build()
+        .await
+        .expect("narrowed bridged-disclosure harness builds");
+
+    harness.submit_turn("hello").await.expect("turn completes");
+
+    harness
+        .assert_model_tools_contains(TOOL_SEARCH_NAME)
+        .await
+        .expect("bridge ids stay advertised under a narrowed allow-set (#5647)");
+    harness
+        .assert_model_tool_description_excludes(TOOL_SEARCH_NAME, "github__list_issues")
+        .await
+        .expect(
+            "non-allowlisted tool name must not leak via tool_search's own \
+                 advertised description index",
+        );
+}
+
 /// #5712: tool_search RESULTS are narrowed by the caller's allow-set — the
 /// bridge port's catalog is built below the profile filter, so without
 /// result filtering a narrowed profile reads every capability's metadata.
