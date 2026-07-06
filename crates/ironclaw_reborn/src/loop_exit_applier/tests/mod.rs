@@ -1559,6 +1559,7 @@ async fn thread_checkpoint_evidence_rejects_unverified_failure_explanation_ref()
         thread_service,
         Arc::new(ironclaw_turns::InMemoryTurnStateStore::default()) as Arc<dyn TurnStateStore>,
         loop_checkpoint_store,
+        empty_await_dependent_run_evidence(),
         thread_scope,
     )
     .with_checkpoint_state_store(checkpoint_state_store);

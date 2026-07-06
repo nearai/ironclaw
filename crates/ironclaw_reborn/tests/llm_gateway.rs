@@ -35,11 +35,11 @@ use ironclaw_turns::{
         HostManagedLoopModelPort, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
         InMemoryRunProfileResolver, InstructionMaterializationStore, InstructionSafetyContext,
-        LoopCapabilityPort, LoopHostMilestoneKind, LoopInlineMessage, LoopInlineMessageRole,
-        LoopModelGateway, LoopModelGatewayRequest, LoopModelMessage, LoopModelPort,
-        LoopModelRequest, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-        LoopRuntimeContext, LoopSafeSummary, ModelProfileId, ParentLoopOutput, PromptMode,
-        ProviderToolCall, ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
+        LoopCapabilityPort, LoopHostMilestoneKind, LoopInlineMessage, LoopInlineMessageBody,
+        LoopInlineMessageRole, LoopModelGateway, LoopModelGatewayRequest, LoopModelMessage,
+        LoopModelPort, LoopModelRequest, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+        LoopRuntimeContext, ModelProfileId, ParentLoopOutput, PromptMode, ProviderToolCall,
+        ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
         VisibleCapabilitySurface,
     },
 };
@@ -1920,7 +1920,7 @@ async fn production_loop_model_gateway_accepts_inline_prompt_messages() {
                 None,
                 vec![LoopInlineMessage {
                     role: LoopInlineMessageRole::System,
-                    safe_body: LoopSafeSummary::new(inline_text).unwrap(),
+                    safe_body: LoopInlineMessageBody::new(inline_text).unwrap(),
                 }],
             )
             .await,
