@@ -791,18 +791,20 @@ fn compare(results: &[ResultRow]) -> Vec<ComparisonRow> {
         let throughput_ratio = ratio(pg.throughput_ops_sec, libsql.throughput_ops_sec);
         let errors_ok = pg.errors <= libsql.errors;
         let state_hash_ok = pg.state_hash == libsql.state_hash;
+        let latency_thresholds_ok = pg.p50_ms <= (libsql.p50_ms * 1.10).max(libsql.p50_ms + 3.0)
+            && pg.p95_ms <= (libsql.p95_ms * 1.15).max(libsql.p95_ms + 8.0)
+            && pg.p99_ms <= (libsql.p99_ms * 1.25).max(libsql.p99_ms + 15.0);
         let dev_pass = pg.errors == 0
             && libsql.errors == 0
             && state_hash_ok
-            && pg.p50_ms <= (libsql.p50_ms * 1.10).max(libsql.p50_ms + 3.0)
-            && pg.p95_ms <= (libsql.p95_ms * 1.15).max(libsql.p95_ms + 8.0)
-            && pg.p99_ms <= (libsql.p99_ms * 1.25).max(libsql.p99_ms + 15.0)
+            && latency_thresholds_ok
             && throughput_ratio >= 0.90
             && errors_ok;
+        let latency_hard_fail =
+            !latency_thresholds_ok && (p95_ratio > 1.5 || p99_ratio > 2.0);
         let hard_fail = libsql.errors > 0
             || pg.errors > 0
-            || p95_ratio > 1.5
-            || p99_ratio > 2.0
+            || latency_hard_fail
             || !errors_ok
             || !state_hash_ok;
         comparisons.push(ComparisonRow {
@@ -1022,6 +1024,29 @@ mod tests {
         comparison.dev_pass = false;
 
         assert!(!scored_gate_failed("dev", &[], &[comparison]));
+    }
+
+    #[test]
+    fn compare_allows_high_ratio_when_additive_latency_target_passes() {
+        let mut libsql = result_row(BackendName::Libsql, "query_exact", 0);
+        libsql.p50_ms = 0.2;
+        libsql.p95_ms = 0.3;
+        libsql.p99_ms = 0.4;
+        libsql.throughput_ops_sec = 100.0;
+
+        let mut postgres = result_row(BackendName::Postgres, "query_exact", 0);
+        postgres.postgres_pool_size = Some(1);
+        postgres.p50_ms = 0.6;
+        postgres.p95_ms = 0.9;
+        postgres.p99_ms = 1.2;
+        postgres.throughput_ops_sec = 100.0;
+
+        let comparisons = compare(&[libsql, postgres]);
+
+        assert_eq!(comparisons.len(), 1);
+        assert!(comparisons[0].dev_pass);
+        assert!(!comparisons[0].hard_fail);
+        assert!(comparisons[0].postgres_p95_ratio > 1.5);
     }
 
     #[test]

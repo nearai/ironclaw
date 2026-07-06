@@ -1343,7 +1343,7 @@ where
         let title = request.title;
         let metadata_json = request.metadata_json;
         let thread_id_clone = thread_id.clone();
-        let record = cas_update(
+        let (record, created) = cas_update(
             self.filesystem.as_ref(),
             &resource_scope,
             &path,
@@ -1357,7 +1357,7 @@ where
                 let metadata_json = metadata_json.clone();
                 let thread_id = thread_id_clone.clone();
                 let outcome: Result<
-                    CasApply<StoredThreadRecord, SessionThreadRecord>,
+                    CasApply<StoredThreadRecord, (SessionThreadRecord, bool)>,
                     SessionThreadError,
                 > = match current {
                     Some(existing) => {
@@ -1371,7 +1371,7 @@ where
                             Err(SessionThreadError::ThreadScopeMismatch { thread_id })
                         } else {
                             // Unchanged snapshot → cas_update skips the write.
-                            Ok(CasApply::new(existing.clone(), existing.record))
+                            Ok(CasApply::new(existing.clone(), (existing.record, false)))
                         }
                     }
                     None => {
@@ -1395,7 +1395,7 @@ where
                             record: record.clone(),
                             next_sequence: 1,
                         };
-                        Ok(CasApply::new(stored, record))
+                        Ok(CasApply::new(stored, (record, true)))
                     }
                 };
                 async move { outcome }
@@ -1403,8 +1403,10 @@ where
         )
         .await
         .map_err(map_cas_error)?;
-        self.refresh_thread_index_from_source(&record.scope, &record.thread_id)
-            .await?;
+        if created || !self.is_thread_index_known(&record.scope, &record.thread_id) {
+            self.refresh_thread_index_from_source(&record.scope, &record.thread_id)
+                .await?;
+        }
         Ok(record)
     }
 

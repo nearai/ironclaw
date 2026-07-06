@@ -109,6 +109,13 @@ where
         }
     }
 
+    pub(super) fn is_thread_index_known(&self, scope: &ThreadScope, thread_id: &ThreadId) -> bool {
+        self.known_thread_index_rows
+            .lock()
+            .map(|known| known.contains(&thread_index_record_cache_key(scope, thread_id)))
+            .unwrap_or(false)
+    }
+
     fn mark_thread_index_scope_complete(&self, scope: &ThreadScope) {
         if let Ok(mut complete) = self.complete_thread_index_scopes.lock() {
             let key = thread_index_cache_key(scope);
