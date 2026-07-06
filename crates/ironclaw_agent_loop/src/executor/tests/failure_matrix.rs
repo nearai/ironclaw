@@ -208,9 +208,26 @@ const ROWS: &[MatrixRow] = &[
 
 macro_rules! matrix_row_test {
     ($name:ident, $row_index:expr) => {
-        #[tokio::test]
-        async fn $name() {
-            run_matrix_row(&ROWS[$row_index]).await;
+        // The executor future outgrows the default 2MiB test-thread stack in
+        // debug builds on the in-run recovery rows (capability failure ->
+        // model-visible result -> second model turn). Production loop threads
+        // run with 8MiB stacks (`ironclaw_reborn_cli` serve runtime), so run
+        // each row on a big-stack thread — the repo's standard pattern
+        // (`traces/tests.rs`, `process_port.rs`) — instead of shrinking the row.
+        #[test]
+        fn $name() {
+            std::thread::Builder::new()
+                .stack_size(16 * 1024 * 1024)
+                .spawn(|| {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("matrix row runtime")
+                        .block_on(run_matrix_row(&ROWS[$row_index]))
+                })
+                .expect("matrix row thread should spawn")
+                .join()
+                .expect("matrix row thread should not panic");
         }
     };
 }
