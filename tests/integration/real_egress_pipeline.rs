@@ -71,9 +71,9 @@ async fn real_network_policy_denies_out_of_allowlist_host_before_transport() {
 #[tokio::test]
 async fn real_leak_scan_blocks_response_containing_seeded_secret() {
     let h = RebornIntegrationHarness::test_default()
-        .with_real_egress_response_bodies([
-            format!(r#"{{"note":"{SEEDED_AWS_KEY}"}}"#).into_bytes(),
-        ])
+        .with_real_egress_response_bodies(
+            [format!(r#"{{"note":"{SEEDED_AWS_KEY}"}}"#).into_bytes()],
+        )
         .script([
             RebornScriptedReply::tool_call("builtin.http", json!({"url": ALLOWED_URL})),
             RebornScriptedReply::text("done"),
