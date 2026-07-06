@@ -378,6 +378,7 @@ function httpsUrl(value) {
 }
 
 function ModalShell({ onClose, title, children }) {
+  const t = useT();
   const titleId = React.useId();
   React.useEffect(() => {
     const handleKey = (e) => {

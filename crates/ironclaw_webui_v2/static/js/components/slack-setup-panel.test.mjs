@@ -14,7 +14,7 @@ function slackSetupPanelSourceForTest() {
         .replace("export function SlackSetupPanel", "function SlackSetupPanel"),
     );
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { SlackSetupPanel, FIELD_HELP, slackSetupCopy };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { SlackSetupPanel, FIELD_HELP, FieldHint, slackSetupCopy };`;
 }
 
 function createReactStub(state) {
@@ -148,6 +148,26 @@ test("SlackSetupPanel does not reset dirty form fields on background setup refet
 
   assert.equal(state.values[0].installation_id, "install_dirty");
   assert.equal(state.values[0].bot_token, "xoxb-dirty");
+});
+
+test("FieldHint falls back to literal help copy when no translator is supplied", () => {
+  const state = { hookIndex: 0, values: {}, refs: {}, effectDeps: {} };
+  const { context } = setupContext(state);
+  const { FieldHint } = context.globalThis.__testExports;
+
+  const rendered = FieldHint({
+    help: {
+      bodyKey: "slackSetup.help.body",
+      body: "Fallback body",
+      exampleKey: "slackSetup.help.example",
+      example: "Fallback example",
+    },
+    t: null,
+  });
+
+  const body = JSON.stringify(rendered);
+  assert.match(body, /Fallback body/);
+  assert.match(body, /Fallback example/);
 });
 
 test("SlackSetupPanel does not overwrite user input when initial setup load resolves", () => {

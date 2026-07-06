@@ -223,6 +223,10 @@ function emptyForm() {
   };
 }
 
+function translateOptional(t, key, fallback) {
+  return typeof t === "function" ? t(key) : fallback;
+}
+
 function textInput(label, value, onChange, placeholder = "", help = null, t = null) {
   return html`
     <label className="min-w-0">
@@ -250,7 +254,7 @@ function secretInput(label, value, onChange, configured, help = null, t = null) 
         spellCheck=${false}
         value=${value}
         onChange=${onChange}
-        placeholder=${configured ? t("slackSetup.placeholder.keepSecret") : ""}
+        placeholder=${configured ? translateOptional(t, "slackSetup.placeholder.keepSecret", "") : ""}
         className="h-9 w-full min-w-0 rounded-md border border-white/12 bg-white/[0.04] px-3 text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
       />
       <${FieldHint} help=${help} t=${t} />
@@ -260,8 +264,8 @@ function secretInput(label, value, onChange, configured, help = null, t = null) 
 
 function FieldHint({ help, t }) {
   if (!help) return null;
-  const body = help.bodyKey ? t(help.bodyKey) : help.body;
-  const example = help.exampleKey ? t(help.exampleKey) : help.example;
+  const body = help.bodyKey ? translateOptional(t, help.bodyKey, help.body) : help.body;
+  const example = help.exampleKey ? translateOptional(t, help.exampleKey, help.example) : help.example;
   return html`
     <p className="mt-1.5 min-h-8 text-[11px] leading-4 text-iron-400">
       <span className="block">${body}</span>
