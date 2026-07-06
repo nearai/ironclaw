@@ -19,6 +19,24 @@ test("markdown code blocks are passed through highlight.js when available", () =
   );
 });
 
+test("markdown code block controls resync labels after language changes", () => {
+  assert.match(
+    rendererSource,
+    /function syncCodeBlockLabels\(pre, labels\)/,
+    "enhanced code blocks should have a label sync path",
+  );
+  assert.match(
+    rendererSource,
+    /if \(pre\.dataset\.enhanced === "1"\) \{\s*syncCodeBlockLabels\(pre, labels\);/s,
+    "already-enhanced code blocks should refresh translated labels instead of returning early",
+  );
+  assert.match(
+    rendererSource,
+    /copyBtn\.dataset\.labelCopy \|\| labels\.copy/,
+    "pending copy reset should use the latest translated copy label",
+  );
+});
+
 test("highlight.js token classes have local readable styles", () => {
   for (const selector of [
     ".markdown-body pre code.hljs",

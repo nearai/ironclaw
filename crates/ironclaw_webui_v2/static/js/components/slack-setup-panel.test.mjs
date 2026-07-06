@@ -14,7 +14,7 @@ function slackSetupPanelSourceForTest() {
         .replace("export function SlackSetupPanel", "function SlackSetupPanel"),
     );
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { SlackSetupPanel, FIELD_HELP };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { SlackSetupPanel, FIELD_HELP, slackSetupCopy };`;
 }
 
 function createReactStub(state) {
@@ -111,6 +111,7 @@ function setupContext(state, saveResponses = []) {
         config.onSuccess(data, variables);
       },
     }),
+    useT: () => (key) => key,
   };
   vm.runInNewContext(slackSetupPanelSourceForTest(), context);
   return { context, invalidations, setQueryDataCalls };
@@ -255,12 +256,12 @@ test("SlackSetupPanel defines field guidance for Slack credentials", () => {
   const { context } = setupContext(state);
   const help = context.globalThis.__testExports.FIELD_HELP;
 
-  assert.match(help.installationId.body, /Local IronClaw name/);
-  assert.equal(help.installationId.example, "Example: local-slack");
-  assert.match(help.teamId.body, /workspace\/team ID/);
-  assert.equal(help.teamId.example, "Example: T0123456789");
-  assert.match(help.appId.body, /App Credentials/);
-  assert.equal(help.appId.example, "Example: A0123456789");
-  assert.match(help.botToken.body, /Bot User OAuth Token/);
-  assert.match(help.signingSecret.body, /Signing Secret/);
+  assert.equal(help.installationId.bodyKey, "slackSetup.help.installationId");
+  assert.equal(help.installationId.exampleKey, "slackSetup.example.localSlack");
+  assert.equal(help.teamId.bodyKey, "slackSetup.help.teamId");
+  assert.equal(help.teamId.exampleKey, "slackSetup.example.teamId");
+  assert.equal(help.appId.bodyKey, "slackSetup.help.appId");
+  assert.equal(help.appId.exampleKey, "slackSetup.example.appId");
+  assert.equal(help.botToken.bodyKey, "slackSetup.help.botToken");
+  assert.equal(help.signingSecret.bodyKey, "slackSetup.help.signingSecret");
 });
