@@ -686,9 +686,9 @@ use ironclaw_processes::{FilesystemProcessResultStore, FilesystemProcessStore};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn_event_store::RebornEventStoreConfig;
 use ironclaw_reborn_event_store::RebornEventStoreError;
-use ironclaw_resources::ResourceError;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_resources::{FilesystemResourceGovernorStore, PersistentResourceGovernor};
+use ironclaw_resources::FilesystemResourceGovernor;
+use ironclaw_resources::ResourceError;
 use ironclaw_run_state::RunStateError;
 use ironclaw_secrets::SecretError;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -703,7 +703,7 @@ use thiserror::Error;
 #[cfg(feature = "libsql")]
 pub type LibSqlProductionHostRuntimeServices = HostRuntimeServices<
     LibSqlRootFilesystem,
-    PersistentResourceGovernor<FilesystemResourceGovernorStore<LibSqlRootFilesystem>>,
+    FilesystemResourceGovernor<LibSqlRootFilesystem>,
     FilesystemProcessStore<LibSqlRootFilesystem>,
     FilesystemProcessResultStore<LibSqlRootFilesystem>,
 >;
@@ -711,7 +711,7 @@ pub type LibSqlProductionHostRuntimeServices = HostRuntimeServices<
 #[cfg(feature = "postgres")]
 pub type PostgresProductionHostRuntimeServices = HostRuntimeServices<
     PostgresRootFilesystem,
-    PersistentResourceGovernor<FilesystemResourceGovernorStore<PostgresRootFilesystem>>,
+    FilesystemResourceGovernor<PostgresRootFilesystem>,
     FilesystemProcessStore<PostgresRootFilesystem>,
     FilesystemProcessResultStore<PostgresRootFilesystem>,
 >;
@@ -866,6 +866,10 @@ where
 {
     pub database: Arc<libsql::Database>,
     pub event_store: RebornEventStoreConfig,
+    /// Set this only when deployment guarantees exactly one runtime process, or
+    /// one elected runtime owner, is allowed to enforce resource quotas for this
+    /// database. The filesystem governor keeps in-process tallies as authority.
+    pub process_local_resource_governor_singleton: bool,
     pub secret_master_key: Option<SecretMaterial>,
     pub trust_policy: Arc<TPolicy>,
     pub runtime_policy: RebornProductionRuntimePolicy,
@@ -882,6 +886,10 @@ where
 {
     pub pool: deadpool_postgres::Pool,
     pub event_store: RebornEventStoreConfig,
+    /// Set this only when deployment guarantees exactly one runtime process, or
+    /// one elected runtime owner, is allowed to enforce resource quotas for this
+    /// database. The filesystem governor keeps in-process tallies as authority.
+    pub process_local_resource_governor_singleton: bool,
     pub secret_master_key: Option<SecretMaterial>,
     pub trust_policy: Arc<TPolicy>,
     pub runtime_policy: RebornProductionRuntimePolicy,

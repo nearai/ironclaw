@@ -50,10 +50,7 @@ use ironclaw_reborn_event_store::{
     CoalescingEventSink, EventBatchConfig, RebornEventStoreConfig, RebornEventStoreError,
     RebornEventStores, RebornProfile, build_reborn_event_stores,
 };
-use ironclaw_resources::{
-    FilesystemResourceGovernorStore, InMemoryResourceGovernor, PersistentResourceGovernor,
-    ResourceGovernor,
-};
+use ironclaw_resources::{FilesystemResourceGovernor, InMemoryResourceGovernor, ResourceGovernor};
 use ironclaw_run_state::{
     ApprovalRequestStore, FilesystemApprovalRequestStore, FilesystemRunStateStore,
     InMemoryApprovalRequestStore, InMemoryRunStateStore, RunStateApprovalStore, RunStateStore,

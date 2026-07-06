@@ -41,6 +41,9 @@ const DEFAULT_REBORN_SECRET_MASTER_KEY_ENV: &str = "IRONCLAW_REBORN_SECRET_MASTE
 #[cfg(feature = "postgres")]
 const REBORN_POSTGRES_POOL_MAX_SIZE_ENV: &str = "IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE";
 #[cfg(feature = "postgres")]
+const REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON_ENV: &str =
+    "IRONCLAW_REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON";
+#[cfg(feature = "postgres")]
 const DATABASE_SSLMODE_ENV: &str = "DATABASE_SSLMODE";
 #[cfg(feature = "postgres")]
 const ALLOW_REMOTE_POSTGRES_CLEAR_TEXT_ENV: &str =
@@ -215,6 +218,7 @@ pub(crate) enum RebornStorageInput {
         host_home_root: Option<PathBuf>,
         pool: deadpool_postgres::Pool,
         secret_master_key: ironclaw_secrets::SecretMaterial,
+        process_local_resource_governor_singleton: bool,
     },
     #[cfg(feature = "libsql")]
     Libsql {
@@ -222,6 +226,7 @@ pub(crate) enum RebornStorageInput {
         path_or_url: String,
         auth_token: Option<ironclaw_secrets::SecretMaterial>,
         secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
+        process_local_resource_governor_singleton: bool,
     },
     #[cfg(feature = "postgres")]
     Postgres {
@@ -229,6 +234,7 @@ pub(crate) enum RebornStorageInput {
         url: ironclaw_secrets::SecretMaterial,
         tls_options: PostgresPoolTlsOptions,
         secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
+        process_local_resource_governor_singleton: bool,
     },
 }
 
@@ -301,6 +307,35 @@ impl RebornBuildInput {
     }
 
     #[cfg(feature = "postgres")]
+    pub fn hosted_single_tenant_postgres(
+        profile: RebornCompositionProfile,
+        owner_id: impl Into<String>,
+        root: PathBuf,
+        pool: deadpool_postgres::Pool,
+        secret_master_key: ironclaw_secrets::SecretMaterial,
+    ) -> Result<Self, RebornBuildError> {
+        if profile != RebornCompositionProfile::HostedSingleTenant {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "hosted single-tenant Postgres storage requires profile=hosted-single-tenant; got profile={profile}"
+                ),
+            });
+        }
+        Ok(Self::new(
+            profile,
+            owner_id,
+            RebornStorageInput::HostedSingleTenantPostgres {
+                root,
+                workspace_root: None,
+                host_home_root: None,
+                pool,
+                secret_master_key,
+                process_local_resource_governor_singleton: true,
+            },
+        ))
+    }
+
+    #[cfg(feature = "postgres")]
     pub fn hosted_single_tenant_postgres_from_config_and_env(
         profile: RebornCompositionProfile,
         owner_id: impl Into<String>,
@@ -317,6 +352,7 @@ impl RebornBuildInput {
         let ResolvedPostgresStorage {
             pool,
             secret_master_key,
+            process_local_resource_governor_singleton,
             ..
         } = resolve_postgres_storage_from_config_and_env(profile, config_file)?;
         Ok(Self::new(
@@ -328,6 +364,7 @@ impl RebornBuildInput {
                 host_home_root: None,
                 pool,
                 secret_master_key,
+                process_local_resource_governor_singleton,
             },
         ))
     }
@@ -440,6 +477,7 @@ impl RebornBuildInput {
                 path_or_url: path_or_url.into(),
                 auth_token,
                 secret_master_key: Some(secret_master_key),
+                process_local_resource_governor_singleton: true,
             },
         )
     }
@@ -460,6 +498,7 @@ impl RebornBuildInput {
                 path_or_url: path_or_url.into(),
                 auth_token,
                 secret_master_key: None,
+                process_local_resource_governor_singleton: true,
             },
         )
     }
@@ -480,6 +519,7 @@ impl RebornBuildInput {
                 url,
                 tls_options: PostgresPoolTlsOptions::default(),
                 secret_master_key: Some(secret_master_key),
+                process_local_resource_governor_singleton: true,
             },
         )
     }
@@ -499,6 +539,7 @@ impl RebornBuildInput {
                 url,
                 tls_options: PostgresPoolTlsOptions::default(),
                 secret_master_key: None,
+                process_local_resource_governor_singleton: true,
             },
         )
     }
@@ -514,6 +555,7 @@ impl RebornBuildInput {
             url,
             tls_options,
             secret_master_key,
+            process_local_resource_governor_singleton,
         } = resolve_postgres_storage_from_config_and_env(profile, config_file)?;
         let runtime_policy = resolve_production_runtime_policy(profile, config_file)?;
         let trust_policy = crate::builtin_first_party_trust_policy()?;
@@ -526,6 +568,7 @@ impl RebornBuildInput {
                 url,
                 tls_options,
                 secret_master_key: Some(secret_master_key),
+                process_local_resource_governor_singleton,
             },
         )
         .with_production_trust_policy(Arc::new(trust_policy))
@@ -752,6 +795,7 @@ struct ResolvedPostgresStorage {
     url: ironclaw_secrets::SecretMaterial,
     tls_options: PostgresPoolTlsOptions,
     secret_master_key: ironclaw_secrets::SecretMaterial,
+    process_local_resource_governor_singleton: bool,
 }
 
 #[cfg(feature = "postgres")]
@@ -797,6 +841,8 @@ fn resolve_postgres_storage_from_config_and_env(
         "Reborn secret master key",
         "storage.secret_master_key_env",
     )?;
+    let process_local_resource_governor_singleton =
+        require_postgres_resource_governor_singleton_env()?;
     let (pool_max_size, pool_max_size_source) =
         resolve_postgres_pool_max_size(storage.pool_max_size)?;
     tracing::debug!(
@@ -817,6 +863,7 @@ fn resolve_postgres_storage_from_config_and_env(
         url: database_url,
         tls_options,
         secret_master_key,
+        process_local_resource_governor_singleton,
     })
 }
 
@@ -942,6 +989,35 @@ fn required_production_key_env(
 }
 
 #[cfg(feature = "postgres")]
+fn require_postgres_resource_governor_singleton_env() -> Result<bool, RebornBuildError> {
+    match std::env::var(REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON_ENV) {
+        Ok(value) => match parse_bool_opt_in(&value) {
+            Some(true) => Ok(true),
+            Some(false) => Err(RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "{REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON_ENV} must be true when this process is the singleton or elected resource-governor authority for the shared Postgres database"
+                ),
+            }),
+            None => Err(RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "{REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON_ENV} must be one of true, false, 1, 0, yes, no, on, or off"
+                ),
+            }),
+        },
+        Err(std::env::VarError::NotPresent) => Err(RebornBuildError::InvalidConfig {
+            reason: format!(
+                "{REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON_ENV} must be set to true when this process is the singleton or elected resource-governor authority for the shared Postgres database"
+            ),
+        }),
+        Err(std::env::VarError::NotUnicode(_)) => Err(RebornBuildError::InvalidConfig {
+            reason: format!(
+                "{REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON_ENV} must be valid UTF-8"
+            ),
+        }),
+    }
+}
+
+#[cfg(feature = "postgres")]
 fn postgres_pool_tls_options_from_env() -> Result<PostgresPoolTlsOptions, RebornBuildError> {
     let ssl_mode_override = match std::env::var(DATABASE_SSLMODE_ENV) {
         Ok(value) if value.trim().is_empty() => None,
@@ -961,7 +1037,7 @@ fn postgres_pool_tls_options_from_env() -> Result<PostgresPoolTlsOptions, Reborn
         }
     };
     let allow_remote_cleartext = match std::env::var(ALLOW_REMOTE_POSTGRES_CLEAR_TEXT_ENV) {
-        Ok(value) => parse_cleartext_opt_in(&value).ok_or_else(|| {
+        Ok(value) => parse_bool_opt_in(&value).ok_or_else(|| {
             RebornBuildError::InvalidConfig {
                 reason: format!(
                     "{ALLOW_REMOTE_POSTGRES_CLEAR_TEXT_ENV} must be one of true, false, 1, 0, yes, no, on, or off"
@@ -983,7 +1059,7 @@ fn postgres_pool_tls_options_from_env() -> Result<PostgresPoolTlsOptions, Reborn
 }
 
 #[cfg(feature = "postgres")]
-fn parse_cleartext_opt_in(value: &str) -> Option<bool> {
+fn parse_bool_opt_in(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "" | "0" | "false" | "no" | "off" => Some(false),
         "1" | "true" | "yes" | "on" => Some(true),

@@ -1,3 +1,4 @@
+// arch-exempt: large_file, filesystem thread contract suite decomposition, plan #5662
 //! Contract tests for [`FilesystemSessionThreadService`].
 //!
 //! Drives the production filesystem-backed store over an
@@ -11,7 +12,7 @@ use std::{
     collections::HashMap,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -24,7 +25,7 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::{
     AgentId, CapabilityId, HostPath, InvocationId, MountAlias, MountGrant, MountPermissions,
-    MountView, ProjectId, TenantId, ThreadId, UserId, VirtualPath,
+    MountView, ProjectId, ScopedPath, TenantId, ThreadId, UserId, VirtualPath,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AppendAssistantDraftRequest,
@@ -98,6 +99,191 @@ async fn filesystem_delete_thread_removes_owned_thread_and_hides_missing_or_wron
         .await
         .expect_err("missing delete should be non-enumerating");
     assert_unknown_thread(missing_error, &missing);
+}
+
+#[tokio::test]
+async fn filesystem_delete_thread_invalidates_thread_index_cache() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-delete-cache", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let request_scope = scope("delete-cache");
+    let keep = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-delete-cache-keep").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let delete = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-delete-cache-remove").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let warmed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: request_scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(warmed.threads.len(), 2);
+
+    service
+        .delete_thread(&request_scope, &delete.thread_id)
+        .await
+        .expect("delete succeeds");
+
+    let listed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: request_scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids: Vec<&ThreadId> = listed
+        .threads
+        .iter()
+        .map(|record| &record.thread_id)
+        .collect();
+    assert!(ids.contains(&&keep.thread_id));
+    assert!(!ids.contains(&&delete.thread_id));
+}
+
+#[tokio::test]
+async fn filesystem_delete_thread_retry_cleans_stale_thread_index_row() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-delete-stale-index", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let request_scope = scope("delete-stale-index");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-delete-stale-index").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("stale title".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let warmed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: request_scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(warmed.threads.len(), 1);
+
+    scoped
+        .delete(
+            &request_scope.to_resource_scope(),
+            &thread_root_path_for_test(&request_scope, thread.thread_id.as_str()),
+        )
+        .await
+        .expect("test setup removes source thread root but leaves derived index row");
+    service.clear_thread_index_cache_for_scope(&request_scope);
+
+    let retry_error = service
+        .delete_thread(&request_scope, &thread.thread_id)
+        .await
+        .expect_err("retry after partial delete should still report unknown source");
+    assert_unknown_thread(retry_error, &thread.thread_id);
+
+    let listed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: request_scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        listed
+            .threads
+            .iter()
+            .all(|record| record.thread_id != thread.thread_id),
+        "retry cleanup must remove stale derived index metadata from listings"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_list_threads_skips_stale_thread_index_after_partial_delete() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-list-stale-index", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let request_scope = scope("list-stale-index");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-list-stale-index").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("stale title".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: request_scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .expect("warm list creates thread index row");
+
+    scoped
+        .delete(
+            &request_scope.to_resource_scope(),
+            &thread_root_path_for_test(&request_scope, thread.thread_id.as_str()),
+        )
+        .await
+        .expect("test setup removes source thread root but leaves derived index row");
+    service.clear_thread_index_cache_for_scope(&request_scope);
+
+    let listed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: request_scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        listed
+            .threads
+            .iter()
+            .all(|record| record.thread_id != thread.thread_id),
+        "list_threads_for_scope must not expose an index row whose source thread root is gone"
+    );
+    assert!(
+        scoped
+            .get(
+                &request_scope.to_resource_scope(),
+                &thread_index_record_path_for_test(&request_scope, thread.thread_id.as_str()),
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "stale index row should be removed during list cleanup"
+    );
 }
 
 #[tokio::test]
@@ -1451,6 +1637,274 @@ async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
     assert_eq!(ids_b, ["t-b-001"]);
 }
 
+#[tokio::test]
+async fn filesystem_list_threads_bootstraps_missing_thread_index_rows() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-index-bootstrap", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let scope = scope("index-bootstrap");
+
+    for id in ["legacy-001", "legacy-002"] {
+        service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: Some(ThreadId::new(id).unwrap()),
+                created_by_actor_id: "actor-a".into(),
+                title: Some(id.into()),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    for id in ["legacy-001", "legacy-002"] {
+        scoped
+            .delete(
+                &scope.to_resource_scope(),
+                &thread_index_record_path_for_test(&scope, id),
+            )
+            .await
+            .expect("test setup removes derived index row");
+    }
+    service.clear_thread_index_cache_for_scope(&scope);
+
+    let listed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids: Vec<&str> = listed
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(ids, ["legacy-002", "legacy-001"]);
+
+    service.clear_thread_index_cache_for_scope(&scope);
+    let listed_again = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids_again: Vec<&str> = listed_again
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(
+        ids_again,
+        ["legacy-002", "legacy-001"],
+        "first list should rebuild durable derived index rows"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_list_threads_merges_partial_thread_index_with_source_rows() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-index-partial", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let scope = scope("index-partial");
+
+    for id in ["legacy-indexed", "legacy-missing"] {
+        service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: Some(ThreadId::new(id).unwrap()),
+                created_by_actor_id: "actor-a".into(),
+                title: Some(id.into()),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    scoped
+        .delete(
+            &scope.to_resource_scope(),
+            &thread_index_record_path_for_test(&scope, "legacy-missing"),
+        )
+        .await
+        .expect("test setup removes one derived index row");
+    service.clear_thread_index_cache_for_scope(&scope);
+
+    let listed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids: Vec<&str> = listed
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert!(ids.contains(&"legacy-indexed"));
+    assert!(ids.contains(&"legacy-missing"));
+}
+
+#[tokio::test]
+async fn filesystem_list_threads_retries_bootstrap_after_source_read_error() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(FailOnceThreadRecordReadBackend::new("legacy-flaky-read"));
+    let scoped = scoped_threads_fs_at(
+        Arc::clone(&backend),
+        "tenant-index-bootstrap-retry",
+        "alice",
+    );
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let scope = scope("index-bootstrap-retry");
+
+    for id in ["legacy-indexed", "legacy-flaky-read"] {
+        service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: Some(ThreadId::new(id).unwrap()),
+                created_by_actor_id: "actor-a".into(),
+                title: Some(id.into()),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    scoped
+        .delete(
+            &scope.to_resource_scope(),
+            &thread_index_record_path_for_test(&scope, "legacy-flaky-read"),
+        )
+        .await
+        .expect("test setup removes one derived index row");
+    backend.fail_next_thread_record_read();
+    service.clear_thread_index_cache_for_scope(&scope);
+
+    let first = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let first_ids: Vec<&str> = first
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert!(first_ids.contains(&"legacy-indexed"));
+    assert!(!first_ids.contains(&"legacy-flaky-read"));
+
+    service.clear_thread_index_cache_for_scope(&scope);
+    let second = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let second_ids: Vec<&str> = second
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert!(
+        second_ids.contains(&"legacy-flaky-read"),
+        "a partial bootstrap read failure must not mark the scope complete"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_list_threads_bootstrap_preserves_fresher_existing_index_activity() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-index-bootstrap-fresh", "alice");
+    let writer = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let request_scope = scope("index-bootstrap-fresh");
+
+    let older = writer
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-bootstrap-older").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("older".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    wait_until_after(older.updated_at.expect("older thread has activity stamp")).await;
+    let newer = writer
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-bootstrap-newer").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("newer".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    wait_until_after(newer.updated_at.expect("newer thread has activity stamp")).await;
+
+    writer
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: request_scope.clone(),
+            thread_id: older.thread_id.clone(),
+            turn_run_id: "run-bootstrap-fresh".into(),
+            content: MessageContent::text("fresh activity"),
+        })
+        .await
+        .unwrap();
+
+    let cold_bootstrap = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let listed = cold_bootstrap
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: request_scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids: Vec<&str> = listed
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(ids, ["thread-bootstrap-older", "thread-bootstrap-newer"]);
+
+    let cold_after_bootstrap = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let listed_again = cold_after_bootstrap
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: request_scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids_again: Vec<&str> = listed_again
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(
+        ids_again,
+        ["thread-bootstrap-older", "thread-bootstrap-newer"],
+        "bootstrap must not overwrite a fresher derived index row with stale thread.json activity"
+    );
+}
+
 /// Regression: the "Recent" list must order by last interaction, not by
 /// creation time or thread id. Appending a message to the *older* thread
 /// has to bump it ahead of a more recently *created* one. Before this
@@ -2078,6 +2532,42 @@ fn scope(label: &str) -> ThreadScope {
     }
 }
 
+fn thread_index_record_path_for_test(scope: &ThreadScope, thread_id: &str) -> ScopedPath {
+    ScopedPath::new(format!(
+        "/threads/agents/{}/projects/{}/owners/{}/thread_index/{thread_id}.json",
+        scope.agent_id.as_str(),
+        scope
+            .project_id
+            .as_ref()
+            .expect("test scope has project")
+            .as_str(),
+        scope
+            .owner_user_id
+            .as_ref()
+            .expect("test scope has owner")
+            .as_str()
+    ))
+    .unwrap()
+}
+
+fn thread_root_path_for_test(scope: &ThreadScope, thread_id: &str) -> ScopedPath {
+    ScopedPath::new(format!(
+        "/threads/agents/{}/projects/{}/owners/{}/threads/{thread_id}",
+        scope.agent_id.as_str(),
+        scope
+            .project_id
+            .as_ref()
+            .expect("test scope has project")
+            .as_str(),
+        scope
+            .owner_user_id
+            .as_ref()
+            .expect("test scope has owner")
+            .as_str()
+    ))
+    .unwrap()
+}
+
 fn assert_unknown_thread(error: SessionThreadError, thread_id: &ThreadId) {
     match error {
         SessionThreadError::UnknownThread { thread_id: actual } => assert_eq!(actual, *thread_id),
@@ -2152,6 +2642,31 @@ impl LookupIndexReadFailureBackend {
         Self {
             inner: InMemoryBackend::new(),
         }
+    }
+}
+
+struct FailOnceThreadRecordReadBackend {
+    inner: InMemoryBackend,
+    thread_id: String,
+    fail_next_read: AtomicBool,
+}
+
+impl FailOnceThreadRecordReadBackend {
+    fn new(thread_id: &str) -> Self {
+        Self {
+            inner: InMemoryBackend::new(),
+            thread_id: thread_id.to_string(),
+            fail_next_read: AtomicBool::new(false),
+        }
+    }
+
+    fn fail_next_thread_record_read(&self) {
+        self.fail_next_read.store(true, Ordering::SeqCst);
+    }
+
+    fn is_target_thread_record_path(&self, path: &VirtualPath) -> bool {
+        path.as_str()
+            .contains(&format!("/threads/{}/thread.json", self.thread_id))
     }
 }
 
@@ -2305,6 +2820,56 @@ impl RootFilesystem for LookupIndexReadFailureBackend {
                 path: path.clone(),
                 operation: FilesystemOperation::ReadFile,
                 reason: "lookup index reads disabled by contract test".to_string(),
+            });
+        }
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query(path, filter, page).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for FailOnceThreadRecordReadBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        if self.is_target_thread_record_path(path)
+            && self.fail_next_read.swap(false, Ordering::SeqCst)
+        {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::ReadFile,
+                reason: "thread record reads disabled once by contract test".to_string(),
             });
         }
         self.inner.get(path).await
