@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "Slack (personal) send_message",
+  "title": "Slack send_message",
   "description": "Send a message as you to a channel or DM.",
   "type": "object",
   "required": ["channel", "text"],
