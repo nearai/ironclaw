@@ -29,16 +29,22 @@ use ironclaw_host_api::{ExtensionId, UserId};
 use ironclaw_turns::{TurnRunId, TurnScope};
 
 use crate::RebornBuildError;
-use crate::manual_token_flow::{PortBackedManualTokenFlowService, RebornManualTokenFlowService};
-use crate::oauth_dcr::{DcrGateChallengeRequest, DcrSetupFlowRequest, OAuthDcrProviderRegistry};
-use crate::oauth_gate::{GoogleOAuthGateProviderRegistry, OAuthGateChallengeRequest};
-use crate::product_auth_runtime_credentials::host_managed_fallback::{
+use crate::product_auth::credentials::manual_token_flow::{
+    PortBackedManualTokenFlowService, RebornManualTokenFlowService,
+};
+use crate::product_auth::credentials::runtime_credentials::host_managed_fallback::{
     HostManagedCredentialFallbackRule, HostManagedRuntimeCredentialAccountSelector,
 };
-use crate::product_auth_runtime_credentials::{
+use crate::product_auth::credentials::runtime_credentials::{
     ProductAuthRuntimeCredentialAccountRefresher, ProductAuthRuntimeCredentialAccountSelector,
     RuntimeCredentialAccountRefreshPort, RuntimeCredentialAccountRefreshService,
     RuntimeCredentialAccountSelectionService,
+};
+use crate::product_auth::oauth::oauth_dcr::{
+    DcrGateChallengeRequest, DcrSetupFlowRequest, OAuthDcrProviderRegistry,
+};
+use crate::product_auth::oauth::oauth_gate::{
+    GoogleOAuthGateProviderRegistry, OAuthGateChallengeRequest,
 };
 use crate::{AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller};
 

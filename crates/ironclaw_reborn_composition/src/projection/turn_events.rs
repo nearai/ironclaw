@@ -32,9 +32,11 @@ use ironclaw_turns::{
 use tokio::sync::{Mutex, OnceCell, Semaphore};
 
 use crate::AuthChallengeProvider;
-use crate::auth_prompt::{BlockedAuthPromptRequest, auth_prompt_view_for_blocked_auth};
 use crate::failure_summary::{
     pinned_failure_summary_for_category, reborn_failure_summary_for_category,
+};
+use crate::product_auth::api::auth_prompt::{
+    BlockedAuthPromptRequest, auth_prompt_view_for_blocked_auth,
 };
 
 pub(super) const WEBUI_TURN_EVENT_PAGE_LIMIT: usize = 256;

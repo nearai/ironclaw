@@ -27,11 +27,11 @@ use ironclaw_turns::{
 use secrecy::SecretString;
 use std::sync::Mutex;
 
-use crate::auth::AUTH_CONTINUATION_DISPATCH_FAILED_CODE;
+use crate::product_auth::api::auth::AUTH_CONTINUATION_DISPATCH_FAILED_CODE;
 
 use super::*;
-use crate::notion_oauth::{NOTION_PROVIDER_ID, notion_provider_spec};
-use crate::oauth_provider_client::HostOAuthProviderClient;
+use crate::product_auth::oauth::notion_oauth::{NOTION_PROVIDER_ID, notion_provider_spec};
+use crate::product_auth::oauth::oauth_provider_client::HostOAuthProviderClient;
 
 #[derive(Clone)]
 struct ErrorTurnCoordinator {

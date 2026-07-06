@@ -13,8 +13,10 @@ use ironclaw_host_api::{
 use ironclaw_secrets::InMemorySecretStore;
 use ironclaw_turns::{TurnRunId, TurnScope};
 
-use crate::auth::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
-use crate::oauth_dcr::{OAuthDcrProvider, OAuthDcrProviderConfig, OAuthDcrProviderRegistry};
+use crate::product_auth::api::auth::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
+use crate::product_auth::oauth::oauth_dcr::{
+    OAuthDcrProvider, OAuthDcrProviderConfig, OAuthDcrProviderRegistry,
+};
 
 #[tokio::test]
 async fn dcr_challenge_errors_propagate_through_product_auth_provider() {
@@ -22,7 +24,7 @@ async fn dcr_challenge_errors_propagate_through_product_auth_provider() {
     let dcr_provider = Arc::new(
         OAuthDcrProvider::new(
             OAuthDcrProviderConfig {
-                spec: crate::notion_oauth::notion_provider_spec(),
+                spec: crate::product_auth::oauth::notion_oauth::notion_provider_spec(),
                 callback_origin: "http://127.0.0.1:3000".to_string(),
                 client_name: "Ironclaw".to_string(),
                 account_label: CredentialAccountLabel::new("notion").unwrap(),
@@ -77,7 +79,7 @@ async fn dcr_registry_returns_none_for_zero_and_multiple_requirements() {
     let dcr_provider = Arc::new(
         OAuthDcrProvider::new(
             OAuthDcrProviderConfig {
-                spec: crate::notion_oauth::notion_provider_spec(),
+                spec: crate::product_auth::oauth::notion_oauth::notion_provider_spec(),
                 callback_origin: "http://127.0.0.1:3000".to_string(),
                 client_name: "Ironclaw".to_string(),
                 account_label: CredentialAccountLabel::new("notion").unwrap(),

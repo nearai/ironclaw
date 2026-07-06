@@ -9,7 +9,7 @@
 //! - **Tick logic (B3):** enumerate all Google/Configured accounts with a
 //!   `refresh_secret` whose `updated_at` is older than `idle_threshold`. The
 //!   worker wraps the sweep in a
-//!   [`crate::product_auth_refresh_lock::CredentialRefreshLeaderLock`]: only
+//!   [`crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock`]: only
 //!   one process per deployment becomes the leader per tick and runs the sweep;
 //!   non-leaders skip the tick without touching the token endpoint.
 //! - **Scheduling:** mirrors `trigger_poller.rs` exactly — startup jitter,
@@ -32,7 +32,7 @@ use tokio_util::sync::CancellationToken;
 
 use async_trait::async_trait;
 
-use crate::auth::RebornProductAuthServices;
+use crate::product_auth::api::auth::RebornProductAuthServices;
 use crate::runtime_input::CredentialRefreshSettings;
 
 // ---------------------------------------------------------------------------
@@ -103,12 +103,12 @@ pub(crate) trait CredentialRefreshCandidateSource: Send + Sync {
 // Note: this requires the `product_auth_durable` module to be `pub(crate)`.
 #[async_trait]
 impl<F> CredentialRefreshCandidateSource
-    for crate::product_auth_durable::FilesystemAuthProductServices<F>
+    for crate::product_auth::durable::FilesystemAuthProductServices<F>
 where
     F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
 {
     async fn list_refresh_candidates(&self) -> Vec<ironclaw_auth::CredentialAccount> {
-        crate::product_auth_durable::FilesystemAuthProductServices::list_refresh_candidates(self)
+        crate::product_auth::durable::FilesystemAuthProductServices::list_refresh_candidates(self)
             .await
     }
 }
@@ -129,7 +129,9 @@ pub(crate) struct CredentialRefreshWorkerDeps {
     /// Deployment-wide leader lock. Only the process that acquires this each
     /// tick runs the sweep; others skip. Built from the Postgres pool on
     /// production paths; always-leader on libsql / local-dev paths.
-    pub(crate) leader_lock: Arc<crate::product_auth_refresh_lock::CredentialRefreshLeaderLock>,
+    pub(crate) leader_lock: Arc<
+        crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock,
+    >,
 }
 
 // ---------------------------------------------------------------------------
@@ -187,7 +189,7 @@ async fn tick_once(
     settings: &CredentialRefreshSettings,
     cancel: &CancellationToken,
 ) {
-    use crate::product_auth_refresh_lock::LeaderOutcome;
+    use crate::product_auth::credentials::product_auth_refresh_lock::LeaderOutcome;
 
     // Acquire the deployment-wide leader lock before doing any enumeration
     // work. Non-leader processes skip this tick entirely.
