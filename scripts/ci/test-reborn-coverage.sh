@@ -21,6 +21,12 @@
 # this module's regression proof (exercised transitively through both
 # consuming scripts), not a separate lib-level test file.
 #
+# The R section (reborn-coverage-ratchet.sh cases) lives in the sibling
+# test-reborn-coverage-ratchet-cases.sh, `source`d near the end of this file —
+# split out to keep this file under 1000 lines once a fifth script's cases
+# joined the suite. That file is not standalone; it shares this script's
+# helpers, fixtures, and PASS_COUNT/FAIL_COUNT counters.
+#
 # reborn-coverage-summary.sh and reborn-coverage-comment.sh consume a merged,
 # crate-filtered lcov tracefile (scripts/ci/reborn-coverage-merge-lcov.sh) plus
 # the exemptions manifest (tests/integration/coverage-exemptions.toml schema),
@@ -872,229 +878,12 @@ assert_eq "D5: support/ dir is not discovered as a suite" \
 # R. reborn-coverage-ratchet.sh (coverage-floor ratchet gate)
 # ---------------------------------------------------------------------------
 #
-# reborn-coverage-ratchet.sh <lcov-path> <exemptions-toml> <floor-toml>. All
-# fixtures below reuse the merge_sh/summary_sh conventions above: hand-built
-# lcov tracefiles, no cargo-llvm-cov shellout.
+# Split into test-reborn-coverage-ratchet-cases.sh (sourced below, sharing
+# this script's helpers/fixtures/counters) to keep this file under 1000
+# lines as a fifth script's worth of cases joined the suite.
 
-cat > "${fixtures_dir}/r_composition.lcov" <<'EOF'
-SF:/work/ironclaw/crates/ironclaw_reborn_composition/src/a.rs
-LF:1000
-LH:400
-end_of_record
-EOF
-
-# R1: global below its effective floor (enforce=true) -> exit 1, RATCHET FAIL
-# names "global" and shows the observed/floor numbers.
-cat > "${fixtures_dir}/r1_floor.toml" <<'TOML'
-[global]
-enforce = true
-floor_percent = 50.0
-tolerance_percent = 0.5
-captured_total_lines = 1000
-TOML
-capture "${ratchet_sh}" "${fixtures_dir}/r_composition.lcov" "${empty_exemptions}" "${fixtures_dir}/r1_floor.toml"
-assert_exit_code "R1: global below floor (enforce=true) exits 1" 1 "${CAP_RC}"
-assert_contains "R1: reports RATCHET FAIL for global" "${CAP_OUT}" "RATCHET FAIL: global"
-assert_contains "R1: shows observed global numbers" "${CAP_OUT}" "observed: 40% (400 / 1000 lines)"
-assert_contains "R1: shows floor and effective floor" "${CAP_OUT}" "floor:    50% (tolerance 0.5pp -> effective floor 49.5%)"
-
-# R2: global exactly at the effective floor (boundary inclusive) -> exit 0.
-# floor_percent 40.5, tolerance 0.5 -> effective floor 40.0, which equals the
-# fixture's observed 400/1000 = 40.0% exactly.
-cat > "${fixtures_dir}/r2_floor.toml" <<'TOML'
-[global]
-enforce = true
-floor_percent = 40.5
-tolerance_percent = 0.5
-captured_total_lines = 1000
-TOML
-capture "${ratchet_sh}" "${fixtures_dir}/r_composition.lcov" "${empty_exemptions}" "${fixtures_dir}/r2_floor.toml"
-assert_exit_code "R2: global exactly at effective floor exits 0 (boundary inclusive)" 0 "${CAP_RC}"
-assert_contains "R2: reports RATCHET PASS for global" "${CAP_OUT}" "RATCHET PASS: global"
-
-# R3: crate below its own floor_percent -> exit 1, names the crate.
-cat > "${fixtures_dir}/r3_floor.toml" <<'TOML'
-[global]
-enforce = true
-floor_percent = 0.0
-
-[[crate]]
-name = "ironclaw_reborn_composition"
-floor_percent = 90.0
-TOML
-capture "${ratchet_sh}" "${fixtures_dir}/r_composition.lcov" "${empty_exemptions}" "${fixtures_dir}/r3_floor.toml"
-assert_exit_code "R3: crate below floor_percent exits 1" 1 "${CAP_RC}"
-assert_contains "R3: names the failing crate" "${CAP_OUT}" "RATCHET FAIL: ironclaw_reborn_composition"
-
-# R4: crate holds floor_percent (40% >= 39.5% effective) but drops below
-# floor_covered_lines (400 < 430 effective) -> exit 1, proving the two
-# checks are ANDed (both must hold), not OR'd.
-cat > "${fixtures_dir}/r4_floor.toml" <<'TOML'
-[global]
-enforce = true
-floor_percent = 0.0
-
-[[crate]]
-name = "ironclaw_reborn_composition"
-floor_percent = 40.0
-floor_covered_lines = 450
-tolerance_percent = 0.5
-tolerance_lines = 20
-TOML
-capture "${ratchet_sh}" "${fixtures_dir}/r_composition.lcov" "${empty_exemptions}" "${fixtures_dir}/r4_floor.toml"
-assert_exit_code "R4: crate holds percent floor but fails lines floor exits 1 (ANDed, not ORed)" 1 "${CAP_RC}"
-assert_contains "R4: names the failing crate" "${CAP_OUT}" "RATCHET FAIL: ironclaw_reborn_composition"
-assert_contains "R4: percent line present and would itself pass" "${CAP_OUT}" \
-  "floor:    40% (tolerance 0.5pp -> effective floor 39.5%)"
-assert_contains "R4: lines floor line shows the violated effective floor" "${CAP_OUT}" \
-  "floor_covered_lines: 450 (tolerance 20 lines -> effective floor 430)"
-
-# R5: crate configured with only floor_covered_lines (no percent) -> gates
-# correctly on lines alone (no "floor:" percent line rendered at all).
-cat > "${fixtures_dir}/r5_floor.toml" <<'TOML'
-[global]
-enforce = true
-floor_percent = 0.0
-
-[[crate]]
-name = "ironclaw_reborn_composition"
-floor_covered_lines = 500
-tolerance_lines = 20
-TOML
-capture "${ratchet_sh}" "${fixtures_dir}/r_composition.lcov" "${empty_exemptions}" "${fixtures_dir}/r5_floor.toml"
-assert_exit_code "R5: lines-only crate floor exits 1 (400 < 480 effective)" 1 "${CAP_RC}"
-assert_contains "R5: lines floor line rendered" "${CAP_OUT}" \
-  "floor_covered_lines: 500 (tolerance 20 lines -> effective floor 480)"
-# Scope the "no percent floor line" check to just this crate's own block (the
-# [global] entry above it legitimately prints its own "floor:" line) — slice
-# from the crate's header down to the next blank line.
-r5_crate_block="$(printf '%s\n' "${CAP_OUT}" | sed -n '/^RATCHET FAIL: ironclaw_reborn_composition$/,/^$/p')"
-assert_not_contains "R5: no percent floor line rendered for a lines-only entry" "${r5_crate_block}" "  floor:    "
-
-# R6: floor entry missing both floor_percent and floor_covered_lines -> exit
-# 1, schema error (structural bug, independent of enforce).
-cat > "${fixtures_dir}/r6_floor.toml" <<'TOML'
-[global]
-enforce = false
-floor_percent = 0.0
-
-[[crate]]
-name = "ironclaw_reborn_composition"
-TOML
-capture "${ratchet_sh}" "${fixtures_dir}/r_composition.lcov" "${empty_exemptions}" "${fixtures_dir}/r6_floor.toml"
-assert_exit_code "R6: crate entry missing both floor forms exits 1" 1 "${CAP_RC}"
-assert_contains "R6: reports the missing-both-fields schema error" "${CAP_ERR}" \
-  "missing both 'floor_percent' and 'floor_covered_lines'"
-
-# R7: floor entry for a crate that is ALSO whole-crate-exempted in
-# coverage-exemptions.toml -> exit 1, conflict error.
-cat > "${fixtures_dir}/r7_exemptions.toml" <<'TOML'
-[[exemption]]
-crate = "ironclaw_reborn_composition"
-reason = "test-only whole-crate exemption"
-issue = "https://github.com/nearai/ironclaw/issues/1"
-TOML
-cat > "${fixtures_dir}/r7_floor.toml" <<'TOML'
-[global]
-enforce = false
-floor_percent = 0.0
-
-[[crate]]
-name = "ironclaw_reborn_composition"
-floor_percent = 10.0
-TOML
-capture "${ratchet_sh}" "${fixtures_dir}/r_composition.lcov" "${fixtures_dir}/r7_exemptions.toml" "${fixtures_dir}/r7_floor.toml"
-assert_exit_code "R7: floored crate also whole-crate-exempted exits 1" 1 "${CAP_RC}"
-assert_contains "R7: reports the floor/exemption conflict" "${CAP_ERR}" "also whole-crate-exempted"
-
-# R8: duplicate [[crate]] entries for the same crate name -> exit 1.
-cat > "${fixtures_dir}/r8_floor.toml" <<'TOML'
-[global]
-enforce = false
-floor_percent = 0.0
-
-[[crate]]
-name = "ironclaw_reborn_composition"
-floor_percent = 10.0
-
-[[crate]]
-name = "ironclaw_reborn_composition"
-floor_percent = 20.0
-TOML
-capture "${ratchet_sh}" "${fixtures_dir}/r_composition.lcov" "${empty_exemptions}" "${fixtures_dir}/r8_floor.toml"
-assert_exit_code "R8: duplicate [[crate]] entries exits 1" 1 "${CAP_RC}"
-assert_contains "R8: reports the duplicate-entry error" "${CAP_ERR}" "duplicate [[crate]] entry"
-
-# R9: enforce=false with a failing crate -> exit 0, but stdout still shows
-# the RATCHET FAIL-shaped diagnostic prefixed "[dry-run, would FAIL]" — dry
-# run never masks the signal, only the exit code.
-cat > "${fixtures_dir}/r9_floor.toml" <<'TOML'
-[global]
-enforce = false
-floor_percent = 0.0
-
-[[crate]]
-name = "ironclaw_reborn_composition"
-floor_percent = 90.0
-TOML
-capture "${ratchet_sh}" "${fixtures_dir}/r_composition.lcov" "${empty_exemptions}" "${fixtures_dir}/r9_floor.toml"
-assert_exit_code "R9: enforce=false with a failing crate still exits 0" 0 "${CAP_RC}"
-assert_contains "R9: dry-run diagnostic keeps the RATCHET FAIL shape" "${CAP_OUT}" "RATCHET FAIL"
-assert_contains "R9: dry-run diagnostic is prefixed [dry-run, would FAIL]" "${CAP_OUT}" "[dry-run, would FAIL]"
-
-# R10: missing floor-toml file -> exit 1, same not-found phrasing convention
-# as the other three scripts.
-capture "${ratchet_sh}" "${fixtures_dir}/r_composition.lcov" "${empty_exemptions}" "${fixtures_dir}/does_not_exist_floor.toml"
-assert_exit_code "R10: missing floor manifest exits 1" 1 "${CAP_RC}"
-assert_contains "R10: reports missing floor manifest" "${CAP_ERR}" "coverage floor manifest not found"
-
-# R11: captured_total_lines diverges >5% from the current total -> the
-# denominator note appears even when the crate otherwise PASSES
-# (informational, never itself gates).
-cat > "${fixtures_dir}/r11_floor.toml" <<'TOML'
-[global]
-enforce = true
-floor_percent = 0.0
-
-[[crate]]
-name = "ironclaw_reborn_composition"
-floor_percent = 10.0
-captured_total_lines = 800
-TOML
-capture "${ratchet_sh}" "${fixtures_dir}/r_composition.lcov" "${empty_exemptions}" "${fixtures_dir}/r11_floor.toml"
-assert_exit_code "R11: crate with diverged denominator still PASSES (percent floor holds)" 0 "${CAP_RC}"
-assert_contains "R11: crate reported as PASS" "${CAP_OUT}" "RATCHET PASS: ironclaw_reborn_composition"
-assert_contains "R11: denominator note flags the >5% material change" "${CAP_OUT}" \
-  "denominator: 1000 lines now vs 800 at floor capture (+200 lines, +25%) — material change (>5%)"
-
-# R12: crate named in the floor file produces zero lines in the merged lcov
-# at all (e.g. renamed/removed) -> no crash (divide-by-zero guarded),
-# treated as 0% / 0 covered, fails since its floor is > 0.
-cat > "${fixtures_dir}/r12_floor.toml" <<'TOML'
-[global]
-enforce = true
-floor_percent = 0.0
-
-[[crate]]
-name = "ironclaw_nonexistent_crate"
-floor_percent = 10.0
-TOML
-capture "${ratchet_sh}" "${fixtures_dir}/r_composition.lcov" "${empty_exemptions}" "${fixtures_dir}/r12_floor.toml"
-assert_exit_code "R12: crate absent from the merged lcov exits 1 (guarded, not a crash)" 1 "${CAP_RC}"
-assert_contains "R12: treated as 0% / 0 covered" "${CAP_OUT}" "observed: 0% (0 / 0 lines)"
-
-# R13: enforce=false, everything passes (no violations at all) -> exit 0 AND
-# stdout still contains the unconditional "Ratchet mode: DRY-RUN" banner —
-# the dry-run reminder is structurally guaranteed, not dependent on a
-# violation existing to attach a "[dry-run, would FAIL]" prefix to.
-cat > "${fixtures_dir}/r13_floor.toml" <<'TOML'
-[global]
-enforce = false
-floor_percent = 0.0
-TOML
-capture "${ratchet_sh}" "${fixtures_dir}/r_composition.lcov" "${empty_exemptions}" "${fixtures_dir}/r13_floor.toml"
-assert_exit_code "R13: enforce=false with no violations exits 0" 0 "${CAP_RC}"
-assert_contains "R13: unconditional DRY-RUN banner present even with no violations" "${CAP_OUT}" "Ratchet mode: DRY-RUN"
+# shellcheck source=./test-reborn-coverage-ratchet-cases.sh
+source "${script_dir}/test-reborn-coverage-ratchet-cases.sh"
 
 # ---------------------------------------------------------------------------
 # Summary
