@@ -233,6 +233,48 @@ async fn multiple_attachments_in_one_turn_all_reach_the_model() {
         .expect("second attachment rendered at index 2");
 }
 
+/// W6-COLD-SPOTS: `extract_pdf` branch of `extract_document`, previously
+/// crate-tier-only. Reuses the proven `tests/fixtures/hello.pdf` fixture.
+#[tokio::test]
+async fn pdf_attachment_reaches_the_model_with_extracted_text() {
+    const HELLO_PDF: &[u8] = include_bytes!("../fixtures/hello.pdf");
+    let group = RebornIntegrationGroup::attachment_tools()
+        .await
+        .expect("attachment-tools group builds");
+    let harness = group
+        .thread("conv-attach-pdf")
+        .script([RebornScriptedReply::text("read it")])
+        .build()
+        .await
+        .expect("thread builds");
+
+    harness
+        .submit_turn_with_attachments(
+            "summarize this pdf",
+            vec![("hello.pdf", "application/pdf", HELLO_PDF.to_vec())],
+        )
+        .await
+        .expect("turn completes");
+
+    harness
+        .assert_model_request_contains("Hello")
+        .await
+        .expect("PDF-extracted text reached the model");
+    harness
+        .assert_model_request_contains("type=\\\"document\\\"")
+        .await
+        .expect("the PDF attachment tags as a document, not an image");
+
+    // Non-vacuity guard, mirroring the existing text/plain test's pattern.
+    if harness
+        .assert_model_request_contains("UNWRITTEN-MARKER-PDF-999")
+        .await
+        .is_ok()
+    {
+        panic!("negative guard failed: model request must not contain an unwritten marker");
+    }
+}
+
 /// W5-WEBUI-API-1: attachment bytes served via the real `webui_v2_router`
 /// GET-attachment route, over `RebornServices` wired with the production
 /// `InboundAttachmentReader` (Enabler C) — not the model-injection
