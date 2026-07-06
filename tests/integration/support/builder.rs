@@ -1036,7 +1036,7 @@ impl RebornIntegrationHarness {
     /// picks the stop condition so the deadline/interval have one home.
     /// `timeout_context` keeps each caller's timeout message distinct (e.g.
     /// `wait_for_status`'s byte-identical `"timed out waiting for {expected:?}"`).
-    async fn poll_until_terminal_condition(
+    async fn poll_run_state_until(
         &self,
         run_id: TurnRunId,
         mut decide: impl FnMut(&TurnRunState) -> ControlFlow<HarnessResult<TurnRunState>>,
@@ -1076,7 +1076,7 @@ impl RebornIntegrationHarness {
         run_id: TurnRunId,
         expected: TurnStatus,
     ) -> HarnessResult<TurnRunState> {
-        self.poll_until_terminal_condition(
+        self.poll_run_state_until(
             run_id,
             |state| {
                 if state.status == expected {
@@ -1099,7 +1099,7 @@ impl RebornIntegrationHarness {
     /// Poll until ANY terminal status (#5466): unlike `wait_for_status`, does
     /// NOT fail fast on an unexpected terminal — caller branches on the result.
     pub async fn wait_for_terminal(&self, run_id: TurnRunId) -> HarnessResult<TurnRunState> {
-        self.poll_until_terminal_condition(
+        self.poll_run_state_until(
             run_id,
             |state| {
                 if state.status.is_terminal() {

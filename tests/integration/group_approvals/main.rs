@@ -12,9 +12,11 @@
 //! Every scenario drives the REAL gate path: scripted `builtin.write_file` call
 //! → real `TurnStatus::BlockedApproval` gate (auto-approve disabled for the
 //! group at construction) → real `ApprovalResolver` (`approve_gate`/`deny_gate`)
-//! → `coordinator.resume_turn`. Only the model is faked. Exception:
+//! → `coordinator.resume_turn`. Only the model is faked. Exceptions:
 //! `failure_category_demasked` drives a genuinely-FAILED run (no gate) to prove
-//! the loop-exit de-mask wiring.
+//! the loop-exit de-mask wiring; `discard_then_resubmit` (#5467) drives the
+//! approval-request store directly (no `submit_turn`/gate at all) since no
+//! harness fault-injection seam exists for the mid-turn discard race it covers.
 //!
 //! ## Ordering (state machine over the shared auto-approve store)
 //!
