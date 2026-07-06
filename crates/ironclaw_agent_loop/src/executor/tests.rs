@@ -1,12 +1,14 @@
-use ironclaw_host_api::{ApprovalRequestId, CorrelationId, ProviderToolName, ResourceEstimate};
+use ironclaw_host_api::{
+    ApprovalRequestId, CorrelationId, DispatchInputIssueCode, ProviderToolName, ResourceEstimate,
+};
 use ironclaw_turns::{
     CapabilityActivityId, GateResumeDisposition, LoopCancelledReasonKind, LoopCompletionKind,
     LoopDiagnosticRef, LoopExit, LoopFailureKind, LoopGateRef, LoopResultRef, TurnRunId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
         CapabilityCallCandidate, CapabilityFailureDetail, CapabilityFailureKind,
-        CapabilityInputIssue, CapabilityInputIssueCode, CapabilityInputRef, CapabilityInputRepair,
-        CapabilityOutcome, CapabilityRecoveryHint, CapabilityResultMessage, CapabilityResumeToken,
+        CapabilityInputIssue, CapabilityInputRef, CapabilityInputRepair, CapabilityOutcome,
+        CapabilityRecoveryHint, CapabilityResultMessage, CapabilityResumeToken,
         LoopCancelReasonKind, LoopCheckpointKind, LoopCompactionError, LoopCompactionOutcome,
         LoopCompactionResponse, LoopContextCompactionKind, LoopInput, LoopInputAckToken,
         LoopInputBatch, LoopInputCursor, LoopInterruptKind, LoopProcessRef, LoopProgressEvent,
@@ -1365,7 +1367,11 @@ async fn repeated_reply_rejections_stop_as_invalid_model_output() {
 #[tokio::test]
 async fn default_reply_admission_rejects_tool_history_echo_and_continues() {
     let host = MockHost::new(vec![
-        reply_response_with_text("Previous tool event: demo__echo was invoked."),
+        // Multi-line, all provider-transcript-artifact lines: a replayed-history
+        // echo (still rejected under the multi-line artifact rule).
+        reply_response_with_text(
+            "Previous tool event: demo__echo was invoked.\nTool result from demo__echo: hi",
+        ),
         reply_response_with_text("done"),
     ]);
     let executor = CanonicalAgentLoopExecutor;
@@ -2946,7 +2952,7 @@ async fn invalid_provider_tool_failure_appends_structured_model_observation() {
                     detail: Some(CapabilityFailureDetail::InvalidInput {
                         issues: vec![CapabilityInputIssue {
                             path: "file_path".to_string(),
-                            code: CapabilityInputIssueCode::MissingRequired,
+                            code: DispatchInputIssueCode::MissingRequired,
                             expected: Some("required field".to_string()),
                             received: None,
                             schema_path: Some("required".to_string()),
@@ -2977,7 +2983,7 @@ async fn invalid_provider_tool_failure_appends_structured_model_observation() {
         ToolObservationDetail::InvalidInput { issues } => {
             assert_eq!(issues.len(), 1);
             assert_eq!(issues[0].path, "file_path");
-            assert_eq!(issues[0].code, CapabilityInputIssueCode::MissingRequired);
+            assert_eq!(issues[0].code, DispatchInputIssueCode::MissingRequired);
         }
         detail => panic!("expected invalid input detail, got {detail:?}"),
     }

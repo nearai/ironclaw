@@ -1638,6 +1638,60 @@ mod postgres_tests {
     }
 
     #[tokio::test]
+    async fn postgres_create_dir_all_conflict_rolls_back_inserted_prefixes() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let parent = vpath(&prefix, "mkdir_conflict");
+        let blocking_file = vpath(&prefix, "mkdir_conflict/file");
+        let child_under_file = vpath(&prefix, "mkdir_conflict/file/child");
+
+        fs.put(
+            &blocking_file,
+            Entry::bytes(b"already a file".to_vec()),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+
+        let err = fs
+            .create_dir_all(&child_under_file)
+            .await
+            .expect_err("existing file prefix must reject create_dir_all");
+        match err {
+            FilesystemError::Backend {
+                path,
+                operation,
+                reason,
+            } => {
+                assert_eq!(path, blocking_file);
+                assert_eq!(operation, FilesystemOperation::CreateDirAll);
+                assert!(
+                    reason.contains("file exists where directory is required"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            other => panic!("expected create_dir_all Backend error, got: {other:?}"),
+        }
+        assert_eq!(
+            fs.get(&blocking_file).await.unwrap().unwrap().entry.body,
+            b"already a file"
+        );
+
+        fs.delete(&blocking_file).await.unwrap();
+        assert!(
+            matches!(
+                fs.stat(&parent).await,
+                Err(FilesystemError::NotFound {
+                    operation: FilesystemOperation::Stat,
+                    ..
+                })
+            ),
+            "failed create_dir_all must roll back explicit directory rows inserted before the conflict"
+        );
+    }
+
+    #[tokio::test]
     async fn postgres_transaction_rollback_discards_prior_put_after_later_cas_conflict() {
         let Some((fs, prefix)) = postgres_root().await else {
             return;

@@ -828,8 +828,9 @@ async def test_configure_modal_field_variants(page):
     modal = page.locator(SEL["configure_modal"])
     assert await modal.is_visible()
     text = await modal.text_content()
-    # Basic field with label and input
-    assert "Enter API key" in text
+    # Basic field with label and input. The UI intentionally strips leading
+    # "Enter" prompt copy so fields read as compact labels.
+    assert "API key" in text
     assert await page.locator(SEL["configure_input"]).count() >= 1
     # Provided badge and at least one input with 'already set'/'keep' placeholder
     assert await modal.locator(SEL["field_provided"]).count() >= 1
@@ -837,8 +838,8 @@ async def test_configure_modal_field_variants(page):
     input_count = await inputs.count()
     placeholders = [await inputs.nth(i).get_attribute("placeholder") or "" for i in range(input_count)]
     assert any("already set" in p or "keep" in p for p in placeholders), f"No provided placeholder: {placeholders}"
-    # Optional label
-    assert "(optional)" in text
+    # Optional fields are grouped under a compact summary.
+    assert "Optional settings (1)" in text
     # Auto-generate hint
     assert "Auto-generated" in text
     # Modal heading contains extension name

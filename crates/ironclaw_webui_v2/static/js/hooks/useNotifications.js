@@ -68,7 +68,7 @@ export function useNotifications({
     refetchIntervalInBackground: false,
   });
 
-  const approvalMessages = React.useMemo(() => {
+  const messages = React.useMemo(() => {
     if (!scope) return [];
     const records = Array.isArray(query.data?.threads) ? query.data.threads : [];
     const approvalThreads = records.map((record) => ({
@@ -78,17 +78,9 @@ export function useNotifications({
     return approvalThreadNotifications(approvalThreads, threadStates, t);
   }, [query.data, scope, t, threadStates]);
 
-  const messages = React.useMemo(
-    () =>
-      approvalMessages.filter(
-        (message) => !notificationState.seenIds.has(message.id),
-      ),
-    [approvalMessages, notificationState],
-  );
-
   React.useEffect(() => {
     if (!activeThreadId || !scope) return;
-    const activeMessageIds = approvalMessages
+    const activeMessageIds = messages
       .filter(
         (message) =>
           message.href === `/chat/${encodeURIComponent(activeThreadId)}` &&
@@ -98,11 +90,16 @@ export function useNotifications({
     if (activeMessageIds.length === 0) return;
     const next = markNotificationIdsSeen(activeMessageIds, scope);
     setNotificationState(next);
-  }, [activeThreadId, approvalMessages, notificationState, scope]);
+  }, [activeThreadId, messages, notificationState, scope]);
 
   const unreadIds = React.useMemo(
-    () => new Set(messages.map((message) => message.id)),
-    [messages],
+    () =>
+      new Set(
+        messages
+          .filter((message) => !notificationState.seenIds.has(message.id))
+          .map((message) => message.id),
+      ),
+    [messages, notificationState],
   );
 
   const dismissMessage = React.useCallback((messageId) => {

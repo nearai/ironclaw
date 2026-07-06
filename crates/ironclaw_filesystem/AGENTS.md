@@ -16,7 +16,7 @@
 - The universal stored value `Entry`/`VersionedEntry` and its primitives `RecordKind`/`RecordVersion`/`SeqNo`/`CasExpectation`/`ContentType` (`record`).
 - Declarative index/query primitives `IndexSpec`/`IndexName`/`IndexKey`/`IndexValue`/`IndexKind`/`Filter`/`Page` (`index`) — no SQL strings cross the boundary; plus shared brute-force vector ranking helpers (`vector`).
 - Filesystem vocabulary in `types`: `BackendCapabilities`/`BackendId`/`BackendKind`/`Capability`/`TxnCapability`, `FileStat`/`DirEntry`/`FileType`/`ContentKind`, `StorageClass`, `IndexPolicy`/`IndexConflictReason`, `FilesystemError`/`FilesystemOperation`; supporting handles `StorageTxn`/`EventRecord` (`backend`).
-- Mount table + catalog: `CompositeRootFilesystem`, `MountDescriptor`, `FilesystemCatalog`, `PathPlacement` (`catalog`) — longest-prefix mount routing.
+- Mount table + catalog: `CompositeRootFilesystem`, `MountDescriptor`, `PathPlacement` (`catalog`) — longest-prefix mount routing and inherent catalog inspection.
 - Invocation-scoped view `ScopedFilesystem` + `MountViewResolver` (`scoped`) — checks permission against `MountView` before any backend dispatch.
 - Backends, all implementing `RootFilesystem`: `LocalFilesystem`, `PostgresRootFilesystem`, `LibSqlRootFilesystem`, `InMemoryBackend`, `HsmBackend`; plus backend containment (symlink traversal, mount escape, raw-host-path prevention).
 - Crate-local public API, tests, and fixtures needed to prove that ownership.

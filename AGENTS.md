@@ -18,10 +18,11 @@ Start with these deeper docs as needed:
 
 ## Code Discovery — Query the Knowledge Graph First
 
-This repo is indexed into a **codebase knowledge graph** via the `codebase-memory` MCP server (~464k nodes / ~2.5M edges over `src/` + `crates/`). For any *where-is / who-calls / how-does-data-flow / what-does-this-touch* question, **query the graph before `grep`** — text search can't see cross-crate call chains, and a feature here crosses many crates (`product_workflow → composition → webui_v2 → runtime → frontend`).
+This repo can be indexed into a **codebase knowledge graph** via the `codebase-memory` MCP server over `src/` + `crates/`. For any *where-is / who-calls / how-does-data-flow / what-does-this-touch* question, **probe the graph before `grep`** — text search can't see cross-crate call chains, and a feature here crosses many crates (`product_workflow → composition → webui_v2 → runtime → frontend`).
 
 - **Location:** `.codebase-memory/graph.db.zst` — a git-ignored build artifact (rebuilt from code, one per environment, never committed).
 - **Freshness:** run `bash scripts/codebase-graph.sh status` (compares indexed commit vs `HEAD`). If missing → `index_repository(repo_path=".")`; if stale → `detect_changes(since="<indexed-commit>")` or re-index. The graph is point-in-time — verify its claims against live code before acting.
+- **Fallback:** if the `codebase-memory` MCP server is not connected in your session (common), do **not** stall or retry — probe once, then fall back immediately to the `crates/AGENTS.md` routing map, the `ironclaw-reborn-orientation` skill's flow map, and targeted grep; note the fallback in your report.
 - **Recipes:** define → `search_graph(name_pattern=…)` + `get_code_snippet(…)`; callers → `trace_path(mode="calls")`; value flow → `trace_path(mode="data_flow")`; cross-crate flow → `trace_path(mode="cross_service")`; area shape → `get_architecture(…)`; Cypher → `query_graph(…)`.
 
 Use `grep`/read for text, config, and non-code files, and after the graph for code structure — not before.
@@ -37,7 +38,9 @@ Use `grep`/read for text, config, and non-code files, and after the graph for co
 
 ## Where to Work
 
-**Build new features Reborn-side, in `crates/` — not the v1 `src/` monolith.** A Reborn feature crosses `product_workflow → composition → webui_v2 → runtime/serve → frontend`; the binary entry point is `crates/ironclaw_reborn_cli` (`reborn_cli`), **not** `src/main.rs`. Start from the `reborn-feature` skill, which maps the layers. `src/` is v1, being retired under "Clean up old architecture" — touch it only to maintain existing v1 behavior, never to add new features.
+**Build new features Reborn-side, in `crates/` — not the v1 `src/` monolith.** A Reborn feature crosses `product_workflow → composition → webui_v2 → runtime/serve → frontend`; the binary entry point is `crates/ironclaw_reborn_cli` (binary name `ironclaw-reborn`), **not** `src/main.rs`. Start from the `reborn-feature` skill, which maps the layers. `src/` is v1, being retired under "Clean up old architecture" — touch it only to maintain existing v1 behavior, never to add new features.
+
+Repo-specific agent skills live in `.claude/skills/*/SKILL.md` as plain markdown — **agents on any runtime (Codex included) should `Read` the relevant file directly** if their harness doesn't auto-load skills: `ironclaw-reborn-orientation` (where things go, legacy-vs-target map, discovery fallback), `reborn-feature` (build a feature across the layers), `ironclaw-reborn-architecture-review` (boundaries, abstractions, re-exports), `ironclaw-reborn-testing` (test tiers and harness seams), `ironclaw-reborn-skill-maintainer` (editing guidance/skills safely).
 
 Existing subsystem locations (mostly v1 `src/`; maintain, don't extend):
 - Agent/runtime behavior: `src/agent/`

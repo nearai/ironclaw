@@ -1,9 +1,10 @@
 //! Shared test-only env-var harness for `runtime::tests` and
 //! `runtime::trigger_poller::tests`. These modules read or mutate process
 //! env vars (`IRONCLAW_TRIGGER_POLLER_*`, `IRONCLAW_REBORN_RUNNER_*`, OAuth
-//! knobs); without a single lock + single `EnvGuard` they would race in the
-//! same test binary. The lock is process-wide across all runtime env-var
-//! tests (trigger, runner, OAuth), hence the scope-neutral name.
+//! knobs, credential-refresh knobs); without a single lock + single `EnvGuard`
+//! they would race in the same test binary. The lock is process-wide across
+//! all runtime env-var tests (trigger, runner, OAuth, credential refresh),
+//! hence the scope-neutral name.
 //!
 //! Not exposed outside `#[cfg(test)]`.
 

@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use ironclaw_turns::run_profile::{
-    LoopInlineMessage, LoopInlineMessageRole, LoopPromptBundleRequest, LoopSafeSummary, PromptMode,
+    LoopInlineMessage, LoopInlineMessageBody, LoopInlineMessageRole, LoopPromptBundleRequest,
+    PromptMode,
 };
 
 use crate::state::{LoopExecutionState, RepeatedCallWarningPhase};
@@ -118,7 +119,7 @@ fn loop_control_inline_messages(state: &LoopExecutionState) -> LoopControlInline
 pub(crate) fn repeated_call_warning_control_message() -> LoopInlineMessage {
     LoopInlineMessage {
         role: LoopInlineMessageRole::System,
-        safe_body: LoopSafeSummary::new(REPEATED_CALL_WARNING_CONTROL_TEXT)
+        safe_body: LoopInlineMessageBody::new(REPEATED_CALL_WARNING_CONTROL_TEXT)
             .expect("static loop-control text is non-empty and safe"), // safety: static safe ASCII words.
     }
 }

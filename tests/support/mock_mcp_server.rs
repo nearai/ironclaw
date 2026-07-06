@@ -98,6 +98,21 @@ impl MockMcpServer {
         *self.state.force_tool_call_error.lock().unwrap() = Some((code, message.into()));
     }
 
+    /// Switch every id-bearing JSON-RPC response to SSE framing:
+    /// `Content-Type: text/event-stream` with the JSON-RPC body wrapped in a
+    /// `data:` event, preceded by an empty `ping` keepalive event. This is a
+    /// legal Streamable-HTTP MCP framing — the client advertises
+    /// `Accept: application/json, text/event-stream` — so a conformant client
+    /// must parse it identically to plain JSON. Notification acks (no id) stay
+    /// `202 Accepted` with no body regardless. Sticky; default off (plain
+    /// JSON), so existing tests are unaffected. Drives the SSE format-matrix case.
+    ///
+    /// Only `initialize` and `tools/call` are exercised by any caller today;
+    /// `tools/list` framing is dispatch-reachable but currently untested.
+    pub fn enable_sse_framing(&self) {
+        *self.state.sse_framing.lock().unwrap() = true;
+    }
+
     pub fn clear_recorded_requests(&self) {
         self.state.recorded_requests.lock().unwrap().clear();
     }
@@ -153,6 +168,10 @@ struct MockState {
     /// client's error-detection guard is the only thing preventing a spurious
     /// Completed). Drives the tool-call-error MCP case.
     force_tool_call_error: std::sync::Mutex<Option<(i64, String)>>,
+    /// When true, id-bearing JSON-RPC responses are SSE-framed
+    /// (`text/event-stream`, `data:`-wrapped, keepalive-ping prefixed) instead of
+    /// plain `application/json`. Default false. See `enable_sse_framing`.
+    sse_framing: std::sync::Mutex<bool>,
 }
 
 #[derive(Clone, Serialize)]
@@ -210,6 +229,7 @@ pub async fn start_mock_mcp_server(tool_responses: Vec<MockToolResponse>) -> Moc
         session_counter: std::sync::Mutex::new(0),
         force_status: std::sync::Mutex::new(None),
         force_tool_call_error: std::sync::Mutex::new(None),
+        sse_framing: std::sync::Mutex::new(false),
     });
 
     let app = Router::new()
@@ -290,6 +310,7 @@ pub async fn start_mock_mcp_server_with_specs(specs: Vec<MockToolSpec>) -> MockM
         session_counter: std::sync::Mutex::new(0),
         force_status: std::sync::Mutex::new(None),
         force_tool_call_error: std::sync::Mutex::new(None),
+        sse_framing: std::sync::Mutex::new(false),
     });
 
     let app = Router::new()
@@ -568,6 +589,26 @@ async fn handle_mcp(
     } else {
         StatusCode::OK
     };
+
+    // SSE framing — see `enable_sse_framing` doc comment.
+    if *state.sse_framing.lock().unwrap() {
+        let json = serde_json::to_string(&response)
+            .expect("serializing serde_json::Value for SSE body should not fail");
+        let sse_body = format!("event: ping\ndata:\n\nevent: message\ndata: {json}\n\n");
+        return if let Some(session_id) = response_session_id {
+            (
+                status,
+                [
+                    ("content-type", "text/event-stream"),
+                    ("mcp-session-id", session_id.as_str()),
+                ],
+                sse_body,
+            )
+                .into_response()
+        } else {
+            (status, [("content-type", "text/event-stream")], sse_body).into_response()
+        };
+    }
 
     if let Some(session_id) = response_session_id {
         (

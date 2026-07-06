@@ -146,11 +146,10 @@ for WebUI Slack workflow coverage.
 
 - `IRONCLAW_REBORN_SLACK_SIGNING_SECRET`
 - `IRONCLAW_REBORN_SLACK_BOT_TOKEN`
-- `REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_CHANNEL_ID` when a stable delivery
-  target should be pinned instead of discovered from `auth.test`
-- `REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID` when the route channel is not
-  pinned and the discovery DM should target a specific QA Slack user; otherwise
-  discovery falls back to a Slackbot DM, never a public channel
+- `REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID` for the real QA Slack user that
+  should receive seeded personal-DM deliveries. DM delivery cases fail preflight
+  when neither this nor a non-default
+  `REBORN_WEBUI_V2_LIVE_QA_SLACK_INBOUND_USER_ID` is configured.
 
 Telegram workflow cases require a real test bot token:
 

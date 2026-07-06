@@ -35,19 +35,29 @@ use crate::slack_outbound_targets::{
     SlackPersonalDmTargetStore,
 };
 use crate::slack_personal_binding::{
-    RebornUserIdentityBinding, RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
+    RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
+    RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
 };
 use crate::slack_personal_binding_pairing::{
     IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingChallenge,
     SlackPersonalBindingPairingChallengeStore, SlackPersonalBindingPairingCode,
     SlackPersonalBindingPairingError,
 };
-use crate::slack_serve::SlackUserId;
+use crate::slack_serve::{SlackTeamId, SlackUserId};
 use crate::slack_setup::{SlackInstallationSetup, SlackInstallationSetupStore, SlackSetupError};
 
 const SLACK_HOST_STATE_ROOT: &str = "/tenant-shared/slack-personal-binding";
 const SLACK_INSTALLATION_SETUP_PATH: &str = "/tenant-shared/slack-setup/installation.json";
 const IDENTITY_ROOT: &str = "/tenant-shared/slack-personal-binding/identities";
+// Per-(provider, user) inverse index of identity bindings. Primary identity
+// records are keyed by `provider_user_id`, so answering "is THIS user bound?"
+// otherwise scans every paired identity. This index lets the connection check
+// (WebUI extension listing + Slack activation gate) resolve a bound caller by
+// listing only that caller's own bindings. It is maintained best-effort on
+// bind/delete: a missing marker only makes the reader fall back to the scan
+// (correct, just slower), and the reader verifies the primary record before
+// trusting a marker, so a stale marker can never be a false positive.
+const IDENTITY_BY_USER_ROOT: &str = "/tenant-shared/slack-personal-binding/identities-by-user";
 const PAIRING_CODE_ROOT: &str = "/tenant-shared/slack-personal-binding/pairing/codes";
 const PAIRING_ACTOR_ROOT: &str = "/tenant-shared/slack-personal-binding/pairing/actors";
 const CHANNEL_ROUTE_ROOT: &str = "/tenant-shared/slack-channel-routes";
@@ -196,6 +206,107 @@ where
 
     async fn delete_record(&self, path: &ScopedPath) -> Result<(), FilesystemError> {
         self.filesystem.delete(&self.scope, path).await
+    }
+
+    /// Best-effort write of the per-user index marker for a binding. A missing
+    /// marker only makes the connection check fall back to a scan (correct, just
+    /// slower), so a fault here is logged, not propagated. See
+    /// [`IDENTITY_BY_USER_ROOT`].
+    async fn write_user_binding_index_marker(&self, binding: &RebornUserIdentityBinding) {
+        let path = match Self::identity_user_index_path(
+            binding.provider.as_str(),
+            binding.user_id.as_str(),
+            binding.provider_user_id.as_str(),
+        ) {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::debug!(%error, "could not build Slack user-binding index path");
+                return;
+            }
+        };
+        let marker = StoredUserBindingIndexMarker {
+            provider_user_id: binding.provider_user_id.as_str().to_string(),
+        };
+        if let Err(error) = self.write_record(&path, &marker, CasExpectation::Any).await {
+            tracing::debug!(
+                %error,
+                "failed to write Slack user-binding index marker; connection check will fall back to a scan"
+            );
+        }
+    }
+
+    /// Best-effort delete of a per-user index marker. A stale marker cannot
+    /// cause a false positive (the reader verifies the primary record), so a
+    /// delete fault is logged, not propagated.
+    async fn delete_user_binding_index_marker(
+        &self,
+        provider: &str,
+        user_id: &str,
+        provider_user_id: &str,
+    ) {
+        let path = match Self::identity_user_index_path(provider, user_id, provider_user_id) {
+            Ok(path) => path,
+            Err(_) => return,
+        };
+        match self.delete_record(&path).await {
+            Ok(()) | Err(FilesystemError::NotFound { .. }) => {}
+            Err(error) => {
+                tracing::debug!(%error, "failed to delete Slack user-binding index marker");
+            }
+        }
+    }
+
+    /// Fast-path connection check via the per-user index. Returns `true` only
+    /// after verifying the primary record still exists and matches (so a stale
+    /// marker is never a false positive). Returns `false` when the index has no
+    /// verified match — the caller must fall back to the full scan, because
+    /// bindings written before this index existed have no marker.
+    async fn user_binding_via_index_marker(
+        &self,
+        provider: &str,
+        user_id: &UserId,
+        provider_user_id_prefix: Option<&str>,
+    ) -> Result<bool, RebornUserIdentityLookupError> {
+        let dir = Self::identity_user_index_dir(provider, user_id.as_str())
+            .map_err(map_lookup_fs_error)?;
+        let entries = match self.filesystem.list_dir(&self.scope, &dir).await {
+            Ok(entries) => entries,
+            Err(FilesystemError::NotFound { .. }) => return Ok(false),
+            Err(error) => return Err(map_lookup_fs_error(error)),
+        };
+        for entry in entries {
+            if !entry.name.ends_with(".json") {
+                continue;
+            }
+            // The marker file name is `path_segment(provider_user_id).json`,
+            // identical to the primary record's file name, so the primary path
+            // is the identity dir plus this entry name — no decoding needed.
+            let primary = scoped_path(&format!(
+                "{IDENTITY_ROOT}/{}/{}",
+                path_segment(provider),
+                entry.name
+            ))
+            .map_err(map_lookup_fs_error)?;
+            let Some((record, _)) = self
+                .read_record::<StoredSlackUserIdentity>(&primary)
+                .await
+                .map_err(map_lookup_fs_error)?
+            else {
+                // Stale marker (primary gone); skip. Verifying the primary is
+                // what keeps a failed delete-marker from becoming a false
+                // positive.
+                continue;
+            };
+            if identity_record_matches_user_binding(
+                &record,
+                provider,
+                user_id,
+                provider_user_id_prefix,
+            ) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     async fn acquire_channel_route_replace_lease(
@@ -508,6 +619,35 @@ where
         ))
     }
 
+    fn identity_user_index_dir(
+        provider: &str,
+        user_id: &str,
+    ) -> Result<ScopedPath, FilesystemError> {
+        scoped_path(&format!(
+            "{}/{}/{}",
+            IDENTITY_BY_USER_ROOT,
+            path_segment(provider),
+            path_segment(user_id)
+        ))
+    }
+
+    fn identity_user_index_path(
+        provider: &str,
+        user_id: &str,
+        provider_user_id: &str,
+    ) -> Result<ScopedPath, FilesystemError> {
+        // The marker file name reuses `path_segment(provider_user_id)`, exactly
+        // like the primary record, so the primary path can be rebuilt from a
+        // marker entry name without decoding.
+        scoped_path(&format!(
+            "{}/{}/{}/{}.json",
+            IDENTITY_BY_USER_ROOT,
+            path_segment(provider),
+            path_segment(user_id),
+            path_segment(provider_user_id)
+        ))
+    }
+
     fn pairing_code_path(
         code: &SlackPersonalBindingPairingCode,
     ) -> Result<ScopedPath, FilesystemError> {
@@ -573,7 +713,7 @@ where
             "{}/{}/{}/{}.json",
             PERSONAL_DM_TARGET_ROOT,
             path_segment(key.installation_id.as_str()),
-            path_segment(&key.team_id),
+            path_segment(key.team_id.as_str()),
             path_segment(key.user_id.as_str())
         ))
     }
@@ -707,6 +847,17 @@ where
             .map(|_| ())
             .map_err(map_setup_fs_error)
     }
+
+    async fn delete_slack_installation_setup(&self) -> Result<(), SlackSetupError> {
+        let path = ScopedPath::new(SLACK_INSTALLATION_SETUP_PATH)
+            .map_err(|_| SlackSetupError::StoreUnavailable)?;
+        let lock = self.lock_for("slack-installation-setup".to_string());
+        let _guard = lock.lock().await;
+        match self.delete_record(&path).await {
+            Ok(()) | Err(FilesystemError::NotFound { .. }) => Ok(()),
+            Err(error) => Err(map_setup_fs_error(error)),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -730,6 +881,67 @@ where
         let user_id = UserId::new(record.user_id)
             .map_err(|error| RebornUserIdentityLookupError::InvalidUserId(error.to_string()))?;
         Ok(Some(user_id))
+    }
+
+    async fn user_has_provider_binding(
+        &self,
+        provider: &str,
+        user_id: &UserId,
+    ) -> Result<bool, RebornUserIdentityLookupError> {
+        self.user_has_provider_binding_with_provider_user_id_prefix(provider, user_id, None)
+            .await
+    }
+
+    async fn user_has_provider_binding_with_provider_user_id_prefix(
+        &self,
+        provider: &str,
+        user_id: &UserId,
+        provider_user_id_prefix: Option<&str>,
+    ) -> Result<bool, RebornUserIdentityLookupError> {
+        // Fast path: the per-user index resolves a bound caller by listing only
+        // that caller's own bindings. A verified `true` short-circuits the scan;
+        // a miss is inconclusive (bindings predating the index have no marker),
+        // so fall through to the full scan below.
+        if self
+            .user_binding_via_index_marker(provider, user_id, provider_user_id_prefix)
+            .await?
+        {
+            return Ok(true);
+        }
+        let provider_dir = scoped_path(&format!("{IDENTITY_ROOT}/{}", path_segment(provider)))
+            .map_err(map_lookup_fs_error)?;
+        let entries = match self.filesystem.list_dir(&self.scope, &provider_dir).await {
+            Ok(entries) => entries,
+            Err(FilesystemError::NotFound { .. }) => return Ok(false),
+            Err(error) => return Err(map_lookup_fs_error(error)),
+        };
+        for entry in entries {
+            if !entry.name.ends_with(".json") {
+                continue;
+            }
+            let path = scoped_path(&format!(
+                "{IDENTITY_ROOT}/{}/{}",
+                path_segment(provider),
+                entry.name
+            ))
+            .map_err(map_lookup_fs_error)?;
+            let Some((record, _)) = self
+                .read_record::<StoredSlackUserIdentity>(&path)
+                .await
+                .map_err(map_lookup_fs_error)?
+            else {
+                continue;
+            };
+            if identity_record_matches_user_binding(
+                &record,
+                provider,
+                user_id,
+                provider_user_id_prefix,
+            ) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 
@@ -773,6 +985,7 @@ where
                 }
                 Err(error) => return Err(map_binding_fs_error(error)),
             }
+            self.write_user_binding_index_marker(&binding).await;
             return Ok(());
         }
 
@@ -788,7 +1001,90 @@ where
             }
             Err(error) => return Err(map_binding_fs_error(error)),
         }
+        self.write_user_binding_index_marker(&binding).await;
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl<F> RebornUserIdentityBindingDeleteStore for FilesystemSlackHostState<F>
+where
+    F: RootFilesystem + 'static,
+{
+    async fn delete_user_identity_bindings_for_user(
+        &self,
+        provider: &str,
+        user_id: &UserId,
+        provider_user_id_prefix: Option<&str>,
+    ) -> Result<usize, RebornUserIdentityBindingError> {
+        let provider_dir = scoped_path(&format!("{IDENTITY_ROOT}/{}", path_segment(provider)))
+            .map_err(map_binding_fs_error)?;
+        let entries = match self.filesystem.list_dir(&self.scope, &provider_dir).await {
+            Ok(entries) => entries,
+            Err(FilesystemError::NotFound { .. }) => return Ok(0),
+            Err(error) => return Err(map_binding_fs_error(error)),
+        };
+        let mut deleted = 0;
+        for entry in entries {
+            if !entry.name.ends_with(".json") {
+                continue;
+            }
+            let path = scoped_path(&format!(
+                "{IDENTITY_ROOT}/{}/{}",
+                path_segment(provider),
+                entry.name
+            ))
+            .map_err(map_binding_fs_error)?;
+            let Some((candidate, _)) = self
+                .read_record::<StoredSlackUserIdentity>(&path)
+                .await
+                .map_err(map_binding_fs_error)?
+            else {
+                continue;
+            };
+            if !identity_record_matches_user_binding(
+                &candidate,
+                provider,
+                user_id,
+                provider_user_id_prefix,
+            ) {
+                continue;
+            }
+            let lock = self.lock_for(format!(
+                "identity:{}:{}",
+                candidate.provider, candidate.provider_user_id
+            ));
+            let _guard = lock.lock().await;
+            let Some((current, _)) = self
+                .read_record::<StoredSlackUserIdentity>(&path)
+                .await
+                .map_err(map_binding_fs_error)?
+            else {
+                continue;
+            };
+            if !identity_record_matches_user_binding(
+                &current,
+                provider,
+                user_id,
+                provider_user_id_prefix,
+            ) {
+                continue;
+            }
+            match self.delete_record(&path).await {
+                Ok(()) => {
+                    deleted += 1;
+                    self.delete_user_binding_index_marker(
+                        provider,
+                        user_id.as_str(),
+                        &current.provider_user_id,
+                    )
+                    .await;
+                }
+                Err(FilesystemError::NotFound { .. }) => {}
+                Err(error) => return Err(map_binding_fs_error(error)),
+            }
+        }
+        Ok(deleted)
     }
 }
 
@@ -877,7 +1173,7 @@ where
         let lock = self.lock_for(format!(
             "personal-dm:{}:{}:{}",
             target.key.installation_id.as_str(),
-            target.key.team_id,
+            target.key.team_id.as_str(),
             target.key.user_id.as_str()
         ));
         let _guard = lock.lock().await;
@@ -908,6 +1204,47 @@ where
             }
             Err(error) => Err(map_personal_dm_target_fs_error(error)),
         }
+    }
+
+    async fn delete_personal_dm_target(
+        &self,
+        key: &SlackPersonalDmTargetKey,
+    ) -> Result<bool, SlackPersonalDmTargetError> {
+        if key.tenant_id != self.scope.tenant_id {
+            return Ok(false);
+        }
+        let path = Self::personal_dm_target_path(key).map_err(map_personal_dm_target_fs_error)?;
+        let lock = self.lock_for(format!(
+            "personal-dm:{}:{}:{}",
+            key.installation_id.as_str(),
+            key.team_id.as_str(),
+            key.user_id.as_str()
+        ));
+        let _guard = lock.lock().await;
+        match self.delete_record(&path).await {
+            Ok(()) => Ok(true),
+            Err(FilesystemError::NotFound { .. }) => Ok(false),
+            Err(error) => Err(map_personal_dm_target_fs_error(error)),
+        }
+    }
+
+    async fn delete_personal_dm_targets_for_user(
+        &self,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+        installation_id: &AdapterInstallationId,
+        team_id: &SlackTeamId,
+    ) -> Result<usize, SlackPersonalDmTargetError> {
+        if tenant_id != &self.scope.tenant_id {
+            return Ok(0);
+        }
+        let key = SlackPersonalDmTargetKey::new(
+            tenant_id.clone(),
+            installation_id.clone(),
+            team_id.clone(),
+            user_id.clone(),
+        )?;
+        self.delete_personal_dm_target(&key).await.map(usize::from)
     }
 }
 
@@ -941,66 +1278,43 @@ where
         if let Some((actor_record, _)) = existing_actor.as_ref()
             && actor_record.expires_at <= Utc::now()
         {
-            self.cleanup_actor_pairing_code_record(actor_record).await;
+            self.cleanup_actor_pairing_code_record(actor_record).await?;
         }
 
-        let expires_at = Utc::now()
-            + chrono::Duration::from_std(self.pairing_ttl).map_err(|_| {
-                SlackPersonalBindingPairingError::Backend(
-                    "Slack pairing TTL could not be represented".into(),
-                )
-            })?;
-        for _ in 0..PAIRING_CODE_RETRIES {
-            let code = SlackPersonalBindingPairingCode::new(random_pairing_code())?;
-            let path = Self::pairing_code_path(&code).map_err(map_pairing_fs_error)?;
-            let record = StoredSlackPairingChallenge::pending(&code, &challenge, expires_at);
-            match self
-                .write_record(&path, &record, CasExpectation::Absent)
-                .await
-            {
-                Ok(_) => {
-                    let actor_record =
-                        StoredSlackPairingActorChallenge::pending(&code, &challenge, expires_at);
-                    let actor_cas = existing_actor
-                        .as_ref()
-                        .map(|(_, version)| CasExpectation::Version(*version))
-                        .unwrap_or(CasExpectation::Absent);
-                    match self
-                        .write_record(&actor_path, &actor_record, actor_cas)
-                        .await
-                    {
-                        Ok(_) => {}
-                        Err(FilesystemError::VersionMismatch { .. }) => {
-                            self.cleanup_pairing_code_record(&path).await;
-                            let Some((winner, _)) = self
-                                .read_record::<StoredSlackPairingActorChallenge>(&actor_path)
-                                .await
-                                .map_err(map_pairing_fs_error)?
-                            else {
-                                continue;
-                            };
-                            if let Some(issued) = self
-                                .active_actor_pairing_challenge(&winner, &challenge)
-                                .await?
-                            {
-                                return Ok(issued);
-                            }
-                            continue;
-                        }
-                        Err(error) => {
-                            self.cleanup_pairing_code_record(&path).await;
-                            return Err(map_pairing_fs_error(error));
-                        }
-                    }
-                    return Ok(IssuedSlackPersonalBindingPairingChallenge { code, challenge });
-                }
-                Err(FilesystemError::VersionMismatch { .. }) => continue,
-                Err(error) => return Err(map_pairing_fs_error(error)),
-            }
+        self.mint_fresh_challenge(
+            challenge,
+            &actor_path,
+            existing_actor.as_ref().map(|(_, version)| *version),
+        )
+        .await
+    }
+
+    async fn reissue_challenge(
+        &self,
+        challenge: SlackPersonalBindingPairingChallenge,
+    ) -> Result<IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError> {
+        let actor_path = Self::pairing_actor_path(&challenge).map_err(map_pairing_fs_error)?;
+        let actor_lock = self.lock_for(format!(
+            "pairing-actor:{}:{}",
+            challenge.installation_id.as_str(),
+            challenge.slack_user_id.as_str()
+        ));
+        let _actor_guard = actor_lock.lock().await;
+        let existing_actor = self
+            .read_record::<StoredSlackPairingActorChallenge>(&actor_path)
+            .await
+            .map_err(map_pairing_fs_error)?;
+        // Explicit recovery always invalidates any outstanding code (even one
+        // still active) so the user is handed a guaranteed-fresh code.
+        if let Some((actor_record, _)) = existing_actor.as_ref() {
+            self.cleanup_actor_pairing_code_record(actor_record).await?;
         }
-        Err(SlackPersonalBindingPairingError::Backend(
-            "could not allocate a unique Slack pairing code".into(),
-        ))
+        self.mint_fresh_challenge(
+            challenge,
+            &actor_path,
+            existing_actor.as_ref().map(|(_, version)| *version),
+        )
+        .await
     }
 
     async fn get_challenge(
@@ -1057,7 +1371,7 @@ where
             }
             Err(error) => return Err(map_pairing_fs_error(error)),
         }
-        self.cleanup_pairing_code_record(&path).await;
+        self.cleanup_pairing_code_record(&path).await?;
         self.cleanup_pairing_actor_record(&actor_path, code).await;
         Ok(challenge)
     }
@@ -1242,6 +1556,84 @@ impl<F> FilesystemSlackHostState<F>
 where
     F: RootFilesystem + 'static,
 {
+    /// Allocate a brand-new pairing code + actor record for `challenge`,
+    /// overwriting the actor record at `actor_path` (CAS against
+    /// `existing_actor_version`, or expecting absence when `None`). Shared by
+    /// [`Self::issue_challenge`] and the force-fresh
+    /// [`Self::reissue_challenge`]; callers hold the per-actor lock and have
+    /// already cleaned up any code record they intend to invalidate.
+    async fn mint_fresh_challenge(
+        &self,
+        challenge: SlackPersonalBindingPairingChallenge,
+        actor_path: &ScopedPath,
+        existing_actor_version: Option<RecordVersion>,
+    ) -> Result<IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError> {
+        let expires_at = Utc::now()
+            + chrono::Duration::from_std(self.pairing_ttl).map_err(|_| {
+                SlackPersonalBindingPairingError::Backend(
+                    "Slack pairing TTL could not be represented".into(),
+                )
+            })?;
+        for _ in 0..PAIRING_CODE_RETRIES {
+            let code = SlackPersonalBindingPairingCode::new(random_pairing_code())?;
+            let path = Self::pairing_code_path(&code).map_err(map_pairing_fs_error)?;
+            let record = StoredSlackPairingChallenge::pending(&code, &challenge, expires_at);
+            match self
+                .write_record(&path, &record, CasExpectation::Absent)
+                .await
+            {
+                Ok(_) => {
+                    let actor_record =
+                        StoredSlackPairingActorChallenge::pending(&code, &challenge, expires_at);
+                    let actor_cas = existing_actor_version
+                        .map(CasExpectation::Version)
+                        .unwrap_or(CasExpectation::Absent);
+                    match self
+                        .write_record(actor_path, &actor_record, actor_cas)
+                        .await
+                    {
+                        Ok(_) => {}
+                        Err(FilesystemError::VersionMismatch { .. }) => {
+                            self.cleanup_pairing_code_record(&path).await?;
+                            let Some((winner, _)) = self
+                                .read_record::<StoredSlackPairingActorChallenge>(actor_path)
+                                .await
+                                .map_err(map_pairing_fs_error)?
+                            else {
+                                continue;
+                            };
+                            if let Some(issued) = self
+                                .active_actor_pairing_challenge(&winner, &challenge)
+                                .await?
+                            {
+                                return Ok(issued);
+                            }
+                            continue;
+                        }
+                        Err(error) => {
+                            self.cleanup_pairing_code_record(&path).await?;
+                            return Err(map_pairing_fs_error(error));
+                        }
+                    }
+                    return Ok(IssuedSlackPersonalBindingPairingChallenge { code, challenge });
+                }
+                Err(FilesystemError::VersionMismatch { .. }) => continue,
+                // security: this FS error is from writing the code record, whose
+                // path (`pairing/code/<code>.json`) the error's Display embeds.
+                // Map to a code-free error so the pairing code can never reach an
+                // error string or log line (the handler logs the cause at debug).
+                Err(_) => {
+                    return Err(SlackPersonalBindingPairingError::Backend(
+                        "Slack pairing code could not be persisted".into(),
+                    ));
+                }
+            }
+        }
+        Err(SlackPersonalBindingPairingError::Backend(
+            "could not allocate a unique Slack pairing code".into(),
+        ))
+    }
+
     async fn active_actor_pairing_challenge(
         &self,
         actor_record: &StoredSlackPairingActorChallenge,
@@ -1277,23 +1669,26 @@ where
         Ok(None)
     }
 
-    async fn cleanup_pairing_code_record(&self, path: &ScopedPath) {
-        if self.delete_record(path).await.is_err() {
-            tracing::warn!("failed to delete Slack pairing code record");
+    async fn cleanup_pairing_code_record(
+        &self,
+        path: &ScopedPath,
+    ) -> Result<(), SlackPersonalBindingPairingError> {
+        match self.delete_record(path).await {
+            Ok(()) | Err(FilesystemError::NotFound { .. }) => Ok(()),
+            Err(error) => Err(map_pairing_fs_error(error)),
         }
     }
 
     async fn cleanup_actor_pairing_code_record(
         &self,
         actor_record: &StoredSlackPairingActorChallenge,
-    ) {
-        let Ok(code) = SlackPersonalBindingPairingCode::new(actor_record.code.clone()) else {
-            return;
-        };
-        let Ok(path) = Self::pairing_code_path(&code) else {
-            return;
-        };
-        self.cleanup_pairing_code_record(&path).await;
+    ) -> Result<(), SlackPersonalBindingPairingError> {
+        let code = SlackPersonalBindingPairingCode::new(actor_record.code.clone())?;
+        let path = Self::pairing_code_path(&code).map_err(map_pairing_fs_error)?;
+        match self.delete_record(&path).await {
+            Ok(()) | Err(FilesystemError::NotFound { .. }) => Ok(()),
+            Err(error) => Err(map_pairing_fs_error(error)),
+        }
     }
 
     async fn cleanup_pairing_actor_record(
@@ -1327,6 +1722,14 @@ where
             }
         }
     }
+}
+
+/// Per-user index marker (see [`IDENTITY_BY_USER_ROOT`]). The file name encodes
+/// the `provider_user_id`; the body carries the raw id for debuggability but is
+/// never read on the hot path (the reader verifies the primary record instead).
+#[derive(Debug, Serialize, Deserialize)]
+struct StoredUserBindingIndexMarker {
+    provider_user_id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1365,6 +1768,19 @@ impl StoredSlackUserIdentity {
     }
 }
 
+fn identity_record_matches_user_binding(
+    record: &StoredSlackUserIdentity,
+    provider: &str,
+    user_id: &UserId,
+    provider_user_id_prefix: Option<&str>,
+) -> bool {
+    record.provider == provider
+        && record.user_id == user_id.as_str()
+        && provider_user_id_prefix
+            .map(|prefix| record.provider_user_id.starts_with(prefix))
+            .unwrap_or(true)
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct StoredSlackPersonalDmTarget {
     tenant_id: String,
@@ -1386,7 +1802,7 @@ impl StoredSlackPersonalDmTarget {
         Self {
             tenant_id: target.key.tenant_id.as_str().to_string(),
             installation_id: target.key.installation_id.as_str().to_string(),
-            team_id: target.key.team_id.clone(),
+            team_id: target.key.team_id.as_str().to_string(),
             user_id: target.key.user_id.as_str().to_string(),
             slack_user_id: target.slack_user_id.as_str().to_string(),
             dm_channel_id: target.dm_channel_id.clone(),
@@ -1404,7 +1820,7 @@ fn stored_personal_dm_target(
             .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?,
         AdapterInstallationId::new(record.installation_id)
             .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?,
-        record.team_id,
+        SlackTeamId::new(record.team_id),
         UserId::new(record.user_id).map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?,
     )
     .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?;
@@ -1672,8 +2088,13 @@ fn map_binding_fs_error(error: FilesystemError) -> RebornUserIdentityBindingErro
     RebornUserIdentityBindingError::Backend(error.to_string())
 }
 
-fn map_pairing_fs_error(error: FilesystemError) -> SlackPersonalBindingPairingError {
-    SlackPersonalBindingPairingError::Backend(error.to_string())
+fn map_pairing_fs_error(_error: FilesystemError) -> SlackPersonalBindingPairingError {
+    // security: a pairing FilesystemError's Display embeds the record's scoped
+    // path, and a pairing *code* record lives at `pairing/<code>.json` — the path
+    // IS the pairing code. Never surface the path/reason and never log `%error`
+    // here; map to a static, code-free message (mirroring the mint site) so the
+    // code can never reach an error string, a client response, or a log line.
+    SlackPersonalBindingPairingError::Backend("Slack pairing storage operation failed".into())
 }
 
 fn map_route_fs_error(error: FilesystemError) -> SlackChannelRouteError {
@@ -1720,7 +2141,27 @@ mod tests {
     };
     use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 
-    use crate::slack_personal_binding::{RebornIdentityProviderId, RebornIdentityProviderUserId};
+    use crate::slack_personal_binding::{
+        RebornIdentityProviderId, RebornIdentityProviderUserId,
+        RebornUserIdentityBindingDeleteStore,
+    };
+
+    #[test]
+    fn map_pairing_fs_error_never_surfaces_the_pairing_code() {
+        // In production a pairing *code* record lives at `pairing/<code>.json`, so
+        // a FilesystemError for it embeds the code in its Display. The mapper must
+        // surface a fixed, code-free message regardless of its input, so the code
+        // can never reach an error string, a client response, or a log line. (The
+        // path below is a valid stand-in; the mapper ignores its input entirely.)
+        let error = FilesystemError::MountNotFound {
+            path: VirtualPath::new("/memory/pairing-code.json").unwrap(),
+        };
+        assert_eq!(
+            map_pairing_fs_error(error).to_string(),
+            "slack personal binding pairing backend unavailable: \
+             Slack pairing storage operation failed",
+        );
+    }
 
     #[tokio::test]
     async fn filesystem_slack_host_state_binds_and_resolves_identity() {
@@ -1746,13 +2187,189 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn filesystem_slack_host_state_user_has_provider_binding() {
+        let state = state();
+        assert!(
+            !state
+                .user_has_provider_binding("slack", &user("user:alice"))
+                .await
+                .expect("lookup succeeds"),
+            "no binding yet -> not connected"
+        );
+
+        state
+            .bind_user_identity(RebornUserIdentityBinding {
+                provider: RebornIdentityProviderId::new("slack").unwrap(),
+                provider_user_id: RebornIdentityProviderUserId::new("install-alpha:U123").unwrap(),
+                user_id: user("user:alice"),
+            })
+            .await
+            .expect("bind succeeds");
+
+        assert!(
+            state
+                .user_has_provider_binding("slack", &user("user:alice"))
+                .await
+                .expect("lookup succeeds"),
+            "bound user reports connected"
+        );
+        assert!(
+            state
+                .user_has_provider_binding_with_provider_user_id_prefix(
+                    "slack",
+                    &user("user:alice"),
+                    Some("install-alpha:"),
+                )
+                .await
+                .expect("scoped lookup succeeds"),
+            "bound user reports connected inside the matching installation scope"
+        );
+        assert!(
+            !state
+                .user_has_provider_binding_with_provider_user_id_prefix(
+                    "slack",
+                    &user("user:alice"),
+                    Some("install-beta:"),
+                )
+                .await
+                .expect("scoped lookup succeeds"),
+            "binding in another installation does not satisfy this scope"
+        );
+        assert!(
+            !state
+                .user_has_provider_binding("slack", &user("user:bob"))
+                .await
+                .expect("lookup succeeds"),
+            "different user reports not connected"
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_connection_check_survives_index_faults() {
+        // The per-user index is a best-effort accelerator: a missing marker must
+        // still resolve via the scan, and a stale marker (primary gone) must
+        // never be reported as a live binding.
+        let state = state();
+        let binding = RebornUserIdentityBinding {
+            provider: RebornIdentityProviderId::new("slack").unwrap(),
+            provider_user_id: RebornIdentityProviderUserId::new("install-alpha:U123").unwrap(),
+            user_id: user("user:alice"),
+        };
+        state
+            .bind_user_identity(binding.clone())
+            .await
+            .expect("bind");
+
+        let marker = scoped_path(&format!(
+            "{IDENTITY_BY_USER_ROOT}/{}/{}/{}.json",
+            path_segment("slack"),
+            path_segment("user:alice"),
+            path_segment("install-alpha:U123"),
+        ))
+        .unwrap();
+        let primary = scoped_path(&format!(
+            "{IDENTITY_ROOT}/{}/{}.json",
+            path_segment("slack"),
+            path_segment("install-alpha:U123"),
+        ))
+        .unwrap();
+
+        // Legacy shape: primary present, index marker absent -> the scan
+        // fallback still resolves the binding.
+        state.delete_record(&marker).await.expect("drop marker");
+        assert!(
+            state
+                .user_has_provider_binding("slack", &user("user:alice"))
+                .await
+                .expect("lookup"),
+            "a binding with no index marker is still found via the scan fallback"
+        );
+
+        // Stale marker: re-bind to restore the marker, then drop the primary,
+        // leaving the marker dangling. The verify-read must reject it.
+        state
+            .bind_user_identity(binding.clone())
+            .await
+            .expect("rebind");
+        state.delete_record(&primary).await.expect("drop primary");
+        assert!(
+            !state
+                .user_has_provider_binding("slack", &user("user:alice"))
+                .await
+                .expect("lookup"),
+            "a stale index marker whose primary record is gone is not a false positive"
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_deletes_installation_scoped_identity_bindings_for_user() {
+        let state = state();
+        state
+            .bind_user_identity(RebornUserIdentityBinding {
+                provider: RebornIdentityProviderId::new("slack").unwrap(),
+                provider_user_id: RebornIdentityProviderUserId::new("install-alpha:U123").unwrap(),
+                user_id: user("user:alice"),
+            })
+            .await
+            .expect("bind alpha succeeds");
+        state
+            .bind_user_identity(RebornUserIdentityBinding {
+                provider: RebornIdentityProviderId::new("slack").unwrap(),
+                provider_user_id: RebornIdentityProviderUserId::new("install-beta:U123").unwrap(),
+                user_id: user("user:alice"),
+            })
+            .await
+            .expect("bind beta succeeds");
+        state
+            .bind_user_identity(RebornUserIdentityBinding {
+                provider: RebornIdentityProviderId::new("slack").unwrap(),
+                provider_user_id: RebornIdentityProviderUserId::new("install-alpha:U999").unwrap(),
+                user_id: user("user:bob"),
+            })
+            .await
+            .expect("bind bob succeeds");
+
+        let deleted = state
+            .delete_user_identity_bindings_for_user(
+                "slack",
+                &user("user:alice"),
+                Some("install-alpha:"),
+            )
+            .await
+            .expect("delete succeeds");
+
+        assert_eq!(deleted, 1);
+        assert_eq!(
+            state
+                .resolve_user_identity("slack", "install-alpha:U123")
+                .await
+                .expect("alpha alice lookup succeeds"),
+            None
+        );
+        assert_eq!(
+            state
+                .resolve_user_identity("slack", "install-beta:U123")
+                .await
+                .expect("beta alice lookup succeeds"),
+            Some(user("user:alice"))
+        );
+        assert_eq!(
+            state
+                .resolve_user_identity("slack", "install-alpha:U999")
+                .await
+                .expect("alpha bob lookup succeeds"),
+            Some(user("user:bob"))
+        );
+    }
+
+    #[tokio::test]
     async fn filesystem_slack_host_state_persists_personal_dm_targets_across_state_recreation() {
         let root = Arc::new(InMemoryBackend::default());
         let writer = state_with_root(root.clone());
         let key = SlackPersonalDmTargetKey::new(
             TenantId::new("tenant-alpha").unwrap(),
             installation(),
-            "T123".to_string(),
+            SlackTeamId::new("T123"),
             user("user:alice"),
         )
         .unwrap();
@@ -1780,6 +2397,26 @@ mod tests {
                 .expect("load persisted personal DM target succeeds"),
             Some(target)
         );
+
+        assert!(
+            reader
+                .delete_personal_dm_target(&key)
+                .await
+                .expect("delete personal DM target succeeds")
+        );
+        assert_eq!(
+            reader
+                .load_personal_dm_target(&key)
+                .await
+                .expect("load after delete succeeds"),
+            None
+        );
+        assert!(
+            !reader
+                .delete_personal_dm_target(&key)
+                .await
+                .expect("second delete is idempotent")
+        );
     }
 
     #[tokio::test]
@@ -1788,7 +2425,7 @@ mod tests {
         let foreign_key = SlackPersonalDmTargetKey::new(
             TenantId::new("tenant-foreign").unwrap(),
             installation(),
-            "T123".to_string(),
+            SlackTeamId::new("T123"),
             user("user:alice"),
         )
         .unwrap();
@@ -1810,6 +2447,12 @@ mod tests {
                 .expect("foreign tenant load fails closed"),
             None
         );
+        assert!(
+            !state
+                .delete_personal_dm_target(&foreign_key)
+                .await
+                .expect("foreign tenant delete fails closed")
+        );
     }
 
     #[tokio::test]
@@ -1818,7 +2461,7 @@ mod tests {
         let key = SlackPersonalDmTargetKey::new(
             TenantId::new("tenant-alpha").unwrap(),
             installation(),
-            "T123".to_string(),
+            SlackTeamId::new("T123"),
             user("user:alice"),
         )
         .unwrap();
@@ -1857,7 +2500,7 @@ mod tests {
         let key = SlackPersonalDmTargetKey::new(
             TenantId::new("tenant-alpha").unwrap(),
             installation(),
-            "T123".to_string(),
+            SlackTeamId::new("T123"),
             user("user:alice"),
         )
         .unwrap();
@@ -1921,7 +2564,7 @@ mod tests {
         let key = SlackPersonalDmTargetKey::new(
             TenantId::new("tenant-alpha").unwrap(),
             installation(),
-            "T123".to_string(),
+            SlackTeamId::new("T123"),
             user("user:alice"),
         )
         .unwrap();
@@ -1989,6 +2632,44 @@ mod tests {
             state.consume_challenge(&issued.code).await,
             Err(SlackPersonalBindingPairingError::ChallengeNotFound)
         ));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn filesystem_slack_host_state_deletes_libsql_pairing_code_record_after_consumption() {
+        let (state, _dir) = libsql_state().await;
+        let issued = state
+            .issue_challenge(challenge())
+            .await
+            .expect("issue succeeds");
+        let path =
+            FilesystemSlackHostState::<ironclaw_filesystem::LibSqlRootFilesystem>::pairing_code_path(
+                &issued.code,
+            )
+            .expect("pairing code path");
+        assert!(
+            state
+                .read_record::<StoredSlackPairingChallenge>(&path)
+                .await
+                .expect("read issued code")
+                .is_some(),
+            "issued pairing code record should exist before consumption"
+        );
+
+        let consumed = state
+            .consume_challenge(&issued.code)
+            .await
+            .expect("consume succeeds");
+
+        assert_eq!(consumed, challenge());
+        assert!(
+            state
+                .read_record::<StoredSlackPairingChallenge>(&path)
+                .await
+                .expect("read consumed code")
+                .is_none(),
+            "consumed pairing code records must be physically removed"
+        );
     }
 
     #[tokio::test]
@@ -2096,6 +2777,106 @@ mod tests {
                 .await
                 .expect("reissued code remains active"),
             challenge()
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_reissue_mints_fresh_and_invalidates_prior() {
+        let state = state();
+        let first = state
+            .issue_challenge(challenge())
+            .await
+            .expect("issue succeeds");
+        // A normal re-issue would reuse the still-active code; reissue must mint fresh.
+        let reissued = state
+            .reissue_challenge(challenge())
+            .await
+            .expect("reissue succeeds");
+
+        assert_ne!(reissued.code, first.code);
+        assert_eq!(reissued.challenge, challenge());
+        assert!(matches!(
+            state.get_challenge(&first.code).await,
+            Err(SlackPersonalBindingPairingError::ChallengeNotFound)
+        ));
+        assert_eq!(
+            state
+                .get_challenge(&reissued.code)
+                .await
+                .expect("reissued code is active"),
+            challenge()
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_reissue_stops_when_prior_code_cleanup_fails() {
+        let root = Arc::new(RouteLockTestBackend::normal());
+        let state = state_with_backend(root.clone());
+        let first = state
+            .issue_challenge(challenge())
+            .await
+            .expect("issue succeeds");
+
+        root.fail_next_pairing_code_deletes(1);
+        let error = state
+            .reissue_challenge(challenge())
+            .await
+            .expect_err("delete failure must stop reissue");
+
+        assert!(matches!(
+            error,
+            SlackPersonalBindingPairingError::Backend(_)
+        ));
+        assert_eq!(
+            state
+                .get_challenge(&first.code)
+                .await
+                .expect("old code remains active after failed cleanup"),
+            challenge()
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_issue_fails_closed_when_fresh_code_cleanup_fails_after_actor_conflict()
+     {
+        let root = Arc::new(RouteLockTestBackend::normal());
+        let state = state_with_backend(root.clone());
+
+        root.fail_next_pairing_actor_writes(1);
+        root.fail_next_pairing_code_deletes(1);
+        let error = state
+            .issue_challenge(challenge())
+            .await
+            .expect_err("orphaned fresh code cleanup failure must stop issuance");
+
+        assert!(matches!(
+            error,
+            SlackPersonalBindingPairingError::Backend(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_concurrent_reissue_keeps_single_active_code() {
+        let state = Arc::new(state());
+        state
+            .issue_challenge(challenge())
+            .await
+            .expect("issue succeeds");
+        let first_state = Arc::clone(&state);
+        let second_state = Arc::clone(&state);
+
+        let (first, second) = tokio::join!(
+            first_state.reissue_challenge(challenge()),
+            second_state.reissue_challenge(challenge())
+        );
+        let first = first.expect("first reissue succeeds");
+        let second = second.expect("second reissue succeeds");
+
+        let first_active = state.get_challenge(&first.code).await.is_ok();
+        let second_active = state.get_challenge(&second.code).await.is_ok();
+        assert!(
+            first_active ^ second_active,
+            "exactly one reissued code should remain active (first={first_active}, second={second_active})"
         );
     }
 
@@ -2749,6 +3530,24 @@ mod tests {
         state_with_backend(root)
     }
 
+    #[cfg(feature = "libsql")]
+    async fn libsql_state() -> (
+        FilesystemSlackHostState<ironclaw_filesystem::LibSqlRootFilesystem>,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db_path = dir.path().join("slack-host-state.db");
+        let db = Arc::new(
+            libsql::Builder::new_local(db_path)
+                .build()
+                .await
+                .expect("build libsql database"),
+        );
+        let root = Arc::new(ironclaw_filesystem::LibSqlRootFilesystem::new(db));
+        root.run_migrations().await.expect("run libsql migrations");
+        (state_with_backend(root), dir)
+    }
+
     fn state_with_backend<F>(root: Arc<F>) -> FilesystemSlackHostState<F>
     where
         F: RootFilesystem + 'static,
@@ -2777,6 +3576,8 @@ mod tests {
         route_write_delay: Option<Duration>,
         personal_dm_write_barrier: Option<Arc<tokio::sync::Barrier>>,
         route_write_failures: AtomicUsize,
+        pairing_actor_write_conflicts: AtomicUsize,
+        pairing_code_delete_failures: AtomicUsize,
         lock_puts: AtomicUsize,
     }
 
@@ -2788,6 +3589,8 @@ mod tests {
                 route_write_delay: None,
                 personal_dm_write_barrier: None,
                 route_write_failures: AtomicUsize::new(0),
+                pairing_actor_write_conflicts: AtomicUsize::new(0),
+                pairing_code_delete_failures: AtomicUsize::new(0),
                 lock_puts: AtomicUsize::new(0),
             }
         }
@@ -2799,6 +3602,8 @@ mod tests {
                 route_write_delay: Some(delay),
                 personal_dm_write_barrier: None,
                 route_write_failures: AtomicUsize::new(0),
+                pairing_actor_write_conflicts: AtomicUsize::new(0),
+                pairing_code_delete_failures: AtomicUsize::new(0),
                 lock_puts: AtomicUsize::new(0),
             }
         }
@@ -2810,6 +3615,8 @@ mod tests {
                 route_write_delay: Some(delay),
                 personal_dm_write_barrier: None,
                 route_write_failures: AtomicUsize::new(0),
+                pairing_actor_write_conflicts: AtomicUsize::new(0),
+                pairing_code_delete_failures: AtomicUsize::new(0),
                 lock_puts: AtomicUsize::new(0),
             }
         }
@@ -2821,12 +3628,24 @@ mod tests {
                 route_write_delay: None,
                 personal_dm_write_barrier: Some(Arc::new(tokio::sync::Barrier::new(2))),
                 route_write_failures: AtomicUsize::new(0),
+                pairing_actor_write_conflicts: AtomicUsize::new(0),
+                pairing_code_delete_failures: AtomicUsize::new(0),
                 lock_puts: AtomicUsize::new(0),
             }
         }
 
         fn fail_next_route_writes(&self, count: usize) {
             self.route_write_failures.store(count, Ordering::SeqCst);
+        }
+
+        fn fail_next_pairing_actor_writes(&self, count: usize) {
+            self.pairing_actor_write_conflicts
+                .store(count, Ordering::SeqCst);
+        }
+
+        fn fail_next_pairing_code_deletes(&self, count: usize) {
+            self.pairing_code_delete_failures
+                .store(count, Ordering::SeqCst);
         }
 
         fn lock_puts(&self) -> usize {
@@ -2864,6 +3683,17 @@ mod tests {
             {
                 barrier.wait().await;
             }
+            if is_pairing_actor_record_path(path)
+                && self.pairing_actor_write_conflicts.load(Ordering::SeqCst) > 0
+            {
+                self.pairing_actor_write_conflicts
+                    .fetch_sub(1, Ordering::SeqCst);
+                return Err(FilesystemError::VersionMismatch {
+                    path: path.clone(),
+                    expected: Some(RecordVersion::from_backend(0)),
+                    found: Some(RecordVersion::from_backend(1)),
+                });
+            }
             if is_channel_route_record_path(path)
                 && self.route_write_failures.load(Ordering::SeqCst) > 0
             {
@@ -2899,6 +3729,17 @@ mod tests {
         }
 
         async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+            if is_pairing_code_record_path(path)
+                && self.pairing_code_delete_failures.load(Ordering::SeqCst) > 0
+            {
+                self.pairing_code_delete_failures
+                    .fetch_sub(1, Ordering::SeqCst);
+                return Err(FilesystemError::Backend {
+                    path: path.clone(),
+                    operation: FilesystemOperation::Delete,
+                    reason: "injected pairing code delete failure".to_string(),
+                });
+            }
             self.inner.delete(path).await
         }
     }
@@ -2916,6 +3757,18 @@ mod tests {
     fn is_personal_dm_target_record_path(path: &VirtualPath) -> bool {
         path.as_str()
             .contains("/slack-personal-binding/dm-targets/")
+            && path.as_str().ends_with(".json")
+    }
+
+    fn is_pairing_code_record_path(path: &VirtualPath) -> bool {
+        path.as_str()
+            .contains("/slack-personal-binding/pairing/codes/")
+            && path.as_str().ends_with(".json")
+    }
+
+    fn is_pairing_actor_record_path(path: &VirtualPath) -> bool {
+        path.as_str()
+            .contains("/slack-personal-binding/pairing/actors/")
             && path.as_str().ends_with(".json")
     }
 
