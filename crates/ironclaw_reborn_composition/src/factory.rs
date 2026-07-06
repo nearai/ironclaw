@@ -1912,7 +1912,7 @@ where
 fn resource_governor_unlimited_fast_path_enabled_from_env() -> Result<bool, String> {
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     {
-        return Ok(false);
+        Ok(false)
     }
 
     #[cfg(any(feature = "libsql", feature = "postgres"))]

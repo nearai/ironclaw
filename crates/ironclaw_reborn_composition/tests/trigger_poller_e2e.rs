@@ -7,7 +7,6 @@
 
 #![cfg(feature = "test-support")]
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -21,7 +20,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     RuntimeCapabilityOutcome, RuntimeCapabilityRequest, TRIGGER_CREATE_CAPABILITY_ID,
-    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
+    TRIGGER_PAUSE_CAPABILITY_ID,
 };
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
@@ -70,7 +69,7 @@ fn provider_tool_name_for_capability_id(capability_id: &str) -> String {
 
 /// Shared by every scripted `HostManagedModelGateway` test double in this
 /// file that records raw requests (`RecordingGateway`,
-/// `TriggerMutatorAttemptGateway`) — flattens every captured request's message
+/// `SingleMutatorAttemptGateway`) — flattens every captured request's message
 /// contents into one list.
 async fn captured_message_contents(
     requests: &Arc<TokioMutex<Vec<HostManagedModelRequest>>>,
@@ -114,131 +113,103 @@ impl HostManagedModelGateway for RecordingGateway {
     }
 }
 
-/// Model gateway for T0-5505-E2E: on its FIRST turn of the fired run,
-/// attempts to register EVERY scheduled-trigger mutator capability
-/// (`builtin.trigger_create`, `builtin.trigger_remove`, `builtin.trigger_pause`,
-/// `builtin.trigger_resume`) as real provider tool calls — as a real native
-/// provider tool call would — directly against the fired run's actual
-/// (composed) capability port via `stream_model_with_capabilities`. This is
-/// the same seam a production LLM-provider-backed gateway uses to turn a raw
-/// tool-call response into a `CapabilityCallCandidate`
-/// (`LoopCapabilityPort::register_provider_tool_call`), so registering
-/// through it here exercises the *real* `PerSurfaceCapabilityDenyDecorator` /
-/// `CapabilitySurfaceDenyFilter` composition chain, not a stand-in.
+/// Model gateway for T0-5505-E2E: on the fired run's first turn, registers a
+/// single provider tool call against the run's actual composed
+/// `LoopCapabilityPort` (every subsequent turn just replies plainly, so the
+/// run terminates after at most one capability-call round trip). Shared by
+/// the `trigger_create` denial test below and
+/// `scheduled_trigger_fire_can_pause_another_trigger_it_manages` — both
+/// attempt exactly one mutator capability and differ only in which
+/// `ProviderToolCall` they set via [`Self::set_tool_call`] before the fire.
 ///
-/// Generalized from a single `trigger_create`-only attempt (PR #5515 review:
-/// "production mutator deny set only has create covered end-to-end — the
-/// full-path poller test only attempts `builtin.trigger_create`") to cover
-/// all four mutators from the SAME first turn:
-/// `HostManagedModelResponse::capability_calls` already takes a `Vec`, so all
-/// four registration attempts are made, and any that resolve are forwarded,
-/// before the turn's single response is returned. This closes the drift risk
-/// where the production `SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS` deny set
-/// could accidentally drop `trigger_remove`/`trigger_pause`/`trigger_resume`
-/// while only `trigger_create` stayed covered by a full-path (real host
-/// composition) test.
-///
-/// `CapabilitySurfaceDenyFilter::register_provider_tool_call` resolves each
+/// `CapabilitySurfaceDenyFilter::register_provider_tool_call` resolves the
 /// provider tool call to a capability id via its OWN
 /// `provider_tool_call_capability_ids` override (delegating to `inner` so
 /// deferred/disclosed tools still resolve — see #5149's progressive tool
 /// disclosure), then scope-checks the resolved id against its deny set
-/// before ever building a candidate. All four mutator ids are on the fix's
-/// scheduled_trigger deny set, so every scope check fails closed with
-/// `AgentLoopHostErrorKind::InvalidInvocation` /
-/// "provider tool call targets a disabled capability" — registration never
-/// reaches `inner.register_provider_tool_call`. `builtin.trigger_list` stays
-/// permitted (verified directly against `tool_definitions()` while
-/// developing this test), matching the fix's read-only carve-out.
-///
-/// Whichever registrations succeed (capability visible + permitted) are
-/// forwarded together as one `capability_calls` response, which the loop
-/// will actually dispatch — including staging the real JSON input through
-/// the run's real `LocalDevCapabilityIo`, so a genuinely unpatched surface
-/// would really create a second trigger and/or remove/pause/resume the
-/// target trigger. If every registration is denied (the fixed, expected
-/// behavior), there is nothing to dispatch and a plain reply is returned
-/// instead so the run still terminates cleanly.
-///
-/// Every subsequent turn returns a plain assistant reply so the run
-/// terminates after at most one capability-call round trip.
+/// before ever building a candidate — the exact seam a production
+/// LLM-provider-backed gateway uses to turn a raw tool-call response into a
+/// `CapabilityCallCandidate`, so registering through it here exercises the
+/// *real* `PerSurfaceCapabilityDenyDecorator` / `CapabilitySurfaceDenyFilter`
+/// composition chain, not a stand-in. If registration is denied, there is
+/// nothing to dispatch and a plain reply is returned instead so the run
+/// still terminates cleanly; if permitted, the candidate is forwarded so the
+/// loop actually dispatches it for real.
 #[derive(Default)]
-struct TriggerMutatorAttemptGateway {
+struct SingleMutatorAttemptGateway {
     requests: Arc<TokioMutex<Vec<HostManagedModelRequest>>>,
     call_count: TokioMutex<usize>,
-    /// Set by the test body, before the fire is triggered, to the id of the
-    /// already-created legitimate trigger. `trigger_remove`/`trigger_pause`/
-    /// `trigger_resume`'s attempts target this record — a real `trigger_id`
-    /// is required to shape a realistic input for those capabilities' input
-    /// schema, even though the scope-check denial happens before the payload
-    /// is ever read.
-    mutator_target_trigger_id: TokioMutex<Option<TriggerId>>,
-    /// Empty until the first turn runs. Populated with one entry per
-    /// attempted mutator capability id: `Ok(())` if the registration was
-    /// accepted (capability was visible + permitted on this run's surface —
-    /// the pre-fix behavior for that mutator), `Err(safe_summary)` if it was
-    /// denied before a candidate could even be built (the fixed behavior).
-    registration_outcomes: TokioMutex<BTreeMap<String, Result<(), String>>>,
+    tool_call: TokioMutex<Option<ProviderToolCall>>,
+    /// `None` until the first turn runs. `Some(Ok(()))` if the registration
+    /// was accepted (capability was visible + permitted on this run's
+    /// surface), `Some(Err(safe_summary))` if it was denied before a
+    /// candidate could even be built.
+    outcome: TokioMutex<Option<Result<(), String>>>,
 }
 
-impl TriggerMutatorAttemptGateway {
+impl SingleMutatorAttemptGateway {
     async fn captured_message_contents(&self) -> Vec<String> {
         captured_message_contents(&self.requests).await
     }
 
-    async fn set_mutator_target_trigger_id(&self, trigger_id: TriggerId) {
-        *self.mutator_target_trigger_id.lock().await = Some(trigger_id);
+    async fn set_tool_call(&self, tool_call: ProviderToolCall) {
+        *self.tool_call.lock().await = Some(tool_call);
     }
 
-    async fn registration_outcomes(&self) -> BTreeMap<String, Result<(), String>> {
-        self.registration_outcomes.lock().await.clone()
+    async fn outcome(&self) -> Option<Result<(), String>> {
+        self.outcome.lock().await.clone()
     }
 
-    /// One provider tool call per scheduled-trigger mutator capability id,
-    /// paired with a payload shaped for that capability's real input schema
-    /// (see `ironclaw_host_runtime::first_party_tools::trigger_management`'s
-    /// `TriggerCreateInput`/`TriggerRemoveInput`/`TriggerStateInput`).
-    fn mutator_tool_calls(target_trigger_id: TriggerId) -> Vec<(&'static str, ProviderToolCall)> {
-        let mutator_payload = json!({ "trigger_id": target_trigger_id.to_string() });
-        [
-            (
+    /// The `trigger_create` provider tool call attempt, shaped for its real
+    /// input schema (see
+    /// `ironclaw_host_runtime::first_party_tools::trigger_management`'s
+    /// `TriggerCreateInput`) — attempts to create a second trigger named
+    /// `SELF_CREATE_MARKER_TRIGGER_NAME`.
+    fn create_tool_call() -> ProviderToolCall {
+        ProviderToolCall {
+            provider_id: "trigger-e2e-provider".to_string(),
+            provider_model_id: "trigger-e2e-model".to_string(),
+            turn_id: Some("trigger-e2e-self-create-turn".to_string()),
+            id: format!("trigger-e2e-mutator-call-{TRIGGER_CREATE_CAPABILITY_ID}"),
+            name: ProviderToolName::new(provider_tool_name_for_capability_id(
                 TRIGGER_CREATE_CAPABILITY_ID,
-                json!({
-                    "name": SELF_CREATE_MARKER_TRIGGER_NAME,
-                    "prompt": "run-time action steps -- this trigger must never be created",
-                    "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" },
-                }),
-            ),
-            (TRIGGER_REMOVE_CAPABILITY_ID, mutator_payload.clone()),
-            (TRIGGER_PAUSE_CAPABILITY_ID, mutator_payload.clone()),
-            (TRIGGER_RESUME_CAPABILITY_ID, mutator_payload),
-        ]
-        .into_iter()
-        .map(|(capability_id, arguments)| {
-            (
-                capability_id,
-                ProviderToolCall {
-                    provider_id: "trigger-e2e-provider".to_string(),
-                    provider_model_id: "trigger-e2e-model".to_string(),
-                    turn_id: Some("trigger-e2e-self-create-turn".to_string()),
-                    id: format!("trigger-e2e-mutator-call-{capability_id}"),
-                    name: ProviderToolName::new(provider_tool_name_for_capability_id(
-                        capability_id,
-                    ))
-                    .expect("mutator provider tool name is valid"),
-                    arguments,
-                    response_reasoning: None,
-                    reasoning: None,
-                    signature: None,
-                },
-            )
-        })
-        .collect()
+            ))
+            .expect("mutator provider tool name is valid"),
+            arguments: json!({
+                "name": SELF_CREATE_MARKER_TRIGGER_NAME,
+                "prompt": "run-time action steps -- this trigger must never be created",
+                "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" },
+            }),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        }
+    }
+
+    /// The `trigger_pause` provider tool call attempt against `target_trigger_id`,
+    /// shaped for its real input schema (see
+    /// `ironclaw_host_runtime::first_party_tools::trigger_management`'s
+    /// `TriggerStateInput`).
+    fn pause_tool_call(target_trigger_id: TriggerId) -> ProviderToolCall {
+        ProviderToolCall {
+            provider_id: "trigger-e2e-provider".to_string(),
+            provider_model_id: "trigger-e2e-model".to_string(),
+            turn_id: Some("trigger-e2e-pause-other-turn".to_string()),
+            id: format!("trigger-e2e-mutator-call-{TRIGGER_PAUSE_CAPABILITY_ID}"),
+            name: ProviderToolName::new(provider_tool_name_for_capability_id(
+                TRIGGER_PAUSE_CAPABILITY_ID,
+            ))
+            .expect("pause provider tool name is valid"),
+            arguments: json!({ "trigger_id": target_trigger_id.to_string() }),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        }
     }
 }
 
 #[async_trait]
-impl HostManagedModelGateway for TriggerMutatorAttemptGateway {
+impl HostManagedModelGateway for SingleMutatorAttemptGateway {
     async fn stream_model(
         &self,
         request: HostManagedModelRequest,
@@ -271,47 +242,32 @@ impl HostManagedModelGateway for TriggerMutatorAttemptGateway {
             ));
         }
 
-        let target_trigger_id = self
-            .mutator_target_trigger_id
+        let tool_call = self
+            .tool_call
             .lock()
             .await
-            .expect("test sets mutator_target_trigger_id before triggering the fire");
-
-        let mut accepted_candidates = Vec::new();
-        for (capability_id, tool_call) in Self::mutator_tool_calls(target_trigger_id) {
-            let registration = capabilities
-                .register_provider_tool_call(RegisterProviderToolCallRequest::new(tool_call))
-                .await;
-            let outcome = match registration {
-                Ok(candidate) => {
-                    accepted_candidates.push(candidate);
-                    Ok(())
-                }
-                Err(error) => Err(error.safe_summary.clone()),
-            };
-            self.registration_outcomes
-                .lock()
-                .await
-                .insert(capability_id.to_string(), outcome);
-        }
-
-        if accepted_candidates.is_empty() {
-            // Every mutator registration was rejected before any capability
-            // call candidate could exist, so there is nothing to dispatch.
-            // Reply plainly so the run still terminates cleanly — this is
-            // what proves the fix only blocks the mutators, not the fire
-            // itself.
-            Ok(HostManagedModelResponse::assistant_reply(
-                "capability unavailable; continuing".to_string(),
-            ))
-        } else {
-            // At least one mutator was (incorrectly) permitted — forward it
-            // so the loop actually dispatches it, letting the repository-side
-            // assertions below catch the regression too.
-            Ok(HostManagedModelResponse::capability_calls(
-                accepted_candidates,
-                "",
-            ))
+            .clone()
+            .expect("test sets a tool call before triggering the fire");
+        let registration = capabilities
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(tool_call))
+            .await;
+        match registration {
+            Ok(candidate) => {
+                *self.outcome.lock().await = Some(Ok(()));
+                // Permitted — forward the candidate so the loop actually
+                // dispatches it, letting repository-side assertions catch a
+                // regression too.
+                Ok(HostManagedModelResponse::capability_calls(
+                    vec![candidate],
+                    "",
+                ))
+            }
+            Err(error) => {
+                *self.outcome.lock().await = Some(Err(error.safe_summary.clone()));
+                Ok(HostManagedModelResponse::assistant_reply(
+                    "capability unavailable; continuing".to_string(),
+                ))
+            }
         }
     }
 }
@@ -367,7 +323,7 @@ fn current_minute_slot() -> chrono::DateTime<Utc> {
 ///
 /// Generic over the concrete gateway type (rather than
 /// `Arc<dyn HostManagedModelGateway>`) so every call site — the existing
-/// `RecordingGateway` ones and `TriggerMutatorAttemptGateway`'s — passes its
+/// `RecordingGateway` ones and `SingleMutatorAttemptGateway`'s — passes its
 /// `Arc<Concrete>` unchanged; the unsized coercion to
 /// `Arc<dyn HostManagedModelGateway>` happens once, here, instead of at every
 /// call site.
@@ -1341,28 +1297,25 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
 /// T0-5505-E2E: end-to-end proof that issue #5505's fix composes through the
 /// real Reborn runtime — a scheduled-trigger fire resolves the dedicated
 /// `scheduled_trigger` capability surface, and a fired run that tries to
-/// create a *second* trigger, or remove/pause/resume the existing one,
-/// cannot, because all four mutator capabilities are stripped from that
-/// surface (`builtin.trigger_list` and firing itself stay intact).
+/// create a *second* trigger cannot, because `trigger_create` is stripped
+/// from that surface (`builtin.trigger_list`, `builtin.trigger_remove`,
+/// `builtin.trigger_pause`, `builtin.trigger_resume`, and firing itself all
+/// stay intact — see `scheduled_trigger_fire_can_pause_another_trigger_it_manages`
+/// below for a full-path proof that a permitted mutator actually dispatches).
 ///
 /// Unlike the other tests in this file, the fired run's model gateway
-/// (`TriggerMutatorAttemptGateway`) does not just record requests — on the fired
-/// run's first turn it registers real `builtin.trigger_create`,
-/// `builtin.trigger_remove`, `builtin.trigger_pause`, and
-/// `builtin.trigger_resume` provider tool calls against the run's actual
+/// (`SingleMutatorAttemptGateway`, set to attempt `trigger_create`) does not
+/// just record requests — on the fired run's first turn it registers a real
+/// `builtin.trigger_create` provider tool call against the run's actual
 /// composed `LoopCapabilityPort` (the exact seam a native provider tool-call
-/// response goes through in production) — one attempting to create a second
-/// trigger named `SELF_CREATE_MARKER_TRIGGER_NAME`, the other three
-/// targeting the already-created legitimate trigger. See
-/// `TriggerMutatorAttemptGateway`'s doc comment for why this exercises the real
-/// `PerSurfaceCapabilityDenyDecorator` / `CapabilitySurfaceDenyFilter` chain
-/// instead of a stand-in, and for why all four mutators — not just
-/// `trigger_create` — are covered here (PR #5515 review comment: a
-/// full-path test that only exercised `trigger_create` would not catch the
-/// production deny constant accidentally dropping one of the other three).
+/// response goes through in production), attempting to create a second
+/// trigger named `SELF_CREATE_MARKER_TRIGGER_NAME`. See
+/// `SingleMutatorAttemptGateway`'s doc comment for why this exercises the
+/// real `PerSurfaceCapabilityDenyDecorator` / `CapabilitySurfaceDenyFilter`
+/// chain instead of a stand-in.
 #[tokio::test]
 async fn scheduled_trigger_fire_cannot_invoke_trigger_mutators() {
-    scheduled_trigger_denies_mutators_with_tool_disclosure(ToolDisclosureMode::Off).await;
+    scheduled_trigger_denies_create_with_tool_disclosure(ToolDisclosureMode::Off).await;
 }
 
 /// Same coverage as `scheduled_trigger_fire_cannot_invoke_trigger_mutators`,
@@ -1373,24 +1326,26 @@ async fn scheduled_trigger_fire_cannot_invoke_trigger_mutators() {
 /// self-review: the deny decorator (`PerSurfaceCapabilityDenyDecorator` /
 /// `CapabilitySurfaceDenyFilter`) is deliberately wired in `runtime.rs`
 /// *after* the conditional `ToolDisclosureCapabilityDecorator` so the
-/// mutator denial stays outermost — and therefore still wins — even when
-/// bridged tool disclosure is enabled. Before this test, `Bridged` had
-/// exactly one usage anywhere in the repo (an unrelated system-prompt test),
-/// so nothing exercised that decorator-ordering composition end-to-end; a
-/// decorator-order or bridged-disclosure regression could have re-exposed
-/// `trigger_create`/`remove`/`pause`/`resume` without any whole-path test
-/// failing. Keep this alongside the `Off` variant rather than folding it in
-/// — it pins the composition order, not just the deny outcome.
+/// `trigger_create` denial stays outermost — and therefore still wins —
+/// even when bridged tool disclosure is enabled. Before this test,
+/// `Bridged` had exactly one usage anywhere in the repo (an unrelated
+/// system-prompt test), so nothing exercised that decorator-ordering
+/// composition end-to-end; a decorator-order or bridged-disclosure
+/// regression could have re-exposed `trigger_create` without any
+/// whole-path test failing. Keep this alongside the `Off` variant rather
+/// than folding it in — it pins the composition order, not just the deny
+/// outcome.
 #[tokio::test]
 async fn scheduled_trigger_fire_cannot_invoke_trigger_mutators_with_bridged_disclosure() {
-    scheduled_trigger_denies_mutators_with_tool_disclosure(ToolDisclosureMode::Bridged).await;
+    scheduled_trigger_denies_create_with_tool_disclosure(ToolDisclosureMode::Bridged).await;
 }
 
-async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
-    tool_disclosure: ToolDisclosureMode,
-) {
+async fn scheduled_trigger_denies_create_with_tool_disclosure(tool_disclosure: ToolDisclosureMode) {
     let root = tempfile::tempdir().expect("tempdir");
-    let gateway = Arc::new(TriggerMutatorAttemptGateway::default());
+    let gateway = Arc::new(SingleMutatorAttemptGateway::default());
+    gateway
+        .set_tool_call(SingleMutatorAttemptGateway::create_tool_call())
+        .await;
 
     let runtime = build_runtime_with_tool_disclosure(
         &root,
@@ -1442,15 +1397,10 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
         .await
         .expect("make created trigger due");
 
-    // The remove/pause/resume mutator attempts need a real trigger_id to
-    // shape a realistic input payload against; give them the already-created
-    // legitimate trigger's id before the fire runs.
-    gateway.set_mutator_target_trigger_id(trigger_id).await;
-
     // Wait for the fire to settle. This is the model's ONLY turn where a
     // capability call can be attempted (`invoke_trigger_create` above never
-    // touched the model), so once `last_status` is set, the mutator
-    // self-attempts inside `gateway` have already run to completion.
+    // touched the model), so once `last_status` is set, the create
+    // self-attempt inside `gateway` has already run to completion.
     let settled = wait_for_settled(
         &repo,
         &tenant_id,
@@ -1463,78 +1413,51 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
     runtime.shutdown().await.expect("runtime shutdown");
 
     let captured_contents = gateway.captured_message_contents().await;
-    let registration_outcomes = gateway.registration_outcomes().await;
+    let outcome = gateway.outcome().await;
 
-    assert_eq!(
-        registration_outcomes.len(),
-        4,
-        "the fired run must have attempted all 4 scheduled-trigger mutator \
-         registrations (create/remove/pause/resume) — captured_messages: \
-         {captured_contents:?}, outcomes: {registration_outcomes:?}"
+    assert!(
+        outcome.is_some(),
+        "the fired run must have attempted the trigger_create registration — \
+         captured_messages: {captured_contents:?}"
     );
 
-    // Core assertion, mechanism-level: the surface must deny EVERY mutator
-    // registration, not just `trigger_create`. Each of these ids is on the
+    // Core assertion, mechanism-level: the surface must deny the
+    // `trigger_create` registration. `trigger_create` is the id on the
     // scheduled_trigger deny set (the fix's `PerSurfaceCapabilityDenyDecorator`
     // / `CapabilitySurfaceDenyFilter`), so `register_provider_tool_call`'s own
     // scope check on the resolved capability id fails closed before a
-    // candidate is ever built — see `TriggerMutatorAttemptGateway`'s doc comment
-    // for the exact call chain.
+    // candidate is ever built — see `SingleMutatorAttemptGateway`'s doc
+    // comment for the exact call chain.
     //
     // GUARD AGAINST FALSE-PASS: pre-fix (or if the production deny constant
-    // ever drops one of these ids), the scheduled_trigger capability surface
-    // would not deny that mutator, so the scope check above would pass and
+    // ever drops `trigger_create`), the scheduled_trigger capability surface
+    // would not deny it, so the scope check above would pass and
     // `capabilities.register_provider_tool_call(...)` inside the gateway
-    // would return `Ok(candidate)` for it — with a REAL, run-scoped staged
-    // input, because `register_provider_tool_call` is the exact path a
-    // native provider tool call uses to stage its arguments through the
-    // run's real `LocalDevCapabilityIo`. The loop would then actually
-    // dispatch that mutator against the staged input, and either the marker
-    // trigger asserted absent below WOULD exist, or the original trigger's
-    // state WOULD have changed. Reverting any one entry of the
-    // scheduled_trigger deny map turns that entry's assertion here into a
-    // `Some(Ok(()))` and one of the repository-state assertions below into a
-    // failure — both catch the regression independently, per mutator.
+    // would return `Ok(candidate)` — with a REAL, run-scoped staged input,
+    // because `register_provider_tool_call` is the exact path a native
+    // provider tool call uses to stage its arguments through the run's real
+    // `LocalDevCapabilityIo`. The loop would then actually dispatch it, and
+    // the marker trigger asserted absent below WOULD exist.
     const DENIED_SUMMARY: &str = "provider tool call targets a disabled capability";
     assert_eq!(
-        registration_outcomes.get(TRIGGER_CREATE_CAPABILITY_ID),
-        Some(&Err(DENIED_SUMMARY.to_string())),
+        outcome,
+        Some(Err(DENIED_SUMMARY.to_string())),
         "expected the scheduled_trigger surface to deny the trigger_create \
-         registration attempt made from inside the fired run: {registration_outcomes:?}"
-    );
-    assert_eq!(
-        registration_outcomes.get(TRIGGER_REMOVE_CAPABILITY_ID),
-        Some(&Err(DENIED_SUMMARY.to_string())),
-        "expected the scheduled_trigger surface to deny the trigger_remove \
-         registration attempt made from inside the fired run: {registration_outcomes:?}"
-    );
-    assert_eq!(
-        registration_outcomes.get(TRIGGER_PAUSE_CAPABILITY_ID),
-        Some(&Err(DENIED_SUMMARY.to_string())),
-        "expected the scheduled_trigger surface to deny the trigger_pause \
-         registration attempt made from inside the fired run: {registration_outcomes:?}"
-    );
-    assert_eq!(
-        registration_outcomes.get(TRIGGER_RESUME_CAPABILITY_ID),
-        Some(&Err(DENIED_SUMMARY.to_string())),
-        "expected the scheduled_trigger surface to deny the trigger_resume \
-         registration attempt made from inside the fired run: {registration_outcomes:?}"
+         registration attempt made from inside the fired run"
     );
 
-    // The mutator denials must not otherwise break the fire: the original
-    // trigger still settles Ok, exactly like the happy-path tests above.
+    // The denial must not otherwise break the fire: the original trigger
+    // still settles Ok, exactly like the happy-path tests above.
     assert_eq!(
         settled.last_status,
         Some(TriggerRunStatus::Ok),
-        "the original trigger must still settle Ok — the fix blocks only the \
-         mutator capabilities, not the fire itself — record: {settled:?}"
+        "the original trigger must still settle Ok — the fix blocks only \
+         trigger_create, not the fire itself — record: {settled:?}"
     );
 
     // Belt-and-suspenders behavioral check straight against the repository:
-    // regardless of how the denials surfaced, no second trigger was ever
-    // persisted, and the only trigger that exists is the original —
-    // unmodified (a should-be-denied pause/resume attempt did not flip its
-    // state).
+    // regardless of how the denial surfaced, no second trigger was ever
+    // persisted, and the only trigger that exists is the original.
     let all_triggers = repo
         .list_triggers(tenant_id)
         .await
@@ -1556,8 +1479,137 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
     assert_eq!(
         all_triggers[0].state,
         TriggerState::Scheduled,
-        "a should-be-denied trigger_pause attempt must not have changed the \
-         original trigger's state: {:?}",
+        "the trigger_create denial must not otherwise disturb the original \
+         trigger's state: {:?}",
         all_triggers[0]
+    );
+}
+
+/// T0-5505-E2E (pause/resume/remove permit decision): a scheduled-trigger
+/// fire may need to manage the trigger fleet — pausing, resuming, or
+/// removing a trigger — to complete its task, so unlike `trigger_create`,
+/// `builtin.trigger_pause` is NOT denied on the `scheduled_trigger`
+/// capability surface. This proves the permit decision holds through the
+/// real composed pipeline, not just the mechanism-level
+/// `scheduled_trigger_surface_excludes_create_interactive_includes_it` unit
+/// test in `ironclaw_reborn::runtime` — `register_provider_tool_call`
+/// resolves and scope-checks the capability id, and a genuine
+/// `PerSurfaceCapabilityDenyDecorator` regression that started denying
+/// `trigger_pause` again would fail this test's registration assertion.
+/// `trigger_remove`/`trigger_resume` share the exact same
+/// `CapabilitySurfaceDenyFilter::permits` code path as `trigger_pause` (all
+/// three are simply absent from `SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS`),
+/// so one full-path proof is representative; duplicating this test per
+/// mutator would not exercise a different mechanism.
+///
+/// Targets a *different* trigger than the one that fires — a fired trigger
+/// mutating its own record mid-run is a distinct, more involved scenario
+/// (interaction with the poller's own settle write) that this test
+/// deliberately does not attempt.
+#[tokio::test]
+async fn scheduled_trigger_fire_can_pause_another_trigger_it_manages() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let gateway = Arc::new(SingleMutatorAttemptGateway::default());
+
+    let runtime = build_runtime_with(
+        &root,
+        Arc::clone(&gateway),
+        TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
+            TriggerPollerWorkerConfig {
+                poll_interval: Duration::from_millis(20),
+                ..Default::default()
+            },
+        ),
+    )
+    .await;
+
+    // The trigger that fires and does the managing.
+    let firer = invoke_trigger_create(
+        &runtime,
+        json!({
+            "name": "trigger-e2e-pause-firer",
+            "prompt": TRIGGER_PROMPT,
+            "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
+        }),
+    )
+    .await;
+    let firer_trigger_id = TriggerId::parse(
+        firer["trigger"]["trigger_id"]
+            .as_str()
+            .expect("created firer trigger id"),
+    )
+    .expect("valid firer trigger id");
+
+    // A separate trigger the firer's fire manages (pauses).
+    let managed = invoke_trigger_create(
+        &runtime,
+        json!({
+            "name": "trigger-e2e-pause-managed",
+            "prompt": TRIGGER_PROMPT,
+            "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
+        }),
+    )
+    .await;
+    let managed_trigger_id = TriggerId::parse(
+        managed["trigger"]["trigger_id"]
+            .as_str()
+            .expect("created managed trigger id"),
+    )
+    .expect("valid managed trigger id");
+
+    let repo = runtime
+        .trigger_repository()
+        .expect("local-dev runtime exposes trigger repository");
+    let tenant_id = TenantId::new(TENANT).expect("tenant id");
+
+    let mut firer_record = repo
+        .get_trigger(tenant_id.clone(), firer_trigger_id)
+        .await
+        .expect("get firer trigger")
+        .expect("firer trigger persisted");
+    firer_record.next_run_at = Utc::now() - chrono::Duration::seconds(120);
+    repo.upsert_trigger(firer_record)
+        .await
+        .expect("make firer trigger due");
+
+    gateway
+        .set_tool_call(SingleMutatorAttemptGateway::pause_tool_call(
+            managed_trigger_id,
+        ))
+        .await;
+
+    let settled = wait_for_settled(
+        &repo,
+        &tenant_id,
+        firer_trigger_id,
+        Duration::from_secs(15),
+        |r| r.last_fired_slot.is_some() && r.last_run_at.is_some() && r.last_status.is_some(),
+    )
+    .await;
+
+    runtime.shutdown().await.expect("runtime shutdown");
+
+    assert_eq!(
+        gateway.outcome().await,
+        Some(Ok(())),
+        "expected the scheduled_trigger surface to permit the trigger_pause \
+         registration attempt made from inside the fired run"
+    );
+    assert_eq!(
+        settled.last_status,
+        Some(TriggerRunStatus::Ok),
+        "the firer trigger must still settle Ok — record: {settled:?}"
+    );
+
+    let managed_after = repo
+        .get_trigger(tenant_id, managed_trigger_id)
+        .await
+        .expect("get managed trigger after fire settles")
+        .expect("managed trigger still exists");
+    assert_eq!(
+        managed_after.state,
+        TriggerState::Paused,
+        "the permitted trigger_pause dispatch must have actually paused the \
+         managed trigger: {managed_after:?}"
     );
 }
