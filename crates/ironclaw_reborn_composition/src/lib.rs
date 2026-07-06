@@ -832,6 +832,15 @@ pub(crate) fn slack_host_state_mount_view(
             ))?,
             MountPermissions::read_write_list_delete(),
         ),
+        // Durable Slack conversation-binding store: RebornFilesystemConversationServices
+        // persists `/conversations/state.json`. Without this alias the ScopedFilesystem
+        // cannot resolve that path, the conversation store fails to open, and every
+        // inbound Slack event (e.g. a DM to the bot) is dropped with a 503.
+        MountGrant::new(
+            MountAlias::new("/conversations")?,
+            VirtualPath::new(format!("/tenants/{tenant_id}/shared/slack-conversations"))?,
+            MountPermissions::read_write_list_delete(),
+        ),
     ])
 }
 
@@ -1090,6 +1099,14 @@ mod mount_view_tests {
                 "/engine/product_workflow/idempotency",
                 "/engine/product_workflow/idempotency/actions/action.json",
                 "slack-product-workflow/idempotency/actions/action.json",
+            ),
+            // Regression: the durable conversation-binding store persists
+            // `/conversations/state.json`; without this alias every inbound Slack
+            // event (e.g. a DM to the bot) fails to open the store and is dropped.
+            (
+                "/conversations",
+                "/conversations/state.json",
+                "slack-conversations/state.json",
             ),
         ] {
             let (resolved, grant) = view
