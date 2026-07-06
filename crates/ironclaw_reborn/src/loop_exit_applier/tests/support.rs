@@ -25,8 +25,13 @@ use ironclaw_turns::{
 };
 
 use crate::loop_exit_applier::{
-    InMemoryLoopExitEvidencePort, LoopExitApplier, ThreadCheckpointLoopExitEvidencePort,
+    AwaitDependentRunEvidenceStore, InMemoryLoopExitEvidencePort, LoopExitApplier,
+    ThreadCheckpointLoopExitEvidencePort,
 };
+
+pub(super) fn empty_await_dependent_run_evidence() -> Arc<dyn AwaitDependentRunEvidenceStore> {
+    Arc::new(crate::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new())
+}
 
 pub(super) fn text_checkpoint_evidence(
     loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
@@ -35,6 +40,7 @@ pub(super) fn text_checkpoint_evidence(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(StaticTurnStateStore::new(claimed_run().state)),
         loop_checkpoint_store,
+        empty_await_dependent_run_evidence(),
     )
 }
 
@@ -399,7 +405,6 @@ pub(super) struct RecordingTransitionPort {
     raw_failures: Mutex<Vec<String>>,
     apply_calls: Mutex<usize>,
     latest_resumable_checkpoint_result: Mutex<Result<Option<TurnCheckpointId>, TurnError>>,
-    failed_resume_checkpoints: Mutex<Vec<Option<TurnCheckpointId>>>,
 }
 
 impl Default for RecordingTransitionPort {
@@ -408,7 +413,6 @@ impl Default for RecordingTransitionPort {
             raw_failures: Mutex::new(Vec::new()),
             apply_calls: Mutex::new(0),
             latest_resumable_checkpoint_result: Mutex::new(Ok(None)),
-            failed_resume_checkpoints: Mutex::new(Vec::new()),
         }
     }
 }
@@ -424,10 +428,6 @@ impl RecordingTransitionPort {
 
     pub(super) fn apply_count(&self) -> usize {
         *self.apply_calls.lock().expect("lock")
-    }
-
-    pub(super) fn failed_resume_checkpoints(&self) -> Vec<Option<TurnCheckpointId>> {
-        self.failed_resume_checkpoints.lock().expect("lock").clone()
     }
 }
 
@@ -566,15 +566,7 @@ impl TurnRunTransitionPort for RecordingTransitionPort {
                         Some(reason.gate_ref().clone()),
                     ))
                 }
-                ironclaw_turns::runner::TurnRunnerOutcome::Failed {
-                    failure,
-                    resume_checkpoint_id,
-                    ..
-                } => {
-                    self.failed_resume_checkpoints
-                        .lock()
-                        .expect("lock")
-                        .push(resume_checkpoint_id);
+                ironclaw_turns::runner::TurnRunnerOutcome::Failed { failure } => {
                     self.fail_run(FailRunRequest {
                         run_id: request.run_id,
                         runner_id: request.runner_id,

@@ -1,10 +1,10 @@
-"""Shared Reborn WebUI v2 Playwright harness.
+"""Shared Reborn WebUI v2 E2E harness.
 
 The legacy Playwright suite has mature shared fixtures in ``conftest.py`` for
 the ``ironclaw`` gateway. Reborn WebUI v2 is a different product surface: it
 boots ``ironclaw-reborn serve``, serves the React SPA under ``/v2/``, and uses
-``/api/webchat/v2/*`` endpoints. Keep that setup here so migrated scenarios
-exercise the real Reborn binary without duplicating process plumbing.
+``/api/webchat/v2/*`` endpoints. Keep that setup here so browser and served API
+scenarios exercise the real Reborn binary without duplicating process plumbing.
 """
 
 import asyncio
@@ -16,7 +16,6 @@ from pathlib import Path
 
 import httpx
 import pytest
-from playwright.async_api import async_playwright
 
 from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, wait_for_ready
 
@@ -311,6 +310,7 @@ async def reborn_v2_vision_server(ironclaw_reborn_binary, mock_llm_server, tmp_p
 async def reborn_v2_browser():
     """Chromium instance for Reborn v2 tests, independent of the legacy gateway."""
     from playwright.async_api import Error as PlaywrightError
+    from playwright.async_api import async_playwright
 
     headless = os.environ.get("HEADED", "").strip() not in ("1", "true")
     async with async_playwright() as p:

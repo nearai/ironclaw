@@ -144,6 +144,38 @@ async fn exchange_maps_provider_5xx_to_retryable_backend_unavailable() {
     );
 }
 
+// C-WIREFMT: format-matrix coverage for the malformed/non-JSON success-body
+// framing of `parse_token_response` (~line 613), reached via the success leg
+// of `execute_token_request`. Google's token endpoint only ever emits
+// well-formed JSON on 200, so this pins the untested-but-legal parse-failure
+// path rather than a live defect.
+#[tokio::test]
+async fn exchange_maps_malformed_200_body_to_token_exchange_failed() {
+    let egress = Arc::new(RecordingEgress::ok(b"not-json".to_vec()));
+    let client = HostOAuthProviderClient::new(
+        google_spec(),
+        egress,
+        Arc::new(RecordingSecretStore::recording()),
+        Arc::new(NoopObligationHandler),
+        OAuthClientId::new("google-client").unwrap(),
+        OAuthRedirectUri::new("https://app.example/callback").unwrap(),
+    )
+    .unwrap();
+
+    let error = client
+        .exchange_callback(
+            exchange_context(),
+            callback_request("google", "work google", &["gmail.readonly"]),
+        )
+        .await
+        .expect_err("malformed 200 token response body must not parse");
+
+    assert_eq!(
+        error.code(),
+        ironclaw_auth::AuthErrorCode::TokenExchangeFailed
+    );
+}
+
 #[tokio::test]
 async fn exchange_request_includes_client_secret_and_derived_network_policy_host() {
     let egress = Arc::new(RecordingEgress::ok(

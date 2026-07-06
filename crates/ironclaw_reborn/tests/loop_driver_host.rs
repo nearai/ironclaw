@@ -125,13 +125,13 @@ use ironclaw_turns::{
         LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError, LoopCompactionMode,
         LoopCompactionOutcome, LoopCompactionPort, LoopCompactionRequest, LoopContextRequest,
         LoopDriverId, LoopDriverNoteKind, LoopGateKind, LoopHostMilestone, LoopHostMilestoneKind,
-        LoopInlineMessage, LoopInlineMessageRole, LoopInput, LoopInputAckToken, LoopInputCursor,
-        LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant, LoopModelGatewayError,
-        LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopProgressEvent,
-        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopSafeSummary, ModelWorkKind,
-        ModelWorkOutcome, ModelWorkRequest, NoOpBudgetAccountant, NoOpPolicyGuard,
-        ParentLoopOutput, PersonalContextPolicy, PromptMode, SkillVisibility,
-        StageCheckpointPayloadRequest, SystemInferenceTaskId, UserProfileContext,
+        LoopInlineMessage, LoopInlineMessageBody, LoopInlineMessageRole, LoopInput,
+        LoopInputAckToken, LoopInputCursor, LoopInputCursorToken, LoopInputPort,
+        LoopModelBudgetAccountant, LoopModelGatewayError, LoopModelPort, LoopModelRequest,
+        LoopModelRouteSnapshot, LoopProgressEvent, LoopPromptBundleRequest, LoopPromptPort,
+        LoopRunContext, LoopSafeSummary, ModelWorkKind, ModelWorkOutcome, ModelWorkRequest,
+        NoOpBudgetAccountant, NoOpPolicyGuard, ParentLoopOutput, PersonalContextPolicy, PromptMode,
+        SkillVisibility, StageCheckpointPayloadRequest, SystemInferenceTaskId, UserProfileContext,
         VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::{
@@ -1839,6 +1839,7 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
             thread_service.clone(),
             turn_store.clone(),
             loop_checkpoint_store.clone(),
+            Arc::new(BoundedSubagentGateResolutionStore::new()),
         ));
     let applier = Arc::new(LoopExitApplier::new(transition_port, evidence));
     let gateway = Arc::new(RecordingGateway::reply("model says hi"));
@@ -3319,10 +3320,12 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
     let surface_resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
         CapabilityAllowSet::allowlist([allowed_id.clone()]),
     ));
+    let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
     let evidence = Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
         fixture.thread_service.clone(),
         turn_store.clone(),
         turn_store.clone(),
+        subagent_gate_store.clone(),
     ));
     let event_sink = Arc::new(InMemoryTurnEventSink::default());
     let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
@@ -3338,7 +3341,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
         capability_surface_resolver: surface_resolver,
         capability_result_writer: io.clone(),
         subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
-        subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
+        subagent_gate_store,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
         subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
@@ -3472,10 +3475,12 @@ async fn pre_minted_scheduler_wake_wiring_drives_scheduler_on_coordinator_submit
     let surface_resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
         CapabilityAllowSet::allowlist([allowed_id.clone()]),
     ));
+    let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
     let evidence = Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
         fixture.thread_service.clone(),
         turn_store.clone(),
         turn_store.clone(),
+        subagent_gate_store.clone(),
     ));
     // A 60-second poll interval ensures the scheduler cannot advance the run
     // via fallback polling within the 5-second assertion window. Only a wake
@@ -3493,7 +3498,7 @@ async fn pre_minted_scheduler_wake_wiring_drives_scheduler_on_coordinator_submit
         capability_surface_resolver: surface_resolver,
         capability_result_writer: io.clone(),
         subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
-        subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
+        subagent_gate_store,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
         subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
@@ -3638,10 +3643,12 @@ async fn build_runtime_host_with_optional_hooks(
     let surface_resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
         CapabilityAllowSet::allowlist([allowed_id.clone()]),
     ));
+    let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
     let evidence = Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
         fixture.thread_service.clone(),
         turn_store.clone(),
         turn_store.clone(),
+        subagent_gate_store.clone(),
     ));
     let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
@@ -3656,7 +3663,7 @@ async fn build_runtime_host_with_optional_hooks(
         capability_surface_resolver: surface_resolver,
         capability_result_writer: io.clone(),
         subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
-        subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
+        subagent_gate_store,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
         subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
@@ -3989,6 +3996,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
         ),
     );
 
+    let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
         turn_state: turn_store.clone(),
@@ -4004,7 +4012,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
         )),
         capability_result_writer: io.clone(),
         subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
-        subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
+        subagent_gate_store: subagent_gate_store.clone(),
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
         subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
@@ -4012,6 +4020,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
             fixture.thread_service.clone(),
             turn_state_store_dyn(&turn_store),
             turn_store,
+            subagent_gate_store,
         )),
         config: DefaultPlannedRuntimeConfig::default(),
         model_route_resolver: Some(model_route_resolver),
@@ -4106,6 +4115,7 @@ async fn product_live_parts_for_gate_test(
             ModelRoute::new("nearai", "qwen3-coder").unwrap(),
         ),
     );
+    let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
     DefaultPlannedRuntimeParts {
         attachment_read_port: None,
         turn_state: turn_store.clone(),
@@ -4121,7 +4131,7 @@ async fn product_live_parts_for_gate_test(
         )),
         capability_result_writer: io.clone(),
         subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
-        subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
+        subagent_gate_store: subagent_gate_store.clone(),
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
         subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
@@ -4129,6 +4139,7 @@ async fn product_live_parts_for_gate_test(
             fixture.thread_service.clone(),
             turn_state_store_dyn(&turn_store),
             turn_store,
+            subagent_gate_store,
         )),
         config: DefaultPlannedRuntimeConfig::default(),
         model_route_resolver: Some(model_route_resolver),
@@ -4658,7 +4669,7 @@ async fn text_only_host_prompt_materializes_inline_messages() {
             capability_view: None,
             inline_messages: vec![LoopInlineMessage {
                 role: LoopInlineMessageRole::User,
-                safe_body: LoopSafeSummary::new("safe inline nudge").unwrap(),
+                safe_body: LoopInlineMessageBody::new("safe inline nudge").unwrap(),
             }],
         })
         .await
@@ -8259,11 +8270,13 @@ fn loop_exit_applier_for_fixture(
     turn_store: Arc<InMemoryTurnStateStore>,
 ) -> Arc<LoopExitApplier> {
     let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
+    let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
     let evidence = Arc::new(
         ThreadCheckpointLoopExitEvidencePort::new(
             Arc::clone(&fixture.thread_service),
             turn_store.clone(),
             loop_checkpoint_store,
+            subagent_gate_store,
         )
         .with_checkpoint_state_store(fixture.checkpoint_state_store.clone()),
     );

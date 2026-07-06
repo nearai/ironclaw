@@ -14,10 +14,11 @@ use ironclaw_turns::{
     GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver,
     InMemoryTurnStateStore, LoopCheckpointKind, LoopCheckpointStateRef, LoopCheckpointStore,
     LoopExitMapping, PutLoopCheckpointRequest, ReplyTargetBindingRef, RetryTurnRequest,
-    RunProfileRequest, RunProfileVersion, SanitizedFailure, SourceBindingRef, SubmitTurnRequest,
-    SubmitTurnResponse, ThreadBusy, TurnActor, TurnError, TurnIdempotencyOperationKind,
-    TurnIdempotencyOutcomeKind, TurnIdempotencyReplay, TurnLeaseToken, TurnPersistenceSnapshot,
-    TurnRunId, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
+    RunProfileRequest, RunProfileVersion, SanitizedFailure, SourceBindingRef,
+    StaticTurnAdmissionLimitProvider, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
+    TurnAdmissionAxisKind, TurnError, TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind,
+    TurnIdempotencyReplay, TurnLeaseToken, TurnPersistenceSnapshot, TurnRunId, TurnRunnerId,
+    TurnScope, TurnStateStore, TurnStatus,
     runner::{
         ApplyValidatedLoopExitRequest, ClaimRunRequest, ClaimedTurnRun, FailRunRequest,
         RecoverExpiredLeasesRequest, TurnRunTransitionPort, TurnRunnerOutcome,
@@ -170,11 +171,7 @@ where
         .unwrap()
 }
 
-async fn fail_claimed_run<S>(
-    store: &S,
-    claimed: &ClaimedTurnRun,
-    resume_checkpoint_id: Option<ironclaw_turns::TurnCheckpointId>,
-) -> ironclaw_turns::TurnRunState
+async fn fail_claimed_run<S>(store: &S, claimed: &ClaimedTurnRun) -> ironclaw_turns::TurnRunState
 where
     S: TurnRunTransitionPort + ?Sized,
 {
@@ -185,8 +182,6 @@ where
             lease_token: claimed.lease_token,
             mapping: LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Failed {
                 failure: SanitizedFailure::new("model_error").unwrap(),
-                explanation_message_refs: Vec::new(),
-                resume_checkpoint_id,
             }),
         })
         .await
@@ -222,12 +217,11 @@ where
 {
     let claimed = submit_and_claim(store, thread, idempotency_key).await;
     let checkpoint = put_loop_checkpoint(store, &claimed, kind).await;
-    let failed = fail_claimed_run(store, &claimed, Some(checkpoint.checkpoint_id)).await;
+    let failed = fail_claimed_run(store, &claimed).await;
     assert_eq!(failed.status, TurnStatus::Failed);
-    // The explicit resume checkpoint is preserved only when it is actually
-    // resumable (BeforeModel/BeforeBlock). A non-resumable kind is filtered out
-    // and, with no other resumable checkpoint seeded, the failed run advertises
-    // no retry checkpoint — matching what retry_turn would accept.
+    // Failed runs advertise only a stored resumable checkpoint
+    // (BeforeModel/BeforeBlock). A non-resumable checkpoint is ignored so
+    // retryability matches what retry_turn would accept.
     let expected_checkpoint = matches!(
         kind,
         LoopCheckpointKind::BeforeModel | LoopCheckpointKind::BeforeBlock
@@ -356,7 +350,7 @@ async fn assert_failed_transition_uses_latest_resumable_checkpoint<S>(
     let claimed = submit_and_claim(store, thread, submit_idem).await;
     let checkpoint = put_loop_checkpoint(store, &claimed, LoopCheckpointKind::BeforeModel).await;
 
-    let failed = fail_claimed_run(store, &claimed, None).await;
+    let failed = fail_claimed_run(store, &claimed).await;
     assert_eq!(
         failed.checkpoint_id,
         Some(checkpoint.checkpoint_id),
@@ -371,81 +365,36 @@ async fn assert_failed_transition_uses_latest_resumable_checkpoint<S>(
     assert_eq!(retry.status, TurnStatus::Queued);
 }
 
-/// Regression: an explicit `resume_checkpoint_id` handed to the failed
-/// transition must still be a same-run resumable (`BeforeModel`/`BeforeBlock`)
-/// checkpoint. A non-resumable (`Final`) id must be filtered out, falling back
-/// to the host-derived latest resumable checkpoint. Otherwise the failed run
-/// would advertise retryability that `retry_turn` then refuses, stranding the
-/// UI on a retry button that always fails.
-async fn assert_explicit_nonresumable_resume_checkpoint_is_not_retryable<S>(
+async fn assert_retry_admission_rejection_is_not_idempotently_replayed<S>(
     store: &S,
-    thread: &str,
-    submit_idem: &str,
+    failed_thread: &str,
+    blocker_thread: &str,
     retry_idem: &str,
 ) where
     S: TurnStateStore + TurnRunTransitionPort + LoopCheckpointStore + ?Sized,
 {
-    let claimed = submit_and_claim(store, thread, submit_idem).await;
-    // Only a non-resumable Final checkpoint exists for this run.
-    let final_checkpoint = put_loop_checkpoint(store, &claimed, LoopCheckpointKind::Final).await;
-
-    // The runner hands back the Final checkpoint as the resume id. It must be
-    // filtered out rather than blindly trusted; with no resumable checkpoint to
-    // fall back to, the failed run is not retryable.
-    let failed = fail_claimed_run(store, &claimed, Some(final_checkpoint.checkpoint_id)).await;
+    let failed_claimed =
+        submit_and_claim(store, failed_thread, "idem-retry-admission-failed").await;
+    put_loop_checkpoint(store, &failed_claimed, LoopCheckpointKind::BeforeModel).await;
+    let failed = fail_claimed_run(store, &failed_claimed).await;
     assert_eq!(failed.status, TurnStatus::Failed);
-    assert_eq!(
-        failed.checkpoint_id, None,
-        "an explicit non-resumable resume checkpoint must not advertise retryability"
-    );
+    assert!(failed.checkpoint_id.is_some());
 
-    let error = store
-        .retry_turn(retry_request(thread, claimed.state.run_id, retry_idem))
+    let blocker = submit_and_claim(store, blocker_thread, "idem-retry-admission-blocker").await;
+    let denied = store
+        .retry_turn(retry_request(failed_thread, failed.run_id, retry_idem))
         .await
         .unwrap_err();
-    assert_eq!(
-        error,
-        TurnError::RunNotRetryable {
-            run_id: claimed.state.run_id
-        }
-    );
-}
+    assert!(matches!(denied, TurnError::AdmissionRejected(_)));
 
-/// Companion to the rejection case above: when a bogus (non-resumable) explicit
-/// `resume_checkpoint_id` is supplied but a real resumable checkpoint exists,
-/// the failed transition must fall back to the latest resumable checkpoint and
-/// stay retryable. Guards the `latest_resumable_loop_checkpoint` fallback in
-/// `fail_claimed_record` — without it, retryable failed runs would silently
-/// regress to `RunNotRetryable`.
-async fn assert_invalid_explicit_checkpoint_falls_back_to_latest_resumable<S>(
-    store: &S,
-    thread: &str,
-    submit_idem: &str,
-    retry_idem: &str,
-) where
-    S: TurnStateStore + TurnRunTransitionPort + LoopCheckpointStore + ?Sized,
-{
-    let claimed = submit_and_claim(store, thread, submit_idem).await;
-    // A real resumable checkpoint plus a later non-resumable Final checkpoint.
-    let resumable = put_loop_checkpoint(store, &claimed, LoopCheckpointKind::BeforeModel).await;
-    let final_checkpoint = put_loop_checkpoint(store, &claimed, LoopCheckpointKind::Final).await;
+    complete_claimed_run(store, &blocker).await;
 
-    // The runner hands back the Final (non-resumable) checkpoint as the resume
-    // id; it must be filtered out and fall back to the resumable checkpoint.
-    let failed = fail_claimed_run(store, &claimed, Some(final_checkpoint.checkpoint_id)).await;
-    assert_eq!(failed.status, TurnStatus::Failed);
-    assert_eq!(
-        failed.checkpoint_id,
-        Some(resumable.checkpoint_id),
-        "a bogus explicit checkpoint must fall back to the latest resumable checkpoint"
-    );
-
-    let retry = store
-        .retry_turn(retry_request(thread, claimed.state.run_id, retry_idem))
+    let retried = store
+        .retry_turn(retry_request(failed_thread, failed.run_id, retry_idem))
         .await
-        .expect("fallback resumable checkpoint must keep the failed run retryable");
-    assert_ne!(retry.run_id, claimed.state.run_id);
-    assert_eq!(retry.status, TurnStatus::Queued);
+        .expect("admission rejection must not be cached for retry idempotency");
+    assert_ne!(retried.run_id, failed.run_id);
+    assert_eq!(retried.status, TurnStatus::Queued);
 }
 
 async fn assert_retry_rejections_and_idempotency<S>(store: &S, prefix: &str)
@@ -495,7 +444,7 @@ where
         &format!("idem-{prefix}-no-checkpoint"),
     )
     .await;
-    fail_claimed_run(store, &no_checkpoint_claimed, None).await;
+    fail_claimed_run(store, &no_checkpoint_claimed).await;
     let no_checkpoint_error = store
         .retry_turn(retry_request(
             &no_checkpoint_thread,
@@ -810,53 +759,32 @@ async fn filesystem_failed_transition_uses_latest_resumable_checkpoint() {
 }
 
 #[tokio::test]
-async fn inmemory_explicit_nonresumable_resume_checkpoint_is_not_retryable() {
-    let store = InMemoryTurnStateStore::default();
-    assert_explicit_nonresumable_resume_checkpoint_is_not_retryable(
+async fn inmemory_retry_admission_rejection_is_not_idempotently_replayed() {
+    let limits = StaticTurnAdmissionLimitProvider::default()
+        .with_total_limit(TurnAdmissionAxisKind::Tenant, 1);
+    let store = InMemoryTurnStateStore::with_admission_limit_provider(Arc::new(limits));
+    assert_retry_admission_rejection_is_not_idempotently_replayed(
         &store,
-        "thread-memory-explicit-nonresumable",
-        "idem-memory-explicit-nonresumable-submit",
-        "idem-memory-explicit-nonresumable-retry",
+        "thread-memory-retry-admission-failed",
+        "thread-memory-retry-admission-blocker",
+        "idem-memory-retry-admission",
     )
     .await;
 }
 
 #[tokio::test]
-async fn filesystem_explicit_nonresumable_resume_checkpoint_is_not_retryable() {
+async fn filesystem_retry_admission_rejection_is_not_idempotently_replayed() {
+    let limits = StaticTurnAdmissionLimitProvider::default()
+        .with_total_limit(TurnAdmissionAxisKind::Tenant, 1);
     let backend = engine_filesystem();
     let backend = Arc::new(backend);
-    let store = FilesystemTurnStateStore::new(scoped_turns_fs(backend));
-    assert_explicit_nonresumable_resume_checkpoint_is_not_retryable(
+    let store = FilesystemTurnStateStore::new(scoped_turns_fs(backend))
+        .with_admission_limit_provider(Arc::new(limits));
+    assert_retry_admission_rejection_is_not_idempotently_replayed(
         &store,
-        "thread-filesystem-explicit-nonresumable",
-        "idem-filesystem-explicit-nonresumable-submit",
-        "idem-filesystem-explicit-nonresumable-retry",
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn inmemory_invalid_explicit_checkpoint_falls_back_to_latest_resumable() {
-    let store = InMemoryTurnStateStore::default();
-    assert_invalid_explicit_checkpoint_falls_back_to_latest_resumable(
-        &store,
-        "thread-memory-invalid-explicit-fallback",
-        "idem-memory-invalid-explicit-fallback-submit",
-        "idem-memory-invalid-explicit-fallback-retry",
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn filesystem_invalid_explicit_checkpoint_falls_back_to_latest_resumable() {
-    let backend = engine_filesystem();
-    let backend = Arc::new(backend);
-    let store = FilesystemTurnStateStore::new(scoped_turns_fs(backend));
-    assert_invalid_explicit_checkpoint_falls_back_to_latest_resumable(
-        &store,
-        "thread-filesystem-invalid-explicit-fallback",
-        "idem-filesystem-invalid-explicit-fallback-submit",
-        "idem-filesystem-invalid-explicit-fallback-retry",
+        "thread-filesystem-retry-admission-failed",
+        "thread-filesystem-retry-admission-blocker",
+        "idem-filesystem-retry-admission",
     )
     .await;
 }

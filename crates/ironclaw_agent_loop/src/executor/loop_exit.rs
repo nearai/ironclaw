@@ -3,7 +3,7 @@ use ironclaw_turns::{
     LoopExit, LoopFailureKind, LoopMessageRef,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, FinalizeAssistantMessage, LoopInlineMessage,
-        LoopInlineMessageRole, LoopModelCapabilityView, LoopModelRequest, LoopSafeSummary,
+        LoopInlineMessageBody, LoopInlineMessageRole, LoopModelCapabilityView, LoopModelRequest,
         ParentLoopOutput,
     },
 };
@@ -62,11 +62,12 @@ pub(super) async fn try_final_answer_nudge(
     let mut request = context_plan.request;
     request.surface_version = None;
     request.capability_view = None;
-    let safe_body = LoopSafeSummary::new(FINAL_ANSWER_NUDGE.trim().to_string()).map_err(|_| {
-        AgentLoopExecutorError::PlannerContract {
-            detail: "final-answer nudge body was invalid",
-        }
-    })?;
+    let safe_body =
+        LoopInlineMessageBody::new(FINAL_ANSWER_NUDGE.trim().to_string()).map_err(|_| {
+            AgentLoopExecutorError::PlannerContract {
+                detail: "final-answer nudge body was invalid",
+            }
+        })?;
     request.inline_messages.push(LoopInlineMessage {
         role: LoopInlineMessageRole::User,
         safe_body,

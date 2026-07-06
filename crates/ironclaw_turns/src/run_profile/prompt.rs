@@ -357,8 +357,8 @@ mod tests {
         run_profile::{
             InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
             LoopContextBundle, LoopContextCompactionKind, LoopContextCompactionMetadata,
-            LoopContextMessage, LoopInlineMessage, LoopInlineMessageRole, LoopRuntimeContext,
-            LoopSafeSummary, ResolvedRunProfile,
+            LoopContextMessage, LoopInlineMessage, LoopInlineMessageBody, LoopInlineMessageRole,
+            LoopRuntimeContext, ResolvedRunProfile,
         },
     };
 
@@ -410,7 +410,7 @@ mod tests {
                 capability_view: None,
                 inline_messages: vec![LoopInlineMessage {
                     role: LoopInlineMessageRole::User,
-                    safe_body: LoopSafeSummary::new("safe inline nudge").unwrap(),
+                    safe_body: LoopInlineMessageBody::new("safe inline nudge").unwrap(),
                 }],
             })
             .await
@@ -446,7 +446,10 @@ mod tests {
                 capability_view: None,
                 inline_messages: vec![LoopInlineMessage {
                     role: LoopInlineMessageRole::System,
-                    safe_body: LoopSafeSummary::new("safe failure explanation context").unwrap(),
+                    safe_body: LoopInlineMessageBody::new(
+                        "safe failure explanation context".to_string(),
+                    )
+                    .unwrap(),
                 }],
             })
             .await

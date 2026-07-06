@@ -1971,7 +1971,7 @@ impl Inner {
                         resume_idempotency_order.push_back(key.clone());
                         resume_idempotency.insert(key, replay);
                     } else {
-                        warn_malformed_idempotency_record(&record);
+                        debug_malformed_idempotency_record(&record);
                     }
                 }
                 TurnIdempotencyOperationKind::Retry => {
@@ -1989,7 +1989,7 @@ impl Inner {
                         // Retry ThreadBusy records are retained in the durable snapshot for
                         // auditability, but are intentionally not replayable.
                     } else {
-                        warn_malformed_idempotency_record(&record);
+                        debug_malformed_idempotency_record(&record);
                     }
                 }
                 TurnIdempotencyOperationKind::Cancel => {
@@ -2002,7 +2002,7 @@ impl Inner {
                         cancel_idempotency_order.push_back(key.clone());
                         cancel_idempotency.insert(key, replay);
                     } else {
-                        warn_malformed_idempotency_record(&record);
+                        debug_malformed_idempotency_record(&record);
                     }
                 }
             }
@@ -2333,9 +2333,14 @@ impl Inner {
         result: Result<RetryTurnResponse, TurnError>,
         created_at: crate::TurnTimestamp,
     ) {
-        let replayable = !matches!(result, Err(TurnError::ThreadBusy(_)));
-        let record = retry_idempotency_record(&key, &result, created_at);
-        self.remember_persisted_idempotency(record);
+        let replayable = !matches!(
+            result,
+            Err(TurnError::ThreadBusy(_) | TurnError::AdmissionRejected(_))
+        );
+        if !matches!(result, Err(TurnError::AdmissionRejected(_))) {
+            let record = retry_idempotency_record(&key, &result, created_at);
+            self.remember_persisted_idempotency(record);
+        }
         if replayable {
             if !self.retry_idempotency.contains_key(&key) {
                 self.retry_idempotency_order.push_back(key.clone());
@@ -2833,11 +2838,9 @@ impl Inner {
                     reason,
                     blocked_activity_id,
                 ),
-                LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Failed {
-                    failure,
-                    resume_checkpoint_id,
-                    ..
-                }) => self.fail_claimed_record(record, failure, resume_checkpoint_id),
+                LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Failed { failure }) => {
+                    self.fail_claimed_record(record, failure)
+                }
                 LoopExitMapping::RecoveryRequired { failure } => {
                     self.cancel_or_fail_claimed_record(record, failure)
                 }
@@ -2983,7 +2986,6 @@ impl Inner {
         &mut self,
         mut record: RunRecord,
         failure: SanitizedFailure,
-        resume_checkpoint_id: Option<TurnCheckpointId>,
     ) -> AppliedLoopTransition {
         if record.status.get() != TurnStatus::Running {
             let from = record.status.get();
@@ -2995,21 +2997,8 @@ impl Inner {
                 },
             };
         }
-        // An explicit resume checkpoint must still be a same-run, resumable
-        // (BeforeModel/BeforeBlock) checkpoint. A final or foreign-run id would
-        // otherwise mark the failed run retryable here while retry_turn later
-        // rejects it (retryable_loop_checkpoint only accepts same-run resumable
-        // checkpoints), leaving the UI advertising a retry that always fails.
-        // Filter the explicit id through the same gate, then fall back to the
-        // host-derived latest resumable checkpoint.
-        let retry_checkpoint_id = resume_checkpoint_id
-            .filter(|checkpoint_id| {
-                self.retryable_loop_checkpoint(&record, *checkpoint_id)
-                    .is_some()
-            })
-            .or_else(|| {
-                self.latest_resumable_loop_checkpoint(&record.scope, record.turn_id, record.run_id)
-            });
+        let retry_checkpoint_id =
+            self.latest_resumable_loop_checkpoint(&record.scope, record.turn_id, record.run_id);
         // Running → Failed: decrement per-user running counter.
         let transition = record.status.set(TurnStatus::Failed);
         self.apply_status_transition(transition, &record);
@@ -3046,12 +3035,7 @@ impl Inner {
                 // Mirror terminal_transition: a runner-reported failure keeps the
                 // run retryable from its latest resumable checkpoint rather than
                 // discarding it.
-                let resume = self.latest_resumable_loop_checkpoint(
-                    &record.scope,
-                    record.turn_id,
-                    record.run_id,
-                );
-                self.fail_claimed_record(record, failure, resume)
+                self.fail_claimed_record(record, failure)
             }
             TurnStatus::CancelRequested => self.cancel_claimed_record(record),
             _ => AppliedLoopTransition::Rejected {
@@ -3485,8 +3469,8 @@ fn persisted_key_for_record(record: &TurnIdempotencyRecord) -> PersistedIdempote
 /// kind (or lacks a run id) cannot be rehydrated; the duplicate-request guard
 /// for that key is lost until the operation is re-recorded. Surface it instead
 /// of dropping silently. Logs metadata only — never the replay payload.
-fn warn_malformed_idempotency_record(record: &TurnIdempotencyRecord) {
-    tracing::warn!(
+fn debug_malformed_idempotency_record(record: &TurnIdempotencyRecord) {
+    tracing::debug!(
         operation = ?record.operation,
         run_id = ?record.run_id,
         "skipping malformed idempotency record during snapshot load; replay guard lost for this key"

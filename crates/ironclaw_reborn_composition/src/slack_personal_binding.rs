@@ -84,6 +84,16 @@ pub trait RebornUserIdentityBindingStore: Send + Sync {
     ) -> Result<(), RebornUserIdentityBindingError>;
 }
 
+#[async_trait::async_trait]
+pub(crate) trait RebornUserIdentityBindingDeleteStore: Send + Sync {
+    async fn delete_user_identity_bindings_for_user(
+        &self,
+        provider: &str,
+        user_id: &UserId,
+        provider_user_id_prefix: Option<&str>,
+    ) -> Result<usize, RebornUserIdentityBindingError>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlackPersonalBindingInstallation {
     pub tenant_id: TenantId,

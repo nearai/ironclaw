@@ -23,7 +23,6 @@ mod user_turn;
 use std::{
     any::Any,
     collections::BTreeMap,
-    env::{self, VarError},
     io::ErrorKind,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -33,13 +32,15 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(feature = "postgres")]
+use crate::redaction::redact_postgres_url;
 use crate::{
     capture::CapturedRun,
     child_io::{join_child_stderr_reader, spawn_child_stderr_reader},
     db_probe::DbProbeSummary,
     process_metrics::{ProcessMetrics, ProcessMetricsSampler},
     progress::{ProgressCounters, spawn_progress_reporter, stop_progress_reporter},
-    redaction::{redact_libsql_path, redact_postgres_url},
+    redaction::redact_libsql_path,
     summary::{
         FailureCause, FailureCauseSummary, LatencySummary, latency_summary,
         summarize_failure_causes, summarize_user_turn_operation_attribution,
@@ -1987,6 +1988,7 @@ fn panic_payload_to_string(payload: &Box<dyn Any + Send + 'static>) -> String {
     "non-string panic payload".to_string()
 }
 
+#[cfg(feature = "postgres")]
 pub(crate) fn resolve_postgres_url(args: &Args) -> Result<String, String> {
     if let Some(url) = args.postgres_url.clone() {
         return Ok(url);
@@ -2004,11 +2006,12 @@ pub(crate) fn resolve_postgres_url(args: &Args) -> Result<String, String> {
     )
 }
 
+#[cfg(feature = "postgres")]
 fn optional_env_var(name: &str) -> Result<Option<String>, String> {
-    match env::var(name) {
+    match std::env::var(name) {
         Ok(value) => Ok(Some(value)),
-        Err(VarError::NotPresent) => Ok(None),
-        Err(VarError::NotUnicode(_)) => Err(format!("{name} is not valid Unicode")),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} is not valid Unicode")),
     }
 }
 

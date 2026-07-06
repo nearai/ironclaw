@@ -4,8 +4,8 @@ use ironclaw_turns::{
     LoopFailureKind, LoopMessageRef,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, FinalizeAssistantMessage, LoopInlineMessage,
-        LoopInlineMessageRole, LoopModelRequest, LoopModelResponse, LoopPromptBundleRequest,
-        LoopSafeSummary, ParentLoopOutput, PromptMode,
+        LoopInlineMessageBody, LoopInlineMessageRole, LoopModelRequest, LoopModelResponse,
+        LoopPromptBundleRequest, ParentLoopOutput, PromptMode,
     },
 };
 
@@ -176,11 +176,11 @@ fn build_explanation_prompt_request(
         inline_messages: vec![
             LoopInlineMessage {
                 role: LoopInlineMessageRole::System,
-                safe_body: safe_summary(failure_context(state, reason_kind), reason_kind)?,
+                safe_body: inline_message_body(failure_context(state, reason_kind), reason_kind)?,
             },
             LoopInlineMessage {
                 role: LoopInlineMessageRole::User,
-                safe_body: safe_summary(final_instruction(reason_kind), reason_kind)?,
+                safe_body: inline_message_body(final_instruction(reason_kind), reason_kind)?,
             },
         ],
     })
@@ -213,9 +213,12 @@ fn final_instruction(reason_kind: LoopFailureKind) -> String {
     )
 }
 
-fn safe_summary(value: String, reason_kind: LoopFailureKind) -> Option<LoopSafeSummary> {
-    match LoopSafeSummary::new(value) {
-        Ok(summary) => Some(summary),
+fn inline_message_body(
+    value: String,
+    reason_kind: LoopFailureKind,
+) -> Option<LoopInlineMessageBody> {
+    match LoopInlineMessageBody::new(value) {
+        Ok(body) => Some(body),
         Err(error) => {
             tracing::debug!(
                 reason_kind = reason_kind.as_str(),

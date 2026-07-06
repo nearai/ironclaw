@@ -32,7 +32,6 @@ mod live_tests {
     #[ignore] // Live tier: requires LLM API keys + network access
     async fn provider_reasoning_surfaces_as_thinking_status() {
         let harness = LiveTestHarnessBuilder::new("provider_reasoning_surfaces_as_thinking_status")
-            .with_engine_v2(true)
             .with_auto_approve_tools(false)
             .build()
             .await;
@@ -119,7 +118,6 @@ mod live_tests {
         }
 
         let harness = LiveTestHarnessBuilder::new("non_reasoning_model_emits_no_thinking")
-            .with_engine_v2(true)
             .build()
             .await;
 

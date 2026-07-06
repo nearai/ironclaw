@@ -8,13 +8,14 @@ use ironclaw_extensions::SharedExtensionRegistry;
 use ironclaw_host_api::{EffectKind, InvocationId, ResourceScope};
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
-    ConnectableChannelsProductFacade, OperatorStatusService, RebornOperatorStatusCheck,
-    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
-    RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornServices as ProductRebornServices,
-    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo,
-    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
-    RebornSkillTrustLevel, SkillsProductFacade, WebUiAuthenticatedCaller,
+    ChannelConnectionFacade, ConnectableChannelsProductFacade, OperatorStatusService,
+    RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
+    RebornOperatorStatusState, RebornOperatorToolCatalog, RebornOperatorToolInfo,
+    RebornServices as ProductRebornServices, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSkillActionResponse,
+    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel, SkillsProductFacade,
+    WebUiAuthenticatedCaller,
 };
 
 use ironclaw_triggers::TriggerRepository;
@@ -25,12 +26,15 @@ use crate::{
     lifecycle::{
         RebornLocalLifecycleFacade, RebornLocalSkillManagementError, RebornLocalSkillManagementPort,
     },
-    outbound_delivery_capability_surface::{
-        outbound_delivery_synthetic_provider, outbound_delivery_target_set_operator_tool_info,
-    },
-    outbound_preferences::{
+    observability::RebornLocalServiceLifecycle,
+    outbound::{
         OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistry,
-        RebornOutboundPreferencesFacade,
+        RebornOutboundPreferencesFacade, outbound_delivery_synthetic_provider,
+        outbound_delivery_target_set_operator_tool_info,
+    },
+    support::fs::{
+        MountScopedFilesystemReader, ProjectScopedAttachmentLander, ProjectScopedAttachmentReader,
+        ProjectScopedFilesystemReader,
     },
     webui_extension_credentials::ProductAuthExtensionCredentialSetup,
 };
@@ -111,13 +115,14 @@ pub fn build_webui_services(
     runtime: &RebornRuntime,
     event_stream: Option<Arc<dyn ProjectionStream>>,
 ) -> Result<RebornWebuiBundle, RebornBuildError> {
-    build_webui_services_with_connectable_channels(runtime, event_stream, None, Vec::new())
+    build_webui_services_with_connectable_channels(runtime, event_stream, None, None, Vec::new())
 }
 
 pub(crate) fn build_webui_services_with_connectable_channels(
     runtime: &RebornRuntime,
     event_stream: Option<Arc<dyn ProjectionStream>>,
     connectable_channels: Option<Arc<dyn ConnectableChannelsProductFacade>>,
+    channel_connection: Option<Arc<dyn ChannelConnectionFacade>>,
     mut outbound_delivery_target_providers: Vec<Arc<dyn OutboundDeliveryTargetProvider>>,
 ) -> Result<RebornWebuiBundle, RebornBuildError> {
     let services = runtime.services();
@@ -135,31 +140,27 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     .with_auth_interactions(runtime.webui_auth_interaction_service());
     if let Some(workspace_filesystem) = runtime.webui_workspace_filesystem() {
         api = api
-            .with_inbound_attachments(Arc::new(
-                crate::attachment_landing::ProjectScopedAttachmentLander::new(Arc::clone(
-                    &workspace_filesystem,
-                )),
-            ))
+            .with_inbound_attachments(Arc::new(ProjectScopedAttachmentLander::new(Arc::clone(
+                &workspace_filesystem,
+            ))))
             // Read-only project filesystem backing directory listing and file
             // download chips, over the same workspace mount.
-            .with_project_filesystem_reader(Arc::new(
-                crate::project_filesystem_reader::ProjectScopedFilesystemReader::new(Arc::clone(
-                    &workspace_filesystem,
-                )),
-            ))
+            .with_project_filesystem_reader(Arc::new(ProjectScopedFilesystemReader::new(
+                Arc::clone(&workspace_filesystem),
+            )))
             // Read counterpart: serves landed attachment bytes back to the
             // browser (image thumbnails) through the same workspace mount.
-            .with_inbound_attachment_reader(Arc::new(
-                crate::attachment_landing::ProjectScopedAttachmentReader::new(workspace_filesystem),
-            ));
+            .with_inbound_attachment_reader(Arc::new(ProjectScopedAttachmentReader::new(
+                workspace_filesystem,
+            )));
     }
     // Standalone read-only filesystem viewer: browses memory + workspace over a
     // dedicated read-only multi-mount view (not the read-write workspace handle
     // above), so navigation can never become a write path.
     if let Some(browse_filesystem) = runtime.webui_browse_filesystem() {
-        api = api.with_filesystem_browser(Arc::new(
-            crate::mount_filesystem_reader::MountScopedFilesystemReader::new(browse_filesystem),
-        ));
+        api = api.with_filesystem_browser(Arc::new(MountScopedFilesystemReader::new(
+            browse_filesystem,
+        )));
     }
     if let Some(skill_activation_source) = runtime.webui_skill_activation_source() {
         let activation_recorder = Arc::clone(&skill_activation_source);
@@ -313,6 +314,9 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     if let Some(connectable_channels) = connectable_channels {
         api = api.with_connectable_channels_facade(connectable_channels);
     }
+    if let Some(channel_connection) = channel_connection {
+        api = api.with_channel_connection_facade(channel_connection);
+    }
     api = api.with_event_stream(event_stream.unwrap_or_else(|| runtime.webui_event_stream()));
     api = api.with_operator_status_service(Arc::new(ReadinessOperatorStatusService::new(
         services.readiness.clone(),
@@ -324,7 +328,7 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         #[cfg(not(feature = "root-llm-provider"))]
         let webui_boot_config = None;
         api = api.with_operator_service_lifecycle_service(Arc::new(
-            crate::operator_service_lifecycle::RebornLocalServiceLifecycle::new_for_operator_with_boot_config(
+            RebornLocalServiceLifecycle::new_for_operator_with_boot_config(
                 runtime.webui_tenant_id().clone(),
                 local_runtime.owner_user_id.clone(),
                 webui_boot_config,
@@ -975,7 +979,7 @@ mod tests {
         assert!(
             catalog.list_operator_tools().iter().any(|tool| {
                 tool.capability_id.as_str()
-                    == crate::outbound_delivery_capability_surface::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID
+                    == crate::outbound::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID
                     && tool.provider == synthetic_provider
             }),
             "synthetic outbound delivery capability must use the Settings > Tools provider key"

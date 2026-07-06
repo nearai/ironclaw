@@ -151,7 +151,6 @@ impl LoopExitApplier {
             completion_refs_verified: false,
             blocked_evidence_verified: false,
             failure_evidence_verified: false,
-            failure_resume_checkpoint_id: None,
         };
 
         match exit {
@@ -507,8 +506,6 @@ pub(crate) struct LoopExitValidationPolicy {
     completion_refs_verified: bool,
     blocked_evidence_verified: bool,
     failure_evidence_verified: bool,
-    #[serde(skip_serializing)]
-    failure_resume_checkpoint_id: Option<TurnCheckpointId>,
 }
 
 impl LoopExitValidationPolicy {
@@ -560,15 +557,6 @@ impl LoopExitValidationPolicy {
     }
 
     #[cfg(test)]
-    pub(crate) fn with_host_verified_failure_resume_checkpoint(
-        mut self,
-        checkpoint_id: TurnCheckpointId,
-    ) -> Self {
-        self.failure_resume_checkpoint_id = Some(checkpoint_id);
-        self
-    }
-
-    #[cfg(test)]
     pub(crate) fn requires_final_checkpoint(&self) -> bool {
         self.require_final_checkpoint
     }
@@ -601,11 +589,6 @@ impl LoopExitValidationPolicy {
     #[cfg(test)]
     pub(crate) fn failure_evidence_verified(&self) -> bool {
         self.failure_evidence_verified
-    }
-
-    #[cfg(test)]
-    pub(crate) fn failure_resume_checkpoint_id(&self) -> Option<TurnCheckpointId> {
-        self.failure_resume_checkpoint_id
     }
 }
 
@@ -858,14 +841,7 @@ fn validate_failed_exit(
     let failure = exit
         .safe_summary
         .unwrap_or_else(|| exit.reason_kind.to_sanitized_failure());
-    LoopExitValidationDecision::trusted(
-        exit_id,
-        TurnRunnerOutcome::Failed {
-            failure,
-            explanation_message_refs: exit.explanation_message_refs,
-            resume_checkpoint_id: policy.failure_resume_checkpoint_id,
-        },
-    )
+    LoopExitValidationDecision::trusted(exit_id, TurnRunnerOutcome::Failed { failure })
 }
 
 fn invalid_exit_decision(
@@ -873,12 +849,7 @@ fn invalid_exit_decision(
     kind: LoopExitViolationKind,
 ) -> LoopExitValidationDecision {
     let failure = SanitizedFailure::from_trusted_static(kind.failure_category());
-    let mapping = TurnRunnerOutcome::Failed {
-        failure,
-        explanation_message_refs: Vec::new(),
-        resume_checkpoint_id: None,
-    }
-    .into();
+    let mapping = TurnRunnerOutcome::Failed { failure }.into();
 
     LoopExitValidationDecision {
         exit_id,

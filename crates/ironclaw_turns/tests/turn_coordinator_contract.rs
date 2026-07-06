@@ -79,8 +79,6 @@ fn cancelled_mapping() -> LoopExitMapping {
 fn failed_mapping(category: &'static str) -> LoopExitMapping {
     LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Failed {
         failure: SanitizedFailure::new(category).unwrap(),
-        explanation_message_refs: Vec::new(),
-        resume_checkpoint_id: None,
     })
 }
 

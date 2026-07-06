@@ -2,9 +2,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BlockedReason, CapabilityActivityId, LoopExitMapping, LoopMessageRef, ResolvedRunProfile,
-    SanitizedFailure, TurnCheckpointId, TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState,
-    TurnRunnerId, TurnScope, TurnTimestamp,
+    BlockedReason, CapabilityActivityId, LoopExitMapping, ResolvedRunProfile, SanitizedFailure,
+    TurnCheckpointId, TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId,
+    TurnScope, TurnTimestamp,
     events::EventCursor,
     run_profile::{LoopCheckpointStateRef, LoopModelRouteSnapshot},
 };
@@ -118,10 +118,6 @@ pub enum TurnRunnerOutcome {
     },
     Failed {
         failure: SanitizedFailure,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        explanation_message_refs: Vec<LoopMessageRef>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        resume_checkpoint_id: Option<TurnCheckpointId>,
     },
 }
 

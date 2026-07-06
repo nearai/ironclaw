@@ -1035,15 +1035,16 @@ impl CapabilityStage {
         // recent-failure-kind record and (when the kind is explainable) the
         // explanation message ref are produced consistently with the other
         // failed-exit sites instead of being pushed inline here.
+        let failure_kind = exhausted_capability_failure_kind(summary.class);
         let explanation_message_ref =
-            attach_failure_explanation(ctx, &mut state, LoopFailureKind::DriverBug).await?;
+            attach_failure_explanation(ctx, &mut state, failure_kind).await?;
         let checked = CheckpointStage
             .write(ctx, state, CheckpointKind::Final)
             .await?;
         Ok(BatchStep::Exit(failed_exit(
             ctx.host,
             checked.state,
-            exhausted_capability_failure_kind(summary.class),
+            failure_kind,
             Some(checked.checkpoint_id),
             FailedExitDetails {
                 diagnostic_ref: summary.diagnostic_ref.clone(),

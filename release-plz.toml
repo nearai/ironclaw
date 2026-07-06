@@ -4,19 +4,13 @@
 git_release_enable = false
 
 # ── Main binary ─────────────────────────────────────────────
-# Cannot publish to crates.io because ironclaw_engine depends on `monty`
-# (git-only, not on crates.io). Still create git tags so cargo-dist builds
+# Not published to crates.io. Still create git tags so cargo-dist builds
 # binaries and creates GitHub Releases.
 [[package]]
 name = "ironclaw"
 publish = false
 
 # ── Internal crates (not useful standalone) ─────────────────
-[[package]]
-name = "ironclaw_engine"
-publish = false
-release = false
-
 [[package]]
 name = "ironclaw_tui"
 publish = false

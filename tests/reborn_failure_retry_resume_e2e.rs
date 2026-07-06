@@ -8,16 +8,20 @@
 //! tests; this test locks the whole loop→runner→store→coordinator path.
 
 #[allow(dead_code)]
-#[path = "support/reborn/mod.rs"]
+#[path = "support/reborn_parity_qa/mod.rs"]
+mod parity_qa_support;
+#[allow(dead_code)]
+#[path = "integration/support/mod.rs"]
 mod reborn_support;
 mod support;
 
 use ironclaw_loop_support::{HostManagedModelErrorKind, HostManagedModelResponse};
 use ironclaw_turns::{TurnStatus, run_profile::LoopHostMilestoneKind};
-use reborn_support::{
-    harness::{RebornBinaryE2EHarness, RecordingTestCapabilityPort},
+use parity_qa_support::{
+    binary_e2e::RebornBinaryE2EHarness,
     model_replay::{RebornModelReplayStep, RebornTraceReplayModelGateway},
 };
+use reborn_support::doubles::RecordingTestCapabilityPort;
 
 /// First model call fails (provider rejects the request); the run must end as a
 /// sanitized, retryable `Failed`. Retrying resumes from the `BeforeModel`

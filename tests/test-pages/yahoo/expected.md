@@ -42,5 +42,4 @@ Already a hit on the Oculus Rift, this space dogfighting game was one of the fir
 - [Sony’s PlayStation 4 Pro shows promise, potential and plenty of pretty lighting](https://www.yahoo.com/tech/sonys-playstation-4-pro-shows-promise-potential-161304037.html)
 - [Review: ‘Madden NFL 17’ runs hard, plays it safe](https://www.yahoo.com/tech/review-madden-nfl-17-runs-000000394.html)
 
-
 *Ben Silverman is on Twitter at* [*ben_silverman*](https://twitter.com/ben_silverman)*.*

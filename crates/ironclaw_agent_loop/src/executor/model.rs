@@ -237,7 +237,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
             }
         }
 
-        state.recent_failure_kinds.push(LoopFailureKind::DriverBug);
+        state.recent_failure_kinds.push(LoopFailureKind::ModelError);
         let checked = CheckpointStage
             .write(ctx, state, CheckpointKind::Final)
             .await?;

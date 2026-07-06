@@ -105,6 +105,7 @@ fn auth_prompt() -> AuthPromptView {
         account_label: None,
         authorization_url: None,
         expires_at: None,
+        connection: None,
     }
 }
 

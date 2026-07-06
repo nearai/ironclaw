@@ -61,6 +61,11 @@ on:
         type: string
         required: false
         default: ""
+      use_target_harness:
+        description: "Use target_ref's Reborn WebUI v2 live QA harness instead of restoring the canonical main harness."
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -394,6 +399,17 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: live-canary-workflow-canary
+      - name: Setup OVH sccache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
+          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
+          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
+          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
+          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
+          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Install cargo-component
         run: cargo install cargo-component --locked || true
       - name: Build WASM channels
@@ -431,6 +447,17 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: live-canary-deterministic-replay
+      - name: Setup OVH sccache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
+          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
+          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
+          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
+          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
+          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Install cargo-component
         run: cargo install cargo-component --locked || true
       - name: Build WASM extensions
@@ -474,6 +501,17 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: live-canary-public-smoke
+      - name: Setup OVH sccache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
+          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
+          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
+          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
+          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
+          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Install cargo-component
         run: cargo install cargo-component --locked || true
       - name: Build WASM extensions
@@ -546,7 +584,6 @@ jobs:
       REBORN_WEBUI_V2_LIVE_QA_SLACK_INSTALLATION_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_INSTALLATION_ID }}
       REBORN_WEBUI_V2_LIVE_QA_SLACK_TEAM_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_TEAM_ID }}
       REBORN_WEBUI_V2_LIVE_QA_SLACK_API_APP_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_API_APP_ID }}
-      REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_CHANNEL_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_CHANNEL_ID }}
       REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID }}
       REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_SUBJECT_USER_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_SUBJECT_USER_ID }}
       LIVE_OPENAI_COMPATIBLE_BASE_URL: ${{ vars.LIVE_OPENAI_COMPATIBLE_BASE_URL || 'https://cloud-api.near.ai/v1' }}
@@ -658,7 +695,8 @@ jobs:
         if: >
           steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1' &&
           github.event_name == 'workflow_dispatch' &&
-          inputs.target_ref != ''
+          inputs.target_ref != '' &&
+          inputs.use_target_harness != true
         with:
           persist-credentials: false
           ref: ${{ github.event.repository.default_branch }}
@@ -667,7 +705,8 @@ jobs:
         if: >
           steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1' &&
           github.event_name == 'workflow_dispatch' &&
-          inputs.target_ref != ''
+          inputs.target_ref != '' &&
+          inputs.use_target_harness != true
         run: |
           set -euo pipefail
           harness_ref="$(git -C .canonical-live-qa-harness rev-parse HEAD)"
@@ -692,6 +731,18 @@ jobs:
         if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
         with:
           key: live-canary-reborn-webui-v2-live-qa
+      - name: Setup OVH sccache
+        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
+          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
+          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
+          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
+          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
+          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Install cargo-component
         if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
         run: cargo install cargo-component --locked || true
@@ -792,6 +843,17 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: live-canary-persona-rotating
+      - name: Setup OVH sccache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
+          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
+          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
+          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
+          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
+          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Install cargo-component
         run: cargo install cargo-component --locked || true
       - name: Build WASM extensions
@@ -900,6 +962,17 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: live-canary-provider-${{ matrix.provider }}
+      - name: Setup OVH sccache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
+          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
+          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
+          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
+          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
+          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Install cargo-component
         run: cargo install cargo-component --locked || true
       - name: Build WASM extensions
@@ -964,6 +1037,17 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: live-canary-release-public-full
+      - name: Setup OVH sccache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
+          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
+          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
+          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
+          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
+          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Install cargo-component
         run: cargo install cargo-component --locked || true
       - name: Build WASM extensions
@@ -1006,6 +1090,17 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: live-canary-upgrade
+      - name: Setup OVH sccache
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
+          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
+          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
+          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
+          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
+          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Run upgrade canary lane
         env:
           LANE: upgrade-canary

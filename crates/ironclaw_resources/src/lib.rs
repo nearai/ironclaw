@@ -42,6 +42,7 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use chrono::{DateTime, Duration, Utc};
@@ -56,6 +57,68 @@ pub use ironclaw_host_api::{ResourceReceipt, ResourceReservation};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+mod decimal_string_or_legacy_number {
+    use super::*;
+
+    pub(crate) fn serialize<S>(value: &Decimal, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        rust_decimal::serde::str::serialize(value, serializer)
+    }
+
+    pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<Decimal, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        decimal_from_value(serde_json::Value::deserialize(deserializer)?)
+    }
+
+    fn decimal_from_value<E>(value: serde_json::Value) -> Result<Decimal, E>
+    where
+        E: serde::de::Error,
+    {
+        match value {
+            serde_json::Value::String(raw) => parse_decimal(&raw),
+            serde_json::Value::Number(raw) => parse_decimal(&raw.to_string()),
+            other => Err(E::custom(format!(
+                "expected decimal string or legacy numeric JSON, got {other}"
+            ))),
+        }
+    }
+
+    fn parse_decimal<E>(raw: &str) -> Result<Decimal, E>
+    where
+        E: serde::de::Error,
+    {
+        Decimal::from_str(raw).map_err(E::custom)
+    }
+
+    pub(crate) mod option {
+        use super::*;
+
+        pub(crate) fn serialize<S>(
+            value: &Option<Decimal>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            rust_decimal::serde::str_option::serialize(value, serializer)
+        }
+
+        pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<Option<Decimal>, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            match serde_json::Value::deserialize(deserializer)? {
+                serde_json::Value::Null => Ok(None),
+                value => super::decimal_from_value(value).map(Some),
+            }
+        }
+    }
+}
 
 /// Source of `now` for governor period accounting.
 ///
@@ -343,6 +406,7 @@ impl std::fmt::Display for ResourceAccount {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceLimits {
+    #[serde(default, with = "decimal_string_or_legacy_number::option")]
     pub max_usd: Option<Decimal>,
     pub max_input_tokens: Option<u64>,
     pub max_output_tokens: Option<u64>,
@@ -426,7 +490,7 @@ impl std::fmt::Display for ResourceDimension {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum ResourceValue {
-    Decimal(Decimal),
+    Decimal(#[serde(with = "decimal_string_or_legacy_number")] Decimal),
     Integer(u64),
 }
 
@@ -524,6 +588,7 @@ pub enum ResourceError {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceTally {
+    #[serde(with = "decimal_string_or_legacy_number")]
     pub usd: Decimal,
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -1532,7 +1597,7 @@ struct StrictResourceScope {
 #[derive(Deserialize)]
 #[serde(remote = "ResourceEstimate", deny_unknown_fields)]
 struct StrictResourceEstimate {
-    #[serde(default)]
+    #[serde(default, with = "decimal_string_or_legacy_number::option")]
     usd: Option<Decimal>,
     #[serde(default)]
     input_tokens: Option<u64>,
@@ -1553,6 +1618,7 @@ struct StrictResourceEstimate {
 #[derive(Deserialize)]
 #[serde(remote = "ResourceUsage", deny_unknown_fields)]
 struct StrictResourceUsage {
+    #[serde(with = "decimal_string_or_legacy_number")]
     usd: Decimal,
     input_tokens: u64,
     output_tokens: u64,
@@ -2609,6 +2675,97 @@ fn decimal_to_f64(d: Decimal) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resource_value_decimal_uses_stable_string_json() {
+        let value = ResourceValue::Decimal(Decimal::new(125, 2));
+        let encoded = serde_json::to_value(&value).unwrap();
+
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "kind": "decimal",
+                "value": "1.25"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ResourceValue>(encoded).unwrap(),
+            value
+        );
+    }
+
+    #[test]
+    fn resource_tally_usd_uses_stable_string_json() {
+        let tally = ResourceTally {
+            usd: Decimal::new(625, 2),
+            ..ResourceTally::default()
+        };
+        let encoded = serde_json::to_value(&tally).unwrap();
+
+        assert_eq!(encoded["usd"], "6.25");
+        assert_eq!(
+            serde_json::from_value::<ResourceTally>(encoded).unwrap(),
+            tally
+        );
+    }
+
+    #[test]
+    fn legacy_numeric_decimal_json_still_decodes() {
+        let value = serde_json::from_value::<ResourceValue>(serde_json::json!({
+            "kind": "decimal",
+            "value": 1.25
+        }))
+        .unwrap();
+        assert_eq!(value, ResourceValue::Decimal(Decimal::new(125, 2)));
+
+        let tally = serde_json::from_value::<ResourceTally>(serde_json::json!({
+            "usd": 6.25,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "wall_clock_ms": 0,
+            "output_bytes": 0,
+            "network_egress_bytes": 0,
+            "process_count": 0,
+            "concurrency_slots": 0
+        }))
+        .unwrap();
+        assert_eq!(tally.usd, Decimal::new(625, 2));
+
+        let limits = serde_json::from_value::<ResourceLimits>(serde_json::json!({
+            "max_usd": 1000.0,
+            "max_input_tokens": null,
+            "max_output_tokens": null,
+            "max_wall_clock_ms": null,
+            "max_output_bytes": null,
+            "max_network_egress_bytes": null,
+            "max_process_count": null,
+            "max_concurrency_slots": null,
+            "period": { "kind": "rolling24h" },
+            "thresholds": {
+                "warn_at": 1.0,
+                "pause_at": 1.0
+            }
+        }))
+        .unwrap();
+        assert_eq!(limits.max_usd, Some(Decimal::from(1000)));
+
+        let limits_without_usd = serde_json::from_value::<ResourceLimits>(serde_json::json!({
+            "max_input_tokens": null,
+            "max_output_tokens": null,
+            "max_wall_clock_ms": null,
+            "max_output_bytes": null,
+            "max_network_egress_bytes": null,
+            "max_process_count": null,
+            "max_concurrency_slots": null,
+            "period": { "kind": "rolling24h" },
+            "thresholds": {
+                "warn_at": 1.0,
+                "pause_at": 1.0
+            }
+        }))
+        .unwrap();
+        assert_eq!(limits_without_usd.max_usd, None);
+    }
 
     #[test]
     fn atomic_snapshot_replace_overwrites_existing_file() {
