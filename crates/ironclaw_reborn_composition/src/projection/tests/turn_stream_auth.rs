@@ -233,6 +233,7 @@ async fn webui_event_stream_renders_channel_pairing_requirement_as_manual_token_
                 }),
                 sanitized_reason: Some("Slack connection required".to_string()),
                 retryable: None,
+                detail: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator {
