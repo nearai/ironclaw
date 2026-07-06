@@ -179,7 +179,8 @@ jobs:
     needs: [changes, package-matrix]
     if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 60->90 for llvm-cov instrumentation overhead; watch `composition-core` first (single-package bucket, most feature-loaded, zero headroom).
+    timeout-minutes: 90
     env:
       ANTHROPIC_API_KEY: ""
       LLM_BACKEND: ""
@@ -206,6 +207,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: llvm-tools-preview
 
       - name: Resolve bucket settings
         id: bucket-settings
@@ -255,7 +258,9 @@ jobs:
           # download flakes (mitigated separately by .cargo/config.toml). A single
           # shared key keeps the registry + shared-dep build in one small,
           # always-resident entry, so the registry is downloaded once, not ~60x.
-          shared-key: reborn-tests-crates
+          #
+          # `-cov` suffix: instrumented llvm-cov build is a different artifact than plain `reborn-tests-crates`; separate lineage avoids corrupting whichever restores second (same as `reborn-integration-cov` below).
+          shared-key: reborn-tests-crates-cov
           # Keep saves to protected-branch and merge_group runs so the ~10 GB
           # repo cache LRU is seeded by shared states, not arbitrary PR branches.
           save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
@@ -272,6 +277,9 @@ jobs:
           cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
 
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # cargo-llvm-cov
+
       - name: Run crate tests
         env:
           BUCKET_NAME: ${{ matrix.bucket.name }}
@@ -280,20 +288,39 @@ jobs:
           echo "Running Reborn crate bucket: ${BUCKET_NAME}"
           printf '%s\n' "${BUCKET_PACKAGES}" | jq -r '.[] | "- " + .'
 
+          mkdir -p coverage
+
           while IFS= read -r package; do
             feature_flags="$(scripts/ci/package-feature-flags.sh "$package")"
-            echo "::group::cargo test -p ${package} ${feature_flags}"
+            echo "::group::cargo llvm-cov -p ${package} ${feature_flags} test"
 
+            # Scoped to this invocation only (never `export`) so it can't leak
+            # onto later packages in the same bucket iteration if
+            # composition-core ever stops being single-package.
+            incremental_env=()
             if [ "$package" = "ironclaw_reborn_composition" ]; then
               echo "Disabling incremental compilation for ironclaw_reborn_composition to keep runner disk usage bounded."
-              export CARGO_INCREMENTAL=0
+              incremental_env=(env CARGO_INCREMENTAL=0)
             fi
 
+            # One combined test+lcov invocation, not the two-step `--no-report test` + `report` shape (report has no --workspace/-p, only reports the root package).
             # shellcheck disable=SC2086 # feature_flags intentionally expands to zero or more Cargo args.
-            timeout --signal=INT --kill-after=30s 28m \
-              cargo test -p "$package" ${feature_flags} --all-targets -- --nocapture
+            timeout --signal=INT --kill-after=30s 40m \
+              "${incremental_env[@]}" cargo llvm-cov -p "$package" ${feature_flags} --all-targets \
+                --lcov --output-path "coverage/${package}.lcov" \
+                test -- --nocapture
             echo "::endgroup::"
           done < <(printf '%s\n' "${BUCKET_PACKAGES}" | jq -r '.[]')
+
+          # Concat per-package lcov into one artifact per bucket (keeps artifact count at ~12, not ~60); merge script parses end_of_record blocks per file already, so `cat` is sufficient.
+          cat coverage/*.lcov > "bucket-${BUCKET_NAME}.lcov"
+
+      - name: Upload bucket lcov artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: reborn-crate-cov-bucket-${{ matrix.bucket.name }}
+          path: bucket-${{ matrix.bucket.name }}.lcov
+          if-no-files-found: error
 
   root-reborn-parity-tests:
     name: Reborn root tests (${{ matrix.partition }})
@@ -567,10 +594,11 @@ jobs:
 
   coverage-report:
     name: Reborn integration-tier coverage report
-    needs: [changes, reborn-integration-coverage]
+    # Also needs crate-tests now: merges lane + bucket lcov, still pure text processing (no test execution), so the 10-min SLA below still holds.
+    needs: [changes, reborn-integration-coverage, crate-tests]
     if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     permissions:
       contents: read
       # The sticky coverage comment upserts a PR comment via the issues API.
@@ -589,13 +617,20 @@ jobs:
           path: coverage-parts
           merge-multiple: true
 
-      - name: Merge lane lcov reports
+      - name: Download crate bucket lcov artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: reborn-crate-cov-bucket-*
+          path: coverage-parts
+          merge-multiple: true
+
+      - name: Merge lane and bucket lcov reports
         run: |
           set -euo pipefail
           shopt -s nullglob
           parts=(coverage-parts/*.lcov)
           if [ "${#parts[@]}" -eq 0 ]; then
-            echo "No Reborn integration coverage lane artifacts found" >&2
+            echo "No Reborn coverage artifacts found (neither integration-tier lanes nor crate-tier buckets)" >&2
             exit 1
           fi
           scripts/ci/reborn-coverage-merge-lcov.sh reborn-integration-merged.lcov "${parts[@]}"
@@ -775,8 +810,8 @@ jobs:
             exit 1
           fi
 
-          # coverage-report only merges lane lcov files and renders/posts the
-          # informational summary — it never re-runs tests, so a failure here
+          # coverage-report only merges lane + crate-bucket lcov files and
+          # renders/posts the informational summary — it never re-runs tests, so a failure here
           # is a reporting-pipeline bug, not a test regression. Warn instead of
           # failing the roll-up: the coverage signal has no ratchet/threshold
           # yet, and the underlying tests are already gated above.

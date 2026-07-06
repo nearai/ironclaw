@@ -20,9 +20,13 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
+use axum::http::StatusCode;
+use ironclaw_product_workflow::RebornServices;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
+use reborn_support::webui_mount::{get_raw, mount_webui_v2_router, webui_caller_for};
+use std::sync::Arc;
 
 /// A vision-capable model id per `ironclaw_llm::vision_models::VISION_PATTERNS`.
 const VISION_MODEL: &str = "claude-3-5-sonnet-20241022";
@@ -227,4 +231,80 @@ async fn multiple_attachments_in_one_turn_all_reach_the_model() {
         .assert_model_request_contains("index=\\\"2\\\"")
         .await
         .expect("second attachment rendered at index 2");
+}
+
+/// W5-WEBUI-API-1: attachment bytes served via the real `webui_v2_router`
+/// GET-attachment route, over `RebornServices` wired with the production
+/// `InboundAttachmentReader` (Enabler C) — not the model-injection
+/// `LoopAttachmentReadPort` path above.
+#[tokio::test]
+async fn landed_attachment_reaches_webui_get_attachment_after_refresh() {
+    let group = RebornIntegrationGroup::attachment_tools()
+        .await
+        .expect("attachment-tools group builds");
+    let h = group
+        .thread("conv-attach-webui-get")
+        .with_model_override(VISION_MODEL)
+        .script([RebornScriptedReply::text("I see a diagram")])
+        .build()
+        .await
+        .expect("thread builds");
+
+    h.submit_turn_with_image_attachment(
+        "what's in this image?",
+        "diagram.png",
+        PNG_MIME,
+        PNG_BYTES.to_vec(),
+    )
+    .await
+    .expect("turn completes");
+
+    let history = h
+        .thread_harness
+        .history(h.binding.thread_id.clone())
+        .await
+        .expect("thread history readable");
+    let message = history
+        .iter()
+        .find(|message| !message.attachments.is_empty())
+        .expect("a persisted message carries the landed attachment ref");
+    let attachment = message
+        .attachments
+        .first()
+        .expect("message has at least one attachment ref");
+
+    let capability_harness = group
+        .capability_harness()
+        .expect("attachment_tools group uses a host-runtime capability backend");
+    let reader = capability_harness
+        .inbound_attachment_reader_for_test()
+        .expect("local-dev inbound attachment reader wired");
+
+    let services = RebornServices::new(h.thread_harness.service.clone(), h.coordinator.clone())
+        .with_inbound_attachment_reader(reader);
+    let caller = webui_caller_for(&h.binding);
+    let router = mount_webui_v2_router(Arc::new(services), caller);
+
+    let (status, headers, bytes) = get_raw(
+        router,
+        &format!(
+            "/api/webchat/v2/threads/{}/messages/{}/attachments/{}",
+            h.binding.thread_id.as_str(),
+            message.message_id.as_uuid(),
+            attachment.id
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "attachment GET status");
+    assert_eq!(
+        headers
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some(PNG_MIME),
+        "Content-Type must reflect the stored ref's mime type"
+    );
+    assert_eq!(
+        bytes, PNG_BYTES,
+        "served bytes must byte-match the landed image"
+    );
 }

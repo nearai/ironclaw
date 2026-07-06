@@ -340,6 +340,78 @@ assert_exit_code "A9: non-crates/-prefixed exemption module exits non-zero" 1 "$
 assert_contains "A9: non-crates/-prefixed exemption module reports the validation error" "${CAP_ERR}" \
   "must be repo-relative and start with 'crates/'"
 
+# A10: whole-crate `crate =` exemption form drops the entire crate from the
+# table and is rendered in the Exemptions section with a "crate: X" label
+# (never `entry["module"]` — that key doesn't exist on this entry shape, the
+# structural regression this case pins).
+cat > "${fixtures_dir}/a10_two_crates.lcov" <<'EOF'
+SF:/work/ironclaw/crates/ironclaw_embeddings/src/a.rs
+LF:10
+LH:0
+end_of_record
+SF:/work/ironclaw/crates/ironclaw_reborn/src/a.rs
+LF:10
+LH:5
+end_of_record
+EOF
+cat > "${fixtures_dir}/a10_crate_exemption.toml" <<'TOML'
+[[exemption]]
+crate = "ironclaw_embeddings"
+reason = "v1-only: consumed exclusively by the root ironclaw package"
+issue = "https://github.com/nearai/ironclaw/issues/1"
+TOML
+capture "${summary_sh}" "${fixtures_dir}/a10_two_crates.lcov" "${fixtures_dir}/a10_crate_exemption.toml"
+assert_exit_code "A10: whole-crate exemption exits 0 (no KeyError on missing 'module')" 0 "${CAP_RC}"
+assert_not_contains "A10: exempted crate dropped from the per-crate table" "${CAP_OUT}" "| \`ironclaw_embeddings\` |"
+assert_contains "A10: exempted crate kept out of the table, other crate still reported" "${CAP_OUT}" \
+  "| \`ironclaw_reborn\` | 50% | 5 / 10 |"
+assert_contains "A10: whole-crate exemption listed under its 'crate: X' label" "${CAP_OUT}" "\`crate: ironclaw_embeddings\`"
+assert_contains "A10: aggregate excludes the exempted crate's lines (5/10, not 5/20)" "${CAP_OUT}" \
+  '**Line coverage (Reborn crates): 50%** — 5 / 10 lines'
+
+# A11: mixed manifest (one per-file `module` entry + one whole-crate `crate`
+# entry) renders both, sorted together by their shared `label` field.
+cat > "${fixtures_dir}/a11_mixed_forms.toml" <<'TOML'
+[[exemption]]
+module = "crates/ironclaw_reborn/src/a.rs"
+reason = "per-file exemption"
+issue = "https://github.com/nearai/ironclaw/issues/2"
+
+[[exemption]]
+crate = "ironclaw_embeddings"
+reason = "whole-crate exemption"
+issue = "https://github.com/nearai/ironclaw/issues/1"
+TOML
+capture "${summary_sh}" "${fixtures_dir}/a10_two_crates.lcov" "${fixtures_dir}/a11_mixed_forms.toml"
+assert_exit_code "A11: mixed module+crate manifest exits 0" 0 "${CAP_RC}"
+assert_contains "A11: per-file form still rendered by its module path" "${CAP_OUT}" "\`crates/ironclaw_reborn/src/a.rs\`"
+assert_contains "A11: whole-crate form still rendered by its 'crate: X' label" "${CAP_OUT}" "\`crate: ironclaw_embeddings\`"
+assert_contains "A11: both exemptions fully drain the table (no data left)" "${CAP_OUT}" \
+  "No Reborn crate coverage data found"
+
+# A12: malformed entry with BOTH 'module' and 'crate' set -> exactly-one-of
+# validation rejects it instead of silently preferring one key.
+cat > "${fixtures_dir}/a12_both_keys.toml" <<'TOML'
+[[exemption]]
+module = "crates/ironclaw_reborn/src/a.rs"
+crate = "ironclaw_embeddings"
+reason = "ambiguous"
+issue = "https://github.com/nearai/ironclaw/issues/1"
+TOML
+capture "${summary_sh}" "${fixtures_dir}/a10_two_crates.lcov" "${fixtures_dir}/a12_both_keys.toml"
+assert_exit_code "A12: exemption with both 'module' and 'crate' exits non-zero" 1 "${CAP_RC}"
+assert_contains "A12: reports the exactly-one-of violation (both present)" "${CAP_ERR}" "both present"
+
+# A13: malformed entry with NEITHER 'module' nor 'crate' set.
+cat > "${fixtures_dir}/a13_neither_key.toml" <<'TOML'
+[[exemption]]
+reason = "no scope given"
+issue = "https://github.com/nearai/ironclaw/issues/1"
+TOML
+capture "${summary_sh}" "${fixtures_dir}/a10_two_crates.lcov" "${fixtures_dir}/a13_neither_key.toml"
+assert_exit_code "A13: exemption with neither 'module' nor 'crate' exits non-zero" 1 "${CAP_RC}"
+assert_contains "A13: reports the exactly-one-of violation (neither present)" "${CAP_ERR}" "neither present"
+
 # ---------------------------------------------------------------------------
 # B. reborn-coverage-summary.sh --zero-crates
 # ---------------------------------------------------------------------------
@@ -381,6 +453,13 @@ assert_eq "B2: all-covered fixture --zero-crates emits nothing" "" "${CAP_OUT}"
 capture "${summary_sh}" --zero-crates "${fixtures_dir}/a2_empty.lcov" "${empty_exemptions}"
 assert_exit_code "B3: empty lcov --zero-crates exits 0" 0 "${CAP_RC}"
 assert_eq "B3: empty lcov --zero-crates emits nothing" "" "${CAP_OUT}"
+
+# B4: a whole-crate `crate =` exemption drops its zero-covered crate from
+# --zero-crates too, not just from the report-mode table (A10 only covers
+# report mode; reuses that fixture — ironclaw_embeddings is 0/10, exempted).
+capture "${summary_sh}" --zero-crates "${fixtures_dir}/a10_two_crates.lcov" "${fixtures_dir}/a10_crate_exemption.toml"
+assert_exit_code "B4: --zero-crates with a whole-crate exemption exits 0" 0 "${CAP_RC}"
+assert_eq "B4: exempted zero-covered crate is excluded from --zero-crates output" "" "${CAP_OUT}"
 
 # ---------------------------------------------------------------------------
 # C. reborn-coverage-comment.sh (sticky PR comment upsert via a fake `gh`)
@@ -623,19 +702,55 @@ else
   report_pass "C8: fake gh did not record a mutation (guard fires before gh use)"
 fi
 
+# C9: a zero-covered crate excluded by a whole-crate exemption must not surface
+# in the sticky comment's 0-coverage callout (reuses the A10/B4 fixture pair —
+# ironclaw_embeddings is 0/10 but exempted, ironclaw_reborn is 5/10 not zero).
+c9_log="${tmp_root}/c9-gh.log"
+capture env \
+  GH_TOKEN="fake-token" \
+  GITHUB_REPOSITORY="${gh_repo}" \
+  PR_NUMBER="${gh_pr}" \
+  PATH="${gh_bin_dir}:${PATH}" \
+  FAKE_GH_COMMENTS_JSON="${fixtures_dir}/c1_comments_empty.json" \
+  FAKE_GH_LOG="${c9_log}" \
+  "${comment_sh}" "${fixtures_dir}/a10_two_crates.lcov" "${fixtures_dir}/a10_crate_exemption.toml"
+assert_exit_code "C9: comment script exits 0 (zero-covered crate whole-crate-exempted)" 0 "${CAP_RC}"
+if [ -f "${c9_log}" ]; then
+  c9_body="$(sed -n '/^BODY_START$/,/^BODY_END$/p' "${c9_log}" | sed '1d;$d')"
+  assert_not_contains "C9: sticky comment omits the 0-coverage callout for the exempted crate" \
+    "${c9_body}" "0 int-tier coverage"
+else
+  report_fail "C9: fake gh did not record a mutation"
+fi
+
 # ---------------------------------------------------------------------------
 # D. reborn-coverage-int-tier-tests.sh (int-tier suite discovery)
 # ---------------------------------------------------------------------------
 #
 # The script derives its repo root from its own path and `cd`s there, so
 # each case copies it into a fresh temp tree's scripts/ci/ and builds a
-# tests/integration/ subtree alongside it, then invokes the copy.
+# tests/integration/ subtree alongside it, then invokes the copy. It also
+# filters candidates against a `[[test]] name = "..."` entry in Cargo.toml
+# (see that script's header comment), so every case seeds a fake Cargo.toml
+# with one `[[test]]` block per fixture suite the case constructs — mirrors
+# the real repo root always having a `[[test]]` entry per suite.
 
 setup_int_tier_case() {
   local case_dir="$1"
+  shift
   mkdir -p "${case_dir}/scripts/ci" "${case_dir}/tests/integration"
   cp "${int_tier_sh}" "${case_dir}/scripts/ci/reborn-coverage-int-tier-tests.sh"
   chmod +x "${case_dir}/scripts/ci/reborn-coverage-int-tier-tests.sh"
+  : > "${case_dir}/Cargo.toml"
+  local candidate
+  for candidate in "$@"; do
+    cat >>"${case_dir}/Cargo.toml" <<EOF
+[[test]]
+name = "${candidate}"
+path = "tests/integration/${candidate}.rs"
+
+EOF
+  done
 }
 
 # D1: empty tests/integration/ -> non-zero exit + discovery error.
@@ -648,7 +763,7 @@ assert_contains "D1: empty tests/integration/ prints the discovery error" "${CAP
 
 # D2: one tests/integration/foo.rs -> --test / reborn_integration_foo.
 d2="${tmp_root}/d2"
-setup_int_tier_case "${d2}"
+setup_int_tier_case "${d2}" reborn_integration_foo
 : > "${d2}/tests/integration/foo.rs"
 capture "${d2}/scripts/ci/reborn-coverage-int-tier-tests.sh"
 assert_exit_code "D2: single flat integration file exits 0" 0 "${CAP_RC}"
@@ -657,7 +772,7 @@ assert_eq "D2: single flat integration file emits its --test pair" \
 
 # D3: one tests/integration/group_bar/main.rs -> --test / reborn_group_bar.
 d3="${tmp_root}/d3"
-setup_int_tier_case "${d3}"
+setup_int_tier_case "${d3}" reborn_group_bar
 mkdir -p "${d3}/tests/integration/group_bar"
 : > "${d3}/tests/integration/group_bar/main.rs"
 capture "${d3}/scripts/ci/reborn-coverage-int-tier-tests.sh"
@@ -667,7 +782,7 @@ assert_eq "D3: single group dir emits its --test pair, dir->name rewrite applied
 
 # D3b: a half-scaffolded group dir (no main.rs yet) is skipped, not errored.
 d3b="${tmp_root}/d3b"
-setup_int_tier_case "${d3b}"
+setup_int_tier_case "${d3b}" reborn_group_bar
 mkdir -p "${d3b}/tests/integration/group_bar" "${d3b}/tests/integration/group_incomplete"
 : > "${d3b}/tests/integration/group_bar/main.rs"
 capture "${d3b}/scripts/ci/reborn-coverage-int-tier-tests.sh"
@@ -678,7 +793,7 @@ assert_eq "D3b: half-scaffolded group dir (no main.rs) is skipped" \
 # D4: multiple files + dirs, created out of alphabetical order -> sorted,
 # deduped output. Group dirs ('g') sort before integration files ('i').
 d4="${tmp_root}/d4"
-setup_int_tier_case "${d4}"
+setup_int_tier_case "${d4}" reborn_group_beta reborn_group_omega reborn_integration_alpha reborn_integration_zeta
 : > "${d4}/tests/integration/zeta.rs"
 : > "${d4}/tests/integration/alpha.rs"
 mkdir -p "${d4}/tests/integration/group_omega" "${d4}/tests/integration/group_beta"
@@ -694,7 +809,7 @@ assert_eq "D4: multiple suites sorted+deduped in expected order" \
 # mistaken for a suite (no main.rs, and doesn't match the `group_*` name
 # pattern either) — mirrors the real tests/integration/support/ harness tree.
 d5="${tmp_root}/d5"
-setup_int_tier_case "${d5}"
+setup_int_tier_case "${d5}" reborn_integration_only
 : > "${d5}/tests/integration/only.rs"
 mkdir -p "${d5}/tests/integration/support"
 : > "${d5}/tests/integration/support/mod.rs"

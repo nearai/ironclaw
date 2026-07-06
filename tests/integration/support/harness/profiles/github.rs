@@ -173,9 +173,12 @@ fn github_issue_tools_with_credential_result(
         project_service: None,
         skill_activation_source: None,
         attachment_test_support: None,
+        inbound_attachment_reader: None,
         outbound_target_tools: None,
         scope_capability_by_run_owner: false,
         product_auth: None,
         tool_permission_overrides: None,
+        persistent_approval_policies: None,
+        trigger_repository: None,
     })
 }
