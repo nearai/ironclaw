@@ -1236,6 +1236,40 @@ impl RebornIntegrationHarness {
         .await
     }
 
+    /// Seed a Configured credential account WITH real secret material for
+    /// `provider` through the production manual-token flow, scoped so this
+    /// group's CAPABILITY dispatch finds it: account selection matches all of
+    /// `(tenant, user, agent, project)`, and the user must be the capability
+    /// harness's dispatch user — which, on groups that do not align it to the
+    /// binding subject, differs from this thread's binding actor.
+    pub async fn seed_capability_credential_account(
+        &self,
+        provider: &str,
+        label: &str,
+        provider_scopes: &[&str],
+    ) -> HarnessResult<()> {
+        let harness = match &self._shared.capability {
+            GroupCapability::HostRuntime(arc) => arc,
+            GroupCapability::Recording => {
+                return Err(
+                    "no host-runtime capability backend to seed a credential account".into(),
+                );
+            }
+        };
+        let scope = ResourceScope {
+            tenant_id: self.turn_scope.tenant_id.clone(),
+            user_id: harness.capability_user_id().clone(),
+            agent_id: self.turn_scope.agent_id.clone(),
+            project_id: self.turn_scope.project_id.clone(),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        harness
+            .seed_credential_account_with_material(&scope, provider, label, provider_scopes)
+            .await
+    }
+
     /// Flip the per-`(tenant, user)` auto-approve toggle back ON for the run's
     /// capability scope via the real CAS-persisted `AutoApproveSettingStore` (the
     /// no-gate / approve-always arm: with auto-approve on, the same capability

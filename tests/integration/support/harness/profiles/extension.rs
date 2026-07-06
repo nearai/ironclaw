@@ -8,18 +8,29 @@ use ironclaw_host_api::{
     AgentId, InvocationId, MountView, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
 };
 
+use std::sync::Arc;
+
+use ironclaw_network::NetworkHttpEgress;
+
 use super::super::super::extension_surface::{
     BUNDLED_EXTENSION_CAPABILITY_IDS, EXTENSION_LIFECYCLE_CAPABILITY_IDS,
 };
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
 use super::super::{
-    HarnessResult, HostRuntimeCapabilityHarness, bundled_extension_provider_trust,
-    capability_ids_from_strs, local_dev_all_effects, wildcard_test_policy,
+    HarnessResult, HostRuntimeCapabilityHarness, RecordingNetworkHttpEgress,
+    bundled_extension_provider_trust, capability_ids_from_strs, local_dev_all_effects,
+    wildcard_test_policy,
 };
 
 pub(crate) fn extension_lifecycle_tools_profile() -> HarnessResult<ToolsProfile> {
     let mut capability_ids = capability_ids_from_strs(EXTENSION_LIFECYCLE_CAPABILITY_IDS)?;
     capability_ids.extend(capability_ids_from_strs(BUNDLED_EXTENSION_CAPABILITY_IDS)?);
+    // Hermetic guard: without a test egress, `build_local_runtime` defaults to
+    // a REAL `ReqwestNetworkTransport`, and this profile's scenarios dispatch a
+    // bundled extension capability post-activation, which crosses HTTP.
+    let network_egress: Arc<dyn NetworkHttpEgress> = Arc::new(
+        RecordingNetworkHttpEgress::with_body(br#"{"messages":[],"resultSizeEstimate":0}"#.to_vec()),
+    );
     Ok(ToolsProfile {
         capability_ids,
         effect_kinds: local_dev_all_effects(),
@@ -29,7 +40,8 @@ pub(crate) fn extension_lifecycle_tools_profile() -> HarnessResult<ToolsProfile>
                 true,
             )?),
         )
-        .with_seed_extension_credentials(),
+        .with_seed_extension_credentials()
+        .with_network_http_egress_for_test(network_egress),
         network_policy_override: Some(wildcard_test_policy()),
         provider_trust_override: Some(bundled_extension_provider_trust()?),
         auto_approve_default: Some(true),

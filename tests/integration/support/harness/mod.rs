@@ -23,7 +23,10 @@ use std::{
 
 use super::{filesystem::BlockingTurnStatePutFilesystem, product_workflow::resource_scope};
 use ironclaw_approvals::{ApprovalResolver, AutoApproveSettingInput, DenyApproval, LeaseApproval};
-use ironclaw_auth::{AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel};
+use ironclaw_auth::{
+    AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
+    CredentialAccountStatus, CredentialOwnership, NewCredentialAccount, ProviderScope,
+};
 use ironclaw_filesystem::{
     BackendKind, CompositeRootFilesystem, ContentKind, InMemoryBackend, IndexPolicy,
     RootFilesystem, ScopedFilesystem, StorageClass,
@@ -270,17 +273,42 @@ impl HostRuntimeCapabilityHarness {
         &self,
         scope: &ResourceScope,
     ) -> HarnessResult<()> {
+        self.seed_credential_account_with_material(scope, "github", "journey github", &[])
+            .await
+    }
+
+    /// Provider-generic core of [`Self::seed_github_credential_account`]:
+    /// seeds a Configured credential account WITH real secret material through
+    /// the production manual-token flow, under `scope`. The same
+    /// dispatch-scope caveat applies: `scope` must match the run's actual
+    /// `(tenant, user, agent, project)` or dispatch-time selection never finds
+    /// the account.
+    ///
+    /// When `provider_scopes` is non-empty, a second Configured account
+    /// carrying those scopes is created over the SAME secret handle the
+    /// manual-token flow minted: OAuth-setup requirements only select accounts
+    /// whose stored scopes cover the requirement, and manual-token accounts
+    /// store none — the scoped twin satisfies selection while the shared
+    /// handle keeps dispatch-time staging backed by real material.
+    pub(crate) async fn seed_credential_account_with_material(
+        &self,
+        scope: &ResourceScope,
+        provider: &str,
+        label: &str,
+        provider_scopes: &[&str],
+    ) -> HarnessResult<()> {
         let product_auth = self
             .product_auth
             .as_ref()
             .ok_or("harness missing local-dev product auth (not built via new_with_options)")?;
         let scope = AuthProductScope::credential_owner(scope, AuthSurface::Api);
+        let provider_id = AuthProviderId::new(provider)?;
         let challenge = product_auth
             .request_manual_token_setup(
                 ironclaw_reborn_composition::RebornManualTokenSetupRequest::new(
                     scope.clone(),
-                    AuthProviderId::new("github")?,
-                    CredentialAccountLabel::new("journey github")?,
+                    provider_id.clone(),
+                    CredentialAccountLabel::new(label)?,
                     ironclaw_auth::AuthContinuationRef::SetupOnly,
                     chrono::Utc::now() + chrono::Duration::minutes(10),
                 ),
@@ -292,12 +320,52 @@ impl HostRuntimeCapabilityHarness {
                 ironclaw_reborn_composition::RebornManualTokenSubmitRequest::new(
                     scope.clone(),
                     challenge.interaction_id,
-                    secrecy::SecretString::from("journey-github-token"),
+                    secrecy::SecretString::from(format!("itest-{provider}-token")),
                 ),
             )
             .await
             .map_err(|error| format!("manual token submit failed: {error:?}"))?;
+        if provider_scopes.is_empty() {
+            return Ok(());
+        }
+        let record_source = product_auth.credential_account_record_source_for_test();
+        let minted_handle = record_source
+            .accounts_for_owner(&scope)
+            .await
+            .map_err(|error| format!("account read-back after manual token failed: {error:?}"))?
+            .into_iter()
+            .filter(|account| account.provider == provider_id)
+            .find_map(|account| account.access_secret)
+            .ok_or("manual-token account with a secret handle not found on read-back")?;
+        product_auth
+            .credential_account_service()
+            .create_account(NewCredentialAccount {
+                scope,
+                provider: provider_id,
+                label: CredentialAccountLabel::new(format!("{label} scoped"))?,
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(minted_handle),
+                refresh_secret: None,
+                scopes: provider_scopes
+                    .iter()
+                    .map(|scope| ProviderScope::new(*scope))
+                    .collect::<Result<Vec<_>, _>>()?,
+            })
+            .await
+            .map_err(|error| format!("scoped credential account creation failed: {error:?}"))?;
         Ok(())
+    }
+
+    /// The fixed user this harness dispatches first-party capabilities under
+    /// (see [`Self::with_user_id`]). Credential seeding aimed at a capability's
+    /// dispatch-time account selection must use THIS user — for groups that do
+    /// not align the capability user to the binding subject, it differs from
+    /// the thread's binding actor.
+    pub(crate) fn capability_user_id(&self) -> &UserId {
+        &self.user_id
     }
 
     async fn enable_global_auto_approve_for_product_and_harness_users(&self) -> HarnessResult<()> {
