@@ -1,25 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-function sourceForTest(path, exportNames) {
-  const source = readFileSync(new URL(path, import.meta.url), "utf8");
-  const lines = [];
-  let skippingImport = false;
-  for (const line of source.split("\n")) {
-    if (!skippingImport && line.startsWith("import ")) {
-      skippingImport = !line.trimEnd().endsWith(";");
-      continue;
-    }
-    if (skippingImport) {
-      skippingImport = !line.trimEnd().endsWith(";");
-      continue;
-    }
-    lines.push(line.replace(/^export function /, "function "));
-  }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { ${exportNames.join(", ")} };`;
-}
+import { sourceForTest } from "../../../test-utils/source-for-test.mjs";
 
 function html(strings, ...values) {
   return { strings: Array.from(strings), values };
@@ -119,7 +102,12 @@ function renderToolsModule({ tools = [], translations = {}, toolError = null } =
     }),
   };
   vm.runInNewContext(
-    sourceForTest("./tools-tab.js", ["ToolsTab", "AutoApproveCard", "Switch", "ToolRow"]),
+    sourceForTest(import.meta.url, "./tools-tab.js", [
+      "ToolsTab",
+      "AutoApproveCard",
+      "Switch",
+      "ToolRow",
+    ]),
     context
   );
   return { exports: context.globalThis.__testExports, saved };

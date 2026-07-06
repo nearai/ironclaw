@@ -1,17 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-function sourceForTest(path, exportNames) {
-  const source = readFileSync(new URL(path, import.meta.url), "utf8");
-  const lines = [];
-  for (const line of source.split("\n")) {
-    if (line.startsWith("import ")) continue;
-    lines.push(line.replace(/^export function /, "function "));
-  }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { ${exportNames.join(", ")} };`;
-}
+import { sourceForTest } from "../../../test-utils/source-for-test.mjs";
 
 function loadUseTools({ mutationError = null } = {}) {
   const calls = [];
@@ -39,7 +30,7 @@ function loadUseTools({ mutationError = null } = {}) {
     }),
   };
 
-  vm.runInNewContext(sourceForTest("./useTools.js", ["useTools"]), context);
+  vm.runInNewContext(sourceForTest(import.meta.url, "./useTools.js", ["useTools"]), context);
 
   return {
     calls,
