@@ -1,7 +1,7 @@
 //! Contract tests for WebUI-facing RebornServices facade.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -12,8 +12,10 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_approvals::{
-    PersistentApprovalAction, PersistentApprovalPolicy, PersistentApprovalPolicyError,
-    PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
+    AutoApproveSettingInput, AutoApproveSettingKey, AutoApproveSettingRecord,
+    AutoApproveSettingStore, CapabilityPermissionStoreError, PersistentApprovalAction,
+    PersistentApprovalPolicy, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
+    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
 };
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{CredentialAccountId, CredentialAccountProjection};
@@ -28,7 +30,8 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE,
     AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE,
-    AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, ApprovalInteractionDecision, ApprovalInteractionService,
+    AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, ApprovalInteractionActionView,
+    ApprovalInteractionDecision, ApprovalInteractionScope, ApprovalInteractionService,
     AuthInteractionDecision, AuthInteractionService, AutomationListRequest,
     AutomationProductFacade, CodexLoginStart, ExtensionCredentialSetupService,
     ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, InboundAttachmentLander,
@@ -43,9 +46,9 @@ use ironclaw_product_workflow::{
     LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
     LlmProviderView, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
     NearAiWalletLoginResult, OperatorLogsService, OperatorServiceLifecycleService,
-    OperatorStatusService, OutboundPreferencesProductFacade, ProductAgentBoundCaller,
-    ProductWorkflowError, ProjectCaller, ProjectService, ProjectServiceError,
-    RebornAddMemberRequest, RebornAttachmentRequest, RebornAutomationInfo,
+    OperatorStatusService, OutboundPreferencesProductFacade, PendingApprovalInteractionView,
+    ProductAgentBoundCaller, ProductWorkflowError, ProjectCaller, ProjectService,
+    ProjectServiceError, RebornAddMemberRequest, RebornAttachmentRequest, RebornAutomationInfo,
     RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornChannelConnectAction, RebornChannelConnectStrategy,
@@ -641,6 +644,88 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
     }
 }
 
+struct ThreadScopedApprovalInteractionService {
+    pending_thread_ids: HashSet<ThreadId>,
+}
+
+#[async_trait]
+impl ApprovalInteractionService for ThreadScopedApprovalInteractionService {
+    async fn list_pending(
+        &self,
+        request: ListPendingApprovalsRequest,
+    ) -> Result<ListPendingApprovalsResponse, ProductWorkflowError> {
+        if !self.pending_thread_ids.contains(&request.scope.thread_id) {
+            return Ok(ListPendingApprovalsResponse { approvals: vec![] });
+        }
+        let approval_request_id = ApprovalRequestId::new();
+        Ok(ListPendingApprovalsResponse {
+            approvals: vec![PendingApprovalInteractionView {
+                scope: ApprovalInteractionScope::from_turn(&request.scope, &request.actor),
+                run_id: TurnRunId::new(),
+                gate_ref: approval_gate_ref(approval_request_id).expect("approval gate ref"),
+                approval_request_id,
+                summary: "Approval required".to_string(),
+                action: ApprovalInteractionActionView::Dispatch {
+                    capability_id: CapabilityId::new("demo.echo").expect("capability id"),
+                },
+            }],
+        })
+    }
+
+    async fn resolve(
+        &self,
+        _request: ResolveApprovalInteractionRequest,
+    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
+        panic!("resolve is not used by thread approval filter tests")
+    }
+}
+
+struct ActorFallbackApprovalInteractionService {
+    pending_thread_id: ThreadId,
+    tenant_id: TenantId,
+    owner_user_id: UserId,
+    agent_id: AgentId,
+    project_id: Option<ProjectId>,
+}
+
+#[async_trait]
+impl ApprovalInteractionService for ActorFallbackApprovalInteractionService {
+    async fn list_pending(
+        &self,
+        request: ListPendingApprovalsRequest,
+    ) -> Result<ListPendingApprovalsResponse, ProductWorkflowError> {
+        let is_expected_scope = request.scope.thread_id == self.pending_thread_id
+            && request.scope.tenant_id == self.tenant_id
+            && request.scope.agent_id.as_ref() == Some(&self.agent_id)
+            && request.scope.project_id == self.project_id
+            && !request.scope.has_explicit_thread_owner()
+            && request.actor.user_id == self.owner_user_id;
+        if !is_expected_scope {
+            return Ok(ListPendingApprovalsResponse { approvals: vec![] });
+        }
+        let approval_request_id = ApprovalRequestId::new();
+        Ok(ListPendingApprovalsResponse {
+            approvals: vec![PendingApprovalInteractionView {
+                scope: ApprovalInteractionScope::from_turn(&request.scope, &request.actor),
+                run_id: TurnRunId::new(),
+                gate_ref: approval_gate_ref(approval_request_id).expect("approval gate ref"),
+                approval_request_id,
+                summary: "Approval required".to_string(),
+                action: ApprovalInteractionActionView::Dispatch {
+                    capability_id: CapabilityId::new("demo.echo").expect("capability id"),
+                },
+            }],
+        })
+    }
+
+    async fn resolve(
+        &self,
+        _request: ResolveApprovalInteractionRequest,
+    ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
+        panic!("resolve is not used by actor-fallback approval list tests")
+    }
+}
+
 #[derive(Default)]
 struct RecordingAuthInteractionService {
     resolutions: Mutex<Vec<ResolveAuthInteractionRequest>>,
@@ -980,6 +1065,7 @@ impl AutomationProductFacade for RecordingAutomationFacade {
 struct StaticAutomationFacade {
     output: Vec<RebornAutomationInfo>,
     scheduler_enabled: bool,
+    list_calls: Arc<Mutex<Vec<ListAutomationCall>>>,
     /// Scopes returned by `resolve_run_thread_scope`, keyed by the queried
     /// thread id so tests prove the lookup contract rather than accepting a
     /// cached scope for any request.
@@ -992,6 +1078,7 @@ impl StaticAutomationFacade {
         Self {
             output,
             scheduler_enabled: true,
+            list_calls: Arc::new(Mutex::new(Vec::new())),
             resolve_scopes: HashMap::new(),
             resolve_calls: Arc::new(Mutex::new(Vec::new())),
         }
@@ -1014,6 +1101,10 @@ impl StaticAutomationFacade {
     fn resolve_calls(&self) -> Vec<ThreadId> {
         self.resolve_calls.lock().expect("lock").clone()
     }
+
+    fn list_calls(&self) -> Vec<ListAutomationCall> {
+        self.list_calls.lock().expect("lock").clone()
+    }
 }
 
 #[async_trait]
@@ -1024,9 +1115,18 @@ impl AutomationProductFacade for StaticAutomationFacade {
 
     async fn list_automations(
         &self,
-        _caller: ProductAgentBoundCaller,
-        _request: AutomationListRequest,
+        caller: ProductAgentBoundCaller,
+        request: AutomationListRequest,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
+        self.list_calls
+            .lock()
+            .expect("lock")
+            .push(ListAutomationCall {
+                caller,
+                limit: request.limit,
+                run_limit: request.run_limit,
+                include_completed: request.include_completed,
+            });
         Ok(self.output.clone())
     }
 
@@ -4888,11 +4988,11 @@ async fn list_connectable_channels_returns_configured_action_metadata() {
             strategy: RebornChannelConnectStrategy::InboundProofCode,
             action: RebornChannelConnectAction {
                 title: "Slack account connection".to_string(),
-                instructions: "Message the Slack app, then enter the code here.".to_string(),
+                instructions: "Run /pair in Slack to get a code, then paste it here. Codes expire in 10 minutes.".to_string(),
                 input_placeholder: "Enter Slack pairing code...".to_string(),
                 submit_label: "Connect".to_string(),
                 success_message: "Slack account connected.".to_string(),
-                error_message: "Invalid or expired Slack pairing code.".to_string(),
+                error_message: "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one.".to_string(),
             },
             command_aliases: vec!["slack".to_string(), "slack account".to_string()],
         },
@@ -4912,7 +5012,7 @@ async fn list_connectable_channels_returns_configured_action_metadata() {
     );
     assert_eq!(
         channel.action.instructions,
-        "Message the Slack app, then enter the code here."
+        "Run /pair in Slack to get a code, then paste it here. Codes expire in 10 minutes."
     );
     assert_eq!(
         channel.command_aliases,
@@ -4938,11 +5038,11 @@ fn channel_connect_action_serializes_neutral_input_placeholder_and_accepts_legac
 
     let legacy: RebornChannelConnectAction = serde_json::from_value(serde_json::json!({
         "title": "Slack account connection",
-        "instructions": "Message the Slack app, then enter the code here.",
+        "instructions": "Run /pair in Slack to get a code, then paste it here. Codes expire in 10 minutes.",
         "code_placeholder": "Enter Slack pairing code...",
         "submit_label": "Connect",
         "success_message": "Slack account connected.",
-        "error_message": "Invalid or expired Slack pairing code."
+        "error_message": "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one."
     }))
     .expect("legacy action deserializes");
     assert_eq!(legacy.input_placeholder, "Enter Slack pairing code...");
@@ -7046,6 +7146,29 @@ async fn setup_trigger_thread(
     tid
 }
 
+async fn setup_ownerless_trigger_thread(
+    thread_service: &Arc<InMemorySessionThreadService>,
+    caller: &WebUiAuthenticatedCaller,
+    thread_id: &str,
+) -> ThreadId {
+    let tid = ThreadId::new(thread_id).expect("valid trigger thread id");
+    let mut scope = trigger_thread_scope_for(caller);
+    scope.owner_user_id = None;
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope,
+            thread_id: Some(tid.clone()),
+            created_by_actor_id: "system".to_string(),
+            title: Some("Legacy trigger thread".to_string()),
+            metadata_json: Some(automation_trigger_thread_metadata_json(
+                "trigger-gate-automation",
+            )),
+        })
+        .await
+        .expect("legacy trigger thread stored");
+    tid
+}
+
 #[tokio::test]
 async fn resolve_gate_approval_succeeds_for_own_automation_trigger_thread() {
     // The caller owns the automation that produced the trigger thread. Approval
@@ -7997,6 +8120,43 @@ impl PersistentApprovalPolicyStore for FailingAllowPersistentApprovalPolicyStore
     }
 }
 
+#[derive(Debug, Default)]
+struct RecordingAutoApproveSettingStore {
+    get_keys: Mutex<Vec<AutoApproveSettingKey>>,
+}
+
+impl RecordingAutoApproveSettingStore {
+    fn get_keys(&self) -> Vec<AutoApproveSettingKey> {
+        self.get_keys.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl AutoApproveSettingStore for RecordingAutoApproveSettingStore {
+    async fn set(
+        &self,
+        input: AutoApproveSettingInput,
+    ) -> Result<AutoApproveSettingRecord, CapabilityPermissionStoreError> {
+        let key = AutoApproveSettingKey::from_resource_scope(&input.scope);
+        let now = Utc::now();
+        Ok(AutoApproveSettingRecord {
+            key,
+            enabled: input.enabled,
+            updated_by: input.updated_by,
+            created_at: now,
+            updated_at: now,
+        })
+    }
+
+    async fn get(
+        &self,
+        key: &AutoApproveSettingKey,
+    ) -> Result<Option<AutoApproveSettingRecord>, CapabilityPermissionStoreError> {
+        self.get_keys.lock().expect("lock").push(key.clone());
+        Ok(None)
+    }
+}
+
 fn services_with_operator_approval_config() -> RebornServices {
     services_with_operator_approval_config_parts().0
 }
@@ -8015,13 +8175,23 @@ fn services_with_operator_approval_config_parts() -> (
 fn services_with_operator_approval_config_policy_store(
     persistent_policies: Arc<dyn PersistentApprovalPolicyStore>,
 ) -> RebornServices {
+    services_with_operator_approval_config_stores(
+        Arc::new(ironclaw_approvals::InMemoryAutoApproveSettingStore::new()),
+        persistent_policies,
+    )
+}
+
+fn services_with_operator_approval_config_stores(
+    auto_approve: Arc<dyn AutoApproveSettingStore>,
+    persistent_policies: Arc<dyn PersistentApprovalPolicyStore>,
+) -> RebornServices {
     RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
     )
     .with_operator_approval_config(
         Arc::new(ironclaw_approvals::InMemoryToolPermissionOverrideStore::new()),
-        Arc::new(ironclaw_approvals::InMemoryAutoApproveSettingStore::new()),
+        auto_approve,
         persistent_policies.clone(),
         Arc::new(StaticOperatorToolCatalogForTest {
             tools: vec![
@@ -8053,6 +8223,28 @@ fn services_with_operator_approval_config_policy_store(
                     default_permission: PermissionMode::Ask,
                     effects: Arc::from([EffectKind::Financial]),
                 },
+                RebornOperatorToolInfo {
+                    capability_id: CapabilityId::new("nearai.web_search").expect("capability id"),
+                    provider: ExtensionId::new("nearai").expect("extension id"),
+                    description: Arc::from("Search through the NEAR AI MCP server."),
+                    default_permission: PermissionMode::Ask,
+                    effects: Arc::from([EffectKind::DispatchCapability]),
+                },
+                RebornOperatorToolInfo {
+                    capability_id: CapabilityId::new("github.get_repo").expect("capability id"),
+                    provider: ExtensionId::new("github").expect("extension id"),
+                    description: Arc::from("Read GitHub repository metadata."),
+                    default_permission: PermissionMode::Ask,
+                    effects: Arc::from([EffectKind::DispatchCapability]),
+                },
+                RebornOperatorToolInfo {
+                    capability_id: CapabilityId::new("google-calendar.list_events")
+                        .expect("capability id"),
+                    provider: ExtensionId::new("google-calendar").expect("extension id"),
+                    description: Arc::from("List Google Calendar events."),
+                    default_permission: PermissionMode::Ask,
+                    effects: Arc::from([EffectKind::DispatchCapability]),
+                },
             ],
         }),
     )
@@ -8083,6 +8275,82 @@ fn operator_policy_scope_for_test(tenant_id: &str, user_id: &str) -> ResourceSco
 }
 
 #[tokio::test]
+async fn operator_config_reads_provider_grantee_policies_as_always_allow() {
+    let (services, persistent_policies) = services_with_operator_approval_config_parts();
+    let operator_scope = operator_policy_scope_for_test("tenant-alpha", "user-alpha");
+
+    for (capability_id, provider) in [
+        ("nearai.web_search", "nearai"),
+        ("github.get_repo", "github"),
+        ("google-calendar.list_events", "google-calendar"),
+    ] {
+        persistent_policies
+            .allow(PersistentApprovalPolicyInput {
+                scope: operator_scope.clone(),
+                action: PersistentApprovalAction::Dispatch,
+                capability_id: CapabilityId::new(capability_id).expect("capability id"),
+                grantee: Principal::Extension(ExtensionId::new(provider).expect("extension id")),
+                approved_by: Principal::User(UserId::new("user-alpha").expect("user id")),
+                constraints: ironclaw_host_api::GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: Default::default(),
+                    network: Default::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: None,
+                },
+                source_approval_request_id: Some(ApprovalRequestId::new()),
+            })
+            .await
+            .expect("seed provider-grantee always-allow policy");
+    }
+
+    let config = services
+        .list_operator_config(caller())
+        .await
+        .expect("operator config");
+    for capability_id in [
+        "nearai.web_search",
+        "github.get_repo",
+        "google-calendar.list_events",
+    ] {
+        let value = operator_config_entry_value(&config, &format!("tool.{capability_id}"));
+        assert_eq!(value["state"], "always_allow");
+        assert_eq!(value["effective_source"], "override");
+    }
+}
+
+#[tokio::test]
+async fn global_auto_approve_enabled_scopes_read_by_caller_tenant_and_user() {
+    let auto_approve = Arc::new(RecordingAutoApproveSettingStore::default());
+    let services = services_with_operator_approval_config_stores(
+        auto_approve.clone(),
+        Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new()),
+    );
+    let caller = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-scope").expect("tenant"),
+        UserId::new("user-scope").expect("user"),
+        Some(AgentId::new("agent-scope").expect("agent")),
+        Some(ProjectId::new("project-scope").expect("project")),
+    );
+
+    let enabled = services
+        .global_auto_approve_enabled(caller)
+        .await
+        .expect("global auto approve read");
+
+    assert!(
+        enabled,
+        "unset auto-approve should resolve through the default"
+    );
+    let keys = auto_approve.get_keys();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0].tenant_id.as_str(), "tenant-scope");
+    assert_eq!(keys[0].user_id.as_str(), "user-scope");
+}
+
+#[tokio::test]
 async fn operator_config_reads_and_writes_auto_approve_and_tool_permissions() {
     let (services, persistent_policies) = services_with_operator_approval_config_parts();
 
@@ -8092,11 +8360,11 @@ async fn operator_config_reads_and_writes_auto_approve_and_tool_permissions() {
         .expect("operator config");
     assert_eq!(
         operator_config_entry_value(&initial, "agent.auto_approve_tools"),
-        &json!(false)
+        &json!(true)
     );
     assert_eq!(
         operator_config_entry_value(&initial, "tool.tool.alpha")["state"],
-        "ask_each_time"
+        "always_allow"
     );
     assert_eq!(
         operator_config_entry_value(&initial, "tool.tool.alpha")["effective_source"],
@@ -8104,8 +8372,8 @@ async fn operator_config_reads_and_writes_auto_approve_and_tool_permissions() {
     );
     assert_eq!(
         operator_config_entry_value(&initial, "tool.tool.default_allow")["state"],
-        "ask_each_time",
-        "default-allow tools must still ask while global auto-approve is off"
+        "always_allow",
+        "follow-global tools auto-approve while global auto-approve defaults on"
     );
     assert_eq!(
         operator_config_entry_value(&initial, "tool.tool.default_allow")["effective_source"],
@@ -8313,10 +8581,14 @@ async fn operator_config_is_scoped_by_tenant_and_user() {
         .set_operator_config_key(
             alice_tenant_a.clone(),
             "agent.auto_approve_tools".to_string(),
-            RebornOperatorConfigSetRequest { value: json!(true) },
+            // Set the non-default (off) so isolation is provable: other
+            // users/tenants must still read the default (on), not this value.
+            RebornOperatorConfigSetRequest {
+                value: json!(false),
+            },
         )
         .await
-        .expect("alice enables auto approve in tenant alpha");
+        .expect("alice disables auto approve in tenant alpha");
     services
         .set_operator_config_key(
             alice_tenant_a.clone(),
@@ -8341,7 +8613,7 @@ async fn operator_config_is_scoped_by_tenant_and_user() {
         .expect("same tenant/user operator config");
     assert_eq!(
         operator_config_entry_value(&alice_alpha_other_project, "agent.auto_approve_tools"),
-        &json!(true),
+        &json!(false),
         "auto-approve settings are scoped by tenant/user, not agent/project"
     );
     assert_eq!(
@@ -8361,13 +8633,13 @@ async fn operator_config_is_scoped_by_tenant_and_user() {
             .expect("isolated operator config");
         assert_eq!(
             operator_config_entry_value(&config, "agent.auto_approve_tools"),
-            &json!(false),
+            &json!(true),
             "auto-approve must not leak across user or tenant"
         );
         assert_eq!(
             operator_config_entry_value(&config, "tool.tool.alpha")["state"],
-            "ask_each_time",
-            "tool override must not leak across user or tenant"
+            "always_allow",
+            "tool override must not leak across user or tenant (follows global default-on)"
         );
         assert_eq!(
             operator_config_entry_value(&config, "tool.tool.alpha")["effective_source"],
@@ -9828,6 +10100,307 @@ async fn list_threads_hides_automation_trigger_threads() {
 }
 
 #[tokio::test]
+async fn list_threads_needs_approval_returns_only_automation_threads_with_pending_approval() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let caller = caller();
+    let pending_thread_id = ThreadId::new("thread-pending").expect("pending thread id");
+    let automation_pending_thread_id =
+        setup_trigger_thread(&thread_service, &caller, "thread-automation-pending").await;
+    let approval_service = Arc::new(ThreadScopedApprovalInteractionService {
+        pending_thread_ids: [
+            pending_thread_id.clone(),
+            automation_pending_thread_id.clone(),
+        ]
+        .into_iter()
+        .collect(),
+    });
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade_with_trigger_thread(
+        automation_pending_thread_id.clone(),
+        &caller,
+    ))
+    .with_approval_interactions(approval_service);
+
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&caller),
+            thread_id: Some(pending_thread_id.clone()),
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: Some("Normal chat pending approval".to_string()),
+            metadata_json: Some(json!({ "source": "webui" }).to_string()),
+        })
+        .await
+        .expect("normal pending thread");
+
+    let response = services
+        .list_threads(
+            caller,
+            WebUiListThreadsRequest {
+                needs_approval: true,
+                ..WebUiListThreadsRequest::default()
+            },
+        )
+        .await
+        .expect("list approval threads");
+    let thread_ids = response
+        .threads
+        .iter()
+        .map(|thread| thread.thread_id.clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        thread_ids,
+        vec![automation_pending_thread_id],
+        "notification thread filter must exclude non-automation approval threads",
+    );
+}
+
+#[tokio::test]
+async fn list_threads_needs_approval_queries_pending_with_run_scope_shape() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let caller = caller();
+    let automation_pending_thread_id =
+        setup_trigger_thread(&thread_service, &caller, "thread-automation-run-scope").await;
+    let trigger_scope = trigger_run_thread_scope_for(&caller);
+    let approval_service = Arc::new(ActorFallbackApprovalInteractionService {
+        pending_thread_id: automation_pending_thread_id.clone(),
+        tenant_id: caller.tenant_id.clone(),
+        owner_user_id: trigger_scope.creator_user_id.clone(),
+        agent_id: caller.agent_id.clone().expect("agent id"),
+        project_id: caller.project_id.clone(),
+    });
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade_with_trigger_thread(
+        automation_pending_thread_id.clone(),
+        &caller,
+    ))
+    .with_approval_interactions(approval_service);
+
+    let response = services
+        .list_threads(
+            caller,
+            WebUiListThreadsRequest {
+                needs_approval: true,
+                ..WebUiListThreadsRequest::default()
+            },
+        )
+        .await
+        .expect("list approval threads");
+    let thread_ids = response
+        .threads
+        .iter()
+        .map(|thread| thread.thread_id.clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        thread_ids,
+        vec![automation_pending_thread_id],
+        "notification approval lookup must use the same actor-fallback turn scope shape as blocked run state",
+    );
+}
+
+#[tokio::test]
+async fn list_threads_needs_approval_uses_bounded_run_candidates() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let caller = caller();
+    let automation_pending_thread_id =
+        setup_trigger_thread(&thread_service, &caller, "thread-automation-bounded").await;
+    let trigger_scope = trigger_run_thread_scope_for(&caller);
+    let approval_service = Arc::new(ActorFallbackApprovalInteractionService {
+        pending_thread_id: automation_pending_thread_id.clone(),
+        tenant_id: caller.tenant_id.clone(),
+        owner_user_id: trigger_scope.creator_user_id.clone(),
+        agent_id: caller.agent_id.clone().expect("agent id"),
+        project_id: caller.project_id.clone(),
+    });
+    let automation_facade =
+        automation_facade_with_trigger_thread(automation_pending_thread_id.clone(), &caller);
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone())
+    .with_approval_interactions(approval_service);
+
+    let response = services
+        .list_threads(
+            caller,
+            WebUiListThreadsRequest {
+                needs_approval: true,
+                ..WebUiListThreadsRequest::default()
+            },
+        )
+        .await
+        .expect("list approval threads");
+
+    assert_eq!(response.threads.len(), 1);
+    let list_calls = automation_facade.list_calls();
+    assert_eq!(list_calls.len(), 1);
+    assert_eq!(list_calls[0].limit, 20);
+    assert_eq!(list_calls[0].run_limit, 20);
+    assert!(list_calls[0].include_completed);
+    assert_eq!(
+        automation_facade.resolve_calls(),
+        vec![automation_pending_thread_id],
+        "notification lookup should still resolve the thread id once to recover the true trigger creator scope",
+    );
+}
+
+#[tokio::test]
+async fn list_threads_needs_approval_finds_legacy_ownerless_automation_thread() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let caller = caller();
+    let automation_pending_thread_id =
+        setup_ownerless_trigger_thread(&thread_service, &caller, "thread-automation-ownerless")
+            .await;
+    let trigger_scope = trigger_run_thread_scope_for(&caller);
+    let approval_service = Arc::new(ActorFallbackApprovalInteractionService {
+        pending_thread_id: automation_pending_thread_id.clone(),
+        tenant_id: caller.tenant_id.clone(),
+        owner_user_id: trigger_scope.creator_user_id.clone(),
+        agent_id: caller.agent_id.clone().expect("agent id"),
+        project_id: caller.project_id.clone(),
+    });
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade_with_trigger_thread(
+        automation_pending_thread_id.clone(),
+        &caller,
+    ))
+    .with_approval_interactions(approval_service);
+
+    let response = services
+        .list_threads(
+            caller,
+            WebUiListThreadsRequest {
+                needs_approval: true,
+                ..WebUiListThreadsRequest::default()
+            },
+        )
+        .await
+        .expect("list approval threads");
+    let thread_ids = response
+        .threads
+        .iter()
+        .map(|thread| thread.thread_id.clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        thread_ids,
+        vec![automation_pending_thread_id],
+        "notification approval lookup must include legacy ownerless automation run threads",
+    );
+}
+
+#[tokio::test]
+async fn list_threads_needs_approval_uses_automation_name_when_thread_title_missing() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let caller = caller();
+    let automation_pending_thread_id =
+        ThreadId::new("thread-automation-titleless").expect("valid trigger thread id");
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: trigger_thread_scope_for(&caller),
+            thread_id: Some(automation_pending_thread_id.clone()),
+            created_by_actor_id: "system".to_string(),
+            title: None,
+            metadata_json: Some(automation_trigger_thread_metadata_json(
+                "trigger-gate-automation",
+            )),
+        })
+        .await
+        .expect("titleless trigger thread stored");
+    let trigger_scope = trigger_run_thread_scope_for(&caller);
+    let approval_service = Arc::new(ActorFallbackApprovalInteractionService {
+        pending_thread_id: automation_pending_thread_id.clone(),
+        tenant_id: caller.tenant_id.clone(),
+        owner_user_id: trigger_scope.creator_user_id.clone(),
+        agent_id: caller.agent_id.clone().expect("agent id"),
+        project_id: caller.project_id.clone(),
+    });
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade_with_trigger_thread(
+        automation_pending_thread_id.clone(),
+        &caller,
+    ))
+    .with_approval_interactions(approval_service);
+
+    let response = services
+        .list_threads(
+            caller,
+            WebUiListThreadsRequest {
+                needs_approval: true,
+                ..WebUiListThreadsRequest::default()
+            },
+        )
+        .await
+        .expect("list approval threads");
+
+    assert_eq!(response.threads.len(), 1);
+    assert_eq!(
+        response.threads[0].title.as_deref(),
+        Some("Gate test automation"),
+        "notification approval thread fallback title should use the automation name",
+    );
+}
+
+#[tokio::test]
+async fn list_threads_needs_approval_checks_candidate_automation_thread() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let caller = caller();
+    let automation_pending_thread_id =
+        setup_trigger_thread(&thread_service, &caller, "thread-automation-candidate").await;
+    let approval_service = Arc::new(ThreadScopedApprovalInteractionService {
+        pending_thread_ids: [automation_pending_thread_id.clone()].into_iter().collect(),
+    });
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(Arc::new(
+        StaticAutomationFacade::new(Vec::new()).with_resolve_scope_for_thread(
+            automation_pending_thread_id.clone(),
+            trigger_run_thread_scope_for(&caller),
+        ),
+    ))
+    .with_approval_interactions(approval_service);
+
+    let response = services
+        .list_threads(
+            caller,
+            WebUiListThreadsRequest {
+                needs_approval: true,
+                candidate_thread_id: Some(automation_pending_thread_id.as_str().to_string()),
+                ..WebUiListThreadsRequest::default()
+            },
+        )
+        .await
+        .expect("list approval threads");
+    let thread_ids = response
+        .threads
+        .iter()
+        .map(|thread| thread.thread_id.clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        thread_ids,
+        vec![automation_pending_thread_id],
+        "candidate thread must still be automation-authorized before entering notifications",
+    );
+}
+
+#[tokio::test]
 async fn list_threads_breaks_out_when_cursor_does_not_advance_for_automation_threads() {
     let caller = caller();
     let scope = thread_scope_for(&caller);
@@ -9866,6 +10439,7 @@ async fn list_threads_breaks_out_when_cursor_does_not_advance_for_automation_thr
             WebUiListThreadsRequest {
                 limit: Some(2),
                 cursor: None,
+                ..WebUiListThreadsRequest::default()
             },
         ),
     )
@@ -9926,6 +10500,7 @@ async fn list_threads_caps_filtered_pages_when_automation_threads_dominate() {
             WebUiListThreadsRequest {
                 limit: Some(1),
                 cursor: None,
+                ..WebUiListThreadsRequest::default()
             },
         )
         .await
@@ -10014,6 +10589,7 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
             WebUiListThreadsRequest {
                 limit: Some(1),
                 cursor: None,
+                ..WebUiListThreadsRequest::default()
             },
         )
         .await
@@ -10034,6 +10610,7 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
             WebUiListThreadsRequest {
                 limit: Some(1),
                 cursor: first_page.next_cursor,
+                ..WebUiListThreadsRequest::default()
             },
         )
         .await

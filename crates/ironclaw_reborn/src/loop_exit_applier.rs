@@ -6,15 +6,16 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_loop_support::RunCancellationFactory;
+use ironclaw_loop_support::{RunCancellationFactory, SpawnSubagentMode};
 use ironclaw_threads::{
     MessageKind, MessageStatus, SessionThreadService, ThreadHistory, ThreadHistoryRequest,
     ThreadMessageId, ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope,
 };
 use ironclaw_turns::{
-    CheckpointStateStore, GetCheckpointStateRequest, GetLoopCheckpointRequest, GetRunStateRequest,
-    LoopBlockedKind, LoopCheckpointKind, LoopMessageRef, LoopResultRef, TurnError, TurnId,
-    TurnRunId, TurnScope, TurnStateStore, TurnStatus,
+    CheckpointStateStore, GateRef, GetCheckpointStateRequest, GetLoopCheckpointRequest,
+    GetRunStateRequest, LoopBlockedKind, LoopCheckpointKind, LoopCheckpointStateRef, LoopGateRef,
+    LoopMessageRef, LoopResultRef, TurnError, TurnId, TurnRunId, TurnScope, TurnStateStore,
+    TurnStatus,
 };
 
 pub use ironclaw_turns::loop_exit::{
@@ -165,6 +166,8 @@ where
     loop_checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore>,
     checkpoint_state_store: Option<Arc<dyn CheckpointStateStore>>,
     approval_gate_evidence: Option<Arc<dyn ApprovalGateEvidenceStore>>,
+    resource_gate_evidence: Option<Arc<dyn ResourceGateEvidenceStore>>,
+    await_dependent_run_evidence: Arc<dyn AwaitDependentRunEvidenceStore>,
     thread_scope: Option<ThreadScope>,
     cancellation_factory: Option<Arc<dyn RunCancellationFactory>>,
 }
@@ -178,6 +181,28 @@ pub trait ApprovalGateEvidenceStore: Send + Sync {
     ) -> Result<bool, TurnError>;
 }
 
+#[async_trait]
+pub trait ResourceGateEvidenceStore: Send + Sync {
+    async fn pending_resource_gate(
+        &self,
+        scope: &TurnScope,
+        gate_ref: &LoopGateRef,
+    ) -> Result<bool, TurnError>;
+}
+
+#[async_trait]
+pub trait AwaitDependentRunEvidenceStore: Send + Sync {
+    /// Return true when the gate ref identifies an awaited child recorded for
+    /// this parent run. Terminal/delivery state is not part of blocked-exit
+    /// evidence; the checkpoint gate binding verifies the blocking point.
+    async fn has_awaited_child_gate(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        gate_ref: &LoopGateRef,
+    ) -> Result<bool, TurnError>;
+}
+
 impl<S> ThreadCheckpointLoopExitEvidencePort<S>
 where
     S: SessionThreadService + ?Sized,
@@ -186,6 +211,7 @@ where
         thread_service: Arc<S>,
         turn_state_store: Arc<dyn TurnStateStore>,
         loop_checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore>,
+        await_dependent_run_evidence: Arc<dyn AwaitDependentRunEvidenceStore>,
     ) -> Self {
         Self {
             thread_service,
@@ -193,6 +219,8 @@ where
             loop_checkpoint_store,
             checkpoint_state_store: None,
             approval_gate_evidence: None,
+            resource_gate_evidence: None,
+            await_dependent_run_evidence,
             thread_scope: None,
             cancellation_factory: None,
         }
@@ -202,6 +230,7 @@ where
         thread_service: Arc<S>,
         turn_state_store: Arc<dyn TurnStateStore>,
         loop_checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore>,
+        await_dependent_run_evidence: Arc<dyn AwaitDependentRunEvidenceStore>,
         thread_scope: ThreadScope,
     ) -> Self {
         Self {
@@ -210,6 +239,8 @@ where
             loop_checkpoint_store,
             checkpoint_state_store: None,
             approval_gate_evidence: None,
+            resource_gate_evidence: None,
+            await_dependent_run_evidence,
             thread_scope: Some(thread_scope),
             cancellation_factory: None,
         }
@@ -228,6 +259,14 @@ where
         approval_gate_evidence: Arc<dyn ApprovalGateEvidenceStore>,
     ) -> Self {
         self.approval_gate_evidence = Some(approval_gate_evidence);
+        self
+    }
+
+    pub fn with_resource_gate_evidence(
+        mut self,
+        resource_gate_evidence: Arc<dyn ResourceGateEvidenceStore>,
+    ) -> Self {
+        self.resource_gate_evidence = Some(resource_gate_evidence);
         self
     }
 
@@ -330,20 +369,21 @@ where
         request: BlockedEvidenceRequest<'_>,
     ) -> Result<bool, TurnError> {
         match request.blocked.kind {
-            LoopBlockedKind::Auth => {}
+            LoopBlockedKind::Auth | LoopBlockedKind::ExternalTool => {}
             LoopBlockedKind::Approval => {
                 if !self.verify_pending_approval_gate(&request).await? {
                     return Ok(false);
                 }
             }
-            LoopBlockedKind::Resource | LoopBlockedKind::AwaitDependentRun => {
-                // A BeforeBlock checkpoint alone is not sufficient for approval,
-                // resource, or dependent-run gates: #3424 requires a durable
-                // pending gate/process ref for those block types. Auth gates use
-                // the blocked turn state itself as the product-visible pending ref,
-                // so verifying the pre-block checkpoint is enough to let the
-                // applier persist that state.
-                return Ok(false);
+            LoopBlockedKind::Resource => {
+                if !self.verify_pending_resource_gate(&request).await? {
+                    return Ok(false);
+                }
+            }
+            LoopBlockedKind::AwaitDependentRun => {
+                if !self.verify_awaited_child_gate(&request).await? {
+                    return Ok(false);
+                }
             }
             // `LoopBlockedKind` is `#[non_exhaustive]` in a sibling crate, so
             // the compiler requires a wildcard arm. Any unknown variant is
@@ -400,12 +440,13 @@ where
         if checkpoint.kind != LoopCheckpointKind::Final {
             return Ok(false);
         }
+        let state_ref = checkpoint_state_store_ref(request.run_id, &checkpoint.state_ref)?;
         let Some(checkpoint_state) = checkpoint_state_store
             .get_checkpoint_state(GetCheckpointStateRequest {
                 scope: request.scope.clone(),
                 turn_id: request.turn_id,
                 run_id: request.run_id,
-                state_ref: checkpoint.state_ref,
+                state_ref,
                 schema_id: checkpoint.schema_id,
                 schema_version: checkpoint.schema_version,
                 kind: checkpoint.kind,
@@ -468,6 +509,23 @@ where
     }
 }
 
+fn checkpoint_state_store_ref(
+    run_id: TurnRunId,
+    state_ref: &LoopCheckpointStateRef,
+) -> Result<LoopCheckpointStateRef, TurnError> {
+    let run_scoped_prefix = format!("checkpoint:{run_id}:");
+    if let Some(token) = state_ref.as_str().strip_prefix(&run_scoped_prefix) {
+        return LoopCheckpointStateRef::new(format!("checkpoint:{token}")).map_err(|reason| {
+            TurnError::InvalidRequest {
+                reason: format!(
+                    "could not rebuild store key from run-scoped checkpoint ref: {reason}"
+                ),
+            }
+        });
+    }
+    Ok(state_ref.clone())
+}
+
 impl<S> ThreadCheckpointLoopExitEvidencePort<S>
 where
     S: SessionThreadService + ?Sized + Send + Sync,
@@ -482,6 +540,55 @@ where
         evidence
             .pending_approval_gate(request.scope, &request.blocked.gate_ref)
             .await
+    }
+
+    async fn verify_pending_resource_gate(
+        &self,
+        request: &BlockedEvidenceRequest<'_>,
+    ) -> Result<bool, TurnError> {
+        let Some(evidence) = &self.resource_gate_evidence else {
+            return Ok(false);
+        };
+        evidence
+            .pending_resource_gate(request.scope, &request.blocked.gate_ref)
+            .await
+    }
+
+    async fn verify_awaited_child_gate(
+        &self,
+        request: &BlockedEvidenceRequest<'_>,
+    ) -> Result<bool, TurnError> {
+        self.await_dependent_run_evidence
+            .has_awaited_child_gate(request.scope, request.run_id, &request.blocked.gate_ref)
+            .await
+    }
+}
+
+#[async_trait]
+impl AwaitDependentRunEvidenceStore
+    for crate::subagent::gate_resolution::BoundedSubagentGateResolutionStore
+{
+    async fn has_awaited_child_gate(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        gate_ref: &LoopGateRef,
+    ) -> Result<bool, TurnError> {
+        let gate_ref =
+            GateRef::new(gate_ref.as_str()).map_err(|reason| TurnError::InvalidRequest {
+                reason: format!("awaited child gate evidence has invalid gate ref: {reason}"),
+            })?;
+        let state = self
+            .state_for_gate(&gate_ref)
+            .map_err(|error| TurnError::Unavailable {
+                reason: error.safe_summary,
+            })?;
+        Ok(state.is_some_and(|state| {
+            state.record.parent_run_context.scope == *scope
+                && state.record.parent_run_context.run_id == run_id
+                && state.record.gate_ref == gate_ref
+                && state.record.mode == SpawnSubagentMode::Blocking
+        }))
     }
 }
 

@@ -1,8 +1,8 @@
 schema_version = "reborn.extension_manifest.v2"
-id = "ironclaw.memory.native"
-name = "Reborn Native Memory"
+id = "ironclaw.memory"
+name = "Reborn Memory"
 version = "0.1.0"
-description = "Host-bundled native memory provider (issue #3537). The read and write tools below implement the host-defined memory.document_store.v1 profile; search and tree are provider-specific model-facing tools that implement no portable profile. The provider is filesystem-backed and registered on the always-on first-party lane (like the builtin toolset), so the tools are unconditionally available. Provider-swapping is governed by the document-store profile binding, not by install/enable lifecycle."
+description = "Host-bundled memory extension (issue #3537). The read and write tools below implement the host-defined memory.document_store.v1 profile; search and tree are provider-specific model-facing tools that implement no portable profile. Registered on the always-on first-party lane (like the builtin toolset), so the tools are unconditionally available. The backing provider is resolved by the document-store profile binding — the native filesystem provider by default, swappable without changing these tools — not by install/enable lifecycle."
 # Requested trust only; the host trust policy computes effective trust. A
 # `first_party` runtime + reserved `ironclaw.*` id are accepted only for the
 # loader-supplied `HostBundled` source, and only when a matching host service
@@ -18,7 +18,7 @@ service = "native_memory_provider"
 # schema refs match the document_store profile's read-operation refs so the
 # conformance harness binds this capability to that operation.
 [[capabilities]]
-id = "ironclaw.memory.native.read"
+id = "ironclaw.memory.read"
 implements = ["memory.document_store.v1"]
 description = "Read a Reborn persistent memory document in the current tenant/user/agent/project scope."
 effects = ["read_filesystem"]
@@ -32,7 +32,7 @@ prompt_doc_ref = "prompts/memory-native/read.md"
 # Host prompt-write safety runs before dispatching writes to prompt-injected
 # memory files.
 [[capabilities]]
-id = "ironclaw.memory.native.write"
+id = "ironclaw.memory.write"
 implements = ["memory.document_store.v1"]
 description = "Write, append, or patch Reborn persistent memory documents in the current tenant/user/agent/project scope. For structured user facts (timezone, locale, location), use builtin.profile_set instead."
 effects = ["read_filesystem", "write_filesystem"]
@@ -45,7 +45,7 @@ prompt_doc_ref = "prompts/memory-native/write.md"
 # Native search convenience. Implements no portable profile operation — it is a
 # provider-specific model tool layered on the same filesystem store.
 [[capabilities]]
-id = "ironclaw.memory.native.search"
+id = "ironclaw.memory.search"
 implements = []
 description = "Search Reborn persistent memory documents in the current tenant/user/agent/project scope."
 effects = ["read_filesystem"]
@@ -57,7 +57,7 @@ prompt_doc_ref = "prompts/memory-native/search.md"
 
 # Native tree/list convenience. Implements no portable profile operation.
 [[capabilities]]
-id = "ironclaw.memory.native.tree"
+id = "ironclaw.memory.tree"
 implements = []
 description = "List Reborn persistent memory documents as a compact tree."
 effects = ["read_filesystem"]

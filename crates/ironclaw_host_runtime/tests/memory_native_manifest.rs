@@ -1,4 +1,4 @@
-//! Repo conformance tests for the bundled `ironclaw.memory.native` manifest
+//! Repo conformance tests for the bundled `ironclaw.memory` manifest
 //! (issue #3537).
 //!
 //! These prove the native extension's declared capabilities semantically satisfy

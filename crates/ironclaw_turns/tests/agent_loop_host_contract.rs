@@ -343,6 +343,7 @@ async fn host_managed_model_port_sanitizes_gateway_errors() {
 async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministically() {
     let context = claimed_run_context().await;
     let surface = VisibleCapabilitySurface {
+        callable_capability_ids: None,
         version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
         descriptors: vec![CapabilityDescriptorView {
             capability_id: CapabilityId::new("demo.echo").unwrap(),
@@ -1511,6 +1512,7 @@ async fn loop_prompt_port_builds_text_only_bundle_from_context_refs() {
 async fn loop_prompt_port_filters_visible_surface_by_capability_view() {
     let host = Arc::new(RecordingAgentLoopHost::new(claimed_run_context().await));
     let surface = VisibleCapabilitySurface {
+        callable_capability_ids: None,
         version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
         descriptors: vec![
             CapabilityDescriptorView {
@@ -2104,6 +2106,7 @@ async fn loop_prompt_port_materializes_memory_surface_and_safety_as_host_owned_r
             .with_context_memory_snippet("memory:project", "project memory available"),
     );
     let surface = VisibleCapabilitySurface {
+        callable_capability_ids: None,
         version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
         descriptors: vec![CapabilityDescriptorView {
             capability_id: CapabilityId::new("demo.echo").unwrap(),
@@ -2115,14 +2118,13 @@ async fn loop_prompt_port_materializes_memory_surface_and_safety_as_host_owned_r
             parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
         }],
     };
+    let materialization_store = Arc::new(InMemoryInstructionMaterializationStore::default());
     let port = HostManagedLoopPromptPort::new(
         host.context.clone(),
         host.clone(),
         host.milestone_sink.clone(),
     )
-    .with_instruction_materialization_store(Arc::new(
-        InMemoryInstructionMaterializationStore::default(),
-    ))
+    .with_instruction_materialization_store(materialization_store.clone())
     .with_current_surface(surface.clone())
     .with_safety_context(
         InstructionSafetyContext::new("safety:prompt-write", "prompt write safety enforced")
@@ -2160,6 +2162,62 @@ async fn loop_prompt_port_materializes_memory_surface_and_safety_as_host_owned_r
             .as_str()
             .starts_with("msg:surface.surface-v1.")
     }));
+    let surface_message = bundle
+        .messages
+        .iter()
+        .find(|message| {
+            message
+                .content_ref
+                .as_str()
+                .starts_with("msg:surface.surface-v1.")
+        })
+        .expect("surface message should be present");
+    let surface_materialized = materialization_store
+        .get_materialized_message(&host.context, &surface_message.content_ref)
+        .expect("surface message ref lookup should succeed")
+        .expect("surface message should be materialized");
+    assert!(
+        surface_materialized
+            .model_content
+            .contains("\nPolicy:\nUse only visible capabilities."),
+        "surface prompt must render the capability policy separately: {:?}",
+        surface_materialized.model_content
+    );
+    assert!(
+        surface_materialized
+            .model_content
+            .contains("not listed under Capabilities"),
+        "surface prompt must tell the model to refuse unavailable named capabilities: {:?}",
+        surface_materialized.model_content
+    );
+    assert!(
+        surface_materialized
+            .model_content
+            .contains("do not call another capability as a substitute or workaround"),
+        "surface prompt must tell the model not to route unavailable tools through alternatives: {:?}",
+        surface_materialized.model_content
+    );
+    assert!(
+        surface_materialized
+            .model_content
+            .contains("\nCapabilities:\n- id: demo.echo"),
+        "surface prompt must render capability descriptors under a stable header: {:?}",
+        surface_materialized.model_content
+    );
+    assert!(
+        surface_materialized
+            .model_content
+            .contains("\n  name: Echo"),
+        "surface prompt must render capability names as labeled fields: {:?}",
+        surface_materialized.model_content
+    );
+    assert!(
+        surface_materialized
+            .model_content
+            .contains("\n  description: Echo safe input"),
+        "surface prompt must render capability descriptions as labeled fields: {:?}",
+        surface_materialized.model_content
+    );
     assert!(bundle.instruction_fingerprint.is_some());
     assert_eq!(host.effects(), vec!["context"]);
     assert_eq!(host.milestone_kind_names(), vec!["prompt_bundle_built"]);
@@ -2922,6 +2980,7 @@ impl RecordingAgentLoopHost {
             capability_outcomes: Mutex::new(Vec::new()),
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             visible_surface: VisibleCapabilitySurface {
+                callable_capability_ids: None,
                 version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
                 descriptors: vec![CapabilityDescriptorView {
                     capability_id: CapabilityId::new("demo.echo").unwrap(),

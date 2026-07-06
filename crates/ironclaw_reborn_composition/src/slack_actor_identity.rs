@@ -36,6 +36,33 @@ pub trait RebornUserIdentityLookup: Send + Sync {
         provider: &str,
         provider_user_id: &str,
     ) -> Result<Option<UserId>, RebornUserIdentityLookupError>;
+
+    /// Whether the given IronClaw user has any binding for `provider` — the
+    /// reverse of [`resolve_user_identity`]. Used to tell whether the calling
+    /// user has personally connected a channel (e.g. Slack personal pairing).
+    async fn user_has_provider_binding(
+        &self,
+        provider: &str,
+        user_id: &UserId,
+    ) -> Result<bool, RebornUserIdentityLookupError>;
+
+    /// Whether the given IronClaw user has a provider binding whose provider
+    /// user id starts with `provider_user_id_prefix`. Channel connection state
+    /// uses this for installation-scoped providers such as Slack, where a user
+    /// bound in one Slack installation must not satisfy setup in another.
+    async fn user_has_provider_binding_with_provider_user_id_prefix(
+        &self,
+        provider: &str,
+        user_id: &UserId,
+        provider_user_id_prefix: Option<&str>,
+    ) -> Result<bool, RebornUserIdentityLookupError> {
+        if provider_user_id_prefix.is_none() {
+            return self.user_has_provider_binding(provider, user_id).await;
+        }
+        Err(RebornUserIdentityLookupError::Backend(
+            "scoped provider binding lookup is unavailable".to_string(),
+        ))
+    }
 }
 
 #[derive(Clone)]
@@ -329,6 +356,14 @@ mod tests {
                 .push((provider.to_string(), provider_user_id.to_string()));
             Ok(self.bindings.get(provider_user_id).cloned())
         }
+
+        async fn user_has_provider_binding(
+            &self,
+            _provider: &str,
+            user_id: &UserId,
+        ) -> Result<bool, RebornUserIdentityLookupError> {
+            Ok(self.bindings.values().any(|bound| bound == user_id))
+        }
     }
 
     #[derive(Debug)]
@@ -341,6 +376,14 @@ mod tests {
             _provider: &str,
             _provider_user_id: &str,
         ) -> Result<Option<UserId>, RebornUserIdentityLookupError> {
+            Err(RebornUserIdentityLookupError::Backend("db down".into()))
+        }
+
+        async fn user_has_provider_binding(
+            &self,
+            _provider: &str,
+            _user_id: &UserId,
+        ) -> Result<bool, RebornUserIdentityLookupError> {
             Err(RebornUserIdentityLookupError::Backend("db down".into()))
         }
     }

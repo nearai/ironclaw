@@ -3245,6 +3245,7 @@ mod tests {
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                     reasoning: None,
+                    reasoning_details: None,
                 })
             }
         }
@@ -3322,7 +3323,6 @@ mod tests {
                 multi_tenant: false,
                 max_llm_concurrent_per_user: None,
                 max_jobs_concurrent_per_user: None,
-                engine_v2: false,
             },
             deps,
             channels,
@@ -3397,6 +3397,7 @@ mod tests {
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                     reasoning: None,
+                    reasoning_details: None,
                 });
             }
 
@@ -3411,6 +3412,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 reasoning: None,
+                reasoning_details: None,
             })
         }
     }
@@ -3815,7 +3817,6 @@ mod tests {
                 multi_tenant: false,
                 max_llm_concurrent_per_user: None,
                 max_jobs_concurrent_per_user: None,
-                engine_v2: false,
             },
             deps,
             channels,
@@ -3899,7 +3900,6 @@ mod tests {
                 multi_tenant: false,
                 max_llm_concurrent_per_user: None,
                 max_jobs_concurrent_per_user: None,
-                engine_v2: false,
             },
             deps,
             channels,
@@ -4749,7 +4749,6 @@ mod tests {
                 multi_tenant: false,
                 max_llm_concurrent_per_user: None,
                 max_jobs_concurrent_per_user: None,
-                engine_v2: false,
             },
             deps,
             Arc::new(manager),

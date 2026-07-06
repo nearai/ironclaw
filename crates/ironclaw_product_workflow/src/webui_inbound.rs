@@ -259,6 +259,10 @@ pub struct WebUiListThreadsRequest {
     pub limit: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_thread_id: Option<String>,
+    #[serde(default)]
+    pub needs_approval: bool,
 }
 
 /// Browser query for WebUI automation listing.

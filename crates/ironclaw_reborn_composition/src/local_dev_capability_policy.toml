@@ -114,13 +114,13 @@ mounts = "workspace"
 network = "local_dev_wildcard"
 
 [[grants]]
-capability = "ironclaw.memory.native.search"
+capability = "ironclaw.memory.search"
 effects = ["dispatch_capability", "read_filesystem"]
 mounts = "memory"
 network = "default"
 
 [[grants]]
-capability = "ironclaw.memory.native.write"
+capability = "ironclaw.memory.write"
 effects = ["dispatch_capability", "read_filesystem", "write_filesystem"]
 mounts = "memory"
 network = "default"
@@ -132,13 +132,13 @@ mounts = "memory"
 network = "default"
 
 [[grants]]
-capability = "ironclaw.memory.native.read"
+capability = "ironclaw.memory.read"
 effects = ["dispatch_capability", "read_filesystem"]
 mounts = "memory"
 network = "default"
 
 [[grants]]
-capability = "ironclaw.memory.native.tree"
+capability = "ironclaw.memory.tree"
 effects = ["dispatch_capability", "read_filesystem"]
 mounts = "memory"
 network = "default"

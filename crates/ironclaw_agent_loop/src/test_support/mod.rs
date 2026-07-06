@@ -423,6 +423,13 @@ pub enum ScriptedModelResponse {
         /// Host error kind to return.
         kind: AgentLoopHostErrorKind,
     },
+    /// Return a sanitized host error with an explicit safe summary.
+    ErrorWithSummary {
+        /// Host error kind to return.
+        kind: AgentLoopHostErrorKind,
+        /// Safe summary exposed to loop recovery.
+        safe_summary: &'static str,
+    },
 }
 
 /// Scripted capability call candidate.
@@ -776,6 +783,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockAgentLoopDriverHost
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         self.record_call(MockHostCall::VisibleCapabilities);
         Ok(VisibleCapabilitySurface {
+            callable_capability_ids: None,
             version: surface_version(),
             descriptors: self.visible_capabilities.clone(),
         })
@@ -1032,6 +1040,9 @@ fn scripted_model_response(
         ),
         ScriptedModelResponse::Error { kind } => {
             return Err(AgentLoopHostError::new(kind, "scripted model failure"));
+        }
+        ScriptedModelResponse::ErrorWithSummary { kind, safe_summary } => {
+            return Err(AgentLoopHostError::new(kind, safe_summary));
         }
     };
     Ok(LoopModelResponse {

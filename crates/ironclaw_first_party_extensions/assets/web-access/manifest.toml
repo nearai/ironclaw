@@ -21,8 +21,8 @@ prompt_doc_ref = "prompts/web-access/search.md"
 
 [[capabilities]]
 id = "web-access.get_content"
-description = "Retrieve full content saved from a previous web search response."
-effects = ["dispatch_capability"]
+description = "Retrieve full web page content through Exa MCP, or read content cached from a previous web search response."
+effects = ["dispatch_capability", "network"]
 default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/web-access/get_content.input.v1.json"

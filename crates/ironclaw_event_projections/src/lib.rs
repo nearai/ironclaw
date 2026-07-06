@@ -299,6 +299,14 @@ pub struct CapabilityActivityProjection {
     pub process_id: Option<ProcessId>,
     pub output_bytes: Option<u64>,
     pub error_kind: Option<String>,
+    /// Sanitized display detail derived from `RuntimeEvent.error_summary`.
+    ///
+    /// This intentionally uses the product-facing `error_detail` wire name:
+    /// consumers render it as optional per-tool failure detail, not as the
+    /// durable event's source summary field. Projection replay re-runs the
+    /// runtime-event sanitizer before populating this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_detail: Option<String>,
     #[serde(default)]
     pub first_cursor: EventCursor,
     pub last_cursor: EventCursor,
@@ -431,7 +439,7 @@ pub struct AuditProjectionEntry {
     pub cursor: EventCursor,
     pub event_id: AuditEventId,
     pub timestamp: Timestamp,
-    pub stage: AuditProjectionStage,
+    pub stage: AuditStage,
     pub correlation_id: CorrelationId,
     pub invocation_id: InvocationId,
     pub thread_id: Option<ThreadId>,
@@ -471,34 +479,6 @@ pub struct MemoryAuditProjectionMetadata {
     pub severity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finding_count: Option<u64>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AuditProjectionStage {
-    Before,
-    After,
-    Denied,
-    ApprovalRequested,
-    ApprovalResolved,
-    ResourceReserved,
-    ResourceReconciled,
-    ResourceReleased,
-}
-
-impl From<AuditStage> for AuditProjectionStage {
-    fn from(stage: AuditStage) -> Self {
-        match stage {
-            AuditStage::Before => Self::Before,
-            AuditStage::After => Self::After,
-            AuditStage::Denied => Self::Denied,
-            AuditStage::ApprovalRequested => Self::ApprovalRequested,
-            AuditStage::ApprovalResolved => Self::ApprovalResolved,
-            AuditStage::ResourceReserved => Self::ResourceReserved,
-            AuditStage::ResourceReconciled => Self::ResourceReconciled,
-            AuditStage::ResourceReleased => Self::ResourceReleased,
-        }
-    }
 }
 
 #[derive(Debug, Error)]
@@ -1540,7 +1520,7 @@ fn project_audit_entry(entry: &EventLogEntry<AuditEnvelope>) -> AuditProjectionE
         cursor: entry.cursor,
         event_id: audit.event_id,
         timestamp: audit.timestamp,
-        stage: audit.stage.into(),
+        stage: audit.stage,
         correlation_id: audit.correlation_id,
         invocation_id: audit.invocation_id,
         thread_id: audit.thread_id.clone(),

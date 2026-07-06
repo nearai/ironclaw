@@ -25,8 +25,6 @@ env:
   # cfg!(test) covers unit tests; this covers integration/e2e that link the
   # non-cfg(test) library.
   IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
-  CARGO_HTTP_MULTIPLEXING: "false"
-  CARGO_NET_RETRY: "10"
 
 jobs:
   changes:
@@ -83,7 +81,7 @@ jobs:
 
           printf '%s\n' "$CHANGED_FILES" | scripts/ci/classify-test-scope.sh >> "$GITHUB_OUTPUT"
 
-          if has_match '^(crates/ironclaw_(common|engine|skills)/|src/(agent|auth|bridge|context|extensions|llm|orchestrator|secrets|skills|tools|worker|workspace)/|tests/fixtures/llm_traces/|tests/snapshots/|tests/support/replay_outcome\.rs$|tests/e2e_engine_v2\.rs$|tests/e2e_live\.rs$|tests/e2e_recorded_trace\.rs$|tests/e2e_advanced_traces\.rs$|tests/e2e_trace_.*\.rs$|Cargo\.toml$|\.github/workflows/(replay-gate|test|nightly-deep-ci)\.yml$)'; then
+          if has_match '^(crates/ironclaw_(common|skills)/|src/(agent|auth|bridge|context|extensions|llm|orchestrator|secrets|skills|tools|worker|workspace)/|tests/fixtures/llm_traces/|tests/snapshots/|tests/support/replay_outcome\.rs$|tests/e2e_live\.rs$|tests/e2e_recorded_trace\.rs$|tests/e2e_advanced_traces\.rs$|tests/e2e_trace_.*\.rs$|Cargo\.toml$|\.github/workflows/(replay-gate|test|nightly-deep-ci)\.yml$)'; then
             echo "has_engine_replay_risk=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_engine_replay_risk=false" >> "$GITHUB_OUTPUT"

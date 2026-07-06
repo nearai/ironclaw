@@ -12,7 +12,7 @@ mod runtime;
 mod store;
 mod types;
 
-pub use config::{WIT_TOOL_VERSION, WitToolLimits, WitToolRuntimeConfig};
+pub use config::{WIT_TOOL_VERSION, WitToolRuntimeConfig};
 pub use error::{WasmError, WasmHostError};
 pub use host::{
     DenyWasmHostHttp, DenyWasmHostSecrets, DenyWasmHostTools, DenyWasmHostWorkspace,

@@ -1638,6 +1638,60 @@ mod postgres_tests {
     }
 
     #[tokio::test]
+    async fn postgres_create_dir_all_conflict_rolls_back_inserted_prefixes() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let parent = vpath(&prefix, "mkdir_conflict");
+        let blocking_file = vpath(&prefix, "mkdir_conflict/file");
+        let child_under_file = vpath(&prefix, "mkdir_conflict/file/child");
+
+        fs.put(
+            &blocking_file,
+            Entry::bytes(b"already a file".to_vec()),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+
+        let err = fs
+            .create_dir_all(&child_under_file)
+            .await
+            .expect_err("existing file prefix must reject create_dir_all");
+        match err {
+            FilesystemError::Backend {
+                path,
+                operation,
+                reason,
+            } => {
+                assert_eq!(path, blocking_file);
+                assert_eq!(operation, FilesystemOperation::CreateDirAll);
+                assert!(
+                    reason.contains("file exists where directory is required"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            other => panic!("expected create_dir_all Backend error, got: {other:?}"),
+        }
+        assert_eq!(
+            fs.get(&blocking_file).await.unwrap().unwrap().entry.body,
+            b"already a file"
+        );
+
+        fs.delete(&blocking_file).await.unwrap();
+        assert!(
+            matches!(
+                fs.stat(&parent).await,
+                Err(FilesystemError::NotFound {
+                    operation: FilesystemOperation::Stat,
+                    ..
+                })
+            ),
+            "failed create_dir_all must roll back explicit directory rows inserted before the conflict"
+        );
+    }
+
+    #[tokio::test]
     async fn postgres_transaction_rollback_discards_prior_put_after_later_cas_conflict() {
         let Some((fs, prefix)) = postgres_root().await else {
             return;
@@ -2026,17 +2080,24 @@ mod postgres_tests {
         // through `fs`, so re-derive it from the same env vars.
         let pool = postgres_pool().await.expect("pool available");
         let client = pool.get().await.unwrap();
+        // Scope the read-back to THIS test's GIN FTS index. Parallel postgres
+        // tests share `current_schema()` and every one creates `idx_rfs_*`
+        // indexes, so `ORDER BY indexname DESC LIMIT 1` alone can return another
+        // test's index. The declaring prefix is uuid-unique and embedded in the
+        // partial-index predicate, so match on it and require GIN (the FTS kind).
         let row = client
             .query_one(
                 "SELECT indexdef FROM pg_indexes \
                  WHERE schemaname = current_schema() \
                    AND tablename = 'root_filesystem_entries' \
                    AND indexname LIKE 'idx_rfs_%' \
+                   AND indexdef ILIKE '%using gin%' \
+                   AND strpos(indexdef, $1) > 0 \
                  ORDER BY indexname DESC LIMIT 1",
-                &[],
+                &[&prefix],
             )
             .await
-            .expect("at least one rfs index visible");
+            .expect("the GIN FTS index for this prefix must be visible");
         let indexdef: String = row.get("indexdef");
         assert!(
             indexdef.contains(prefix.as_str()),

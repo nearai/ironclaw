@@ -421,15 +421,14 @@ pub trait RootFilesystem {
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError>;
 }
 
-pub trait FilesystemCatalog {
-    async fn describe_path(&self, path: &VirtualPath) -> Result<PathPlacement, FilesystemError>;
-    async fn mounts(&self) -> Result<Vec<MountDescriptor>, FilesystemError>;
-}
-
 pub struct CompositeRootFilesystem;
 
 impl RootFilesystem for CompositeRootFilesystem { /* delegates by longest virtual prefix */ }
-impl FilesystemCatalog for CompositeRootFilesystem { /* reports mount placement */ }
+
+impl CompositeRootFilesystem {
+    pub async fn describe_path(&self, path: &VirtualPath) -> Result<PathPlacement, FilesystemError>;
+    pub async fn mounts(&self) -> Result<Vec<MountDescriptor>, FilesystemError>;
+}
 
 pub struct ScopedFilesystem<F> {
     root: F,
@@ -462,7 +461,7 @@ Add tests through the caller-facing filesystem APIs, not only helper functions:
 - local backend denies symlink escape
 - local backend does not leak raw host path in display error
 - `CompositeRootFilesystem` routes operations by longest virtual mount prefix
-- `FilesystemCatalog::describe_path` reports matched root, backend identity, content kind, and index policy
+- `CompositeRootFilesystem::describe_path` reports matched root, backend identity, content kind, and index policy
 - exact duplicate composite mount roots fail closed
 - catalog mount listing is stable for diagnostics
 - PostgreSQL/libSQL backends implement `RootFilesystem` without depending on product/runtime/workflow crates

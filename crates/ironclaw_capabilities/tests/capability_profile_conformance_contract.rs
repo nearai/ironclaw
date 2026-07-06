@@ -12,7 +12,7 @@ use ironclaw_host_api::{
 fn capability_profile_conformance_reports_missing_required_operations() {
     let contract = context_retrieval_contract();
     let claim = CapabilityProfileClaim::new(
-        CapabilityId::new("ironclaw.memory.native.context.retrieve").unwrap(),
+        CapabilityId::new("ironclaw.memory.context.retrieve").unwrap(),
         CapabilityProfileId::new("memory.context_retrieval.v1").unwrap(),
         Vec::new(),
     )
@@ -34,7 +34,7 @@ fn capability_profile_conformance_reports_missing_required_operations() {
 fn capability_profile_conformance_reports_schema_mismatches_and_extra_operations() {
     let contract = context_retrieval_contract();
     let claim = CapabilityProfileClaim::new(
-        CapabilityId::new("ironclaw.memory.native.context.retrieve").unwrap(),
+        CapabilityId::new("ironclaw.memory.context.retrieve").unwrap(),
         CapabilityProfileId::new("memory.context_retrieval.v1").unwrap(),
         vec![
             CapabilityProfileClaimedOperation::new(
@@ -75,7 +75,7 @@ fn capability_profile_conformance_reports_schema_mismatches_and_extra_operations
 fn capability_profile_conformance_accepts_matching_claims() {
     let contract = context_retrieval_contract();
     let claim = CapabilityProfileClaim::new(
-        CapabilityId::new("ironclaw.memory.native.context.retrieve").unwrap(),
+        CapabilityId::new("ironclaw.memory.context.retrieve").unwrap(),
         CapabilityProfileId::new("memory.context_retrieval.v1").unwrap(),
         vec![
             CapabilityProfileClaimedOperation::new(
@@ -114,7 +114,7 @@ fn capability_profile_conformance_reports_profile_id_mismatch_with_profile_subje
     let contract = context_retrieval_contract();
     let mismatched_profile = CapabilityProfileId::new("memory.document_store.v1").unwrap();
     let claim = CapabilityProfileClaim::new(
-        CapabilityId::new("ironclaw.memory.native.context.retrieve").unwrap(),
+        CapabilityId::new("ironclaw.memory.context.retrieve").unwrap(),
         mismatched_profile.clone(),
         vec![
             CapabilityProfileClaimedOperation::new(

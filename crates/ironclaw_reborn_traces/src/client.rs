@@ -12,7 +12,6 @@ use crate::ConversationMessage;
 use crate::contribution::{
     self as trace, LocalTraceSubmissionRecord, OutcomeMetadata, RawTraceCaptureTurn,
     TraceContributionEnvelope, TraceFailureMode, TraceQueueFlushReport, TraceQueueWorkerReport,
-    TraceRedactor as _,
 };
 use anyhow::Context;
 use ironclaw_llm::recording::TraceFile;

@@ -1,7 +1,7 @@
 //! Schema-driven validation harness for the native memory capabilities
 //! (issue #3537).
 //!
-//! The live `ironclaw.memory.native` manifest declares an extension-local
+//! The live `ironclaw.memory` manifest declares an extension-local
 //! `input_schema_ref` / `output_schema_ref` per model-facing capability
 //! (`read`/`write`/`search`/`tree`). These tests prove the schema-driven
 //! validation path: every declared schema resolves to a file that compiles as a

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rand::Rng;
+use rand::RngExt as _;
 use rust_decimal::Decimal;
 
 use crate::error::LlmError;
@@ -66,7 +66,7 @@ pub(crate) fn retry_backoff_delay(attempt: u32) -> Duration {
     let base_ms: u64 = 1000u64.saturating_mul(2u64.saturating_pow(attempt));
     let jitter_range = base_ms / 4; // 25%
     let jitter = if jitter_range > 0 {
-        let offset = rand::thread_rng().gen_range(0..=jitter_range * 2);
+        let offset = rand::rng().random_range(0..=jitter_range * 2);
         offset as i64 - jitter_range as i64
     } else {
         0

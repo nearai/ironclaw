@@ -5,7 +5,7 @@
 //! the `ironclaw_capabilities` conformance harness (semantic conformance, not
 //! just JSON shape): a claim that faithfully implements a profile's operations
 //! with matching schema refs conforms, and a claim missing a required operation
-//! does not. The native `ironclaw.memory.native` manifest's claims are validated
+//! does not. The native `ironclaw.memory` manifest's claims are validated
 //! against this same catalog in the native-manifest conformance test.
 
 use ironclaw_capabilities::{
@@ -48,7 +48,7 @@ fn faithful_claim(
 #[test]
 fn every_memory_profile_in_the_catalog_accepts_a_faithful_claim() {
     for contract in memory_capability_profiles().expect("catalog must build") {
-        let claim = faithful_claim(&contract, "ironclaw.memory.native.example");
+        let claim = faithful_claim(&contract, "ironclaw.memory.example");
         let report = evaluate_profile_conformance(&contract, &claim);
         assert!(
             report.is_conformant(),
@@ -65,7 +65,7 @@ fn context_retrieval_rejects_a_claim_missing_the_retrieve_operation() {
     let contract = context_retrieval_profile().expect("context retrieval profile");
     // A claim that implements no operations is missing the required one.
     let claim = CapabilityProfileClaim::new(
-        CapabilityId::new("ironclaw.memory.native.context.retrieve").unwrap(),
+        CapabilityId::new("ironclaw.memory.context.retrieve").unwrap(),
         contract.id().clone(),
         Vec::new(),
     )
@@ -89,7 +89,7 @@ fn document_store_rejects_a_claim_missing_the_write_operation() {
         .find(|op| op.id().as_str() == "memory.document.read.v1")
         .expect("document store must require read");
     let claim = CapabilityProfileClaim::new(
-        CapabilityId::new("ironclaw.memory.native.document.read").unwrap(),
+        CapabilityId::new("ironclaw.memory.document.read").unwrap(),
         contract.id().clone(),
         vec![
             CapabilityProfileClaimedOperation::new(
@@ -117,7 +117,7 @@ fn interaction_log_detects_a_schema_ref_mismatch() {
     let op = &contract.required_operations()[0];
     // Faithful operation id, but a wrong input schema ref.
     let claim = CapabilityProfileClaim::new(
-        CapabilityId::new("ironclaw.memory.native.interaction.record").unwrap(),
+        CapabilityId::new("ironclaw.memory.interaction.record").unwrap(),
         contract.id().clone(),
         vec![
             CapabilityProfileClaimedOperation::new(

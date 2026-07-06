@@ -1,215 +1,264 @@
 //! Caller-level regression tests for per-request `temperature` on the
 //! Responses API (PR #3641, serrrfirat's Medium-severity follow-up).
 //!
-//! The handler used to reject any `temperature` field with 400; PR #3641
-//! removed that rejection and instead stamps the value into the outgoing
-//! `IncomingMessage.metadata` so the agent dispatcher can apply it as a
-//! per-request override before consulting user/admin settings.
-//!
-//! Per `.claude/rules/testing.md` ("Test Through the Caller, Not Just the
-//! Helper"), exercising only the dispatcher's `resolve_settings_temperature`
-//! helper is not enough — the endpoint→metadata wiring sits between the
-//! POST body and the helper, and a future refactor that drops the field
-//! on the floor would not break a helper-level test. These tests drive the
-//! full router with a captured `msg_tx` and assert that the
-//! `IncomingMessage` the agent loop would receive carries the value.
+//! The current Responses API surface is owned by the Reborn
+//! OpenAI-compatible router, not the retired v1 gateway. These tests drive the
+//! route-level workflow and assert that `temperature` is validated at the API
+//! boundary and preserved in the submitted product payload.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
-use ironclaw::channels::IncomingMessage;
-use ironclaw::channels::web::auth::MultiAuthState;
-use ironclaw::channels::web::platform::router::start_server;
-use ironclaw::channels::web::platform::state::GatewayState;
-use ironclaw::channels::web::test_helpers::TestGatewayBuilder;
-use tokio::sync::{mpsc, oneshot};
+use async_trait::async_trait;
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use http_body_util::BodyExt;
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_product_adapters::{
+    AuthRequirement, FakeProductWorkflow, ProductInboundEnvelope, ProductInboundPayload,
+    ProjectionReadRequest, ProtocolAuthEvidence,
+};
+use ironclaw_reborn_openai_compat::{
+    InMemoryOpenAiCompatRefStore, OpenAiCompatActorScope, OpenAiCompatAuthenticatedCaller,
+    OpenAiCompatInternalRefs, OpenAiCompatProductActionRef, OpenAiCompatProjectionRef,
+    OpenAiCompatRouterState, OpenAiCompatTurnRunRef, OpenAiResponseId, OpenAiResponseObject,
+    OpenAiResponseOutputItem, OpenAiResponseOutputItemStatus, OpenAiResponseProjection,
+    OpenAiResponseReadRequest, OpenAiResponseStatus, OpenAiResponseUsage,
+    OpenAiResponseWaitRequest, OpenAiResponsesMessageRole, OpenAiResponsesProjectionReader,
+    OpenAiResponsesWorkflow, openai_compat_router_with_state,
+};
+use ironclaw_turns::{TurnActor, TurnRunId, TurnScope};
+use serde_json::{Value, json};
+use tower::ServiceExt;
 
-const AUTH_TOKEN: &str = "test-responses-api-temperature-token";
-const USER_ID: &str = "test-user";
-
-/// RAII guard that shuts the gateway test server down when dropped.
-struct ServerGuard {
-    shutdown: Option<oneshot::Sender<()>>,
-}
-
-impl Drop for ServerGuard {
-    fn drop(&mut self) {
-        if let Some(tx) = self.shutdown.take() {
-            let _ = tx.send(());
-        }
-    }
-}
-
-async fn start_test_server_with_capture() -> (
-    SocketAddr,
-    Arc<GatewayState>,
-    mpsc::Receiver<IncomingMessage>,
-    ServerGuard,
-) {
-    let (tx, rx) = mpsc::channel::<IncomingMessage>(8);
-    let state = TestGatewayBuilder::new()
-        .user_id(USER_ID)
-        .msg_tx(tx)
-        .build();
-    let auth = MultiAuthState::single(AUTH_TOKEN.to_string(), USER_ID.to_string());
-    let addr: SocketAddr = "127.0.0.1:0"
-        .parse()
-        .expect("hard-coded address must parse");
-    let bound = start_server(addr, state.clone(), auth.into())
-        .await
-        .expect("start gateway test server");
-    let shutdown = state.shutdown_tx.write().await.take();
-    (bound, state, rx, ServerGuard { shutdown })
-}
-
-fn client() -> reqwest::Client {
-    // Short timeout — the handler waits for SSE events that never arrive
-    // in this test fixture, so the HTTP call always times out from the
-    // client side. We only care about the IncomingMessage that lands on
-    // `rx` the moment the handler calls `send_to_agent`, which happens
-    // long before the SSE wait. The handler task is torn down when the
-    // gateway server is dropped at the end of the test.
-    reqwest::Client::builder()
-        .timeout(Duration::from_millis(500))
-        .build()
-        .expect("build test http client")
-}
-
-/// POST `/v1/responses` with `temperature` set must land an
-/// `IncomingMessage` on the agent channel whose `metadata["temperature"]`
-/// matches the request body. Regression: pre-#3641 the handler 400'd; if
-/// a future change drops the `metadata["temperature"]` write, the agent
-/// dispatcher's per-request override would never see it and the
-/// `resolve_settings_temperature` helper test alone would not notice.
+/// POST `/v1/responses` with `temperature` set must preserve it in the
+/// openai_compat product payload. That is the Reborn equivalent of the old v1
+/// gateway writing `IncomingMessage.metadata["temperature"]`.
 #[tokio::test]
-async fn responses_request_temperature_lands_in_incoming_metadata() {
-    let (addr, _state, mut rx, _guard) = start_test_server_with_capture().await;
-    let url = format!("http://{}/v1/responses", addr);
+async fn responses_request_temperature_lands_in_submitted_payload() {
+    let workflow = Arc::new(FakeProductWorkflow::new());
+    let router = test_router(workflow.clone());
 
-    let http = client();
-    let request = async move {
-        // The handler will block waiting for SSE events that never come;
-        // we don't care about the response, only the captured message.
-        let _ = http
-            .post(&url)
-            .bearer_auth(AUTH_TOKEN)
-            .json(&serde_json::json!({
-                "model": "default",
-                "input": "hello",
-                "temperature": 0.42,
-            }))
-            .send()
-            .await;
-    };
-    let captured = async {
-        tokio::time::timeout(Duration::from_secs(2), rx.recv())
-            .await
-            .expect("agent channel must receive a message within 2s")
-            .expect("agent channel must not be closed")
-    };
+    let response = router
+        .oneshot(response_create_request(json!({
+            "model": "default",
+            "input": "hello",
+            "temperature": 0.42,
+        })))
+        .await
+        .expect("response");
 
-    let (_, msg) = tokio::join!(request, captured);
-
-    let metadata = &msg.metadata;
-    let t = metadata
-        .get("temperature")
-        .unwrap_or_else(|| panic!("metadata missing 'temperature': {metadata}"));
-    let t = t
+    assert_eq!(response.status(), StatusCode::OK);
+    let submitted = submitted_user_message_json(
+        &workflow
+            .accepted_envelopes()
+            .into_iter()
+            .next()
+            .expect("accepted envelope"),
+    );
+    let temperature = submitted["temperature"]
         .as_f64()
-        .unwrap_or_else(|| panic!("metadata 'temperature' not a number: {t}"));
+        .unwrap_or_else(|| panic!("submitted payload missing numeric temperature: {submitted}"));
     assert!(
-        (t - 0.42).abs() < 1e-6,
-        "expected metadata['temperature']=0.42, got {t}"
+        (temperature - 0.42).abs() < f64::EPSILON,
+        "expected temperature 0.42, got {temperature}"
     );
 }
 
 /// POST `/v1/responses` with `temperature` outside the OpenAI-compatible
-/// `[0, 2]` range must reject with a 400 `invalid_request_error` at the
-/// API boundary and must NOT enqueue an `IncomingMessage` on the agent
-/// channel. The provider-side `Reasoning::respond_with_tools` path
-/// clamps later, but callers expect the request boundary to fail loudly
-/// rather than silently turn `temperature: 9.0` into `2.0`.
+/// `[0, 2]` range must reject with 400 before submitting to ProductWorkflow.
 #[tokio::test]
-async fn responses_request_temperature_out_of_range_rejects_and_does_not_enqueue() {
-    let (addr, _state, mut rx, _guard) = start_test_server_with_capture().await;
-    let url = format!("http://{}/v1/responses", addr);
-    let http = client();
+async fn responses_request_temperature_out_of_range_rejects_and_does_not_submit() {
+    for bad_temperature in [-0.5_f64, 2.5_f64] {
+        let workflow = Arc::new(FakeProductWorkflow::new());
+        let router = test_router(workflow.clone());
 
-    for bad_temperature in [-0.5_f32, 2.5_f32] {
-        let resp = http
-            .post(&url)
-            .bearer_auth(AUTH_TOKEN)
-            .json(&serde_json::json!({
+        let response = router
+            .oneshot(response_create_request(json!({
                 "model": "default",
                 "input": "hello",
                 "temperature": bad_temperature,
-            }))
-            .send()
+            })))
             .await
-            .expect("send /v1/responses request");
+            .expect("response");
+
         assert_eq!(
-            resp.status().as_u16(),
-            400,
+            response.status(),
+            StatusCode::BAD_REQUEST,
             "temperature {bad_temperature} must be rejected with 400",
         );
-        let body: serde_json::Value = resp.json().await.expect("parse JSON error body");
-        let kind = body
-            .get("error")
-            .and_then(|e| e.get("type"))
-            .and_then(|t| t.as_str())
-            .unwrap_or("");
+        let body = json_body(response).await;
         assert_eq!(
-            kind, "invalid_request_error",
-            "error.type for bad temperature should be invalid_request_error, body={body}",
+            body["error"]["type"], "invalid_request_error",
+            "bad temperature should return invalid_request_error, body={body}",
         );
-    }
-
-    // No `IncomingMessage` may have been enqueued by either rejected request.
-    match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
-        Ok(Some(msg)) => panic!(
-            "no IncomingMessage should be enqueued for rejected temperatures, got: {:?}",
-            msg.metadata
-        ),
-        Ok(None) => panic!("agent channel must not be closed"),
-        Err(_) => {} // timeout = nothing enqueued, expected
+        assert_eq!(
+            body["error"]["param"], "temperature",
+            "bad temperature should name the temperature param, body={body}",
+        );
+        assert_eq!(
+            workflow.accepted_count(),
+            0,
+            "bad temperature {bad_temperature} must not submit to ProductWorkflow"
+        );
     }
 }
 
-/// POST `/v1/responses` *without* a `temperature` field must not
-/// fabricate one in metadata. The dispatcher uses
-/// `metadata.get("temperature").is_some()` as the per-request signal —
-/// an unconditional default here would override every user's settings
-/// value silently.
+/// POST `/v1/responses` without `temperature` must not fabricate a payload
+/// field. Downstream code treats presence as the per-request override signal.
 #[tokio::test]
-async fn responses_request_without_temperature_omits_metadata_field() {
-    let (addr, _state, mut rx, _guard) = start_test_server_with_capture().await;
-    let url = format!("http://{}/v1/responses", addr);
+async fn responses_request_without_temperature_omits_payload_field() {
+    let workflow = Arc::new(FakeProductWorkflow::new());
+    let router = test_router(workflow.clone());
 
-    let http = client();
-    let request = async move {
-        let _ = http
-            .post(&url)
-            .bearer_auth(AUTH_TOKEN)
-            .json(&serde_json::json!({
-                "model": "default",
-                "input": "hello",
-            }))
-            .send()
-            .await;
-    };
-    let captured = async {
-        tokio::time::timeout(Duration::from_secs(2), rx.recv())
-            .await
-            .expect("agent channel must receive a message within 2s")
-            .expect("agent channel must not be closed")
-    };
+    let response = router
+        .oneshot(response_create_request(json!({
+            "model": "default",
+            "input": "hello",
+        })))
+        .await
+        .expect("response");
 
-    let (_, msg) = tokio::join!(request, captured);
-    assert!(
-        msg.metadata.get("temperature").is_none(),
-        "metadata must not carry a fabricated temperature when the request \
-         body has none — got {}",
-        msg.metadata
+    assert_eq!(response.status(), StatusCode::OK);
+    let submitted = submitted_user_message_json(
+        &workflow
+            .accepted_envelopes()
+            .into_iter()
+            .next()
+            .expect("accepted envelope"),
     );
+    assert!(
+        submitted.get("temperature").is_none(),
+        "payload must not carry a fabricated temperature when the request body has none: {submitted}"
+    );
+}
+
+fn test_router(workflow: Arc<FakeProductWorkflow>) -> axum::Router {
+    workflow.program_projection_read_resolution(sample_projection_read_request());
+    let service = OpenAiResponsesWorkflow::new(
+        workflow,
+        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        Arc::new(StaticResponsesReader),
+    );
+    openai_compat_router_with_state(OpenAiCompatRouterState::with_responses(Arc::new(service)))
+        .layer(axum::Extension(caller()))
+}
+
+fn response_create_request(body: Value) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/v1/responses")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("request")
+}
+
+async fn json_body(response: axum::response::Response) -> Value {
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    serde_json::from_slice(&bytes).expect("json")
+}
+
+fn submitted_user_message_json(envelope: &ProductInboundEnvelope) -> Value {
+    let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
+        panic!("expected user message payload");
+    };
+    serde_json::from_str(&payload.text).expect("submitted payload json")
+}
+
+fn caller() -> OpenAiCompatAuthenticatedCaller {
+    OpenAiCompatAuthenticatedCaller::new(
+        OpenAiCompatActorScope::new(
+            TenantId::new("tenant-a").expect("tenant"),
+            UserId::new("test-user").expect("user"),
+            Some(AgentId::new("agent-a").expect("agent")),
+            Some(ProjectId::new("project-a").expect("project")),
+        ),
+        ProtocolAuthEvidence::test_verified_for_tenant(
+            AuthRequirement::BearerToken,
+            "test-user",
+            TenantId::new("tenant-a").expect("tenant"),
+        ),
+    )
+    .expect("caller")
+}
+
+fn sample_projection_read_request() -> ProjectionReadRequest {
+    ProjectionReadRequest {
+        actor: TurnActor::new(UserId::new("test-user").expect("user")),
+        scope: TurnScope::new_with_owner(
+            TenantId::new("tenant-a").expect("tenant"),
+            Some(AgentId::new("agent-a").expect("agent")),
+            Some(ProjectId::new("project-a").expect("project")),
+            ThreadId::new("thread-openai-response").expect("thread"),
+            Some(UserId::new("test-user").expect("user")),
+        ),
+        after_cursor: None,
+        limit: None,
+    }
+}
+
+struct StaticResponsesReader;
+
+#[async_trait]
+impl OpenAiResponsesProjectionReader for StaticResponsesReader {
+    async fn wait_for_response_completion(
+        &self,
+        request: OpenAiResponseWaitRequest,
+    ) -> Result<OpenAiResponseProjection, ironclaw_reborn_openai_compat::OpenAiCompatHttpError>
+    {
+        Ok(OpenAiResponseProjection::new(completed_response(
+            request.public_id,
+            request.requested_model,
+        ))
+        .with_internal_refs(
+            OpenAiCompatInternalRefs::new(
+                OpenAiCompatProductActionRef::new("product-action:response").expect("action"),
+            )
+            .with_turn_run_ref(
+                OpenAiCompatTurnRunRef::new(TurnRunId::new().to_string()).expect("run"),
+            )
+            .with_projection_ref(
+                OpenAiCompatProjectionRef::new("projection:response").expect("projection"),
+            ),
+        ))
+    }
+
+    async fn read_response(
+        &self,
+        request: OpenAiResponseReadRequest,
+    ) -> Result<OpenAiResponseObject, ironclaw_reborn_openai_compat::OpenAiCompatHttpError> {
+        Ok(completed_response(
+            request.public_id,
+            request
+                .requested_model
+                .unwrap_or_else(|| "default".to_string()),
+        ))
+    }
+}
+
+fn completed_response(id: OpenAiResponseId, model: String) -> OpenAiResponseObject {
+    OpenAiResponseObject {
+        id,
+        object: "response".to_string(),
+        created_at: 1_777_777_777,
+        status: OpenAiResponseStatus::Completed,
+        model,
+        output: vec![OpenAiResponseOutputItem::Message {
+            id: "msg_1".to_string(),
+            status: Some(OpenAiResponseOutputItemStatus::Completed),
+            role: OpenAiResponsesMessageRole::Assistant,
+            content: json!([{"type": "output_text", "text": "ok"}]),
+        }],
+        error: None,
+        incomplete_details: None,
+        usage: Some(OpenAiResponseUsage {
+            input_tokens: 1,
+            output_tokens: 1,
+            total_tokens: 2,
+        }),
+    }
 }

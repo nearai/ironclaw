@@ -198,6 +198,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
         // factory's startup-time `visible_capabilities()` probe sees a valid
         // (non-empty) surface and registers the version.
         Ok(VisibleCapabilitySurface {
+            callable_capability_ids: None,
             version: self.surface_version.clone(),
             descriptors: vec![descriptor("cap.blocked"), descriptor("cap.allowed")],
         })
@@ -271,6 +272,7 @@ impl LoopCapabilityPort for ProviderAwareCapabilityPort {
         _request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         Ok(VisibleCapabilitySurface {
+            callable_capability_ids: None,
             version: self.surface_version.clone(),
             descriptors: self.descriptors.clone(),
         })

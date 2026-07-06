@@ -1,13 +1,12 @@
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicU64};
 
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
-#[cfg(test)]
-use ironclaw_event_projections::CapabilityActivityProjection;
 use ironclaw_event_projections::{
-    CapabilityActivityStatus, EventProjectionService, ProjectionCursor as EventProjectionCursor,
-    ProjectionReplay, ProjectionScope as EventProjectionScope, ProjectionSnapshot,
-    ReplayEventProjectionService, RunProjectionStatus, RunStatusProjection,
+    CapabilityActivityProjection, CapabilityActivityStatus, EventProjectionService,
+    ProjectionCursor as EventProjectionCursor, ProjectionReplay,
+    ProjectionScope as EventProjectionScope, ProjectionSnapshot, ReplayEventProjectionService,
+    RunProjectionStatus, RunStatusProjection,
 };
 use ironclaw_event_streams::{
     AllowAllProjectionAccessPolicy, EventStreamManager, InMemoryProjectionStreamAdmissionPolicy,
@@ -76,6 +75,7 @@ const WEBUI_PROJECTION_INSTALLATION_ID: &str = "webui_v2.local";
 pub(crate) struct RebornProjectionServices {
     event_stream_manager: Arc<EventStreamManager>,
     live_updates: Arc<InMemoryProjectionUpdateSource>,
+    live_sequence: Arc<AtomicU64>,
     turn_events: TurnEventBridge,
     approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
     display_previews: Arc<dyn CapabilityDisplayPreviewSource>,
@@ -169,6 +169,7 @@ impl RebornProjectionServices {
         Arc::new(LiveProjectionPublisher::new(
             Arc::clone(&self.live_updates),
             actor_user_id,
+            Arc::clone(&self.live_sequence),
         ))
     }
 
@@ -187,6 +188,10 @@ pub(crate) fn build_reborn_projection_services(
     let projection: Arc<dyn EventProjectionService> =
         Arc::new(ReplayEventProjectionService::from_runtime_log(event_log));
     let live_updates = Arc::new(InMemoryProjectionUpdateSource::new(128));
+    // One counter per projection-services bundle keeps all live publishers in
+    // the same SSE cursor space; per-publisher counters can collide after a
+    // durable cursor has advanced.
+    let live_sequence = Arc::new(AtomicU64::new(0));
     let event_stream_manager = Arc::new(EventStreamManager::from_services(
         projection,
         Arc::new(AllowAllProjectionAccessPolicy),
@@ -198,6 +203,7 @@ pub(crate) fn build_reborn_projection_services(
     RebornProjectionServices {
         event_stream_manager,
         live_updates,
+        live_sequence,
         turn_events: TurnEventBridge::default(),
         approval_requests: None,
         display_previews: Arc::new(NoopCapabilityDisplayPreviewSource),
@@ -939,6 +945,8 @@ async fn runtime_payload_from_candidate(
         }
         RuntimePayloadCandidate::CapabilityActivity(activity) => {
             let activity_order = activity.activity_order_cursor().as_u64();
+            let error_detail =
+                capability_activity_runtime_error_detail(&activity, display_previews);
             // Surface the staged input on the still-running activity frame so
             // the row shows `tool   <arg>` (and a populated Parameters tab)
             // live, instead of a bare tool name until the result lands.
@@ -956,6 +964,12 @@ async fn runtime_payload_from_candidate(
                 process_id: activity.process_id,
                 output_bytes: activity.output_bytes,
                 error_kind: activity.error_kind,
+                // Runtime activity transitions can reach the browser before
+                // the separate display-preview payload is delivered. Prefer
+                // the durable event summary, then fall back to a staged
+                // failure preview so the live card shows the same
+                // host-authored copy as the refresh path.
+                error_detail,
                 subtitle: running.as_ref().and_then(|input| input.subtitle.clone()),
                 input_summary: running.and_then(|input| input.input_summary),
                 updated_at: activity.updated_at,
@@ -1124,6 +1138,22 @@ fn runtime_failure_summary_for_category(category: &str) -> &'static str {
         "unknown" => "The run failed for an unknown reason.",
         _ => "The run failed before producing a reply.",
     }
+}
+
+fn capability_activity_runtime_error_detail(
+    activity: &CapabilityActivityProjection,
+    display_previews: &dyn CapabilityDisplayPreviewSource,
+) -> Option<String> {
+    if !matches!(
+        activity.status,
+        CapabilityActivityStatus::Failed | CapabilityActivityStatus::Killed
+    ) {
+        return None;
+    }
+    activity
+        .error_detail
+        .clone()
+        .or_else(|| display_previews.failure_error_detail(activity))
 }
 
 fn capability_activity_status_wire(

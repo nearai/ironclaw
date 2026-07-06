@@ -1,0 +1,122 @@
+    Finished `release` profile [optimized] target(s) in 0.22s
+     Running `target/release/ironclaw_stress --backend libsql --scenario mixed-user-session --concurrency 12 --operations 20 --duration-seconds 120 --users 1000 --progress-interval-seconds 10 --trace-jsonl tools/ironclaw_stress/results/2026-06-30-usable-boundary/mixed-user-c12-120s.trace.jsonl --human-read --bottleneck-report`
+[ironclaw-stress] preparing backend=libsql scenario=mixed-user-session run_id=60b519879d8e4802b3b11044a5f9cb39
+[ironclaw-stress] running target=libsql://<redacted-local-path> concurrency=12 operations_per_task=20 duration_seconds=120 warmup_seconds=0 users=1000 tenants=1 progress_interval_seconds=10
+[ironclaw-stress] progress backend=libsql scenario=mixed-user-session attempted=246 succeeded=246 failed=0 elapsed_ms=10010 recent_ops_sec=24.6
+[ironclaw-stress] progress backend=libsql scenario=mixed-user-session attempted=436 succeeded=436 failed=0 elapsed_ms=20012 recent_ops_sec=19.0
+[ironclaw-stress] progress backend=libsql scenario=mixed-user-session attempted=574 succeeded=574 failed=0 elapsed_ms=30023 recent_ops_sec=13.8
+[ironclaw-stress] progress backend=libsql scenario=mixed-user-session attempted=693 succeeded=693 failed=0 elapsed_ms=40032 recent_ops_sec=11.9
+[ironclaw-stress] progress backend=libsql scenario=mixed-user-session attempted=796 succeeded=796 failed=0 elapsed_ms=50034 recent_ops_sec=10.3
+[ironclaw-stress] progress backend=libsql scenario=mixed-user-session attempted=892 succeeded=892 failed=0 elapsed_ms=60044 recent_ops_sec=9.6
+[ironclaw-stress] progress backend=libsql scenario=mixed-user-session attempted=997 succeeded=997 failed=0 elapsed_ms=70052 recent_ops_sec=10.5
+[ironclaw-stress] progress backend=libsql scenario=mixed-user-session attempted=1130 succeeded=1130 failed=0 elapsed_ms=80058 recent_ops_sec=13.3
+[ironclaw-stress] progress backend=libsql scenario=mixed-user-session attempted=1260 succeeded=1260 failed=0 elapsed_ms=90060 recent_ops_sec=13.0
+[ironclaw-stress] progress backend=libsql scenario=mixed-user-session attempted=1368 succeeded=1368 failed=0 elapsed_ms=100069 recent_ops_sec=10.8
+[ironclaw-stress] progress backend=libsql scenario=mixed-user-session attempted=1447 succeeded=1447 failed=0 elapsed_ms=110076 recent_ops_sec=7.9
+[ironclaw-stress] progress backend=libsql scenario=mixed-user-session attempted=1516 succeeded=1516 failed=0 elapsed_ms=120086 recent_ops_sec=6.9
+[ironclaw-stress] finished attempted=1528 succeeded=1528 failed=0 duration_ms=120655 throughput_ops_sec=12.7
+
+Run summary
+field                    value
+------------------------ --------------------------------
+backend                  libsql
+preset                   -
+scenario                 mixed-user-session
+run_id                   60b519879d8e4802b3b11044a5f9cb39
+target                   libsql://<redacted-local-path>
+processes                1
+concurrency              12
+operations_per_thread    20
+duration_seconds         120
+warmup_seconds           0
+trace_jsonl_enabled      true
+trace_interval_seconds   1
+users                    1000
+active_thread_count      per-user (1000)
+tenants                  1
+prefill_threads          0
+prefill_turns_per_thread 0
+prefill_concurrency      4
+model_latency_ms         0
+model_latency_profile    fixed
+model_latency_jitter_ms  0
+model_latency_spike_every 0
+model_latency_spike_ms   0
+user_message_bytes       0
+assistant_message_bytes  0
+context_max_messages     20
+context_growth_turns_per_op 4
+tool_calls_per_turn      2
+tool_latency_ms          0
+tool_output_bytes        1024
+tool_failure_every       0
+attempted                1528
+succeeded                1528
+failed                   0
+duration                 120.66s
+throughput_ops_sec       12.66
+
+Operation latency
+name                        count        p50        p95        p99        max
+------------------------ -------- ---------- ---------- ---------- ----------
+operation                    1528    887.5ms      1.84s      2.42s      3.20s
+
+Process metrics
+metric                          value
+------------------------ ------------
+cpu_total                     108.94s
+cpu_user                       70.11s
+cpu_system                     38.83s
+peak_rss                      524.8MB
+peak_threads                        -
+peak_open_fds                      26
+
+DB probe
+metric                                     before        after        delta
+------------------------------------ ------------ ------------ ------------
+libsql_file                                32.0KB       39.5MB      +39.5MB
+libsql_wal                                     0B           0B          +0B
+libsql_shm                                     0B           0B          +0B
+
+Operation attribution
+name                        count        p50        p95        p99        max
+------------------------ -------- ---------- ---------- ---------- ----------
+thread_store_writes          1528     42.9ms    401.9ms    952.8ms      2.04s
+context_reads                1528      3.2ms     13.9ms    118.0ms    491.7ms
+turn_store                   1528     22.8ms    197.9ms    421.9ms      1.93s
+resource_governor            1528    783.5ms      1.27s      2.06s      2.65s
+synthetic_wait               1508        0us        0us        0us        0us
+
+Stage latency
+name                        count        p50        p95        p99        max
+------------------------ -------- ---------- ---------- ---------- ----------
+ensure_thread                1528      1.1ms     50.5ms    164.3ms      1.46s
+accept_inbound               1528      8.5ms    145.2ms    395.7ms      1.63s
+submit_turn                  1528      2.1ms     29.5ms    121.2ms    513.6ms
+mark_submitted               1528      2.1ms     34.2ms    160.8ms      1.79s
+claim_run                    1528      5.6ms     96.0ms    234.7ms      1.80s
+append_assistant             1528     10.6ms    159.7ms    424.1ms      1.14s
+finalize_assistant           1528      4.1ms     61.1ms    268.8ms      2.01s
+complete_run                 1528      9.2ms    110.0ms    281.6ms      1.92s
+load_context                 1528      3.2ms     13.9ms    118.0ms    491.7ms
+resource_reserve             1528    385.4ms    633.4ms      1.37s      1.68s
+model_wait                   1528        0us        0us        0us        0us
+resource_reconcile           1528    387.7ms    627.7ms      1.26s      1.63s
+
+Bottleneck analysis
+signal                 level   evidence
+---------------------- ------- --------------------------------------------------------
+top_operation_group    high    resource_governor p95=1.27s p99=2.06s count=1528
+top_stage_p95          high    resource_reserve p95=633.4ms p99=1.37s count=1528
+trace_worst_p95        high    tools/ironclaw_stress/results/2026-06-30-usable-boundary/mixed-user-c12-120s.trace.jsonl seq=103 phase=interval p95=3.20s recent_ops_sec=9.90
+cpu_pressure           medium  cpu=108.94s wall=120.66s effective_cores=0.90
+memory_growth          medium  rss_start=11.1MiB peak=524.8MiB delta=513.8MiB
+throughput_drop        medium  trace_recent_ops_sec min=1.00 max=30.93
+libsql_growth          info    database_file_delta=39.5MiB
+
+Next probes
+- Run reserve-release and resource-contention presets to isolate governor reservation/reconcile/release writes.
+- Compare reserve-release and reserve-reconcile with the same concurrency to isolate resource-governor write contention.
+- Use the trace sequence and elapsed_ms to correlate latency spikes with DB growth, RSS growth, and stderr spans.
+- Run cpu-burn and the target scenario at the same concurrency; if both flatten together, host CPU is the ceiling.
+- Run memory-churn as a control, then rerun the target with --duration-seconds to see if RSS keeps climbing.

@@ -1,5 +1,8 @@
 #[allow(dead_code)]
-#[path = "support/reborn/mod.rs"]
+#[path = "support/reborn_parity_qa/mod.rs"]
+mod parity_qa_support;
+#[allow(dead_code)]
+#[path = "integration/support/mod.rs"]
 mod reborn_support;
 mod support;
 
@@ -9,9 +12,8 @@ use ironclaw_product_adapters::{
     ProductOutboundTarget, ProductRenderOutcome, ProjectionCursor,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId};
-use reborn_support::{
-    delivery::RecordingOutboundDeliverySink, test_adapter::RebornTestProductAdapter,
-};
+use parity_qa_support::delivery::RecordingOutboundDeliverySink;
+use reborn_support::test_adapter::RebornTestProductAdapter;
 
 #[tokio::test]
 async fn reborn_outbound_reply_target_scope_isolation_parity() {

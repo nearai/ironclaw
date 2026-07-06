@@ -4,7 +4,7 @@
 //! claim that one of its provider-prefixed capabilities *implements* a profile
 //! operation, and the host validates that claim with the conformance harness in
 //! [`ironclaw_capabilities`]. This module owns the concrete, host-defined memory
-//! profile contracts so the manifest layer (the bundled `ironclaw.memory.native`
+//! profile contracts so the manifest layer (the bundled `ironclaw.memory`
 //! extension), the binding layer (`profile_id -> extension_id`), and the repo
 //! conformance tests all read the *same* contract definitions rather than
 //! re-deriving them from loose strings.

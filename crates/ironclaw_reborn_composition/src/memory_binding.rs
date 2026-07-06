@@ -173,7 +173,7 @@ mod tests {
     #[test]
     fn invalid_profile_id_fails_startup() {
         let memory = section(
-            vec![binding("not a valid id", "ironclaw.memory.native")],
+            vec![binding("not a valid id", "ironclaw.memory")],
             Vec::new(),
         );
         let err = resolve_memory_binding_policy(Some(&memory), RebornCompositionProfile::LocalDev)

@@ -522,6 +522,7 @@ impl ServeCommand {
             if let Some(slack_mounts) = slack_mounts {
                 serve_config = serve_config
                     .with_public_route_mount(slack_mounts.events)
+                    .with_public_route_mount(slack_mounts.commands)
                     .with_slack_personal_binding_pairing(slack_mounts.personal_binding_pairing)
                     .with_slack_channel_routes(slack_mounts.channel_routes);
             }
@@ -551,7 +552,7 @@ impl ServeCommand {
                 serve_webui_v2(RebornWebuiServeOptions {
                     addr: listen_addr,
                     router,
-                    shutdown: webui_ctrl_c_shutdown(),
+                    shutdown: webui_shutdown_signal(),
                     bound_addr_tx: None,
                 })
                 .await
@@ -590,7 +591,7 @@ async fn start_hosted_single_tenant_startup_listener(
         serve_webui_v2(RebornWebuiServeOptions {
             addr: listen_addr,
             router,
-            shutdown: webui_ctrl_c_shutdown(),
+            shutdown: webui_shutdown_signal(),
             bound_addr_tx: Some(bound_tx),
         })
         .await
@@ -619,16 +620,44 @@ async fn start_hosted_single_tenant_startup_listener(
     })
 }
 
-fn webui_ctrl_c_shutdown() -> tokio::sync::oneshot::Receiver<()> {
+/// Resolve when a shutdown signal arrives: **SIGTERM** (what orchestrators —
+/// Railway, Kubernetes, systemd — send on a deploy/restart) or **SIGINT**
+/// (Ctrl-C). Handling SIGTERM is what lets the graceful path
+/// (`runtime.shutdown()`, including its in-memory turn-state flush) run on a
+/// deploy; without it the process is killed on SIGTERM and in-flight turns are
+/// lost. On non-unix, only Ctrl-C is available.
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut sigterm) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = sigterm.recv() => {}
+                }
+            }
+            // If the SIGTERM handler can't be installed, still honor Ctrl-C.
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+fn webui_shutdown_signal() -> tokio::sync::oneshot::Receiver<()> {
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            tracing::info!(
-                target = "ironclaw::reborn::cli::serve",
-                "ctrl-c received; signalling WebChat v2 graceful shutdown",
-            );
-            let _ = shutdown_tx.send(());
-        }
+        wait_for_shutdown_signal().await;
+        tracing::info!(
+            target = "ironclaw::reborn::cli::serve",
+            "shutdown signal (SIGTERM/SIGINT) received; signalling WebChat v2 graceful shutdown",
+        );
+        let _ = shutdown_tx.send(());
     });
     shutdown_rx
 }

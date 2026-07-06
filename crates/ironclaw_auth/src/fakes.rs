@@ -80,6 +80,15 @@ impl InMemoryAuthProductServices {
         self.lock_state().refresh_backend_fails.insert(account_id);
     }
 
+    pub fn has_pending_refresh_backend_failure_for_tests(
+        &self,
+        account_id: CredentialAccountId,
+    ) -> bool {
+        self.lock_state()
+            .refresh_backend_fails
+            .contains(&account_id)
+    }
+
     pub fn invalid_grant_next_refresh_for_tests(&self, account_id: CredentialAccountId) {
         self.lock_state().refresh_invalid_grants.insert(account_id);
     }

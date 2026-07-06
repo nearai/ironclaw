@@ -3,7 +3,12 @@
 
 use std::sync::Arc;
 
-use ironclaw_filesystem::{LocalFilesystem, RootFilesystem, ScopedFilesystem};
+use async_trait::async_trait;
+use ironclaw_filesystem::{
+    BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemError,
+    FilesystemOperation, InMemoryBackend, LocalFilesystem, RecordVersion, RootFilesystem,
+    ScopedFilesystem, VersionedEntry,
+};
 use ironclaw_host_api::{
     AgentId, HostPath, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId,
     ThreadId, VirtualPath,
@@ -104,6 +109,43 @@ fn get_request(
     }
 }
 
+#[derive(Default)]
+struct DiskFullFilesystem {
+    inner: InMemoryBackend,
+}
+
+#[async_trait]
+impl RootFilesystem for DiskFullFilesystem {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        _entry: Entry,
+        _cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        Err(FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::WriteFile,
+            reason: "disk full".to_string(),
+        })
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+}
+
 #[tokio::test]
 async fn filesystem_checkpoint_state_store_persists_and_reopens() {
     let backend = Arc::new(engine_filesystem());
@@ -129,6 +171,29 @@ async fn filesystem_checkpoint_state_store_persists_and_reopens() {
         .expect("checkpoint payload should survive store reconstruction");
 
     assert_eq!(loaded, record);
+}
+
+#[tokio::test]
+async fn filesystem_checkpoint_state_store_maps_disk_full_write_failure_to_unavailable() {
+    let backend = Arc::new(DiskFullFilesystem::default());
+    let store = FilesystemCheckpointStateStore::new(scoped_checkpoint_state_fs(backend));
+    let scope = turn_scope("tenant1", "thread-checkpoint-state-disk-full");
+    let turn_id = TurnId::new();
+    let run_id = TurnRunId::new();
+
+    let error = store
+        .put_checkpoint_state(put_request(scope, turn_id, run_id, b"checkpoint".to_vec()))
+        .await
+        .unwrap_err();
+
+    let TurnError::Unavailable { reason } = error else {
+        panic!("expected retryable unavailable error, got {error:?}");
+    };
+    assert_eq!(
+        reason,
+        "checkpoint state persistence temporarily unavailable"
+    );
+    assert!(!reason.contains("disk full"));
 }
 
 #[tokio::test]

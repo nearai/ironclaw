@@ -15,7 +15,7 @@ Memory profile contracts are host-defined portability targets. Extensions may cl
 | --- | --- | --- | --- | --- |
 | `memory.context_retrieval.v1` | `memory.context.retrieve.v1` | `host_internal` | none (deferred host-managed flow) | deferred¹ |
 | `memory.interaction_log.v1` | `memory.interaction.record.v1` | `host_internal` | none (deferred host-managed flow) | deferred¹ |
-| `memory.document_store.v1` | `memory.document.read.v1`, `memory.document.write.v1` | `model` | `ironclaw.memory.native` `read`/`write` tools | none² |
+| `memory.document_store.v1` | `memory.document.read.v1`, `memory.document.write.v1` | `model` | `ironclaw.memory` `read`/`write` tools | none² |
 
 ¹ Required only by the deferred host-managed flow; no live implementer today.
 ² The live native provider is filesystem-backed and declares no host ports. The
@@ -48,7 +48,7 @@ schemas/memory/document-write.output.v1.json
 - **Host ports**: `host.storage.sql_transaction.first_party` and
   `host.events.audit` are registered in
   `ironclaw_host_runtime::default_host_port_catalog()`.
-- **Native v2 manifest (live)**: `ironclaw.memory.native` (HostBundled,
+- **Native v2 manifest (live)**: `ironclaw.memory` (HostBundled,
   `first_party` runtime) is parsed from its bundled TOML and registered on the
   **always-on first-party lane** (like the builtin toolset), not the
   catalog/lifecycle lane — so its tools are unconditionally available with no

@@ -153,7 +153,7 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
         "builtin.http.save should steer GitHub repository API tasks toward the GitHub extension"
     );
 
-    // Memory tools now live in the always-on `ironclaw.memory.native` package,
+    // Memory tools now live in the always-on `ironclaw.memory` package,
     // not the generic builtin package; assert their effects there.
     let native_package = native_memory_first_party_package().unwrap();
     let memory_write = native_package
@@ -322,6 +322,67 @@ async fn builtin_first_party_surface_lists_allowed_tools_in_registry_order() {
     assert!(properties.contains_key("handoff"));
     assert!(!properties.contains_key("mode"));
     assert!(!properties.contains_key("run_in_background"));
+}
+
+#[tokio::test]
+async fn builtin_memory_search_surface_declares_internal_scope_boundary() {
+    let runtime = runtime();
+    let request = VisibleCapabilityRequest::new(
+        execution_context(all_builtin_capability_ids()),
+        SurfaceKind::new("agent_loop").unwrap(),
+    )
+    .with_policy(CapabilitySurfacePolicy::allow_all())
+    .with_provider_trust(provider_trust());
+
+    let surface = runtime.visible_capabilities(request).await.unwrap();
+
+    let memory_search = surface
+        .capabilities
+        .iter()
+        .find(|capability| capability.descriptor.id.as_str() == MEMORY_SEARCH_CAPABILITY_ID)
+        .expect("memory_search must appear in surface");
+    assert!(
+        memory_search
+            .descriptor
+            .description
+            .contains("only Reborn internal persistent memory"),
+        "memory_search description should declare the internal-memory boundary: {}",
+        memory_search.descriptor.description
+    );
+    assert!(
+        memory_search
+            .descriptor
+            .description
+            .contains("does not search connected app or extension data"),
+        "memory_search description should avoid implying it can search external apps: {}",
+        memory_search.descriptor.description
+    );
+
+    let schema = &memory_search.descriptor.parameters_schema;
+    let schema_description = schema
+        .get("description")
+        .and_then(Value::as_str)
+        .expect("memory_search schema should describe its search scope");
+    assert!(
+        schema_description.contains("only Reborn internal persistent memory"),
+        "memory_search schema description should declare scope: {schema_description}"
+    );
+    assert!(
+        schema_description.contains("does not search connected app or extension data"),
+        "memory_search schema description should avoid external-app ambiguity: {schema_description}"
+    );
+
+    let query_description = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .and_then(|properties| properties.get("query"))
+        .and_then(|query| query.get("description"))
+        .and_then(Value::as_str)
+        .expect("memory_search query should have a description");
+    assert!(
+        query_description.contains("Reborn internal persistent memory"),
+        "memory_search query description should declare internal memory: {query_description}"
+    );
 }
 
 #[tokio::test]
@@ -2979,6 +3040,43 @@ async fn builtin_time_tolerates_null_string_sentinels_in_optional_fields() {
         output.get("iso").and_then(Value::as_str).is_some(),
         "time `now` should return an iso timestamp, got {output:?}"
     );
+}
+
+#[tokio::test]
+async fn builtin_time_now_accepts_utc_offset_compatibility_input() {
+    let output = invoke(
+        TIME_CAPABILITY_ID,
+        json!({
+            "operation": "now",
+            "utc_offset": "+03:00"
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["utc_offset"], json!("+03:00"));
+    assert!(
+        output
+            .get("local_iso")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.ends_with("+03:00")),
+        "time `now` should return local_iso with requested offset, got {output:?}"
+    );
+}
+
+#[tokio::test]
+async fn builtin_time_now_rejects_invalid_utc_offset() {
+    let failure = invoke(
+        TIME_CAPABILITY_ID,
+        json!({
+            "operation": "now",
+            "utc_offset": "not-an-offset"
+        }),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(failure, RuntimeFailureKind::InvalidInput);
 }
 
 #[tokio::test]
@@ -5708,23 +5806,24 @@ async fn builtin_http_runtime_policy_denial_stops_before_egress() {
 }
 
 #[tokio::test]
-async fn builtin_http_rejects_hosted_allowlist_plan_before_egress() {
+async fn builtin_http_uses_hosted_allowlist_plan_through_configured_egress() {
     let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
         br#"{"ok":true}"#.to_vec(),
     ));
     let runtime = runtime_with_http_egress_and_policy(Arc::clone(&egress), hosted_dev_policy());
 
-    let error = invoke_with_context(
+    let output = invoke_with_context(
         &runtime,
         HTTP_CAPABILITY_ID,
         json!({"url": "https://api.example.test/v1/items"}),
         execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
     )
     .await
-    .unwrap_err();
+    .unwrap();
 
-    assert_eq!(error, RuntimeFailureKind::Network);
-    assert!(egress.requests().is_empty());
+    assert_eq!(output["status"], json!(200));
+    assert_eq!(output["body_text"], json!(r#"{"ok":true}"#));
+    assert_eq!(egress.requests().len(), 1);
 }
 
 #[tokio::test]
@@ -6013,6 +6112,30 @@ async fn builtin_http_maps_runtime_egress_errors_by_source() {
 }
 
 #[tokio::test]
+async fn builtin_http_offline_runtime_egress_returns_network_failure_without_panicking() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_error(
+        RuntimeHttpEgressError::Network {
+            reason: "network_unavailable".to_string(),
+            request_bytes: 7,
+            response_bytes: 0,
+        },
+    ));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let error = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({"url": "https://api.example.test/v1/items"}),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Network);
+    assert_eq!(egress.requests().len(), 1);
+}
+
+#[tokio::test]
 async fn builtin_http_maps_panicking_runtime_egress_to_backend_failure() {
     let runtime = runtime_with_http_egress(Arc::new(PanickingRuntimeHttpEgress));
     let error = invoke_with_context(
@@ -6187,22 +6310,24 @@ async fn builtin_http_awaits_async_egress_without_blocking_tokio_worker() {
 }
 
 #[tokio::test]
-async fn builtin_read_file_rejects_scoped_virtual_filesystem_plan_before_handler_access() {
+async fn builtin_read_file_reads_scoped_virtual_filesystem_through_mount_services() {
     let temp = tempfile::tempdir().unwrap();
-    std::fs::write(temp.path().join("README.md"), "must not be read\n").unwrap();
+    std::fs::write(temp.path().join("README.md"), "scoped read\n").unwrap();
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
     let runtime = runtime_with_filesystem_and_policy(filesystem, network_denied_policy());
 
-    let error = invoke_with_context(
+    let output = invoke_with_context(
         &runtime,
         READ_FILE_CAPABILITY_ID,
         json!({"path": "/workspace/README.md"}),
         execution_context_with_mounts([READ_FILE_CAPABILITY_ID], mounts),
     )
     .await
-    .unwrap_err();
+    .unwrap();
 
-    assert_eq!(error, RuntimeFailureKind::Authorization);
+    assert_eq!(output["content"], json!("     1│ scoped read"));
+    assert_eq!(output["path"], json!("/workspace/README.md"));
+    assert_eq!(output["total_lines"], json!(1));
 }
 
 #[tokio::test]
@@ -6372,7 +6497,9 @@ async fn read_file_enforces_byte_budget_on_long_lines_and_offers_continuation() 
     );
     let next = read["next_offset"].as_u64().unwrap();
     assert_eq!(next, shown + 1);
-    assert!(content.contains(&format!("Use offset={next} to continue")));
+    assert!(content.contains("run ONE shell command or script"));
+    assert!(content.contains("do NOT page through it"));
+    assert!(content.contains(&format!("offset={next}")));
 
     // Resuming from next_offset advances past the already-shown lines.
     let resumed = invoke_with_context(
@@ -8610,7 +8737,7 @@ fn registry() -> ExtensionRegistry {
         .insert(builtin_first_party_package().unwrap())
         .unwrap();
     // Native memory rides the always-on lane alongside builtin; register its
-    // package so the `ironclaw.memory.native.*` capabilities are declared for
+    // package so the `ironclaw.memory.*` capabilities are declared for
     // dispatch + surface in these host-runtime tests (mirrors composition).
     registry
         .insert(native_memory_first_party_package().unwrap())
@@ -8676,13 +8803,16 @@ fn mounted_filesystem(path: &Path, permissions: MountPermissions) -> (LocalFiles
 }
 
 fn in_memory_mounted_filesystem(permissions: MountPermissions) -> (InMemoryBackend, MountView) {
-    let mounts = MountView::new(vec![MountGrant::new(
+    (InMemoryBackend::new(), workspace_mounts(permissions))
+}
+
+fn workspace_mounts(permissions: MountPermissions) -> MountView {
+    MountView::new(vec![MountGrant::new(
         MountAlias::new("/workspace").unwrap(),
         VirtualPath::new("/projects/coding-pack").unwrap(),
         permissions,
     )])
-    .unwrap();
-    (InMemoryBackend::new(), mounts)
+    .unwrap()
 }
 
 fn memory_mounts(permissions: MountPermissions) -> MountView {
@@ -9284,7 +9414,7 @@ fn trust_policy() -> HostTrustPolicy {
         // its own first-party trust entry (mirrors the composition trust policy).
         AdminEntry::for_local_manifest(
             PackageId::new(NATIVE_MEMORY_FIRST_PARTY_PROVIDER).unwrap(),
-            "/system/extensions/ironclaw.memory.native/manifest.toml".to_string(),
+            "/system/extensions/ironclaw.memory/manifest.toml".to_string(),
             None,
             HostTrustAssignment::first_party(),
             builtin_effects(),

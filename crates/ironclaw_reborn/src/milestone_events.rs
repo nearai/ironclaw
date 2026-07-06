@@ -240,6 +240,7 @@ impl DurableLoopHostMilestoneSink {
                 provider,
                 runtime,
                 reason_kind,
+                safe_summary,
             } => {
                 let mut scope = scope;
                 scope.invocation_id = InvocationId::from_uuid(activity_id.as_uuid());
@@ -250,6 +251,9 @@ impl DurableLoopHostMilestoneSink {
                     *runtime,
                     reason_kind.as_str(),
                 );
+                if let Some(summary) = safe_summary {
+                    event = event.with_error_summary(summary.as_str());
+                }
                 event.parent_invocation_id =
                     Some(InvocationId::from_uuid(milestone.run_id.as_uuid()));
                 event
@@ -382,6 +386,7 @@ mod tests {
         CapabilityActivityId, TurnId, TurnScope,
         run_profile::{
             CapabilityFailureKind, HookDecisionSummary, LoopDriverId, LoopHostMilestone,
+            LoopSafeSummary,
         },
     };
 
@@ -533,6 +538,12 @@ mod tests {
                 provider: Some(provider.clone()),
                 runtime: Some(RuntimeKind::Script),
                 reason_kind: CapabilityFailureKind::OperationFailed,
+                safe_summary: Some(
+                    LoopSafeSummary::new(
+                        "read_file failed for path workspace ironclaw_issues.json: file not found",
+                    )
+                    .expect("safe summary"),
+                ),
             });
 
         let sink = projector_for(thread_id, run_id);
@@ -554,6 +565,10 @@ mod tests {
         assert_eq!(event.provider.as_ref(), Some(&provider));
         assert_eq!(event.runtime, Some(RuntimeKind::Script));
         assert_eq!(event.error_kind.as_deref(), Some("operation_failed"));
+        assert_eq!(
+            event.error_summary.as_deref(),
+            Some("can't access your workspace file")
+        );
     }
 
     #[tokio::test]
@@ -580,6 +595,7 @@ mod tests {
                 provider: Some(provider.clone()),
                 runtime: Some(RuntimeKind::Script),
                 reason_kind: CapabilityFailureKind::OperationFailed,
+                safe_summary: None,
             },
         ] {
             let (mut milestone, thread_id, run_id) = fixture_milestone(kind);

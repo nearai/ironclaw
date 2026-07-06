@@ -15,15 +15,16 @@ use crate::title::derive_thread_title;
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
-    AppendToolResultReferenceRequest, CapabilityDisplayPreviewEnvelope, ContextMessage,
-    ContextMessages, ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest,
-    LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
-    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
-    MessageStatus, RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
-    SessionThreadRecord, SessionThreadService, SummaryArtifact, SummaryModelContextPolicy,
-    ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange,
-    ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope,
-    UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
+    AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest,
+    CapabilityDisplayPreviewEnvelope, ContextMessage, ContextMessages, ContextWindow,
+    CreateSummaryArtifactRequest, EnsureThreadRequest, LatestThreadMessageRequest,
+    ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
+    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
+    SessionThreadService, SummaryArtifact, SummaryModelContextPolicy, ThreadHistory,
+    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest,
+    ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
+    UpdateToolResultReferenceRequest,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -282,6 +283,48 @@ impl SessionThreadService for InMemorySessionThreadService {
             sequence: thread.next_sequence,
             kind: MessageKind::Assistant,
             status: MessageStatus::Draft,
+            actor_id: None,
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            turn_id: None,
+            turn_run_id: Some(request.turn_run_id),
+            tool_result_ref: None,
+            tool_result_provider_call: None,
+            content: Some(request.content.into_text()),
+            attachments: Vec::new(),
+            redaction_ref: None,
+        };
+        thread.next_sequence += 1;
+        // Appending a message is thread activity; bump the last-activity
+        // stamp so activity-ordered listings surface this thread first.
+        thread.record.updated_at = Some(Utc::now());
+        thread.messages.push(message.clone());
+        Ok(message)
+    }
+
+    async fn append_finalized_assistant_message(
+        &self,
+        request: AppendFinalizedAssistantMessageRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let mut state = self.state.lock().await;
+        let thread = get_thread_mut(&mut state, &request.scope, &request.thread_id)?;
+        if let Some(existing) = thread.messages.iter_mut().find(|message| {
+            message.kind == MessageKind::Assistant
+                && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
+        }) {
+            if existing.status == MessageStatus::Draft {
+                existing.status = MessageStatus::Finalized;
+                existing.content = Some(request.content.into_text());
+                existing.attachments = Vec::new();
+            }
+            return Ok(existing.clone());
+        }
+        let message = ThreadMessageRecord {
+            message_id: ThreadMessageId::new(),
+            thread_id: request.thread_id.clone(),
+            sequence: thread.next_sequence,
+            kind: MessageKind::Assistant,
+            status: MessageStatus::Finalized,
             actor_id: None,
             source_binding_id: None,
             reply_target_binding_id: None,

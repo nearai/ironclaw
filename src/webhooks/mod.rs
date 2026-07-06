@@ -617,6 +617,7 @@ mod tests {
         });
 
         let payload = br#"{"action":"opened"}"#;
+        use hmac::KeyInit as _;
         let mut mac =
             hmac::Hmac::<sha2::Sha256>::new_from_slice(b"github-secret").expect("hmac key");
         mac.update(payload);

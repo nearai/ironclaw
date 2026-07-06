@@ -45,7 +45,7 @@ v2 adds, per the landed implementation:
 
 A host-bundled manifest's declarations are **not** authority on their own: a
 `first_party`/`system` runtime takes effect only when the host also registers a
-matching service/handler (see `ironclaw.memory.native`, whose manifest's
+matching service/handler (see `ironclaw.memory`, whose manifest's
 `service` must match the host-registered native memory provider identity).
 
 ## Consequences
