@@ -416,6 +416,7 @@ mod tests {
             Vec::new(),
             Arc::new(InMemorySecretStore::new()),
             OAuthProviderRuntimePorts::new(egress.clone(), Arc::new(NoopObligationHandler)),
+            #[cfg(feature = "slack-v2-host-beta")]
             None,
         )
         .expect("provider client composition")
@@ -461,6 +462,7 @@ mod tests {
                 Arc::new(RecordingEgress::ok(Vec::new())),
                 Arc::new(NoopObligationHandler),
             ),
+            #[cfg(feature = "slack-v2-host-beta")]
             None,
         )
         .expect("provider composition");
@@ -553,6 +555,7 @@ mod tests {
             Vec::new(),
             secret_store,
             OAuthProviderRuntimePorts::new(egress.clone(), Arc::new(NoopObligationHandler)),
+            #[cfg(feature = "slack-v2-host-beta")]
             None,
         )
         .expect("provider composition")
@@ -661,6 +664,7 @@ mod tests {
             Vec::new(),
             secret_store,
             OAuthProviderRuntimePorts::new(egress.clone(), Arc::new(NoopObligationHandler)),
+            #[cfg(feature = "slack-v2-host-beta")]
             None,
         )
         .expect("provider composition")
