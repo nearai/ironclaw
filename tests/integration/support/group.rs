@@ -658,7 +658,6 @@ impl RebornIntegrationGroupBuilder {
                 Arc::new(StaticCapabilitySurfaceProfileResolver {
                     allow_set: self
                         .narrowed_bridged_allow_set
-                        .clone()
                         .unwrap_or(CapabilityAllowSet::All),
                 })
             } else {

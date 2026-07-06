@@ -29,7 +29,7 @@ use ironclaw_filesystem::{
     CompositeRootFilesystem, InMemoryBackend, LibSqlRootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
-    InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
+    CapabilityId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
     RuntimeHttpEgressRequest, VirtualPath,
 };
 use ironclaw_llm::Role;
@@ -124,7 +124,7 @@ pub struct RebornIntegrationHarnessBuilder {
     tool_disclosure: Option<ToolDisclosureMode>,
     /// #5647 RED-pin seam: pass-through to
     /// `RebornIntegrationGroupBuilder::with_narrowed_capability_allow_set_for_bridged_test`. `None` (default) preserves today's forced-`All` behavior.
-    narrowed_bridged_allow_set: Option<Vec<&'static str>>,
+    narrowed_bridged_allow_set: Option<Vec<CapabilityId>>,
     /// C-BUDGET: when `true`, wire the production budget accountant into the
     /// degenerate one-thread group (see `RebornIntegrationGroupBuilder::budget_accounting`).
     budget_accounting: bool,
@@ -261,7 +261,11 @@ impl RebornIntegrationHarnessBuilder {
         mut self,
         ids: impl IntoIterator<Item = &'static str>,
     ) -> Self {
-        self.narrowed_bridged_allow_set = Some(ids.into_iter().collect());
+        self.narrowed_bridged_allow_set = Some(
+            ids.into_iter()
+                .map(|id| CapabilityId::new(id).expect("test capability id must be valid"))
+                .collect(),
+        );
         self
     }
 

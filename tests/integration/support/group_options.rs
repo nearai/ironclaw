@@ -99,12 +99,9 @@ impl RebornIntegrationGroupBuilder {
     /// bridged deferral; requires `.with_tool_disclosure_bridged()` too — `into_group` fails fast otherwise.
     pub fn with_narrowed_capability_allow_set_for_bridged_test(
         mut self,
-        ids: impl IntoIterator<Item = &'static str>,
+        ids: impl IntoIterator<Item = CapabilityId>,
     ) -> Self {
-        self.narrowed_bridged_allow_set =
-            Some(CapabilityAllowSet::allowlist(ids.into_iter().map(|id| {
-                CapabilityId::new(id).expect("test capability id must be valid")
-            })));
+        self.narrowed_bridged_allow_set = Some(CapabilityAllowSet::allowlist(ids));
         self
     }
 
