@@ -46,11 +46,11 @@ export function storeToken(token) {
 // Must be a non-empty token with no control characters; `crypto.randomUUID`
 // satisfies the validator in `webui_inbound::parse_client_action_id`.
 export function clientActionId() {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+  if (typeof crypto !== "undefined" && crypto && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
   }
   const bytes = new Uint8Array(16);
-  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+  if (typeof crypto !== "undefined" && crypto && typeof crypto.getRandomValues === "function") {
     // Must be invoked on `crypto` — an unbound call throws `Illegal invocation`.
     crypto.getRandomValues(bytes);
   } else {

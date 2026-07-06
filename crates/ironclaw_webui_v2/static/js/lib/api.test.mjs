@@ -21,14 +21,32 @@ function withCryptoGlobal(replacement, run) {
     configurable: true,
     writable: true,
   });
-  try {
-    return run();
-  } finally {
+  const restore = () => {
     if (prior) {
       Object.defineProperty(globalThis, "crypto", prior);
     } else {
       delete globalThis.crypto;
     }
+  };
+  try {
+    const result = run();
+    if (result && typeof result.then === "function") {
+      return result.then(
+        (value) => {
+          restore();
+          return value;
+        },
+        (error) => {
+          restore();
+          throw error;
+        },
+      );
+    }
+    restore();
+    return result;
+  } catch (error) {
+    restore();
+    throw error;
   }
 }
 
@@ -323,5 +341,13 @@ test("clientActionId yields distinct non-zero ids without Web Crypto", () => {
     // made the server dedupe distinct sends as replays of one action.
     assert.notEqual(first, "0".repeat(32));
     assert.notEqual(first, second);
+  });
+});
+
+test("clientActionId falls back when global crypto is null", () => {
+  withCryptoGlobal(null, () => {
+    const id = clientActionId();
+    assert.match(id, /^[0-9a-f]{32}$/);
+    assert.notEqual(id, "0".repeat(32));
   });
 });
