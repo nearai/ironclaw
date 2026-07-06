@@ -51,6 +51,11 @@ on:
         type: string
         required: false
         default: ""
+      target_branch:
+        description: "Optional branch name for the Reborn WebUI v2 live QA checkout. Used by /canary PR comments."
+        type: string
+        required: false
+        default: ""
       target_pr:
         description: "Optional pull request number for validating target_ref before running Reborn WebUI v2 live QA with secrets."
         type: string
@@ -1169,6 +1174,10 @@ jobs:
           CANARY_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           GITHUB_SHA: ${{ github.sha }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          CANARY_TARGET_BRANCH: ${{ github.event_name == 'workflow_dispatch' && inputs.target_branch || '' }}
+          CANARY_TARGET_PR: ${{ github.event_name == 'workflow_dispatch' && inputs.target_pr || '' }}
+          CANARY_TARGET_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.target_ref || '' }}
+          CANARY_TRIGGER_CONTEXT: ${{ github.event_name == 'workflow_dispatch' && inputs.trigger_context || '' }}
           CANARY_CREATE_ISSUES: "0"
         run: |
           # The notifier is intentionally side-effect-light: it exits 0 even on
