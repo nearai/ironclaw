@@ -25,6 +25,9 @@ fn main() {
     let generated_dist_dir = out_dir.join("webui-v2-dist").join("dist");
 
     println!("cargo:rerun-if-changed=static");
+    println!("cargo:rerun-if-changed=frontend/src");
+    println!("cargo:rerun-if-changed=frontend/public");
+    println!("cargo:rerun-if-changed=frontend/vite.config.ts");
     println!("cargo:rerun-if-changed=frontend/build.mjs");
     println!("cargo:rerun-if-changed=frontend/package.json");
     println!("cargo:rerun-if-changed=frontend/pnpm-lock.yaml");
@@ -225,16 +228,11 @@ fn collect(root: &Path, dir: &Path, url_prefix: &str, out: &mut Vec<(String, Pat
             }
             collect(root, &path, url_prefix, out);
         } else if file_type.is_file() {
-            // `*.test.js` / `*.test.mjs` are colocated Node `node:test` unit
-            // tests, not browser assets — never embed or serve them (shipping
+            // Colocated frontend tests are not browser assets — never embed or serve them (shipping
             // test-only code to clients is dead weight + needless exposure). A
-            // path ending in `.test.js`/`.test.mjs` implies its file name does
-            // too, so check the path. The `assets.rs` regression tests that
-            // assert `.test.mjs` content read it from disk, not this table.
-            if path
-                .to_str()
-                .is_some_and(|p| p.ends_with(".test.js") || p.ends_with(".test.mjs"))
-            {
+            // path ending in `.test.*` implies its file name does too, so check
+            // the path. Source-level regression tests read them from disk.
+            if path.to_str().is_some_and(|p| p.contains(".test.")) {
                 continue;
             }
             println!("cargo:rerun-if-changed={}", path.display());

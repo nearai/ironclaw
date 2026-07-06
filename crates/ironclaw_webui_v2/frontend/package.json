@@ -15,7 +15,7 @@
     "build:legacy": "node build.mjs",
     "build:vite": "vite build",
     "typecheck": "tsc --noEmit",
-    "test": "node --test '../static/js/**/*.test.{js,mjs}' && vitest run --passWithNoTests",
+    "test": "vitest run",
     "vendor": "bash vendor.sh",
     "all": "bash build.sh"
   },

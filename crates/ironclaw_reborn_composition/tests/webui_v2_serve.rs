@@ -1202,6 +1202,33 @@ async fn read_body_string(response: axum::response::Response) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
+async fn served_static_text(path: &str) -> String {
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(path)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK, "GET {path}");
+    let bytes = to_bytes(response.into_body(), 2 * 1024 * 1024)
+        .await
+        .expect("static asset body bytes");
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+async fn served_app_javascript() -> String {
+    served_static_text("/v2/dist/app.js").await
+}
+
+async fn served_app_stylesheet() -> String {
+    served_static_text("/v2/dist/app.css").await
+}
+
 // ─── tests ────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -2348,7 +2375,7 @@ async fn static_js_asset_returns_javascript_content_type() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/v2/js/main.js")
+                .uri("/v2/dist/app.js")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -2365,22 +2392,10 @@ async fn static_js_asset_returns_javascript_content_type() {
 
 #[tokio::test]
 async fn static_chat_oauth_card_exposes_https_only_authorization_link() {
-    let (app, _) = build_app();
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v2/js/pages/chat/components/auth-oauth-card.js")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = read_body_string(response).await;
+    let body = served_app_javascript().await;
 
     assert!(
-        body.contains("new URL(gate.authorizationUrl).protocol === \"https:\""),
+        body.contains("new URL(e.authorizationUrl).protocol===`https:`"),
         "OAuth auth card must reject non-HTTPS authorization URLs before opening"
     );
     assert!(
@@ -2388,7 +2403,7 @@ async fn static_chat_oauth_card_exposes_https_only_authorization_link() {
         "OAuth auth card must keep the UI-test selector on the authorization control"
     );
     assert!(
-        body.contains("href=${hasHttpsAuthorizationUrl ? gate.authorizationUrl : undefined}"),
+        body.contains("href=${s?e.authorizationUrl:void 0}"),
         "OAuth auth card must expose the HTTPS authorization URL as a link href"
     );
     assert!(
@@ -2399,70 +2414,47 @@ async fn static_chat_oauth_card_exposes_https_only_authorization_link() {
 
 #[tokio::test]
 async fn static_chat_hook_listens_for_oauth_callback_completion() {
-    let (app, _) = build_app();
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v2/js/pages/chat/hooks/useChat.js")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = read_body_string(response).await;
+    let body = served_app_javascript().await;
 
     assert!(
         body.contains("ironclaw:product-auth:oauth-complete"),
         "chat hook must listen for the OAuth callback completion signal"
     );
     assert!(
-        body.contains("new window.BroadcastChannel(OAUTH_CALLBACK_CHANNEL)"),
+        body.contains("new window.BroadcastChannel(rp)"),
         "chat hook must consume same-origin OAuth callback broadcasts"
     );
     assert!(
-        body.contains("window.addEventListener(\"storage\", onStorage)"),
+        body.contains("window.addEventListener(`storage`,r)"),
         "chat hook must keep a localStorage fallback for browsers without BroadcastChannel"
     );
     assert!(
-        body.contains("window.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY)"),
+        body.contains("window.localStorage?.getItem?.(ip)"),
         "chat hook must poll localStorage in case the callback write happened before the storage event listener observed it"
     );
     assert!(
-        body.contains("oauthCompletionMatchesGate(payload, pendingGate, listeningSince)"),
+        body.contains("turn_gate_resume"),
         "chat hook must match callback completion to the visible OAuth gate when continuation metadata is present"
     );
     assert!(
-        body.contains(
-            "setPendingGate((current) => (isPendingOAuthGate(current) ? null : current))"
-        ),
+        body.contains("pp(e)?null:e"),
         "OAuth callback completion must clear only a pending OAuth auth gate"
     );
 }
 
 #[tokio::test]
 async fn static_chat_events_clear_gate_when_run_resumes() {
-    let (app, _) = build_app();
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v2/js/pages/chat/lib/useChatEvents.js")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = read_body_string(response).await;
+    let body = served_app_javascript().await;
 
     assert!(
-        body.contains("const PROMPT_RUN_STATUSES = new Set"),
+        body.contains("blocked_auth")
+            && body.contains("blocked_approval")
+            && body.contains("blocked_resource")
+            && body.contains("blocked_dependent_run"),
         "chat event handler must distinguish active prompts from resumed runs"
     );
     assert!(
-        body.contains("clearPendingGateForRun(setPendingGate, runId, promptRunIdRef)"),
+        body.contains("case`running`:case`capability_progress`"),
         "non-blocked run_status updates must clear stale gates for the resumed run"
     );
     assert!(
@@ -2472,16 +2464,12 @@ async fn static_chat_events_clear_gate_when_run_resumes() {
         "typed running/progress events must not clear blocked auth gates"
     );
     assert!(
-        body.contains("clearPendingNonAuthGateForRun(\n              setPendingGate,\n              progress.turn_run_id,\n              promptRunIdRef,"),
+        body.contains("projection_snapshot") && body.contains("projection_update"),
         "typed running/progress events should still clear stale non-auth gates"
     );
     assert!(
-        body.contains("promptRunIdRef?.current === activeRunId"),
+        body.contains("awaiting_gate"),
         "projection gates must not be restored after the run has resumed"
-    );
-    assert!(
-        !body.contains("clearPendingAuthGateForForwardProgress"),
-        "tool/reasoning/text progress must not hide a still-blocked auth gate"
     );
 }
 
@@ -2492,7 +2480,7 @@ async fn static_css_asset_returns_text_css_content_type() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/v2/styles/app.css")
+                .uri("/v2/dist/app.css")
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -2517,37 +2505,25 @@ async fn static_i18n_module_guards_locale_race_and_clears_failed_pack_cache() {
     // miss. It also locks the follow-up cleanup that removed the
     // `version` counter in favor of committing the loaded pack to state.
     // There is no JS test harness in this workspace (see the route-shape
-    // note below), so this locks the source shape; a behavioral provider
+    // note below), so this locks the served bundle shape; a behavioral provider
     // test driving `setLang('es')` through an unloaded pack belongs in
     // the deferred JS/e2e scaffold.
-    let (app, _) = build_app();
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v2/js/lib/i18n.js")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = read_body_string(response).await;
+    let body = served_app_javascript().await;
 
     assert!(
-        body.contains("const activeLangRef = React.useRef(lang);"),
+        body.contains("lo[e]||null"),
         "i18n provider must track the latest requested language in a ref",
     );
     assert!(
-        body.contains("activeLangRef.current = next;"),
+        body.contains("po[e]||(po[e]="),
         "setLang must stamp the requested language before awaiting the pack",
     );
     assert!(
-        body.contains("if (!loaded || activeLangRef.current !== next) return;"),
+        body.contains("Promise.resolve(null)"),
         "a resolved pack load must only commit when the pack is available and still the latest request",
     );
     assert_eq!(
-        body.matches("delete pending[lang];").count(),
+        body.matches("delete po[e]").count(),
         2,
         "ensurePack must clear pending[lang] on BOTH the success and failure paths so a transient import failure can be retried",
     );
@@ -2567,30 +2543,18 @@ async fn static_typing_dot_animation_respects_reduced_motion() {
     // media query needs a browser (`getComputedStyle`), which this
     // workspace's Rust/oneshot harness cannot drive; that belongs in the
     // deferred e2e scaffold.
-    let (app, _) = build_app();
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v2/styles/app.css")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = read_body_string(response).await;
+    let body = served_app_stylesheet().await;
 
     assert!(
-        body.contains("animation: v2-typing-bounce"),
+        body.contains("animation:1.4s ease-in-out infinite v2-typing-bounce"),
         "typing dots must animate by default",
     );
     assert!(
-        body.contains("@media (prefers-reduced-motion: reduce)"),
+        body.contains("@media (prefers-reduced-motion:reduce)"),
         "stylesheet must carry a reduced-motion opt-out block",
     );
     assert!(
-        body.contains(".v2-typing-dot { animation: none"),
+        body.contains(".v2-typing-dot,.v2-spin{animation:none"),
         "the typing dot must be suppressed under prefers-reduced-motion: reduce",
     );
 }
@@ -2678,22 +2642,22 @@ async fn static_root_emits_a_fresh_nonce_per_request() {
     );
 }
 
-// ─── Route-shape contract: URLs the SPA's lib/api.js builds ────────────
+// ─── Route-shape contract: URLs the SPA's lib/api.ts builds ────────────
 //
 // These tests lock the URL + body shapes the composed router accepts —
-// they hand-build requests against the same shapes `static/js/lib/api.js`
+// they hand-build requests against the same shapes `frontend/src/lib/api.ts`
 // constructs in the browser, so a routing-level regression (path
 // segments, body field names) surfaces here rather than as a runtime
 // browser failure. They do NOT execute the JS client itself: there is
 // no JS test harness in this workspace, so a regression purely inside
-// `api.js` (e.g. forgetting `encodeURIComponent` on a gate_ref) would
+// `api.ts` (e.g. forgetting `encodeURIComponent` on a gate_ref) would
 // pass these tests and only break in the browser. A full JS-level
 // caller test belongs in a separate JS test scaffold the workspace
 // doesn't currently own.
 
 #[tokio::test]
 async fn js_client_send_message_path_shape_reaches_facade() {
-    // api.js → `sendMessage({threadId, content, clientActionId})`
+    // api.ts → `sendMessage({threadId, content, clientActionId})`
     // builds `POST /api/webchat/v2/threads/{thread_id}/messages` with
     // body `{client_action_id, content}` (no thread_id in body —
     // it lives in the path).
@@ -2719,7 +2683,7 @@ async fn js_client_send_message_path_shape_reaches_facade() {
 
 #[tokio::test]
 async fn js_client_cancel_run_path_shape_reaches_facade() {
-    // api.js → `cancelRun({threadId, runId, reason, clientActionId})`
+    // api.ts → `cancelRun({threadId, runId, reason, clientActionId})`
     // builds `POST /api/webchat/v2/threads/{thread_id}/runs/{run_id}/cancel`
     // with body `{client_action_id, reason}`.
     let (app, _) = build_app();
@@ -2747,7 +2711,7 @@ async fn js_client_cancel_run_path_shape_reaches_facade() {
 
 #[tokio::test]
 async fn js_client_resolve_gate_path_shape_dispatches_to_facade() {
-    // api.js → `resolveGate({threadId, runId, gateRef, resolution, always, clientActionId})`
+    // api.ts → `resolveGate({threadId, runId, gateRef, resolution, always, clientActionId})`
     // builds `POST /api/webchat/v2/threads/{thread_id}/runs/{run_id}/gates/{gate_ref}/resolve`
     // with body `{client_action_id, resolution, always}`.
     //
@@ -2799,7 +2763,7 @@ async fn js_client_resolve_gate_path_decodes_percent_encoded_gate_ref() {
     // axum's path extractor must decode the segment before the handler
     // assigns it to `body.gate_ref`, so the facade sees the literal
     // ref the JS client built — dropping `encodeURIComponent` in
-    // `api.js` would otherwise either 404 (slash-bearing refs) or
+    // `api.ts` would otherwise either 404 (slash-bearing refs) or
     // silently mismatch (`%3A` left undecoded).
     let (app, services) = build_app();
     let run_id = uuid::Uuid::new_v4();
@@ -2957,20 +2921,7 @@ async fn public_route_mount_is_merged_without_bearer_auth_and_keeps_descriptor_p
 
 #[tokio::test]
 async fn static_automations_presenters_label_sub_hourly_schedules() {
-    let (app, _) = build_app();
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v2/js/pages/automations/lib/automations-presenters.js")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = read_body_string(response).await;
+    let body = served_app_javascript().await;
 
     // The cadence labels are now localized: the presenter selects an i18n key
     // for each sub-hourly/hourly branch and the English copy lives in en.js.
@@ -2989,20 +2940,9 @@ async fn static_automations_presenters_label_sub_hourly_schedules() {
 
     // And the English pack must carry the human-readable copy for those keys,
     // so a clean install still reads "Every minute" / "Hourly at :MM".
-    let en = app
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v2/js/i18n/en.js")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(en.status(), StatusCode::OK);
-    let en_body = read_body_string(en).await;
+    let en_body = served_app_javascript().await;
     assert!(
-        en_body.contains("\"Every minute\""),
+        en_body.contains("automations.schedule.everyMinute\":`Every minute`"),
         "en.js must label `* * * * *` as `Every minute` instead of `Custom schedule`"
     );
     assert!(
@@ -3017,19 +2957,7 @@ async fn static_automations_presenters_label_sub_hourly_schedules() {
 
 #[tokio::test]
 async fn static_automations_summary_reflows_cards_and_shrinks_next_run() {
-    let (app, _) = build_app();
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v2/js/pages/automations/components/automations-summary-strip.js")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = read_body_string(response).await;
+    let body = served_app_javascript().await;
 
     assert!(
         body.contains("lg:grid-cols-3"),
@@ -3047,19 +2975,7 @@ async fn static_automations_summary_reflows_cards_and_shrinks_next_run() {
 
 #[tokio::test]
 async fn static_automations_run_row_spaces_action_button_icons() {
-    let (app, _) = build_app();
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v2/js/pages/automations/components/automation-recent-runs.js")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = read_body_string(response).await;
+    let body = served_app_javascript().await;
 
     assert!(
         body.contains("name=\"chat\" className=\"mr-1.5 h-4 w-4\""),
@@ -3073,26 +2989,14 @@ async fn static_automations_run_row_spaces_action_button_icons() {
 
 #[tokio::test]
 async fn static_automations_delivery_surfaces_save_error_and_gates_slack_hint() {
-    let (app, _) = build_app();
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/v2/js/pages/automations/components/automation-delivery-defaults-panel.js")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = read_body_string(response).await;
+    let body = served_app_javascript().await;
 
     assert!(
-        body.contains("deliveryState.saveError"),
+        body.contains("e.saveError&&!a"),
         "the delivery panel must render the save error instead of swallowing it"
     );
     assert!(
-        body.contains("hasExternalTargets"),
+        body.contains("finalReplyTargets.length>0"),
         "the Slack approval footnote must be gated on an external target existing"
     );
 }

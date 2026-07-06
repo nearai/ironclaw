@@ -1,6 +1,7 @@
 {
   "compilerOptions": {
     "allowJs": true,
+    "allowImportingTsExtensions": true,
     "checkJs": false,
     "isolatedModules": true,
     "lib": ["DOM", "DOM.Iterable", "ES2022"],
