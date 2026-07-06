@@ -37,8 +37,8 @@ use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_reborn_config::RebornBootConfig;
 use ironclaw_triggers::{TriggerId, TriggerPollerWorkerConfig};
 
-use crate::hooks::HooksActivationConfig;
 use crate::input::RebornBuildInput;
+use crate::observability::hooks::HooksActivationConfig;
 
 /// Caller-owned identity for an assembled Reborn runtime.
 ///
@@ -495,7 +495,7 @@ impl RebornRuntimeInput {
     ///
     /// The observer receives a **bounded safe preview** of arguments/results
     /// (long strings truncated, large arrays capped — see
-    /// [`crate::trajectory_observer`]), keeping a downstream logs/UI/telemetry
+    /// [`crate::observability::trajectory_observer`]), keeping a downstream logs/UI/telemetry
     /// sink within the same boundary the model-visible display path enforces.
     /// A consumer that needs the unbounded raw payloads (and owns its own
     /// redaction/access control) must opt in via
@@ -510,8 +510,11 @@ impl RebornRuntimeInput {
         mut self,
         observer: Arc<dyn crate::RebornTrajectoryObserver>,
     ) -> Self {
-        self.trajectory_observer =
-            Some(crate::trajectory_observer::SafePreviewTrajectoryObserver::wrap(observer));
+        self.trajectory_observer = Some(
+            crate::observability::trajectory_observer::SafePreviewTrajectoryObserver::wrap(
+                observer,
+            ),
+        );
         self
     }
 

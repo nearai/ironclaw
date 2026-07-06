@@ -77,18 +77,6 @@ impl HandleOutcome {
     }
 }
 
-impl From<crate::bridge::BridgeOutcome> for HandleOutcome {
-    fn from(outcome: crate::bridge::BridgeOutcome) -> Self {
-        match outcome {
-            crate::bridge::BridgeOutcome::Respond(s) => {
-                HandleOutcome::Respond(OutgoingResponse::text(s))
-            }
-            crate::bridge::BridgeOutcome::NoResponse => HandleOutcome::NoResponse,
-            crate::bridge::BridgeOutcome::Pending => HandleOutcome::Pending,
-        }
-    }
-}
-
 /// Static greeting persisted to DB and broadcast on first launch.
 ///
 /// Collapse a tool output string into a single-line preview for display.
@@ -121,8 +109,6 @@ pub(crate) fn truncate_for_preview(output: &str, max_chars: usize) -> String {
 /// a pending approval or it's an explicit slash command). Returns `false`
 /// when the message should be treated as regular `UserInput`.
 ///
-/// Used by the legacy routing path; the engine_v2 path performs an equivalent
-/// check earlier (before the BeforeInbound hook).
 fn should_route_as_approval(thread_state: ThreadState, raw_content: &str) -> bool {
     thread_state == ThreadState::AwaitingApproval || raw_content.trim().starts_with('/')
 }
@@ -559,9 +545,6 @@ pub struct Agent {
     /// the engine to gateway/manual trigger entry points.
     pub(super) routine_engine_slot:
         Arc<tokio::sync::RwLock<Option<Arc<crate::agent::routine_engine::RoutineEngine>>>>,
-    /// Engine v2 mission manager for firing learning missions (set after engine init).
-    pub(crate) mission_manager_slot:
-        Arc<tokio::sync::RwLock<Option<Arc<ironclaw_engine::MissionManager>>>>,
 }
 
 impl Agent {
@@ -639,7 +622,6 @@ impl Agent {
             hygiene_config,
             routine_config,
             routine_engine_slot: Arc::new(tokio::sync::RwLock::new(None)),
-            mission_manager_slot: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 
@@ -656,15 +638,6 @@ impl Agent {
         &self,
     ) -> Option<Arc<crate::agent::routine_engine::RoutineEngine>> {
         self.routine_engine_slot.read().await.clone()
-    }
-
-    /// Set the engine v2 mission manager (called after engine init).
-    pub async fn set_mission_manager(&self, mgr: Arc<ironclaw_engine::MissionManager>) {
-        *self.mission_manager_slot.write().await = Some(mgr);
-    }
-
-    pub(crate) async fn mission_manager(&self) -> Option<Arc<ironclaw_engine::MissionManager>> {
-        self.mission_manager_slot.read().await.clone()
     }
 
     // Convenience accessors
@@ -739,10 +712,6 @@ impl Agent {
         &self.deps.llm
     }
 
-    pub(crate) fn config(&self) -> &AgentConfig {
-        &self.config
-    }
-
     /// Get the cheap/fast LLM provider, falling back to the main one.
     pub(crate) fn cheap_llm(&self) -> &Arc<dyn LlmProvider> {
         self.deps.cheap_llm.as_ref().unwrap_or(&self.deps.llm)
@@ -774,13 +743,110 @@ impl Agent {
         &self.deps.hooks
     }
 
+    /// Approve a WASM-channel pairing code from a chat submission.
+    ///
+    /// Independent of any engine version — touches only the pairing store and
+    /// extension manager. Returns a user-facing status string. (Relocated from
+    /// the former engine-v2 bridge; see #3317.)
+    async fn process_pairing_claim(
+        &self,
+        message: &IncomingMessage,
+        channel: &str,
+        code: &str,
+    ) -> String {
+        use ironclaw_common::ExtensionName;
+
+        // Validate the channel name at the boundary, mirroring
+        // `web::features::pairing::parse_channel`. We discard the canonical
+        // form and carry the lowercased raw string forward because the pairing
+        // store keys off the un-folded name.
+        let lowered = channel.to_ascii_lowercase();
+        if ExtensionName::new(&lowered).is_err() {
+            // The raw `channel` token comes from chat input and is unbounded.
+            // Cap the echo at 32 characters and strip non-printable / non-
+            // alphanumeric characters so a hostile or accidentally-pasted blob
+            // can't blow up the chat reply or smuggle control characters /
+            // Markdown through to the SSE / Telegram / TUI surface.
+            let preview: String = channel
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+                .take(32)
+                .collect();
+            let preview = if preview.is_empty() {
+                "<empty>".to_string()
+            } else {
+                preview
+            };
+            return format!(
+                "Invalid channel name `{preview}` — channel names must be \
+                 lowercase letters, digits, hyphens, or underscores (e.g. \
+                 `telegram`, `slack-relay`)."
+            );
+        }
+
+        let Some(ext_mgr) = self.deps.extension_manager.as_ref() else {
+            return "Pairing is not available — extension manager is not configured.".into();
+        };
+        let Some(pairing_store) = ext_mgr.pairing_store() else {
+            return "Pairing is not available — pairing store is not configured.".into();
+        };
+
+        // Bind the pairing to the message's user_id. `from_trusted` matches the
+        // web handler's pattern: the user identity is sourced from the inbound
+        // channel auth, not user-controlled chat content.
+        let owner_id = crate::ownership::UserId::from_trusted(
+            message.user_id.clone(),
+            crate::ownership::UserRole::Regular,
+        );
+
+        let approval = match pairing_store.approve(&lowered, code, &owner_id).await {
+            Ok(approval) => approval,
+            Err(crate::error::DatabaseError::NotFound { .. }) => {
+                return "Invalid or expired pairing code.".into();
+            }
+            Err(e) => {
+                tracing::debug!(channel = %lowered, error = %e, "pairing approval failed");
+                return "Internal error processing pairing approval.".into();
+            }
+        };
+
+        // Propagate to the running channel so the WASM channel picks up the new
+        // owner binding without a restart. On propagation failure, revert the
+        // DB approval so the user can retry.
+        match ext_mgr
+            .complete_pairing_approval(&lowered, &approval.external_id)
+            .await
+        {
+            Ok(()) => {
+                format!("Pairing approved — `{lowered}` is now linked to your account.")
+            }
+            Err(e) => {
+                tracing::warn!(
+                    channel = %lowered,
+                    error = %e,
+                    "pairing approval propagation to running channel failed"
+                );
+                if let Err(revert_err) = pairing_store.revert_approval(&approval).await {
+                    tracing::warn!(
+                        channel = %lowered,
+                        error = %revert_err,
+                        "failed to revert pairing approval after propagation failure"
+                    );
+                }
+                "Pairing was approved, but the running channel could not be updated. \
+                 Please retry or restart the channel."
+                    .into()
+            }
+        }
+    }
+
     /// Build platform metadata for self-awareness in system prompts.
-    pub(crate) async fn platform_info(&self) -> ironclaw_engine::PlatformInfo {
+    pub(crate) async fn platform_info(&self) -> ironclaw_common::PlatformInfo {
         let active_channels = self.channels.channel_names().await;
         let database_backend = std::env::var("DATABASE_BACKEND")
             .ok()
             .or_else(|| self.deps.store.as_ref().map(|_| "postgres".to_string()));
-        ironclaw_engine::PlatformInfo {
+        ironclaw_common::PlatformInfo {
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
             llm_backend: Some(self.deps.llm_backend.clone()),
             model_name: Some(self.deps.llm.active_model_name()),
@@ -1010,37 +1076,10 @@ impl Agent {
         }
     }
 
-    /// Send initial engine thread list and routines to the TUI channel so
-    /// the sidebar is populated before the first user message.
+    /// Send the routine list to the TUI channel so the sidebar is populated
+    /// before the first user message.
     async fn hydrate_tui_sidebar(&self) {
         let empty_meta = serde_json::Value::Object(serde_json::Map::new());
-
-        // Engine threads
-        if self.config.engine_v2
-            && let Ok(threads) = crate::bridge::list_engine_threads(None, self.owner_id()).await
-        {
-            let summaries: Vec<crate::channels::EngineThreadSummary> = threads
-                .into_iter()
-                .map(|t| crate::channels::EngineThreadSummary {
-                    id: t.id,
-                    goal: t.goal,
-                    thread_type: t.thread_type,
-                    state: t.state,
-                    step_count: t.step_count,
-                    total_tokens: t.total_tokens,
-                    created_at: t.created_at,
-                    updated_at: t.updated_at,
-                })
-                .collect();
-            let _ = self
-                .channels
-                .send_status(
-                    "tui",
-                    StatusUpdate::EngineThreadList { threads: summaries },
-                    &empty_meta,
-                )
-                .await;
-        }
 
         // Routines
         if let Some(system) = self.system_store()
@@ -1068,14 +1107,6 @@ impl Agent {
 
     /// Run the agent main loop.
     pub async fn run(self) -> Result<(), Error> {
-        // Eagerly initialize engine v2 so gateway API endpoints can serve
-        // data (projects, missions, threads) before the first chat message.
-        if self.config.engine_v2
-            && let Err(e) = crate::bridge::init_engine(&self).await
-        {
-            tracing::debug!("engine v2: eager init failed: {e}");
-        }
-
         // Start channels
         let mut message_stream = self.channels.start_all().await?;
 
@@ -1596,34 +1627,6 @@ impl Agent {
                     }
                 }
             }
-
-            // Refresh engine v2 thread list in the TUI sidebar after each turn.
-            if self.config.engine_v2
-                && let Ok(threads) =
-                    crate::bridge::list_engine_threads(None, &message.user_id).await
-            {
-                let summaries: Vec<crate::channels::EngineThreadSummary> = threads
-                    .into_iter()
-                    .map(|t| crate::channels::EngineThreadSummary {
-                        id: t.id,
-                        goal: t.goal,
-                        thread_type: t.thread_type,
-                        state: t.state,
-                        step_count: t.step_count,
-                        total_tokens: t.total_tokens,
-                        created_at: t.created_at,
-                        updated_at: t.updated_at,
-                    })
-                    .collect();
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::EngineThreadList { threads: summaries },
-                        &message.metadata,
-                    )
-                    .await;
-            }
         }
 
         // Cleanup
@@ -1756,29 +1759,6 @@ impl Agent {
             std::any::type_name_of_val(&submission)
         );
 
-        // Engine V2 early downgrade: bare-keyword ApprovalResponse → UserInput
-        // when no approval gate or auth flow is pending. Done before the
-        // BeforeInbound hook check so the downgraded message flows through
-        // the full UserInput pipeline (hooks, drain loop, etc.).
-        // Only applies to engine_v2 because the legacy path needs session/
-        // thread state (not yet resolved) to determine AwaitingApproval.
-        if self.config.engine_v2
-            && matches!(&submission, Submission::ApprovalResponse { .. })
-            && !message.content.trim().starts_with('/')
-        {
-            let has_pending = crate::bridge::has_pending_auth(&message.user_id).await
-                || crate::bridge::has_any_pending_gate(
-                    &message.user_id,
-                    message.conversation_scope(),
-                )
-                .await;
-            if !has_pending {
-                submission = Submission::UserInput {
-                    content: message.content.clone(),
-                };
-            }
-        }
-
         // Hook: BeforeInbound — allow hooks to modify or reject user input
         if let Submission::UserInput { ref content } = submission {
             let event = crate::hooks::HookEvent::Inbound {
@@ -1811,123 +1791,23 @@ impl Agent {
             }
         }
 
-        // Engine V2 routing (Strategy C: parallel deployment).
-        // Bridge handlers return BridgeOutcome which maps directly to
-        // HandleOutcome — gate status is encoded in the return type, not
-        // queried post-hoc.
-        if self.config.engine_v2 {
-            match &submission {
-                Submission::UserInput { content } => {
-                    return crate::bridge::handle_with_engine(self, message, content)
-                        .await
-                        .map(HandleOutcome::from);
-                }
-                Submission::ApprovalResponse { approved, always } => {
-                    // Reaching here means the message is a slash command (/approve,
-                    // /deny) or has a pending gate/auth — early downgrade above
-                    // already handled the bare-keyword-with-no-gate case.
-                    if crate::bridge::has_pending_auth(&message.user_id).await {
-                        let content = &message.content;
-                        return crate::bridge::handle_with_engine(self, message, content)
-                            .await
-                            .map(HandleOutcome::from);
-                    }
-                    return crate::bridge::handle_approval(self, message, *approved, *always)
-                        .await
-                        .map(HandleOutcome::from);
-                }
-                Submission::ExecApproval {
-                    request_id,
-                    approved,
-                    always,
-                } => {
-                    return crate::bridge::handle_exec_approval(
-                        self,
-                        message,
-                        *request_id,
-                        *approved,
-                        *always,
-                    )
-                    .await
-                    .map(HandleOutcome::from);
-                }
-                Submission::ExternalCallback {
-                    request_id,
-                    payload,
-                } => {
-                    return crate::bridge::handle_external_callback(
-                        self,
-                        message,
-                        *request_id,
-                        payload.clone(),
-                    )
-                    .await
-                    .map(HandleOutcome::from);
-                }
-                Submission::GateAuthResolution {
-                    request_id,
-                    resolution,
-                } => {
-                    return crate::bridge::handle_auth_gate_resolution(
-                        self,
-                        message,
-                        *request_id,
-                        resolution.clone(),
-                    )
-                    .await
-                    .map(HandleOutcome::from);
-                }
-                Submission::Interrupt => {
-                    return crate::bridge::handle_interrupt(self, message)
-                        .await
-                        .map(HandleOutcome::from);
-                }
-                Submission::NewThread => {
-                    return crate::bridge::handle_new_thread(self, message)
-                        .await
-                        .map(HandleOutcome::from);
-                }
-                Submission::Clear => {
-                    return crate::bridge::handle_clear(self, message)
-                        .await
-                        .map(HandleOutcome::from);
-                }
-                Submission::Expected { description } => {
-                    return crate::bridge::handle_expected(self, message, description)
-                        .await
-                        .map(HandleOutcome::from);
-                }
-                Submission::PairingClaim { channel, code } => {
-                    return crate::bridge::handle_pairing_claim(self, message, channel, code)
-                        .await
-                        .map(HandleOutcome::from);
-                }
-                // Undo/Redo/Resume/SwitchThread: v1-only (engine has no undo;
-                // thread switching is implicit via ConversationManager).
-                // Compact/Summarize/Suggest: orthogonal to engine (compaction is internal).
-                // Heartbeat/SystemCommand/JobStatus/JobCancel/Quit: v1 infrastructure.
-                _ => {}
+        // `ExternalCallback` and `GateAuthResolution` were engine-v2-only
+        // structured submissions (external tool callbacks and gate/auth
+        // resolution). They are no longer supported and are rejected before any
+        // session/thread resolution so a crafted request cannot switch the
+        // active thread via conversation_scope.
+        match submission {
+            Submission::ExternalCallback { .. } => {
+                return Ok(HandleOutcome::Respond(OutgoingResponse::text(
+                    "Error: external callbacks are no longer supported".to_string(),
+                )));
             }
-        }
-
-        // V2-only structured submissions must fail before any session/thread
-        // resolution on the legacy path. Otherwise a crafted request can
-        // switch the active thread via conversation_scope before returning the
-        // expected ENGINE_V2 error.
-        if !self.config.engine_v2 {
-            match submission {
-                Submission::ExternalCallback { .. } => {
-                    return Ok(HandleOutcome::Respond(OutgoingResponse::text(
-                        "Error: External callbacks require ENGINE_V2".to_string(),
-                    )));
-                }
-                Submission::GateAuthResolution { .. } => {
-                    return Ok(HandleOutcome::Respond(OutgoingResponse::text(
-                        "Error: Auth gate resolution requires ENGINE_V2".to_string(),
-                    )));
-                }
-                _ => {}
+            Submission::GateAuthResolution { .. } => {
+                return Ok(HandleOutcome::Respond(OutgoingResponse::text(
+                    "Error: auth gate resolution is no longer supported".to_string(),
+                )));
             }
+            _ => {}
         }
 
         // Hydrate thread from DB if it's a historical thread not in memory
@@ -2334,10 +2214,10 @@ impl Agent {
                 .await
             }
             Submission::ExternalCallback { .. } => Ok(SubmissionResult::Error {
-                message: "External callbacks require ENGINE_V2".to_string(),
+                message: "External callbacks are no longer supported".to_string(),
             }),
             Submission::GateAuthResolution { .. } => Ok(SubmissionResult::Error {
-                message: "Auth gate resolution requires ENGINE_V2".to_string(),
+                message: "Auth gate resolution is no longer supported".to_string(),
             }),
             Submission::ApprovalResponse { approved, always } => {
                 let thread_state = {
@@ -2455,25 +2335,11 @@ impl Agent {
                 }
             }
             Submission::PairingClaim { channel, code } => {
-                // Pairing approval is independent of engine_v2 — it only
-                // touches the pairing store and the extension manager.
-                // Reuse the bridge handler so v1 and v2 surfaces behave
-                // identically (#3317).
-                match crate::bridge::handle_pairing_claim(self, message, &channel, &code).await {
-                    Ok(crate::bridge::BridgeOutcome::Respond(text)) => {
-                        Ok(SubmissionResult::Response {
-                            content: text,
-                            attachments: Vec::new(),
-                        })
-                    }
-                    Ok(crate::bridge::BridgeOutcome::NoResponse)
-                    | Ok(crate::bridge::BridgeOutcome::Pending) => {
-                        Ok(SubmissionResult::Ok { message: None })
-                    }
-                    Err(e) => Ok(SubmissionResult::Error {
-                        message: format!("Pairing approval failed: {e}"),
-                    }),
-                }
+                let text = self.process_pairing_claim(message, &channel, &code).await;
+                Ok(SubmissionResult::Response {
+                    content: text,
+                    attachments: Vec::new(),
+                })
             }
             Submission::Plan { sub } => {
                 use crate::agent::submission::PlanSubcommand;
@@ -2689,7 +2555,6 @@ mod tests {
                 multi_tenant: false,
                 max_llm_concurrent_per_user: None,
                 max_jobs_concurrent_per_user: None,
-                engine_v2: false,
             },
             deps,
             Arc::new(crate::channels::ChannelManager::new()),
@@ -3211,7 +3076,7 @@ Only Alice should be able to activate this skill.
             .expect("handle message");
         assert!(matches!(
             outcome,
-            HandleOutcome::Respond(ref msg) if msg.content == "Error: Auth gate resolution requires ENGINE_V2"
+            HandleOutcome::Respond(ref msg) if msg.content == "Error: auth gate resolution is no longer supported"
         ));
         {
             let sess = session.lock().await;
@@ -3232,7 +3097,7 @@ Only Alice should be able to activate this skill.
             .expect("handle callback");
         assert!(matches!(
             outcome,
-            HandleOutcome::Respond(ref msg) if msg.content == "Error: External callbacks require ENGINE_V2"
+            HandleOutcome::Respond(ref msg) if msg.content == "Error: external callbacks are no longer supported"
         ));
         {
             let sess = session.lock().await;

@@ -38,6 +38,8 @@ test("redeemPairingCode posts channel and code through the v2 extensions endpoin
     success: true,
     provider: "slack",
     provider_user_id: "install-alpha:U123",
+    resumeError: false,
+    resumedRunCount: 0,
   });
   assert.equal(calls.length, 1);
   assert.equal(calls[0].path, PAIRING_REDEEM_PATH);

@@ -1363,7 +1363,20 @@ pub(crate) fn parse_response_create_request(
             OpenAiCompatHttpError::invalid_request(Some("body".to_string()))
         })?;
     crate::model_validation::validate_model_name(&request.model)?;
+    validate_temperature(request.temperature)?;
     Ok(request)
+}
+
+fn validate_temperature(temperature: Option<f64>) -> Result<(), OpenAiCompatHttpError> {
+    let Some(temperature) = temperature else {
+        return Ok(());
+    };
+    if (0.0..=2.0).contains(&temperature) {
+        return Ok(());
+    }
+    Err(OpenAiCompatHttpError::invalid_request(Some(
+        "temperature".to_string(),
+    )))
 }
 
 fn responses_user_message_payload(
@@ -1412,6 +1425,9 @@ fn responses_input_to_product_text(
     });
     if let Some(context) = &request.x_context {
         payload["context"] = serde_json::Value::String(responses_context_to_product_text(context));
+    }
+    if let Some(temperature) = request.temperature {
+        payload["temperature"] = serde_json::json!(temperature);
     }
     serde_json::to_string(&payload).map_err(|_| OpenAiCompatHttpError::internal())
 }

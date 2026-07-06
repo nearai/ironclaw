@@ -1,14 +1,11 @@
 use std::sync::Arc;
 
 use ironclaw_extensions::{
-    ExtensionPackage, ExtensionRegistry, ExtensionRuntime, HostedMcpDiscoveredTool,
-    HostedMcpDiscoveredToolAnnotations, SharedExtensionRegistry,
+    ExtensionPackage, ExtensionRegistry, ExtensionRuntime, SharedExtensionRegistry,
     package_with_discovered_hosted_mcp_tools,
 };
 use ironclaw_host_api::{ResourceScope, RuntimeHttpEgress};
-use ironclaw_mcp::{
-    McpClient, McpClientRequest, McpDiscoveredTool, McpHostHttpClient, McpRuntimeHttpAdapter,
-};
+use ironclaw_mcp::{McpClient, McpClientRequest, McpHostHttpClient, McpRuntimeHttpAdapter};
 
 use crate::mcp::{MCP_RESPONSE_BODY_LIMIT, RegistryMcpEgressPlanner};
 
@@ -83,26 +80,8 @@ pub(crate) async fn discover_hosted_mcp_package(
             package.id
         )));
     }
-    let tools = output
-        .tools
-        .iter()
-        .map(discovered_tool_for_extension_domain)
-        .collect::<Vec<_>>();
-    package_with_discovered_hosted_mcp_tools(package, &tools)
+    package_with_discovered_hosted_mcp_tools(package, &output.tools)
         .map_err(|error| HostedMcpDiscoveryError::Permanent(error.to_string()))
 }
 
 pub(crate) use ironclaw_extensions::is_hosted_http_mcp_package;
-
-fn discovered_tool_for_extension_domain(tool: &McpDiscoveredTool) -> HostedMcpDiscoveredTool {
-    HostedMcpDiscoveredTool {
-        name: tool.name.clone(),
-        description: tool.description.clone(),
-        input_schema: tool.input_schema.clone(),
-        annotations: HostedMcpDiscoveredToolAnnotations {
-            destructive_hint: tool.annotations.destructive_hint,
-            side_effects_hint: tool.annotations.side_effects_hint,
-            read_only_hint: tool.annotations.read_only_hint,
-        },
-    }
-}

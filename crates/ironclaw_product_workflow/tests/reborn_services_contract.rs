@@ -4988,11 +4988,11 @@ async fn list_connectable_channels_returns_configured_action_metadata() {
             strategy: RebornChannelConnectStrategy::InboundProofCode,
             action: RebornChannelConnectAction {
                 title: "Slack account connection".to_string(),
-                instructions: "Message the Slack app, then enter the code here.".to_string(),
+                instructions: "Run /pair in Slack to get a code, then paste it here. Codes expire in 10 minutes.".to_string(),
                 input_placeholder: "Enter Slack pairing code...".to_string(),
                 submit_label: "Connect".to_string(),
                 success_message: "Slack account connected.".to_string(),
-                error_message: "Invalid or expired Slack pairing code.".to_string(),
+                error_message: "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one.".to_string(),
             },
             command_aliases: vec!["slack".to_string(), "slack account".to_string()],
         },
@@ -5012,7 +5012,7 @@ async fn list_connectable_channels_returns_configured_action_metadata() {
     );
     assert_eq!(
         channel.action.instructions,
-        "Message the Slack app, then enter the code here."
+        "Run /pair in Slack to get a code, then paste it here. Codes expire in 10 minutes."
     );
     assert_eq!(
         channel.command_aliases,
@@ -5038,11 +5038,11 @@ fn channel_connect_action_serializes_neutral_input_placeholder_and_accepts_legac
 
     let legacy: RebornChannelConnectAction = serde_json::from_value(serde_json::json!({
         "title": "Slack account connection",
-        "instructions": "Message the Slack app, then enter the code here.",
+        "instructions": "Run /pair in Slack to get a code, then paste it here. Codes expire in 10 minutes.",
         "code_placeholder": "Enter Slack pairing code...",
         "submit_label": "Connect",
         "success_message": "Slack account connected.",
-        "error_message": "Invalid or expired Slack pairing code."
+        "error_message": "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one."
     }))
     .expect("legacy action deserializes");
     assert_eq!(legacy.input_placeholder, "Enter Slack pairing code...");

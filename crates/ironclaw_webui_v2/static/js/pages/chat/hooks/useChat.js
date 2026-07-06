@@ -5,9 +5,13 @@ import {
   sendMessage,
   submitManualToken,
 } from "../../../lib/api.js";
+import { redeemSlackPairingCode } from "../../../lib/slack-pairing-api.js";
+import { subscribeChannelConnected } from "../../../lib/channel-connection-events.js";
+import { queryClient } from "../../../lib/query-client.js";
 import { React } from "../../../lib/html.js";
+import { redeemPairingCode } from "../../extensions/lib/pairing-api.js";
 import { useChatEvents } from "../lib/useChatEvents.js";
-import { touchThreadInCache, upsertThreadInCache } from "../lib/thread-cache.js";
+import { touchThreadInCache } from "../lib/thread-cache.js";
 import {
   addPending,
   recordAcceptedMessageRef,
@@ -54,6 +58,14 @@ function approvalGatePendingSendError() {
   );
   error.safeErrorCode = APPROVAL_GATE_PENDING_SEND_ERROR;
   return error;
+}
+
+function threadNeedsSidebarRefresh(threadId) {
+  const cached = queryClient.getQueryData?.(["threads"]);
+  const threads = cached?.threads;
+  if (!Array.isArray(threads)) return true;
+  const thread = threads.find((item) => item.thread_id === threadId || item.id === threadId);
+  return !thread?.title;
 }
 
 function busyNoticeKey(threadId, gate) {
@@ -432,7 +444,7 @@ export function useChat(threadId) {
 
       if (!sendThreadId) {
         const created = await createThreadRequest();
-        upsertThreadInCache(created?.thread);
+        queryClient.invalidateQueries({ queryKey: ["threads"] });
         sendThreadId = created?.thread?.thread_id;
         if (!sendThreadId) {
           throw new Error("createThread returned no thread_id");
@@ -508,6 +520,12 @@ export function useChat(threadId) {
             messageContent: renderContent,
             updatedAt: pendingRecord.timestamp,
           });
+        }
+        // Refresh the sidebar only while the cached entry is missing
+        // or title-less. Once the first-message title has appeared,
+        // repeated sends do not need to refetch the whole thread list.
+        if (threadNeedsSidebarRefresh(sendThreadId)) {
+          queryClient.invalidateQueries({ queryKey: ["threads"] });
         }
         let runSettledBeforeResponse = false;
         if (response?.run_id && shouldTrackLocalRun) {
@@ -638,10 +656,6 @@ export function useChat(threadId) {
         updateSeededTarget(markFailed);
         updateCurrentRunState(() => setIsProcessing(false));
         submitBusyRef.current = false;
-        if (err && typeof err === "object") {
-          err.optimisticMessageId = optimisticId;
-          err.optimisticThreadId = sendThreadId;
-        }
         throw err;
       } finally {
         // Release the re-entrancy guard once the send POST settles — that is
@@ -675,6 +689,18 @@ export function useChat(threadId) {
       setActiveRun,
     ],
   );
+
+  React.useEffect(() => {
+    return subscribeChannelConnected(() => {
+      // A channel connected — here, in another tab, or on the extensions page.
+      // The parked turn is resumed backend-side on redeem, and its projection
+      // clears the pairing gate. This subscription only refreshes the per-user
+      // connection snapshot so the extensions / connectable-channels UI on any
+      // open surface sees "connected" instead of the stale "needs setup" cache.
+      queryClient.invalidateQueries?.({ queryKey: ["extensions"] });
+      queryClient.invalidateQueries?.({ queryKey: ["connectable-channels"] });
+    });
+  }, []);
 
   // v2 resolveGate signature: `(resolution, { always?, credentialRef? })`.
   // run_id and gate_ref come from the live `pendingGate` (set by the
@@ -801,6 +827,51 @@ export function useChat(threadId) {
     [pendingGate, threadId],
   );
 
+  // Channel-pairing gate submit. A `manual_token` gate that carries a
+  // `connection` is a per-user authorization to act on a connectable channel
+  // (Slack, Telegram, …). Redeeming the pair code binds the identity and — as
+  // of V2 — RESUMES the parked turn backend-side, so unlike `submitAuthToken`
+  // this deliberately does NOT call `resolveGate`: the run resumes on its own
+  // and the projection update clears the gate. Modeled on `submitAuthToken`
+  // minus the resolve step.
+  const submitChannelConnectionPairing = React.useCallback(
+    async (code) => {
+      const gate = pendingGateRef.current || pendingGate;
+      const channel = String(gate?.connection?.channel || "").trim();
+      if (!gate || !channel) {
+        throw new Error("channel connection gate is no longer pending");
+      }
+      const trimmed = String(code || "").trim();
+      if (!trimmed) {
+        throw new Error("pairing code is required");
+      }
+      const options = { threadId };
+      // Every channel redeems through the same mounted v2 endpoint. The legacy
+      // /api/pairing/* approve route is not mounted in the reborn binary (404), so
+      // the in-chat and Settings paths must not diverge onto it.
+      const response = isSlackPersonalPairing(channel)
+        ? await redeemSlackPairingCode(trimmed, options)
+        : await redeemPairingCode(channel, trimmed, options);
+      if (response?.success === false) {
+        throw new Error(response.message || "Pairing failed");
+      }
+      if (response?.resumeError) {
+        // The connection succeeded (binding is durable), but the backend
+        // couldn't continue this parked chat. The gate only clears when the
+        // turn actually resumes, so it will stay pending — surface a distinct,
+        // recoverable error instead of leaving the card spinning forever.
+        const error = new Error("channel connection resume did not complete");
+        error.resumeFailed = true;
+        throw error;
+      }
+      // No resolveGate on success: the backend resumes the parked turn and the
+      // projection clears this gate (a pairing gate has no AuthFlowRecord, so
+      // routing a resolve through resolve_auth_gate would fail anyway).
+      return response;
+    },
+    [pendingGate, threadId],
+  );
+
   const cancelRun = React.useCallback(
     async (reason) => {
       const runId = activeRun?.runId;
@@ -888,12 +959,7 @@ export function useChat(threadId) {
           setMessages(restoreFailedIfNoReplacement);
           if (threadId) seedThreadMessages(threadId, restoreFailedIfNoReplacement);
         }
-      } catch (err) {
-        if (err?.optimisticMessageId) {
-          setMessages(removeFailed);
-          if (threadId) seedThreadMessages(threadId, removeFailed);
-          return;
-        }
+      } catch {
         // `send` renders a replacement failed optimistic message after
         // admission. If admission failed before that point, restore the
         // original retryable error bubble.
@@ -919,6 +985,7 @@ export function useChat(threadId) {
     send,
     resolveGate,
     submitAuthToken,
+    submitChannelConnectionPairing,
     cancelRun,
     loadMore,
     // fork-shape compatibility — see comments above
@@ -929,6 +996,10 @@ export function useChat(threadId) {
     recoverHistory: noop,
     recoveryNotice: null,
   };
+}
+
+function isSlackPersonalPairing(extensionName) {
+  return String(extensionName || "").trim().toLowerCase() === "slack";
 }
 
 function isDeclinedGateResolution(resolution) {

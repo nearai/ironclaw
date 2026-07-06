@@ -23,6 +23,23 @@ Owns ProductAdapter host-api projection contracts for IronClaw Reborn.
   - validate every egress credential handle is declared in
     `required_credentials`,
   - keep `(host, credential_handle)` pairs distinct.
+- A section MAY declare `host_ingress` routes (`[[product_adapter.<sub>.host_ingress]]`),
+  each carrying a full host-owned `ironclaw_host_api::IngressRouteDescriptor`
+  (validated by host_api's own `Deserialize` — dotted route id, absolute path,
+  and every policy invariant incl. the fail-closed floor that a
+  `public_webhook` listener MUST require `webhook_signature`) plus the
+  `credential_handles` that verify it. This crate does NOT re-own ingress
+  route/policy vocabulary — it only projects the descriptor and enforces
+  **ingress credential coherence**, which is fail-closed:
+  - every `credential_handles` entry must be declared in `required_credentials`
+    (mirrors the egress rule, so ingress handles flow into the same declared
+    set installation bindings validate against),
+  - an auth-required route (`IngressAuthPolicy::Required`) must name at least
+    one verifying credential handle,
+  - route ids stay distinct within a section.
+  Mounting these routes (descriptor → axum route + verifier) is the serve
+  layer's job, NOT this crate's — this crate still must not route webhooks,
+  resolve secret material, or bind HTTP ingress.
 - ProductAdapter runtime projection must keep the cross-write invariant at
   read time: every surfaced installation must remain valid against its
   registered manifest and current ProductAdapter sections.
@@ -38,6 +55,11 @@ Owns ProductAdapter host-api projection contracts for IronClaw Reborn.
   mismatch, redacted health, and cross-write invariant maintenance.
 - Integration tests in `tests/manifest_ingestion.rs` cover manifest
   parsing, unknown-field rejection, inline-secret rejection, and egress
-  credential validation.
+  credential validation — plus host-ingress route projection over the wire,
+  the inherited host_api fail-closed floor (`public_webhook` without
+  `webhook_signature` rejected), and ingress credential coherence. The
+  ingress credential-coherence matrix (undeclared handle, auth-required route
+  missing a credential, duplicate route id, happy projection) has focused
+  unit coverage in `src/lib.rs` `mod tests`.
 - `cargo test -p ironclaw_architecture reborn_crate_dependency_boundaries_hold`
   pins crate dependency boundary.

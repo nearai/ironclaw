@@ -53,7 +53,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["time", "rt", "sync"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
-wasmtime = { version = "46.0.1", features = ["component-model"] }
+wasmtime = { workspace = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }

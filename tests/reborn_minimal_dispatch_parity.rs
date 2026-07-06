@@ -1,12 +1,15 @@
 #[allow(dead_code)]
-#[path = "support/reborn/mod.rs"]
+#[path = "support/reborn_parity_qa/mod.rs"]
+mod parity_qa_support;
+#[allow(dead_code)]
+#[path = "integration/support/mod.rs"]
 mod reborn_support;
 mod support;
 
 use ironclaw_product_adapters::ProductInboundAck;
 use ironclaw_threads::{MessageKind, MessageStatus};
 use ironclaw_turns::TurnStatus;
-use reborn_support::harness::RebornBinaryE2EHarness;
+use parity_qa_support::binary_e2e::RebornBinaryE2EHarness;
 
 #[tokio::test]
 async fn reborn_minimal_dispatch_parity() {

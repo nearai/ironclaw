@@ -305,7 +305,7 @@ test("passes local thread state to approval notification presenter for backend r
   assert.equal(harness.hook.unreadCount, 1);
 });
 
-test("shows approval messages until they are dismissed", () => {
+test("keeps pending approval messages after they are marked seen", () => {
   const { hook, markSeenCalls, render } = instantiate({
     data: { threads: [{ id: "thread-1", state: "needs_attention" }] },
     isLoading: false,
@@ -319,7 +319,10 @@ test("shows approval messages until they are dismissed", () => {
   assert.deepEqual(plainCalls(markSeenCalls), [
     { ids: ["approval:thread-1"], scope: "tenant:user" },
   ]);
-  assert.equal(render().messages.length, 0);
+  const nextHook = render();
+  assert.equal(nextHook.messages.length, 1);
+  assert.equal(nextHook.unreadCount, 0);
+  assert.equal(nextHook.unreadIds.has("approval:thread-1"), false);
 });
 
 test("uses the profile scope for notification dismissal", () => {
@@ -339,8 +342,8 @@ test("uses the profile scope for notification dismissal", () => {
   ]);
 });
 
-test("dismisses an approval notification after the thread has been opened", () => {
-  const { markSeenCalls } = instantiate(
+test("marks an approval notification seen after the thread has been opened", () => {
+  const { hook, markSeenCalls } = instantiate(
     {
       data: { threads: [{ id: "thread-1", state: "needs_attention" }] },
       isLoading: false,
@@ -354,4 +357,7 @@ test("dismisses an approval notification after the thread has been opened", () =
   assert.deepEqual(plainCalls(markSeenCalls), [
     { ids: ["approval:thread-1"], scope: "tenant:user" },
   ]);
+  assert.equal(hook.messages.length, 1);
+  assert.equal(hook.unreadCount, 0);
+  assert.equal(hook.unreadIds.has("approval:thread-1"), false);
 });

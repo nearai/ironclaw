@@ -1,12 +1,28 @@
-//! Shared OAuth callback infrastructure used by every IronClaw OAuth flow
-//! (NEAR AI session login, WASM tool auth, MCP server auth, registry-provider
-//! OAuth backends).
+//! Loopback OAuth callback transport for the **v1 (legacy) stack only**.
 //!
-//! This crate owns the loopback callback listener, the branded landing pages,
-//! and the host-binding rules that keep the callback safe on remote hosts.
-//! It is deliberately small and free of LLM/auth-provider concerns — the
-//! provider-specific OAuth flows live in their owning crates and depend on
-//! this crate for the transport.
+//! This crate owns the fixed-port (`127.0.0.1:9876`) loopback callback
+//! listener, the branded landing pages, and the host-binding rules that keep
+//! the callback safe on remote hosts. It is deliberately small and free of
+//! LLM/auth-provider concerns — the provider-specific v1 OAuth flows (NEAR AI
+//! session login, WASM tool auth, MCP server auth, registry-provider backends)
+//! live in their owning v1 modules and depend on this crate for the transport.
+//!
+//! ## Not used by Reborn
+//!
+//! The Reborn stack does **not** use this crate. Its hosted, multi-tenant model
+//! receives OAuth callbacks on durable gateway HTTP routes
+//! (`/api/reborn/product-auth/oauth/callback/{flow_id}`, see
+//! `ironclaw_reborn_composition::product_auth_serve`) with persisted flow state,
+//! which is fundamentally incompatible with a single-flow, in-process,
+//! fixed-port loopback listener. The sole consumer is the root `ironclaw` v1
+//! binary.
+//!
+//! ## DELETE WITH V1
+//!
+//! This crate is part of the deprecated v1 surface (see "Where to Build —
+//! Reborn-First" in the root `CLAUDE.md`). When the legacy `src/` stack is
+//! removed, delete this crate outright — do **not** port it to Reborn, which
+//! already has its own callback transport, and do **not** add new consumers.
 
 use std::collections::HashMap;
 use std::time::Duration;
