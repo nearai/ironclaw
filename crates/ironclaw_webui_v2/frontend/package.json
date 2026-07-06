@@ -11,7 +11,8 @@
   "scripts": {
     "build": "node build.mjs",
     "vendor": "bash vendor.sh",
-    "all": "bash build.sh"
+    "all": "bash build.sh",
+    "lint": "eslint ../static/js"
   },
   "dependencies": {
     "@tanstack/react-query": "5.87.4",
@@ -22,6 +23,8 @@
     "react-router": "7.15.1"
   },
   "devDependencies": {
-    "esbuild": "0.25.0"
+    "esbuild": "0.25.0",
+    "eslint": "9.39.4",
+    "globals": "17.7.0"
   }
 }
