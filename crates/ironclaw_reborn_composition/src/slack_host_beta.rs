@@ -2345,7 +2345,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slack_mounts_wire_personal_connection_state_into_extension_list() {
+    async fn slack_tools_extension_lists_as_auth_required_until_personal_oauth_connected() {
         let (runtime, _root) = runtime().await;
         let mounts =
             build_slack_host_beta_mounts(&runtime, config_without_legacy_actor()).expect("mounts");
@@ -2357,14 +2357,18 @@ mod tests {
         )
         .expect("webui bundle");
         let caller = operator_caller();
-        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack_bot")
+        // Model B: the user installs the tools extension (`slack`); the bot
+        // channel (`slack_bot`) is hidden operator infrastructure. The tools
+        // extension carries the slack_personal OAuth requirement, so — like any
+        // OAuth extension — it lists as SetupRequired until the user connects.
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack")
             .expect("valid slack package ref");
 
         bundle
             .api
             .install_extension(caller.clone(), package_ref)
             .await
-            .expect("install Slack extension");
+            .expect("install Slack tools extension");
         let response = bundle
             .api
             .list_extensions(caller)
@@ -2373,13 +2377,19 @@ mod tests {
         let slack = response
             .extensions
             .iter()
-            .find(|extension| extension.package_ref.id.as_str() == "slack_bot")
-            .expect("Slack extension is listed");
+            .find(|extension| extension.package_ref.id.as_str() == "slack")
+            .expect("Slack tools extension is listed");
 
-        assert_eq!(slack.kind, "channel");
+        assert_ne!(
+            slack.kind, "channel",
+            "the user-installable Slack extension is the tools package, not the bot channel"
+        );
         assert_eq!(
             slack.onboarding_state,
-            Some(RebornExtensionOnboardingState::SetupRequired)
+            // The tools extension is credential-gated (an OAuth extension, not a
+            // channel), so it reports AuthRequired — not the channel-specific
+            // SetupRequired — until the slack_personal OAuth is connected.
+            Some(RebornExtensionOnboardingState::AuthRequired)
         );
         assert!(!slack.authenticated);
 
@@ -2387,7 +2397,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dynamic_slack_setup_save_activates_installed_slack_channel_extension() {
+    async fn dynamic_slack_setup_save_succeeds_and_bot_channel_stays_hidden_from_catalog() {
         let (runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_runtime_mounts(
             &runtime,
@@ -2403,28 +2413,17 @@ mod tests {
         )
         .expect("webui bundle");
         let caller = operator_caller();
+        // Model B: the Slack bot channel is operator-provisioned infrastructure,
+        // configured through the operator setup route (not the user catalog). Even
+        // when installed, it must never surface in the user-facing extension list —
+        // only the tools extension (`slack`) does.
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack_bot")
             .expect("valid slack package ref");
-
         bundle
             .api
             .install_extension(caller.clone(), package_ref)
             .await
-            .expect("install Slack extension");
-        let before_setup = bundle
-            .api
-            .list_extensions(caller.clone())
-            .await
-            .expect("list extensions before setup");
-        let slack_before_setup = before_setup
-            .extensions
-            .iter()
-            .find(|extension| extension.package_ref.id.as_str() == "slack_bot")
-            .expect("Slack extension is listed before setup");
-        assert!(
-            !slack_before_setup.active,
-            "test precondition: installed Slack extension must start inactive before setup save"
-        );
+            .expect("install Slack bot channel");
 
         let route_mount = slack_channel_route_admin_route_mount(mounts.channel_routes);
         let response = route_mount
@@ -2456,14 +2455,12 @@ mod tests {
             .list_extensions(caller)
             .await
             .expect("list extensions after setup");
-        let slack = extensions
-            .extensions
-            .iter()
-            .find(|extension| extension.package_ref.id.as_str() == "slack_bot")
-            .expect("Slack extension is listed");
         assert!(
-            slack.active,
-            "saving valid dynamic Slack setup should activate an installed Slack channel"
+            extensions
+                .extensions
+                .iter()
+                .all(|extension| extension.package_ref.id.as_str() != "slack_bot"),
+            "the operator-provisioned Slack bot channel must stay hidden from the user extension catalog"
         );
 
         runtime.shutdown().await.expect("runtime shuts down");

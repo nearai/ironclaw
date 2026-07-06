@@ -66,6 +66,9 @@ const SLACK_AUTH_CANCELED_MESSAGE: &str = "Authentication canceled.";
 /// Posted when a run blocks on a credential-entry (non-OAuth) auth challenge:
 /// entering a secret in chat is a security risk, so it must be done in the web app.
 const SLACK_AUTH_UNAVAILABLE_MESSAGE: &str = "Setting this up needs a credential (an API key or token). Sharing one here is a security risk — anything entered in chat is stored in the conversation — so credential-based connections can only be set up in the Ironclaw web app. Connect it there, then ask me again here.";
+// Model B: greeting for a first-contact DM from a Slack user who has not yet
+// connected their account. Fixed, host-authored text only — no agent runs.
+const SLACK_CONNECT_NUDGE_MESSAGE: &str = "\u{1F44B} To use me, connect your Slack account in the Ironclaw web app: install the Slack extension and finish the connect step, then message me here again.";
 const SLACK_DELIVERY_TIMEOUT_MESSAGE: &str =
     "This is taking longer than expected — check the WebUI for the result.";
 const SLACK_DELIVERY_ERROR_MESSAGE: &str =
@@ -747,6 +750,43 @@ impl SlackFinalReplyDeliveryObserver {
         }
         true
     }
+
+    /// Model B: a first-contact DM from a Slack user with no identity binding is
+    /// rejected with `BindingRequired`. Instead of silently dropping it, greet
+    /// them with a connect nudge. Deliberately performs NO binding lookup (the
+    /// sender is unbound by definition) and posts only a fixed, host-authored
+    /// message — no agent turn runs, no tools execute, no data is read. Slack
+    /// transport retries arrive as `Duplicate` (not `Rejected`), so this fires
+    /// at most once per inbound event.
+    async fn post_connect_nudge_if_unbound_user_message(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        ack: &ProductInboundAck,
+    ) -> bool {
+        let ProductInboundAck::Rejected(rejection) = ack else {
+            return false;
+        };
+        if !matches!(rejection.kind, ProductRejectionKind::BindingRequired) {
+            return false;
+        }
+        if !matches!(envelope.payload(), ProductInboundPayload::UserMessage(_)) {
+            return false;
+        }
+        if let Err(error) = post_slack_message(
+            self.services.egress.as_ref(),
+            envelope.external_conversation_ref(),
+            SLACK_CONNECT_NUDGE_MESSAGE,
+        )
+        .await
+        {
+            tracing::debug!(
+                target = "ironclaw::reborn::slack_delivery",
+                error = %error,
+                "failed to post Slack connect nudge (best-effort)"
+            );
+        }
+        true
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1235,6 +1275,12 @@ impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
         // semaphore so it cannot queue behind runs that may poll until max_wait.
         if self
             .post_rejection_hint_if_authorized(&envelope, &ack)
+            .await
+        {
+            return;
+        }
+        if self
+            .post_connect_nudge_if_unbound_user_message(&envelope, &ack)
             .await
         {
             return;
@@ -4217,12 +4263,21 @@ mod tests {
         );
     }
 
-    /// Rejected user-message payload → nothing posted.
+    /// Model B: a rejected first-contact UserMessage from an unbound Slack user
+    /// (BindingRequired) is greeted with a connect nudge — no binding lookup, no
+    /// agent turn. Previously this was silently dropped.
     #[tokio::test]
-    async fn rejected_user_message_ack_posts_nothing() {
+    async fn rejected_unbound_user_message_posts_connect_nudge() {
         let install = "test-install";
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
         egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "1000.1"),
+            )),
+        );
 
         let outbound = Arc::new(InMemoryOutboundStateStore::default());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
@@ -4234,10 +4289,21 @@ mod tests {
 
         observer.observe_workflow_ack(env, ack).await;
 
-        let calls = egress.calls();
+        let posted: Vec<String> = egress
+            .calls()
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .map(|c| String::from_utf8_lossy(&c.body).to_string())
+            .collect();
+        assert_eq!(
+            posted.len(),
+            1,
+            "an unbound first-contact DM should get exactly one connect nudge"
+        );
         assert!(
-            !calls.iter().any(|c| c.path == "/api/chat.postMessage"),
-            "no chat.postMessage expected for rejected user-message payload"
+            posted[0].contains("connect your Slack account"),
+            "the connect nudge must tell the user to connect, got: {}",
+            posted[0]
         );
     }
 

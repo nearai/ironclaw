@@ -1,6 +1,6 @@
-// arch-exempt: large_file, PR #5604 adds the channel-connect requirement +
-// slack_user companion lifecycle here pending the composition decomposition
-// tracked for this crate, plan #5604
+// arch-exempt: large_file, channel-connect requirement + extension lifecycle and
+// its test module; the slack_user companion special-casing was removed in the
+// model-B remodel (docs/plans/2026-07-05-slack-bot-tools-remodel.md), plan #5604
 use std::{collections::BTreeSet, sync::Arc};
 
 use ironclaw_extensions::{
@@ -32,8 +32,6 @@ use crate::available_extensions::{
     AvailableExtensionCatalog, AvailableExtensionPackage, is_internal_extension_package_ref,
     materialize_available_extension, visible_capability_ids,
 };
-#[cfg(feature = "slack-v2-host-beta")]
-use crate::available_extensions::{is_public_slack_bot_package_ref, slack_package_ref};
 use crate::extension_activation_credentials::{
     ExtensionActivationCredentialGate, RuntimeExtensionActivationCredentialGate,
     UnavailableExtensionActivationCredentialGate,
@@ -312,12 +310,6 @@ impl RebornLocalExtensionManagementPort {
             .await?;
         let package = self.lifecycle_package(&extension_id).await?;
         let requirements = package_runtime_credential_auth_requirements(&package);
-        #[cfg(feature = "slack-v2-host-beta")]
-        let mut requirements = requirements;
-        #[cfg(feature = "slack-v2-host-beta")]
-        if is_public_slack_bot_package_ref(package_ref) {
-            self.append_slack_user_companion_credential_requirements(&mut requirements)?;
-        }
         Ok(requirements)
     }
 
@@ -404,11 +396,6 @@ impl RebornLocalExtensionManagementPort {
         let available = self.catalog.resolve(&package_ref)?;
         let _operation_guard = self.operation_lock.lock().await;
         self.install_available_locked(available).await?;
-        #[cfg(feature = "slack-v2-host-beta")]
-        if is_public_slack_bot_package_ref(&package_ref) {
-            self.install_slack_user_companion_available_locked(&package_ref)
-                .await?;
-        }
 
         Ok(response_with_payload(
             Some(package_ref.clone()),
@@ -483,14 +470,6 @@ impl RebornLocalExtensionManagementPort {
         mode: ExtensionActivationMode,
         credential_gate: impl ExtensionActivationCredentialGate,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        #[cfg(feature = "slack-v2-host-beta")]
-        if is_public_slack_bot_package_ref(&package_ref)
-            && self.slack_user_companion_package()?.is_some()
-        {
-            return self
-                .activate_slack_with_companion(package_ref, mode, &credential_gate)
-                .await;
-        }
         self.activate_inner(package_ref, mode, &credential_gate)
             .await
     }
@@ -503,90 +482,8 @@ impl RebornLocalExtensionManagementPort {
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let credential_gate =
             crate::extension_activation_credentials::PrecheckedExtensionActivationCredentialGate;
-        #[cfg(feature = "slack-v2-host-beta")]
-        if is_public_slack_bot_package_ref(&package_ref)
-            && self.slack_user_companion_package()?.is_some()
-        {
-            return self
-                .activate_slack_with_companion(package_ref, mode, &credential_gate)
-                .await;
-        }
         self.activate_inner(package_ref, mode, &credential_gate)
             .await
-    }
-
-    #[cfg(feature = "slack-v2-host-beta")]
-    async fn activate_slack_with_companion(
-        &self,
-        package_ref: LifecyclePackageRef,
-        mode: ExtensionActivationMode,
-        credential_gate: &dyn ExtensionActivationCredentialGate,
-    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        self.ensure_slack_user_companion_installed().await?;
-        let mut slack_response = self
-            .activate_inner(package_ref, mode.clone(), credential_gate)
-            .await?;
-        let companion_response = self
-            .activate_inner(slack_package_ref()?, mode, credential_gate)
-            .await?;
-        append_companion_visible_capabilities(&mut slack_response, &companion_response);
-        Ok(slack_response)
-    }
-
-    #[cfg(feature = "slack-v2-host-beta")]
-    async fn ensure_slack_user_companion_installed(&self) -> Result<(), ProductWorkflowError> {
-        let Some(companion) = self.slack_user_companion_package()? else {
-            return Ok(());
-        };
-        let _operation_guard = self.operation_lock.lock().await;
-        if self
-            .extension_installed_or_manifest_present(&companion.package.id)
-            .await?
-        {
-            return Ok(());
-        }
-        self.install_available_locked(companion).await
-    }
-
-    #[cfg(feature = "slack-v2-host-beta")]
-    fn append_slack_user_companion_credential_requirements(
-        &self,
-        requirements: &mut Vec<RuntimeCredentialAuthRequirement>,
-    ) -> Result<(), ProductWorkflowError> {
-        let Some(companion) = self.slack_user_companion_package()? else {
-            return Ok(());
-        };
-        requirements.extend(package_runtime_credential_auth_requirements(
-            &companion.package,
-        ));
-        Ok(())
-    }
-
-    #[cfg(feature = "slack-v2-host-beta")]
-    async fn install_slack_user_companion_available_locked(
-        &self,
-        public_package_ref: &LifecyclePackageRef,
-    ) -> Result<(), ProductWorkflowError> {
-        let Some(companion) = self.slack_user_companion_package()? else {
-            return Ok(());
-        };
-        if self
-            .extension_installed_or_manifest_present(&companion.package.id)
-            .await?
-        {
-            return Ok(());
-        }
-        if let Err(error) = self.install_available_locked(companion).await {
-            if let Err(rollback_error) = self.remove_locked(public_package_ref.clone()).await {
-                return Err(compensation_failure(
-                    "Slack install failed to install internal user-tool package and public Slack rollback failed",
-                    error,
-                    rollback_error,
-                ));
-            }
-            return Err(error);
-        }
-        Ok(())
     }
 
     async fn activate_inner(
@@ -749,28 +646,7 @@ impl RebornLocalExtensionManagementPort {
         package_ref: LifecyclePackageRef,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let _operation_guard = self.operation_lock.lock().await;
-        #[cfg(feature = "slack-v2-host-beta")]
-        if is_public_slack_bot_package_ref(&package_ref)
-            && self.slack_user_companion_package()?.is_some()
-        {
-            let companion_ref = slack_package_ref()?;
-            let (companion_id, _) = extension_ids_from_package_ref(&companion_ref)?;
-            if self
-                .extension_installed_or_manifest_present(&companion_id)
-                .await?
-            {
-                self.remove_locked(companion_ref).await?;
-            }
-        }
         self.remove_locked(package_ref).await
-    }
-
-    #[cfg(feature = "slack-v2-host-beta")]
-    fn slack_user_companion_package(
-        &self,
-    ) -> Result<Option<&AvailableExtensionPackage>, ProductWorkflowError> {
-        let companion_ref = slack_package_ref()?;
-        Ok(self.catalog.resolve(&companion_ref).ok())
     }
 
     async fn remove_locked(
@@ -997,29 +873,6 @@ impl RebornLocalExtensionManagementPort {
             });
         }
         Ok(())
-    }
-
-    #[cfg(feature = "slack-v2-host-beta")]
-    async fn extension_installed_or_manifest_present(
-        &self,
-        extension_id: &ExtensionId,
-    ) -> Result<bool, ProductWorkflowError> {
-        let installation_id = ExtensionInstallationId::new(extension_id.as_str().to_string())
-            .map_err(map_extension_installation_error)?;
-        if self
-            .installation_store
-            .get_installation(&installation_id)
-            .await
-            .map_err(map_extension_installation_error)?
-            .is_some()
-        {
-            return Ok(true);
-        }
-        self.installation_store
-            .get_manifest(extension_id)
-            .await
-            .map_err(map_extension_installation_error)
-            .map(|manifest| manifest.is_some())
     }
 
     async fn load_installation(
@@ -1369,32 +1222,6 @@ fn package_visible_capability_ids(package: &ExtensionPackage) -> Vec<String> {
         .collect()
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
-fn append_companion_visible_capabilities(
-    response: &mut LifecycleProductResponse,
-    companion_response: &LifecycleProductResponse,
-) {
-    let Some(LifecycleProductPayload::ExtensionActivate {
-        visible_capability_ids,
-        ..
-    }) = &mut response.payload
-    else {
-        return;
-    };
-    let Some(LifecycleProductPayload::ExtensionActivate {
-        visible_capability_ids: companion_capability_ids,
-        ..
-    }) = &companion_response.payload
-    else {
-        return;
-    };
-    for capability_id in companion_capability_ids {
-        if !visible_capability_ids.contains(capability_id) {
-            visible_capability_ids.push(capability_id.clone());
-        }
-    }
-}
-
 fn activation_success_message(
     package_ref: &LifecyclePackageRef,
     package: &ExtensionPackage,
@@ -1669,8 +1496,11 @@ mod tests {
         let payload = LifecycleProductPayload::ExtensionSearch {
             extensions: vec![LifecycleSearchExtensionSummary {
                 summary: LifecycleExtensionSummary {
-                    package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack_bot")
-                        .expect("valid package ref"),
+                    package_ref: LifecyclePackageRef::new(
+                        LifecyclePackageKind::Extension,
+                        "slack_bot",
+                    )
+                    .expect("valid package ref"),
                     name: "Slack".to_string(),
                     version: "1.0.0".to_string(),
                     description: "Slack channel".to_string(),
@@ -1844,12 +1674,13 @@ mod tests {
         let (_dir, _storage_root, facade, _active_registry, _installation_store) =
             extension_lifecycle_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_packages(vec![fixture_external_channel_package(
-                    "slack_bot", "Slack",
+                    "slack_bot",
+                    "Slack",
                 )]),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
             );
-        let package_ref =
-            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack_bot").expect("valid ref");
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack_bot")
+            .expect("valid ref");
         facade
             .execute(
                 lifecycle_surface_context(),
@@ -1981,15 +1812,20 @@ mod tests {
 
     #[tokio::test]
     async fn extension_search_distinguishes_external_channel_connect_from_delivery() {
+        // Generic external-channel search guidance. Uses a neutral `example_bot`
+        // fixture rather than the real Slack bot: under model B `slack_bot` is
+        // hidden from search, so a Slack-named fixture would be filtered out and
+        // this generic guidance would go untested.
         let (_dir, _storage_root, facade, _active_registry, _installation_store) =
             extension_lifecycle_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_packages(vec![fixture_external_channel_package(
-                    "slack_bot", "Slack",
+                    "example_bot",
+                    "Example",
                 )]),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
             );
-        let package_ref =
-            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack_bot").expect("valid ref");
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "example_bot")
+            .expect("valid ref");
         facade
             .execute(
                 lifecycle_surface_context(),
@@ -1998,7 +1834,7 @@ mod tests {
                 },
             )
             .await
-            .expect("install slack channel");
+            .expect("install example channel");
         facade
             .execute(
                 lifecycle_surface_context(),
@@ -2007,17 +1843,17 @@ mod tests {
                 },
             )
             .await
-            .expect("activate slack channel");
+            .expect("activate example channel");
 
         let search = facade
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionSearch {
-                    query: "slack".to_string(),
+                    query: "example".to_string(),
                 },
             )
             .await
-            .expect("search active slack channel");
+            .expect("search active example channel");
 
         let message = search.message.as_deref().expect("search guidance");
         assert!(
@@ -2037,28 +1873,31 @@ mod tests {
         else {
             panic!("expected extension search payload");
         };
-        let slack = extensions
+        let example = extensions
             .iter()
-            .find(|extension| extension.summary.package_ref.id.as_str() == "slack_bot")
-            .expect("slack search result");
-        assert_eq!(slack.installation_phase, Some(LifecyclePhase::Active));
+            .find(|extension| extension.summary.package_ref.id.as_str() == "example_bot")
+            .expect("example search result");
+        assert_eq!(example.installation_phase, Some(LifecyclePhase::Active));
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
-    async fn slack_install_and_activation_manage_internal_user_tools_without_second_public_extension()
-     {
+    async fn slack_tools_extension_installs_activates_and_publishes_capabilities() {
         let (_dir, _storage_root, port, _active_registry, installation_store) =
             extension_management_port_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
             );
+        // Model B: the user-installable Slack extension is the tools package
+        // (`slack`); the bot channel (`slack_bot`) is operator-provisioned and
+        // hidden. Installing the tools extension installs only itself — there is
+        // no hidden companion.
         let slack_ref =
-            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack_bot").expect("slack ref");
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("slack ref");
 
         port.install(slack_ref.clone())
             .await
-            .expect("install public Slack extension");
+            .expect("install Slack tools extension");
 
         let installed_ids = installation_store
             .list_installations()
@@ -2069,11 +1908,11 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert_eq!(
             installed_ids,
-            ["slack_bot", "slack"]
+            ["slack"]
                 .into_iter()
                 .map(String::from)
                 .collect::<BTreeSet<_>>(),
-            "Slack install should own the internal Slack user-tool package without making it a second product extension"
+            "installing the Slack tools extension installs only itself, with no hidden companion"
         );
 
         let list = port.list_installed().await.expect("list installed");
@@ -2082,7 +1921,7 @@ mod tests {
             panic!("expected extension list payload");
         };
         assert_eq!(count, 1);
-        assert_eq!(extensions[0].summary.package_ref.id.as_str(), "slack_bot");
+        assert_eq!(extensions[0].summary.package_ref.id.as_str(), "slack");
 
         let search = port.search("slack", None).await.expect("search slack");
         let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) = search.payload
@@ -2094,7 +1933,8 @@ mod tests {
                 .iter()
                 .map(|extension| extension.summary.package_ref.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["slack_bot"]
+            vec!["slack"],
+            "search exposes the tools extension (slack); the bot channel (slack_bot) is hidden"
         );
 
         port.activate_with_prechecked_credentials_for_test(
@@ -2102,7 +1942,7 @@ mod tests {
             ExtensionActivationMode::Static,
         )
         .await
-        .expect("activate Slack and internal user tools");
+        .expect("activate Slack tools extension");
 
         let active_capability_ids = port
             .active_model_visible_capabilities()
@@ -2113,24 +1953,24 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert!(
             active_capability_ids.contains("slack.search_messages"),
-            "activating the single public Slack extension should publish Slack user tools"
+            "activating the Slack tools extension publishes its read tools"
         );
         assert!(
             active_capability_ids.contains("slack.send_message"),
-            "write-capable Slack user tools should also be owned by the single public Slack extension"
+            "activating the Slack tools extension publishes its write tool"
         );
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
-    async fn slack_public_activation_requires_internal_user_tool_oauth() {
+    async fn slack_tools_extension_activation_requires_personal_oauth() {
         let (_dir, _storage_root, port, _active_registry, _installation_store) =
             extension_management_port_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
             );
         let slack_ref =
-            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack_bot").expect("slack ref");
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("slack ref");
 
         port.install(slack_ref.clone())
             .await
@@ -2179,14 +2019,14 @@ mod tests {
 
     #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
-    async fn slack_remove_cleans_internal_user_tools() {
+    async fn slack_tools_extension_removes_cleanly() {
         let (_dir, _storage_root, port, _active_registry, installation_store) =
             extension_management_port_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
             );
         let slack_ref =
-            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack_bot").expect("slack ref");
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("slack ref");
 
         port.install(slack_ref.clone())
             .await

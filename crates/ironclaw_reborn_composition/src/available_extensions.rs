@@ -53,9 +53,8 @@ const GOOGLE_SHEETS_WASM_MODULE: &[u8] = include_bytes!(
 const SLACK_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/slack/manifest.toml");
 #[cfg(feature = "slack-v2-host-beta")]
-const SLACK_WASM_MODULE: &[u8] = include_bytes!(
-    "../../ironclaw_first_party_extensions/assets/slack/wasm/slack_user_tool.wasm"
-);
+const SLACK_WASM_MODULE: &[u8] =
+    include_bytes!("../../ironclaw_first_party_extensions/assets/slack/wasm/slack_user_tool.wasm");
 const GOOGLE_SLIDES_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/google-slides/manifest.toml");
 const GOOGLE_SLIDES_WASM_MODULE: &[u8] = include_bytes!(
@@ -270,8 +269,12 @@ fn credential_requirements(
     if is_host_managed_credential_extension(&package.package_ref) {
         return Vec::new();
     }
+    // Model B: the user-installable Slack tools extension (`slack`) surfaces the
+    // slack_personal OAuth connect requirement; the bot channel is operator infra.
     #[cfg(feature = "slack-v2-host-beta")]
-    if is_slack_bot_extension_package(&package.package_ref) {
+    if package.package_ref.kind == LifecyclePackageKind::Extension
+        && package.package_ref.id.as_str() == SLACK_EXTENSION_ID
+    {
         return slack_personal_oauth_credential_requirements();
     }
 
@@ -319,12 +322,6 @@ fn credential_requirements(
             }
         })
         .collect()
-}
-
-#[cfg(feature = "slack-v2-host-beta")]
-fn is_slack_bot_extension_package(package_ref: &LifecyclePackageRef) -> bool {
-    package_ref.kind == LifecyclePackageKind::Extension
-        && package_ref.id.as_str() == SLACK_BOT_EXTENSION_ID
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
@@ -612,19 +609,12 @@ pub(crate) fn slack_manifest_digest() -> String {
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
-pub(crate) fn slack_package_ref() -> Result<LifecyclePackageRef, ProductWorkflowError> {
-    LifecyclePackageRef::new(LifecyclePackageKind::Extension, SLACK_EXTENSION_ID)
-}
-
-#[cfg(feature = "slack-v2-host-beta")]
-pub(crate) fn is_public_slack_bot_package_ref(package_ref: &LifecyclePackageRef) -> bool {
-    is_slack_bot_extension_package(package_ref)
-}
-
-#[cfg(feature = "slack-v2-host-beta")]
 pub(crate) fn is_internal_extension_package_ref(package_ref: &LifecyclePackageRef) -> bool {
+    // Model B: the Slack bot channel is operator-provisioned infrastructure
+    // (mounted from operator config, not the user catalog), so it is hidden.
+    // The user-installable Slack extension is the tools package (`slack`).
     package_ref.kind == LifecyclePackageKind::Extension
-        && package_ref.id.as_str() == SLACK_EXTENSION_ID
+        && package_ref.id.as_str() == SLACK_BOT_EXTENSION_ID
 }
 
 #[cfg(not(feature = "slack-v2-host-beta"))]
@@ -2204,17 +2194,19 @@ mod tests {
 
         assert_eq!(
             slack_results,
-            vec!["slack_bot".to_string()],
-            "the Slack user-tool package is internal plumbing and must not be a second user-visible extension"
+            vec!["slack".to_string()],
+            "model B: the operator-provisioned bot channel (slack_bot) is hidden from the catalog; the user-visible Slack extension is the user-tools package (slack)"
         );
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
     #[test]
-    fn bundled_slack_projects_personal_oauth_setup_for_entrypoint_identity_and_tools() {
+    fn bundled_slack_tools_extension_projects_personal_oauth_setup() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        // Model B: the user-installable tools extension (`slack`) surfaces the
+        // slack_personal OAuth connect requirement, not the hidden bot channel.
         let package_ref =
-            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack_bot").unwrap();
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").unwrap();
         let summary = catalog.resolve(&package_ref).unwrap().summary();
 
         assert_eq!(summary.credential_requirements.len(), 1);
