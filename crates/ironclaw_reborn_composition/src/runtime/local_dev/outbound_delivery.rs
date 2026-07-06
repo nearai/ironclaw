@@ -808,13 +808,15 @@ fn approval_lease_outcome(
         ),
         CapabilityLeaseError::Persistence { .. }
         | CapabilityLeaseError::VersionMismatch
-        | CapabilityLeaseError::CasExhausted => Err(ironclaw_loop_support::raw_agent_loop_host_error(
-            "local_dev_outbound_delivery",
-            operation,
-            AgentLoopHostErrorKind::Unavailable,
-            "outbound delivery approval lease operation failed",
-            error,
-        )),
+        | CapabilityLeaseError::CasExhausted => {
+            Err(ironclaw_loop_support::raw_agent_loop_host_error(
+                "local_dev_outbound_delivery",
+                operation,
+                AgentLoopHostErrorKind::Unavailable,
+                "outbound delivery approval lease operation failed",
+                error,
+            ))
+        }
     }
 }
 
@@ -909,8 +911,9 @@ mod tests {
 
     #[test]
     fn rate_limited_is_a_recoverable_tool_failure_not_terminal() {
-        let outcome = outbound_delivery_outcome(service_error(RebornServicesErrorCode::RateLimited))
-            .expect("rate limited must be a model-visible failure, not terminal");
+        let outcome =
+            outbound_delivery_outcome(service_error(RebornServicesErrorCode::RateLimited))
+                .expect("rate limited must be a model-visible failure, not terminal");
 
         assert!(matches!(
             outcome,
@@ -921,8 +924,9 @@ mod tests {
 
     #[test]
     fn unavailable_is_a_recoverable_tool_failure_not_terminal() {
-        let outcome = outbound_delivery_outcome(service_error(RebornServicesErrorCode::Unavailable))
-            .expect("transient unavailability must not kill the run");
+        let outcome =
+            outbound_delivery_outcome(service_error(RebornServicesErrorCode::Unavailable))
+                .expect("transient unavailability must not kill the run");
 
         assert!(matches!(
             outcome,

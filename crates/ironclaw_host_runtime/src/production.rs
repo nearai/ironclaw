@@ -2158,8 +2158,7 @@ fn host_runtime_spawn_input_for_capability(
                     capability_id.clone(),
                     RuntimeFailureKind::InvalidInput,
                     Some(
-                        "process sandbox capability input must be a SandboxProcessPlan"
-                            .to_string(),
+                        "process sandbox capability input must be a SandboxProcessPlan".to_string(),
                     ),
                 ),
             ));
