@@ -1,0 +1,23 @@
+@import "tailwindcss";
+@import "../../../static/styles/app.css";
+
+@source "../../../static/js";
+
+@theme {
+  --font-sans: "Geist", "Inter", "SF Pro Display", "Helvetica Neue",
+    ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Newsreader", "Lyon Text", "Instrument Serif", georgia, serif;
+  --font-mono: "Geist Mono", "SF Mono", "JetBrains Mono", ui-monospace,
+    monospace;
+  --color-iron-950: var(--v2-canvas-strong);
+  --color-iron-900: var(--v2-surface);
+  --color-iron-800: var(--v2-surface-soft);
+  --color-iron-700: var(--v2-panel-border);
+  --color-iron-400: var(--v2-text-faint);
+  --color-iron-300: var(--v2-text-muted);
+  --color-iron-200: var(--v2-text);
+  --color-iron-100: var(--v2-text-strong);
+  --color-signal: var(--v2-accent-text);
+  --color-copper: var(--v2-warning-text);
+  --color-mint: var(--v2-accent-text);
+}
