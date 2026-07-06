@@ -58,9 +58,10 @@ use ironclaw_turns::{
 
 pub(crate) use super::doubles::{
     EmptyIdentityContextSource, HarnessCapabilityPortFactory,
-    HostRuntimeHarnessCapabilityPortFactory, RecordingApprovalRequestStore,
-    RecordingCapabilityResultWriter, RecordingDelegatingCapabilityPort, RecordingHostRuntime,
-    RecordingNetworkHttpEgress, RecordingRuntimeHttpEgress, RecordingTestCapabilityPort,
+    HostRuntimeHarnessCapabilityPortFactory, ParkingCapabilityGate, ParkingHostRuntime,
+    RecordingApprovalRequestStore, RecordingCapabilityResultWriter,
+    RecordingDelegatingCapabilityPort, RecordingHostRuntime, RecordingNetworkHttpEgress,
+    RecordingRuntimeHttpEgress, RecordingTestCapabilityPort,
     StaticCapabilitySurfaceProfileResolver,
 };
 pub(crate) use assembly::{
@@ -569,6 +570,18 @@ impl HostRuntimeCapabilityHarness {
             persistent_approval_policies,
             trigger_repository,
         })
+    }
+
+    /// Park this harness's tool/capability dispatch until released
+    /// (`ParkingCapabilityGate`) — the tool-path analog of
+    /// `RebornThreadBuilder::park_model`, for lease-expiry-under-a-wedged-tool
+    /// coverage (see `tests/integration/lease_wedge.rs`). Wraps whatever
+    /// `self.runtime` already is (e.g. `RecordingHostRuntime` over the real
+    /// runtime), so parking sits outside the existing recorder at the same
+    /// `HostRuntime` trait-object seam.
+    pub(crate) fn park_capability_dispatch(mut self, gate: ParkingCapabilityGate) -> Self {
+        self.runtime = Arc::new(ParkingHostRuntime::new(self.runtime, gate));
+        self
     }
 
     pub(crate) fn capability_factory(

@@ -96,7 +96,8 @@ use ironclaw_turns::run_profile::{
 };
 use ironclaw_turns::{
     FilesystemTurnStateStore, InMemoryCheckpointStateStore, InMemoryTurnEventSink,
-    LoopCheckpointStore, TurnCoordinator, TurnEventSink, TurnScope, TurnStateStore,
+    InMemoryTurnStateStoreLimits, LoopCheckpointStore, TurnCoordinator, TurnEventSink, TurnScope,
+    TurnStateStore,
 };
 
 use super::builder::{
@@ -341,6 +342,7 @@ impl RebornIntegrationGroup {
             budget: false,
             communication_context_provider: None,
             hook_dispatcher_builder_factory: None,
+            runner_lease_ttl_override: None,
         }
     }
 
@@ -529,6 +531,10 @@ pub struct RebornIntegrationGroupBuilder {
     /// lifecycle points on a coordinator-path turn. Default `None` (hook
     /// framework dormant, matching today's behavior).
     hook_dispatcher_builder_factory: Option<HookDispatcherBuilderFactory>,
+    /// Issue #5476 lease-wedge coverage: overrides the turn-state store's
+    /// `runner_lease_ttl` (default 90s) when set. Builder method lives in
+    /// `group_options.rs`. Default `None` (today's behavior, byte-identical).
+    runner_lease_ttl_override: Option<chrono::Duration>,
 }
 
 impl RebornIntegrationGroupBuilder {
@@ -605,11 +611,23 @@ impl RebornIntegrationGroupBuilder {
     ) -> HarnessResult<RebornIntegrationGroup> {
         let scope_gateway = Arc::new(ScopeRegistryGateway::new());
 
-        let turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>> =
-            Arc::new(FilesystemTurnStateStore::new(scoped_turns_fs_composite(
+        // Issue #5476 lease-wedge coverage: `.with_limits` is the store's own
+        // public builder method (`ironclaw_turns::filesystem_store`); this only
+        // calls it a second time with a shortened `runner_lease_ttl` when a test
+        // opts in via `with_runner_lease_ttl_for_test`. `None` (default) leaves
+        // `InMemoryTurnStateStoreLimits::default()` untouched, byte-identical to
+        // today's behavior.
+        let mut turn_state_limits = InMemoryTurnStateStoreLimits::default();
+        if let Some(ttl) = self.runner_lease_ttl_override {
+            turn_state_limits.runner_lease_ttl = ttl;
+        }
+        let turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>> = Arc::new(
+            FilesystemTurnStateStore::new(scoped_turns_fs_composite(
                 Arc::clone(&base.composite),
                 &base.canonical_binding,
-            )?));
+            )?)
+            .with_limits(turn_state_limits),
+        );
         let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
         let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
 

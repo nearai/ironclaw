@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use super::doubles::ParkingCapabilityGate;
 use super::group::GroupCapability;
 use super::harness::profiles::core_builtin::{self, CoreBuiltinOptions};
 use super::http_matcher::ScriptedHttpResponse;
@@ -71,6 +72,7 @@ impl RebornCapabilityBackend {
         keyed_http_responses: Vec<ScriptedHttpResponse>,
         web_access_response_bodies: Vec<Vec<u8>>,
         github_network_statuses: Vec<u16>,
+        park_capability_gate: Option<ParkingCapabilityGate>,
     ) -> HarnessResult<GroupCapability> {
         Ok(match self {
             RebornCapabilityBackend::Echo => GroupCapability::Recording,
@@ -93,6 +95,13 @@ impl RebornCapabilityBackend {
                 if let ShellMode::Scripted(scripted_process) = shell_mode {
                     host_runtime.install_process_script(scripted_process)?;
                 }
+                // E-GATEWAY tool-path analog of `park_model` (lease-wedge coverage,
+                // issue #5476). Only wired for this backend — no other caller needs
+                // it yet; other arms below ignore `park_capability_gate`.
+                let host_runtime = match park_capability_gate {
+                    Some(gate) => host_runtime.park_capability_dispatch(gate),
+                    None => host_runtime,
+                };
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
             RebornCapabilityBackend::MockMcp { mcp_url } => {
