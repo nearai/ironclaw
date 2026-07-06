@@ -133,7 +133,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
 fn action_from_context(context: Option<&str>) -> Result<&'static str, String> {
     let context = context.ok_or_else(|| "missing_invocation_context".to_string())?;
     let context: ToolContext =
-        serde_json::from_str(context).map_err(|_| "invalid_invocation_context".to_string())?;
+        serde_json::from_str(context).map_err(|e| format!("invalid_invocation_context: {e}"))?;
     match context.capability_id.as_str() {
         "slack.search_messages" => Ok("search_messages"),
         "slack.list_conversations" => Ok("list_conversations"),
