@@ -1354,19 +1354,17 @@ fn google_sheets_assets() -> Vec<AvailableExtensionAsset> {
 
 #[cfg(feature = "slack-v2-host-beta")]
 fn slack_assets() -> Vec<AvailableExtensionAsset> {
-    // The tool's asset subtree keeps its `slack_user` schema/prompt directory
-    // names and the `slack_user_tool.wasm` binary name even though the
-    // extension id is now `slack`; only the top-level asset dir moved to
-    // `assets/slack`. So this can't use `google_wasm_assets!` (which ties the
-    // outer dir, the inner dir, and the mounted virtual path to a single id) —
-    // the source dir is `slack` while the inner dir and mounted paths stay
-    // `slack_user`. Spell the assets out.
+    // The schema/prompt asset dirs now match the extension id (`slack`), but the
+    // WASM binary keeps its legacy `slack_user_tool.wasm` filename (and the tool
+    // uses the `slack_user_token` credential handle). `google_wasm_assets!` ties
+    // the wasm filename to the extension id, so it can't be used here — spell the
+    // assets out.
     macro_rules! slack_schema_asset {
         ($path:literal) => {
             bytes_asset(
-                concat!("schemas/slack_user/", $path),
+                concat!("schemas/slack/", $path),
                 include_bytes!(concat!(
-                    "../../ironclaw_first_party_extensions/assets/slack/schemas/slack_user/",
+                    "../../ironclaw_first_party_extensions/assets/slack/schemas/slack/",
                     $path
                 )),
             )
@@ -1375,9 +1373,9 @@ fn slack_assets() -> Vec<AvailableExtensionAsset> {
     macro_rules! slack_prompt_asset {
         ($operation:literal) => {
             bytes_asset(
-                concat!("prompts/slack_user/", $operation, ".md"),
+                concat!("prompts/slack/", $operation, ".md"),
                 include_bytes!(concat!(
-                    "../../ironclaw_first_party_extensions/assets/slack/prompts/slack_user/",
+                    "../../ironclaw_first_party_extensions/assets/slack/prompts/slack/",
                     $operation,
                     ".md"
                 )),
