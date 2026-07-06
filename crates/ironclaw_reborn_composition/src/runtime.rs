@@ -105,7 +105,7 @@ use self::latency::{trace_runtime_latency_error, trace_runtime_latency_ok};
 use self::runtime_turn_scheduler::RuntimeTurnScheduler;
 use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore, builtin_extension_registry};
-use crate::local_dev_capability_policy::local_dev_capability_policy;
+use crate::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
 #[cfg(any(test, feature = "test-support"))]
 use crate::outbound::OutboundDeliveryTargetEntry;
 use crate::outbound::{
@@ -352,6 +352,9 @@ mod outbound_delivery_tests;
 mod production;
 mod runtime_turn_scheduler;
 mod skills;
+#[cfg(feature = "test-support")]
+#[path = "runtime/test_support.rs"]
+mod test_support;
 
 #[cfg(feature = "test-support")]
 pub(crate) use local_dev::PROJECT_CREATE_CAPABILITY_ID;
@@ -569,6 +572,59 @@ impl RegistryPersistentApprovalGranteeResolver {
             outbound_delivery_target_set_provider,
         })
     }
+}
+
+/// Shared local-dev `DefaultApprovalInteractionService` wiring recipe. Used by both
+/// `build_reborn_runtime` and `test_support::local_dev_approval_interaction_service_for_test`
+/// so the two never drift (W5-WEBUI-API-2 follow-up). `audit_sink` is `None` from the
+/// test accessor: production wires one for audit-log observability only, not
+/// correctness the test needs. Propagates policy/resolver construction failures
+/// instead of collapsing them to `None`.
+pub(crate) fn build_local_dev_approval_interaction_service(
+    local_runtime: &crate::factory::RebornLocalRuntimeServices,
+    local_dev_capability_policy: Arc<LocalDevCapabilityPolicy>,
+    turn_coordinator: Arc<dyn TurnCoordinator>,
+    audit_sink: Option<Arc<dyn ironclaw_events::AuditSink>>,
+) -> Result<Arc<dyn ApprovalInteractionService>, RebornRuntimeError> {
+    let approval_turn_runs = Arc::new(LocalDevApprovalTurnRunLocator::new(Arc::clone(
+        &local_runtime.turn_state,
+    )));
+    let approval_read_model = Arc::new(RunStateApprovalInteractionReadModel::new(
+        local_runtime.approval_requests.clone(),
+        approval_turn_runs,
+    ));
+    let mut approval_resolver = ApprovalResolverPort::new(
+        local_runtime.approval_requests.clone(),
+        local_runtime.capability_leases.clone(),
+    );
+    if let Some(audit_sink) = audit_sink {
+        approval_resolver = approval_resolver.with_audit_sink(audit_sink);
+    }
+    let approval_resolver = Arc::new(approval_resolver);
+
+    Ok(Arc::new(
+        DefaultApprovalInteractionService::new(
+            approval_read_model,
+            Arc::new(approval::LocalDevApprovalLeaseTermsProvider::new(
+                local_dev_capability_policy,
+                Arc::clone(&local_runtime.extension_registry),
+                local_runtime.workspace_mounts.clone(),
+                local_runtime.skill_mounts.clone(),
+                local_runtime.memory_mounts.clone(),
+                local_runtime.system_extensions_lifecycle_mounts.clone(),
+                local_dev::extension_surface::LocalDevExtensionSurfaceSource::new(
+                    local_runtime.extension_management.clone(),
+                ),
+            )),
+            approval_resolver,
+            turn_coordinator,
+        )
+        .with_persistent_policy_store(local_runtime.persistent_approval_policies.clone())
+        .with_persistent_grantee_resolver(Arc::new(RegistryPersistentApprovalGranteeResolver::new(
+            Arc::clone(&local_runtime.extension_registry),
+        )?))
+        .with_tool_permission_override_store(local_runtime.tool_permission_overrides.clone()),
+    ))
 }
 
 pub(crate) type LocalDevSelectableSkillContextSource =
@@ -3506,47 +3562,12 @@ pub async fn build_reborn_runtime(
         if let (Some(local_runtime), Some(local_dev_capability_policy)) =
             (local_runtime, local_dev_capability_policy)
         {
-            let approval_turn_runs = Arc::new(LocalDevApprovalTurnRunLocator::new(Arc::clone(
-                &local_runtime.turn_state,
-            )));
-            let approval_read_model = Arc::new(RunStateApprovalInteractionReadModel::new(
-                local_runtime.approval_requests.clone(),
-                approval_turn_runs,
-            ));
-            let approval_resolver = Arc::new(
-                ApprovalResolverPort::new(
-                    local_runtime.approval_requests.clone(),
-                    local_runtime.capability_leases.clone(),
-                )
-                .with_audit_sink(approval_audit_sink.clone()),
-            );
-            Arc::new(
-                DefaultApprovalInteractionService::new(
-                    approval_read_model,
-                    Arc::new(approval::LocalDevApprovalLeaseTermsProvider::new(
-                        local_dev_capability_policy,
-                        Arc::clone(&local_runtime.extension_registry),
-                        local_runtime.workspace_mounts.clone(),
-                        local_runtime.skill_mounts.clone(),
-                        local_runtime.memory_mounts.clone(),
-                        local_runtime.system_extensions_lifecycle_mounts.clone(),
-                        local_dev::extension_surface::LocalDevExtensionSurfaceSource::new(
-                            local_runtime.extension_management.clone(),
-                        ),
-                    )),
-                    approval_resolver,
-                    Arc::clone(&planned_turn_coordinator),
-                )
-                .with_persistent_policy_store(local_runtime.persistent_approval_policies.clone())
-                .with_persistent_grantee_resolver(Arc::new(
-                    RegistryPersistentApprovalGranteeResolver::new(Arc::clone(
-                        &local_runtime.extension_registry,
-                    ))?,
-                ))
-                .with_tool_permission_override_store(
-                    local_runtime.tool_permission_overrides.clone(),
-                ),
-            )
+            build_local_dev_approval_interaction_service(
+                local_runtime,
+                local_dev_capability_policy,
+                Arc::clone(&planned_turn_coordinator),
+                Some(approval_audit_sink.clone()),
+            )?
         } else {
             Arc::new(UnavailableApprovalInteractionService)
         };
@@ -4389,6 +4410,83 @@ output_schema_ref = "schemas/write.output.json"
                 &capability_id,
             ),
             Some(Principal::Extension(expected_provider))
+        );
+    }
+
+    /// W5-WEBUI-API-2 follow-up (henrypark133 review): both `*_for_test`
+    /// accessors document `None`/`Ok(None)` without a local-dev runtime;
+    /// `RebornServices::disabled()` is the non-local-dev shape (no
+    /// `local_runtime`), so this covers that branch without standing up a
+    /// full runtime.
+    #[test]
+    fn local_dev_test_support_interaction_service_accessors_return_none_without_local_dev_runtime()
+    {
+        struct UnusedTurnCoordinator;
+
+        #[async_trait]
+        impl ironclaw_turns::TurnCoordinator for UnusedTurnCoordinator {
+            async fn prepare_turn(
+                &self,
+                _scope: TurnScope,
+            ) -> Result<TurnRunId, ironclaw_turns::TurnError> {
+                unimplemented!(
+                    "no local-dev runtime: neither accessor should reach the coordinator"
+                )
+            }
+
+            async fn submit_turn(
+                &self,
+                _request: SubmitTurnRequest,
+            ) -> Result<SubmitTurnResponse, ironclaw_turns::TurnError> {
+                unimplemented!(
+                    "no local-dev runtime: neither accessor should reach the coordinator"
+                )
+            }
+
+            async fn resume_turn(
+                &self,
+                _request: ironclaw_turns::ResumeTurnRequest,
+            ) -> Result<ironclaw_turns::ResumeTurnResponse, ironclaw_turns::TurnError> {
+                unimplemented!(
+                    "no local-dev runtime: neither accessor should reach the coordinator"
+                )
+            }
+
+            async fn cancel_run(
+                &self,
+                _request: ironclaw_turns::CancelRunRequest,
+            ) -> Result<ironclaw_turns::CancelRunResponse, ironclaw_turns::TurnError> {
+                unimplemented!(
+                    "no local-dev runtime: neither accessor should reach the coordinator"
+                )
+            }
+
+            async fn get_run_state(
+                &self,
+                _request: GetRunStateRequest,
+            ) -> Result<ironclaw_turns::TurnRunState, ironclaw_turns::TurnError> {
+                unimplemented!(
+                    "no local-dev runtime: neither accessor should reach the coordinator"
+                )
+            }
+        }
+
+        let services = super::RebornServices::disabled();
+        let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
+            Arc::new(UnusedTurnCoordinator);
+
+        let approval = services
+            .local_dev_approval_interaction_service_for_test(Arc::clone(&turn_coordinator))
+            .expect("no local-dev runtime means no capability-policy/resolver work is attempted");
+        assert!(
+            approval.is_none(),
+            "approval accessor must be None without a local-dev runtime"
+        );
+
+        let auth = services.local_dev_auth_interaction_service_for_test(turn_coordinator);
+        assert!(
+            auth.is_none(),
+            "auth accessor must be None without a local-dev runtime"
         );
     }
 

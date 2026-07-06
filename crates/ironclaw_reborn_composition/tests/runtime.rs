@@ -1,15 +1,38 @@
-use std::{sync::LazyLock, time::Duration};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{sync::Arc, sync::LazyLock, time::Duration};
 
+use async_trait::async_trait;
+use ironclaw_approvals::AutoApproveSettingInput;
 use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
+use ironclaw_host_api::{
+    AgentId, CapabilityId, InvocationId, Principal, ResourceScope, TenantId, ThreadId, UserId,
+};
+use ironclaw_loop_support::{
+    HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
+    HostManagedModelRequest, HostManagedModelResponse,
+};
+use ironclaw_product_workflow::{
+    ApprovalInteractionDecision, ListPendingApprovalsRequest, ListPendingAuthInteractionsRequest,
+    ResolveApprovalInteractionRequest,
+};
 use ironclaw_reborn_composition::{
     HooksActivationConfig, PollSettings, RebornBuildInput, RebornCompositionProfile,
     RebornRuntimeError, RebornRuntimeIdentity, RebornRuntimeInput, RebornSkillSourceKind,
-    TurnRunnerSettings, build_reborn_runtime, local_runtime_build_input_with_options,
+    RebornTurnDriveOutcome, TurnRunnerSettings, build_reborn_runtime,
+    local_runtime_build_input_with_options,
 };
-use ironclaw_turns::TurnStatus;
+use ironclaw_turns::run_profile::{
+    LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
+};
+use ironclaw_turns::{
+    CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey, ResumeTurnRequest,
+    ResumeTurnResponse, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator,
+    TurnError, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+};
+use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 const SEND_USER_MESSAGE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -578,6 +601,338 @@ async fn multi_worker_runtime_does_not_raise_worker_stopped_while_workers_are_al
     assert!(
         !matches!(reply, Err(RebornRuntimeError::WorkerStopped)),
         "WorkerStopped must not be raised while all workers are running; got: {reply:?}"
+    );
+
+    runtime.shutdown().await.unwrap();
+}
+
+// W5-WEBUI-API-2 enabler smoke test: `local_dev_*_interaction_service_for_test`
+// build real services (not `Rejecting*`/`Unavailable*` fallbacks) using the
+// runtime's own live `TurnCoordinator`. Full RESOLVE_GATE scenario coverage is a later PR.
+#[tokio::test]
+async fn local_dev_test_support_interaction_service_accessors_build_real_services() {
+    let _guard = runtime_composition_test_guard().await;
+    let root = tempfile::tempdir().unwrap();
+    let input = RebornRuntimeInput::from_services(
+        RebornBuildInput::local_dev(
+            "test-support-accessors-owner",
+            root.path().join("local-dev"),
+        )
+        .with_runtime_policy(local_dev_runtime_policy()),
+    )
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: "test-support-accessors-tenant".to_string(),
+        agent_id: "test-support-accessors-agent".to_string(),
+        source_binding_id: "test-support-accessors-source".to_string(),
+        reply_target_binding_id: "test-support-accessors-reply".to_string(),
+    })
+    .with_runner_settings(TurnRunnerSettings {
+        heartbeat_interval: Duration::from_secs(60),
+        poll_interval: Duration::from_secs(60),
+        ..TurnRunnerSettings::default()
+    });
+
+    let runtime = build_reborn_runtime(input).await.unwrap();
+    let turn_coordinator = runtime
+        .services()
+        .turn_coordinator
+        .clone()
+        .expect("local-dev runtime should wire a turn coordinator");
+
+    let approval_interaction_service = runtime
+        .services()
+        .local_dev_approval_interaction_service_for_test(turn_coordinator.clone())
+        .expect("local-dev capability policy and grantee resolver should construct cleanly")
+        .expect("local-dev runtime should support the approval interaction test accessor");
+    let auth_interaction_service = runtime
+        .services()
+        .local_dev_auth_interaction_service_for_test(turn_coordinator)
+        .expect("local-dev runtime should support the auth interaction test accessor");
+
+    let scope = TurnScope::new(
+        TenantId::new("test-support-accessors-tenant").expect("tenant id"),
+        None,
+        None,
+        ThreadId::new("test-support-accessors-thread".to_string()).expect("thread id"),
+    );
+    let actor = TurnActor::new(UserId::new("test-support-accessors-user").expect("user id"));
+
+    // Discriminating assertion: a real service answers `Ok` with an empty list;
+    // the fail-closed `Rejecting*`/`Unavailable*` fallbacks always `Err`.
+    let pending_approvals = approval_interaction_service
+        .list_pending(ListPendingApprovalsRequest {
+            scope: scope.clone(),
+            actor: actor.clone(),
+        })
+        .await
+        .expect("real approval interaction service must answer Ok, not fail closed");
+    assert!(pending_approvals.approvals.is_empty());
+
+    let pending_auth = auth_interaction_service
+        .list_pending(ListPendingAuthInteractionsRequest { scope, actor })
+        .await
+        .expect("real auth interaction service must answer Ok, not fail closed");
+    assert!(pending_auth.auth_interactions.is_empty());
+
+    runtime.shutdown().await.unwrap();
+}
+
+/// Delegates every `TurnCoordinator` method to `inner`, counting `resume_turn`
+/// calls. Proves `local_dev_approval_interaction_service_for_test` actually
+/// wires the *caller-supplied* coordinator into resolve/resume, not the
+/// runtime's own (henrypark133 review, PR #5654).
+struct SpyTurnCoordinator {
+    inner: Arc<dyn TurnCoordinator>,
+    resume_calls: AtomicUsize,
+}
+
+impl SpyTurnCoordinator {
+    fn new(inner: Arc<dyn TurnCoordinator>) -> Self {
+        Self {
+            inner,
+            resume_calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn resume_calls(&self) -> usize {
+        self.resume_calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl TurnCoordinator for SpyTurnCoordinator {
+    async fn prepare_turn(&self, scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        self.inner.prepare_turn(scope).await
+    }
+
+    async fn abort_prepared_turn(&self, run_id: TurnRunId) -> Result<(), TurnError> {
+        self.inner.abort_prepared_turn(run_id).await
+    }
+
+    async fn submit_turn(
+        &self,
+        request: SubmitTurnRequest,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        self.inner.submit_turn(request).await
+    }
+
+    async fn resume_turn(
+        &self,
+        request: ResumeTurnRequest,
+    ) -> Result<ResumeTurnResponse, TurnError> {
+        self.resume_calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.resume_turn(request).await
+    }
+
+    async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
+        self.inner.cancel_run(request).await
+    }
+
+    async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        self.inner.get_run_state(request).await
+    }
+}
+
+/// Scripted gateway that dispatches one `builtin.write_file` call (default
+/// permission `ask`, so it parks the turn on `TurnStatus::BlockedApproval`
+/// instead of completing), then emits a final reply once resumed.
+#[derive(Default)]
+struct SingleWriteApprovalGateway {
+    call_count: std::sync::Mutex<usize>,
+}
+
+#[async_trait]
+impl HostManagedModelGateway for SingleWriteApprovalGateway {
+    async fn stream_model(
+        &self,
+        _request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        Err(HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidRequest,
+            "SingleWriteApprovalGateway requires the capability-aware model path",
+        ))
+    }
+
+    async fn stream_model_with_capabilities(
+        &self,
+        _request: HostManagedModelRequest,
+        capabilities: Arc<dyn LoopCapabilityPort>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let call_index = {
+            let mut count = self
+                .call_count
+                .lock()
+                .expect("write gateway call lock poisoned");
+            let index = *count;
+            *count += 1;
+            index
+        };
+        if call_index > 0 {
+            return Ok(HostManagedModelResponse::assistant_reply(
+                "wrote the coordinator-spy file".to_string(),
+            ));
+        }
+
+        let write_id = CapabilityId::new("builtin.write_file").expect("write_file capability id");
+        let write_tool = capabilities
+            .tool_definitions()
+            .map_err(|err| {
+                HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    format!("tool_definitions failed: {err}"),
+                )
+            })?
+            .into_iter()
+            .find(|def| def.capability_id == write_id)
+            .expect("builtin.write_file must be visible in local-dev capability surface");
+        let call = capabilities
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
+                provider_id: "coordinator-spy-provider".to_string(),
+                provider_model_id: "coordinator-spy-model".to_string(),
+                turn_id: Some("coordinator-spy-turn".to_string()),
+                id: "coordinator-spy-write".to_string(),
+                name: write_tool.name,
+                arguments: json!({"path": "/workspace/coordinator-spy.txt", "content": "spy write"}),
+                response_reasoning: None,
+                reasoning: None,
+                signature: None,
+            }))
+            .await
+            .map_err(|err| {
+                HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    format!("register_provider_tool_call(write_file) failed: {err}"),
+                )
+            })?;
+        Ok(HostManagedModelResponse::capability_calls(vec![call], ""))
+    }
+}
+
+// W5-WEBUI-API-2 follow-up (henrypark133 review): the smoke test above only
+// calls `list_pending`, so it can't prove the caller-supplied `TurnCoordinator`
+// is actually the one driving resolve/resume. Drive a real approval gate to
+// `BlockedApproval` and resolve it through a service built with a *spy*
+// coordinator wrapping the runtime's own — only the spy's `resume_turn` may
+// fire.
+#[tokio::test]
+async fn local_dev_test_support_interaction_services_use_supplied_turn_coordinator_on_resolve() {
+    let _guard = runtime_composition_test_guard().await;
+    let root = tempfile::tempdir().unwrap();
+    let tag = "coordinator-spy";
+    let input = RebornRuntimeInput::from_services(
+        RebornBuildInput::local_dev(format!("{tag}-owner"), root.path().join("local-dev"))
+            .with_runtime_policy(local_dev_runtime_policy()),
+    )
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: format!("{tag}-tenant"),
+        agent_id: format!("{tag}-agent"),
+        source_binding_id: format!("{tag}-source"),
+        reply_target_binding_id: format!("{tag}-reply"),
+    })
+    .with_poll_settings(PollSettings {
+        interval: Duration::from_millis(10),
+        max_total: Duration::from_secs(5),
+    })
+    .with_model_gateway_override(Arc::new(SingleWriteApprovalGateway::default()));
+
+    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+
+    // `AUTO_APPROVE_DEFAULT_ENABLED` is `true` for a never-configured user
+    // (ironclaw_approvals::auto_approve), so a fresh runtime auto-dispatches
+    // `write_filesystem` capabilities instead of gating them. Disable it here
+    // so the scripted write actually parks on `BlockedApproval`.
+    runtime
+        .services()
+        .local_dev_auto_approve_settings_for_test()
+        .expect("local-dev exposes auto-approve settings for test")
+        .set(AutoApproveSettingInput {
+            updated_by: Principal::User(UserId::new(format!("{tag}-owner")).expect("user")),
+            scope: ResourceScope {
+                tenant_id: TenantId::new(format!("{tag}-tenant")).expect("tenant"),
+                user_id: UserId::new(format!("{tag}-owner")).expect("user"),
+                agent_id: Some(AgentId::new(format!("{tag}-agent")).expect("agent")),
+                project_id: None,
+                mission_id: None,
+                thread_id: None,
+                invocation_id: InvocationId::new(),
+            },
+            enabled: false,
+        })
+        .await
+        .expect("disable auto-approve for the coordinator-spy scope");
+
+    let inner_coordinator = runtime
+        .services()
+        .turn_coordinator
+        .clone()
+        .expect("local-dev runtime should wire a turn coordinator");
+    let spy = Arc::new(SpyTurnCoordinator::new(inner_coordinator));
+    let spy_dyn: Arc<dyn TurnCoordinator> = spy.clone();
+
+    let approval_interaction_service = runtime
+        .services()
+        .local_dev_approval_interaction_service_for_test(spy_dyn)
+        .expect("local-dev capability policy and grantee resolver should construct cleanly")
+        .expect("local-dev runtime should support the approval interaction test accessor");
+
+    let conversation = runtime.new_conversation().await.expect("conversation");
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        runtime.send_user_message_until_gate(&conversation, "write the coordinator spy file"),
+    )
+    .await
+    .expect("send finishes")
+    .expect("send should block on the approval gate");
+
+    let (run_id, gate_ref) = match outcome {
+        RebornTurnDriveOutcome::BlockedOnGate {
+            run_id,
+            status,
+            gate_ref,
+            ..
+        } => {
+            assert_eq!(
+                status,
+                TurnStatus::BlockedApproval,
+                "expected the write to block on an approval gate"
+            );
+            (run_id, gate_ref)
+        }
+        RebornTurnDriveOutcome::Terminal(reply) => {
+            panic!(
+                "expected the write to block on an approval gate; got terminal reply: {reply:?}"
+            );
+        }
+    };
+
+    let scope = TurnScope::new_with_owner(
+        TenantId::new(format!("{tag}-tenant")).expect("tenant id"),
+        Some(AgentId::new(format!("{tag}-agent")).expect("agent id")),
+        None,
+        conversation.0.clone(),
+        Some(UserId::new(format!("{tag}-owner")).expect("user id")),
+    );
+    let actor = TurnActor::new(UserId::new(format!("{tag}-owner")).expect("user id"));
+
+    assert_eq!(spy.resume_calls(), 0, "resume must not fire before resolve");
+
+    approval_interaction_service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope,
+            actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: ApprovalInteractionDecision::ApproveOnce,
+            idempotency_key: IdempotencyKey::new(format!("{tag}-resolve"))
+                .expect("idempotency key"),
+        })
+        .await
+        .expect("resolve should approve and resume the blocked run");
+
+    assert_eq!(
+        spy.resume_calls(),
+        1,
+        "the supplied (spy) coordinator, not the runtime's own, must be the one used to resume the run"
     );
 
     runtime.shutdown().await.unwrap();

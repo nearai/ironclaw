@@ -308,6 +308,9 @@ ironclaw_reborn_config = { path = "crates/ironclaw_reborn_config", version = "0.
 ironclaw_reborn_openai_compat = { path = "crates/ironclaw_reborn_openai_compat", version = "0.1.0", features = ["openai-compat-beta"] }
 ironclaw_run_state = { path = "crates/ironclaw_run_state", version = "0.1.0" }
 ironclaw_threads = { path = "crates/ironclaw_threads", version = "0.1.0" }
+# `InMemoryDurableEventLog` for the W5-WEBUI-API-1 SSE scenario's test-local
+# `ProjectionStream` wiring (`build_webui_event_stream_for_test`).
+ironclaw_events = { path = "crates/ironclaw_events", version = "0.1.0" }
 # `test-support` unlocks `TrustedTriggerSubmitRequest::new_for_test` (E-TRIGGERED-SUBMIT
 # harness seam) — cfg(test) does not propagate from an integration-test binary into its deps.
 ironclaw_triggers = { path = "crates/ironclaw_triggers", version = "0.1.0", features = ["test-support"] }
@@ -454,6 +457,10 @@ name = "reborn_integration_http_matcher"
 path = "tests/integration/http_matcher.rs"
 
 [[test]]
+name = "reborn_integration_idempotent_replay"
+path = "tests/integration/idempotent_replay.rs"
+
+[[test]]
 name = "reborn_integration_identity_resolution_smoke"
 path = "tests/integration/identity_resolution_smoke.rs"
 
@@ -524,6 +531,10 @@ path = "tests/integration/triggered_submit.rs"
 [[test]]
 name = "reborn_integration_web_access"
 path = "tests/integration/web_access.rs"
+
+[[test]]
+name = "reborn_integration_webui_v2_product_api"
+path = "tests/integration/webui_v2_product_api.rs"
 
 [[test]]
 name = "reborn_integration_webui_v2_router_smoke"

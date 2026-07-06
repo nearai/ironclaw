@@ -22,9 +22,9 @@
 //!    without duplicating the wiring logic.
 //! 4. [`project_create`] — `project_create` synthetic-capability test support
 //!    (E-PROJ seam).
-//! 5. [`durable`] — extension-installation, approval-request, trigger, and
-//!    outbound-preferences durable-store test support (E-DURABLE / C-DURABLE /
-//!    W6-COLD-SPOTS seam).
+//! 5. [`durable`] — extension-installation, approval-request, trigger,
+//!    outbound-preferences, and approval-settings durable-store test support
+//!    (E-DURABLE / C-DURABLE / W6-COLD-SPOTS / W5-WEBUI-API-1 seam).
 //! 6. [`skill_activation`] — `skill_activate` synthetic-capability test
 //!    support (E-SKILL seam).
 //! 7. [`user_profile`] — `HostUserProfileSource` test support (E-PROFILE
@@ -35,18 +35,28 @@
 //! 9. [`trace_capture`] — `trace_capture_turn_event_sink_for_test`, the
 //!    production `TraceCaptureTurnEventSink` factory for the integration-test
 //!    harness (C-TRACECAP seam).
+//! 10. [`automation`] — `local_dev_automation_product_facade_for_test`, the
+//!     production `RebornAutomationProductFacade` constructor for the
+//!     automations-cold-LIST scenario (W5-WEBUI-API-1 Enabler B.2).
+//! 11. [`projection`] — `build_webui_event_stream_for_test`, a deliberately
+//!     narrowed `ProjectionStream` (turn-lifecycle events only) for the SSE
+//!     activity-stream scenario (W5-WEBUI-API-1 Enabler A).
 
+mod automation;
 mod budget_gateway;
 mod durable;
 mod local_dev_boot;
 mod oauth_product_auth;
 mod outbound_delivery;
 mod project_create;
+mod projection;
 mod skill_activation;
 mod trace_capture;
 mod trigger_materializer;
 mod user_profile;
 
+#[cfg(feature = "test-support")]
+pub use automation::local_dev_automation_product_facade_for_test;
 pub use budget_gateway::{
     BudgetTestGateway, FailingTestGateway, ScriptedReply, assistant_reply_without_text_for_test,
 };
@@ -55,6 +65,7 @@ pub use durable::open_local_dev_extension_installation_store_for_test;
 #[cfg(all(feature = "test-support", feature = "libsql"))]
 pub use durable::{
     open_local_dev_approval_request_store_for_test,
+    open_local_dev_approval_settings_stores_for_test,
     open_local_dev_outbound_preferences_store_for_test, open_local_dev_trigger_repository_for_test,
 };
 pub use local_dev_boot::LOCAL_DEV_DB_FILENAME;
@@ -77,6 +88,8 @@ pub use outbound_delivery::{
 };
 #[cfg(feature = "test-support")]
 pub use project_create::{PROJECT_CREATE_CAPABILITY_ID, wrap_project_create_capability_for_test};
+#[cfg(feature = "test-support")]
+pub use projection::build_webui_event_stream_for_test;
 #[cfg(feature = "test-support")]
 pub use skill_activation::{
     SKILL_ACTIVATE_CAPABILITY_ID, SkillActivationTestSource,

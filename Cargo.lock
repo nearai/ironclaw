@@ -3926,6 +3926,7 @@ dependencies = [
  "ironclaw_common",
  "ironclaw_conversations",
  "ironclaw_embeddings",
+ "ironclaw_events",
  "ironclaw_extensions",
  "ironclaw_extractors",
  "ironclaw_filesystem",
