@@ -448,6 +448,10 @@ name = "reborn_integration_durable"
 path = "tests/integration/durable.rs"
 
 [[test]]
+name = "reborn_integration_extension_visibility"
+path = "tests/integration/extension_visibility.rs"
+
+[[test]]
 name = "reborn_integration_golden_payload"
 path = "tests/integration/golden_payload.rs"
 
