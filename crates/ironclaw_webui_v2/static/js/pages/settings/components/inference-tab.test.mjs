@@ -1,28 +1,9 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
-import vm from "node:vm";
 
 import { INFERENCE_FIELDS } from "../lib/settings-schema.js";
 import { filterSettingsSections, matchesSearch } from "../lib/settings-search.js";
-
-function sourceForTest(path, exportNames) {
-  const source = readFileSync(new URL(path, import.meta.url), "utf8");
-  const lines = [];
-  let skippingImport = false;
-  for (const line of source.split("\n")) {
-    if (!skippingImport && line.startsWith("import ")) {
-      skippingImport = !line.trimEnd().endsWith(";");
-      continue;
-    }
-    if (skippingImport) {
-      skippingImport = !line.trimEnd().endsWith(";");
-      continue;
-    }
-    lines.push(line.replace(/^export function /, "function "));
-  }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { ${exportNames.join(", ")} };`;
-}
+import { runVmModuleForTest } from "../../../test-support/vm-module-harness.test.mjs";
 
 function html(strings, ...values) {
   return { strings: Array.from(strings), values };
@@ -63,7 +44,6 @@ function renderInferenceModule() {
     ProviderManagement: component("ProviderManagement"),
     SettingsGroup: component("SettingsGroup"),
     SettingsSearchEmpty: component("SettingsSearchEmpty"),
-    globalThis: {},
     html,
     INFERENCE_FIELDS,
     filterSettingsSections,
@@ -77,8 +57,13 @@ function renderInferenceModule() {
     useT: () => (key) => key,
   };
 
-  vm.runInNewContext(sourceForTest("./inference-tab.js", ["InferenceTab"]), context);
-  return { context, exports: context.globalThis.__testExports };
+  const exports = runVmModuleForTest(
+    "./inference-tab.js",
+    ["InferenceTab"],
+    context,
+    import.meta.url
+  );
+  return { context, exports };
 }
 
 test("Inference tab omits unsupported operator-config fields", () => {
