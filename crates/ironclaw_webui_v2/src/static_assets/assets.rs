@@ -468,9 +468,11 @@ mod tests {
     fn desktop_sidebar_toggle_assets_are_wired() {
         let header = asset_text("js/components/page-header.js");
         assert!(header.contains("type=\"button\""));
-        assert!(header.contains("aria-label=\"Toggle sidebar\""));
+        assert!(header.contains(r#"const toggleSidebarLabel = t("sidebar.toggle")"#));
+        assert!(header.contains("aria-label=${toggleSidebarLabel}"));
         assert!(header.contains("aria-controls=\"gateway-sidebar\""));
         assert!(header.contains("aria-expanded=${sidebarOpen ? \"true\" : \"false\"}"));
+        assert!(header.contains("title=${toggleSidebarLabel}"));
         assert!(!header.contains("md:hidden"));
 
         let sidebar = asset_text("js/components/sidebar.js");
