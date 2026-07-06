@@ -322,6 +322,9 @@ impl LoopExecutionState {
     /// re-validates the gate before honoring the record, so this is not a
     /// trust-boundary leak.
     pub fn rebase_for_run(mut self, context: &LoopRunContext) -> Self {
+        if self.input_cursor.is_for_run(context) {
+            return self;
+        }
         self.input_cursor = LoopInputCursor::origin_for_run(context);
         self.assistant_refs.clear();
         self.result_refs.clear();
@@ -835,6 +838,28 @@ mod tests {
             state.pending_approval_resume
         );
         assert_eq!(rebased.pending_auth_resume, state.pending_auth_resume);
+    }
+
+    #[test]
+    fn rebase_for_run_preserves_refs_for_same_run_gate_resume() {
+        let context = test_run_context();
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.input_cursor = LoopInputCursor::from_host_token(
+            &context,
+            ironclaw_turns::run_profile::LoopInputCursorToken::new("input-cursor:gate-seen")
+                .unwrap(),
+        );
+        state
+            .assistant_refs
+            .push(LoopMessageRef::new("msg:same-run").unwrap());
+        state
+            .result_refs
+            .push(ironclaw_turns::LoopResultRef::new("result:same-run").unwrap());
+        state.iteration = 3;
+
+        let rebased = state.clone().rebase_for_run(&context);
+
+        assert_eq!(rebased, state);
     }
 
     #[test]
