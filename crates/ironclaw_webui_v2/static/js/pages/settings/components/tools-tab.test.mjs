@@ -92,8 +92,15 @@ function componentProps(node, component) {
   return props;
 }
 
-function renderToolsModule({ tools = [], translations = {} } = {}) {
+function renderToolsModule({ tools = [], translations = {}, toolError = null } = {}) {
   const saved = [];
+  const translate = (key, params = {}) => {
+    let value = translations[key] || key;
+    for (const [name, replacement] of Object.entries(params)) {
+      value = value.replaceAll(`{${name}}`, String(replacement));
+    }
+    return value;
+  };
   const context = {
     Badge: "Badge",
     Card: "Card",
@@ -102,12 +109,13 @@ function renderToolsModule({ tools = [], translations = {} } = {}) {
     html,
     matchesSearch: (query, values) =>
       !query || values.some((value) => String(value || "").includes(query)),
-    useT: () => (key) => translations[key] || key,
+    useT: () => translate,
     useTools: () => ({
       tools,
       query: { isLoading: false, error: null },
       setPermission: () => {},
       savedTools: {},
+      error: toolError,
     }),
   };
   vm.runInNewContext(
@@ -311,4 +319,18 @@ test("Tools tab search does not index locked tools as disabled unless disabled",
   const rendered = exports.ToolsTab({ searchQuery: "disabled" });
   assert.equal(findComponentNode(rendered, exports.ToolRow), null);
   assert.ok(collectScalars(rendered).includes("tools.noMatch"));
+});
+
+test("Tools tab surfaces permission save failures", () => {
+  const { exports } = renderToolsModule({
+    translations: {
+      "error.saveFailed": "Save failed: {message}",
+    },
+    toolError: new Error("permission denied"),
+  });
+
+  const rendered = exports.ToolsTab({});
+
+  assert.match(collectTemplateText(rendered), /role="alert"/);
+  assert.ok(collectScalars(rendered).includes("Save failed: permission denied"));
 });
