@@ -155,10 +155,7 @@ def _slack_inbound_user_id_for_cases(selected_cases: list[str]) -> str | None:
     return slack_user_id
 
 
-def _discover_slack_dm_route_channel(
-    config_text: str,
-    extra_env: dict[str, str],
-) -> dict[str, object]:
+def _discover_slack_dm_route_channel(extra_env: dict[str, str]) -> dict[str, object]:
     token = _env_value(SLACK_BOT_TOKEN_ENV, extra_env)
     if not token:
         return {"checked": False, "ok": False, "error": "bot token env unavailable"}

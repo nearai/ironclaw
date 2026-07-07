@@ -528,7 +528,7 @@ def prepare_reborn_home(
         and _has_live_slack_env(config, process_env)
         and not _has_slack_delivery_target(config, prepared_home, auth_user_id)
     ):
-        slack_route_discovery = _discover_slack_dm_route_channel(config, process_env)
+        slack_route_discovery = _discover_slack_dm_route_channel(process_env)
         channel_id = (
             str(slack_route_discovery.get("channel_id") or "").strip()
             if slack_route_discovery.get("ok")
@@ -799,11 +799,11 @@ async def _apply_slack_setup_api_after_start(
                 headers={"Authorization": f"Bearer {AUTH_TOKEN}"},
                 json=payload,
             )
-            response_text = response.text[:1000]
             if response.status_code < 200 or response.status_code >= 300:
                 raise LiveQaError(
                     "Slack setup API returned HTTP "
-                    f"{response.status_code}: {response_text!r}"
+                    f"{response.status_code}; response body omitted because "
+                    "this endpoint handles Slack secrets"
                 )
             status = response.json()
     except LiveQaError:

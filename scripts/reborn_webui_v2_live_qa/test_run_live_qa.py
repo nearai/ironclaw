@@ -989,7 +989,6 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             patch.dict(sys.modules, {"httpx": fake_httpx}),
         ):
             result = run_live_qa._discover_slack_dm_route_channel(
-                "[slack]\nenabled = true\n",
                 {"IRONCLAW_REBORN_SLACK_BOT_TOKEN": "xoxb-test"},
             )
 
@@ -1032,7 +1031,6 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 patch.dict(sys.modules, {"httpx": fake_httpx}),
             ):
                 result = run_live_qa._discover_slack_dm_route_channel(
-                    "[slack]\nenabled = true\n",
                     {"IRONCLAW_REBORN_SLACK_BOT_TOKEN": "xoxb-test"},
                 )
 
@@ -1053,7 +1051,6 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             patch.dict(sys.modules, {"httpx": fake_httpx}),
         ):
             result = run_live_qa._discover_slack_dm_route_channel(
-                "[slack]\nenabled = true\n",
                 {"IRONCLAW_REBORN_SLACK_BOT_TOKEN": "xoxb-test"},
             )
 
@@ -2688,6 +2685,73 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIsNotNone(payload)
         self.assertEqual(payload.get("oauth_client_id"), "persisted-client-id")
         self.assertTrue(preflight["personal_oauth_ready"])
+
+    def test_slack_setup_api_failure_omits_response_body(self):
+        class FakeResponse:
+            status_code = 400
+            text = (
+                "echoed xoxb-bot-token signing-secret-value "
+                "oauth-client-secret-value"
+            )
+
+            def json(self):
+                return {"ok": False}
+
+        class FakeAsyncClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, _exc_type, _exc, _tb):
+                return None
+
+            async def put(self, *_args, **_kwargs):
+                return FakeResponse()
+
+        fake_httpx = types.SimpleNamespace(AsyncClient=FakeAsyncClient)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reborn_home = Path(tmpdir) / "reborn-home"
+            reborn_home.mkdir()
+            (reborn_home / "config.toml").write_text(
+                "[slack]\nenabled = true\n",
+                encoding="utf-8",
+            )
+            prepared = run_live_qa.PreparedRebornHome(
+                path=reborn_home,
+                env={"IRONCLAW_REBORN_SLACK_BOT_TOKEN": "xoxb-bot-token"},
+            )
+            with (
+                patch.dict(sys.modules, {"httpx": fake_httpx}),
+                patch.object(
+                    run_live_qa,
+                    "_slack_setup_payload",
+                    return_value=(
+                        {
+                            "bot_token": "xoxb-bot-token",
+                            "signing_secret": "signing-secret-value",
+                            "oauth_client_secret": "oauth-client-secret-value",
+                        },
+                        {},
+                    ),
+                ),
+                self.assertRaises(run_live_qa.LiveQaError) as raised,
+            ):
+                asyncio.run(
+                    run_live_qa._apply_slack_setup_api_after_start(
+                        base_url="http://127.0.0.1:38555",
+                        prepared_home=prepared,
+                    )
+                )
+
+        error = str(raised.exception)
+        self.assertIn("Slack setup API returned HTTP 400", error)
+        self.assertIn("response body omitted", error)
+        self.assertNotIn("xoxb-bot-token", error)
+        self.assertNotIn("signing-secret-value", error)
+        self.assertNotIn("oauth-client-secret-value", error)
+        self.assertNotIn("echoed", error)
 
     def test_prepare_reborn_home_synthesizes_config_for_copied_db_home(self):
         with tempfile.TemporaryDirectory() as tmpdir:
