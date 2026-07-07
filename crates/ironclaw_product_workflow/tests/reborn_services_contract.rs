@@ -10104,6 +10104,86 @@ async fn list_threads_hides_automation_trigger_threads() {
 }
 
 #[tokio::test]
+async fn list_threads_keeps_created_threads_without_source_metadata_when_filtering_automation() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+    let caller = caller();
+    let visible_thread_id =
+        ThreadId::new("thread-created-without-source").expect("visible thread id");
+    let automation_thread_id =
+        ThreadId::new("thread-newer-automation-source").expect("automation thread id");
+
+    let created = services
+        .create_thread(
+            caller.clone(),
+            serde_json::from_value::<WebUiCreateThreadRequest>(json!({
+                "client_action_id": "create-without-source",
+                "requested_thread_id": visible_thread_id.as_str()
+            }))
+            .expect("create request"),
+        )
+        .await
+        .expect("create source-less thread");
+    assert_eq!(created.thread.thread_id, visible_thread_id);
+    let metadata = created
+        .thread
+        .metadata_json
+        .as_deref()
+        .and_then(|metadata| serde_json::from_str::<serde_json::Value>(metadata).ok())
+        .expect("created thread metadata is json");
+    assert_eq!(
+        metadata.get("source"),
+        None,
+        "ordinary WebUI create-thread metadata does not carry a source field",
+    );
+    if let Some(updated_at) = created.thread.updated_at {
+        wait_until_after(updated_at).await;
+    }
+
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope_for(&caller),
+            thread_id: Some(automation_thread_id.clone()),
+            created_by_actor_id: "system".to_string(),
+            title: Some("Newer automation run".to_string()),
+            metadata_json: Some(automation_trigger_thread_metadata_json(
+                "trigger-created-source-less",
+            )),
+        })
+        .await
+        .expect("newer automation thread");
+
+    let response = services
+        .list_threads(
+            caller,
+            WebUiListThreadsRequest {
+                limit: Some(1),
+                ..WebUiListThreadsRequest::default()
+            },
+        )
+        .await
+        .expect("list visible threads");
+    let thread_ids = response
+        .threads
+        .iter()
+        .map(|thread| thread.thread_id.clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        thread_ids,
+        vec![visible_thread_id],
+        "source-less WebUI-created threads must stay visible when automation threads are filtered before pagination",
+    );
+    assert!(
+        !thread_ids.contains(&automation_thread_id),
+        "newer automation thread would have filled the page if the backend exclusion were not active",
+    );
+}
+
+#[tokio::test]
 async fn list_threads_needs_approval_returns_only_automation_threads_with_pending_approval() {
     let thread_service = Arc::new(InMemorySessionThreadService::default());
     let caller = caller();

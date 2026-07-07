@@ -14,8 +14,8 @@ use ironclaw_threads::{
     MessageContent, MessageKind, MessageStatus, ProviderToolCallReferenceEnvelope,
     RedactMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
     SummaryModelContextPolicy, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRangeRequest,
-    ThreadMetadataSource, ThreadScope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
-    UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
+    ThreadMetadataSource, ThreadMetadataSourceError, ThreadScope, ToolResultReferenceEnvelope,
+    ToolResultSafeSummary, UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
 };
 
 fn scope(label: &str) -> ThreadScope {
@@ -34,6 +34,31 @@ fn user_message(text: &str) -> MessageContent {
 
 fn metadata_source(source: &str) -> ThreadMetadataSource {
     ThreadMetadataSource::new(source).unwrap()
+}
+
+#[test]
+fn thread_metadata_source_rejects_empty_too_long_and_control_values() {
+    assert_eq!(
+        ThreadMetadataSource::new(" \t").unwrap_err(),
+        ThreadMetadataSourceError::Empty
+    );
+    assert_eq!(
+        ThreadMetadataSource::new("a".repeat(129)).unwrap_err(),
+        ThreadMetadataSourceError::TooLong { max: 128 }
+    );
+    assert_eq!(
+        ThreadMetadataSource::new("automation\ntrigger").unwrap_err(),
+        ThreadMetadataSourceError::ControlCharacter
+    );
+
+    let serde_error =
+        serde_json::from_value::<ThreadMetadataSource>(serde_json::json!("automation\u{0000}"));
+    assert!(
+        serde_error
+            .expect_err("serde must reject invalid metadata source values")
+            .to_string()
+            .contains("control characters")
+    );
 }
 
 fn provider_call_reference() -> ProviderToolCallReferenceEnvelope {
