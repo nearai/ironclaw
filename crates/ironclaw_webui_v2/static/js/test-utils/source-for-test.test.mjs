@@ -27,7 +27,10 @@ export async function loadValue() {
   return value;
 }
 export default { ok: true };
-export { value as renamedValue };
+export {
+  value as renamedValue,
+  Thing as RenamedThing
+};
 `
   );
 
@@ -44,4 +47,35 @@ export { value as renamedValue };
   assert.equal(new exports.Thing().label(), "thing");
   assert.equal(await exports.loadValue(), 42);
   assert.equal(exports.default.ok, true);
+});
+
+test("sourceForTest maps named default function and class exports", () => {
+  const dir = mkdtempSync(join(tmpdir(), "source-for-test-"));
+  writeFileSync(
+    join(dir, "default-function.js"),
+    `
+export default function namedDefault() {
+  return namedDefault.name;
+}
+`
+  );
+  writeFileSync(
+    join(dir, "default-class.js"),
+    `
+export default class NamedDefault {
+  label() {
+    return NamedDefault.name;
+  }
+}
+`
+  );
+  const baseUrl = pathToFileURL(join(dir, "source-for-test.test.mjs")).href;
+
+  const functionContext = { globalThis: {} };
+  vm.runInNewContext(sourceForTest(baseUrl, "./default-function.js", ["default"]), functionContext);
+  assert.equal(functionContext.globalThis.__testExports.default(), "namedDefault");
+
+  const classContext = { globalThis: {} };
+  vm.runInNewContext(sourceForTest(baseUrl, "./default-class.js", ["default"]), classContext);
+  assert.equal(new classContext.globalThis.__testExports.default().label(), "NamedDefault");
 });
