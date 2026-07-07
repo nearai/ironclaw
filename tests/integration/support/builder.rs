@@ -1071,7 +1071,6 @@ impl RebornIntegrationHarness {
         all[self.baseline_invocation_count..].to_vec()
     }
 
-
     /// S2 seam: assert the named capability produced EXACTLY `expected`
     /// recorded RESULTS (`captured_capability_results`) — the proof that a
     /// gate resume dispatched the gated capability's real execution once,
