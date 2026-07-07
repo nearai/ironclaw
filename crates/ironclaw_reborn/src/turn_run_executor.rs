@@ -24,6 +24,7 @@ use tracing::{debug, error};
 
 use crate::{
     driver_registry::{DriverRegistry, LoopDriverRegistryKey},
+    failure_categories::host_stage_unavailable_category,
     loop_exit_applier::LoopExitApplier,
     turn_runner::{HostFactory, sanitized_driver_failure, sanitized_failure},
 };
@@ -160,7 +161,8 @@ impl TurnRunExecutor for RebornTurnRunExecutor {
                 let sanitized = match &err {
                     DriverInvocationError::DriverError(AgentLoopDriverError::Failed {
                         reason_kind,
-                    }) => sanitized_driver_failure(reason_kind),
+                        detail,
+                    }) => sanitized_driver_failure(reason_kind, detail.as_deref()),
                     DriverInvocationError::DriverNotFound { .. } => {
                         sanitized_failure("driver_not_found")
                     }
@@ -174,8 +176,8 @@ impl TurnRunExecutor for RebornTurnRunExecutor {
                         ..
                     }) => sanitized_failure("driver_invalid_request"),
                     DriverInvocationError::DriverError(AgentLoopDriverError::Unavailable {
-                        ..
-                    }) => sanitized_failure("driver_unavailable"),
+                        reason,
+                    }) => sanitized_failure(host_stage_unavailable_category(reason)),
                 };
                 // `sanitized` is always Some — sanitized_failure /
                 // sanitized_driver_failure fall back to "unknown_failure" before
@@ -183,8 +185,12 @@ impl TurnRunExecutor for RebornTurnRunExecutor {
                 // guard that is never reached in practice.
                 let failure =
                     sanitized.unwrap_or_else(|| unknown_failure_error().failure().clone());
-                let error = TurnRunExecutorError::new(failure.category())
-                    .unwrap_or_else(|_| unknown_failure_error().clone());
+                // Preserve the full `SanitizedFailure` (category + scrubbed
+                // model-visible `detail`) across the host-runtime boundary. The
+                // scheduler records `executor_error.failure()`, so this is what
+                // carries the real driver-failure cause into
+                // `TurnLifecycleEvent.detail` and the failure explainer.
+                let error = TurnRunExecutorError::from_failure(failure);
                 trace_executor_latency_error("execute_claimed_run", &claimed, started_at, &error);
                 Err(error)
             }
@@ -1122,10 +1128,10 @@ mod tests {
 
     /// When the driver returns `AgentLoopDriverError::InvalidRequest`, the executor
     /// must return `Err` with category `"driver_invalid_request"`, and when it
-    /// returns `AgentLoopDriverError::Unavailable`, the category must be
-    /// `"driver_unavailable"`. Both are verified here to confirm the two branches
-    /// in the `DriverInvocationError::DriverError` match arm produce distinct,
-    /// correctly-named categories.
+    /// returns `AgentLoopDriverError::Unavailable`, the category must identify
+    /// the unavailable host stage. Both are verified here to confirm the two
+    /// branches in the `DriverInvocationError::DriverError` match arm produce
+    /// distinct, correctly-named categories.
     #[tokio::test]
     async fn driver_invalid_request_and_unavailable_record_distinct_categories() {
         // ── InvalidRequest → driver_invalid_request ───────────────────────────
@@ -1152,9 +1158,9 @@ mod tests {
             "executor must NOT call fail_run; scheduler owns terminal failure recording"
         );
 
-        // ── Unavailable → driver_unavailable ──────────────────────────────────
+        // ── Unavailable → host_stage_unavailable_model ───────────────────────
         let executor = make_executor_with_failing_driver(AgentLoopDriverError::Unavailable {
-            reason: "driver temporarily unavailable in test".to_string(),
+            reason: "model: driver temporarily unavailable in test".to_string(),
         });
         let transitions = Arc::new(RecordingTransitionPort::default());
         let result = executor
@@ -1167,8 +1173,43 @@ mod tests {
         let err = result.expect_err("expected Err for Unavailable driver error");
         assert_eq!(
             err.failure_category(),
-            "driver_unavailable",
-            "Unavailable must map to category driver_unavailable"
+            "host_stage_unavailable_model",
+            "Unavailable must map to the host-stage unavailable category"
+        );
+        assert_eq!(
+            transitions.fail_run_call_count(),
+            0,
+            "executor must NOT call fail_run; scheduler owns terminal failure recording"
+        );
+    }
+
+    /// A driver `Failed` carrying secret-scrubbed `detail` must have that detail
+    /// preserved on the returned `TurnRunExecutorError`. The scheduler records
+    /// `error.failure()`, so this Err path is what lets the real scrubbed cause
+    /// reach `TurnLifecycleEvent.detail` and the failure explainer. Regression
+    /// for the former `TurnRunExecutorError::new(category)` conversion that
+    /// dropped `detail` at the host-runtime boundary.
+    #[tokio::test]
+    async fn driver_failed_preserves_scrubbed_detail_on_executor_error() {
+        let executor = make_executor_with_failing_driver(AgentLoopDriverError::Failed {
+            reason_kind: "model_error".to_string(),
+            detail: Some("provider returned HTTP 500 for /internal/models/route".to_string()),
+        });
+        let transitions = Arc::new(RecordingTransitionPort::default());
+        let result = executor
+            .execute_claimed_run(
+                test_claimed_run(),
+                transitions.clone() as Arc<dyn TurnRunTransitionPort>,
+            )
+            .await;
+
+        let err = result.expect_err("expected Err for driver Failed");
+        assert_eq!(err.failure_category(), "driver_failed");
+        assert_eq!(
+            err.failure().detail(),
+            Some("provider returned HTTP 500 for /internal/models/route"),
+            "the scrubbed driver-failure detail must survive onto the executor error, \
+             not be dropped at the host-runtime boundary"
         );
         assert_eq!(
             transitions.fail_run_call_count(),

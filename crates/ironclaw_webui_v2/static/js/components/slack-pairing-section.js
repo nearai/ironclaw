@@ -73,7 +73,7 @@ export function SlackPairingSection({ action }) {
 
       ${redeemMutation.isSuccess &&
       html`<p data-testid="slack-pairing-success" className="text-xs text-emerald-300">
-        ${redeemMutation.data?.message || copy.successMessage}
+        ${copy.successMessage}
       </p>`}
       ${redeemMutation.isError &&
       html`<p data-testid="slack-pairing-error" className="text-xs text-red-300">

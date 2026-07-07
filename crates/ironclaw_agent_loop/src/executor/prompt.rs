@@ -1,13 +1,12 @@
 use async_trait::async_trait;
-use ironclaw_turns::LoopFailureKind;
 use ironclaw_turns::{
-    LoopExit,
+    LoopExit, LoopFailureKind, SanitizedFailure,
     run_profile::{
         CapabilitySurfaceVersion, CompactionInitiator, LoopCompactionError, LoopCompactionMode,
         LoopCompactionOutcome, LoopCompactionRequest, LoopContextCompactionKind,
-        LoopContextCompactionMetadata, LoopModelCapabilityView, LoopModelMessage,
-        LoopProgressEvent, LoopSafeSummary, SystemInferenceTaskId, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        LoopContextCompactionMetadata, LoopInlineMessage, LoopModelCapabilityView,
+        LoopModelMessage, LoopProgressEvent, LoopSafeSummary, SystemInferenceTaskId,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 use std::time::Duration;
@@ -17,13 +16,15 @@ use crate::state::{
     CheckpointKind, CompactionPromptSnapshot, DeferredCompactionWatermark, IndexedMessageKind,
     LoopExecutionState, MessageIndexEntry,
 };
-use crate::strategies::CompactionDecision;
+use crate::strategies::{
+    CompactionDecision, RetryAlteration, invalid_model_output_repair_control_message,
+};
 
 use super::{
-    AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, HostStage,
-    PendingInputAck, StageContext, apply_capability_filter, cancelled_exit, debug_host_unavailable,
-    failed_exit, pending_approval_resume_candidate, pending_auth_resume_candidate,
-    pending_external_tool_resume_candidate,
+    AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, FailedExitDetails,
+    HostStage, PendingInputAck, StageContext, apply_capability_filter, attach_failure_explanation,
+    cancelled_exit, debug_host_unavailable, failed_exit, pending_approval_resume_candidate,
+    pending_auth_resume_candidate, pending_external_tool_resume_candidate,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -45,6 +46,7 @@ pub(super) struct PromptOutput {
     pub(super) pending_input_ack: PendingInputAck,
     pub(super) surface: VisibleCapabilitySurface,
     pub(super) messages: Vec<ironclaw_turns::run_profile::LoopModelMessage>,
+    pub(super) inline_messages: Vec<LoopInlineMessage>,
     pub(super) capability_view: LoopModelCapabilityView,
     pub(super) rendered_repeated_call_warning: bool,
 }
@@ -93,6 +95,7 @@ pub(super) enum PromptStep {
 
 pub(super) struct BuiltPromptBundle {
     messages: Vec<LoopModelMessage>,
+    inline_messages: Vec<LoopInlineMessage>,
     compaction_message_index: Vec<LoopContextCompactionMetadata>,
     rendered_reply_admission_control: bool,
     rendered_repeated_call_warning: bool,
@@ -106,7 +109,8 @@ impl BuiltPromptBundle {
         capability_view: LoopModelCapabilityView,
     ) -> Result<Self, AgentLoopExecutorError> {
         let bundle =
-            build_prompt_bundle_for_surface(ctx, state, surface_version, capability_view).await?;
+            build_prompt_bundle_for_surface(ctx, state, surface_version, capability_view, None)
+                .await?;
         refresh_compaction_prompt_from_index(state, &bundle.compaction_message_index);
         Ok(bundle)
     }
@@ -117,6 +121,10 @@ impl BuiltPromptBundle {
     ) -> Vec<LoopModelMessage> {
         refresh_compaction_prompt_from_index(state, &self.compaction_message_index);
         self.messages
+    }
+
+    pub(super) fn inline_messages(&self) -> Vec<LoopInlineMessage> {
+        self.inline_messages.clone()
     }
 }
 
@@ -169,8 +177,8 @@ impl FinalPromptBundle {
         Ok(Self { bundle })
     }
 
-    fn into_messages(self) -> Vec<LoopModelMessage> {
-        self.bundle.messages
+    fn into_model_parts(self) -> (Vec<LoopModelMessage>, Vec<LoopInlineMessage>) {
+        (self.bundle.messages, self.bundle.inline_messages)
     }
 
     fn rendered_reply_admission_control(&self) -> bool {
@@ -352,11 +360,14 @@ impl<'a> PromptPlanningPipeline<'a> {
         }
         let rendered_repeated_call_warning = final_bundle.rendered_repeated_call_warning();
 
+        let (messages, inline_messages) = final_bundle.into_model_parts();
+
         Ok(PromptStep::Prepared(Box::new(PromptOutput {
             state: self.state,
             pending_input_ack: self.pending_input_ack,
             surface,
-            messages: final_bundle.into_messages(),
+            messages,
+            inline_messages,
             capability_view,
             rendered_repeated_call_warning,
         })))
@@ -639,6 +650,16 @@ async fn compaction_failed_exit(
             },
         )
         .await;
+    let mut state = state;
+    state = match CheckpointStage
+        .cancel_if_requested_after_pending_input_ack(ctx, state, pending_input_ack)
+        .await?
+    {
+        CancelCheck::Continue(state) => *state,
+        CancelCheck::Exit(exit) => return Ok(PromptCompactionOutcome::Exited(exit)),
+    };
+    let explanation_message_ref =
+        attach_failure_explanation(ctx, &mut state, LoopFailureKind::CompactionUnavailable).await?;
     let checked = CheckpointStage
         .write(ctx, state, CheckpointKind::Final)
         .await?;
@@ -648,6 +669,11 @@ async fn compaction_failed_exit(
         checked.state,
         LoopFailureKind::CompactionUnavailable,
         Some(checked.checkpoint_id),
+        FailedExitDetails {
+            diagnostic_ref: None,
+            safe_summary: Some(compaction_failure_category(error)?),
+            explanation_message_ref,
+        },
     )?;
     Ok(PromptCompactionOutcome::Exited(exit))
 }
@@ -657,11 +683,21 @@ pub(super) async fn build_prompt_bundle_for_surface(
     state: &LoopExecutionState,
     surface_version: CapabilitySurfaceVersion,
     capability_view: LoopModelCapabilityView,
+    retry_alteration: Option<&RetryAlteration>,
 ) -> Result<BuiltPromptBundle, AgentLoopExecutorError> {
     let context_plan = ctx.planner.context().plan_context_request(state).await;
     let mut context_request = context_plan.request;
     context_request.surface_version = Some(surface_version);
     context_request.capability_view = Some(capability_view);
+    if matches!(
+        retry_alteration,
+        Some(RetryAlteration::RepairInvalidModelOutput)
+    ) {
+        context_request
+            .inline_messages
+            .push(invalid_model_output_repair_control_message());
+    }
+    let inline_messages = context_request.inline_messages.clone();
     let prompt_mode = context_request.mode;
     let rendered_reply_admission_control = context_plan.emitted_admission_control;
     let rendered_repeated_call_warning = context_plan.emitted_repeated_call_warning;
@@ -692,6 +728,7 @@ pub(super) async fn build_prompt_bundle_for_surface(
 
     Ok(BuiltPromptBundle {
         messages: prompt_bundle.messages,
+        inline_messages,
         compaction_message_index: prompt_bundle.compaction_message_index,
         rendered_reply_admission_control,
         rendered_repeated_call_warning,
@@ -730,6 +767,23 @@ fn loop_compaction_reason(error: &LoopCompactionError) -> LoopSafeSummary {
         LoopCompactionError::PersistenceFailed { .. } => "persistence failed",
     };
     LoopSafeSummary::new(value).unwrap_or_else(|_| LoopSafeSummary::model_gateway_failed())
+}
+
+fn compaction_failure_category(
+    error: &LoopCompactionError,
+) -> Result<SanitizedFailure, AgentLoopExecutorError> {
+    let category = match error {
+        LoopCompactionError::InvalidCutPoint => "compaction_invalid_cut_point",
+        LoopCompactionError::UnsupportedMode => "compaction_unsupported_mode",
+        LoopCompactionError::InputTooLarge => "compaction_input_too_large",
+        LoopCompactionError::SecurityRejected { .. } => "compaction_security_rejected",
+        LoopCompactionError::InferenceFailed { .. } => "compaction_inference_failed",
+        LoopCompactionError::Cancelled => "compaction_cancelled",
+        LoopCompactionError::PersistenceFailed { .. } => "compaction_persistence_failed",
+    };
+    SanitizedFailure::new(category).map_err(|_| AgentLoopExecutorError::PlannerContract {
+        detail: "static compaction failure category was invalid",
+    })
 }
 
 fn safe(value: &'static str) -> LoopSafeSummary {

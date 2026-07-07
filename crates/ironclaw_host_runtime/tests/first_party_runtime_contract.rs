@@ -552,7 +552,12 @@ async fn first_party_missing_handler_fails_closed_without_side_effect_handler() 
         panic!("expected missing first-party handler to fail closed, got {outcome:?}");
     };
     assert_eq!(failure.capability_id, capability_id());
-    assert_eq!(failure.kind, RuntimeFailureKind::Backend);
+    // A capability the model named that has no registered handler is a
+    // model-fixable request error (UndeclaredCapability -> InvalidInput ->
+    // model-visible tool error), not an infra Backend fault — it can never
+    // resolve by retrying, so it must surface to the model immediately. See the
+    // From<DispatchFailureKind> mapping in production.rs.
+    assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
     assert_eq!(
         failure.message.as_deref(),
         Some("the tool used an undeclared capability")

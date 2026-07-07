@@ -946,9 +946,9 @@ mod tests {
     };
     use ironclaw_turns::{
         CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest,
-        ResumeTurnResponse, RunProfileId, RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse,
-        TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId, TurnRunState, TurnScope,
-        TurnStatus, TurnSurfaceType, events::EventCursor,
+        ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, RunProfileId, RunProfileVersion,
+        SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator, TurnError, TurnId, TurnOriginKind,
+        TurnRunId, TurnRunState, TurnScope, TurnStatus, TurnSurfaceType, events::EventCursor,
     };
 
     use crate::action::SourceBindingKey;
@@ -998,6 +998,13 @@ mod tests {
             &self,
             _request: ResumeTurnRequest,
         ) -> Result<ResumeTurnResponse, TurnError> {
+            unimplemented!("not used in submit path tests")
+        }
+
+        async fn retry_turn(
+            &self,
+            _request: RetryTurnRequest,
+        ) -> Result<RetryTurnResponse, TurnError> {
             unimplemented!("not used in submit path tests")
         }
 

@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     BlockedReason, CapabilityActivityId, LoopExitMapping, ResolvedRunProfile, SanitizedFailure,
-    TurnCheckpointId, TurnError, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope,
-    TurnTimestamp,
+    TurnCheckpointId, TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId,
+    TurnScope, TurnTimestamp,
     events::EventCursor,
     run_profile::{LoopCheckpointStateRef, LoopModelRouteSnapshot},
 };
@@ -134,6 +134,15 @@ pub trait TurnRunTransitionPort: Send + Sync {
         &self,
         request: RecoverExpiredLeasesRequest,
     ) -> Result<RecoverExpiredLeasesResponse, TurnError>;
+
+    async fn latest_resumable_checkpoint(
+        &self,
+        _scope: &TurnScope,
+        _turn_id: TurnId,
+        _run_id: TurnRunId,
+    ) -> Result<Option<TurnCheckpointId>, TurnError> {
+        Ok(None)
+    }
 
     async fn record_model_route_snapshot(
         &self,

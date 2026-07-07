@@ -36,7 +36,10 @@ export function useTools() {
   });
 
   const setPermission = React.useCallback(
-    (name, state) => mutation.mutate({ name, state }),
+    (name, state) => {
+      mutation.reset();
+      mutation.mutate({ name, state });
+    },
     [mutation]
   );
 

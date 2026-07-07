@@ -60,6 +60,7 @@ mod sse_capacity;
 pub mod static_assets;
 
 #[allow(deprecated)]
+#[cfg(feature = "webui-v2-beta")]
 pub use descriptors::is_webui_v2_llm_config_route_id;
 #[cfg(feature = "webui-v2-beta")]
 pub use descriptors::{
@@ -87,13 +88,13 @@ pub use descriptors::{
     WEBUI_V2_ROUTE_OPERATOR_VALIDATE_CONFIG, WEBUI_V2_ROUTE_PAUSE_AUTOMATION,
     WEBUI_V2_ROUTE_READ_FS_FILE, WEBUI_V2_ROUTE_READ_PROJECT_FILE, WEBUI_V2_ROUTE_REMOVE_EXTENSION,
     WEBUI_V2_ROUTE_REMOVE_PROJECT_MEMBER, WEBUI_V2_ROUTE_REMOVE_SKILL, WEBUI_V2_ROUTE_RESOLVE_GATE,
-    WEBUI_V2_ROUTE_RESUME_AUTOMATION, WEBUI_V2_ROUTE_SEARCH_SKILLS, WEBUI_V2_ROUTE_SEND_MESSAGE,
-    WEBUI_V2_ROUTE_SET_ACTIVE_LLM, WEBUI_V2_ROUTE_SET_AUTO_ACTIVATE_LEARNED,
-    WEBUI_V2_ROUTE_SET_OUTBOUND_PREFERENCES, WEBUI_V2_ROUTE_SET_SETTINGS_TOOL_PERMISSION,
-    WEBUI_V2_ROUTE_SET_SETTINGS_TOOLS_AUTO_APPROVE, WEBUI_V2_ROUTE_SET_SKILL_AUTO_ACTIVATE,
-    WEBUI_V2_ROUTE_SETUP_EXTENSION, WEBUI_V2_ROUTE_START_CODEX_LOGIN,
-    WEBUI_V2_ROUTE_START_NEARAI_LOGIN, WEBUI_V2_ROUTE_STAT_FS_PATH,
-    WEBUI_V2_ROUTE_STAT_PROJECT_FILE, WEBUI_V2_ROUTE_STREAM_EVENTS,
+    WEBUI_V2_ROUTE_RESUME_AUTOMATION, WEBUI_V2_ROUTE_RETRY_RUN, WEBUI_V2_ROUTE_SEARCH_SKILLS,
+    WEBUI_V2_ROUTE_SEND_MESSAGE, WEBUI_V2_ROUTE_SET_ACTIVE_LLM,
+    WEBUI_V2_ROUTE_SET_AUTO_ACTIVATE_LEARNED, WEBUI_V2_ROUTE_SET_OUTBOUND_PREFERENCES,
+    WEBUI_V2_ROUTE_SET_SETTINGS_TOOL_PERMISSION, WEBUI_V2_ROUTE_SET_SETTINGS_TOOLS_AUTO_APPROVE,
+    WEBUI_V2_ROUTE_SET_SKILL_AUTO_ACTIVATE, WEBUI_V2_ROUTE_SETUP_EXTENSION,
+    WEBUI_V2_ROUTE_START_CODEX_LOGIN, WEBUI_V2_ROUTE_START_NEARAI_LOGIN,
+    WEBUI_V2_ROUTE_STAT_FS_PATH, WEBUI_V2_ROUTE_STAT_PROJECT_FILE, WEBUI_V2_ROUTE_STREAM_EVENTS,
     WEBUI_V2_ROUTE_STREAM_EVENTS_WS, WEBUI_V2_ROUTE_TEST_LLM_CONNECTION,
     WEBUI_V2_ROUTE_TRACE_CREDITS, WEBUI_V2_ROUTE_TRACE_HOLD_AUTHORIZE,
     WEBUI_V2_ROUTE_UPDATE_PROJECT, WEBUI_V2_ROUTE_UPDATE_PROJECT_MEMBER,
@@ -112,7 +113,7 @@ pub use handlers::{
     list_extension_registry, list_extensions, list_fs_mounts, list_llm_models,
     list_operator_config, list_outbound_delivery_targets, list_settings_tools, list_skills,
     list_threads, pause_automation, query_logs, query_operator_logs, read_fs_file,
-    remove_extension, remove_skill, resolve_gate, resume_automation,
+    remove_extension, remove_skill, resolve_gate, resume_automation, retry_run,
     run_operator_service_lifecycle, run_operator_setup, search_skills, send_message,
     set_active_llm, set_auto_activate_learned, set_operator_config_key, set_outbound_preferences,
     set_settings_tool_permission, set_settings_tools_auto_approve, set_skill_auto_activate,

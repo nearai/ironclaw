@@ -16,8 +16,9 @@ use crate::{
 };
 
 use super::{
-    AgentLoopExecutorError, BatchStep, CancelCheck, CheckpointStage, ExecutorStage, StageContext,
-    append_capability_result_ref, append_capability_safe_summary_ref, blocked_kind,
+    AgentLoopExecutorError, BatchStep, CancelCheck, CheckpointStage, ExecutorStage,
+    FailedExitDetails, StageContext, append_capability_result_ref,
+    append_capability_safe_summary_ref, attach_failure_explanation, blocked_kind,
     clear_matching_pending_auth_resume, clear_matching_pending_external_tool_resume, exit_id,
     failed_exit, gate_tool_result_summary, loop_gate_kind, push_completed_result,
 };
@@ -199,6 +200,8 @@ impl ExecutorStage<GateInput> for GateStage {
                     CancelCheck::Continue(next) => state = *next,
                     CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
                 }
+                let explanation_message_ref =
+                    attach_failure_explanation(ctx, &mut state, failure_kind).await?;
                 let checked = CheckpointStage
                     .write(ctx, state, CheckpointKind::Final)
                     .await?;
@@ -207,6 +210,11 @@ impl ExecutorStage<GateInput> for GateStage {
                     checked.state,
                     failure_kind,
                     Some(checked.checkpoint_id),
+                    FailedExitDetails {
+                        diagnostic_ref: None,
+                        safe_summary: None,
+                        explanation_message_ref,
+                    },
                 )?))
             }
         }
@@ -284,6 +292,8 @@ impl ExecutorStage<AwaitDependentRunGateInput> for AwaitDependentRunGateStage {
                     CancelCheck::Continue(next) => state = *next,
                     CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
                 }
+                let explanation_message_ref =
+                    attach_failure_explanation(ctx, &mut state, failure_kind).await?;
                 let checked = CheckpointStage
                     .write(ctx, state, CheckpointKind::Final)
                     .await?;
@@ -292,6 +302,11 @@ impl ExecutorStage<AwaitDependentRunGateInput> for AwaitDependentRunGateStage {
                     checked.state,
                     failure_kind,
                     Some(checked.checkpoint_id),
+                    FailedExitDetails {
+                        diagnostic_ref: None,
+                        safe_summary: None,
+                        explanation_message_ref,
+                    },
                 )?))
             }
         }

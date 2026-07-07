@@ -128,6 +128,16 @@ impl TurnStateStore for StaticTurnStateStore {
         panic!("resume_turn should not be called by evidence tests")
     }
 
+    async fn retry_turn(
+        &self,
+        request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        // WS-3 implements this.
+        Err(TurnError::RunNotRetryable {
+            run_id: request.run_id,
+        })
+    }
+
     async fn request_cancel(
         &self,
         _request: CancelRunRequest,
@@ -391,10 +401,20 @@ fn test_profile(
     }
 }
 
-#[derive(Default)]
 pub(super) struct RecordingTransitionPort {
     raw_failures: Mutex<Vec<String>>,
     apply_calls: Mutex<usize>,
+    latest_resumable_checkpoint_result: Mutex<Result<Option<TurnCheckpointId>, TurnError>>,
+}
+
+impl Default for RecordingTransitionPort {
+    fn default() -> Self {
+        Self {
+            raw_failures: Mutex::new(Vec::new()),
+            apply_calls: Mutex::new(0),
+            latest_resumable_checkpoint_result: Mutex::new(Ok(None)),
+        }
+    }
 }
 
 impl RecordingTransitionPort {
@@ -429,6 +449,18 @@ impl TurnRunTransitionPort for RecordingTransitionPort {
         _request: RecoverExpiredLeasesRequest,
     ) -> Result<RecoverExpiredLeasesResponse, TurnError> {
         Ok(RecoverExpiredLeasesResponse { recovered: vec![] })
+    }
+
+    async fn latest_resumable_checkpoint(
+        &self,
+        _scope: &TurnScope,
+        _turn_id: TurnId,
+        _run_id: TurnRunId,
+    ) -> Result<Option<TurnCheckpointId>, TurnError> {
+        self.latest_resumable_checkpoint_result
+            .lock()
+            .expect("lock")
+            .clone()
     }
 
     async fn record_model_route_snapshot(
