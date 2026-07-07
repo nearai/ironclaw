@@ -100,7 +100,7 @@ pub(crate) trait CredentialRefreshCandidateSource: Send + Sync {
 }
 
 // Blanket impl so `FilesystemAuthProductServices<F>` satisfies the trait.
-// Note: this requires the `product_auth_durable` module to be `pub(crate)`.
+// Note: this requires the `product_auth::durable` module to be `pub(crate)`.
 #[async_trait]
 impl<F> CredentialRefreshCandidateSource
     for crate::product_auth::durable::FilesystemAuthProductServices<F>
