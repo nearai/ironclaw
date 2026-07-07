@@ -289,7 +289,7 @@ mod tests {
     use chrono::Utc;
     use ironclaw_extensions::{
         ExtensionActivationState, ExtensionInstallationId, ExtensionManifestRecord,
-        ExtensionManifestRef, MANIFEST_SCHEMA_VERSION,
+        ExtensionManifestRef, InstallationOwner, MANIFEST_SCHEMA_VERSION,
     };
     use ironclaw_filesystem::{
         BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemOperation,
@@ -394,6 +394,7 @@ prompt_doc_ref = "prompts/gmail/echo.md"
                     manifest_ref,
                     Vec::new(),
                     Utc::now(),
+                    InstallationOwner::Tenant,
                 )
                 .expect("valid installation"),
             )

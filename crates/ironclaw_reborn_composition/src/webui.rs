@@ -4,8 +4,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::Utc;
 
 use async_trait::async_trait;
-use ironclaw_extensions::SharedExtensionRegistry;
-use ironclaw_host_api::{EffectKind, InvocationId, ResourceScope};
+use ironclaw_extensions::{InstallationOwner, SharedExtensionRegistry};
+use ironclaw_host_api::{
+    EffectKind, ExtensionId, InvocationId, ResourceScope, RuntimeKind, UserId,
+};
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
     ChannelConnectionFacade, ConnectableChannelsProductFacade, OperatorStatusService,
@@ -20,6 +22,7 @@ use ironclaw_product_workflow::{
 
 use ironclaw_triggers::TriggerRepository;
 
+use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 use crate::{
     RebornAutomationProductFacade, RebornBuildError, RebornProductAuthServices, RebornReadiness,
     RebornReadinessDiagnostic, RebornReadinessDiagnosticStatus, RebornRuntime,
@@ -46,26 +49,84 @@ static SKILL_CONTENT_SAFETY: std::sync::LazyLock<ironclaw_safety::Sanitizer> =
 struct ActiveRegistryOperatorToolCatalog {
     registry: Arc<SharedExtensionRegistry>,
     synthetic_tools: Arc<[RebornOperatorToolInfo]>,
+    /// Source of the installation owner-by-extension map (#5459 P1). Present
+    /// for the local-dev runtime; `None` for assemblies without extension
+    /// management, where every registry tool is treated as tenant-shared
+    /// (there is no per-user install path to leak).
+    owner_source: Option<Arc<RebornLocalExtensionManagementPort>>,
 }
 
 impl ActiveRegistryOperatorToolCatalog {
     fn new(
         registry: Arc<SharedExtensionRegistry>,
         synthetic_tools: Vec<RebornOperatorToolInfo>,
+        owner_source: Option<Arc<RebornLocalExtensionManagementPort>>,
     ) -> Self {
         Self {
             registry,
             synthetic_tools: Arc::from(synthetic_tools),
+            owner_source,
         }
     }
 }
 
+/// Owner data available to one `list_operator_tools` read.
+enum OwnerVisibility {
+    /// No extension management wired: no per-user install path exists, so
+    /// every registry tool is tenant-shared (pre-#5459 behavior).
+    AllShared,
+    /// Owner-aware assembly with a healthy owner map.
+    Owners(std::collections::BTreeMap<ExtensionId, InstallationOwner>),
+    /// Owner-aware assembly whose owner map could not be read. Install-backed
+    /// tools must fail CLOSED — an empty map is indistinguishable from
+    /// "no private owners" (#5525 review).
+    Unavailable,
+}
+
+#[async_trait]
 impl RebornOperatorToolCatalog for ActiveRegistryOperatorToolCatalog {
-    fn list_operator_tools(&self) -> Vec<RebornOperatorToolInfo> {
-        let mut tools = self
-            .registry
-            .snapshot()
+    async fn list_operator_tools(&self, caller: &UserId) -> Vec<RebornOperatorToolInfo> {
+        // #5459 P1: the settings/tools catalog is read by any authenticated
+        // member, so it MUST hide another user's private tool. The global
+        // registry carries no owner, so join the installation owner map and
+        // keep an install-backed capability only when its provider's owner row
+        // says it is tenant-shared or owned by `caller`. Host-authored
+        // builtins (`FirstParty`/`System` runtime — kinds the manifest wire
+        // format cannot even declare) have no install path and stay visible.
+        let owner_by_extension = match &self.owner_source {
+            Some(port) => match port.installation_owners().await {
+                Ok(owners) => OwnerVisibility::Owners(owners),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "settings tool catalog could not read installation owners; \
+                         hiding install-backed registry tools for this read"
+                    );
+                    OwnerVisibility::Unavailable
+                }
+            },
+            None => OwnerVisibility::AllShared,
+        };
+        let snapshot = self.registry.snapshot();
+        let mut tools = snapshot
             .capabilities()
+            .filter(|descriptor| match &owner_by_extension {
+                OwnerVisibility::AllShared => true,
+                _ if matches!(
+                    descriptor.runtime,
+                    RuntimeKind::FirstParty | RuntimeKind::System
+                ) =>
+                {
+                    true
+                }
+                // Fail closed on a missing owner row: a published
+                // install-backed capability without one is anomalous and could
+                // be private (#5525 review).
+                OwnerVisibility::Owners(owners) => owners
+                    .get(&descriptor.provider)
+                    .is_some_and(|owner| owner.visible_to(caller)),
+                OwnerVisibility::Unavailable => false,
+            })
             .map(|descriptor| RebornOperatorToolInfo {
                 capability_id: descriptor.id.clone(),
                 provider: descriptor.provider.clone(),
@@ -249,6 +310,7 @@ pub(crate) fn build_webui_services_with_connectable_channels(
             Arc::new(ActiveRegistryOperatorToolCatalog::new(
                 tool_registry,
                 synthetic_operator_tools,
+                local_runtime.extension_management.clone(),
             )),
         );
         let mut lifecycle_facade =
@@ -971,35 +1033,47 @@ fn status_check(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use ironclaw_extensions::{
-        ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
+        ExtensionActivationState, ExtensionHealthSnapshot, ExtensionInstallation,
+        ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
+        ExtensionManifest, ExtensionManifestRecord, ExtensionPackage, ExtensionRegistry,
+        InMemoryExtensionInstallationStore, ManifestSource,
     };
     use ironclaw_filesystem::LocalFilesystem;
     use ironclaw_host_api::{
-        HostPath, HostPortCatalog, MountAlias, MountGrant, MountPermissions, MountView, TenantId,
-        UserId, VirtualPath,
+        ExtensionId, HostPath, HostPortCatalog, MountAlias, MountGrant, MountPermissions,
+        MountView, TenantId, UserId, VirtualPath,
     };
     use std::{path::Path, time::Duration};
 
-    #[test]
-    fn operator_tool_catalog_reads_shared_registry_updates() {
+    #[tokio::test]
+    async fn operator_tool_catalog_reads_shared_registry_updates() {
         let registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
         let synthetic_provider =
             outbound_delivery_synthetic_provider().expect("synthetic provider id");
+        // No owner source: every registry tool is tenant-visible (the
+        // assembly-without-extension-management case).
         let catalog = ActiveRegistryOperatorToolCatalog::new(
             Arc::clone(&registry),
             vec![
                 outbound_delivery_target_set_operator_tool_info(synthetic_provider.clone())
                     .expect("synthetic tool info"),
             ],
+            None,
         );
+        let caller = UserId::new("caller").expect("caller id");
 
         assert!(
-            catalog.list_operator_tools().iter().any(|tool| {
-                tool.capability_id.as_str()
-                    == crate::outbound::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID
-                    && tool.provider == synthetic_provider
-            }),
+            catalog
+                .list_operator_tools(&caller)
+                .await
+                .iter()
+                .any(|tool| {
+                    tool.capability_id.as_str()
+                        == crate::outbound::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID
+                        && tool.provider == synthetic_provider
+                }),
             "synthetic outbound delivery capability must use the Settings > Tools provider key"
         );
 
@@ -1007,7 +1081,7 @@ mod tests {
             .insert(test_extension_package("dynamic-tools", "echo"))
             .expect("insert dynamic extension");
 
-        let tools = catalog.list_operator_tools();
+        let tools = catalog.list_operator_tools(&caller).await;
 
         assert!(
             tools
@@ -1015,6 +1089,270 @@ mod tests {
                 .any(|tool| tool.capability_id.as_str() == "dynamic-tools.echo"),
             "catalog must read the shared registry at list time so lifecycle updates are visible"
         );
+    }
+
+    /// #5459 P1 leak fix: the settings/tools catalog is read by any
+    /// authenticated member, so it MUST hide another user's private tool. With
+    /// an owner source wired, `list_operator_tools(bob)` excludes alice's
+    /// private capability while `list_operator_tools(alice)` includes it; a
+    /// tenant-shared tool is visible to both. This is the caller-level pin for
+    /// the confirmed enumeration/metadata-disclosure blocker.
+    #[tokio::test]
+    async fn operator_tool_catalog_hides_foreign_private_tools() {
+        use crate::extension_host::available_extensions::AvailableExtensionCatalog;
+        use ironclaw_extensions::{ExtensionLifecycleService, ExtensionManifestRef};
+        use tokio::sync::Mutex;
+
+        fn manifest_record(ext: &str, capability: &str) -> ExtensionManifestRecord {
+            let toml = format!(
+                "schema_version = \"reborn.extension_manifest.v2\"\n\
+                 id = \"{ext}\"\nname = \"{ext}\"\nversion = \"0.1.0\"\n\
+                 description = \"test\"\ntrust = \"third_party\"\n\n\
+                 [runtime]\nkind = \"wasm\"\nmodule = \"wasm/{ext}.wasm\"\n\n\
+                 [[capabilities]]\nid = \"{ext}.{capability}\"\ndescription = \"{capability}\"\n\
+                 effects = [\"network\"]\ndefault_permission = \"ask\"\nvisibility = \"model\"\n\
+                 input_schema_ref = \"schemas/{capability}.input.json\"\n\
+                 output_schema_ref = \"schemas/{capability}.output.json\"\n"
+            );
+            ExtensionManifestRecord::from_toml(
+                toml,
+                ManifestSource::HostBundled,
+                &HostPortCatalog::empty(),
+                None,
+            )
+            .expect("manifest record")
+        }
+
+        let operator = UserId::new("operator").expect("operator id");
+        let alice = UserId::new("alice").expect("alice id");
+        let bob = UserId::new("bob").expect("bob id");
+
+        // Store: alice privately owns `market-data`; `hacker-news` is tenant-shared.
+        // Wrapped so the test can inject an owner-read failure (#5525 review).
+        let store = Arc::new(OwnerReadFailingStore::default());
+        for (ext, capability, owner) in [
+            (
+                "market-data",
+                "snp500",
+                InstallationOwner::user(alice.clone()),
+            ),
+            ("hacker-news", "top_stories", InstallationOwner::Tenant),
+        ] {
+            let ext_id = ExtensionId::new(ext).expect("ext id");
+            store
+                .upsert_manifest_and_installation(
+                    manifest_record(ext, capability),
+                    ExtensionInstallation::new(
+                        ExtensionInstallationId::new(ext).expect("installation id"),
+                        ext_id.clone(),
+                        ExtensionActivationState::Enabled,
+                        ExtensionManifestRef::new(ext_id, None),
+                        Vec::new(),
+                        Utc::now(),
+                        owner,
+                    )
+                    .expect("installation"),
+                )
+                .await
+                .expect("upsert manifest + installation");
+        }
+        let installation_store: Arc<dyn ExtensionInstallationStore> = store.clone();
+
+        // Registry the catalog reads: both extensions' capabilities are
+        // published, plus one anomalous capability with NO installation row.
+        let registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        registry
+            .insert(test_extension_package("market-data", "snp500"))
+            .expect("insert market-data");
+        registry
+            .insert(test_extension_package("hacker-news", "top_stories"))
+            .expect("insert hacker-news");
+        registry
+            .insert(test_extension_package("orphan-tool", "probe"))
+            .expect("insert orphan-tool");
+
+        let trust_policy = Arc::new(
+            ironclaw_trust::HostTrustPolicy::new(vec![
+                Box::new(ironclaw_trust::AdminConfig::new()),
+            ])
+            .expect("trust policy"),
+        );
+        let port = Arc::new(RebornLocalExtensionManagementPort::new(
+            Arc::new(LocalFilesystem::new()),
+            AvailableExtensionCatalog::from_packages(Vec::new()),
+            installation_store,
+            Arc::new(Mutex::new(ExtensionLifecycleService::new(
+                ExtensionRegistry::new(),
+            ))),
+            crate::extension_host::extension_lifecycle::ActiveExtensionPublisher::new(
+                Arc::clone(&registry),
+                trust_policy,
+                Arc::new(ironclaw_trust::InvalidationBus::new()),
+            ),
+            None,
+            operator,
+        ));
+
+        let catalog = ActiveRegistryOperatorToolCatalog::new(registry, Vec::new(), Some(port));
+
+        let ids_for = |tools: Vec<RebornOperatorToolInfo>| {
+            tools
+                .into_iter()
+                .map(|t| t.capability_id.as_str().to_string())
+                .collect::<Vec<_>>()
+        };
+        let bob_ids = ids_for(catalog.list_operator_tools(&bob).await);
+        assert!(
+            bob_ids.contains(&"hacker-news.top_stories".to_string()),
+            "tenant-shared tool must be visible to every member: {bob_ids:?}"
+        );
+        assert!(
+            !bob_ids.contains(&"market-data.snp500".to_string()),
+            "alice's PRIVATE tool must not appear in bob's settings/tools catalog: {bob_ids:?}"
+        );
+        assert!(
+            !bob_ids.contains(&"orphan-tool.probe".to_string()),
+            "an installable capability without an owner row must fail closed: {bob_ids:?}"
+        );
+
+        let alice_ids = ids_for(catalog.list_operator_tools(&alice).await);
+        assert!(
+            alice_ids.contains(&"market-data.snp500".to_string())
+                && alice_ids.contains(&"hacker-news.top_stories".to_string()),
+            "the owner sees her own private tool plus shared tools: {alice_ids:?}"
+        );
+        assert!(
+            !alice_ids.contains(&"orphan-tool.probe".to_string()),
+            "the owner-row fail-closed default applies to every caller: {alice_ids:?}"
+        );
+
+        // #5525 review: when the owner map cannot be read at all, the
+        // owner-aware assembly must hide every install-backed registry tool
+        // (fail closed) instead of treating the empty map as all-shared.
+        store
+            .fail_list_installations
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let degraded_ids = ids_for(catalog.list_operator_tools(&bob).await);
+        assert!(
+            degraded_ids.is_empty(),
+            "unreadable owner data must hide install-backed registry tools: {degraded_ids:?}"
+        );
+
+        // The next healthy read recovers the shared surface.
+        let recovered_ids = ids_for(catalog.list_operator_tools(&bob).await);
+        assert!(
+            recovered_ids.contains(&"hacker-news.top_stories".to_string())
+                && !recovered_ids.contains(&"market-data.snp500".to_string()),
+            "a healthy re-read restores shared visibility only: {recovered_ids:?}"
+        );
+    }
+
+    /// Store wrapper that fails `list_installations` once when armed —
+    /// injects the owner-read failure the settings catalog must fail closed
+    /// on (#5525 review).
+    #[derive(Default)]
+    struct OwnerReadFailingStore {
+        inner: InMemoryExtensionInstallationStore,
+        fail_list_installations: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait]
+    impl ExtensionInstallationStore for OwnerReadFailingStore {
+        async fn list_manifests(
+            &self,
+        ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError> {
+            self.inner.list_manifests().await
+        }
+
+        async fn get_manifest(
+            &self,
+            extension_id: &ExtensionId,
+        ) -> Result<Option<ExtensionManifestRecord>, ExtensionInstallationError> {
+            self.inner.get_manifest(extension_id).await
+        }
+
+        async fn upsert_manifest(
+            &self,
+            manifest: ExtensionManifestRecord,
+        ) -> Result<(), ExtensionInstallationError> {
+            self.inner.upsert_manifest(manifest).await
+        }
+
+        async fn upsert_manifest_and_installation(
+            &self,
+            manifest: ExtensionManifestRecord,
+            installation: ExtensionInstallation,
+        ) -> Result<(), ExtensionInstallationError> {
+            self.inner
+                .upsert_manifest_and_installation(manifest, installation)
+                .await
+        }
+
+        async fn list_installations(
+            &self,
+        ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
+            if self
+                .fail_list_installations
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(ExtensionInstallationError::InvalidInstallation {
+                    reason: "injected owner read failure".to_string(),
+                });
+            }
+            self.inner.list_installations().await
+        }
+
+        async fn list_enabled_installations(
+            &self,
+        ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
+            self.inner.list_enabled_installations().await
+        }
+
+        async fn get_installation(
+            &self,
+            installation_id: &ExtensionInstallationId,
+        ) -> Result<Option<ExtensionInstallation>, ExtensionInstallationError> {
+            self.inner.get_installation(installation_id).await
+        }
+
+        async fn upsert_installation(
+            &self,
+            installation: ExtensionInstallation,
+        ) -> Result<(), ExtensionInstallationError> {
+            self.inner.upsert_installation(installation).await
+        }
+
+        async fn set_activation_state(
+            &self,
+            installation_id: &ExtensionInstallationId,
+            state: ExtensionActivationState,
+        ) -> Result<(), ExtensionInstallationError> {
+            self.inner
+                .set_activation_state(installation_id, state)
+                .await
+        }
+
+        async fn delete_installation(
+            &self,
+            installation_id: &ExtensionInstallationId,
+        ) -> Result<(), ExtensionInstallationError> {
+            self.inner.delete_installation(installation_id).await
+        }
+
+        async fn delete_manifest(
+            &self,
+            extension_id: &ExtensionId,
+        ) -> Result<(), ExtensionInstallationError> {
+            self.inner.delete_manifest(extension_id).await
+        }
+
+        async fn update_health(
+            &self,
+            installation_id: &ExtensionInstallationId,
+            health: ExtensionHealthSnapshot,
+        ) -> Result<(), ExtensionInstallationError> {
+            self.inner.update_health(installation_id, health).await
+        }
     }
 
     #[tokio::test]

@@ -436,7 +436,7 @@ pub use installations::{
     ExtensionHealthMessage, ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
     ExtensionManifestRecord, ExtensionManifestRef, InMemoryExtensionInstallationStore,
-    ManifestHash,
+    InstallationOwner, ManifestHash,
 };
 pub use lifecycle::{
     ExtensionLifecycleEvent, ExtensionLifecycleEventSink, ExtensionLifecycleService,

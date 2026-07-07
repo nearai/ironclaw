@@ -13,13 +13,13 @@ use ironclaw_extensions::{
     CapabilityVisibility, ExtensionActivationState, ExtensionError, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
     ExtensionLifecycleService, ExtensionManifestRecord, ExtensionManifestRef, ExtensionPackage,
-    ManifestHash, ManifestSource,
+    InstallationOwner, ManifestHash, ManifestSource,
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, NetworkTargetPattern,
     PermissionMode, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement,
-    RuntimeHttpEgress, VirtualPath, sha256_digest_token,
+    RuntimeHttpEgress, UserId, VirtualPath, sha256_digest_token,
 };
 use ironclaw_product_adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
 use ironclaw_product_workflow::{
@@ -68,6 +68,7 @@ impl ExtensionCredentialCleanup for RebornProductAuthServices {
 mod active_publication;
 #[cfg(test)]
 mod hosted_mcp_test_support;
+mod install_policy;
 
 use crate::extension_host::available_extensions::{
     AvailableExtensionCatalog, AvailableExtensionPackage, imported_extension_package,
@@ -86,6 +87,10 @@ use crate::extension_host::mcp_discovery::{
 pub(crate) use active_publication::ActiveExtensionPublisher;
 #[cfg(test)]
 use active_publication::extension_trust_policy_input;
+use install_policy::{
+    EvictedPrivateInstall, OccupiedSlotDecision, decide_occupied_slot, derive_owner,
+    ensure_caller_may_operate, install_scope_for_owner,
+};
 
 const RETIRED_SLACK_USER_EXTENSION_ID: &str = "slack_user";
 
@@ -113,6 +118,13 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     /// per-request cap into N x 64 MiB of pressure before any lifecycle lock
     /// applies (#5499 review finding #3).
     import_decode_semaphore: Arc<Semaphore>,
+    /// The tenant operator identity (#5459 P1). In local-dev this is the base
+    /// owner user (`IRONCLAW_REBORN_WEBUI_USER_ID` semantics); installs by this
+    /// user derive [`InstallationOwner::Tenant`] (shared), installs by anyone
+    /// else derive [`InstallationOwner::User`] (private). Resolved ONCE here —
+    /// when P0 role wiring lands, this becomes a role-derived resolver instead
+    /// of an identity comparison; callers do not re-derive admin-ness.
+    tenant_operator_user_id: UserId,
 }
 
 /// Concurrent `import_bundle` decodes allowed before further uploads wait.
@@ -130,6 +142,10 @@ pub(crate) struct ActiveExtensionCapability {
     pub(crate) runtime_credentials: Vec<RuntimeCredentialRequirement>,
     /// Manifest-declared network egress allowlist, independent of credentials.
     pub(crate) network_targets: Vec<NetworkTargetPattern>,
+    /// Who the providing extension's installation belongs to (#5459 P1).
+    /// Tenant-owned capabilities are grant-minted for every user; user-owned
+    /// ones only for their owner (filtered in `LocalDevExtensionSurface`).
+    pub(crate) owner: InstallationOwner,
 }
 
 #[derive(Clone)]
@@ -142,7 +158,7 @@ pub(crate) enum ExtensionActivationMode {
 }
 
 impl ActiveExtensionCapability {
-    fn from_descriptor(descriptor: &CapabilityDescriptor) -> Self {
+    fn from_descriptor(descriptor: &CapabilityDescriptor, owner: InstallationOwner) -> Self {
         Self {
             id: descriptor.id.clone(),
             provider: descriptor.provider.clone(),
@@ -150,6 +166,7 @@ impl ActiveExtensionCapability {
             default_permission: descriptor.default_permission,
             runtime_credentials: descriptor.runtime_credentials.clone(),
             network_targets: descriptor.network_targets.clone(),
+            owner,
         }
     }
 }
@@ -340,6 +357,7 @@ impl RebornLocalExtensionManagementPort {
         lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
         active_extensions: ActiveExtensionPublisher,
         credential_cleanup: Option<Arc<dyn ExtensionCredentialCleanup>>,
+        tenant_operator_user_id: UserId,
     ) -> Self {
         Self {
             filesystem,
@@ -350,6 +368,7 @@ impl RebornLocalExtensionManagementPort {
             operation_lock: Arc::new(Mutex::new(())),
             credential_cleanup,
             import_decode_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORT_DECODES)),
+            tenant_operator_user_id,
         }
     }
 
@@ -377,16 +396,38 @@ impl RebornLocalExtensionManagementPort {
         &self.active_extensions
     }
 
+    /// The wired tenant-operator identity (#5459 P1). Used by tenant-wide
+    /// host activations (e.g. Slack host-beta channel setup) that operate a
+    /// shared install and therefore act as the operator rather than any
+    /// individual member.
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) fn tenant_operator_user_id(&self) -> &UserId {
+        &self.tenant_operator_user_id
+    }
+
+    /// Test-support view of the wired tenant-operator identity (#5459 P1), so
+    /// tests can act "as the operator" without re-deriving the id the runtime
+    /// or fixture was built with. Mirrors the production owner wiring in
+    /// `build_local_runtime`. Tests only — zero bytes in production builds.
+    #[cfg(test)]
+    pub(crate) fn tenant_operator_user_id_for_test(&self) -> &UserId {
+        &self.tenant_operator_user_id
+    }
+
     pub(crate) async fn search(
         &self,
         query: &str,
         credential_gate: Option<&RuntimeExtensionActivationCredentialGate>,
+        caller: &UserId,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let catalog = self.catalog.read().await;
         let extensions = catalog.search(query);
         let mut summaries = Vec::new();
         for extension in extensions {
-            summaries.push(self.search_summary(extension, credential_gate).await?);
+            summaries.push(
+                self.search_summary(extension, credential_gate, caller)
+                    .await?,
+            );
         }
         drop(catalog);
         let count = summaries.len();
@@ -414,8 +455,9 @@ impl RebornLocalExtensionManagementPort {
 
     pub(crate) async fn list_installed(
         &self,
+        caller: &UserId,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        let summaries = self.installed_summaries().await?;
+        let summaries = self.installed_summaries(caller).await?;
         let count = summaries.len();
         Ok(response_with_payload(
             None,
@@ -430,21 +472,34 @@ impl RebornLocalExtensionManagementPort {
     pub(crate) async fn project(
         &self,
         package_ref: LifecyclePackageRef,
+        caller: &UserId,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let (_, installation_id) = extension_ids_from_package_ref(&package_ref)?;
-        let phase = self
+        let installation = self
             .installation_store
             .get_installation(&installation_id)
             .await
             .map_err(map_extension_installation_error)?
+            // A foreign user-private install projects as not-installed for
+            // this caller — same masking as search/list (#5459 P1).
+            .filter(|installation| installation.owner().visible_to(caller));
+        let phase = installation
+            .as_ref()
             .map(|installation| phase_for_activation_state(installation.activation_state()))
             .unwrap_or(LifecyclePhase::Discovered);
+        let install_scope = installation
+            .as_ref()
+            .and_then(|installation| install_scope_for_owner(installation.owner()));
         let summary = self.catalog.read().await.resolve(&package_ref)?.summary();
         Ok(response_with_payload(
             Some(package_ref),
             phase,
             LifecycleProductPayload::ExtensionList {
-                extensions: vec![LifecycleInstalledExtensionSummary { summary, phase }],
+                extensions: vec![LifecycleInstalledExtensionSummary {
+                    summary,
+                    phase,
+                    install_scope,
+                }],
                 count: 1,
             },
         ))
@@ -453,36 +508,77 @@ impl RebornLocalExtensionManagementPort {
     pub(crate) async fn active_model_visible_capabilities(
         &self,
     ) -> Result<Vec<ActiveExtensionCapability>, ProductWorkflowError> {
-        let enabled_extension_ids = self
+        // #5459 P1: carry each enabled installation's owner onto its
+        // capabilities so the per-request grant minting in the local-dev
+        // capability surface can filter user-private extensions to their
+        // owner. The registry itself stays global; owner is joined here.
+        let owner_by_extension = self
             .installation_store
             .list_enabled_installations()
             .await
             .map_err(map_extension_installation_error)?
             .into_iter()
-            .map(|installation| installation.extension_id().clone())
-            .collect::<BTreeSet<_>>();
+            .map(|installation| {
+                (
+                    installation.extension_id().clone(),
+                    installation.owner().clone(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
         let registry = self.active_extensions.snapshot();
         Ok(registry
             .capabilities()
-            .filter(|descriptor| enabled_extension_ids.contains(&descriptor.provider))
-            .filter(|descriptor| {
-                registry
+            .filter_map(|descriptor| {
+                let owner = owner_by_extension.get(&descriptor.provider)?;
+                let model_visible = registry
                     .capability_visibility(&descriptor.id)
                     .unwrap_or(CapabilityVisibility::Model)
-                    == CapabilityVisibility::Model
+                    == CapabilityVisibility::Model;
+                model_visible
+                    .then(|| ActiveExtensionCapability::from_descriptor(descriptor, owner.clone()))
             })
-            .map(ActiveExtensionCapability::from_descriptor)
+            .collect())
+    }
+
+    /// Owner of every installation (all activation states), keyed by extension
+    /// id (#5459 P1). The operator/settings tool catalog joins this to the
+    /// global extension registry so it can hide another user's private tool —
+    /// the registry snapshot alone carries no owner. Uses `list_installations`
+    /// (not `_enabled_`) because the catalog reflects installed tools
+    /// regardless of activation state.
+    pub(crate) async fn installation_owners(
+        &self,
+    ) -> Result<std::collections::BTreeMap<ExtensionId, InstallationOwner>, ProductWorkflowError>
+    {
+        Ok(self
+            .installation_store
+            .list_installations()
+            .await
+            .map_err(map_extension_installation_error)?
+            .into_iter()
+            .map(|installation| {
+                (
+                    installation.extension_id().clone(),
+                    installation.owner().clone(),
+                )
+            })
             .collect())
     }
 
     pub(crate) async fn activation_credential_requirements(
         &self,
         package_ref: &LifecyclePackageRef,
+        caller: &UserId,
     ) -> Result<Vec<RuntimeCredentialAuthRequirement>, ProductWorkflowError> {
         let (extension_id, installation_id) = extension_ids_from_package_ref(package_ref)?;
         let _operation_guard = self.operation_lock.lock().await;
-        self.load_installation(&extension_id, &installation_id)
+        let installation = self
+            .load_installation(&extension_id, &installation_id)
             .await?;
+        // Ownership masks before any credential preflight: a non-owner must
+        // get the "is not installed" denial, never a requirement shape that
+        // confirms a private credentialed install exists (#5525 review).
+        ensure_caller_may_operate(&installation, caller)?;
         let package = self.lifecycle_package(&extension_id).await?;
         let requirements = package_runtime_credential_auth_requirements(&package);
         Ok(requirements)
@@ -490,6 +586,7 @@ impl RebornLocalExtensionManagementPort {
 
     async fn installed_summaries(
         &self,
+        caller: &UserId,
     ) -> Result<Vec<LifecycleInstalledExtensionSummary>, ProductWorkflowError> {
         let installations = self
             .installation_store
@@ -498,6 +595,12 @@ impl RebornLocalExtensionManagementPort {
             .map_err(map_extension_installation_error)?;
         let mut summaries = Vec::with_capacity(installations.len());
         for installation in installations {
+            // #5459 P1: a caller's list is tenant-shared entries plus their
+            // OWN private entries; other users' private installs are invisible
+            // (the operator included — private installs are not enumerable).
+            if !installation.owner().visible_to(caller) {
+                continue;
+            }
             let Ok(package_ref) = LifecyclePackageRef::new(
                 LifecyclePackageKind::Extension,
                 installation.extension_id().as_str(),
@@ -514,6 +617,7 @@ impl RebornLocalExtensionManagementPort {
             summaries.push(LifecycleInstalledExtensionSummary {
                 summary: available.summary(),
                 phase: phase_for_activation_state(installation.activation_state()),
+                install_scope: install_scope_for_owner(installation.owner()),
             });
         }
         Ok(summaries)
@@ -523,10 +627,17 @@ impl RebornLocalExtensionManagementPort {
         &self,
         extension: &AvailableExtensionPackage,
         credential_gate: Option<&RuntimeExtensionActivationCredentialGate>,
+        caller: &UserId,
     ) -> Result<LifecycleSearchExtensionSummary, ProductWorkflowError> {
         let mut summary = extension.summary();
         suppress_search_credential_onboarding(&mut summary);
-        let Some(installation) = self.search_installation(&extension.package.id).await? else {
+        let installation = self
+            .search_installation(&extension.package.id)
+            .await?
+            // A foreign user-private install reads as not-installed for this
+            // caller (#5459 P1) — same masking as list/project.
+            .filter(|installation| installation.owner().visible_to(caller));
+        let Some(installation) = installation else {
             return Ok(LifecycleSearchExtensionSummary {
                 summary,
                 installation_phase: None,
@@ -642,16 +753,76 @@ impl RebornLocalExtensionManagementPort {
     pub(crate) async fn install(
         &self,
         package_ref: LifecyclePackageRef,
+        caller: &UserId,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         // Read guard is held for the whole method because `available` borrows
-        // from the catalog (used by install_available_locked/visible_caps
+        // from the catalog (used by prepare_install/materialize/visible_caps
         // below). Acquired BEFORE `operation_lock`; `import_bundle` takes the
         // write guard before `operation_lock` too, so the lock order is
         // consistent and the two cannot deadlock.
+        let owner = derive_owner(caller, &self.tenant_operator_user_id);
         let catalog = self.catalog.read().await;
         let available = catalog.resolve(&package_ref)?;
+        let plan = prepare_install(available, owner.clone())?;
         let _operation_guard = self.operation_lock.lock().await;
-        self.install_available_locked(available).await?;
+        let evicted = self
+            .ensure_slot_available(
+                &available.package.id,
+                plan.installation.installation_id(),
+                &owner,
+            )
+            .await?;
+        if let Err(error) = self.register_lifecycle_package(&available.package).await {
+            return Err(self
+                .fail_install_restoring_evicted(
+                    "extension install registration failed",
+                    error,
+                    evicted.as_ref(),
+                )
+                .await);
+        }
+
+        if let Err(error) =
+            materialize_available_extension(self.filesystem.as_ref(), available).await
+        {
+            if let Err(rollback_error) =
+                self.rollback_lifecycle_install(&available.package.id).await
+            {
+                return Err(compensation_failure(
+                    "extension install materialization failed and lifecycle rollback failed",
+                    error,
+                    rollback_error,
+                ));
+            }
+            return Err(self
+                .fail_install_restoring_evicted(
+                    "extension install materialization failed",
+                    error,
+                    evicted.as_ref(),
+                )
+                .await);
+        }
+        if let Err(error) = self.persist_install_plan(plan).await {
+            let _ = self
+                .delete_materialized_extension_files(&available.package.id)
+                .await;
+            if let Err(rollback_error) =
+                self.rollback_lifecycle_install(&available.package.id).await
+            {
+                return Err(compensation_failure(
+                    "extension install persistence failed and lifecycle rollback failed",
+                    error,
+                    rollback_error,
+                ));
+            }
+            return Err(self
+                .fail_install_restoring_evicted(
+                    "extension install persistence failed",
+                    error,
+                    evicted.as_ref(),
+                )
+                .await);
+        }
 
         Ok(response_with_payload(
             Some(package_ref.clone()),
@@ -669,54 +840,14 @@ impl RebornLocalExtensionManagementPort {
         ))
     }
 
-    async fn install_available_locked(
-        &self,
-        available: &AvailableExtensionPackage,
-    ) -> Result<(), ProductWorkflowError> {
-        let plan = prepare_install(available)?;
-        self.ensure_not_installed(&available.package.id, plan.installation.installation_id())
-            .await?;
-        self.register_lifecycle_package(&available.package).await?;
-
-        if let Err(error) =
-            materialize_available_extension(self.filesystem.as_ref(), available).await
-        {
-            if let Err(rollback_error) =
-                self.rollback_lifecycle_install(&available.package.id).await
-            {
-                return Err(compensation_failure(
-                    "extension install materialization failed and lifecycle rollback failed",
-                    error,
-                    rollback_error,
-                ));
-            }
-            return Err(error);
-        }
-        if let Err(error) = self.persist_install_plan(plan).await {
-            let _ = self
-                .delete_materialized_extension_files(&available.package.id)
-                .await;
-            if let Err(rollback_error) =
-                self.rollback_lifecycle_install(&available.package.id).await
-            {
-                return Err(compensation_failure(
-                    "extension install persistence failed and lifecycle rollback failed",
-                    error,
-                    rollback_error,
-                ));
-            }
-            return Err(error);
-        }
-        Ok(())
-    }
-
     pub(crate) async fn activate(
         &self,
         package_ref: LifecyclePackageRef,
         mode: ExtensionActivationMode,
+        caller: &UserId,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let credential_gate = UnavailableExtensionActivationCredentialGate;
-        self.activate_inner(package_ref, mode, &credential_gate)
+        self.activate_inner(package_ref, mode, &credential_gate, caller)
             .await
     }
 
@@ -725,8 +856,9 @@ impl RebornLocalExtensionManagementPort {
         package_ref: LifecyclePackageRef,
         mode: ExtensionActivationMode,
         credential_gate: impl ExtensionActivationCredentialGate,
+        caller: &UserId,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        self.activate_inner(package_ref, mode, &credential_gate)
+        self.activate_inner(package_ref, mode, &credential_gate, caller)
             .await
     }
 
@@ -738,7 +870,8 @@ impl RebornLocalExtensionManagementPort {
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let credential_gate =
             crate::extension_host::extension_activation_credentials::PrecheckedExtensionActivationCredentialGate;
-        self.activate_inner(package_ref, mode, &credential_gate)
+        let caller = self.tenant_operator_user_id.clone();
+        self.activate_inner(package_ref, mode, &credential_gate, &caller)
             .await
     }
 
@@ -747,6 +880,7 @@ impl RebornLocalExtensionManagementPort {
         package_ref: LifecyclePackageRef,
         mode: ExtensionActivationMode,
         credential_gate: &dyn ExtensionActivationCredentialGate,
+        caller: &UserId,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let (extension_id, installation_id) = extension_ids_from_package_ref(&package_ref)?;
 
@@ -755,6 +889,7 @@ impl RebornLocalExtensionManagementPort {
             let installation = self
                 .load_installation(&extension_id, &installation_id)
                 .await?;
+            ensure_caller_may_operate(&installation, caller)?;
             let package = self.lifecycle_package(&extension_id).await?;
             credential_gate.ensure_credentials(&package).await?;
             match mode {
@@ -805,6 +940,13 @@ impl RebornLocalExtensionManagementPort {
         let installation = self
             .load_installation(&extension_id, &installation_id)
             .await
+            .map_err(|_| hosted_mcp_changed_during_discovery_error())?;
+        // #5459 P1: the slot may have changed hands while the lock was dropped
+        // for discovery (eviction+reinstall / remove+reinstall reuse the same
+        // installation id), so re-check ownership before committing — phase 1's
+        // check is stale. A foreign row must not be flipped to Enabled under
+        // this caller's action.
+        ensure_caller_may_operate(&installation, caller)
             .map_err(|_| hosted_mcp_changed_during_discovery_error())?;
         let current_package = self
             .lifecycle_package(&extension_id)
@@ -909,20 +1051,39 @@ impl RebornLocalExtensionManagementPort {
     pub(crate) async fn remove(
         &self,
         package_ref: LifecyclePackageRef,
-        scope: &ResourceScope,
+        scope: Option<&ResourceScope>,
+        caller: &UserId,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         // Capture the removed extension's credential providers and id BEFORE
         // taking the operation lock: `activation_credential_requirements` takes
         // the same lock, and the manifest is gone once removal succeeds.
         let removed_extension_id = package_ref.id.as_str().to_string();
-        let removed_providers = self.removed_extension_providers(&package_ref).await;
+        let removed_providers = self.removed_extension_providers(&package_ref, caller).await;
         let response = {
             let _operation_guard = self.operation_lock.lock().await;
-            self.remove_locked(package_ref).await
+            self.remove_locked(package_ref, caller).await
         };
         if response.is_ok() {
-            self.revoke_exclusive_credentials(scope, &removed_extension_id, &removed_providers)
-                .await;
+            match scope {
+                Some(scope) => {
+                    self.revoke_exclusive_credentials(
+                        scope,
+                        &removed_extension_id,
+                        &removed_providers,
+                        caller,
+                    )
+                    .await;
+                }
+                // Command-path removals (#5525) have no caller resource scope
+                // to target credential accounts with; revocation is best-effort
+                // by contract, so skip it rather than reject the removal.
+                None => {
+                    tracing::debug!(
+                        extension_id = %removed_extension_id,
+                        "extension removed without a caller resource scope; skipping credential cleanup"
+                    );
+                }
+            }
         }
         response
     }
@@ -933,8 +1094,12 @@ impl RebornLocalExtensionManagementPort {
     async fn removed_extension_providers(
         &self,
         package_ref: &LifecyclePackageRef,
+        caller: &UserId,
     ) -> Vec<AuthProviderId> {
-        match self.activation_credential_requirements(package_ref).await {
+        match self
+            .activation_credential_requirements(package_ref, caller)
+            .await
+        {
             Ok(requirements) => {
                 let mut providers: Vec<AuthProviderId> = Vec::new();
                 for requirement in requirements {
@@ -976,6 +1141,7 @@ impl RebornLocalExtensionManagementPort {
         scope: &ResourceScope,
         removed_extension_id: &str,
         removed_providers: &[AuthProviderId],
+        caller: &UserId,
     ) {
         let Some(cleanup) = self.credential_cleanup.as_ref() else {
             return;
@@ -983,7 +1149,7 @@ impl RebornLocalExtensionManagementPort {
         if removed_providers.is_empty() {
             return;
         }
-        let Some(providers_still_in_use) = self.providers_still_in_use().await else {
+        let Some(providers_still_in_use) = self.providers_still_in_use(caller).await else {
             return;
         };
         let extension_id = match ExtensionId::new(removed_extension_id) {
@@ -1018,8 +1184,13 @@ impl RebornLocalExtensionManagementPort {
     /// removal. Returns `None` when the set cannot be resolved so the caller
     /// fails safe and skips revocation rather than risk deleting a shared
     /// credential.
-    async fn providers_still_in_use(&self) -> Option<BTreeSet<AuthProviderId>> {
-        let response = match self.list_installed().await {
+    ///
+    /// Enumeration is caller-masked (#5459 P1): another user's private install
+    /// is invisible here, and that is the right universe — the revocation is
+    /// scoped to the remover's own credential accounts, which a foreign
+    /// private install cannot be consuming.
+    async fn providers_still_in_use(&self, caller: &UserId) -> Option<BTreeSet<AuthProviderId>> {
+        let response = match self.list_installed(caller).await {
             Ok(response) => response,
             Err(error) => {
                 tracing::debug!(
@@ -1036,7 +1207,7 @@ impl RebornLocalExtensionManagementPort {
         let mut providers = BTreeSet::new();
         for installed in extensions {
             match self
-                .activation_credential_requirements(&installed.summary.package_ref)
+                .activation_credential_requirements(&installed.summary.package_ref, caller)
                 .await
             {
                 Ok(requirements) => {
@@ -1070,11 +1241,21 @@ impl RebornLocalExtensionManagementPort {
     async fn remove_locked(
         &self,
         package_ref: LifecyclePackageRef,
+        caller: &UserId,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let (extension_id, installation_id) = extension_ids_from_package_ref(&package_ref)?;
         let installation = self
             .load_installation(&extension_id, &installation_id)
             .await?;
+        ensure_caller_may_operate(&installation, caller)?;
+        if installation.owner().is_tenant() && caller != &self.tenant_operator_user_id {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "extension {} is a shared tool; only the tenant admin can remove it",
+                    extension_id.as_str()
+                ),
+            });
+        }
         let manifest = self
             .installation_store
             .get_manifest(&extension_id)
@@ -1263,6 +1444,10 @@ impl RebornLocalExtensionManagementPort {
         Ok(())
     }
 
+    /// Fail-closed slot check for the catalog import path (#5499): reject a
+    /// zip-imported bundle whose id already has an installation row or manifest.
+    /// The per-user owner/slot rules in [`Self::ensure_slot_available`] apply at
+    /// install time; catalog import only needs the id to be free.
     async fn ensure_not_installed(
         &self,
         extension_id: &ExtensionId,
@@ -1291,6 +1476,161 @@ impl RebornLocalExtensionManagementPort {
             });
         }
         Ok(())
+    }
+
+    /// #5459 P1 slot rules — one installation slot per extension id per tenant,
+    /// with a typed owner deciding who may claim an occupied slot:
+    ///
+    /// - vacant → anyone installs (owner already derived by the caller)
+    /// - `Tenant`-owned → nobody re-installs over it (the update flow is a
+    ///   separate concern); members see "already available as a shared tool"
+    /// - `User`-owned → the owner sees "already installed"; OTHER users get a
+    ///   generic "unavailable" (never leaking who holds the slot); a TENANT
+    ///   install EVICTS the private install (admin-wins: a user must not be
+    ///   able to squat an id against the whole tenant, and "two users want it
+    ///   privately → admin installs it shared" self-heals through this rule)
+    ///
+    /// Eviction supersedes, never destroys: it unpublishes/deregisters the
+    /// private install so the tenant install can take the slot, but touches no
+    /// secret-store rows and no credential accounts — the evicted user's
+    /// personal credentials keep resolving caller-first at dispatch.
+    async fn ensure_slot_available(
+        &self,
+        extension_id: &ExtensionId,
+        installation_id: &ExtensionInstallationId,
+        claimant: &InstallationOwner,
+    ) -> Result<Option<EvictedPrivateInstall>, ProductWorkflowError> {
+        let existing = self
+            .installation_store
+            .get_installation(installation_id)
+            .await
+            .map_err(map_extension_installation_error)?;
+        let Some(existing) = existing else {
+            // No installation record; an orphaned manifest row still counts as
+            // an occupied slot (pre-#5459 behavior, kept fail-closed).
+            if self
+                .installation_store
+                .get_manifest(extension_id)
+                .await
+                .map_err(map_extension_installation_error)?
+                .is_some()
+            {
+                return Err(ProductWorkflowError::InvalidBindingRequest {
+                    reason: format!("extension {} is already installed", extension_id.as_str()),
+                });
+            }
+            return Ok(None);
+        };
+        match decide_occupied_slot(extension_id, existing.owner(), claimant)? {
+            OccupiedSlotDecision::EvictPrivateInstall => self
+                .evict_private_installation(extension_id, &existing)
+                .await
+                .map(Some),
+        }
+    }
+
+    /// Admin-wins eviction (#5459 P1): deregister/unpublish a user-private
+    /// installation so a tenant install can take the slot. The subsequent
+    /// install path overwrites the manifest + installation records via its
+    /// normal upsert (same installation id).
+    ///
+    /// Returns the pre-eviction snapshot so a tenant install that FAILS after
+    /// this point can put the victim back exactly as it was
+    /// ([`Self::restore_evicted_private_install`]) — a failed shared install
+    /// must not interfere with the user's private tool (#5525 review).
+    ///
+    /// Retry-safe by construction: if a prior tenant install partially
+    /// succeeded and crashed before compensation could run, the lifecycle
+    /// package may already be gone. Rather than dead-end at
+    /// `lifecycle_package()` — which would leave the id un-installable/
+    /// -removable tenant-wide until restart — eviction tolerates the absent
+    /// package as already-done, so the admin's retry re-runs eviction and
+    /// reclaims the slot. Grant minting gates on the enabled-installation
+    /// owner join, so the private capability is already denied the moment the
+    /// row flips to Disabled here, independent of the active-registry publish
+    /// state.
+    async fn evict_private_installation(
+        &self,
+        extension_id: &ExtensionId,
+        existing: &ExtensionInstallation,
+    ) -> Result<EvictedPrivateInstall, ProductWorkflowError> {
+        tracing::warn!(
+            extension_id = %extension_id.as_str(),
+            "tenant install is evicting a user-private installation (admin-wins slot rule)"
+        );
+        let was_enabled = existing.activation_state() == ExtensionActivationState::Enabled;
+        let manifest = self
+            .installation_store
+            .get_manifest(extension_id)
+            .await
+            .map_err(map_extension_installation_error)?;
+        let lifecycle_package = self.lifecycle_package(extension_id).await.ok();
+        self.installation_store
+            .set_activation_state(
+                existing.installation_id(),
+                ExtensionActivationState::Disabled,
+            )
+            .await
+            .map_err(map_extension_installation_error)?;
+        if let Some(lifecycle_package) = &lifecycle_package {
+            self.remove_lifecycle_package(extension_id).await?;
+            if was_enabled {
+                self.active_extensions.unpublish(lifecycle_package)?;
+            }
+        }
+        Ok(EvictedPrivateInstall {
+            manifest,
+            installation: existing.clone(),
+            lifecycle_package,
+        })
+    }
+
+    /// Inverse of [`Self::evict_private_installation`] for the FAILED
+    /// tenant-install path: restore the victim's manifest/installation rows,
+    /// re-register its lifecycle package, and re-publish its capability
+    /// surface to the captured pre-eviction state. Runs AFTER the tenant
+    /// package rollback so the lifecycle slot is free again.
+    async fn restore_evicted_private_install(
+        &self,
+        evicted: &EvictedPrivateInstall,
+    ) -> Result<(), ProductWorkflowError> {
+        let previous_state = evicted.installation.activation_state();
+        match &evicted.manifest {
+            Some(manifest) => {
+                self.restore_installation_records(manifest.clone(), evicted.installation.clone())
+                    .await?;
+            }
+            None => self.restore_installation(&evicted.installation).await?,
+        }
+        if let Some(package) = &evicted.lifecycle_package {
+            self.restore_lifecycle_package(package, previous_state)
+                .await?;
+            self.restore_active_publication(package, previous_state)?;
+        }
+        Ok(())
+    }
+
+    /// Shared failure exit for the install path: after the tenant-side
+    /// rollback has run, put any evicted private install back. Returns the
+    /// error to propagate — the original install error, or a
+    /// [`compensation_failure`] when the victim restore itself failed.
+    async fn fail_install_restoring_evicted(
+        &self,
+        context: &str,
+        error: ProductWorkflowError,
+        evicted: Option<&EvictedPrivateInstall>,
+    ) -> ProductWorkflowError {
+        let Some(evicted) = evicted else {
+            return error;
+        };
+        match self.restore_evicted_private_install(evicted).await {
+            Ok(()) => error,
+            Err(restore_error) => compensation_failure(
+                &format!("{context} and evicted private install restore failed"),
+                error,
+                restore_error,
+            ),
+        }
     }
 
     async fn load_installation(
@@ -1493,6 +1833,7 @@ struct ExtensionInstallPlan {
 
 fn prepare_install(
     available: &AvailableExtensionPackage,
+    owner: InstallationOwner,
 ) -> Result<ExtensionInstallPlan, ProductWorkflowError> {
     let manifest_hash = available_manifest_hash(available)?;
     let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
@@ -1527,6 +1868,7 @@ fn prepare_install(
         ExtensionManifestRef::new(available.package.id.clone(), Some(manifest_hash)),
         Vec::new(),
         chrono::Utc::now(),
+        owner,
     )
     .map_err(map_extension_installation_error)?;
     Ok(ExtensionInstallPlan {
@@ -1573,6 +1915,9 @@ fn prepare_manifest_migration(
         ExtensionManifestRef::new(existing.extension_id().clone(), Some(manifest_hash)),
         existing.credential_bindings().to_vec(),
         chrono::Utc::now(),
+        // Manifest migration preserves ownership — it changes the manifest
+        // hash, never who the installation belongs to.
+        existing.owner().clone(),
     )
     .map_err(map_extension_installation_error)?;
     Ok(ExtensionInstallPlan {
@@ -1733,6 +2078,10 @@ fn extension_ids_from_package_ref(
     Ok((extension_id, installation_id))
 }
 
+/// Project an installation owner into the wire-facing install scope (#5459
+/// P1): tenant-owned → `shared`, user-owned → `private`. Always `Some` for an
+/// existing installation; callers pass `None` when the caller has no visible
+/// installation at all.
 fn phase_for_activation_state(state: ExtensionActivationState) -> LifecyclePhase {
     match state {
         ExtensionActivationState::Enabled => LifecyclePhase::Active,
@@ -1916,6 +2265,8 @@ mod tests {
         LifecycleReadinessBlocker,
     };
     use ironclaw_trust::{HostTrustPolicy, InvalidationBus, TrustPolicy};
+
+    mod private_install_tests;
 
     #[test]
     fn installed_external_channel_search_result_gets_activation_guidance() {
@@ -2687,7 +3038,7 @@ output_schema_ref = "schemas/run.output.json"
         let slack_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("slack ref");
 
-        port.install(slack_ref.clone())
+        port.install(slack_ref.clone(), &lifecycle_owner())
             .await
             .expect("install Slack tools extension");
 
@@ -2707,7 +3058,10 @@ output_schema_ref = "schemas/run.output.json"
             "installing the Slack tools extension installs only itself, with no hidden companion"
         );
 
-        let list = port.list_installed().await.expect("list installed");
+        let list = port
+            .list_installed(&lifecycle_owner())
+            .await
+            .expect("list installed");
         let Some(LifecycleProductPayload::ExtensionList { extensions, count }) = list.payload
         else {
             panic!("expected extension list payload");
@@ -2715,7 +3069,10 @@ output_schema_ref = "schemas/run.output.json"
         assert_eq!(count, 1);
         assert_eq!(extensions[0].summary.package_ref.id.as_str(), "slack");
 
-        let search = port.search("slack", None).await.expect("search slack");
+        let search = port
+            .search("slack", None, &lifecycle_owner())
+            .await
+            .expect("search slack");
         let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) = search.payload
         else {
             panic!("expected extension search payload");
@@ -2764,12 +3121,12 @@ output_schema_ref = "schemas/run.output.json"
         let slack_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("slack ref");
 
-        port.install(slack_ref.clone())
+        port.install(slack_ref.clone(), &lifecycle_owner())
             .await
             .expect("install public Slack extension");
 
         let requirements = port
-            .activation_credential_requirements(&slack_ref)
+            .activation_credential_requirements(&slack_ref, &lifecycle_owner())
             .await
             .expect("Slack activation requirements");
         assert_eq!(requirements.len(), 1);
@@ -2820,7 +3177,7 @@ output_schema_ref = "schemas/run.output.json"
         let slack_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("slack ref");
 
-        port.install(slack_ref.clone())
+        port.install(slack_ref.clone(), &lifecycle_owner())
             .await
             .expect("install public Slack extension");
         port.activate_with_prechecked_credentials_for_test(
@@ -2829,9 +3186,13 @@ output_schema_ref = "schemas/run.output.json"
         )
         .await
         .expect("activate Slack and internal user tools");
-        port.remove(slack_ref, &hosted_mcp_scope("extension-remove-test"))
-            .await
-            .expect("remove public Slack");
+        port.remove(
+            slack_ref,
+            Some(&hosted_mcp_scope("extension-remove-test")),
+            &lifecycle_owner(),
+        )
+        .await
+        .expect("remove public Slack");
 
         let installed_ids = installation_store
             .list_installations()
@@ -2871,7 +3232,7 @@ output_schema_ref = "schemas/run.output.json"
             .expect("seed builtin package");
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), &lifecycle_owner())
             .await
             .expect("install fixture extension");
         port.activate_with_prechecked_credentials_for_test(
@@ -2966,7 +3327,7 @@ output_schema_ref = "schemas/run.output.json"
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
         let egress = Arc::new(HostedMcpDiscoveryEgress::default());
 
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), &lifecycle_owner())
             .await
             .expect("install Notion MCP");
         port.activate_with_prechecked_credentials_for_test(
@@ -3024,7 +3385,7 @@ output_schema_ref = "schemas/run.output.json"
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
 
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), &lifecycle_owner())
             .await
             .expect("install Notion MCP");
         let activate = port
@@ -3064,7 +3425,7 @@ output_schema_ref = "schemas/run.output.json"
         };
         let calls = Arc::clone(&credential_gate.calls);
 
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), &lifecycle_owner())
             .await
             .expect("install Notion MCP");
         let error = port
@@ -3075,6 +3436,7 @@ output_schema_ref = "schemas/run.output.json"
                     runtime_http_egress: Arc::new(HostedMcpDiscoveryEgress::default()),
                 },
                 credential_gate,
+                &lifecycle_owner(),
             )
             .await
             .expect_err("post-discovery credential recheck should fail activation");
@@ -3111,7 +3473,7 @@ output_schema_ref = "schemas/run.output.json"
         let (egress, tools_list_started, release_tools_list) =
             BlockingToolsListHostedMcpEgress::new();
 
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), &lifecycle_owner())
             .await
             .expect("install Notion MCP");
         let activation = tokio::spawn({
@@ -3132,9 +3494,13 @@ output_schema_ref = "schemas/run.output.json"
             .await
             .expect("tools/list request should start");
 
-        port.remove(package_ref, &hosted_mcp_scope("extension-remove-test"))
-            .await
-            .expect("remove can proceed while discovery is in flight");
+        port.remove(
+            package_ref,
+            Some(&hosted_mcp_scope("extension-remove-test")),
+            &lifecycle_owner(),
+        )
+        .await
+        .expect("remove can proceed while discovery is in flight");
         release_tools_list
             .send(())
             .expect("release blocked tools/list response");
@@ -3167,7 +3533,7 @@ output_schema_ref = "schemas/run.output.json"
             TrustClass::Sandbox
         );
 
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), &lifecycle_owner())
             .await
             .expect("install fixture extension");
         port.activate_with_prechecked_credentials_for_test(
@@ -3192,9 +3558,13 @@ output_schema_ref = "schemas/run.output.json"
             vec![EffectKind::Network, EffectKind::ExternalWrite]
         );
 
-        port.remove(package_ref, &hosted_mcp_scope("extension-remove-test"))
-            .await
-            .expect("remove fixture extension");
+        port.remove(
+            package_ref,
+            Some(&hosted_mcp_scope("extension-remove-test")),
+            &lifecycle_owner(),
+        )
+        .await
+        .expect("remove fixture extension");
         let removed_decision = trust_policy
             .evaluate(&trust_input)
             .expect("removed extension trust");
@@ -3220,11 +3590,15 @@ output_schema_ref = "schemas/run.output.json"
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
 
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), &lifecycle_owner())
             .await
             .expect("install extension");
         let error = port
-            .activate(package_ref, ExtensionActivationMode::Static)
+            .activate(
+                package_ref,
+                ExtensionActivationMode::Static,
+                &lifecycle_owner(),
+            )
             .await
             .expect_err("activation-state persistence failure is reported");
 
@@ -3260,11 +3634,15 @@ output_schema_ref = "schemas/run.output.json"
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
 
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), &lifecycle_owner())
             .await
             .expect("install extension");
         let error = port
-            .activate(package_ref, ExtensionActivationMode::Static)
+            .activate(
+                package_ref,
+                ExtensionActivationMode::Static,
+                &lifecycle_owner(),
+            )
             .await
             .expect_err("publish failure is reported");
 
@@ -3300,7 +3678,7 @@ output_schema_ref = "schemas/run.output.json"
         let extension_id = ExtensionId::new("fixture").expect("valid extension id");
         let installation_id = ExtensionInstallationId::new("fixture").expect("valid installation");
 
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), &lifecycle_owner())
             .await
             .expect("install extension");
         installation_store
@@ -3341,7 +3719,7 @@ output_schema_ref = "schemas/run.output.json"
             );
 
         let error = port
-            .search("fixture", None)
+            .search("fixture", None, &lifecycle_owner())
             .await
             .expect_err("search reports installation-store read failure");
 
@@ -3361,7 +3739,7 @@ output_schema_ref = "schemas/run.output.json"
             );
 
         let error = port
-            .search("fixture", None)
+            .search("fixture", None, &lifecycle_owner())
             .await
             .expect_err("search reports mismatched installation row");
 
@@ -3381,7 +3759,7 @@ output_schema_ref = "schemas/run.output.json"
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
 
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), &lifecycle_owner())
             .await
             .expect("install fixture extension");
         port.activate_with_prechecked_credentials_for_test(
@@ -3419,7 +3797,7 @@ output_schema_ref = "schemas/run.output.json"
             );
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), &lifecycle_owner())
             .await
             .expect("install fixture extension");
         port.activate_with_prechecked_credentials_for_test(
@@ -3499,6 +3877,7 @@ output_schema_ref = "schemas/run.output.json"
                     ),
                     Vec::new(),
                     chrono::Utc::now(),
+                    InstallationOwner::Tenant,
                 )
                 .expect("retired slack_user installation"),
             )
@@ -3559,7 +3938,7 @@ output_schema_ref = "schemas/run.output.json"
             );
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), &lifecycle_owner())
             .await
             .expect("install fixture extension");
         port.activate_with_prechecked_credentials_for_test(
@@ -3609,7 +3988,7 @@ output_schema_ref = "schemas/run.output.json"
             );
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), &lifecycle_owner())
             .await
             .expect("install fixture extension");
         port.activate_with_prechecked_credentials_for_test(
@@ -3989,7 +4368,9 @@ output_schema_ref = "schemas/run.output.json"
         let error = facade
             .execute(
                 lifecycle_surface_context(),
-                LifecycleProductAction::ExtensionActivate { package_ref },
+                LifecycleProductAction::ExtensionActivate {
+                    package_ref: package_ref.clone(),
+                },
             )
             .await
             .expect_err("missing product-auth account blocks activation");
@@ -4003,6 +4384,40 @@ output_schema_ref = "schemas/run.output.json"
                 .snapshot()
                 .get_extension(&ExtensionId::new("github").unwrap())
                 .is_none()
+        );
+
+        // #5525 review: ownership masks BEFORE the credential preflight — a
+        // non-owner activating a private credentialed install must get the
+        // masked "is not installed" denial, never an auth-required response
+        // that leaks the extension's existence and credential requirements.
+        facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionRemove {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("operator clears the shared slot");
+        facade
+            .execute(
+                lifecycle_surface_context_for_user("alice"),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("alice installs the credentialed extension privately");
+        let error = facade
+            .execute(
+                lifecycle_surface_context_for_user("bob"),
+                LifecycleProductAction::ExtensionActivate { package_ref },
+            )
+            .await
+            .expect_err("foreign private credentialed install must be inoperable");
+        assert!(
+            error.to_string().contains("is not installed"),
+            "ownership must mask before the credential preflight: {error}"
         );
     }
 
@@ -4358,12 +4773,17 @@ output_schema_ref = "schemas/run.output.json"
                 test_extension_trust_policy(),
             ),
             None,
+            lifecycle_owner(),
         );
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
 
         let error = port
-            .activate(package_ref, ExtensionActivationMode::Static)
+            .activate(
+                package_ref,
+                ExtensionActivationMode::Static,
+                &lifecycle_owner(),
+            )
             .await
             .expect_err("activation requires an installation record");
 
@@ -4488,7 +4908,7 @@ output_schema_ref = "schemas/run.output.json"
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
 
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), &lifecycle_owner())
             .await
             .expect("install extension");
         port.activate_with_prechecked_credentials_for_test(
@@ -4509,7 +4929,11 @@ output_schema_ref = "schemas/run.output.json"
         );
 
         let error = port
-            .remove(package_ref, &hosted_mcp_scope("extension-remove-test"))
+            .remove(
+                package_ref,
+                Some(&hosted_mcp_scope("extension-remove-test")),
+                &lifecycle_owner(),
+            )
             .await
             .expect_err("delete installation failure is reported");
 
@@ -4551,7 +4975,7 @@ output_schema_ref = "schemas/run.output.json"
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
 
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), &lifecycle_owner())
             .await
             .expect("install extension");
         port.activate_with_prechecked_credentials_for_test(
@@ -4564,7 +4988,11 @@ output_schema_ref = "schemas/run.output.json"
         let trust_input = extension_trust_policy_input(&package).expect("trust input");
 
         let error = port
-            .remove(package_ref, &hosted_mcp_scope("extension-remove-test"))
+            .remove(
+                package_ref,
+                Some(&hosted_mcp_scope("extension-remove-test")),
+                &lifecycle_owner(),
+            )
             .await
             .expect_err("delete manifest failure is reported");
 
@@ -4590,7 +5018,7 @@ output_schema_ref = "schemas/run.output.json"
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
 
-        port.install(package_ref.clone())
+        port.install(package_ref.clone(), &lifecycle_owner())
             .await
             .expect("install extension");
         port.activate_with_prechecked_credentials_for_test(
@@ -4603,7 +5031,11 @@ output_schema_ref = "schemas/run.output.json"
         let trust_input = extension_trust_policy_input(&package).expect("trust input");
 
         let error = port
-            .remove(package_ref, &hosted_mcp_scope("extension-remove-test"))
+            .remove(
+                package_ref,
+                Some(&hosted_mcp_scope("extension-remove-test")),
+                &lifecycle_owner(),
+            )
             .await
             .expect_err("delete files failure is reported");
 
@@ -4919,6 +5351,7 @@ output_schema_ref = "schemas/run.output.json"
                 Arc::clone(&trust_policy),
             ),
             None,
+            lifecycle_owner(),
         ));
         (
             dir,
@@ -5000,6 +5433,7 @@ output_schema_ref = "schemas/run.output.json"
                 test_extension_trust_policy(),
             ),
             credential_cleanup,
+            lifecycle_owner(),
         ));
         let facade =
             crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(skill_management)
@@ -5117,6 +5551,7 @@ output_schema_ref = "schemas/run.output.json"
                 Arc::clone(&trust_policy),
             ),
             None,
+            lifecycle_owner(),
         );
         (dir, port, active_registry, failing_store, trust_policy)
     }
@@ -5164,6 +5599,7 @@ output_schema_ref = "schemas/run.output.json"
                 Arc::clone(&trust_policy),
             ),
             None,
+            lifecycle_owner(),
         );
         (dir, port, active_registry, installation_store, trust_policy)
     }
@@ -5221,46 +5657,37 @@ output_schema_ref = "schemas/run.output.json"
         fail_set_activation_enabled: bool,
         fail_get_installation: bool,
         mismatched_get_installation: bool,
+        /// #5459 P1: fail the NEXT `upsert_installation` once, then clear —
+        /// simulates a mid-install persist failure so the retry can heal.
+        fail_next_upsert_installation: std::sync::atomic::AtomicBool,
     }
 
     impl DeleteInstallationFailingStore {
         fn fail_manifest_delete() -> Self {
             Self {
-                inner: InMemoryExtensionInstallationStore::default(),
                 fail_manifest_delete: true,
-                fail_set_activation_enabled: false,
-                fail_get_installation: false,
-                mismatched_get_installation: false,
+                ..Self::default()
             }
         }
 
         fn fail_set_activation_enabled() -> Self {
             Self {
-                inner: InMemoryExtensionInstallationStore::default(),
-                fail_manifest_delete: false,
                 fail_set_activation_enabled: true,
-                fail_get_installation: false,
-                mismatched_get_installation: false,
+                ..Self::default()
             }
         }
 
         fn fail_get_installation() -> Self {
             Self {
-                inner: InMemoryExtensionInstallationStore::default(),
-                fail_manifest_delete: false,
-                fail_set_activation_enabled: false,
                 fail_get_installation: true,
-                mismatched_get_installation: false,
+                ..Self::default()
             }
         }
 
         fn mismatched_get_installation() -> Self {
             Self {
-                inner: InMemoryExtensionInstallationStore::default(),
-                fail_manifest_delete: false,
-                fail_set_activation_enabled: false,
-                fail_get_installation: false,
                 mismatched_get_installation: true,
+                ..Self::default()
             }
         }
     }
@@ -5327,6 +5754,7 @@ output_schema_ref = "schemas/run.output.json"
                     ExtensionManifestRef::new(extension_id, None),
                     Vec::new(),
                     chrono::Utc::now(),
+                    InstallationOwner::Tenant,
                 )
                 .expect("mismatched installation fixture");
                 return Ok(Some(installation));
@@ -5338,6 +5766,14 @@ output_schema_ref = "schemas/run.output.json"
             &self,
             installation: ExtensionInstallation,
         ) -> Result<(), ExtensionInstallationError> {
+            if self
+                .fail_next_upsert_installation
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(ExtensionInstallationError::InvalidInstallation {
+                    reason: "upsert installation failed".to_string(),
+                });
+            }
             self.inner.upsert_installation(installation).await
         }
 
@@ -5756,12 +6192,25 @@ output_schema_ref = "schemas/run.output.json"
     }
 
     fn lifecycle_surface_context() -> LifecycleProductContext {
+        lifecycle_surface_context_for_user("lifecycle-owner")
+    }
+
+    /// Surface context for an arbitrary member user (#5459 P1 tests). The
+    /// fixture wires `lifecycle-owner` as the tenant operator, so any other
+    /// user id here acts as a plain member whose installs derive `User(..)`.
+    fn lifecycle_surface_context_for_user(user: &str) -> LifecycleProductContext {
         LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
             tenant_id: TenantId::new("lifecycle-tenant").expect("valid tenant"),
-            user_id: UserId::new("lifecycle-owner").expect("valid user"),
+            user_id: UserId::new(user).expect("valid user"),
             agent_id: None,
             project_id: None,
         })
+    }
+
+    /// The fixture's tenant-operator identity — matches the operator user id
+    /// wired into every test `RebornLocalExtensionManagementPort`.
+    fn lifecycle_owner() -> UserId {
+        UserId::new("lifecycle-owner").expect("valid user")
     }
 
     fn test_extension_trust_policy() -> Arc<HostTrustPolicy> {
@@ -6039,6 +6488,7 @@ output_schema_ref = "schemas/search.output.json"
             ),
             Vec::new(),
             chrono::Utc::now(),
+            InstallationOwner::Tenant,
         )
         .expect("fixture installation")
     }

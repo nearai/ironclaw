@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle};
+use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle, UserId};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 use tokio::sync::RwLock;
@@ -315,6 +315,53 @@ impl ExtensionHealthSnapshot {
     }
 }
 
+/// Who an installation belongs to (#5459 P1 — shared vs private installs).
+///
+/// `Tenant` = installed for the whole tenant (the historical behavior, and
+/// what an admin install produces): every user sees and can dispatch the
+/// extension's capabilities. `User` = private to the installing user: only
+/// they see it, only they get grants minted for it.
+///
+/// Legacy persisted records predate this field and deserialize as `Tenant`
+/// via `#[serde(default)]` — no migration required, no behavior change for
+/// existing installs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InstallationOwner {
+    #[default]
+    Tenant,
+    User {
+        user_id: UserId,
+    },
+}
+
+impl InstallationOwner {
+    pub fn user(user_id: UserId) -> Self {
+        Self::User { user_id }
+    }
+
+    pub fn is_tenant(&self) -> bool {
+        matches!(self, Self::Tenant)
+    }
+
+    /// The owning user, if the installation is user-private.
+    pub fn as_user(&self) -> Option<&UserId> {
+        match self {
+            Self::User { user_id } => Some(user_id),
+            Self::Tenant => None,
+        }
+    }
+
+    /// Whether `caller` may see/use this installation: tenant-wide entries
+    /// are visible to everyone, user-private entries only to their owner.
+    pub fn visible_to(&self, caller: &UserId) -> bool {
+        match self {
+            Self::Tenant => true,
+            Self::User { user_id } => user_id == caller,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExtensionInstallation {
     installation_id: ExtensionInstallationId,
@@ -324,6 +371,13 @@ pub struct ExtensionInstallation {
     credential_bindings: Vec<ExtensionCredentialBinding>,
     health: ExtensionHealthSnapshot,
     updated_at: DateTime<Utc>,
+    // Tenant-owned rows serialize WITHOUT the field so they keep the exact
+    // pre-#5459 byte shape: a rollback to an older binary (whose wire struct
+    // uses `deny_unknown_fields`) still loads a state.json that contains no
+    // private installs. Only user-private rows carry the field — the one
+    // shape an older binary genuinely cannot represent.
+    #[serde(default, skip_serializing_if = "InstallationOwner::is_tenant")]
+    owner: InstallationOwner,
 }
 
 impl ExtensionInstallation {
@@ -334,6 +388,7 @@ impl ExtensionInstallation {
         manifest_ref: ExtensionManifestRef,
         credential_bindings: Vec<ExtensionCredentialBinding>,
         updated_at: DateTime<Utc>,
+        owner: InstallationOwner,
     ) -> Result<Self, ExtensionInstallationError> {
         if manifest_ref.extension_id() != &extension_id {
             return Err(ExtensionInstallationError::ManifestExtensionMismatch {
@@ -350,6 +405,7 @@ impl ExtensionInstallation {
             credential_bindings,
             health: ExtensionHealthSnapshot::new(ExtensionHealthStatus::Healthy, None, updated_at),
             updated_at,
+            owner,
         })
     }
 
@@ -381,6 +437,10 @@ impl ExtensionInstallation {
         self.updated_at
     }
 
+    pub fn owner(&self) -> &InstallationOwner {
+        &self.owner
+    }
+
     fn set_activation_state(&mut self, state: ExtensionActivationState) {
         self.activation_state = state;
         self.updated_at = Utc::now();
@@ -407,6 +467,10 @@ impl<'de> Deserialize<'de> for ExtensionInstallation {
             credential_bindings: Vec<ExtensionCredentialBinding>,
             health: ExtensionHealthSnapshot,
             updated_at: DateTime<Utc>,
+            // Legacy records predate the owner field; they were all
+            // tenant-visible, so absent == Tenant is behavior-preserving.
+            #[serde(default)]
+            owner: InstallationOwner,
         }
         let wire = Wire::deserialize(deserializer)?;
         if wire.manifest_ref.extension_id() != &wire.extension_id {
@@ -426,6 +490,7 @@ impl<'de> Deserialize<'de> for ExtensionInstallation {
             credential_bindings: wire.credential_bindings,
             health: wire.health,
             updated_at: wire.updated_at,
+            owner: wire.owner,
         })
     }
 }
@@ -846,8 +911,44 @@ mod tests {
             ),
             Vec::new(),
             Utc::now(),
+            InstallationOwner::Tenant,
         )
         .expect("installation")
+    }
+
+    /// #5459 P1: legacy persisted rows predate the `owner` field and were all
+    /// tenant-visible; a record without it MUST deserialize as `Tenant` (no
+    /// migration). The inverse also holds: a TENANT-owned record serializes
+    /// WITHOUT the field, keeping the exact pre-#5459 byte shape so a rollback
+    /// to an older binary (`deny_unknown_fields` wire struct) still loads a
+    /// state.json holding no private installs. A user-owned record must
+    /// round-trip its owner.
+    #[test]
+    fn installation_owner_defaults_to_tenant_for_legacy_rows_and_round_trips() {
+        let current = installation("fixture", Some("hash-1"));
+        let json = serde_json::to_value(&current).expect("serialize installation");
+        assert!(
+            json.get("owner").is_none(),
+            "tenant-owned rows must keep the pre-#5459 shape (rollback compat): {json}"
+        );
+        let legacy: ExtensionInstallation =
+            serde_json::from_value(json).expect("legacy row without owner deserializes");
+        assert_eq!(legacy.owner(), &InstallationOwner::Tenant);
+
+        let alice = ironclaw_host_api::UserId::new("alice").expect("user id");
+        let private = ExtensionInstallation::new(
+            ExtensionInstallationId::new("fixture".to_string()).expect("installation id"),
+            ExtensionId::new("fixture".to_string()).expect("extension id"),
+            ExtensionActivationState::Installed,
+            ExtensionManifestRef::new(ExtensionId::new("fixture".to_string()).unwrap(), None),
+            Vec::new(),
+            Utc::now(),
+            InstallationOwner::user(alice.clone()),
+        )
+        .expect("installation");
+        let json = serde_json::to_string(&private).expect("serialize");
+        let restored: ExtensionInstallation = serde_json::from_str(&json).expect("round-trip");
+        assert_eq!(restored.owner().as_user(), Some(&alice));
     }
 
     fn manifest_toml(extension_id: &str) -> String {

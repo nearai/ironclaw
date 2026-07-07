@@ -125,12 +125,12 @@ pub use lifecycle::{
     ChannelConnectionRequirement, LifecycleBlockerRef, LifecycleCommandKind,
     LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
     LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
-    LifecycleExtensionSummary, LifecycleExtensionSurfaceKind, LifecycleInstalledExtensionSummary,
-    LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
-    LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
-    LifecycleProductPayload, LifecycleProductResponse, LifecycleProductSurfaceContext,
-    LifecycleReadinessBlocker, LifecycleSearchExtensionSummary, LifecycleSkillSource,
-    LifecycleSkillSummary, UnsupportedLifecycleProductFacade,
+    LifecycleExtensionSummary, LifecycleExtensionSurfaceKind, LifecycleInstallScope,
+    LifecycleInstalledExtensionSummary, LifecyclePackageId, LifecyclePackageKind,
+    LifecyclePackageRef, LifecyclePhase, LifecycleProductAction, LifecycleProductContext,
+    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleProductSurfaceContext, LifecycleReadinessBlocker, LifecycleSearchExtensionSummary,
+    LifecycleSkillSource, LifecycleSkillSummary, UnsupportedLifecycleProductFacade,
 };
 // Product hosts use this outbound orchestration seam to wire outbound policy
 // decisions to adapter rendering without reaching into module internals.

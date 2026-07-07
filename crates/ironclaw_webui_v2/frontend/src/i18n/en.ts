@@ -1286,6 +1286,8 @@ registerPack("en", {
   "extensions.connect": "Connect",
   "extensions.configureName": "Configure {name}",
   "extensions.allInstalled": "All installed extensions",
+  "extensions.scope.shared": "shared",
+  "extensions.scope.private": "mine",
   "mcp.installed": "Installed MCP servers",
   "extensions.oneCapability": "1 capability",
   "extensions.pluralCapabilities": "{count} capabilities",

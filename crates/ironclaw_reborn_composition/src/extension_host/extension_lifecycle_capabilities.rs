@@ -162,13 +162,19 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     Arc::clone(&self.credential_accounts),
                 );
                 self.extension_management
-                    .search(&input.query, Some(&credential_gate))
+                    .search(&input.query, Some(&credential_gate), &request.scope.user_id)
                     .await
             }
             EXTENSION_INSTALL_CAPABILITY_ID => {
                 let input: ExtensionIdInput = parse_input(request.input)?;
+                // The dispatch scope carries the ACTING user, so a chat-driven
+                // install derives the same owner the WebUI path would (#5459
+                // P1): operator → tenant-shared, member → private.
                 self.extension_management
-                    .install(extension_package_ref(input.extension_id)?)
+                    .install(
+                        extension_package_ref(input.extension_id)?,
+                        &request.scope.user_id,
+                    )
                     .await
             }
             EXTENSION_ACTIVATE_CAPABILITY_ID => {
@@ -176,7 +182,7 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                 let package_ref = extension_package_ref(input.extension_id)?;
                 let requirements = self
                     .extension_management
-                    .activation_credential_requirements(&package_ref)
+                    .activation_credential_requirements(&package_ref, &request.scope.user_id)
                     .await
                     .map_err(lifecycle_error)?;
                 let credential_gate = RuntimeExtensionActivationCredentialGate::new(
@@ -198,7 +204,12 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     request.services.runtime_http_egress.clone(),
                 );
                 self.extension_management
-                    .activate_with_credential_gate(package_ref, mode, credential_gate)
+                    .activate_with_credential_gate(
+                        package_ref,
+                        mode,
+                        credential_gate,
+                        &request.scope.user_id,
+                    )
                     .await
             }
             EXTENSION_REMOVE_CAPABILITY_ID => {
@@ -207,7 +218,11 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                 // convergence point shared with the WebUI facade), so the scope
                 // is threaded through rather than cleaned up here.
                 self.extension_management
-                    .remove(extension_package_ref(input.extension_id)?, &request.scope)
+                    .remove(
+                        extension_package_ref(input.extension_id)?,
+                        Some(&request.scope),
+                        &request.scope.user_id,
+                    )
                     .await
             }
             _ => {
@@ -834,6 +849,27 @@ mod tests {
 
         let active = active_extension_capability_ids(&extension_management).await;
         assert!(!active.iter().any(|id| id == "github.search_issues"));
+
+        // #5525 review: a foreign caller probing the same private credentialed
+        // install must NOT receive the auth gate — that response confirms the
+        // install exists and leaks its credential requirement shape. Ownership
+        // masks before the credential preflight, so the non-owner sees the
+        // same failure a missing installation would produce.
+        let outcome = crate::approval_test_support::invoke_with_local_dev_approval(
+            &services,
+            EXTENSION_ACTIVATE_CAPABILITY_ID,
+            execution_context_for_user(
+                "extension-tool-foreign-user",
+                [EXTENSION_ACTIVATE_CAPABILITY_ID],
+            ),
+            serde_json::json!({"extension_id": "github"}),
+            trust_decision(),
+        )
+        .await;
+        let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
+            panic!("foreign caller must get the masked failure, not an auth gate: {outcome:?}");
+        };
+        assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
     }
 
     #[tokio::test]
@@ -1352,9 +1388,16 @@ mod tests {
     fn execution_context<'a>(
         capability_ids: impl IntoIterator<Item = &'a str>,
     ) -> ExecutionContext {
+        execution_context_for_user("extension-tool-test-user", capability_ids)
+    }
+
+    fn execution_context_for_user<'a>(
+        user: &str,
+        capability_ids: impl IntoIterator<Item = &'a str>,
+    ) -> ExecutionContext {
         let caller = ExtensionId::new("extension-tool-test-caller").expect("valid extension id");
         ExecutionContext::local_default(
-            UserId::new("extension-tool-test-user").expect("valid user id"),
+            UserId::new(user).expect("valid user id"),
             caller.clone(),
             RuntimeKind::FirstParty,
             TrustClass::FirstParty,
