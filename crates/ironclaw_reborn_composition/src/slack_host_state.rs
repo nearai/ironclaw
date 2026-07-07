@@ -141,8 +141,10 @@ where
         }
     }
 
-    #[cfg(test)]
-    fn with_pairing_ttl(mut self, pairing_ttl: Duration) -> Self {
+    // `test-support` + `pub(crate)` so `test_support::slack_host_state_for_test_with_pairing_ttl`
+    // can reach it; still zero-cost in production builds.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn with_pairing_ttl(mut self, pairing_ttl: Duration) -> Self {
         self.pairing_ttl = pairing_ttl;
         self
     }
