@@ -660,7 +660,7 @@ impl CodexChatGptProvider {
                     };
 
                     let event_type = Self::resolve_sse_event_type(event.event.as_str(), &parsed);
-                    if Self::handle_sse_event(&mut result, event_type.as_ref(), &parsed) {
+                    if Self::handle_sse_event(&mut result, event_type.as_ref(), &parsed)? {
                         return Ok(result);
                     }
                 }
@@ -711,7 +711,7 @@ impl CodexChatGptProvider {
                 };
 
                 let event_type = Self::resolve_sse_event_type(current_event_type.as_str(), &parsed);
-                if Self::handle_sse_event(&mut result, event_type.as_ref(), &parsed) {
+                if Self::handle_sse_event(&mut result, event_type.as_ref(), &parsed)? {
                     return Ok(result);
                 }
             }
@@ -731,7 +731,11 @@ impl CodexChatGptProvider {
             .unwrap_or_else(|| Cow::Borrowed(event_type))
     }
 
-    fn handle_sse_event(result: &mut ResponsesResult, event_type: &str, parsed: &Value) -> bool {
+    fn handle_sse_event(
+        result: &mut ResponsesResult,
+        event_type: &str,
+        parsed: &Value,
+    ) -> Result<bool, LlmError> {
         match event_type {
             "response.output_text.delta" => {
                 if let Some(delta) = parsed.get("delta").and_then(|d| d.as_str()) {
@@ -827,12 +831,46 @@ impl CodexChatGptProvider {
                     output_tokens = result.output_tokens,
                     "Codex ChatGPT: parsed completed response"
                 );
-                return true;
+                return Ok(true);
+            }
+            "response.failed" => {
+                let reason = parsed
+                    .get("response")
+                    .and_then(|r| r.get("status_details"))
+                    .and_then(|d| d.get("error"))
+                    .and_then(|e| e.get("message"))
+                    .and_then(|m| m.as_str())
+                    .or_else(|| {
+                        parsed
+                            .get("response")
+                            .and_then(|r| r.get("error"))
+                            .and_then(|e| e.get("message"))
+                            .and_then(|m| m.as_str())
+                    })
+                    .unwrap_or("Unknown error");
+                return Err(LlmError::RequestFailed {
+                    provider: "codex_chatgpt".to_string(),
+                    reason: format!("Response failed: {reason}"),
+                });
+            }
+            "error" => {
+                let code = parsed
+                    .get("code")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("unknown");
+                let message = parsed
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("Unknown error");
+                return Err(LlmError::RequestFailed {
+                    provider: "codex_chatgpt".to_string(),
+                    reason: format!("Error {code}: {message}"),
+                });
             }
             _ => {}
         }
 
-        false
+        Ok(false)
     }
 
     fn merge_completed_response_output(result: &mut ResponsesResult, response: &Value) {
@@ -1471,6 +1509,84 @@ data: {"response":{"usage":{"input_tokens":20,"output_tokens":15}}}
         assert_eq!(tc.arguments, "{\"query\":\"rust\"}");
     }
 
+    #[test]
+    fn test_parse_sse_response_failed_event_line_framing_errors() {
+        let sse = r#"event: response.failed
+data: {"response":{"status_details":{"error":{"message":"Content policy violation"}}}}
+
+"#;
+        let err = CodexChatGptProvider::parse_sse_response(sse)
+            .expect_err("response.failed must surface as an error, not silent Ok");
+        match err {
+            LlmError::RequestFailed { provider, reason } => {
+                assert_eq!(provider, "codex_chatgpt");
+                assert!(
+                    reason.contains("Content policy violation"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            other => panic!("expected RequestFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_sse_response_failed_data_only_framing_errors() {
+        let sse = r#"data: {"type":"response.failed","response":{"error":{"message":"Model overloaded"}}}
+
+"#;
+        let err = CodexChatGptProvider::parse_sse_response(sse)
+            .expect_err("response.failed (data-only type) must surface as an error");
+        match err {
+            LlmError::RequestFailed { provider, reason } => {
+                assert_eq!(provider, "codex_chatgpt");
+                assert!(
+                    reason.contains("Model overloaded"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            other => panic!("expected RequestFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_sse_response_top_level_error_event_line_framing_errors() {
+        let sse = r#"event: error
+data: {"code":"rate_limit_exceeded","message":"Too many requests"}
+
+"#;
+        let err = CodexChatGptProvider::parse_sse_response(sse)
+            .expect_err("top-level error event must surface as an error, not silent Ok");
+        match err {
+            LlmError::RequestFailed { provider, reason } => {
+                assert_eq!(provider, "codex_chatgpt");
+                assert!(
+                    reason.contains("rate_limit_exceeded") && reason.contains("Too many requests"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            other => panic!("expected RequestFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_sse_response_top_level_error_data_only_framing_errors() {
+        let sse = r#"data: {"type":"error","code":"server_error","message":"Internal error occurred"}
+
+"#;
+        let err = CodexChatGptProvider::parse_sse_response(sse)
+            .expect_err("top-level error (data-only type) must surface as an error");
+        match err {
+            LlmError::RequestFailed { provider, reason } => {
+                assert_eq!(provider, "codex_chatgpt");
+                assert!(
+                    reason.contains("server_error") && reason.contains("Internal error occurred"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            other => panic!("expected RequestFailed, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn test_parse_sse_stream_response() {
         let stream = stream::iter(vec![
@@ -1540,6 +1656,58 @@ data: {"type":"response.output_text.delta","delta":" ignored"}
             .await
             .unwrap();
         assert_eq!(result.text, "hello");
+    }
+
+    #[tokio::test]
+    async fn test_parse_sse_stream_response_failed_returns_err() {
+        let stream = stream::iter(vec![
+            Ok(Bytes::from_static(
+                b"event: response.output_text.delta\ndata: {\"delta\":\"partial\"}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"event: response.failed\ndata: {\"response\":{\"status_details\":{\"error\":{\"message\":\"Content policy violation\"}}}}\n\n",
+            )),
+        ]);
+
+        let err = CodexChatGptProvider::parse_sse_stream(stream, Duration::from_secs(1))
+            .await
+            .expect_err("response.failed mid-stream must not resolve to Ok");
+        match err {
+            LlmError::RequestFailed { provider, reason } => {
+                assert_eq!(provider, "codex_chatgpt");
+                assert!(
+                    reason.contains("Content policy violation"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            other => panic!("expected RequestFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_sse_stream_top_level_error_returns_err() {
+        let stream = stream::iter(vec![
+            Ok(Bytes::from_static(
+                b"event: response.output_text.delta\ndata: {\"delta\":\"partial\"}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"event: error\ndata: {\"code\":\"rate_limit_exceeded\",\"message\":\"Too many requests\"}\n\n",
+            )),
+        ]);
+
+        let err = CodexChatGptProvider::parse_sse_stream(stream, Duration::from_secs(1))
+            .await
+            .expect_err("top-level error event mid-stream must not resolve to Ok");
+        match err {
+            LlmError::RequestFailed { provider, reason } => {
+                assert_eq!(provider, "codex_chatgpt");
+                assert!(
+                    reason.contains("rate_limit_exceeded") && reason.contains("Too many requests"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            other => panic!("expected RequestFailed, got {other:?}"),
+        }
     }
 
     #[tokio::test]
