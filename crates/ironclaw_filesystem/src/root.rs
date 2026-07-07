@@ -444,4 +444,30 @@ mod tests {
         assert_eq!(first_two.len(), 2);
         assert_eq!(first_two[1].seq, SeqNo::from_backend(2));
     }
+
+    /// `DefaultBoundedBackend` does not override `delete_if_version`, so
+    /// calling it must reach the trait's default body and fail closed with
+    /// `Unsupported` rather than panicking, silently no-op'ing, or falling
+    /// through to some other operation's error variant. Pins the
+    /// currently-untested default arm (round-5 review finding, PR #5749).
+    #[tokio::test]
+    async fn delete_if_version_default_returns_unsupported() {
+        let backend = DefaultBoundedBackend;
+        let path = VirtualPath::new("/projects/leaf").unwrap();
+
+        let result = backend
+            .delete_if_version(&path, RecordVersion::from_backend(1))
+            .await;
+
+        assert!(
+            matches!(
+                &result,
+                Err(FilesystemError::Unsupported {
+                    path: err_path,
+                    operation: FilesystemOperation::Delete,
+                }) if err_path == &path
+            ),
+            "default delete_if_version must fail closed with Unsupported{{Delete}}, got: {result:?}"
+        );
+    }
 }

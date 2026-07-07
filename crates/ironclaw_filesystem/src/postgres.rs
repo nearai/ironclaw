@@ -1638,7 +1638,7 @@ async fn postgres_delete_with_client(
 #[cfg(feature = "postgres")]
 const DELETE_IF_VERSION_ATOMIC_SQL: &str = r#"
     WITH locked AS (
-        SELECT version
+        SELECT path, version
         FROM root_filesystem_entries
         WHERE path = $1 AND is_dir = FALSE
         FOR UPDATE
