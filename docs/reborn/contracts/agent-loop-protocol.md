@@ -165,6 +165,11 @@ Those blocked states are host-managed transitions driven by approval or auth ser
 - Repeated rejected reply candidates fail as invalid model output rather than
   generic no-progress, so recovery can distinguish bad final-answer candidates
   from repeated capability work.
+- Host-managed model responses that are empty or structurally invalid for the
+  active loop contract surface as `invalid_output`, not `unavailable`. The
+  agent loop owns recovery: it retries the model call with a model-visible
+  repair hint in the prompt bundle, and exhausted retries fail the run as
+  `invalid_model_output`.
 - `BlockedApproval` / `BlockedAuth` is host control-plane state
 
 These must not be collapsed into a single vague text outcome.

@@ -1333,6 +1333,76 @@ async fn libsql_capabilities_advertise_events() {
 }
 
 #[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_create_dir_all_concurrent_shared_prefixes_waits_for_writer() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let db_path = db_dir.path().join("root-filesystem.db");
+    let db = std::sync::Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+    let filesystem = std::sync::Arc::new(LibSqlRootFilesystem::new(db));
+    filesystem.run_migrations().await.unwrap();
+
+    let mut tasks = Vec::new();
+    for sample in 0..32 {
+        let filesystem = std::sync::Arc::clone(&filesystem);
+        tasks.push(tokio::spawn(async move {
+            let path = VirtualPath::new(format!(
+                "/engine/tenants/latency/users/libsql/runs/shared-c8/sample-{sample}/d0/d1/d2"
+            ))
+            .unwrap();
+            filesystem.create_dir_all(&path).await
+        }));
+    }
+
+    for task in tasks {
+        task.await.unwrap().unwrap();
+    }
+
+    let shared_prefix =
+        VirtualPath::new("/engine/tenants/latency/users/libsql/runs/shared-c8").unwrap();
+    assert_eq!(
+        filesystem.stat(&shared_prefix).await.unwrap().file_type,
+        FileType::Directory
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_put_concurrent_distinct_children_waits_for_writer() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let db_path = db_dir.path().join("root-filesystem.db");
+    let db = std::sync::Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+    let filesystem = std::sync::Arc::new(LibSqlRootFilesystem::new(db));
+    filesystem.run_migrations().await.unwrap();
+    let parent = VirtualPath::new("/engine/tenants/latency/users/libsql/runs/shared-put").unwrap();
+    filesystem.create_dir_all(&parent).await.unwrap();
+
+    let mut tasks = Vec::new();
+    for sample in 0..32 {
+        let filesystem = std::sync::Arc::clone(&filesystem);
+        tasks.push(tokio::spawn(async move {
+            let path = VirtualPath::new(format!(
+                "/engine/tenants/latency/users/libsql/runs/shared-put/record-{sample}"
+            ))
+            .unwrap();
+            filesystem
+                .put(&path, Entry::bytes(vec![sample as u8]), CasExpectation::Any)
+                .await
+        }));
+    }
+
+    for task in tasks {
+        task.await.unwrap().unwrap();
+    }
+
+    let last =
+        VirtualPath::new("/engine/tenants/latency/users/libsql/runs/shared-put/record-31").unwrap();
+    assert_eq!(
+        filesystem.get(&last).await.unwrap().unwrap().entry.body,
+        vec![31]
+    );
+}
+
+#[cfg(feature = "libsql")]
 async fn libsql_root() -> TestLibSqlRootFilesystem {
     let db_dir = tempfile::tempdir().unwrap();
     let db_path = db_dir.path().join("root-filesystem.db");

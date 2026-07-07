@@ -22,7 +22,6 @@ use ironclaw_loop_support::{
     LoopCapabilityPortFactory, LoopCapabilityResultWriter, loop_driver_execution_extension_id,
 };
 use ironclaw_product_workflow::{OutboundPreferencesProductFacade, ProjectService};
-use ironclaw_reborn::thread_scope::ThreadScopeResolver;
 
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_threads::{
@@ -96,7 +95,6 @@ pub(super) struct LocalDevCapabilityWiring {
 pub(super) fn capability_wiring(
     services: &RebornServices,
     thread_service: Arc<dyn SessionThreadService>,
-    thread_scope: ThreadScope,
     fallback_user_id: UserId,
     policy: Arc<LocalDevCapabilityPolicy>,
     model_gateway: Arc<dyn HostManagedModelGateway>,
@@ -140,7 +138,7 @@ pub(super) fn capability_wiring(
         LocalDevCapabilityIo::new_with_durable_previews(
             Arc::clone(&display_previews),
             thread_service,
-            thread_scope,
+            fallback_user_id.clone(),
         )
         .with_observer(trajectory_observer.clone()),
     );
@@ -275,7 +273,11 @@ struct LocalDevCapabilityIo {
 #[derive(Clone)]
 struct DurableCapabilityDisplayPreviewSink {
     thread_service: Arc<dyn SessionThreadService>,
-    thread_scope: ThreadScope,
+    /// Fallback owner used only when a run scope carries no explicit owner.
+    /// The durable thread scope is otherwise derived per-append from the
+    /// run context so previews write under the SAME scope the run's thread
+    /// was registered under (see `local_dev_thread_scope_for_run`).
+    fallback_user_id: UserId,
 }
 
 impl Default for LocalDevCapabilityIo {
@@ -298,7 +300,7 @@ impl LocalDevCapabilityIo {
     fn new_with_durable_previews(
         display_previews: Arc<CapabilityDisplayPreviewStore>,
         thread_service: Arc<dyn SessionThreadService>,
-        thread_scope: ThreadScope,
+        fallback_user_id: UserId,
     ) -> Self {
         Self {
             inputs: StdMutex::new(StagedValueStore::default()),
@@ -306,7 +308,7 @@ impl LocalDevCapabilityIo {
             display_previews,
             durable_previews: Some(DurableCapabilityDisplayPreviewSink {
                 thread_service,
-                thread_scope,
+                fallback_user_id,
             }),
             observer: None,
         }
@@ -374,11 +376,20 @@ impl LocalDevCapabilityIo {
                     return None;
                 }
             };
-        let thread_scope = ThreadScopeResolver::resolve_for_turn(
-            &durable_previews.thread_scope,
-            &run_context.scope,
-            run_context.actor(),
-        );
+        // Derive the durable thread scope from the run context so the preview
+        // writes under the SAME scope the run's thread was registered under.
+        // A composition-time constant scope can mismatch the run's actual
+        // owner/project and surface as a spurious `UnknownThread` on append.
+        let Some(thread_scope) =
+            local_dev_thread_scope_for_run(run_context, &durable_previews.fallback_user_id)
+        else {
+            tracing::debug!(
+                invocation_id = %invocation_id,
+                capability_id = capability_id.as_str(),
+                "capability display preview skipped: run scope has no agent"
+            );
+            return None;
+        };
         let message = match durable_previews
             .thread_service
             .append_capability_display_preview(AppendCapabilityDisplayPreviewRequest {
@@ -911,6 +922,28 @@ fn local_dev_resource_scope_for_run(
         .or_else(|| run_context.actor().map(|actor| actor.user_id.clone()))
         .unwrap_or_else(|| fallback_user_id.clone());
     scope
+}
+
+/// Build the per-run [`ThreadScope`] for durable display-preview appends.
+///
+/// Mirrors [`local_dev_resource_scope_for_run`] so the durable preview sink
+/// writes under the same scope the run's thread was registered under, rather
+/// than a composition-time constant that can drift from the run's actual
+/// owner/project and surface as a spurious `UnknownThread`. Returns `None`
+/// when the run scope carries no agent (durable previews are agent-scoped),
+/// in which case the caller skips the durable append.
+fn local_dev_thread_scope_for_run(
+    run_context: &LoopRunContext,
+    fallback_user_id: &UserId,
+) -> Option<ThreadScope> {
+    let resource = local_dev_resource_scope_for_run(run_context, fallback_user_id);
+    Some(ThreadScope {
+        tenant_id: resource.tenant_id,
+        agent_id: resource.agent_id?,
+        project_id: resource.project_id,
+        owner_user_id: Some(resource.user_id),
+        mission_id: resource.mission_id,
+    })
 }
 
 struct LocalDevVisibleCapabilityInputs<'a> {

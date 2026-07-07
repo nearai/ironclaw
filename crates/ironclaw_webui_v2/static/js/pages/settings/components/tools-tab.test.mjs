@@ -1,25 +1,7 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
-import vm from "node:vm";
 
-function sourceForTest(path, exportNames) {
-  const source = readFileSync(new URL(path, import.meta.url), "utf8");
-  const lines = [];
-  let skippingImport = false;
-  for (const line of source.split("\n")) {
-    if (!skippingImport && line.startsWith("import ")) {
-      skippingImport = !line.trimEnd().endsWith(";");
-      continue;
-    }
-    if (skippingImport) {
-      skippingImport = !line.trimEnd().endsWith(";");
-      continue;
-    }
-    lines.push(line.replace(/^export function /, "function "));
-  }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { ${exportNames.join(", ")} };`;
-}
+import { runVmModuleForTest } from "../../../test-support/vm-module-harness.test.mjs";
 
 function html(strings, ...values) {
   return { strings: Array.from(strings), values };
@@ -92,29 +74,38 @@ function componentProps(node, component) {
   return props;
 }
 
-function renderToolsModule({ tools = [], translations = {} } = {}) {
+function renderToolsModule({ tools = [], translations = {}, toolError = null } = {}) {
   const saved = [];
+  const translate = (key, params = {}) => {
+    let value = translations[key] || key;
+    for (const [name, replacement] of Object.entries(params)) {
+      value = value.replaceAll(`{${name}}`, String(replacement));
+    }
+    return value;
+  };
   const context = {
     Badge: "Badge",
     Card: "Card",
     Icon: "Icon",
-    globalThis: {},
     html,
     matchesSearch: (query, values) =>
       !query || values.some((value) => String(value || "").includes(query)),
-    useT: () => (key) => translations[key] || key,
+    useT: () => translate,
     useTools: () => ({
       tools,
       query: { isLoading: false, error: null },
       setPermission: () => {},
       savedTools: {},
+      error: toolError,
     }),
   };
-  vm.runInNewContext(
-    sourceForTest("./tools-tab.js", ["ToolsTab", "AutoApproveCard", "Switch", "ToolRow"]),
-    context
+  const exports = runVmModuleForTest(
+    "./tools-tab.js",
+    ["ToolsTab", "AutoApproveCard", "Switch", "ToolRow"],
+    context,
+    import.meta.url
   );
-  return { exports: context.globalThis.__testExports, saved };
+  return { exports, saved };
 }
 
 test("Tools tab renders global auto-approve control and saves the operator key", () => {
@@ -311,4 +302,20 @@ test("Tools tab search does not index locked tools as disabled unless disabled",
   const rendered = exports.ToolsTab({ searchQuery: "disabled" });
   assert.equal(findComponentNode(rendered, exports.ToolRow), null);
   assert.ok(collectScalars(rendered).includes("tools.noMatch"));
+});
+
+test("Tools tab surfaces permission save failures", () => {
+  const { exports } = renderToolsModule({
+    translations: {
+      "error.saveFailed": "Save failed: {message}",
+    },
+    toolError: new Error("permission denied"),
+  });
+
+  const rendered = exports.ToolsTab({});
+
+  assert.match(collectTemplateText(rendered), /role="alert"/);
+  assert.match(collectTemplateText(rendered), /var\(--v2-danger-text\)/);
+  assert.doesNotMatch(collectTemplateText(rendered), /text-red-|bg-red-|border-red-/);
+  assert.ok(collectScalars(rendered).includes("Save failed: permission denied"));
 });

@@ -43,6 +43,11 @@ pub struct BlockedEvidenceRequest<'a> {
 }
 
 /// Evidence request for a failed loop exit.
+///
+/// `failed.explanation_message_refs` are part of the driver-owned evidence
+/// claim. Implementations must treat them as durable references only after
+/// verifying they belong to the scoped run; unverified refs must not be
+/// surfaced through a trusted failed outcome.
 #[derive(Debug, Clone)]
 pub struct FailureEvidenceRequest<'a> {
     pub scope: &'a TurnScope,
@@ -313,6 +318,8 @@ impl LoopExit {
             usage_summary_ref: None,
             diagnostic_ref: None,
             exit_id,
+            explanation_message_refs: Vec::new(),
+            safe_summary: None,
         })
     }
 }
@@ -424,6 +431,14 @@ pub struct LoopFailed {
     pub usage_summary_ref: Option<LoopUsageSummaryRef>,
     pub diagnostic_ref: Option<LoopDiagnosticRef>,
     pub exit_id: LoopExitId,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_bounded_unique_refs",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub explanation_message_refs: Vec<LoopMessageRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub safe_summary: Option<SanitizedFailure>,
 }
 
 #[non_exhaustive]
@@ -823,12 +838,10 @@ fn validate_failed_exit(
     {
         return invalid_exit_decision(exit_id, LoopExitViolationKind::MissingFinalCheckpoint);
     }
-    LoopExitValidationDecision::trusted(
-        exit_id,
-        TurnRunnerOutcome::Failed {
-            failure: exit.reason_kind.to_sanitized_failure(),
-        },
-    )
+    let failure = exit
+        .safe_summary
+        .unwrap_or_else(|| exit.reason_kind.to_sanitized_failure());
+    LoopExitValidationDecision::trusted(exit_id, TurnRunnerOutcome::Failed { failure })
 }
 
 fn invalid_exit_decision(

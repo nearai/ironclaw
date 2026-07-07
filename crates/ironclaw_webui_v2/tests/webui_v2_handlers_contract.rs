@@ -55,16 +55,16 @@ use ironclaw_product_workflow::{
     RebornOutboundPreferencesResponse, RebornProjectInfo, RebornProjectMemberInfo,
     RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole, RebornProjectState,
     RebornRemoveMemberRequest, RebornResolveGateResponse, RebornResumeGateResponse,
-    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, RebornUpdateMemberRoleRequest,
-    RebornUpdateProjectRequest, SetActiveLlmRequest, UpsertLlmProviderRequest,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-    rejecting_reborn_services_error,
+    RebornRetryRunResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, SetActiveLlmRequest,
+    UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
+    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, rejecting_reborn_services_error,
 };
 use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
@@ -252,6 +252,7 @@ struct StubServices {
     stream_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
     cancel_run_calls: Mutex<Vec<WebUiCancelRunRequest>>,
     resolve_gate_calls: Mutex<Vec<WebUiResolveGateRequest>>,
+    retry_run_calls: Mutex<Vec<WebUiRetryRunRequest>>,
     list_threads_calls: Mutex<Vec<WebUiListThreadsRequest>>,
     list_automations_calls: Mutex<Vec<WebUiListAutomationsRequest>>,
     pause_automation_calls: Mutex<Vec<String>>,
@@ -290,6 +291,7 @@ struct StubServices {
     test_llm_connection_calls: Mutex<Vec<String>>,
     list_llm_models_calls: Mutex<Vec<String>>,
     next_create_thread_error: Mutex<Option<RebornServicesError>>,
+    next_retry_run: Mutex<VecDeque<Result<RebornRetryRunResponse, RebornServicesError>>>,
     /// Per-call queued responses for `stream_events`. When non-empty, the
     /// front entry is popped and returned on each call so SSE tests can
     /// drive the handler through specific projection envelopes, error
@@ -349,6 +351,13 @@ impl StubServices {
             .next_set_operator_config_key_error
             .lock()
             .expect("lock") = Some(error);
+    }
+
+    fn enqueue_retry_run(&self, response: Result<RebornRetryRunResponse, RebornServicesError>) {
+        self.next_retry_run
+            .lock()
+            .expect("lock")
+            .push_back(response);
     }
 
     /// Queue one response for the next `stream_events` call. Tests use this
@@ -725,6 +734,22 @@ impl RebornServicesApi for StubServices {
                 event_cursor: EventCursor(3),
             },
         ))
+    }
+
+    async fn retry_run(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: WebUiRetryRunRequest,
+    ) -> Result<RebornRetryRunResponse, RebornServicesError> {
+        self.retry_run_calls
+            .lock()
+            .expect("lock")
+            .push(request.clone());
+        self.next_retry_run
+            .lock()
+            .expect("lock")
+            .pop_front()
+            .expect("retry_run test stub called without queued response")
     }
 
     async fn list_threads(
@@ -1875,6 +1900,107 @@ async fn resolve_gate_path_overrides_body_gate_ref() {
     assert_eq!(calls[0].thread_id.as_deref(), Some("thread-x"));
     assert_eq!(calls[0].run_id.as_deref(), Some("run-y"));
     assert_eq!(calls[0].gate_ref.as_deref(), Some("gate-from-path"));
+}
+
+#[tokio::test]
+async fn retry_run_path_overrides_body_run_id() {
+    let services = Arc::new(StubServices::default());
+    services.enqueue_retry_run(Ok(RebornRetryRunResponse {
+        run_id: TurnRunId::new(),
+        status: TurnStatus::Queued,
+        event_cursor: EventCursor(5),
+    }));
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/threads/thread-x/runs/run-from-path/retry")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"client_action_id":"retry-1","thread_id":"other","run_id":"run-from-body"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services.retry_run_calls.lock().expect("lock").clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].thread_id.as_deref(), Some("thread-x"));
+    assert_eq!(calls[0].run_id.as_deref(), Some("run-from-path"));
+}
+
+#[tokio::test]
+async fn retry_run_non_retryable_error_maps_to_conflict_body() {
+    let services = Arc::new(StubServices::default());
+    services.enqueue_retry_run(Err(RebornServicesError {
+        code: RebornServicesErrorCode::Conflict,
+        kind: RebornServicesErrorKind::Conflict,
+        status_code: 409,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    }));
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/threads/thread-x/runs/run-y/retry")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"client_action_id":"retry-not-retryable"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "conflict");
+    assert_eq!(body["kind"], "conflict");
+    assert_eq!(body["retryable"], false);
+}
+
+#[tokio::test]
+async fn retry_run_idempotent_replay_returns_same_response_shape() {
+    let services = Arc::new(StubServices::default());
+    let run_id = TurnRunId::new();
+    let replay = RebornRetryRunResponse {
+        run_id,
+        status: TurnStatus::Queued,
+        event_cursor: EventCursor(42),
+    };
+    services.enqueue_retry_run(Ok(replay.clone()));
+    services.enqueue_retry_run(Ok(replay));
+    let router = router_with(services.clone());
+
+    async fn post_retry(router: Router) -> axum::response::Response {
+        router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/threads/thread-x/runs/run-y/retry")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"client_action_id":"retry-replay"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot")
+    }
+
+    let first = post_retry(router.clone()).await;
+    let second = post_retry(router).await;
+
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(second.status(), StatusCode::OK);
+    assert_eq!(read_json(first).await, read_json(second).await);
+    let calls = services.retry_run_calls.lock().expect("lock").clone();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].client_action_id, calls[1].client_action_id);
 }
 
 #[tokio::test]
@@ -4527,6 +4653,13 @@ async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime(
             _caller: WebUiAuthenticatedCaller,
             _request: WebUiResolveGateRequest,
         ) -> Result<RebornResolveGateResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+        async fn retry_run(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _request: WebUiRetryRunRequest,
+        ) -> Result<RebornRetryRunResponse, RebornServicesError> {
             unreachable!("not exercised by this test")
         }
         async fn get_run_state(
