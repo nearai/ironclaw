@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_host_api::VirtualPath;
@@ -10,6 +10,8 @@ use crate::db::{
     is_not_found, libsql_db_error, not_found, page_offset_to_i64, record_version_from_i64,
     record_version_to_i64, sql_index_name, system_time_from_unix_seconds, virtual_path_prefixes,
 };
+#[cfg(feature = "libsql")]
+use crate::libsql_pool::{LibSqlPool, PooledLibSqlConnection, build_libsql_pool};
 use crate::vector::{cosine_similarity, decode_embedding_blob};
 use crate::{
     BackendCapabilities, Capability, CasExpectation, ContentType, DirEntry, Entry, FileStat,
@@ -20,61 +22,15 @@ use crate::{
 #[cfg(feature = "libsql")]
 /// libSQL-backed [`RootFilesystem`] storing file contents by virtual path.
 pub struct LibSqlRootFilesystem {
-    db: Arc<libsql::Database>,
+    pool: LibSqlPool,
 }
-
-#[cfg(feature = "libsql")]
-const LIBSQL_CONNECT_ATTEMPTS: u32 = 3;
-#[cfg(feature = "libsql")]
-const LIBSQL_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(50);
-
-/// Per-connection PRAGMAs applied to every libSQL connection.
-///
-/// libSQL/SQLite is a single-writer engine: there is no true "parallel
-/// write" mode for a local file. Concurrent writers always serialise on
-/// the database write lock. The throughput lever is therefore making each
-/// write cheap and keeping readers from blocking the writer — which is
-/// exactly what these PRAGMAs do, alongside `journal_mode=WAL` (set once at
-/// migration time, see `run_migrations`).
-///
-/// - `busy_timeout=5000`: unchanged from the prior policy. A writer that
-///   finds the write lock held waits up to 5s rather than failing fast.
-/// - `synchronous=NORMAL`: in WAL mode this is crash-safe for the
-///   *application* (committed transactions survive a process crash); only an
-///   OS/power loss can roll back the most-recent commits, and the database
-///   stays consistent regardless. It removes one fsync per commit, which is
-///   the dominant cost of the serial-write path under load. This is the
-///   standard high-throughput SQLite setting. Use `FULL` only if per-commit
-///   power-loss durability is required (it is not for turn/loop state).
-/// - `temp_store=MEMORY`: keep transient indexes/sorters off disk.
-/// - `cache_size=-16000`: ~16 MiB page cache per connection (negative =
-///   KiB), so hot pages (the turn-state and resource-snapshot rows that are
-///   read-modify-written every turn) stay resident instead of being
-///   re-read from the OS page cache on each op.
-/// - `mmap_size`: memory-map up to 256 MiB for reads, cutting read syscall
-///   overhead on the many read-before-write checks (`exact_entry`,
-///   `has_child_entry`, snapshot loads) that surround each write.
-/// - `wal_autocheckpoint=1000`: bound WAL growth (checkpoint every ~1000
-///   pages / ~4 MiB) so the WAL does not grow without limit under a burst
-///   of writes.
-///
-/// `journal_mode` is deliberately NOT set here: it is a persistent,
-/// database-level property (stored in the file header) and changing it
-/// inside or alongside ordinary work is wasteful and cannot run inside a
-/// transaction. It is set exactly once in `run_migrations`.
-#[cfg(feature = "libsql")]
-const LIBSQL_CONNECTION_PRAGMAS: &str = "\
-    PRAGMA busy_timeout = 5000;\
-    PRAGMA synchronous = NORMAL;\
-    PRAGMA temp_store = MEMORY;\
-    PRAGMA cache_size = -16000;\
-    PRAGMA mmap_size = 268435456;\
-    PRAGMA wal_autocheckpoint = 1000;";
 
 #[cfg(feature = "libsql")]
 impl LibSqlRootFilesystem {
     pub fn new(db: Arc<libsql::Database>) -> Self {
-        Self { db }
+        Self {
+            pool: build_libsql_pool(db),
+        }
     }
 
     pub async fn run_migrations(&self) -> Result<(), FilesystemError> {
@@ -135,80 +91,24 @@ impl LibSqlRootFilesystem {
         }
     }
 
-    async fn connect(&self) -> Result<libsql::Connection, FilesystemError> {
-        connect_with_retry(|| self.db.connect()).await
-    }
-}
-
-#[cfg(feature = "libsql")]
-async fn connect_with_retry<F>(open: F) -> Result<libsql::Connection, FilesystemError>
-where
-    F: FnMut() -> Result<libsql::Connection, libsql::Error>,
-{
-    connect_with_retry_and_pragmas(open, |_| LIBSQL_CONNECTION_PRAGMAS).await
-}
-
-#[cfg(feature = "libsql")]
-async fn connect_with_retry_and_pragmas<F, P>(
-    mut open: F,
-    mut pragmas_for_attempt: P,
-) -> Result<libsql::Connection, FilesystemError>
-where
-    F: FnMut() -> Result<libsql::Connection, libsql::Error>,
-    P: FnMut(u32) -> &'static str,
-{
-    // Match the legacy libSQL backend's connection policy: every
-    // operation gets its own connection, concurrent writers wait on
-    // SQLite locks, and transient file-open/setup races get a short retry
-    // budget before surfacing as infrastructure errors.
-    let mut last_error = None;
-    for attempt in 0..LIBSQL_CONNECT_ATTEMPTS {
-        match open() {
-            Ok(conn) => {
-                // Apply the per-connection PRAGMAs in a single round-trip.
-                // `execute_batch` runs each statement and discards the rows
-                // PRAGMAs like `busy_timeout` return, which is exactly what
-                // we want — we only care about the side effect.
-                match conn.execute_batch(pragmas_for_attempt(attempt)).await {
-                    Ok(_) => return Ok(conn),
-                    Err(error) => {
-                        last_error = Some(error);
-                        if attempt + 1 < LIBSQL_CONNECT_ATTEMPTS {
-                            tokio::time::sleep(connect_backoff(attempt)).await;
-                        }
-                    }
-                }
+    /// Check out a pooled connection for exclusive use until the guard
+    /// drops. Callers must drop the guard before `.await`-ing any other
+    /// `self` method that also checks out — see the invariant note in
+    /// [`crate::libsql_pool`].
+    async fn connect(&self) -> Result<PooledLibSqlConnection, FilesystemError> {
+        self.pool.get().await.map_err(|error| match error {
+            deadpool::managed::PoolError::Backend(error) => {
+                let reason = error.to_string();
+                tracing::debug!(%reason, "libSQL root filesystem pool checkout failed");
+                error
             }
-            Err(error) => {
-                last_error = Some(error);
-                if attempt + 1 < LIBSQL_CONNECT_ATTEMPTS {
-                    tokio::time::sleep(connect_backoff(attempt)).await;
-                }
+            other => {
+                let reason = format!("libSQL connection pool checkout failed: {other}");
+                tracing::debug!(%reason, "libSQL root filesystem pool checkout failed");
+                crate::db::infrastructure_error(FilesystemOperation::Connect, reason)
             }
-        }
+        })
     }
-
-    let reason = match last_error {
-        Some(error) => {
-            format!(
-                "failed to create or initialize libSQL connection after {LIBSQL_CONNECT_ATTEMPTS} attempts: {error}"
-            )
-        }
-        None => {
-            format!(
-                "failed to create or initialize libSQL connection after {LIBSQL_CONNECT_ATTEMPTS} attempts"
-            )
-        }
-    };
-    Err(crate::db::infrastructure_error(
-        FilesystemOperation::Stat,
-        reason,
-    ))
-}
-
-#[cfg(feature = "libsql")]
-fn connect_backoff(attempt: u32) -> Duration {
-    LIBSQL_CONNECT_INITIAL_BACKOFF * 2u32.pow(attempt)
 }
 
 #[cfg(feature = "libsql")]
@@ -2142,6 +2042,7 @@ mod tests {
     //! reach.
 
     use super::*;
+    use crate::libsql_pool::{LIBSQL_CONNECT_ATTEMPTS, connect_with_retry};
     use crate::{CasExpectation, Entry, RecordKind};
     use ironclaw_host_api::VirtualPath;
 
@@ -2267,39 +2168,6 @@ mod tests {
         assert_eq!(timeout, 5000);
     }
 
-    #[tokio::test]
-    async fn connect_retries_transient_pragma_failures_before_succeeding() {
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("connect-retry-pragma-test.db");
-        let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-        let mut opens = 0;
-        let mut initializers = 0;
-
-        let conn = connect_with_retry_and_pragmas(
-            || {
-                opens += 1;
-                db.connect()
-            },
-            |_| {
-                initializers += 1;
-                if initializers == 1 {
-                    "THIS IS NOT SQL"
-                } else {
-                    LIBSQL_CONNECTION_PRAGMAS
-                }
-            },
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(opens, 2);
-        assert_eq!(initializers, 2);
-        let mut rows = conn.query("PRAGMA busy_timeout", ()).await.unwrap();
-        let row = rows.next().await.unwrap().unwrap();
-        let timeout: i64 = row.get(0).unwrap();
-        assert_eq!(timeout, 5000);
-    }
-
     /// `run_migrations` must switch the database into WAL journaling, which
     /// is the property that lets readers run concurrently with the single
     /// writer instead of serialising behind a whole-file EXCLUSIVE lock.
@@ -2342,5 +2210,49 @@ mod tests {
         let mut rows = conn.query("PRAGMA busy_timeout", ()).await.unwrap();
         let busy_timeout: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
         assert_eq!(busy_timeout, 5000, "busy_timeout must remain 5000");
+    }
+
+    /// A pool checkout that times out waiting for a free connection (every
+    /// slot held by another in-flight operation) must surface as a
+    /// `FilesystemOperation::Connect` infrastructure error through
+    /// `connect()`'s `other` match arm — not panic, hang past the
+    /// configured timeout, or lose the fact that this was a pool
+    /// exhaustion rather than some other backend failure. Uses the
+    /// `build_libsql_pool_with_config` test seam to build a deliberately
+    /// tiny (size-1), fast-timing-out pool so the test doesn't wait out
+    /// the real 10s production timeout.
+    #[tokio::test]
+    async fn connect_maps_pool_checkout_timeout_to_connect_infrastructure_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("checkout-timeout-test.db");
+        let db = std::sync::Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+        let fs = LibSqlRootFilesystem {
+            pool: crate::libsql_pool::build_libsql_pool_with_config(
+                db,
+                1,
+                std::time::Duration::from_millis(50),
+            ),
+        };
+        fs.run_migrations().await.unwrap();
+
+        // Hold the pool's only connection for the rest of the test.
+        let _held = fs.connect().await.unwrap();
+
+        // The pool has no free connection and none will be returned before
+        // the 50ms wait_timeout elapses, so this checkout must time out
+        // rather than hang or succeed.
+        let Err(err) = fs.connect().await else {
+            panic!("checkout must fail while the only connection is held");
+        };
+        match err {
+            FilesystemError::BackendInfrastructure { operation, reason } => {
+                assert_eq!(operation, FilesystemOperation::Connect);
+                assert!(
+                    !reason.is_empty(),
+                    "checkout-timeout reason must not be empty"
+                );
+            }
+            other => panic!("expected FilesystemError::BackendInfrastructure, got {other:?}"),
+        }
     }
 }

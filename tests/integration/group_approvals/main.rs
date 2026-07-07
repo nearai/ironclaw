@@ -1,17 +1,24 @@
 //! Group integration tests for the Reborn approval flow — the real gate path.
 //!
-//! `approvals_group_e2e` is one sequential `#[tokio::test]` that drives eight
-//! scenarios over a shared [`RebornIntegrationGroup::live_approvals`] group
-//! (one approval-request store, one capability-lease store, one
+//! `approvals_group_e2e` is one sequential `#[tokio::test]` that drives
+//! several scenarios over a shared [`RebornIntegrationGroup::live_approvals`]
+//! group (one approval-request store, one capability-lease store, one
 //! `(tenant, user)` auto-approve toggle, all shared across threads). See
 //! `tests/integration/CLAUDE.md` §"Group tests".
+//!
+//! `concurrent_dual_gate_resume_parallel` (#5466) is `approvals_group_e2e`
+//! only (InMemory) -- never add a `StorageMode::LibSql` variant, see its
+//! own module doc (libsql SIGABRTs the whole test binary, #5466).
 //!
 //! Every scenario in that test drives the REAL gate path: scripted
 //! `builtin.write_file` call → real `TurnStatus::BlockedApproval` gate
 //! (auto-approve disabled for the group at construction) → real
 //! `ApprovalResolver` (`approve_gate`/`deny_gate`) → `coordinator.resume_turn`.
 //! Only the model is faked. Exception: `failure_category_demasked` drives a
-//! genuinely-FAILED run (no gate) to prove the loop-exit de-mask wiring.
+//! genuinely-FAILED run (no gate) to prove the loop-exit de-mask wiring. The
+//! discard-tombstone invariant is pinned at the store contract tier and
+//! through the real `CapabilityHost` rollback caller instead of here, to keep
+//! this suite's execution model turn-driven.
 //!
 //! `approvals_group_real_gate_dispatch_e2e` is a separate group/test proving
 //! the `submit_inbound(ApprovalResolution)` dispatch arm instead: it wires the
@@ -44,6 +51,7 @@ mod scenario_approval_request_persists_after_reopen;
 mod scenario_approve_always_persists_cross_thread;
 mod scenario_ask_each_time_resumes_once;
 mod scenario_concurrent_dual_gate_resume;
+mod scenario_concurrent_dual_gate_resume_parallel;
 mod scenario_failure_category_demasked;
 mod scenario_gate_ref_edge_cases;
 mod scenario_gate_then_approve;
@@ -70,6 +78,11 @@ async fn approvals_group_e2e() {
     report.record(
         "concurrent_dual_gate_resume",
         scenario_concurrent_dual_gate_resume::run(&g).await,
+    );
+    // #5466: InMemory only, see this scenario's own module doc + main.rs doc.
+    report.record(
+        "concurrent_dual_gate_resume_parallel",
+        scenario_concurrent_dual_gate_resume_parallel::run(&g).await,
     );
     report.record(
         "failure_category_demasked",
