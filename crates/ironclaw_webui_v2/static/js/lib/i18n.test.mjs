@@ -246,6 +246,16 @@ test("zh-CN localizes Reborn settings copy and compact automation filters", () =
   assert.equal(pack["automations.filter.paused"], "已暂停");
 });
 
+test("zh-CN localizes Reborn Projects summary copy", () => {
+  const pack = loadLocalePack("zh-CN");
+
+  assert.equal(pack["projects.summary.projects"], "项目");
+  assert.equal(pack["projects.summary.attentionQueue"], "关注队列");
+  assert.equal(pack["projects.summary.spendToday"], "今日花费");
+  assert.equal(pack["projects.card.pendingGates"], "待处理门禁：{count}");
+  assert.equal(pack["projects.files.label"], "文件");
+});
+
 test("ja localizes Trace Commons settings navigation label", () => {
   const pack = loadLocalePack("ja");
 

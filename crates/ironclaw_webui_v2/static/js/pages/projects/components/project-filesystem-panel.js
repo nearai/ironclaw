@@ -74,12 +74,10 @@ export function ProjectFilesystemPanel({ threadId }) {
         anchor.remove();
         URL.revokeObjectURL(url);
       } catch (error) {
-        setDownloadError(error?.message || "Unable to download file");
+        setDownloadError(error?.message || t("projects.files.downloadError"));
       }
     },
-    // `t` is not referenced in this callback; depending on it would recreate
-    // the handler on every locale change for no reason.
-    [threadId]
+    [threadId, t]
   );
 
   const segments = relSegments(path);
@@ -88,7 +86,7 @@ export function ProjectFilesystemPanel({ threadId }) {
     <div className="flex flex-wrap items-center justify-between gap-3">
       <div className="flex items-center gap-2">
         <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">
-          ${"Files"}
+          ${t("projects.files.label")}
         </div>
         <${StatusPill} tone="muted" label=${t("workspace.readOnly")} />
       </div>
@@ -108,7 +106,7 @@ export function ProjectFilesystemPanel({ threadId }) {
       <${Panel} className="p-4 sm:p-5">
         ${header}
         <div className="mt-4 rounded-[16px] border border-dashed border-white/10 px-4 py-8 text-sm leading-6 text-iron-300">
-          ${"No files yet — they appear once a thread has run in this project."}
+          ${t("projects.files.noFilesYet")}
         </div>
       <//>
     `;
@@ -124,7 +122,7 @@ export function ProjectFilesystemPanel({ threadId }) {
           onClick=${() => setPath(undefined)}
           className="text-signal hover:underline"
         >
-          ${"workspace"}
+          ${t("projects.files.root")}
         </button>
         ${segments.map((segment, index) => {
           const target = `${PROJECT_FS_ROOT}/${segments.slice(0, index + 1).join("/")}`;
@@ -185,7 +183,7 @@ export function ProjectFilesystemPanel({ threadId }) {
             )
           : html`
               <div className="rounded-[16px] border border-dashed border-white/10 px-4 py-8 text-sm leading-6 text-iron-300">
-                ${"This folder is empty."}
+                ${t("projects.files.folderEmpty")}
               </div>
             `}
       </div>

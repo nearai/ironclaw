@@ -1,4 +1,5 @@
 import { html } from "../../../lib/html.js";
+import { useT } from "../../../lib/i18n.js";
 import { Panel, StatusPill } from "../../../design-system/primitives.js";
 import { formatCurrency, summarizeOverview } from "../lib/projects-presenters.js";
 
@@ -9,25 +10,31 @@ const metricTone = {
 };
 
 export function ProjectsSummaryStrip({ overview }) {
+  const t = useT();
   const summary = summarizeOverview(overview);
   const cards = [
     {
       key: "projects",
-      label: "Projects",
+      label: t("projects.summary.projects"),
+      badgeLabel: t("projects.summary.projectsBadge"),
       value: summary.totalProjects,
-      detail: `${summary.threadsToday} threads active today`,
+      detail: t("projects.summary.threadsActiveToday", { count: summary.threadsToday }),
     },
     {
       key: "attention",
-      label: "Attention queue",
+      label: t("projects.summary.attentionQueue"),
+      badgeLabel: t("projects.summary.attentionBadge"),
       value: summary.attentionCount,
-      detail: `${summary.failures24h} failures in the last 24h`,
+      detail: t("projects.summary.failures24h", { count: summary.failures24h }),
     },
     {
       key: "spend",
-      label: "Spend today",
+      label: t("projects.summary.spendToday"),
+      badgeLabel: t("projects.summary.spendBadge"),
       value: formatCurrency(summary.totalSpend),
-      detail: `${summary.totalProjects ? "Across every project" : "Waiting for activity"}`,
+      detail: summary.totalProjects
+        ? t("projects.summary.acrossEveryProject")
+        : t("projects.summary.waitingForActivity"),
     },
   ];
 
@@ -38,7 +45,7 @@ export function ProjectsSummaryStrip({ overview }) {
           <div key=${card.key} className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
             <div className="flex items-start justify-between gap-3">
               <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">${card.label}</div>
-              <${StatusPill} tone=${metricTone[card.key]} label=${card.key} />
+              <${StatusPill} tone=${metricTone[card.key]} label=${card.badgeLabel} />
             </div>
             <div className="mt-4 text-3xl font-semibold tracking-tight text-white">${card.value}</div>
             <p className="mt-2 text-sm leading-6 text-iron-300">${card.detail}</p>

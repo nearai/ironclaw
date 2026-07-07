@@ -1,4 +1,5 @@
 import { html } from "../../../lib/html.js";
+import { useT } from "../../../lib/i18n.js";
 
 const tone = {
   success: "border-mint/30 bg-mint/10 text-mint",
@@ -7,12 +8,13 @@ const tone = {
 };
 
 export function FeedbackBanner({ result, onDismiss }) {
+  const t = useT();
   if (!result) return null;
 
   return html`
     <div className=${["flex items-center gap-3 rounded-xl border px-4 py-3 text-sm", tone[result.type] || tone.info].join(" ")}>
       <span className="min-w-0 flex-1">${result.message}</span>
-      <button onClick=${onDismiss} className="shrink-0 opacity-70 hover:opacity-100">Dismiss</button>
+      <button onClick=${onDismiss} className="shrink-0 opacity-70 hover:opacity-100">${t("projects.feedback.dismiss")}</button>
     </div>
   `;
 }

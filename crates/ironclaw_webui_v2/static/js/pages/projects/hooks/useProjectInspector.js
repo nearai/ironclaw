@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { React } from "../../../lib/html.js";
+import { useT } from "../../../lib/i18n.js";
 import {
   fetchMissionDetail,
   fetchThreadDetail,
@@ -9,6 +10,7 @@ import {
 } from "../lib/projects-api.js";
 
 export function useProjectInspector({ projectId, missionId, threadId }) {
+  const t = useT();
   const queryClient = useQueryClient();
   const [actionResult, setActionResult] = React.useState(null);
 
@@ -44,14 +46,16 @@ export function useProjectInspector({ projectId, missionId, threadId }) {
     onSuccess: (data) => {
       setActionResult({
         type: "success",
-        message: data?.thread_id ? "Mission fired and a new run is live." : "Mission fire request accepted.",
+        message: data?.thread_id
+          ? t("projects.action.missionFiredWithRun")
+          : t("projects.action.missionFireAccepted"),
       });
       invalidateProject();
     },
     onError: (error) => {
       setActionResult({
         type: "error",
-        message: error.message || "Unable to fire mission",
+        message: error.message || t("projects.action.fireFailed"),
       });
     },
   });
@@ -61,14 +65,14 @@ export function useProjectInspector({ projectId, missionId, threadId }) {
     onSuccess: () => {
       setActionResult({
         type: "success",
-        message: "Mission paused.",
+        message: t("projects.action.missionPaused"),
       });
       invalidateProject();
     },
     onError: (error) => {
       setActionResult({
         type: "error",
-        message: error.message || "Unable to pause mission",
+        message: error.message || t("projects.action.pauseFailed"),
       });
     },
   });
@@ -78,14 +82,14 @@ export function useProjectInspector({ projectId, missionId, threadId }) {
     onSuccess: () => {
       setActionResult({
         type: "success",
-        message: "Mission resumed.",
+        message: t("projects.action.missionResumed"),
       });
       invalidateProject();
     },
     onError: (error) => {
       setActionResult({
         type: "error",
-        message: error.message || "Unable to resume mission",
+        message: error.message || t("projects.action.resumeFailed"),
       });
     },
   });
