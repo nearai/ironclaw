@@ -982,6 +982,53 @@ impl RootFilesystem for LibSqlRootFilesystem {
         Ok(())
     }
 
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        expected: CasExpectation,
+    ) -> Result<(), FilesystemError> {
+        // Single-key CAS delete: unlike `delete`, no subtree/event/sequence
+        // sweep. `is_dir = 0` scopes it to the record plane, matching `put`'s
+        // Version arm and `current_version`.
+        let required_version = expected.required_delete_version(path)?;
+        let conn = self.connect().await?;
+        let deleted = match required_version {
+            Some(expected_version) => {
+                let expected_raw = record_version_to_i64(path, expected_version)?;
+                conn.execute(
+                    "DELETE FROM root_filesystem_entries \
+                     WHERE path = ?1 AND is_dir = 0 AND version = ?2",
+                    libsql::params![path.as_str(), expected_raw],
+                )
+                .await
+            }
+            None => {
+                conn.execute(
+                    "DELETE FROM root_filesystem_entries WHERE path = ?1 AND is_dir = 0",
+                    libsql::params![path.as_str()],
+                )
+                .await
+            }
+        }
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
+        if deleted > 0 {
+            return Ok(());
+        }
+        // 0 rows: absent row → NotFound (already gone, benign); row present
+        // at another version → VersionMismatch (gone stale). Distinct from
+        // put's diagnosis, which collapses absent into VersionMismatch.
+        if let Some(expected_version) = required_version
+            && let Some(found) = self.current_version(path).await?
+        {
+            return Err(FilesystemError::VersionMismatch {
+                path: path.clone(),
+                expected: Some(expected_version),
+                found: Some(found),
+            });
+        }
+        Err(not_found(path.clone(), FilesystemOperation::Delete))
+    }
+
     async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {
         let conn = self.connect().await?;
         // INTEGER PRIMARY KEY AUTOINCREMENT assigns a fresh monotonic id per

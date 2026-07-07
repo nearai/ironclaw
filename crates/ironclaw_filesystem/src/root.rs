@@ -163,6 +163,22 @@ pub trait RootFilesystem: Send + Sync {
         })
     }
 
+    /// Deletes the single entry at `path` only when its current version
+    /// satisfies `expected` — the CAS counterpart of [`delete`](Self::delete),
+    /// never sweeping a subtree, event logs, or sequence counters. An absent
+    /// row surfaces [`FilesystemError::NotFound`] (already gone, benign), a
+    /// row at another version surfaces [`FilesystemError::VersionMismatch`],
+    /// and the meaningless-for-delete `CasExpectation::Absent` is rejected
+    /// with [`FilesystemError::Unsupported`]. Default impl is `Unsupported`,
+    /// same as [`put`](Self::put): backends opt in natively.
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        _expected: CasExpectation,
+    ) -> Result<(), FilesystemError> {
+        unsupported(path, FilesystemOperation::Delete)
+    }
+
     // ─── Atomicity ────────────────────────────────────────────────────────
 
     /// Begin a multi-key transaction scoped to `prefix`. Backends with only

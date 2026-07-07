@@ -255,6 +255,26 @@ pub enum CasExpectation {
     Any,
 }
 
+impl CasExpectation {
+    /// Decode a `delete_if_version` precondition into the version the row
+    /// must hold (`Version` → that version, `Any` → unconditional). `Absent`
+    /// asserts "no entry present" — meaningless for a delete — and fails
+    /// closed with `Unsupported`, shared by every backend implementation.
+    pub(crate) fn required_delete_version(
+        self,
+        path: &ironclaw_host_api::VirtualPath,
+    ) -> Result<Option<RecordVersion>, crate::FilesystemError> {
+        match self {
+            Self::Any => Ok(None),
+            Self::Version(version) => Ok(Some(version)),
+            Self::Absent => Err(crate::FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: crate::FilesystemOperation::Delete,
+            }),
+        }
+    }
+}
+
 /// The universal "thing stored at a virtual path".
 ///
 /// - **Opaque file**: `body` carries arbitrary bytes, `kind` is `None`,

@@ -592,6 +592,15 @@ impl RootFilesystem for PostgresRootFilesystem {
         postgres_delete_with_client(&client, path).await
     }
 
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        expected: CasExpectation,
+    ) -> Result<(), FilesystemError> {
+        let client = self.client().await?;
+        postgres_delete_if_version_with_client(&client, path, expected).await
+    }
+
     async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
         let client = self.client().await?;
         client
@@ -1454,6 +1463,60 @@ async fn postgres_delete_with_client(
     Ok(())
 }
 
+/// `CasExpectation::Version` delete: remove the single file row at `path`
+/// only when it still holds the expected version. Single-key by design —
+/// no subtree band, unlike blind delete's `path = $1 OR (path >= $2 ...)`.
+#[cfg(feature = "postgres")]
+const DELETE_IF_VERSION_VERSION_SQL: &str =
+    "DELETE FROM root_filesystem_entries WHERE path = $1 AND is_dir = FALSE AND version = $2";
+
+/// `CasExpectation::Any` delete: remove the single file row at `path`
+/// unconditionally. Single-key, record-plane only (`is_dir = FALSE`).
+#[cfg(feature = "postgres")]
+const DELETE_IF_VERSION_ANY_SQL: &str =
+    "DELETE FROM root_filesystem_entries WHERE path = $1 AND is_dir = FALSE";
+
+/// CAS delete for the Postgres backend: one statement on the happy path,
+/// mirroring the put round-trip budget. The rare 0-row outcome pays one
+/// follow-up version read to distinguish NotFound (row absent — already
+/// gone, benign) from VersionMismatch (row present at another version —
+/// gone stale). `diagnose_put_failure` is deliberately not reused: its
+/// Version arm collapses an absent row into `VersionMismatch{found: None}`.
+#[cfg(feature = "postgres")]
+async fn postgres_delete_if_version_with_client(
+    client: &deadpool_postgres::Object,
+    path: &VirtualPath,
+    expected: CasExpectation,
+) -> Result<(), FilesystemError> {
+    let required_version = expected.required_delete_version(path)?;
+    let deleted = match required_version {
+        Some(expected_version) => {
+            let expected_raw = record_version_to_i64(path, expected_version)?;
+            cached_execute(
+                client,
+                DELETE_IF_VERSION_VERSION_SQL,
+                &[&path.as_str(), &expected_raw],
+            )
+            .await
+        }
+        None => cached_execute(client, DELETE_IF_VERSION_ANY_SQL, &[&path.as_str()]).await,
+    }
+    .map_err(|error| db_error(path.clone(), FilesystemOperation::Delete, error))?;
+    if deleted > 0 {
+        return Ok(());
+    }
+    if let Some(expected_version) = required_version
+        && let Some(found) = postgres_current_version_with_client(client, path).await?
+    {
+        return Err(FilesystemError::VersionMismatch {
+            path: path.clone(),
+            expected: Some(expected_version),
+            found: Some(found),
+        });
+    }
+    Err(not_found(path.clone(), FilesystemOperation::Delete))
+}
+
 #[cfg(feature = "postgres")]
 async fn postgres_current_version_with_client(
     client: &deadpool_postgres::Object,
@@ -1859,6 +1922,31 @@ mod tests {
         // an explicit is_dir = FALSE predicate.
         assert!(PUT_VERSION_SQL.contains("is_dir = FALSE"));
         assert!(PUT_ANY_SQL.contains("is_dir = FALSE"));
+    }
+
+    /// Each CAS delete arm must stay one single-key statement: one round-trip
+    /// on the happy path (matching the put budget), scoped to the record plane
+    /// (`is_dir = FALSE`), and with no `OR`-joined subtree band — re-adding
+    /// blind delete's sweep would let a version guard on one path silently
+    /// cascade to unguarded descendants.
+    #[test]
+    fn delete_if_version_statements_are_single_round_trip_and_single_key() {
+        for (name, sql) in [
+            ("version", DELETE_IF_VERSION_VERSION_SQL),
+            ("any", DELETE_IF_VERSION_ANY_SQL),
+        ] {
+            assert_eq!(
+                top_level_statement_count(sql),
+                1,
+                "{name} delete_if_version must be a single statement. Got: {sql}"
+            );
+            assert!(
+                !sql.contains(" OR "),
+                "{name} delete_if_version must stay single-key (no subtree band): {sql}"
+            );
+            assert!(sql.contains("is_dir = FALSE"));
+        }
+        assert!(DELETE_IF_VERSION_VERSION_SQL.contains("version = $2"));
     }
 
     /// The descendant range is the half-open `[prefix/, prefix0)` band that the

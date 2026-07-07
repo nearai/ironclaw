@@ -418,6 +418,69 @@ async fn libsql_native_put_cas_version_advances_and_rejects_stale() {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
+async fn libsql_delete_if_version_deletes_current_and_rejects_stale_or_missing() {
+    let filesystem = libsql_root().await;
+    let path = VirtualPath::new("/secrets/leases/CAS-DEL").unwrap();
+
+    // Missing path → NotFound (already gone, benign), never VersionMismatch.
+    let err = filesystem
+        .delete_if_version(
+            &path,
+            CasExpectation::Version(ironclaw_filesystem::RecordVersion::from_backend(1)),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        FilesystemError::NotFound {
+            operation: FilesystemOperation::Delete,
+            ..
+        }
+    ));
+
+    // Concurrent-writer interleaving: the v1 the deleter read is bumped to v2
+    // before the delete lands → the stale delete loses with the observed
+    // version and the entry survives at v2.
+    let v1 = filesystem
+        .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+        .await
+        .unwrap();
+    let log_seq = filesystem.append(&path, b"kept".to_vec()).await.unwrap();
+    let v2 = filesystem
+        .put(&path, Entry::bytes(vec![2]), CasExpectation::Version(v1))
+        .await
+        .unwrap();
+    let err = filesystem
+        .delete_if_version(&path, CasExpectation::Version(v1))
+        .await
+        .unwrap_err();
+    match err {
+        FilesystemError::VersionMismatch {
+            expected, found, ..
+        } => {
+            assert_eq!(expected, Some(v1));
+            assert_eq!(found, Some(v2));
+        }
+        other => panic!("expected VersionMismatch, got {other:?}"),
+    }
+    let got = filesystem.get(&path).await.unwrap().unwrap();
+    assert_eq!(got.version, v2);
+    assert_eq!(got.entry.body, vec![2]);
+
+    // Correct version deletes exactly the entry; single-key, so the event
+    // log at the same path survives (blind `delete` sweeps it).
+    filesystem
+        .delete_if_version(&path, CasExpectation::Version(v2))
+        .await
+        .unwrap();
+    assert!(filesystem.get(&path).await.unwrap().is_none());
+    let log = filesystem.tail(&path, SeqNo::ZERO).await.unwrap();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].seq, log_seq);
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
 async fn libsql_native_put_cas_any_increments_existing_version() {
     let filesystem = libsql_root().await;
     let path = VirtualPath::new("/secrets/leases/L4").unwrap();
@@ -1497,6 +1560,69 @@ mod postgres_tests {
             .await
             .unwrap_err();
         assert!(matches!(err, FilesystemError::VersionMismatch { .. }));
+    }
+
+    #[tokio::test]
+    async fn postgres_delete_if_version_deletes_current_and_rejects_stale_or_missing() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let path = vpath(&prefix, "cas_delete");
+
+        // Missing path → NotFound (already gone, benign), never VersionMismatch.
+        let err = fs
+            .delete_if_version(
+                &path,
+                CasExpectation::Version(ironclaw_filesystem::RecordVersion::from_backend(1)),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FilesystemError::NotFound {
+                operation: FilesystemOperation::Delete,
+                ..
+            }
+        ));
+
+        // Concurrent-writer interleaving: the v1 the deleter read is bumped
+        // to v2 before the delete lands → the stale delete loses with the
+        // observed version and the entry survives at v2.
+        let v1 = fs
+            .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+            .await
+            .unwrap();
+        let log_seq = fs.append(&path, b"kept".to_vec()).await.unwrap();
+        let v2 = fs
+            .put(&path, Entry::bytes(vec![2]), CasExpectation::Version(v1))
+            .await
+            .unwrap();
+        let err = fs
+            .delete_if_version(&path, CasExpectation::Version(v1))
+            .await
+            .unwrap_err();
+        match err {
+            FilesystemError::VersionMismatch {
+                expected, found, ..
+            } => {
+                assert_eq!(expected, Some(v1));
+                assert_eq!(found, Some(v2));
+            }
+            other => panic!("expected VersionMismatch, got {other:?}"),
+        }
+        let got = fs.get(&path).await.unwrap().unwrap();
+        assert_eq!(got.version, v2);
+        assert_eq!(got.entry.body, vec![2]);
+
+        // Correct version deletes exactly the entry; single-key, so the
+        // event log at the same path survives (blind `delete` sweeps it).
+        fs.delete_if_version(&path, CasExpectation::Version(v2))
+            .await
+            .unwrap();
+        assert!(fs.get(&path).await.unwrap().is_none());
+        let log = fs.tail(&path, SeqNo::ZERO).await.unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].seq, log_seq);
     }
 
     #[tokio::test]
