@@ -415,7 +415,7 @@ async fn concrete_mcp_http_client_rejects_missing_or_unsafe_initialize_protocol_
             .await
             .expect_err("unsafe initialize protocol versions must fail the call");
 
-        assert_eq!(error.stable_reason(), "response_error");
+        assert_eq!(error.stable_reason(), "mcp_invalid_protocol_version");
     }
 }
 
@@ -455,7 +455,7 @@ async fn concrete_mcp_http_client_sends_credentials_only_for_tool_call_exchange(
         .await
         .expect_err("direct secret-store leases must fail before MCP transport");
 
-    assert_eq!(error.stable_reason(), "request_denied");
+    assert_eq!(error.stable_reason(), "mcp_denied_credential_source");
     assert!(
         egress.requests().is_empty(),
         "direct leases must be rejected before initialize or tools/call transport"
@@ -606,7 +606,7 @@ async fn concrete_mcp_http_client_does_not_reuse_session_from_failed_initialize(
         })
         .await
         .expect_err("failed initialize responses must fail the call");
-    assert_eq!(error.stable_reason(), "response_error");
+    assert_eq!(error.stable_reason(), "mcp_http_status_500");
 
     client
         .call_tool(McpClientRequest {
@@ -658,7 +658,7 @@ async fn concrete_mcp_http_client_rejects_json_rpc_response_without_matching_id(
         .await
         .expect_err("ID-bearing JSON-RPC requests must reject missing response ids");
 
-    assert_eq!(error.stable_reason(), "response_error");
+    assert_eq!(error.stable_reason(), "mcp_jsonrpc_id_mismatch");
 }
 
 #[tokio::test]
@@ -940,7 +940,7 @@ async fn concrete_mcp_http_client_rejects_invalid_session_id_before_reuse() {
         .await
         .expect_err("invalid upstream session ids must not be reused as request headers");
 
-    assert_eq!(error.stable_reason(), "response_error");
+    assert_eq!(error.stable_reason(), "mcp_invalid_session_id");
 }
 
 #[tokio::test]

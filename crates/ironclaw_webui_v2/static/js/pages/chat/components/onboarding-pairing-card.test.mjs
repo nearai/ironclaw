@@ -47,6 +47,21 @@ function componentProps(node, component) {
   return props;
 }
 
+function tForTest(key, params = {}) {
+  const values = {
+    "common.cancel": "Cancel",
+    "common.dismiss": "Dismiss",
+    "connection.connecting": "Connecting...",
+    "pairing.checkCodeAndRetry": "Pairing failed. Check the code and try again.",
+    "pairing.connect": "Connect",
+    "pairing.connectTitle": `Connect ${params.name}`,
+    "pairing.openAndPaste": `Open ${params.name}, get the pairing code, and paste it here.`,
+    "pairing.placeholder": "PAIRING-CODE",
+    "pairing.resumeFailed": `${params.name} connected, but this chat couldn't continue. Reload the page to keep going.`,
+  };
+  return values[key] || key;
+}
+
 test("OnboardingPairingCard renders configured error copy instead of raw submit errors", async () => {
   const stateUpdates = [];
   let stateIndex = 0;
@@ -65,6 +80,7 @@ test("OnboardingPairingCard renders configured error copy instead of raw submit 
         ];
       },
     },
+    useT: () => tForTest,
   };
 
   vm.runInNewContext(onboardingPairingCardSourceForTest(), context);
@@ -106,6 +122,7 @@ test("OnboardingPairingCard shows connection-succeeded copy when the resume faul
         ];
       },
     },
+    useT: () => tForTest,
   };
 
   vm.runInNewContext(onboardingPairingCardSourceForTest(), context);
@@ -153,6 +170,7 @@ test("OnboardingPairingCard holds a connecting state after a successful pair ins
         ];
       },
     },
+    useT: () => tForTest,
   };
 
   vm.runInNewContext(onboardingPairingCardSourceForTest(), context);
@@ -193,6 +211,7 @@ test("OnboardingPairingCard shows a spinner and disables submit while busy, not 
           return [["PAIRCODE", "", status][index], () => {}];
         },
       },
+      useT: () => tForTest,
     };
     vm.runInNewContext(onboardingPairingCardSourceForTest(), context);
     const rendered = context.globalThis.__testExports.OnboardingPairingCard({

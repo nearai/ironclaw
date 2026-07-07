@@ -58,7 +58,10 @@ pub use external_tool_catalog::{
     ExternalToolCatalog, ExternalToolCatalogError, ExternalToolSpec, ExternalToolSpecError,
     InMemoryExternalToolCatalog, PendingExternalCall,
 };
-pub use filesystem_store::{FilesystemTurnStateBlockPersistence, FilesystemTurnStateStore};
+pub use filesystem_store::{
+    FilesystemTurnStateBlockPersistence, FilesystemTurnStateRowStore, FilesystemTurnStateStore,
+    FilesystemTurnStateStoreKind,
+};
 pub use ids::{
     AcceptedMessageRef, CapabilityActivityId, GateRef, IdempotencyKey, LoopDiagnosticRef,
     LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, LoopUsageSummaryRef,
@@ -82,9 +85,11 @@ pub use origin::{
 };
 pub use request::{
     CancelRunRequest, GateResumeDisposition, GetRunStateRequest, ResumeTurnPrecondition,
-    ResumeTurnRequest, SubmitChildRunRequest, SubmitTurnRequest, TurnTimestamp,
+    ResumeTurnRequest, RetryTurnRequest, SubmitChildRunRequest, SubmitTurnRequest, TurnTimestamp,
 };
-pub use response::{CancelRunResponse, ResumeTurnResponse, SubmitTurnResponse, ThreadBusy};
+pub use response::{
+    CancelRunResponse, ResumeTurnResponse, RetryTurnResponse, SubmitTurnResponse, ThreadBusy,
+};
 pub use run_profile::{
     AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverResumeRequest,
     AgentLoopDriverRunRequest, CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy,

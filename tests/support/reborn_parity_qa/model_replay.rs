@@ -84,6 +84,22 @@ pub enum RebornModelReplayStep {
         calls: Vec<RebornScriptedProviderToolCall>,
         expected_tool_results: Vec<ExpectedToolResult>,
     },
+    /// Returns a model gateway error, simulating a provider failure (5xx,
+    /// unavailable, rejected request, …). Used to exercise the no-borking
+    /// failure path: the loop must surface a sanitized, retryable run failure
+    /// rather than a borking executor error.
+    ModelError {
+        kind: HostManagedModelErrorKind,
+        message: String,
+    },
+    /// Same as [`Self::ModelError`] but only matches requests whose messages
+    /// contain `request_contains`, so a scripted run can fail one specific
+    /// model call and answer others normally.
+    ModelErrorForRequest {
+        request_contains: String,
+        kind: HostManagedModelErrorKind,
+        message: String,
+    },
 }
 
 #[allow(dead_code)]
@@ -139,6 +155,10 @@ enum ReplayOutput {
         delay: Duration,
     },
     ProviderToolCalls(Vec<RebornScriptedProviderToolCall>),
+    ModelError {
+        kind: HostManagedModelErrorKind,
+        message: String,
+    },
 }
 
 impl RebornTraceReplayModelGateway {
@@ -248,6 +268,20 @@ impl RebornTraceReplayModelGateway {
                         request_contains: Some(request_contains),
                         expected_tool_results,
                     },
+                    RebornModelReplayStep::ModelError { kind, message } => ReplayStep {
+                        output: ReplayOutput::ModelError { kind, message },
+                        request_contains: None,
+                        expected_tool_results: Vec::new(),
+                    },
+                    RebornModelReplayStep::ModelErrorForRequest {
+                        request_contains,
+                        kind,
+                        message,
+                    } => ReplayStep {
+                        output: ReplayOutput::ModelError { kind, message },
+                        request_contains: Some(request_contains),
+                        expected_tool_results: Vec::new(),
+                    },
                 })
                 .collect(),
         )
@@ -312,6 +346,9 @@ impl HostManagedModelGateway for RebornTraceReplayModelGateway {
                 HostManagedModelErrorKind::InvalidRequest,
                 "trace replay provider tool calls require capability-aware model streaming",
             )),
+            ReplayOutput::ModelError { kind, message } => {
+                Err(HostManagedModelError::safe(kind, message))
+            }
         }
     }
 
@@ -350,6 +387,9 @@ impl HostManagedModelGateway for RebornTraceReplayModelGateway {
             }
             ReplayOutput::ProviderToolCalls(calls) => {
                 provider_tool_calls_response(&request, capabilities, calls).await
+            }
+            ReplayOutput::ModelError { kind, message } => {
+                Err(HostManagedModelError::safe(kind, message))
             }
         }
     }
@@ -476,6 +516,7 @@ fn replay_step_summary(step: &ReplayStep) -> String {
         }
         ReplayOutput::DelayedResponse { .. } => "delayed_response",
         ReplayOutput::ProviderToolCalls(_) => "provider_tool_calls",
+        ReplayOutput::ModelError { .. } => "model_error",
     };
     let request_contains = step
         .request_contains

@@ -8,8 +8,19 @@ import { groupMessages } from "../lib/message-groups.js";
 
 export const BOTTOM_FOLLOW_THRESHOLD_PX = 100;
 const TOP_LOAD_THRESHOLD_PX = 100;
+// Keep transcript-floating controls above the composer. The spacer mirrors the
+// offset plus the icon control size so the final message can scroll above them.
+// FLOATING_CONTROL_SIZE_PX must stay in sync with the logs button's `size-9`.
+const FLOATING_CONTROL_BOTTOM_OFFSET_PX = 128;
+const FLOATING_CONTROL_SIZE_PX = 36;
+const FLOATING_CONTROL_SPACER_HEIGHT_PX =
+  FLOATING_CONTROL_BOTTOM_OFFSET_PX + FLOATING_CONTROL_SIZE_PX;
+const FLOATING_CONTROL_STYLE = { bottom: FLOATING_CONTROL_BOTTOM_OFFSET_PX };
+const FLOATING_CONTROL_SPACER_STYLE = { height: FLOATING_CONTROL_SPACER_HEIGHT_PX };
 const FLOATING_LOGS_BUTTON_CLASS =
-  "group absolute bottom-5 right-5 inline-flex size-9 items-center justify-center gap-0 overflow-hidden rounded-full border border-[color-mix(in_srgb,var(--v2-accent)_28%,var(--v2-panel-border))] bg-[color-mix(in_srgb,var(--v2-surface)_88%,var(--v2-accent)_12%)] text-xs font-semibold text-[var(--v2-text-base)] shadow-[0_14px_34px_-18px_rgba(0,0,0,0.95),0_0_0_1px_rgba(255,255,255,0.04)] backdrop-blur-md transition-all hover:border-[color-mix(in_srgb,var(--v2-accent)_50%,var(--v2-panel-border))] hover:bg-[color-mix(in_srgb,var(--v2-surface-muted)_82%,var(--v2-accent)_18%)] hover:text-[var(--v2-text-strong)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--v2-accent)_42%,transparent)]";
+  "group absolute right-5 z-10 hidden size-9 items-center justify-center gap-0 overflow-hidden rounded-full border border-[color-mix(in_srgb,var(--v2-accent)_28%,var(--v2-panel-border))] bg-[color-mix(in_srgb,var(--v2-surface)_88%,var(--v2-accent)_12%)] text-xs font-semibold text-[var(--v2-text-base)] shadow-[0_14px_34px_-18px_rgba(0,0,0,0.95),0_0_0_1px_rgba(255,255,255,0.04)] backdrop-blur-md transition-all hover:border-[color-mix(in_srgb,var(--v2-accent)_50%,var(--v2-panel-border))] hover:bg-[color-mix(in_srgb,var(--v2-surface-muted)_82%,var(--v2-accent)_18%)] hover:text-[var(--v2-text-strong)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--v2-accent)_42%,transparent)] sm:inline-flex";
+const JUMP_TO_BOTTOM_BUTTON_CLASS =
+  "absolute left-1/2 z-10 inline-flex max-w-[calc(100%-2rem)] -translate-x-1/2 items-center gap-1.5 whitespace-nowrap rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] px-3 py-1.5 text-xs font-medium text-[var(--v2-text-strong)] shadow-[0_10px_30px_-12px_rgba(0,0,0,0.7)] hover:border-[color-mix(in_srgb,var(--v2-accent)_40%,var(--v2-panel-border))]";
 
 export function distanceFromBottom(el) {
   if (!el) return Number.POSITIVE_INFINITY;
@@ -214,7 +225,7 @@ export function MessageList({
   const grouped = React.useMemo(() => groupMessages(messages), [messages]);
 
   return html`
-    <div className="relative flex min-h-0 min-w-0 flex-1">
+    <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
     <div
       ref=${containerRef}
       onScroll=${onScroll}
@@ -223,12 +234,12 @@ export function MessageList({
       onPointerDown=${markScrollbarDragIntent}
       onCopy=${onCopy}
       data-testid="message-list-scroll"
-      className="flex min-w-0 flex-1 overflow-y-auto px-4 pt-6 pb-14 sm:px-5 lg:px-8"
+      className="flex min-w-0 flex-1 overflow-y-auto overflow-x-hidden px-3 pt-5 pb-14 sm:px-5 sm:pt-6 lg:px-8"
     >
       <div
         ref=${contentRef}
         data-testid="message-list-content"
-        className="mx-auto flex w-full min-w-0 max-w-5xl flex-col gap-5"
+        className="mx-auto flex w-full min-w-0 max-w-5xl flex-col gap-4 sm:gap-5"
       >
         ${hasMore &&
         html`
@@ -256,7 +267,12 @@ export function MessageList({
               />`
         )}
         ${children}
-        ${logsPath && html`<div aria-hidden="true" className="h-14 shrink-0" />`}
+        ${logsPath &&
+        html`<div
+          aria-hidden="true"
+          className="hidden shrink-0 sm:block"
+          style=${FLOATING_CONTROL_SPACER_STYLE}
+        />`}
       </div>
     </div>
     ${logsPath &&
@@ -266,6 +282,7 @@ export function MessageList({
         aria-label=${t("nav.logs")}
         title=${t("nav.logs")}
         className=${FLOATING_LOGS_BUTTON_CLASS}
+        style=${FLOATING_CONTROL_STYLE}
       >
         <${Icon} name="logs" className="size-5" />
       <//>
@@ -276,7 +293,8 @@ export function MessageList({
         type="button"
         onClick=${jumpToBottom}
         aria-label=${t("chat.jumpToLatest")}
-        className="absolute bottom-4 left-1/2 inline-flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] px-3 py-1.5 text-xs font-medium text-[var(--v2-text-strong)] shadow-[0_10px_30px_-12px_rgba(0,0,0,0.7)] hover:border-[color-mix(in_srgb,var(--v2-accent)_40%,var(--v2-panel-border))]"
+        className=${JUMP_TO_BOTTOM_BUTTON_CLASS}
+        style=${FLOATING_CONTROL_STYLE}
       >
         <${Icon} name="arrowDown" className="h-3.5 w-3.5" />
         ${t("chat.jumpToLatest")}

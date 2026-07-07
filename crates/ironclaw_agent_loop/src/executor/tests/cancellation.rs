@@ -414,6 +414,7 @@ async fn cancellation_after_pending_input_ack_permissive_profile_propagates_chec
             safe_summary: LoopSafeSummary::new("scripted checkpoint payload failure").unwrap(),
             reason_kind: None,
             diagnostic_ref: None,
+            detail: None,
         }
     );
 }
@@ -701,6 +702,7 @@ async fn cancellation_checkpoint_payload_unavailable_propagates_for_permissive_p
             safe_summary: LoopSafeSummary::new("scripted checkpoint payload failure").unwrap(),
             reason_kind: None,
             diagnostic_ref: None,
+            detail: None,
         }
     );
     assert!(host.checkpoint_kinds().is_empty());
