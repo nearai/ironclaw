@@ -15,6 +15,7 @@ import { React, html } from "../../../lib/html.js";
 import { Icon } from "../../../design-system/icons.js";
 import { fetchAttachmentBlob, fetchAttachmentDataUrl } from "../../../lib/api.js";
 import { saveBlob } from "../../../lib/download.js";
+import { useT } from "../../../lib/i18n.js";
 
 /* Thumbnail for one attachment. An optimistic (just-sent) image carries a local
    data URL in `preview_url` and renders immediately. A persisted image instead
@@ -23,6 +24,7 @@ import { saveBlob } from "../../../lib/download.js";
    images, not `blob:`). Anything else — non-images, unlanded refs, or a failed
    fetch — falls back to the file icon. */
 export function AttachmentThumbnail({ att }) {
+  const t = useT();
   // Only images get a rendered thumbnail. Every landed attachment carries a
   // `fetch_url` (for click-to-preview of any kind), so the thumbnail must gate
   // on kind — otherwise a PDF/text would be fetched and shown as a broken
@@ -70,7 +72,7 @@ export function AttachmentThumbnail({ att }) {
   if (isImage && resolvedUrl) {
     return html`<img
       src=${resolvedUrl}
-      alt=${att.filename || "attachment"}
+      alt=${att.filename || t("common.attachment")}
       className="h-9 w-9 shrink-0 rounded object-cover"
     />`;
   }
@@ -88,7 +90,9 @@ const ATTACHMENT_CHIP_BASE =
 const ATTACHMENT_CHIP_PADDING = "px-3 py-2";
 
 export function AttachmentChip({ att, onPreview, testId, dataPath, downloadTestId }) {
+  const t = useT();
   const [downloading, setDownloading] = React.useState(false);
+  const filename = att.filename || t("common.attachment");
 
   const onDownload = React.useCallback(async () => {
     if (!att.fetch_url) return;
@@ -105,7 +109,7 @@ export function AttachmentChip({ att, onPreview, testId, dataPath, downloadTestI
 
   const inner = html`
     <${AttachmentThumbnail} att=${att} />
-    <span className="truncate">${att.filename || "attachment"}</span>
+    <span className="truncate">${filename}</span>
     <span className="ml-auto shrink-0 text-iron-200"
       >${att.mime_type}${att.size_label ? " / " + att.size_label : ""}</span
     >
@@ -126,7 +130,7 @@ export function AttachmentChip({ att, onPreview, testId, dataPath, downloadTestI
     <button
       type="button"
       onClick=${() => onPreview(att)}
-      aria-label=${`Preview ${att.filename || "attachment"}`}
+      aria-label=${t("chat.previewAttachment", { name: filename })}
       data-testid=${testId}
       data-file-path=${dataPath}
       className=${`flex min-w-0 flex-1 items-center gap-2 ${ATTACHMENT_CHIP_PADDING} text-left transition-colors hover:bg-iron-900/80`}
@@ -138,7 +142,7 @@ export function AttachmentChip({ att, onPreview, testId, dataPath, downloadTestI
       type="button"
       onClick=${onDownload}
       disabled=${downloading}
-      aria-label=${`Download ${att.filename || "attachment"}`}
+      aria-label=${t("chat.downloadAttachment", { name: filename })}
       data-testid=${downloadTestId}
       className="flex shrink-0 items-center border-l border-iron-700 px-2.5 text-iron-200 transition-colors hover:bg-iron-900/80 hover:text-white disabled:opacity-50"
     >

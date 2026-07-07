@@ -272,7 +272,7 @@ where
                 surface_version: request.surface_version.clone(),
                 checkpoint_state_ref: None,
                 max_messages: Some(self.max_messages.min(u32::MAX as usize) as u32),
-                inline_messages: Vec::new(),
+                inline_messages: request.inline_messages.clone(),
                 capability_view: None,
             })
             .await
@@ -1557,6 +1557,7 @@ fn map_capability_host_error(error: AgentLoopHostError) -> HostManagedModelError
         | AgentLoopHostErrorKind::ScopeMismatch
         | AgentLoopHostErrorKind::StaleSurface => HostManagedModelErrorKind::InvalidRequest,
         AgentLoopHostErrorKind::Unavailable
+        | AgentLoopHostErrorKind::InvalidOutput
         | AgentLoopHostErrorKind::CheckpointRejected
         | AgentLoopHostErrorKind::TranscriptWriteFailed
         | AgentLoopHostErrorKind::Internal => HostManagedModelErrorKind::Unavailable,
@@ -1570,12 +1571,12 @@ fn map_capability_host_error(error: AgentLoopHostError) -> HostManagedModelError
 
 fn map_provider_tool_output_error(error: AgentLoopHostError) -> HostManagedModelError {
     match error.kind {
-        AgentLoopHostErrorKind::Invalid | AgentLoopHostErrorKind::InvalidInvocation => {
-            HostManagedModelError::safe(
-                HostManagedModelErrorKind::InvalidOutput,
-                error.safe_summary,
-            )
-        }
+        AgentLoopHostErrorKind::Invalid
+        | AgentLoopHostErrorKind::InvalidInvocation
+        | AgentLoopHostErrorKind::InvalidOutput => HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidOutput,
+            error.safe_summary,
+        ),
         _ => map_capability_host_error(error),
     }
 }
@@ -1969,12 +1970,19 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
         error_debug = ?error,
         "reborn model provider error mapped to safe summary"
     );
+    // Tier 2b: carry the provider's real message (status line + body snippet)
+    // on the model-visible detail channel so the failure explainer can describe
+    // the actual fault. `safe_with_detail` scrubs credential-looking tokens
+    // (api_key=…, sk-…, access_token=…) before the text is stored; the safe
+    // summary stays a fixed host-authored category string.
+    let provider_detail = error.to_string();
     if is_credit_exhaustion_error(&error) {
         return HostManagedModelError::safe(
             HostManagedModelErrorKind::CredentialUnavailable,
             MODEL_CREDITS_EXHAUSTED_SUMMARY,
         )
-        .with_reason_kind(MODEL_CREDITS_EXHAUSTED_REASON_KIND);
+        .with_reason_kind(MODEL_CREDITS_EXHAUSTED_REASON_KIND)
+        .safe_with_detail(provider_detail.clone());
     }
     match error {
         LlmError::ContextLengthExceeded { .. } => HostManagedModelError::safe(
@@ -1996,6 +2004,7 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
             "model service is unavailable",
         ),
     }
+    .safe_with_detail(provider_detail)
 }
 
 fn is_credit_exhaustion_error(error: &LlmError) -> bool {

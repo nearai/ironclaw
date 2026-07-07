@@ -107,13 +107,14 @@ use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore, builtin_extension_registry};
 use crate::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
 #[cfg(any(test, feature = "test-support"))]
-use crate::outbound::OutboundDeliveryTargetEntry;
+use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
 use crate::outbound::{
     MutableOutboundDeliveryTargetRegistry, OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
     OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome,
     RebornOutboundPreferencesFacade, outbound_delivery_synthetic_provider,
 };
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
+use crate::turn_run_snapshot::TurnRunSnapshotSource;
 
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone)]
@@ -139,9 +140,8 @@ use crate::runtime_input::{
 use crate::trigger_poller::TenantScopedTrustedTriggerFireAuthorizer;
 use crate::trigger_poller::{
     AccessCheckerTriggerFireAuthorizer, ConversationContentRefMaterializer,
-    LocalTriggerTurnSnapshotSource, SnapshotActiveRunLookup, TRIGGER_POLLER_SHUTDOWN_TIMEOUT,
-    TriggerPollerCompositionDeps, TriggerPollerRuntimeHandle, TriggerTurnSnapshotSource,
-    spawn_trigger_poller,
+    SnapshotActiveRunLookup, TRIGGER_POLLER_SHUTDOWN_TIMEOUT, TriggerPollerCompositionDeps,
+    TriggerPollerRuntimeHandle, spawn_trigger_poller,
 };
 use crate::{
     RebornBuildError, RebornCompositionProfile, RebornProductAuthServices, RebornReadiness,
@@ -503,7 +503,7 @@ pub struct RebornRuntime {
     trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     credential_refresh_worker_handle:
-        Option<crate::credential_refresh_worker::CredentialRefreshWorkerRuntimeHandle>,
+        Option<crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshWorkerRuntimeHandle>,
     trace_flush_worker: crate::observability::trace_capture::TraceQueueFlushWorkerHandle,
     #[cfg(feature = "root-llm-provider")]
     skill_learning_extraction_tasks:
@@ -579,16 +579,43 @@ impl RegistryPersistentApprovalGranteeResolver {
 /// so the two never drift (W5-WEBUI-API-2 follow-up). `audit_sink` is `None` from the
 /// test accessor: production wires one for audit-log observability only, not
 /// correctness the test needs. Propagates policy/resolver construction failures
-/// instead of collapsing them to `None`.
+/// instead of collapsing them to `None`. Thin wrapper over
+/// `build_local_dev_approval_interaction_service_with_turn_run_source` using
+/// `local_runtime.turn_state` as the turn-run snapshot source — production
+/// behavior is unchanged by the seam below.
 pub(crate) fn build_local_dev_approval_interaction_service(
     local_runtime: &crate::factory::RebornLocalRuntimeServices,
     local_dev_capability_policy: Arc<LocalDevCapabilityPolicy>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     audit_sink: Option<Arc<dyn ironclaw_events::AuditSink>>,
 ) -> Result<Arc<dyn ApprovalInteractionService>, RebornRuntimeError> {
-    let approval_turn_runs = Arc::new(LocalDevApprovalTurnRunLocator::new(Arc::clone(
-        &local_runtime.turn_state,
-    )));
+    build_local_dev_approval_interaction_service_with_turn_run_source(
+        local_runtime,
+        local_dev_capability_policy,
+        turn_coordinator,
+        audit_sink,
+        Arc::clone(&local_runtime.turn_state) as Arc<dyn TurnRunSnapshotSource>,
+    )
+}
+
+/// Identical to [`build_local_dev_approval_interaction_service`]
+/// except the approval turn-run locator reads `turn_run_source` instead of
+/// always deriving it from `local_runtime.turn_state`. Lets a caller whose
+/// real runs live in a DIFFERENT `TurnStateStore` composition (e.g.
+/// `RebornIntegrationGroup`'s own `build_default_planned_runtime`, whose runs
+/// are invisible to this crate's `local_runtime.turn_state`) substitute its
+/// own store. `build_local_dev_approval_interaction_service` is the
+/// production entry point and is a thin wrapper over this function with
+/// `local_runtime.turn_state` as the source, so production behavior is
+/// unchanged.
+pub(crate) fn build_local_dev_approval_interaction_service_with_turn_run_source(
+    local_runtime: &crate::factory::RebornLocalRuntimeServices,
+    local_dev_capability_policy: Arc<LocalDevCapabilityPolicy>,
+    turn_coordinator: Arc<dyn TurnCoordinator>,
+    audit_sink: Option<Arc<dyn ironclaw_events::AuditSink>>,
+    turn_run_source: Arc<dyn TurnRunSnapshotSource>,
+) -> Result<Arc<dyn ApprovalInteractionService>, RebornRuntimeError> {
+    let approval_turn_runs = Arc::new(LocalDevApprovalTurnRunLocator::new(turn_run_source));
     let approval_read_model = Arc::new(RunStateApprovalInteractionReadModel::new(
         local_runtime.approval_requests.clone(),
         approval_turn_runs,
@@ -815,48 +842,33 @@ where
 fn build_trigger_active_run_lookup(
     turn_state_store: Arc<LocalDevTurnStateStore>,
 ) -> Arc<dyn ironclaw_triggers::TriggerActiveRunLookup> {
-    let snapshot_source: Arc<dyn TriggerTurnSnapshotSource> =
-        Arc::new(LocalTriggerTurnSnapshotSource::new(turn_state_store));
+    let snapshot_source = turn_state_store as Arc<dyn TurnRunSnapshotSource>;
     Arc::new(SnapshotActiveRunLookup::new(snapshot_source))
 }
 
 struct LocalDevApprovalTurnRunLocator {
-    turn_state: Arc<LocalDevTurnStateStore>,
+    /// A trait object (not the concrete `LocalDevTurnStateStore`) so a
+    /// caller can substitute a different turn-state store's snapshot view —
+    /// see `turn_run_snapshot::TurnRunSnapshotSource` and
+    /// `build_local_dev_approval_interaction_service_with_turn_run_source`.
+    turn_state: Arc<dyn TurnRunSnapshotSource>,
 }
 
 impl LocalDevApprovalTurnRunLocator {
-    fn new(turn_state: Arc<LocalDevTurnStateStore>) -> Self {
+    fn new(turn_state: Arc<dyn TurnRunSnapshotSource>) -> Self {
         Self { turn_state }
     }
 
     async fn snapshot(
         &self,
     ) -> Result<TurnPersistenceSnapshot, ironclaw_product_workflow::ProductWorkflowError> {
-        // Durable filesystem store: async `Result`; in-memory authority
-        // (no-DB builds or `inmemory-turn-state`): sync infallible.
-        #[cfg(all(
-            any(feature = "libsql", feature = "postgres"),
-            not(feature = "inmemory-turn-state")
-        ))]
-        {
-            self.turn_state
-                .persistence_snapshot()
-                .await
-                .map_err(|error| {
-                    tracing::debug!(
-                        %error,
-                        "approval turn-run locator could not read turn persistence snapshot"
-                    );
-                    approval_turn_locator_unavailable()
-                })
-        }
-        #[cfg(any(
-            feature = "inmemory-turn-state",
-            not(any(feature = "libsql", feature = "postgres"))
-        ))]
-        {
-            Ok(self.turn_state.persistence_snapshot())
-        }
+        self.turn_state.turn_run_snapshot().await.map_err(|error| {
+            tracing::debug!(
+                %error,
+                "approval turn-run locator could not read turn persistence snapshot"
+            );
+            approval_turn_locator_unavailable()
+        })
     }
 }
 
@@ -1102,12 +1114,6 @@ fn snapshot_run_actor_matches(
     })
 }
 
-// Only referenced by the durable filesystem snapshot path (async `Result`);
-// the in-memory authority's snapshot is infallible.
-#[cfg(all(
-    any(feature = "libsql", feature = "postgres"),
-    not(feature = "inmemory-turn-state")
-))]
 fn approval_turn_locator_unavailable() -> ironclaw_product_workflow::ProductWorkflowError {
     ironclaw_product_workflow::ProductWorkflowError::Transient {
         reason: "approval turn-run locator unavailable".to_string(),
@@ -1265,7 +1271,7 @@ impl RebornRuntime {
     #[cfg(feature = "root-llm-provider")]
     pub(crate) fn webui_nearai_login_states(
         &self,
-    ) -> Option<Arc<crate::llm_config_service::NearAiLoginStateStore>> {
+    ) -> Option<Arc<crate::llm_admin::llm_config_service::NearAiLoginStateStore>> {
         self.llm_reload
             .as_ref()
             .map(|parts| Arc::clone(&parts.nearai_login_states))
@@ -1281,9 +1287,11 @@ impl RebornRuntime {
         let session = self.webui_llm_session()?;
         let reload = self.webui_llm_reload_trigger()?;
         let states = self.webui_nearai_login_states()?;
-        Some(crate::nearai_login_serve::nearai_login_callback_mount(
-            session, reload, boot, states,
-        ))
+        Some(
+            crate::llm_admin::nearai_login_serve::nearai_login_callback_mount(
+                session, reload, boot, states,
+            ),
+        )
     }
 
     /// Live LLM-provider reload trigger for the settings service. Returns the
@@ -1294,12 +1302,14 @@ impl RebornRuntime {
     pub(crate) fn webui_llm_reload_trigger(&self) -> Option<Arc<dyn crate::LlmReloadTrigger>> {
         let boot = self.boot.as_ref()?;
         let parts = self.llm_reload.as_ref()?;
-        Some(Arc::new(crate::llm_reload::RebornLlmReloadAdapter::new(
-            boot.clone(),
-            Arc::clone(&parts.reload_handle),
-            Arc::clone(&parts.session),
-            crate::LlmKeyStore::new(self.services.secret_store()),
-        )))
+        Some(Arc::new(
+            crate::llm_admin::llm_reload::RebornLlmReloadAdapter::new(
+                boot.clone(),
+                Arc::clone(&parts.reload_handle),
+                Arc::clone(&parts.session),
+                crate::LlmKeyStore::new(self.services.secret_store()),
+            ),
+        ))
     }
 
     /// Diagnostic id for the no-profile run profile selected by this runtime.
@@ -2256,7 +2266,7 @@ impl RebornRuntime {
         if let Some(credential_refresh_worker) = self.credential_refresh_worker_handle {
             credential_refresh_worker
                 .shutdown(
-                    crate::credential_refresh_worker::CREDENTIAL_REFRESH_WORKER_SHUTDOWN_TIMEOUT,
+                    crate::product_auth::credentials::credential_refresh_worker::CREDENTIAL_REFRESH_WORKER_SHUTDOWN_TIMEOUT,
                 )
                 .await;
         }
@@ -2849,7 +2859,7 @@ pub async fn build_reborn_runtime(
     if !has_nearai_mcp_bootstrap_config
         && let Some(llm) = llm.as_ref()
         && let Some(config) =
-            crate::nearai_mcp::nearai_mcp_bootstrap_config_from_llm_config(&llm.config)
+            crate::llm_admin::nearai_mcp::nearai_mcp_bootstrap_config_from_llm_config(&llm.config)
                 .await
                 .map_err(|error| RebornRuntimeError::InvalidArgument {
                     reason: format!("NEAR AI MCP bootstrap config: {error}"),
@@ -3228,7 +3238,6 @@ pub async fn build_reborn_runtime(
         let local_dev_capabilities = local_dev::capability_wiring(
             &services,
             Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
-            thread_scope.clone(),
             actor_user_id.clone(),
             Arc::clone(&local_dev_capability_policy),
             model_gateway,
@@ -3456,6 +3465,7 @@ pub async fn build_reborn_runtime(
         config: DefaultPlannedRuntimeConfig {
             heartbeat_interval: runner.heartbeat_interval,
             poll_interval: runner.poll_interval,
+            lease_recovery_interval: default_runtime_config.lease_recovery_interval,
             worker_count: runner.worker_count,
             disabled_capability_ids: default_runtime_config.disabled_capability_ids,
             text_only_driver: Default::default(),
@@ -3689,9 +3699,9 @@ pub async fn build_reborn_runtime(
             candidate_source,
             leader_lock,
             refresh_port,
-        } => crate::credential_refresh_worker::spawn_credential_refresh_worker(
+        } => crate::product_auth::credentials::credential_refresh_worker::spawn_credential_refresh_worker(
             credential_refresh,
-            crate::credential_refresh_worker::CredentialRefreshWorkerDeps {
+            crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshWorkerDeps {
                 candidate_source,
                 refresh_port,
                 leader_lock: std::sync::Arc::new(leader_lock),
@@ -3775,9 +3785,31 @@ pub async fn build_reborn_runtime(
     })
 }
 
+/// Thin wrapper over
+/// `build_webui_auth_interaction_service_with_turn_run_source` using
+/// `turn_state_store` (production always passes `local_runtime.turn_state`)
+/// as the turn-run snapshot source — production behavior is unchanged by the
+/// seam below.
 fn build_webui_auth_interaction_service(
     product_auth: Option<&RebornProductAuthServices>,
     turn_state_store: Arc<LocalDevTurnStateStore>,
+    turn_coordinator: Arc<dyn TurnCoordinator>,
+) -> Arc<dyn AuthInteractionService> {
+    build_webui_auth_interaction_service_with_turn_run_source(
+        product_auth,
+        turn_state_store as Arc<dyn TurnRunSnapshotSource>,
+        turn_coordinator,
+    )
+}
+
+/// Identical to [`build_webui_auth_interaction_service`] except
+/// the auth read model reads `turn_run_source` instead of a hardcoded
+/// `LocalDevTurnStateStore`. See
+/// `build_local_dev_approval_interaction_service_with_turn_run_source`'s doc
+/// for why this seam exists.
+fn build_webui_auth_interaction_service_with_turn_run_source(
+    product_auth: Option<&RebornProductAuthServices>,
+    turn_run_source: Arc<dyn TurnRunSnapshotSource>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
 ) -> Arc<dyn AuthInteractionService> {
     // `AuthFlowRecordSource` is optional on the product-auth bundle because
@@ -3793,7 +3825,7 @@ fn build_webui_auth_interaction_service(
     };
     Arc::new(DefaultAuthInteractionService::new(
         Arc::new(auth_interaction::LocalDevAuthInteractionReadModel::new(
-            turn_state_store,
+            turn_run_source,
             flow_records,
         )),
         product_auth.flow_manager(),
@@ -3966,7 +3998,7 @@ async fn apply_startup_stored_llm_key(
         .await
         .map_err(|error| RebornRuntimeError::LlmProvider(error.to_string()))?
     {
-        crate::llm_catalog::apply_stored_api_key(&mut llm.config, stored);
+        crate::llm_admin::llm_catalog::apply_stored_api_key(&mut llm.config, stored);
     }
 
     Ok(Some(llm))
@@ -3981,11 +4013,12 @@ async fn bootstrap_nearai_mcp_from_effective_llm(
     let Some(llm) = llm else {
         return Ok(());
     };
-    let Some(config) = crate::nearai_mcp::nearai_mcp_bootstrap_config_from_llm_config(&llm.config)
-        .await
-        .map_err(|error| RebornRuntimeError::InvalidArgument {
-            reason: format!("NEAR AI MCP bootstrap config: {error}"),
-        })?
+    let Some(config) =
+        crate::llm_admin::nearai_mcp::nearai_mcp_bootstrap_config_from_llm_config(&llm.config)
+            .await
+            .map_err(|error| RebornRuntimeError::InvalidArgument {
+                reason: format!("NEAR AI MCP bootstrap config: {error}"),
+            })?
     else {
         return Ok(());
     };
@@ -4006,7 +4039,7 @@ async fn bootstrap_nearai_mcp_from_effective_llm(
     else {
         return Ok(());
     };
-    let outcome = crate::nearai_mcp::bootstrap_nearai_mcp(
+    let outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
         Some(config),
         product_auth,
         extension_management,
@@ -4180,7 +4213,8 @@ struct LlmGatewayBundle {
 pub(crate) struct RebornLlmReloadParts {
     pub(crate) reload_handle: Arc<ironclaw_llm::LlmReloadHandle>,
     pub(crate) session: Arc<ironclaw_llm::SessionManager>,
-    pub(crate) nearai_login_states: Arc<crate::llm_config_service::NearAiLoginStateStore>,
+    pub(crate) nearai_login_states:
+        Arc<crate::llm_admin::llm_config_service::NearAiLoginStateStore>,
 }
 
 #[cfg(feature = "root-llm-provider")]
@@ -4253,7 +4287,9 @@ fn wrap_swappable_gateway(
         reload: RebornLlmReloadParts {
             reload_handle,
             session,
-            nearai_login_states: Arc::new(crate::llm_config_service::NearAiLoginStateStore::new()),
+            nearai_login_states: Arc::new(
+                crate::llm_admin::llm_config_service::NearAiLoginStateStore::new(),
+            ),
         },
     })
 }
@@ -4465,6 +4501,15 @@ output_schema_ref = "schemas/write.output.json"
                 &self,
                 _request: GetRunStateRequest,
             ) -> Result<ironclaw_turns::TurnRunState, ironclaw_turns::TurnError> {
+                unimplemented!(
+                    "no local-dev runtime: neither accessor should reach the coordinator"
+                )
+            }
+
+            async fn retry_turn(
+                &self,
+                _request: ironclaw_turns::RetryTurnRequest,
+            ) -> Result<ironclaw_turns::RetryTurnResponse, ironclaw_turns::TurnError> {
                 unimplemented!(
                     "no local-dev runtime: neither accessor should reach the coordinator"
                 )
@@ -10382,7 +10427,7 @@ output_schema_ref = "schemas/write.output.json"
     struct MultiToolConfiguredCredentials;
 
     #[async_trait]
-    impl crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionService
+    impl crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService
         for MultiToolConfiguredCredentials
     {
         async fn select_configured_account_for_binding(
@@ -10395,7 +10440,7 @@ output_schema_ref = "schemas/write.output.json"
 
         async fn select_unique_configured_runtime_account(
             &self,
-            _request: crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionRequest,
+            _request: crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest,
         ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
             let now = chrono::Utc::now();
             Ok(ironclaw_auth::CredentialAccount {

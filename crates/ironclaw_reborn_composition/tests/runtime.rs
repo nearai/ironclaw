@@ -724,6 +724,13 @@ impl TurnCoordinator for SpyTurnCoordinator {
         self.inner.resume_turn(request).await
     }
 
+    async fn retry_turn(
+        &self,
+        request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        self.inner.retry_turn(request).await
+    }
+
     async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
         self.inner.cancel_run(request).await
     }

@@ -1,6 +1,6 @@
 use super::turn_events::{
     FailureExplanationInput, FailureExplanationProvider, ModelFailureExplanationProvider,
-    WEBUI_TURN_EVENT_PAGE_LIMIT, bounded_failure_explanation,
+    WEBUI_TURN_EVENT_PAGE_LIMIT, bounded_failure_explanation, failure_explanation_user_prompt,
 };
 use super::*;
 
@@ -313,6 +313,13 @@ impl TurnCoordinator for FakeTurnCoordinator {
         &self,
         _request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError> {
+        unreachable!("projection tests only read run state")
+    }
+
+    async fn retry_turn(
+        &self,
+        _request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
         unreachable!("projection tests only read run state")
     }
 

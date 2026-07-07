@@ -8,18 +8,30 @@ use ironclaw_host_api::{
     AgentId, InvocationId, MountView, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
 };
 
+use std::sync::Arc;
+
+use ironclaw_network::NetworkHttpEgress;
+
 use super::super::super::extension_surface::{
     BUNDLED_EXTENSION_CAPABILITY_IDS, EXTENSION_LIFECYCLE_CAPABILITY_IDS,
 };
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
 use super::super::{
-    HarnessResult, HostRuntimeCapabilityHarness, bundled_extension_provider_trust,
-    capability_ids_from_strs, local_dev_all_effects, wildcard_test_policy,
+    HarnessResult, HostRuntimeCapabilityHarness, RecordingNetworkHttpEgress,
+    bundled_extension_provider_trust, capability_ids_from_strs, local_dev_all_effects,
+    wildcard_test_policy,
 };
 
 pub(crate) fn extension_lifecycle_tools_profile() -> HarnessResult<ToolsProfile> {
     let mut capability_ids = capability_ids_from_strs(EXTENSION_LIFECYCLE_CAPABILITY_IDS)?;
     capability_ids.extend(capability_ids_from_strs(BUNDLED_EXTENSION_CAPABILITY_IDS)?);
+    // Hermetic guard: without a test egress, `build_local_runtime` defaults to
+    // a REAL `ReqwestNetworkTransport`, and this profile's scenarios dispatch a
+    // bundled extension capability post-activation, which crosses HTTP.
+    let network_egress: Arc<dyn NetworkHttpEgress> =
+        Arc::new(RecordingNetworkHttpEgress::with_body(
+            br#"{"messages":[],"resultSizeEstimate":0}"#.to_vec(),
+        ));
     Ok(ToolsProfile {
         capability_ids,
         effect_kinds: local_dev_all_effects(),
@@ -29,7 +41,8 @@ pub(crate) fn extension_lifecycle_tools_profile() -> HarnessResult<ToolsProfile>
                 true,
             )?),
         )
-        .with_seed_extension_credentials(),
+        .with_seed_extension_credentials()
+        .with_network_http_egress_for_test(network_egress),
         network_policy_override: Some(wildcard_test_policy()),
         provider_trust_override: Some(bundled_extension_provider_trust()?),
         auto_approve_default: Some(true),
@@ -42,6 +55,106 @@ pub(crate) fn extension_lifecycle_tools_profile() -> HarnessResult<ToolsProfile>
 
 pub(crate) async fn extension_lifecycle_tools() -> HarnessResult<HostRuntimeCapabilityHarness> {
     extension_lifecycle_tools_profile()?.build().await
+}
+
+/// Model-visible capability of the visibility-probe fixture extension.
+pub(crate) const VISIBILITY_PROBE_MODEL_CAPABILITY_ID: &str = "visprobe.search";
+/// `host_internal` sibling in the SAME package — must never be advertised to
+/// the model even though it is granted and registry-published.
+pub(crate) const VISIBILITY_PROBE_HOST_INTERNAL_CAPABILITY_ID: &str = "visprobe.audit";
+
+/// Two-capability fixture manifest: one `model`-visible capability and one
+/// `host_internal` sibling. Parsed by the production manifest parser with the
+/// HostBundled source — the same loader path bundled manifests use — so the
+/// visibility vocabulary under test is the real manifest schema, not a
+/// hand-built descriptor.
+const VISIBILITY_PROBE_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "visprobe"
+name = "Visibility Probe"
+version = "0.1.0"
+description = "Surface-visibility probe fixture"
+trust = "first_party_requested"
+
+[runtime]
+kind = "wasm"
+module = "wasm/visprobe.wasm"
+
+[[capabilities]]
+id = "visprobe.search"
+description = "Model-visible probe capability"
+effects = ["network"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/search.input.json"
+output_schema_ref = "schemas/search.output.json"
+
+[[capabilities]]
+id = "visprobe.audit"
+description = "Host-internal probe capability"
+effects = ["network", "external_write"]
+default_permission = "allow"
+visibility = "host_internal"
+input_schema_ref = "schemas/audit.input.json"
+output_schema_ref = "schemas/audit.output.json"
+"#;
+
+fn visibility_probe_package() -> HarnessResult<ironclaw_extensions::ExtensionPackage> {
+    let manifest = ironclaw_extensions::ExtensionManifest::parse(
+        VISIBILITY_PROBE_MANIFEST,
+        ironclaw_extensions::ManifestSource::HostBundled,
+        &ironclaw_host_api::host_port::HostPortCatalog::empty(),
+    )?;
+    Ok(ironclaw_extensions::ExtensionPackage::from_manifest(
+        manifest,
+        ironclaw_host_api::VirtualPath::new("/system/extensions/visprobe")?,
+    )?)
+}
+
+/// Harness for the HostInternal surface-hiding probe: the fixture package is
+/// published into the active-extension registry at construction (the same
+/// publish step activation uses) and BOTH its capabilities are granted — so
+/// the ONLY thing that can keep `visprobe.audit` off the model surface is the
+/// registry-level visibility filter, not grant absence or non-publication.
+pub(crate) fn extension_visibility_probe_tools_profile() -> HarnessResult<ToolsProfile> {
+    let package = visibility_probe_package()?;
+    Ok(ToolsProfile {
+        capability_ids: capability_ids_from_strs(&[
+            VISIBILITY_PROBE_MODEL_CAPABILITY_ID,
+            VISIBILITY_PROBE_HOST_INTERNAL_CAPABILITY_ID,
+        ])?,
+        effect_kinds: local_dev_all_effects(),
+        options: HostRuntimeHarnessOptions::new(
+            MountView::default(),
+            Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
+                true,
+            )?),
+        )
+        .with_activated_bundled_extension(package),
+        network_policy_override: Some(wildcard_test_policy()),
+        provider_trust_override: Some(vec![(
+            ironclaw_host_api::ExtensionId::new("visprobe")?,
+            local_dev_all_effects(),
+        )]),
+        // Surface resolution reads each advertised capability's
+        // `input_schema_ref` off the mounted filesystem under the package
+        // root; without the fixture schemas host creation fails.
+        post_construct_asset_copy: Some((
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/extension_visibility"),
+            std::path::PathBuf::from("local-dev/system/extensions/visprobe"),
+        )),
+        auto_approve_default: Some(true),
+        ..ToolsProfile::new(
+            "reborn-e2e-extension-visibility-probe",
+            "reborn-e2e-extension-visibility-user",
+        )?
+    })
+}
+
+pub(crate) async fn extension_visibility_probe_tools() -> HarnessResult<HostRuntimeCapabilityHarness>
+{
+    extension_visibility_probe_tools_profile()?.build().await
 }
 
 pub(crate) async fn seed_extension_lifecycle_credentials(

@@ -27,7 +27,7 @@ use ironclaw_host_runtime::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult, ProductAuthProviderRuntimePorts,
 };
 
-use crate::product_auth_runtime_credentials::RuntimeCredentialAccountVisibilityPolicy;
+use crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountVisibilityPolicy;
 
 /// Host-bundled GSuite packages available to an install/activation surface.
 ///

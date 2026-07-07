@@ -2,30 +2,11 @@
 //! fire hooks at the expected lifecycle points on a real coordinator-path turn,
 //! and a hook deny should block the capability without wedging the run.
 //!
-//! # BLOCKED by a production bug (both scenarios are `#[ignore]`d RED regressions)
-//!
-//! Wiring ANY hook dispatcher into a full coordinator-path turn fails EVERY
-//! turn with `driver_unavailable`:
-//! `HostUnavailableWithDiagnostics { stage: Checkpoint, kind: Unavailable,
-//! safe_summary: "stage_checkpoint_payload not implemented" }`.
-//!
-//! Root cause: `ironclaw_hooks::middleware::checkpoint_port::
-//! HookedLoopCheckpointPort` overrides only `LoopCheckpointPort::checkpoint`;
-//! it does NOT forward `stage_checkpoint_payload`/`load_checkpoint_payload` to
-//! its inner port, so those fall through to the trait's fail-closed defaults.
-//! A planned run stages a checkpoint payload before the first model call, so
-//! with a hook dispatcher active the turn dies there before any hook fires.
-//! Hooks are off by default in production, so this latent bug has never been
-//! exercised — this is the first full-turn-with-hooks path.
-//!
-//! TODO(reborn-hooks-checkpoint-forward): forward both methods through
-//! `HookedLoopCheckpointPort` to `self.inner` (mirroring `checkpoint()`), then
-//! remove the `#[ignore]`s below. Cross-crate fix in `ironclaw_hooks`, out of
-//! scope for this tests-only lane.
-//!
-//! The E-HOOK-INFRA enabler (recording hook doubles, the
-//! `hook_dispatcher_builder_factory` group-builder seam, `with_hook_factory`)
-//! DOES land and is correct — these scenarios go green once the wrapper bug is fixed.
+//! These drive a full coordinator-path turn with an active hook dispatcher —
+//! the first tests to do so — so they also pin that `HookedLoopCheckpointPort`
+//! stays transparent for `stage_checkpoint_payload`/`load_checkpoint_payload`,
+//! not just `checkpoint`. A planned run stages a checkpoint payload before
+//! every model call, so any gap there fails every hooks-enabled turn.
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
@@ -44,17 +25,10 @@ use serde_json::json;
 
 const HTTP_TOOL_URL: &str = "https://api.example.test/v1/items";
 
-/// The AfterModel observer fires on the model call and the BeforeCapability gate
-/// hook fires before the dispatched capability — both recorded through the real
-/// turn wire. The passing gate hook does not block the capability, so the http
-/// tool still runs.
-///
-/// `#[ignore]`d RED regression — currently fails at the checkpoint stage (see the
-/// module-level bug note). Un-ignore once `HookedLoopCheckpointPort` forwards
-/// `stage_checkpoint_payload`.
-#[ignore = "blocked: HookedLoopCheckpointPort omits stage_checkpoint_payload forwarding; \
-            hooked coordinator turn dies driver_unavailable at checkpoint_before_model \
-            (TODO reborn-hooks-checkpoint-forward)"]
+/// The BeforeCapability gate hook fires before the dispatched capability, and
+/// the AfterModel observer fires once for the turn — both recorded through
+/// the real turn wire. The passing gate hook does not block the capability,
+/// so the http tool still runs.
 #[tokio::test]
 async fn hooks_fire_at_lifecycle_points_on_coordinator_turn() {
     let log = RecordingHookLog::new();
@@ -73,29 +47,21 @@ async fn hooks_fire_at_lifecycle_points_on_coordinator_turn() {
     h.assert_tool_invoked("builtin.http")
         .await
         .expect("http tool ran through the real capability path");
-    // Both lifecycle points fired in order: AfterModel dispatches once per
-    // `finalize_assistant_message` call, and the script's two assistant turns
-    // sandwich the BeforeCapability gate hook right before dispatch.
+    // AfterModel fires only once per turn, at `finalize_assistant_message`
+    // for the terminal text reply — the tool-call reply that precedes it
+    // finalizes through the capability path, not the transcript port, so it
+    // does not fire AfterModel on its own.
     assert_eq!(
         log.fires(),
-        vec![
-            "observer:AfterModel",
-            "before_capability:builtin.http",
-            "observer:AfterModel",
-        ],
-        "hook fires must occur in lifecycle order: AfterModel (tool-call reply) -> \
-         BeforeCapability (builtin.http dispatch) -> AfterModel (final text reply)"
+        vec!["before_capability:builtin.http", "observer:AfterModel",],
+        "hook fires must occur in lifecycle order: BeforeCapability (builtin.http dispatch) \
+         -> AfterModel (final text reply)"
     );
 }
 
 /// A BeforeCapability hook deny should block the capability (it never reaches the
 /// wire) yet the run should still complete — the hook error path must NOT wedge
 /// the run.
-///
-/// `#[ignore]`d RED regression — same checkpoint bug as above blocks it.
-#[ignore = "blocked: HookedLoopCheckpointPort omits stage_checkpoint_payload forwarding; \
-            hooked coordinator turn dies driver_unavailable at checkpoint_before_model \
-            (TODO reborn-hooks-checkpoint-forward)"]
 #[tokio::test]
 async fn hook_deny_blocks_capability_without_wedging_run() {
     let log = RecordingHookLog::new();
