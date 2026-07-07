@@ -128,16 +128,9 @@ async fn run_delta_journal_materializer<F>(
     F: RootFilesystem,
 {
     while let Some(mut target_seq) = receiver.recv().await {
-        loop {
-            tokio::time::sleep(DELTA_JOURNAL_MATERIALIZE_IDLE_DELAY).await;
-            let mut saw_new_target = false;
-            while let Ok(next_seq) = receiver.try_recv() {
-                target_seq = target_seq.max(next_seq);
-                saw_new_target = true;
-            }
-            if !saw_new_target {
-                break;
-            }
+        tokio::time::sleep(DELTA_JOURNAL_MATERIALIZE_IDLE_DELAY).await;
+        while let Ok(next_seq) = receiver.try_recv() {
+            target_seq = target_seq.max(next_seq);
         }
         if let Err(error) =
             materialize_delta_batch(filesystem.as_ref(), &materialize_gate, &target_seq).await
@@ -441,7 +434,7 @@ where
         let cas = match current {
             Some(versioned) => {
                 let current_seq = materialized_row_seq(&versioned.entry.body, collection)?;
-                if current_seq > journal_seq {
+                if current_seq >= journal_seq {
                     return Ok(());
                 }
                 CasExpectation::Version(versioned.version)

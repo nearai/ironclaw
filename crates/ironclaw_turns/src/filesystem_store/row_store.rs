@@ -314,15 +314,34 @@ where
             }
             let key = active_lock_record_key(&lock)?;
             let path = row_path(ACTIVE_LOCK_ROWS, &key)?;
-            self.filesystem
+            match self
+                .filesystem
                 .delete(&ResourceScope::system(), &path)
                 .await
-                .map_err(fs_error)?;
-            tracing::warn!(
-                active_lock_key = %key,
-                run_id = %lock.run_id,
-                "removed orphan turn-state active-lock row without a durable run row",
-            );
+            {
+                Ok(()) => {
+                    tracing::warn!(
+                        active_lock_key = %key,
+                        run_id = %lock.run_id,
+                        "removed orphan turn-state active-lock row without a durable run row",
+                    );
+                }
+                Err(FilesystemError::NotFound { .. }) => {
+                    tracing::warn!(
+                        active_lock_key = %key,
+                        run_id = %lock.run_id,
+                        "orphan turn-state active-lock row disappeared during cleanup",
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        active_lock_key = %key,
+                        run_id = %lock.run_id,
+                        %error,
+                        "failed to remove orphan turn-state active-lock row; continuing with filtered snapshot",
+                    );
+                }
+            }
         }
         snapshot.active_locks = retained;
         Ok(snapshot)
@@ -434,6 +453,19 @@ where
     where
         T: DeserializeOwned,
     {
+        self.read_row_collection_filtered(collection, |_| true)
+            .await
+    }
+
+    async fn read_row_collection_filtered<T, P>(
+        &self,
+        collection: &'static str,
+        include_key: P,
+    ) -> Result<Vec<T>, TurnError>
+    where
+        T: DeserializeOwned,
+        P: Fn(&str) -> bool,
+    {
         let dir = row_dir(collection)?;
         let entries = match self
             .filesystem
@@ -447,23 +479,19 @@ where
         let paths = entries
             .into_iter()
             .filter(|entry| entry.file_type == FileType::File)
-            .filter(|entry| entry.name.ends_with(".json"))
-            .map(|entry| {
-                let key = entry.name.trim_end_matches(".json").to_string();
-                row_path(collection, &key)
-            })
+            .filter_map(|entry| entry.name.strip_suffix(".json").map(ToString::to_string))
+            .filter(|key| include_key(key))
+            .map(|key| row_path(collection, &key))
             .collect::<Result<Vec<_>, _>>()?;
         let records = stream::iter(paths)
             .map(|path| async move {
-                let Some(versioned) = self
-                    .filesystem
-                    .get(&ResourceScope::system(), &path)
-                    .await
-                    .map_err(fs_error)?
-                else {
-                    return Ok(None);
-                };
-                deserialize_materialized_row(&versioned.entry.body, collection)
+                match self.filesystem.get(&ResourceScope::system(), &path).await {
+                    Ok(Some(versioned)) => {
+                        deserialize_materialized_row(&versioned.entry.body, collection)
+                    }
+                    Ok(None) | Err(FilesystemError::NotFound { .. }) => Ok(None),
+                    Err(error) => Err(fs_error(error)),
+                }
             })
             .buffer_unordered(ROW_COLLECTION_READ_CONCURRENCY)
             .try_collect::<Vec<_>>()
@@ -480,15 +508,11 @@ where
         T: DeserializeOwned,
     {
         let path = row_path(collection, key)?;
-        let Some(versioned) = self
-            .filesystem
-            .get(&ResourceScope::system(), &path)
-            .await
-            .map_err(fs_error)?
-        else {
-            return Ok(None);
-        };
-        deserialize_materialized_row(&versioned.entry.body, collection)
+        match self.filesystem.get(&ResourceScope::system(), &path).await {
+            Ok(Some(versioned)) => deserialize_materialized_row(&versioned.entry.body, collection),
+            Ok(None) | Err(FilesystemError::NotFound { .. }) => Ok(None),
+            Err(error) => Err(fs_error(error)),
+        }
     }
 
     async fn read_run_state_from_durable_rows(
@@ -526,8 +550,15 @@ where
         materialize_delta_log(self.filesystem.as_ref(), &self.materialize_gate, None).await?;
         self.ensure_legacy_blob_migrated_for_direct_row_read()
             .await?;
+        let after_key = after.map(|cursor| format!("{:020}", cursor.0));
         let events = keyed_records(
-            &self.read_row_collection(EVENT_ROWS).await?,
+            &self
+                .read_row_collection_filtered(EVENT_ROWS, |key| {
+                    after_key
+                        .as_ref()
+                        .is_none_or(|after_key| key > after_key.as_str())
+                })
+                .await?,
             &event_record_key,
         )
         .map_err(RowPersistError::into_turn)?;

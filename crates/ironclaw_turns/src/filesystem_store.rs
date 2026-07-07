@@ -728,6 +728,13 @@ where
         }
     }
 
+    async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
+        match self {
+            Self::Blob(store) => store.retry_turn(request).await,
+            Self::Row(store) => store.retry_turn(request).await,
+        }
+    }
+
     async fn request_cancel(
         &self,
         request: CancelRunRequest,

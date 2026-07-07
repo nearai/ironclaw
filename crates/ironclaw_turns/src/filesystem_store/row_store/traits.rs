@@ -6,10 +6,10 @@ use tracing::Instrument;
 use crate::{
     CancelRunRequest, CancelRunResponse, EventCursor, GetLoopCheckpointRequest, GetRunStateRequest,
     LoopCheckpointRecord, LoopCheckpointStore, PutLoopCheckpointRequest, ResumeTurnRequest,
-    ResumeTurnResponse, RunProfileResolver, SpawnTreeReservation, SubmitChildRunRequest,
-    SubmitTurnRequest, SubmitTurnResponse, TurnAdmissionPolicy, TurnError, TurnEventPage,
-    TurnEventProjectionSource, TurnRunId, TurnRunRecord, TurnRunState, TurnScope,
-    TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
+    ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, RunProfileResolver,
+    SpawnTreeReservation, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse,
+    TurnAdmissionPolicy, TurnError, TurnEventPage, TurnEventProjectionSource, TurnRunId,
+    TurnRunRecord, TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
@@ -115,6 +115,21 @@ where
         .instrument(turn_state_write_span(
             "resume_turn",
             Some(&request.scope),
+            Some(&run_id),
+        ))
+        .await
+    }
+
+    async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
+        let scope = request.scope.clone();
+        let run_id = request.run_id;
+        self.apply(RunnerLeaseOverlay::None, |store| {
+            let request = request.clone();
+            async move { store.retry_turn(request).await }
+        })
+        .instrument(turn_state_write_span(
+            "retry_turn",
+            Some(&scope),
             Some(&run_id),
         ))
         .await
