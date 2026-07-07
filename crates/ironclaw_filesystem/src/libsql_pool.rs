@@ -354,4 +354,50 @@ mod tests {
         let timeout: i64 = row.get(0).unwrap();
         assert_eq!(timeout, 5000);
     }
+
+    /// A connection that opens successfully but whose PRAGMA batch fails on
+    /// *every* attempt (not just a transient one, unlike the test above)
+    /// must exhaust the fixed retry budget and surface a `Connect`
+    /// infrastructure error carrying the PRAGMA failure as its cause —
+    /// mirroring the permanent-open-failure test, but for the PRAGMA half
+    /// of `connect_with_retry_and_pragmas`'s two failure branches.
+    #[tokio::test]
+    async fn connect_with_retry_returns_connect_error_after_exhausting_pragma_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("connect-retry-pragma-permanent-test.db");
+        let db = libsql::Builder::new_local(db_path).build().await.unwrap();
+        let mut opens = 0;
+        let mut initializers = 0;
+
+        let result = connect_with_retry_and_pragmas(
+            || {
+                opens += 1;
+                db.connect()
+            },
+            |_| {
+                initializers += 1;
+                "THIS IS NOT SQL"
+            },
+        )
+        .await;
+
+        assert_eq!(
+            opens, LIBSQL_CONNECT_ATTEMPTS,
+            "must stop after exhausting the fixed retry budget, not retry forever"
+        );
+        assert_eq!(
+            initializers, LIBSQL_CONNECT_ATTEMPTS,
+            "every open succeeded, so every attempt must have reached the PRAGMA batch"
+        );
+        match result {
+            Err(FilesystemError::BackendInfrastructure { operation, reason }) => {
+                assert_eq!(operation, FilesystemOperation::Connect);
+                assert!(
+                    reason.contains("THIS IS NOT SQL") || reason.to_lowercase().contains("syntax"),
+                    "reason must include the final PRAGMA attempt's cause: {reason}"
+                );
+            }
+            other => panic!("expected FilesystemError::BackendInfrastructure, got {other:?}"),
+        }
+    }
 }
