@@ -94,7 +94,7 @@ pub(crate) enum LeaderOutcome<T> {
 /// Deployment-wide leader-lock for the background credential keepalive worker.
 ///
 /// Constructed by the composition root (`runtime.rs`) and threaded into the
-/// worker's [`crate::credential_refresh_worker::CredentialRefreshWorkerDeps`].
+/// worker's [`crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshWorkerDeps`].
 ///
 /// The Postgres pool is intentionally `Option`: `None` on the libsql /
 /// local-dev path means this process is trivially the leader (single writer by

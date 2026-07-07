@@ -28,10 +28,10 @@ use ironclaw_reborn_event_store::{PostgresPoolTlsOptions, RebornPostgresSslMode}
 
 #[cfg(feature = "postgres")]
 use crate::RebornBuildError;
-use crate::google_oauth::google_provider_spec;
-use crate::notion_oauth::notion_provider_spec;
-use crate::oauth_dcr::OAuthDcrProviderConfig;
-use crate::oauth_provider_client::HostOAuthProviderSpec;
+use crate::product_auth::oauth::google_oauth::google_provider_spec;
+use crate::product_auth::oauth::notion_oauth::notion_provider_spec;
+use crate::product_auth::oauth::oauth_dcr::OAuthDcrProviderConfig;
+use crate::product_auth::oauth::oauth_provider_client::HostOAuthProviderSpec;
 use crate::{RebornCompositionProfile, RebornProductAuthServicePorts};
 
 #[cfg(feature = "postgres")]

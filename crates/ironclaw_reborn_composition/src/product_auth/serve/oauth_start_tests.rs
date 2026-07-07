@@ -25,8 +25,10 @@ mod tests {
     use uuid::Uuid;
 
     use crate::RebornAuthContinuationDispatcher;
-    use crate::notion_oauth::notion_provider_spec;
-    use crate::oauth_dcr::{OAuthDcrProvider, OAuthDcrProviderConfig, OAuthDcrProviderRegistry};
+    use crate::product_auth::oauth::notion_oauth::notion_provider_spec;
+    use crate::product_auth::oauth::oauth_dcr::{
+        OAuthDcrProvider, OAuthDcrProviderConfig, OAuthDcrProviderRegistry,
+    };
 
     #[derive(Debug)]
     struct NoopDispatcher;

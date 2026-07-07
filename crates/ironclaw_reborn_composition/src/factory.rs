@@ -7,7 +7,7 @@ use std::{
 };
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use crate::product_auth_durable::{FilesystemAuthProductServices, UnavailableAuthProviderClient};
+use crate::product_auth::durable::{FilesystemAuthProductServices, UnavailableAuthProviderClient};
 use crate::support::fs::RebornProjectService;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_approvals::{
@@ -150,8 +150,10 @@ use crate::local_dev_mounts::{
     skill_management_mount_view, system_extensions_lifecycle_mount_view, workspace_mount_view,
 };
 use crate::mcp::hosted_http_mcp_runtime;
-use crate::product_auth_providers::{OAuthProviderComposition, compose_provider_client};
-use crate::product_auth_runtime_credentials::ProductAuthRuntimeCredentialResolver;
+use crate::product_auth::credentials::product_auth_providers::{
+    OAuthProviderComposition, compose_provider_client,
+};
+use crate::product_auth::credentials::runtime_credentials::ProductAuthRuntimeCredentialResolver;
 use crate::runtime_input::RebornRuntimeIdentity;
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
@@ -481,8 +483,8 @@ pub(crate) enum CredentialRefreshWorkerReady {
     /// the worker; the `enabled` policy flag still gates the actual spawn.
     Ready {
         candidate_source:
-            Arc<dyn crate::credential_refresh_worker::CredentialRefreshCandidateSource>,
-        leader_lock: crate::product_auth_refresh_lock::CredentialRefreshLeaderLock,
+            Arc<dyn crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshCandidateSource>,
+        leader_lock: crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock,
         refresh_port: Arc<RebornProductAuthServices>,
     },
     /// Deps intentionally absent: local-dev (single-user, no cross-owner
@@ -4332,7 +4334,7 @@ async fn build_backend_production<F>(
     // Leader lock for the background credential keepalive worker. The worker
     // uses this to elect one process per tick as the sweep leader. `None`
     // pool → always-leader (libsql / single-process). Stays private.
-    leader_lock: crate::product_auth_refresh_lock::CredentialRefreshLeaderLock,
+    leader_lock: crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock,
 ) -> Result<RebornServices, RebornBuildError>
 where
     F: RootFilesystem + 'static,
@@ -4474,7 +4476,7 @@ where
     // instance here, so the candidate source is None (worker finds no
     // candidates, which is safe for override/test callers).
     let credential_refresh_candidate_source: Option<
-        Arc<dyn crate::credential_refresh_worker::CredentialRefreshCandidateSource>,
+        Arc<dyn crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshCandidateSource>,
     >;
     let product_auth_ports = match product_auth_ports {
         Some(ports) => {
@@ -4488,7 +4490,7 @@ where
                 Arc::clone(&secret_store),
             ));
             credential_refresh_candidate_source = Some(Arc::clone(&durable)
-                as Arc<dyn crate::credential_refresh_worker::CredentialRefreshCandidateSource>);
+                as Arc<dyn crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshCandidateSource>);
             RebornProductAuthServicePorts::from_shared_with_provider(
                 durable,
                 provider_composition
@@ -4615,11 +4617,11 @@ async fn build_libsql_production(
         {
             #[cfg(feature = "postgres")]
             {
-                crate::product_auth_refresh_lock::CredentialRefreshLeaderLock::new(None)
+                crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock::new(None)
             }
             #[cfg(not(feature = "postgres"))]
             {
-                crate::product_auth_refresh_lock::CredentialRefreshLeaderLock::always_leader()
+                crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock::always_leader()
             }
         },
     )
@@ -4670,7 +4672,7 @@ async fn build_postgres_production(
         stores,
         trigger_repository,
         RebornProductionRuntimeServices::Postgres,
-        crate::product_auth_refresh_lock::CredentialRefreshLeaderLock::new(Some(
+        crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock::new(Some(
             pool_for_refresh_lock,
         )),
     )

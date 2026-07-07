@@ -1610,14 +1610,14 @@ fn reborn_product_auth_contract_stays_reborn_native() {
     let mut violations = Vec::new();
     collect_forbidden_uses(&auth_src, &root, &forbidden, &mut violations);
     collect_forbidden_reborn_auth_file_uses(
-        &root.join("crates/ironclaw_reborn_composition/src/auth.rs"),
+        &root.join("crates/ironclaw_reborn_composition/src/product_auth/api/auth.rs"),
         &root,
         &forbidden,
         &mut violations,
     );
     collect_forbidden_reborn_auth_path_uses(
-        &root.join("crates/ironclaw_reborn_composition/src/product_auth_serve"),
-        &root.join("crates/ironclaw_reborn_composition/src/product_auth_serve.rs"),
+        &root.join("crates/ironclaw_reborn_composition/src/product_auth/serve"),
+        &root.join("crates/ironclaw_reborn_composition/src/product_auth/serve.rs"),
         &root,
         &forbidden,
         &mut violations,

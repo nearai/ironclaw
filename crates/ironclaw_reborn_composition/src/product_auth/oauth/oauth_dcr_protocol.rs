@@ -6,7 +6,9 @@ use ironclaw_host_api::SecretHandle;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::oauth_provider_client::{HostOAuthProviderSpec, OAuthClientMaterial};
+use crate::product_auth::oauth::oauth_provider_client::{
+    HostOAuthProviderSpec, OAuthClientMaterial,
+};
 
 #[derive(Debug, Deserialize)]
 pub(super) struct ProtectedResourceMetadata {
@@ -167,7 +169,7 @@ pub(super) fn validate_callback_origin(origin: &str) -> Result<(), AuthProductEr
     Ok(())
 }
 
-pub(super) fn flow_secret_handle(
+pub(crate) fn flow_secret_handle(
     spec: &HostOAuthProviderSpec,
     flow_id: AuthFlowId,
     kind: &'static str,
