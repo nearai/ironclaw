@@ -1,20 +1,14 @@
 var usersCreateInFlight = false;
+var usersCreatePendingConfig = {
+  submit: '#users-create-submit',
+  controls: ['#user-display-name', '#user-email', '#user-role', '#users-create-cancel'],
+  loadingClass: 'is-loading',
+  idleLabel: { key: 'users.create', fallback: 'Create' },
+  pendingLabel: { key: 'users.creating', fallback: 'Creating...' },
+};
 
 function setUsersCreatePending(isPending) {
-  var submit = document.getElementById('users-create-submit');
-  var cancel = document.getElementById('users-create-cancel');
-  var displayName = document.getElementById('user-display-name');
-  var email = document.getElementById('user-email');
-  var role = document.getElementById('user-role');
-  [displayName, email, role, cancel].forEach(function(el) {
-    if (el) el.disabled = isPending;
-  });
-  if (submit) {
-    submit.disabled = isPending;
-    submit.setAttribute('aria-busy', isPending ? 'true' : 'false');
-    submit.classList.toggle('is-loading', isPending);
-    submit.textContent = isPending ? I18n.t('users.creating') : I18n.t('users.create');
-  }
+  IronClawUserCreateForm.setPending(usersCreatePendingConfig, isPending);
 }
 
 function loadUsers() {
@@ -161,7 +155,7 @@ document.getElementById('users-create-submit')?.addEventListener('click', functi
   usersCreateInFlight = true;
   setUsersCreatePending(true);
 
-  apiFetch('/api/admin/users', {
+  IronClawUserCreateForm.request(apiFetch, '/api/admin/users', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -178,7 +172,13 @@ document.getElementById('users-create-submit')?.addEventListener('click', functi
     }
     loadUsers();
   }).catch(function(e) {
-    alert(I18n.t('users.failedCreate') + ': ' + e.message);
+    alert(IronClawUserCreateForm.text(
+      {
+        key: 'users.failedCreateWithMessage',
+        fallback: 'Failed to create user: {message}',
+      },
+      { message: IronClawUserCreateForm.errorMessage(e) }
+    ));
   }).finally(function() {
     usersCreateInFlight = false;
     setUsersCreatePending(false);

@@ -88,6 +88,8 @@ I18n.register('en', {
   'users.copied': 'Copied!',
   'users.displayNameRequired': 'Display name is required',
   'users.failedCreate': 'Failed to create user',
+  'users.failedCreateWithMessage': 'Failed to create user: {message}',
+  'users.createTimedOut': 'Create user request timed out. Please try again.',
   'users.columns.id': 'ID',
   'users.columns.displayName': 'Display Name',
   'users.columns.email': 'Email',

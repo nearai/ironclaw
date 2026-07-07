@@ -23,6 +23,8 @@ pub const INDEX_HTML: &str = include_str!("../static/index.html");
 pub const APP_JS: &str = concat!(
     include_str!("../static/js/core/bootstrap.js"),
     "\n",
+    include_str!("../static/js/shared/user-create-form.js"),
+    "\n",
     include_str!("../static/js/core/activity-store.js"),
     "\n",
     include_str!("../static/js/core/routing.js"),
@@ -171,7 +173,11 @@ pub const ADMIN_HTML: &str = include_str!("../static/admin.html");
 pub const ADMIN_CSS: &str = include_str!("../static/admin/admin.css");
 
 /// Admin panel JavaScript.
-pub const ADMIN_JS: &str = include_str!("../static/admin/admin.js");
+pub const ADMIN_JS: &str = concat!(
+    include_str!("../static/js/shared/user-create-form.js"),
+    "\n",
+    include_str!("../static/admin/admin.js"),
+);
 
 #[cfg(test)]
 mod tests {

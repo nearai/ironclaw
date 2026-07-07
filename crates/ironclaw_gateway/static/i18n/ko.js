@@ -88,6 +88,8 @@ I18n.register('ko', {
   'users.copied': '복사됨!',
   'users.displayNameRequired': '표시 이름은 필수입니다',
   'users.failedCreate': '사용자 생성에 실패했습니다',
+  'users.failedCreateWithMessage': '사용자 생성에 실패했습니다: {message}',
+  'users.createTimedOut': '사용자 생성 요청 시간이 초과되었습니다. 다시 시도하세요.',
   'users.columns.id': 'ID',
   'users.columns.displayName': '표시 이름',
   'users.columns.email': '이메일',

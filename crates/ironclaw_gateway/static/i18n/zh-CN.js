@@ -88,6 +88,8 @@ I18n.register('zh-CN', {
   'users.copied': '已复制！',
   'users.displayNameRequired': '显示名称为必填项',
   'users.failedCreate': '创建用户失败',
+  'users.failedCreateWithMessage': '创建用户失败：{message}',
+  'users.createTimedOut': '创建用户请求超时，请重试。',
   'users.columns.id': 'ID',
   'users.columns.displayName': '显示名称',
   'users.columns.email': '邮箱',

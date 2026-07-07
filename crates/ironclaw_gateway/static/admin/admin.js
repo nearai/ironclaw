@@ -324,6 +324,13 @@
   var usersFilter = 'all';
   var usersSearch = '';
   var createUserInFlight = false;
+  var createUserPendingConfig = {
+    submit: '[data-action="create-user"]',
+    controls: ['#new-user-name', '#new-user-email', '#new-user-role', '[data-action="hide-create-form"]'],
+    loadingClass: 'is-loading',
+    idleLabel: { key: 'users.create', fallback: 'Create' },
+    pendingLabel: { key: 'users.creating', fallback: 'Creating...' },
+  };
 
   function renderUsers(el) {
     el.innerHTML = '<div class="loading">Loading users...</div>';
@@ -800,7 +807,10 @@
     createUserInFlight = true;
     setAdminCreateUserPending(true);
 
-    apiFetch('/api/admin/users', { method: 'POST', body: body }).then(function (res) {
+    IronClawUserCreateForm.request(apiFetch, '/api/admin/users', {
+      method: 'POST',
+      body: body
+    }).then(function (res) {
       var formEl = document.getElementById('create-user-form');
       if (formEl) formEl.style.display = 'none';
       if (nameEl) nameEl.value = '';
@@ -808,7 +818,7 @@
       var createdToken = res && (res.token || res.plaintext_token);
 
       // Reload users list
-      return apiFetch('/api/admin/users').then(function (raw) {
+      return IronClawUserCreateForm.request(apiFetch, '/api/admin/users').then(function (raw) {
         usersCache = Array.isArray(raw) ? raw : (raw && raw.users ? raw.users : []);
         renderUsersPage(el);
         if (createdToken) {
@@ -816,7 +826,13 @@
         }
       });
     }).catch(function (err) {
-      alert('Failed to create user: ' + err.message);
+      alert(IronClawUserCreateForm.text(
+        {
+          key: 'users.failedCreateWithMessage',
+          fallback: 'Failed to create user: {message}',
+        },
+        { message: IronClawUserCreateForm.errorMessage(err) }
+      ));
     }).finally(function () {
       createUserInFlight = false;
       setAdminCreateUserPending(false);
@@ -824,20 +840,7 @@
   }
 
   function setAdminCreateUserPending(isPending) {
-    var submit = document.querySelector('[data-action="create-user"]');
-    var cancel = document.querySelector('[data-action="hide-create-form"]');
-    var nameEl = document.getElementById('new-user-name');
-    var emailEl = document.getElementById('new-user-email');
-    var roleEl = document.getElementById('new-user-role');
-    [nameEl, emailEl, roleEl, cancel].forEach(function (el) {
-      if (el) el.disabled = isPending;
-    });
-    if (submit) {
-      submit.disabled = isPending;
-      submit.setAttribute('aria-busy', isPending ? 'true' : 'false');
-      submit.classList.toggle('is-loading', isPending);
-      submit.textContent = isPending ? 'Creating...' : 'Create';
-    }
+    IronClawUserCreateForm.setPending(createUserPendingConfig, isPending);
   }
 
   function showTokenBanner(tokenValue) {
