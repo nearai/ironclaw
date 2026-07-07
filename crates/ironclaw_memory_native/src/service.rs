@@ -337,7 +337,11 @@ impl MemoryService for NativeMemoryService {
             .with_pre_fusion_limit(request.max_snippets.saturating_mul(2))
             // Full-text only: the native backend declares vector_search=false and
             // fails closed on a vector request (matches the `search` method).
-            .with_vector(false);
+            .with_vector(false)
+            // The query is derived from a recent user message, not authored
+            // as a search query — match it as literal content rather than
+            // interpreting any query syntax it happens to contain.
+            .with_literal_phrase(true);
         let mut results = self
             .backend
             .search(&context, search_request)

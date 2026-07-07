@@ -1620,6 +1620,18 @@ fn translate_filter(
             ));
             Ok(())
         }
+        Filter::FtsPhrase { key, phrase } => {
+            // `phraseto_tsquery` requires the lexemes it finds to appear as
+            // an exact adjacent phrase, giving literal-phrase semantics
+            // instead of `plainto_tsquery`'s implicit AND-of-terms.
+            params.push(Box::new(phrase.clone()));
+            out.push_str(&format!(
+                "(to_tsvector('english', COALESCE(indexed->>'{}', '')) @@ phraseto_tsquery('english', ${}))",
+                key.as_str(),
+                params.len()
+            ));
+            Ok(())
+        }
         Filter::VectorNearest { .. } => Err(FilesystemError::Unsupported {
             // Same reason as libsql: VectorNearest is a ranking operation
             // and is evaluated at the top-level `query` method, not as a

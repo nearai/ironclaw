@@ -95,6 +95,76 @@ async fn native_provider_reads_writes_lists_and_searches_through_memory_service(
 }
 
 #[tokio::test]
+async fn native_context_retrieve_matches_literal_phrase_while_search_matches_free_form() {
+    // `retrieve_context` (prompt-context recall) and `search` (the
+    // user-authored `builtin.memory_search` path) must diverge on query
+    // semantics: retrieve_context treats its query as literal phrase
+    // content, search treats it as a free-form (token-AND) query. Two
+    // documents distinguish the two: one contains the exact phrase, the
+    // other contains the same three tokens in a different order — a
+    // phrase match excludes the reordered document, a free-form match
+    // does not.
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+    let invocation = invocation();
+
+    for (target, content) in [
+        ("phrase-order.md", "shipment tracking id 12345"),
+        ("reordered.md", "id tracking shipment reversed"),
+    ] {
+        service
+            .write(
+                invocation.clone(),
+                MemoryServiceWriteRequest {
+                    target: target.to_string(),
+                    content: content.to_string(),
+                    append: false,
+                    old_string: None,
+                    new_string: None,
+                    replace_all: false,
+                    metadata: None,
+                    timezone: None,
+                },
+            )
+            .await
+            .expect("write through IronClaw memory facade");
+    }
+
+    let context = service
+        .retrieve_context(
+            invocation.clone(),
+            MemoryServiceContextRequest {
+                query: "shipment tracking id".to_string(),
+                max_snippets: 5,
+                context_profile_id: MemoryContextProfileId::new("default").unwrap(),
+            },
+        )
+        .await
+        .expect("retrieve_context through IronClaw memory facade");
+    assert_eq!(
+        context.len(),
+        1,
+        "literal-phrase recall must exclude the reordered document"
+    );
+    assert!(context[0].model_content.contains("shipment tracking id"));
+
+    let search = service
+        .search(
+            invocation,
+            MemoryServiceSearchRequest {
+                query: "shipment tracking id".to_string(),
+                limit: 5,
+            },
+        )
+        .await
+        .expect("search through IronClaw memory facade");
+    assert_eq!(
+        search.results.len(),
+        2,
+        "free-form search must match both documents on token presence alone"
+    );
+}
+
+#[tokio::test]
 async fn native_context_retrieve_filters_cross_scope_results_and_hashes_snippet_refs() {
     let service = NativeMemoryService::new(Arc::new(MockSearchBackend {
         results: vec![

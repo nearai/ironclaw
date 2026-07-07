@@ -539,6 +539,16 @@ fn filter_matches(
             Some(IndexValue::Text(stored)) => fts_naive_matches(stored, query),
             _ => false,
         },
+        Filter::FtsPhrase { key, phrase } => match indexed.get(key) {
+            // Literal-phrase match: plain case-insensitive substring
+            // content, never interpreted as query syntax. An empty phrase
+            // matches nothing rather than degrading to `contains("")`,
+            // which would match every row.
+            Some(IndexValue::Text(stored)) => {
+                !phrase.is_empty() && stored.to_lowercase().contains(&phrase.to_lowercase())
+            }
+            _ => false,
+        },
         // Audit finding F5: `Filter::VectorNearest` is a ranking operation
         // and is only meaningful at the top level of a `query` filter.
         // The top of `query` extracts a top-level `VectorNearest` before
@@ -554,33 +564,17 @@ fn filter_matches(
     }
 }
 
-/// Coarse FTS approximation: a whole-query FTS5 double-quoted phrase
-/// (`"..."`, embedded `"` doubled) matches as literal substring content;
-/// otherwise tokenize the query on whitespace and require every token to
-/// appear (case-insensitively) in the stored text. This matches FTS5's
-/// phrase and default `AND`-of-terms behavior closely enough for the
-/// in-memory reference; the SQL backends use the real engines.
+/// Coarse FTS approximation: tokenize the query on whitespace and require
+/// every token to appear (case-insensitively) in the stored text. This
+/// matches FTS5's default `AND`-of-terms behavior closely enough for the
+/// in-memory reference; the SQL backends use the real engines. Literal
+/// phrase matching (never interpreting the input as query syntax) is a
+/// distinct filter — see [`Filter::FtsPhrase`].
 fn fts_naive_matches(stored: &str, query: &str) -> bool {
     let stored_lower = stored.to_lowercase();
-    if let Some(phrase) = fts5_literal_phrase(query) {
-        return stored_lower.contains(&phrase.to_lowercase());
-    }
     query
         .split_whitespace()
         .all(|token| stored_lower.contains(&token.to_lowercase()))
-}
-
-/// If `query` is a single FTS5 double-quoted phrase, return its unescaped
-/// literal content (embedded `""` collapsed to `"`). `None` for anything
-/// else, including an empty or unterminated quote.
-fn fts5_literal_phrase(query: &str) -> Option<String> {
-    let inner = query.strip_prefix('"')?.strip_suffix('"')?;
-    if inner.is_empty() {
-        // An empty phrase (`""`) is not a literal-phrase query — treating it
-        // as one would make `contains("")` match every stored row.
-        return None;
-    }
-    Some(inner.replace("\"\"", "\""))
 }
 
 /// If `filter` is a top-level `VectorNearest` (the only shape the SQL
@@ -908,13 +902,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fts_filter_matches_quoted_phrase_as_literal_content() {
-        // Callers that bound and quote attacker-controlled text into a
-        // single FTS5 phrase (loop-support's `memory_search_query_from_message`)
-        // send a query wrapped in `"..."` with embedded `"` doubled. The
-        // naive matcher must treat that as a literal-phrase lookup rather
-        // than whitespace-splitting the query and matching the leading/
-        // trailing quote characters as part of the first/last token.
+    async fn fts_phrase_filter_matches_literal_content() {
+        // `Filter::FtsPhrase` types the "match this text literally" intent
+        // instead of encoding it as FTS5 query syntax at the caller: the raw
+        // phrase is never parsed, so metacharacters in ordinary text land as
+        // literal content rather than column filters or boolean operators.
         let fs = InMemoryBackend::new();
         let kind = RecordKind::new("chunk").unwrap();
         for (path, text) in [
@@ -931,9 +923,9 @@ mod tests {
         let results = fs
             .query(
                 &vpath("/memory"),
-                &Filter::Fts {
+                &Filter::FtsPhrase {
                     key: key("content"),
-                    query: "\"shipment tracking id\"".into(),
+                    phrase: "shipment tracking id".into(),
                 },
                 Page::default(),
             )
@@ -941,8 +933,8 @@ mod tests {
             .unwrap();
         assert_eq!(results.len(), 1);
 
-        // Embedded `"` in the original content is escaped as `""` per FTS5
-        // convention; the phrase match must unescape it before comparing.
+        // FTS5 metacharacters (quotes) in the phrase are literal content,
+        // not escaping syntax to interpret.
         let entry = Entry::record(kind.clone(), &serde_json::json!({}))
             .unwrap()
             .with_indexed(key("content"), IndexValue::Text("say \"hello\" now".into()));
@@ -952,9 +944,9 @@ mod tests {
         let results = fs
             .query(
                 &vpath("/memory"),
-                &Filter::Fts {
+                &Filter::FtsPhrase {
                     key: key("content"),
-                    query: "\"say \"\"hello\"\" now\"".into(),
+                    phrase: "say \"hello\" now".into(),
                 },
                 Page::default(),
             )
@@ -962,34 +954,20 @@ mod tests {
             .unwrap();
         assert_eq!(results.len(), 1);
 
-        // An empty quoted phrase must not degrade to `contains("")`, which
-        // would match every row; it falls back to token matching instead.
+        // An empty phrase must not degrade to `contains("")`, which would
+        // match every row.
         let empty_phrase_results = fs
             .query(
                 &vpath("/memory"),
-                &Filter::Fts {
+                &Filter::FtsPhrase {
                     key: key("content"),
-                    query: "\"\"".into(),
+                    phrase: "".into(),
                 },
                 Page::default(),
             )
             .await
             .unwrap();
         assert!(empty_phrase_results.is_empty());
-
-        // An unterminated quote is not a literal phrase either.
-        let unterminated_results = fs
-            .query(
-                &vpath("/memory"),
-                &Filter::Fts {
-                    key: key("content"),
-                    query: "\"unterminated".into(),
-                },
-                Page::default(),
-            )
-            .await
-            .unwrap();
-        assert!(unterminated_results.is_empty());
     }
 
     #[tokio::test]

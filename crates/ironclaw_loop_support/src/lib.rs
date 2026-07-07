@@ -28,6 +28,7 @@ mod filesystem_skill_bundle_source;
 pub mod identity_context;
 mod input_port;
 mod input_queue;
+mod memory_context;
 mod model_capability_view;
 mod prompt_context_budget;
 mod skill_bundle_context_source;
@@ -133,7 +134,7 @@ use ironclaw_threads::{
     ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
-    LoopGateRef, LoopMessageRef, TurnActor, TurnId, TurnRunId, TurnScope,
+    LoopGateRef, LoopMessageRef, TurnId, TurnRunId, TurnScope,
     run_profile::ModelProfileId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
@@ -146,23 +147,15 @@ use ironclaw_turns::{
         LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputCursor, LoopModelMessage,
         LoopModelPort, LoopModelRequest, LoopModelResponse, LoopModelUsage,
         LoopPromptBundleAuthority, LoopRunContext, LoopRunInfoPort, LoopSafeSummary,
-        LoopTranscriptPort, MemoryPromptContextRequest, MemoryPromptContextService,
-        ModelStreamChunk, ParentLoopOutput, PromptMode, UpdateAssistantDraft,
-        VisibleCapabilityRequest, VisibleCapabilitySurface, sanitize_model_visible_text,
-        sort_instruction_snippets_for_prompt,
+        LoopTranscriptPort, MemoryPromptContextService, ModelStreamChunk, ParentLoopOutput,
+        PromptMode, UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        sanitize_model_visible_text, sort_instruction_snippets_for_prompt,
     },
 };
 use serde::{Deserialize, Serialize};
 
 const EMPTY_SURFACE_VERSION: &str = "empty:v1";
 const LOOP_SYSTEM_ROLE: &str = "system";
-/// Upper bound on memory snippets admitted into one loop context bundle.
-/// Not yet caller-configurable — no composition site has needed a different
-/// value; revisit if one does.
-const DEFAULT_MEMORY_CONTEXT_MAX_SNIPPETS: usize = 5;
-/// Upper bound (in `char`s) admitted into a memory-recall search query
-/// derived from a user message, before backend dispatch.
-const MEMORY_QUERY_MAX_CHARS: usize = 512;
 
 pub fn raw_agent_loop_host_error(
     component: &'static str,
@@ -402,54 +395,12 @@ where
             }
             None => Vec::new(),
         };
-        let memory_snippets = match latest_user_message_query(&context.messages) {
-            Some(query) => {
-                // Explicit thread owner wins over the submitting actor: shared
-                // conversation routes intentionally let actor/owner diverge
-                // (`validate_thread_scope_for_run`), and memory must recall
-                // under the thread's owner, not whichever actor is currently
-                // posting into it.
-                let actor = self
-                    .run_context
-                    .scope
-                    .explicit_owner_user_id()
-                    .cloned()
-                    .map(TurnActor::new)
-                    .or_else(|| self.run_context.actor().cloned())
-                    .unwrap_or_else(|| {
-                        TurnActor::new(self.run_context.scope.to_resource_scope().user_id)
-                    });
-                // Unlike the skill/identity sources above, memory recall is
-                // best-effort prompt enrichment, not required context —
-                // a backend hiccup (contention, transient unavailability)
-                // degrades to no snippets rather than failing the turn.
-                match self
-                    .memory_context_source
-                    .load_memory_snippets(MemoryPromptContextRequest {
-                        scope: self.run_context.scope.clone(),
-                        actor,
-                        query,
-                        max_snippets: DEFAULT_MEMORY_CONTEXT_MAX_SNIPPETS,
-                        context_profile_id: self
-                            .run_context
-                            .resolved_run_profile
-                            .context_profile_id
-                            .clone(),
-                    })
-                    .await
-                {
-                    Ok(snippets) => snippets,
-                    Err(error) => {
-                        tracing::debug!(
-                            ?error,
-                            "memory context recall failed; continuing without snippets"
-                        );
-                        Vec::new()
-                    }
-                }
-            }
-            None => Vec::new(),
-        };
+        let memory_snippets = memory_context::load_memory_snippets_for_run(
+            &context.messages,
+            &self.run_context,
+            self.memory_context_source.as_ref(),
+        )
+        .await;
 
         let compaction_message_index = context
             .messages
@@ -1907,33 +1858,6 @@ fn history_summaries_by_ref(summaries: Vec<SummaryArtifact>) -> HashMap<String, 
         .collect()
 }
 
-/// Search query for memory recall: the most recent user-authored message in
-/// the loaded context window, or `None` if the window has no user message
-/// (nothing to search for — the caller must skip the memory lookup entirely).
-/// The raw message is attacker-controlled, so it is bounded and quoted into a
-/// single literal FTS5 phrase (see [`memory_search_query_from_message`])
-/// before it ever reaches the memory backend.
-fn latest_user_message_query(messages: &[ContextMessage]) -> Option<String> {
-    messages
-        .iter()
-        .rev()
-        .find(|message| message.kind == MessageKind::User)
-        .map(|message| message.content.trim())
-        .filter(|content| !content.is_empty())
-        .map(memory_search_query_from_message)
-}
-
-/// Turns a raw, potentially attacker-controlled message into a memory-backend
-/// search query: bounded to [`MEMORY_QUERY_MAX_CHARS`] and quoted as a single
-/// FTS5 phrase (embedded `"` doubled per FTS5 escaping) so query-syntax
-/// metacharacters in ordinary conversational text — hyphens, colons, commas —
-/// can never be parsed as column filters or boolean operators by the
-/// backend's full-text index; they land as literal phrase content instead.
-fn memory_search_query_from_message(content: &str) -> String {
-    let bounded: String = content.chars().take(MEMORY_QUERY_MAX_CHARS).collect();
-    format!("\"{}\"", bounded.replace('"', "\"\""))
-}
-
 fn context_message_to_compaction_metadata(
     message: &ContextMessage,
 ) -> Option<LoopContextCompactionMetadata> {
@@ -2247,36 +2171,5 @@ mod tests {
             Some("2Fassistant-directives.md")
         );
         assert_eq!(personal_context_source_label("///"), None);
-    }
-
-    #[test]
-    fn memory_search_query_from_message_quotes_fts5_metacharacters() {
-        // Hyphens, colons, and commas are FTS5 query-syntax metacharacters
-        // (column filters, NOT-prefix, etc.) — raw conversational text hits
-        // them constantly. Quoting the whole message as one literal phrase
-        // neutralizes them instead of crashing the backend's query parser.
-        let query = memory_search_query_from_message("write the stale-ref file, please: now");
-
-        assert_eq!(
-            query, "\"write the stale-ref file, please: now\"",
-            "message must be wrapped as a single literal FTS5 phrase"
-        );
-    }
-
-    #[test]
-    fn memory_search_query_from_message_escapes_embedded_quotes() {
-        let query = memory_search_query_from_message(r#"say "hello" now"#);
-
-        assert_eq!(query, r#""say ""hello"" now""#);
-    }
-
-    #[test]
-    fn memory_search_query_from_message_bounds_length() {
-        let long_message = "a".repeat(MEMORY_QUERY_MAX_CHARS + 100);
-
-        let query = memory_search_query_from_message(&long_message);
-
-        // 2 quote chars + MEMORY_QUERY_MAX_CHARS content chars.
-        assert_eq!(query.chars().count(), MEMORY_QUERY_MAX_CHARS + 2);
     }
 }
