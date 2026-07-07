@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
+import { CONNECTION_STATUS } from "../lib/connection-status.js";
+
 function loadConnectionStatusForTest() {
   const source = readFileSync(new URL("./connection-status.js", import.meta.url), "utf8");
   const body = source
@@ -11,6 +13,7 @@ function loadConnectionStatusForTest() {
     .join("\n")
     .replace("export function ConnectionStatus", "function ConnectionStatus");
   const context = {
+    CONNECTION_STATUS,
     html: (strings, ...values) => ({ strings, values }),
     useT: () => (key) => key,
     globalThis: {},
@@ -25,8 +28,10 @@ function loadConnectionStatusForTest() {
 test("ConnectionStatus suppresses transient initial connecting state", () => {
   const ConnectionStatus = loadConnectionStatusForTest();
 
-  assert.equal(ConnectionStatus({ status: "connecting" }), null);
-  const reconnecting = ConnectionStatus({ status: "reconnecting" });
+  assert.equal(ConnectionStatus({ status: CONNECTION_STATUS.CONNECTING }), null);
+  const reconnecting = ConnectionStatus({
+    status: CONNECTION_STATUS.RECONNECTING,
+  });
   assert.notEqual(reconnecting, null);
   assert.equal(typeof reconnecting, "object");
 });

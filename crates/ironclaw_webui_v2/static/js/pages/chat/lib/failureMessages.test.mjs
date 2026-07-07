@@ -6,6 +6,7 @@ import {
   failureMessageForRunStatus,
   rewriteConnectionLostRunFailures,
 } from "./failureMessages.js";
+import { CONNECTION_STATUS } from "./connection-status.js";
 
 test("failureMessageForRunStatus prefers trimmed failureSummary", () => {
   assert.equal(
@@ -58,7 +59,7 @@ test("failureMessageForRunStatus prefers connection copy for disconnected driver
       failureCategory: "driver_unavailable",
       failureSummary:
         "The run failed because the execution driver was temporarily unavailable.",
-      connectionStatus: "disconnected",
+      connectionStatus: CONNECTION_STATUS.DISCONNECTED,
     }),
     CONNECTION_LOST_RUN_FAILURE_MESSAGE,
   );
@@ -71,7 +72,7 @@ test("failureMessageForRunStatus keeps non-connection driver failures unchanged"
       failureCategory: "driver_unavailable",
       failureSummary:
         "The run failed because the execution driver was temporarily unavailable.",
-      connectionStatus: "connected",
+      connectionStatus: CONNECTION_STATUS.CONNECTED,
     }),
     "The run failed because the execution driver was temporarily unavailable.",
   );
@@ -84,7 +85,7 @@ test("failureMessageForRunStatus does not hide unrelated failures while disconne
       failureCategory: "driver_invalid_request",
       failureSummary:
         "The run failed because the execution driver rejected the request.",
-      connectionStatus: "disconnected",
+      connectionStatus: CONNECTION_STATUS.DISCONNECTED,
     }),
     "The run failed because the execution driver rejected the request.",
   );

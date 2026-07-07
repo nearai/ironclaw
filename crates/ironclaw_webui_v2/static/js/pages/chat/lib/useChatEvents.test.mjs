@@ -12,6 +12,7 @@ import {
   CONNECTION_LOST_RUN_FAILURE_MESSAGE,
   failureMessageForRunStatus,
 } from "./failureMessages.js";
+import { CONNECTION_STATUS } from "./connection-status.js";
 import { gateFromProjectionGate } from "./gates.js";
 import {
   createToolActivityState,
@@ -46,9 +47,8 @@ function createUseChatEventsHarness({
   gateFromEvent = () => null,
   failureMessageForRunStatus = () => "run failed",
   locallyResolvedGatesRef = { current: new Map() },
-  connectionStatusRef,
-  connectionInterruptedRunIdsRef,
-  connectionInterruptedUnknownRef,
+  noteConnectionInterruptedRunId = () => {},
+  connectionContextForRunFailure = () => ({}),
 } = {}) {
   let messages = [];
   let pendingGate = null;
@@ -98,9 +98,8 @@ function createUseChatEventsHarness({
     activeRunRef,
     locallyResolvedGatesRef,
     toolActivityStateRef,
-    connectionStatusRef,
-    connectionInterruptedRunIdsRef,
-    connectionInterruptedUnknownRef,
+    noteConnectionInterruptedRunId,
+    connectionContextForRunFailure,
     onRunSettled: (runId, { success }) => settledRuns.push({ runId, success }),
   });
 
@@ -273,6 +272,35 @@ test("useChatEvents: progress clears non-auth gates for the resumed run", () => 
   });
 
   assert.equal(harness.pendingGate, null);
+});
+
+test("useChatEvents: observed run ids are passed to the connection observer", () => {
+  const notedRunIds = [];
+  const harness = createUseChatEventsHarness({
+    noteConnectionInterruptedRunId: (runId) => notedRunIds.push(runId),
+  });
+
+  harness.handleEvent({
+    type: "accepted",
+    frame: {
+      ack: {
+        run_id: "run-accepted-1",
+        thread_id: "thread-1",
+        status: "queued",
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "capability_progress",
+    frame: {
+      progress: {
+        turn_run_id: "run-progress-1",
+        kind: "tool_running",
+      },
+    },
+  });
+
+  assert.deepEqual(notedRunIds, ["run-accepted-1", "run-progress-1"]);
 });
 
 test("useChatEvents: approval gate annotates an existing tool activity", () => {
@@ -713,10 +741,16 @@ test("useChatEvents: failed terminal projection appends visible error", () => {
 
 test("useChatEvents: interrupted driver_unavailable projection shows connection error", () => {
   const runId = "run-disconnected-driver";
+  const contextRunIds = [];
   const harness = createUseChatEventsHarness({
     failureMessageForRunStatus,
-    connectionStatusRef: { current: "connected" },
-    connectionInterruptedRunIdsRef: { current: new Set([runId]) },
+    connectionContextForRunFailure: (actualRunId) => {
+      contextRunIds.push(actualRunId);
+      return {
+        connectionStatus: CONNECTION_STATUS.CONNECTED,
+        connectionInterrupted: actualRunId === runId,
+      };
+    },
   });
 
   harness.setCurrentActiveRun({
@@ -748,6 +782,7 @@ test("useChatEvents: interrupted driver_unavailable projection shows connection 
   assert.equal(harness.messages[0].id, `err-${runId}`);
   assert.equal(harness.messages[0].role, "error");
   assert.equal(harness.messages[0].content, CONNECTION_LOST_RUN_FAILURE_MESSAGE);
+  assert.deepEqual(contextRunIds, [runId]);
 });
 
 test("useChatEvents: repeated failed projection updates existing error content", () => {

@@ -24,6 +24,10 @@ import {
   resetToolActivityState,
 } from "../lib/tool-activity-state.js";
 import { rewriteConnectionLostRunFailures } from "../lib/failureMessages.js";
+import {
+  CONNECTION_STATUS,
+  isConnectionLostStatus,
+} from "../lib/connection-status.js";
 import { toRenderAttachment, toWireAttachment } from "../lib/attachments.js";
 import { useHistory } from "./useHistory.js";
 import { useSSE } from "./useSSE.js";
@@ -35,7 +39,6 @@ const APPROVAL_GATE_PENDING_SEND_ERROR = "approval_gate_pending_send_blocked";
 const OAUTH_CALLBACK_CHANNEL = "ironclaw-product-auth";
 const OAUTH_CALLBACK_STORAGE_KEY = "ironclaw:product-auth:oauth-complete";
 const OAUTH_CALLBACK_MESSAGE_TYPE = "ironclaw:product-auth:oauth-complete";
-const CONNECTION_LOST_SSE_STATUSES = new Set(["disconnected", "reconnecting"]);
 
 async function withAuthTokenTimeout(task) {
   const controller = new AbortController();
@@ -132,7 +135,7 @@ export function useChat(threadId) {
   const [now, setNow] = React.useState(Date.now());
   const [activeRun, setActiveRunState] = React.useState(null);
   const activeRunRef = React.useRef(activeRun);
-  const connectionStatusRef = React.useRef("idle");
+  const connectionStatusRef = React.useRef(CONNECTION_STATUS.IDLE);
   const connectionInterruptedRunIdsRef = React.useRef(new Set());
   const connectionInterruptedUnknownRef = React.useRef(false);
   const setActiveRun = React.useCallback((next) => {
@@ -272,7 +275,7 @@ export function useChat(threadId) {
     locallyResolvedGatesRef.current.clear();
     connectionInterruptedRunIdsRef.current.clear();
     connectionInterruptedUnknownRef.current = false;
-    connectionStatusRef.current = "idle";
+    connectionStatusRef.current = CONNECTION_STATUS.IDLE;
   }, [threadId]);
 
   const cooldownSeconds = Math.max(0, Math.ceil((cooldownUntil - now) / 1000));
@@ -338,6 +341,38 @@ export function useChat(threadId) {
     };
   }, [pendingGate]);
 
+  const noteConnectionInterruptedRunId = React.useCallback((runId) => {
+    if (!runId || !connectionInterruptedUnknownRef.current) return;
+    connectionInterruptedRunIdsRef.current.add(runId);
+    connectionInterruptedUnknownRef.current = false;
+  }, []);
+
+  const connectionContextForRunFailure = React.useCallback((runId) => {
+    const connectionStatus = connectionStatusRef.current;
+    const connectionLostNow = isConnectionLostStatus(connectionStatus);
+    let connectionInterrupted = Boolean(
+      (runId && connectionInterruptedRunIdsRef.current.has(runId)) ||
+        connectionInterruptedUnknownRef.current,
+    );
+
+    if (connectionLostNow && runId) {
+      connectionInterruptedRunIdsRef.current.add(runId);
+      connectionInterrupted = true;
+    } else if (connectionLostNow) {
+      connectionInterruptedUnknownRef.current = true;
+      connectionInterrupted = true;
+    }
+
+    if (runId && connectionInterruptedUnknownRef.current) {
+      connectionInterruptedRunIdsRef.current.add(runId);
+      connectionInterruptedUnknownRef.current = false;
+      connectionInterrupted = true;
+    }
+
+    if (!connectionInterrupted && !connectionLostNow) return {};
+    return { connectionStatus, connectionInterrupted };
+  }, []);
+
   const handleEvent = useChatEvents({
     threadId,
     setMessages,
@@ -347,9 +382,8 @@ export function useChat(threadId) {
     activeRunRef,
     locallyResolvedGatesRef,
     toolActivityStateRef,
-    connectionStatusRef,
-    connectionInterruptedRunIdsRef,
-    connectionInterruptedUnknownRef,
+    noteConnectionInterruptedRunId,
+    connectionContextForRunFailure,
     // Reborn's projection bridge does not yet emit `Text` items for
     // assistant replies, and never emits `capability_display_preview`
     // items in the projection state — the assistant reply and the rich
@@ -393,7 +427,7 @@ export function useChat(threadId) {
 
   React.useEffect(() => {
     connectionStatusRef.current = sseStatus;
-    if (!CONNECTION_LOST_SSE_STATUSES.has(sseStatus)) return;
+    if (!isConnectionLostStatus(sseStatus)) return;
     const runId = activeRunRef.current?.runId || null;
     if (runId) {
       connectionInterruptedRunIdsRef.current.add(runId);
@@ -554,8 +588,7 @@ export function useChat(threadId) {
         let runSettledBeforeResponse = false;
         if (response?.run_id && shouldTrackLocalRun) {
           if (connectionInterruptedUnknownRef.current) {
-            connectionInterruptedRunIdsRef.current.add(response.run_id);
-            connectionInterruptedUnknownRef.current = false;
+            noteConnectionInterruptedRunId(response.run_id);
             setMessages((prev) =>
               rewriteConnectionLostRunFailures(prev, { runId: response.run_id }),
             );
@@ -718,6 +751,7 @@ export function useChat(threadId) {
       setIsProcessing,
       setPendingGate,
       setActiveRun,
+      noteConnectionInterruptedRunId,
     ],
   );
 

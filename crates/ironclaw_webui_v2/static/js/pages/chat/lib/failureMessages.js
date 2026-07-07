@@ -1,22 +1,25 @@
+import { isConnectionLostStatus } from "./connection-status.js";
+
 export const CONNECTION_LOST_RUN_FAILURE_MESSAGE =
   "Connection to the server was lost. Please reconnect and try again.";
-
-const CONNECTION_LOST_STATUSES = new Set(["disconnected", "reconnecting"]);
 
 function normalizeText(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function normalizeLowerText(value) {
+  return normalizeText(value).toLowerCase();
+}
+
 function hasConnectionLostContext({ connectionStatus, connectionInterrupted }) {
-  const status = normalizeText(connectionStatus).toLowerCase();
-  return connectionInterrupted === true || CONNECTION_LOST_STATUSES.has(status);
+  return connectionInterrupted === true || isConnectionLostStatus(connectionStatus);
 }
 
 function isDriverUnavailableFailure({ failureCategory, failureSummary }) {
-  const category = normalizeText(failureCategory).toLowerCase();
+  const category = normalizeLowerText(failureCategory);
   if (category === "driver_unavailable") return true;
 
-  const summary = normalizeText(failureSummary).toLowerCase();
+  const summary = normalizeLowerText(failureSummary);
   return (
     (summary.includes("execution driver") &&
       summary.includes("temporarily unavailable")) ||
