@@ -110,6 +110,15 @@ export function formatMissionStatus(status, t) {
   return tx(t, `projects.status.${key}`, {}, fallback);
 }
 
+export function formatMissionCadence(mission, t) {
+  if (mission?.cadence_description) return mission.cadence_description;
+  const cadenceType = mission?.cadence_type || "";
+  if (String(cadenceType).toLowerCase() === "manual") {
+    return tx(t, "projects.missions.manual", {}, "Manual");
+  }
+  return cadenceType || tx(t, "projects.missions.manual", {}, "Manual");
+}
+
 export function formatThreadState(state, t) {
   const key = String(state || "unknown").toLowerCase();
   const fallbackByKey = {

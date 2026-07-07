@@ -37,14 +37,15 @@ function ProjectWidgetMount({ widget, projectId }) {
   }, [projectId, widget]);
 
   return html`
-      <div className="rounded-[20px] border border-white/10 bg-white/[0.03] p-4">
+    <div className="rounded-[20px] border border-white/10 bg-white/[0.03] p-4">
       <div className="mb-3">
         <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">${widget.manifest?.slot || t("projects.widgets.fallbackSlot")}</div>
         <div className="mt-1 text-lg font-semibold tracking-tight text-white">${widget.manifest?.name || widget.manifest?.id}</div>
       </div>
       ${errorName !== undefined
         ? html`<p className="rounded-xl border border-red-400/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">${t("projects.widgets.mountFailed", { name: errorName || t("projects.widgets.fallbackSlot") })}</p>`
-        : html`<div ref=${containerRef} />`}
+        : null}
+      <div ref=${containerRef} className=${errorName !== undefined ? "hidden" : ""} />
     </div>
   `;
 }

@@ -2,6 +2,7 @@ import { html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
 import { Panel, StatusPill } from "../../../design-system/primitives.js";
 import {
+  formatMissionCadence,
   formatMissionStatus,
   formatProjectDate,
   missionTone,
@@ -46,7 +47,7 @@ export function ProjectMissionsColumn({ missions, selectedMissionId, onSelectMis
                   <${StatusPill} tone=${missionTone(mission.status)} label=${formatMissionStatus(mission.status, t)} />
                 </div>
                 <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-400">
-                  <span>${mission.cadence_description || mission.cadence_type || t("projects.missions.manual")}</span>
+                  <span>${formatMissionCadence(mission, t)}</span>
                   <span>${t("projects.missions.threadCount", { count: mission.thread_count })}</span>
                   <span>${t("projects.missions.updated", { date: formatProjectDate(mission.updated_at, t) })}</span>
                 </div>

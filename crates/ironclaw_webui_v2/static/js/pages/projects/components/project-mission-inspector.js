@@ -4,6 +4,7 @@ import { Button } from "../../../design-system/button.js";
 import { Panel, StatusPill } from "../../../design-system/primitives.js";
 import { MarkdownRenderer } from "../../chat/components/markdown-renderer.js";
 import {
+  formatMissionCadence,
   formatMissionStatus,
   formatProjectDate,
   missionTone,
@@ -50,7 +51,7 @@ export function ProjectMissionInspector({
         </div>
 
         <div className="mt-4 grid gap-3 sm:grid-cols-2">
-          <${MetaCard} label=${t("projects.mission.cadence")} value=${mission.cadence_description || mission.cadence_type || t("projects.missions.manual")} />
+          <${MetaCard} label=${t("projects.mission.cadence")} value=${formatMissionCadence(mission, t)} />
           <${MetaCard} label=${t("projects.mission.threadsToday")} value=${t("projects.mission.threadsTodayValue", { count: mission.threads_today || 0, max: mission.max_threads_per_day || "∞" })} />
           <${MetaCard} label=${t("projects.mission.nextFire")} value=${mission.next_fire_at ? formatProjectDate(mission.next_fire_at, t) : t("projects.mission.notScheduled")} />
           <${MetaCard} label=${t("projects.mission.created")} value=${formatProjectDate(mission.created_at, t)} />
