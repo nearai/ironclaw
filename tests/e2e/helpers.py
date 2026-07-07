@@ -321,6 +321,17 @@ SEL_V2 = {
         "[data-testid='llm-provider-card'][data-provider-id='{provider_id}']"
     ),
     "llm_provider_disclosure": "llm-provider-disclosure",
+    "automation_row_for": (
+        "[data-testid='automation-row'][data-automation-id='{id}']"
+    ),
+    "automation_name_button_for": (
+        "[data-testid='automation-name-button'][data-automation-id='{id}']"
+    ),
+    "automation_detail": "[data-testid='automation-detail-panel']",
+    "automation_detail_title": "[data-testid='automation-detail-title']",
+    "automation_rename_button": "[data-testid='automation-rename-button']",
+    "automation_rename_input": "[data-testid='automation-rename-input']",
+    "automation_rename_save": "[data-testid='automation-rename-save']",
     "skills_card": "#skills-list .ext-card",
     "skill_name_placeholder": "skill-name",
     "skill_content_placeholder": "---\\nname: example\\ndescription: ...\\n---\\n",

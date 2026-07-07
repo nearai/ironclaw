@@ -26,6 +26,7 @@ Wiring confirmed manually before this test existed:
 
 import asyncio
 import json
+import uuid
 from urllib.parse import parse_qs, urlparse
 
 import aiohttp
@@ -42,6 +43,30 @@ from reborn_webui_harness import (
     send_message as _send_message,
     wait_for_assistant_message as _wait_for_assistant_message,
 )
+
+
+async def _wait_for_automation_named(
+    client: httpx.AsyncClient,
+    base_url: str,
+    name: str,
+    *,
+    timeout: float = 30.0,
+) -> dict:
+    last_body: dict = {}
+    for _ in range(int(timeout * 2)):
+        response = await client.get(
+            f"{base_url}/api/webchat/v2/automations",
+            timeout=15,
+        )
+        response.raise_for_status()
+        last_body = response.json()
+        for automation in last_body.get("automations", []):
+            if automation.get("name") == name:
+                return automation
+        await asyncio.sleep(0.5)
+    raise AssertionError(
+        f"Timed out waiting for automation {name!r}. Last body: {last_body}"
+    )
 
 
 async def test_reborn_v2_serves_shell_and_gates_auth(reborn_v2_server, reborn_v2_browser):
@@ -107,6 +132,70 @@ async def test_reborn_v2_ui_send_renders_reply(reborn_v2_page, reborn_v2_server)
     await expect(reborn_v2_page.locator(SEL_V2["msg_assistant"]).first).to_contain_text(
         "Hello", timeout=30000
     )
+
+
+async def test_reborn_v2_automation_rename_persists_from_ui(
+    reborn_v2_server, reborn_v2_browser
+):
+    """Creating an automation through chat can be renamed from /v2/automations."""
+    label = f"ui-{uuid.uuid4().hex[:8]}"
+    original_name = f"E2E rename original {label}"
+    renamed_name = f"E2E rename updated {label}"
+    headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
+
+    async with httpx.AsyncClient(headers=headers) as client:
+        thread_id = await _create_thread(client, reborn_v2_server)
+        await _send_message(
+            client,
+            reborn_v2_server,
+            thread_id,
+            f"reborn create automation rename target {label}",
+        )
+        await _wait_for_assistant_message(client, reborn_v2_server, thread_id)
+        automation = await _wait_for_automation_named(
+            client, reborn_v2_server, original_name
+        )
+        automation_id = automation["automation_id"]
+
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+    try:
+        await page.goto(f"{reborn_v2_server}/v2/automations?token={REBORN_V2_AUTH_TOKEN}")
+        row_selector = SEL_V2["automation_row_for"].format(id=automation_id)
+        row = page.locator(row_selector)
+        await expect(row).to_be_visible(timeout=15000)
+        await row.locator(
+            SEL_V2["automation_name_button_for"].format(id=automation_id)
+        ).click()
+
+        await expect(page.locator(SEL_V2["automation_detail"])).to_be_visible(
+            timeout=15000
+        )
+        await expect(page.locator(SEL_V2["automation_detail_title"])).to_contain_text(
+            original_name
+        )
+
+        await page.locator(SEL_V2["automation_rename_button"]).click()
+        rename_input = page.locator(SEL_V2["automation_rename_input"])
+        await expect(rename_input).to_have_value(original_name)
+        await rename_input.fill(f"  {renamed_name}  ")
+        await page.locator(SEL_V2["automation_rename_save"]).click()
+
+        await expect(page.locator(SEL_V2["automation_detail_title"])).to_contain_text(
+            renamed_name,
+            timeout=15000,
+        )
+        await expect(row).to_contain_text(renamed_name)
+
+        await page.reload()
+        row = page.locator(row_selector)
+        await expect(row).to_contain_text(renamed_name, timeout=15000)
+    finally:
+        await context.close()
+
+    async with httpx.AsyncClient(headers=headers) as client:
+        renamed = await _wait_for_automation_named(client, reborn_v2_server, renamed_name)
+        assert renamed["automation_id"] == automation_id
 
 
 async def test_reborn_v2_composer_accepts_draft_while_run_is_processing(reborn_v2_page):

@@ -118,7 +118,7 @@ export function AutomationDetailPanel({
   };
 
   return html`
-    <${Panel} className="overflow-hidden">
+    <${Panel} className="overflow-hidden" data-testid="automation-detail-panel">
       <div className="border-b border-[var(--v2-panel-border)] p-4 sm:p-5">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="min-w-0">
@@ -133,6 +133,7 @@ export function AutomationDetailPanel({
                         size="sm"
                         value=${draftName}
                         maxLength=${AUTOMATION_NAME_MAX_BYTES}
+                        data-testid="automation-rename-input"
                         aria-label=${t("automations.rename.nameLabel")}
                         disabled=${isMutating}
                         error=${Boolean(nameError)}
@@ -146,6 +147,7 @@ export function AutomationDetailPanel({
                         type="submit"
                         variant="primary"
                         size="icon-sm"
+                        data-testid="automation-rename-save"
                         aria-label=${t("common.save")}
                         title=${t("common.save")}
                         disabled=${isMutating}
@@ -172,7 +174,10 @@ export function AutomationDetailPanel({
                 `
               : html`
                   <div className="flex min-w-0 items-start gap-2">
-                    <h3 className="min-w-0 flex-1 truncate text-xl font-semibold tracking-tight text-iron-100">
+                    <h3
+                      data-testid="automation-detail-title"
+                      className="min-w-0 flex-1 truncate text-xl font-semibold tracking-tight text-iron-100"
+                    >
                       ${automation.display_name}
                     </h3>
                     ${canRename &&
@@ -181,6 +186,7 @@ export function AutomationDetailPanel({
                         type="button"
                         variant="ghost"
                         size="icon-sm"
+                        data-testid="automation-rename-button"
                         aria-label=${renameTitle}
                         title=${renameTitle}
                         disabled=${isMutating}
