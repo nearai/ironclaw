@@ -12,7 +12,11 @@ use ironclaw_auth::{AuthFlowId, CredentialAccountId};
 use ironclaw_conversations::{
     ConversationBindingService as ConversationBindingPort, InMemoryConversationServices,
 };
-use ironclaw_host_api::{AgentId, ApprovalRequestId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+use ironclaw_host_api::{
+    AgentId, ApprovalRequestId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
+    ProjectId, ResourceScope, TenantId, ThreadId, UserId, VirtualPath,
+};
 use ironclaw_product_adapters::{
     AdapterInstallationId, ApprovalDecision, ApprovalResolutionPayload, AuthRequirement,
     AuthResolutionPayload, AuthResolutionResult, ExternalActorRef, ExternalConversationRef,
@@ -40,9 +44,10 @@ use ironclaw_product_workflow::{
     ProductCommandName, ProductConversationBindingService, ProductConversationRouteKey,
     ProductConversationSubjectRouteResolutionRequest, ProductConversationSubjectRouteResolver,
     ProductInstallationKey, ProductInstallationScope, ProductWorkflowError,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, ResolveBindingRequest,
-    ResolvedBinding, SourceBindingKey, StaticProductInstallationResolver, approval_gate_ref,
+    RebornFilesystemIdempotencyLedger, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, ResolveBindingRequest, ResolvedBinding, SourceBindingKey,
+    StaticProductInstallationResolver, approval_gate_ref,
 };
 use ironclaw_threads::InMemorySessionThreadService;
 use ironclaw_turns::{
@@ -3131,6 +3136,61 @@ async fn before_inbound_policy_rewrite_replays_rewritten_outcome_on_duplicate() 
     assert_eq!(prior_run, first_run);
     // Policy and inbound must NOT be re-invoked on duplicate replay.
     assert_eq!(policy.request_count(), 1);
+    assert_eq!(inbound.accepted_count(), 1);
+}
+
+fn scoped_in_memory_filesystem() -> Arc<ScopedFilesystem<InMemoryBackend>> {
+    let backend = Arc::new(InMemoryBackend::new());
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/engine").expect("engine alias"),
+        VirtualPath::new("/engine/production-ledger-contract").expect("engine target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
+}
+
+// PR #5653 review: earlier coverage only exercised the test-support in-memory
+// ledger fake, never the production CAS-backed `RebornFilesystemIdempotencyLedger`
+// through the `DefaultProductWorkflow` caller. This composes the real adapter
+// (over an in-memory `ScopedFilesystem`) with the existing fake inbound service.
+#[tokio::test]
+async fn submit_inbound_duplicate_replay_uses_production_filesystem_ledger() {
+    let filesystem = scoped_in_memory_filesystem();
+    let scope = ResourceScope {
+        tenant_id: TenantId::new("tenant:prod-ledger").expect("tenant"),
+        user_id: UserId::new("user:prod-ledger").expect("user"),
+        agent_id: Some(AgentId::new("agent:prod-ledger").expect("agent")),
+        project_id: Some(ProjectId::new("project:prod-ledger").expect("project")),
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    };
+    let ledger = Arc::new(RebornFilesystemIdempotencyLedger::new(filesystem, scope));
+    let inbound = Arc::new(FakeInboundTurnService::new());
+    let binding = Arc::new(FakeConversationBindingService::new());
+    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger, binding);
+    let envelope = sample_envelope("prod-ledger-replay");
+
+    let first = workflow
+        .submit_inbound(envelope.clone())
+        .await
+        .expect("first submit accepted");
+    assert!(matches!(first, ProductInboundAck::Accepted { .. }));
+    assert_eq!(inbound.accepted_count(), 1);
+
+    let second = workflow
+        .submit_inbound(envelope)
+        .await
+        .expect("duplicate submit does not error");
+    let ProductInboundAck::Duplicate { prior } = second else {
+        panic!("expected duplicate ack from production filesystem ledger, got {second:?}")
+    };
+    assert_eq!(
+        *prior, first,
+        "duplicate replay must return the exact prior outcome, not a fresh submission"
+    );
+    // Inbound must NOT be re-invoked on duplicate replay.
     assert_eq!(inbound.accepted_count(), 1);
 }
 

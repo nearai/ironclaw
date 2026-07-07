@@ -3,7 +3,9 @@ reviewers:
   - id: reviewer
     display_name: ironloop/common-reviewer
     instructions: .ironloop/agents/common-reviewer/AGENTS.md
-    auto_review: true
+    auto_review:
+      enabled: true
+      on_update: false
 
 developers:
   - id: implementer
