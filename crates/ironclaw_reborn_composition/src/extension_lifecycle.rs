@@ -1,6 +1,7 @@
 // arch-exempt: large_file, channel-connect requirement + extension lifecycle and
-// its test module; the slack_user companion special-casing was removed in the
-// model-B remodel (docs/plans/2026-07-05-slack-bot-tools-remodel.md), plan #5604
+// its test module; includes restore-time compatibility cleanup for the retired
+// slack_user companion from the model-B remodel
+// (docs/plans/2026-07-05-slack-bot-tools-remodel.md), plan #5604
 use std::{collections::BTreeSet, sync::Arc};
 
 use ironclaw_extensions::{
@@ -45,6 +46,8 @@ use crate::mcp_discovery::{
 pub(crate) use active_publication::ActiveExtensionPublisher;
 #[cfg(test)]
 use active_publication::extension_trust_policy_input;
+
+const RETIRED_SLACK_USER_EXTENSION_ID: &str = "slack_user";
 
 // This port is deliberately scoped to LocalSingleUser composition. The
 // lifecycle service models the installed extension set, while active_registry
@@ -119,6 +122,9 @@ pub(crate) async fn restore_extension_lifecycle_state(
         .await
         .map_err(map_extension_installation_error)?
     {
+        if remove_retired_internal_installation(installation_store, &installation).await? {
+            continue;
+        }
         let package_ref = LifecyclePackageRef::new(
             LifecyclePackageKind::Extension,
             installation.extension_id().as_str(),
@@ -160,6 +166,33 @@ pub(crate) async fn restore_extension_lifecycle_state(
         }
     }
     Ok(())
+}
+
+async fn remove_retired_internal_installation(
+    installation_store: &Arc<dyn ExtensionInstallationStore>,
+    installation: &ExtensionInstallation,
+) -> Result<bool, ProductWorkflowError> {
+    if installation.extension_id().as_str() != RETIRED_SLACK_USER_EXTENSION_ID {
+        return Ok(false);
+    }
+
+    tracing::info!(
+        extension_id = installation.extension_id().as_str(),
+        installation_id = installation.installation_id().as_str(),
+        "removing retired internal extension installation during lifecycle restore"
+    );
+    installation_store
+        .delete_installation(installation.installation_id())
+        .await
+        .map_err(map_extension_installation_error)?;
+    match installation_store
+        .delete_manifest(installation.extension_id())
+        .await
+    {
+        Ok(()) | Err(ExtensionInstallationError::ManifestNotFound { .. }) => {}
+        Err(error) => return Err(map_extension_installation_error(error)),
+    }
+    Ok(true)
 }
 
 impl RebornLocalExtensionManagementPort {
@@ -2678,6 +2711,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restore_removes_retired_slack_user_installation_without_catalog_entry() {
+        let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
+        let extension_id =
+            ExtensionId::new(RETIRED_SLACK_USER_EXTENSION_ID).expect("valid extension id");
+        let installation_id =
+            ExtensionInstallationId::new(RETIRED_SLACK_USER_EXTENSION_ID).expect("valid install");
+        let manifest_hash = "sha256:retired-slack-user".to_string();
+        installation_store
+            .upsert_manifest(fixture_manifest_record_with_source(
+                retired_slack_user_manifest(),
+                ManifestSource::HostBundled,
+                Some(manifest_hash.clone()),
+            ))
+            .await
+            .expect("upsert retired slack_user manifest");
+        installation_store
+            .upsert_installation(
+                ExtensionInstallation::new(
+                    installation_id.clone(),
+                    extension_id.clone(),
+                    ExtensionActivationState::Enabled,
+                    ExtensionManifestRef::new(
+                        extension_id.clone(),
+                        Some(ManifestHash::new(manifest_hash).expect("valid hash")),
+                    ),
+                    Vec::new(),
+                    chrono::Utc::now(),
+                )
+                .expect("retired slack_user installation"),
+            )
+            .await
+            .expect("upsert retired slack_user installation");
+        let restored_lifecycle = Arc::new(Mutex::new(ExtensionLifecycleService::new(
+            ExtensionRegistry::new(),
+        )));
+        let restored_active_registry =
+            Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let restored_trust_policy = test_extension_trust_policy();
+        let restored_active_extensions = test_active_extension_publisher(
+            Arc::clone(&restored_active_registry),
+            Arc::clone(&restored_trust_policy),
+        );
+        let installation_store_trait: Arc<dyn ExtensionInstallationStore> =
+            installation_store.clone();
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(LocalFilesystem::new());
+
+        restore_extension_lifecycle_state(
+            &AvailableExtensionCatalog::from_packages(Vec::new()),
+            &filesystem,
+            &installation_store_trait,
+            &restored_lifecycle,
+            &restored_active_extensions,
+        )
+        .await
+        .expect("retired slack_user install is cleaned up during restore");
+
+        assert!(
+            installation_store
+                .get_installation(&installation_id)
+                .await
+                .expect("read retired installation")
+                .is_none()
+        );
+        assert!(
+            installation_store
+                .get_manifest(&extension_id)
+                .await
+                .expect("read retired manifest")
+                .is_none()
+        );
+        assert!(
+            restored_active_registry
+                .snapshot()
+                .get_extension(&extension_id)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn restore_refreshes_materialized_extension_assets_from_catalog() {
         let (_dir, storage_root, port, _active_registry, installation_store, _trust_policy) =
             extension_management_port_fixture_with_catalog_service_and_trust(
@@ -4877,6 +4989,36 @@ section = "capability_provider.tools"
 [[capability_provider.tools.capabilities]]
 id = "fixture.search"
 description = "Search fixture data"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/search.input.json"
+output_schema_ref = "schemas/search.output.json"
+"#
+    }
+
+    fn retired_slack_user_manifest() -> &'static str {
+        r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "slack_user"
+name = "Retired Slack User Extension"
+version = "0.1.0"
+description = "Retired internal Slack user tools companion"
+trust = "first_party_requested"
+
+[runtime]
+kind = "wasm"
+module = "wasm/slack_user_tool.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "slack_user.search"
+description = "Search Slack messages"
 effects = ["network"]
 default_permission = "ask"
 visibility = "model"
