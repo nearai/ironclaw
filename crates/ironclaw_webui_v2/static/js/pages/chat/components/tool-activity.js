@@ -309,12 +309,13 @@ function ToolDetailPanel({
    of flat objects, pretty-printed JSON for other structured payloads, and a
    plain preformatted block otherwise. */
 function ToolResult({ text }) {
+  const t = useT();
   const value = typeof text === "string" ? text.trim() : "";
 
   if (/^data:image\/(?:png|jpe?g|gif|webp|bmp);/i.test(value)) {
     return html`<img
       src=${value}
-      alt="Tool result"
+      alt=${t("tool.resultAlt")}
       className="max-h-72 max-w-full rounded-lg border border-iron-700 object-contain"
     />`;
   }

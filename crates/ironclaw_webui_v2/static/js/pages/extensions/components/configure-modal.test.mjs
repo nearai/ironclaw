@@ -18,7 +18,7 @@ function configureModalSourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { ConfigureModal };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { ConfigureModal, ModalShell };`;
 }
 
 function renderModal({
@@ -62,6 +62,7 @@ function renderModal({
       useCallback: (fn) => fn,
       useEffect: () => {},
       useRef: (value) => ({ current: value }),
+      useId: () => "configure-modal-title",
     },
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     useT: () => translate || ((key) => key),
@@ -104,7 +105,23 @@ function renderModal({
     onClose,
     onSaved,
   });
-  return { calls, invalidations, mutationConfig, rendered };
+  return { calls, context, invalidations, mutationConfig, rendered };
+}
+
+function renderFirstComponent(rendered, component, props = {}) {
+  if (!rendered || !Array.isArray(rendered.values)) return null;
+  if (rendered.values[0] === component) {
+    return component({
+      onClose: rendered.values[1],
+      title: rendered.values[2],
+      ...props,
+    });
+  }
+  for (const value of rendered.values) {
+    const child = renderFirstComponent(value, component, props);
+    if (child) return child;
+  }
+  return null;
 }
 
 test("ConfigureModal renders the pairing panel for a channel extension", () => {
@@ -178,6 +195,26 @@ test("ConfigureModal localizes channel pairing copy", () => {
   assert.match(body, /Localized connect/);
   assert.doesNotMatch(body, /Open Slack and message/);
   assert.doesNotMatch(body, /Enter pairing code/);
+});
+
+test("ConfigureModal renders a localized close label through ModalShell", () => {
+  const { context, rendered } = renderModal({
+    kind: "channel",
+    onboardingState: "pairing_required",
+    translate: (key) =>
+      ({
+        "common.close": "Localized close",
+        "extensions.configureName": "Configure {name}",
+      })[key] || key,
+  });
+
+  const shell = renderFirstComponent(
+    rendered,
+    context.globalThis.__testExports.ModalShell,
+  );
+
+  assert.ok(shell, "the configure modal shell should render");
+  assert.match(JSON.stringify(shell), /Localized close/);
 });
 
 test("ConfigureModal pairing redeems then activates, invalidates queries, and closes", async () => {

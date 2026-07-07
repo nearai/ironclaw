@@ -29,7 +29,6 @@ test("redeemSlackPairingCode posts Slack codes to the Reborn pairing endpoint", 
     provider_user_id: "install-alpha:U123",
     resumeError: false,
     resumedRunCount: 0,
-    message: "Slack account connected.",
   });
   assert.equal(calls.length, 1);
   assert.equal(calls[0].path, SLACK_PAIRING_REDEEM_PATH);
