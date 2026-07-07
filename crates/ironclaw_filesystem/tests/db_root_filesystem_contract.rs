@@ -416,6 +416,35 @@ async fn libsql_native_put_cas_version_advances_and_rejects_stale() {
     assert!(matches!(err, FilesystemError::VersionMismatch { .. }));
 }
 
+/// Mirrors `postgres_put_cas_version_on_missing_path_reports_no_found_version`:
+/// a `Version` CAS write against a path with no existing row must fail
+/// closed with `found: None` rather than panicking or reporting a stale
+/// version, so callers can distinguish "never written" from "someone
+/// else won the race" on the version-mismatch error.
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_native_put_cas_version_on_missing_path_reports_no_found_version() {
+    let filesystem = libsql_root().await;
+    let path = VirtualPath::new("/secrets/leases/L3-missing").unwrap();
+    let err = filesystem
+        .put(
+            &path,
+            Entry::bytes(vec![1]),
+            CasExpectation::Version(ironclaw_filesystem::RecordVersion::from_backend(1)),
+        )
+        .await
+        .expect_err("version CAS on a missing path must fail");
+    match err {
+        FilesystemError::VersionMismatch { found, .. } => {
+            assert!(
+                found.is_none(),
+                "missing path should report no found version, got: {found:?}"
+            );
+        }
+        other => panic!("expected VersionMismatch, got: {other:?}"),
+    }
+}
+
 #[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_delete_if_version_deletes_current_and_rejects_stale_or_missing() {
