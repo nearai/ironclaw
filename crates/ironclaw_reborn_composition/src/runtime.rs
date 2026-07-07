@@ -3148,6 +3148,9 @@ pub async fn build_reborn_runtime(
         Arc::clone(&loop_checkpoint_store) as Arc<dyn ironclaw_turns::LoopCheckpointStore>,
         await_dependent_run_evidence,
         thread_scope.clone(),
+    )
+    .with_checkpoint_state_store(
+        Arc::clone(&checkpoint_state_store) as Arc<dyn ironclaw_turns::CheckpointStateStore>
     );
     if let Some(local_runtime) = local_runtime {
         loop_exit_evidence = loop_exit_evidence.with_approval_gate_evidence(Arc::new(
@@ -4857,6 +4860,11 @@ output_schema_ref = "schemas/write.output.json"
     }
 
     #[derive(Debug, Default)]
+    struct ModelOutageGateway {
+        calls: AtomicUsize,
+    }
+
+    #[derive(Debug, Default)]
     struct FailingSkillContextSource {
         calls: AtomicUsize,
     }
@@ -4924,6 +4932,20 @@ output_schema_ref = "schemas/write.output.json"
                 .push(request);
             Ok(HostManagedModelResponse::assistant_reply(
                 self.reply.clone(),
+            ))
+        }
+    }
+
+    #[async_trait]
+    impl HostManagedModelGateway for ModelOutageGateway {
+        async fn stream_model(
+            &self,
+            _request: HostManagedModelRequest,
+        ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(HostManagedModelError::safe(
+                HostManagedModelErrorKind::Unavailable,
+                "model service is unavailable",
             ))
         }
     }
@@ -6956,6 +6978,50 @@ output_schema_ref = "schemas/write.output.json"
         assert_eq!(reply.status, TurnStatus::Completed);
         assert_eq!(reply.text.as_deref(), Some("recorded runtime reply"));
         assert_eq!(recorded_request_count(&requests), 1);
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn send_user_message_preserves_model_unavailable_after_retry_budget() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(ModelOutageGateway::default());
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-model-outage-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-model-outage-tenant".to_string(),
+            agent_id: "runtime-model-outage-agent".to_string(),
+            source_binding_id: "runtime-model-outage-source".to_string(),
+            reply_target_binding_id: "runtime-model-outage-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: RUNTIME_POLL_TIMEOUT,
+        })
+        .with_model_gateway_override(gateway.clone());
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            RUNTIME_SEND_TIMEOUT,
+            runtime.send_user_message(&conversation, "please write a long report"),
+        )
+        .await
+        .expect("runtime send should finish")
+        .expect("runtime send should succeed");
+
+        assert_eq!(reply.status, TurnStatus::Failed);
+        assert_eq!(reply.failure_category.as_deref(), Some("model_unavailable"));
+        assert_eq!(reply.text, None);
+        assert!(
+            gateway.calls.load(Ordering::SeqCst) >= 3,
+            "model outage should be retried before the run fails"
+        );
 
         runtime.shutdown().await.expect("runtime shutdown");
     }
