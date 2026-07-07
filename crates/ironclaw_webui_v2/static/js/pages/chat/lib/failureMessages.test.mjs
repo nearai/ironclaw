@@ -122,3 +122,20 @@ test("rewriteConnectionLostRunFailures updates existing driver_unavailable bubbl
   );
   assert.equal(rewriteConnectionLostRunFailures(next, { runId: "run-1" }), next);
 });
+
+test("rewriteConnectionLostRunFailures leaves history alone without a run id", () => {
+  const messages = [
+    {
+      id: "err-old-run",
+      role: "error",
+      content:
+        "The run failed because the execution driver was temporarily unavailable.",
+      failureCategory: "driver_unavailable",
+      failureSummary:
+        "The run failed because the execution driver was temporarily unavailable.",
+    },
+  ];
+
+  assert.equal(rewriteConnectionLostRunFailures(messages, { runId: null }), messages);
+  assert.equal(rewriteConnectionLostRunFailures(messages, {}), messages);
+});

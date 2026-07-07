@@ -58,11 +58,12 @@ export function failureMessageForRunStatus({
 
 export function rewriteConnectionLostRunFailures(messages, { runId } = {}) {
   if (!Array.isArray(messages)) return messages;
+  if (!runId) return messages;
   let changed = false;
-  const targetId = runId ? `err-${runId}` : null;
+  const targetId = `err-${runId}`;
   const next = messages.map((message) => {
     if (!message || message.role !== "error") return message;
-    if (targetId && message.id !== targetId) return message;
+    if (message.id !== targetId) return message;
 
     const content = failureMessageForRunStatus({
       status: message.failureStatus || "failed",

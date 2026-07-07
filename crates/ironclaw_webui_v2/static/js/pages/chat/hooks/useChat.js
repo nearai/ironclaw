@@ -400,7 +400,7 @@ export function useChat(threadId) {
     } else if (isProcessingRef.current) {
       connectionInterruptedUnknownRef.current = true;
     }
-    if (!runId && !isProcessingRef.current) return;
+    if (!runId) return;
     setMessages((prev) => rewriteConnectionLostRunFailures(prev, { runId }));
   }, [sseStatus, setMessages]);
 
@@ -556,6 +556,9 @@ export function useChat(threadId) {
           if (connectionInterruptedUnknownRef.current) {
             connectionInterruptedRunIdsRef.current.add(response.run_id);
             connectionInterruptedUnknownRef.current = false;
+            setMessages((prev) =>
+              rewriteConnectionLostRunFailures(prev, { runId: response.run_id }),
+            );
           }
           const localRunAdmission = localRunAdmissionRef.current;
           runSettledBeforeResponse = Boolean(
