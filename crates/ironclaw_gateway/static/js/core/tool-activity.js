@@ -27,7 +27,17 @@ function buildToolFailureText(parameters, error) {
 
 function getToolActivityBodyText(entry) {
   if (!entry) return '';
-  return entry.error || entry.result || entry.result_preview || '';
+  const sections = [];
+  if (entry.input_summary) {
+    sections.push('Input:\n' + entry.input_summary);
+  }
+  const output = entry.error || entry.result || entry.result_preview || '';
+  if (output) {
+    sections.push((entry.error ? 'Error' : 'Output') + ':\n' + output);
+  } else if (entry.status === 'running') {
+    sections.push('Status:\nRunning');
+  }
+  return sections.join('\n\n');
 }
 
 function normalizeHistoryToolCall(toolCall) {
@@ -35,6 +45,7 @@ function normalizeHistoryToolCall(toolCall) {
     call_id: toolCall.call_id || null,
     name: toolCall.name || 'tool',
     status: toolCall.has_error ? 'fail' : (toolCall.has_result ? 'success' : 'running'),
+    input_summary: toolCall.detail || toolCall.input_summary || toolCall.parameters || '',
     result_preview: toolCall.result_preview || '',
     result: toolCall.result || '',
     error: toolCall.error || '',
@@ -109,10 +120,16 @@ function applyToolActivityCardState(rendered, options) {
 
   rendered.output.textContent = getToolActivityBodyText(entry);
   const shouldAutoExpand = !!(
-    options.expandErrors
-    && !options.subtleFailure
-    && status === 'fail'
-    && rendered.output.textContent
+    rendered.output.textContent
+    && (
+      status === 'running'
+      || status === 'success'
+      || (
+        options.expandErrors
+        && !options.subtleFailure
+        && status === 'fail'
+      )
+    )
   );
   setToolActivityCardExpanded(rendered, shouldAutoExpand);
 }
@@ -206,8 +223,9 @@ function createToolActivityCard(entry, options) {
 function createActivityGroupFromEntries(entries, options) {
   const groupStatus = getToolActivityGroupStatus(entries);
   const hasTerminalError = groupStatus === 'fail';
+  const startExpanded = options.expanded !== false || hasTerminalError;
   const group = document.createElement('div');
-  group.className = 'activity-group' + (hasTerminalError ? '' : ' collapsed');
+  group.className = 'activity-group' + (startExpanded ? '' : ' collapsed');
 
   let totalDurationMs = 0;
   let hasDuration = false;
@@ -224,14 +242,14 @@ function createActivityGroupFromEntries(entries, options) {
     options.includeSummaryDuration && hasDuration,
     groupStatus
   );
-  if (hasTerminalError) {
+  if (startExpanded) {
     summary.querySelector('.activity-summary-chevron').classList.add('expanded');
     summary.setAttribute('aria-expanded', 'true');
   }
 
   const cardsContainer = document.createElement('div');
   cardsContainer.className = 'activity-cards-container';
-  cardsContainer.style.display = hasTerminalError ? 'flex' : 'none';
+  cardsContainer.style.display = startExpanded ? 'flex' : 'none';
 
   entries.forEach((entry, index) => {
     const rendered = createToolActivityCard(entry, {
@@ -367,6 +385,7 @@ function createToolActivityController(options) {
       call_id: event.call_id || null,
       name: event.name || 'tool',
       status: 'running',
+      input_summary: event.detail || event.input_summary || '',
       result_preview: '',
       result: '',
       error: '',
@@ -468,12 +487,14 @@ function createToolActivityController(options) {
 
     const cardsContainer = document.createElement('div');
     cardsContainer.className = 'activity-cards-container';
-    cardsContainer.style.display = 'none';
+    cardsContainer.style.display = 'flex';
     for (const rendered of activeEntries) {
       cardsContainer.appendChild(rendered.card);
     }
 
     const summary = createToolActivitySummary(activeEntries.length, totalDurationMs, true, groupStatus);
+    summary.setAttribute('aria-expanded', 'true');
+    summary.querySelector('.activity-summary-chevron').classList.add('expanded');
     summary.addEventListener('click', () => {
       const isOpen = cardsContainer.style.display !== 'none';
       cardsContainer.style.display = isOpen ? 'none' : 'flex';
@@ -482,7 +503,7 @@ function createToolActivityController(options) {
     });
 
     activeGroup.innerHTML = '';
-    activeGroup.classList.add('collapsed');
+    activeGroup.classList.remove('collapsed');
     activeGroup.appendChild(summary);
     activeGroup.appendChild(cardsContainer);
 
