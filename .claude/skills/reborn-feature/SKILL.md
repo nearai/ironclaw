@@ -132,7 +132,7 @@ alive in the tree today:
 - Port: `crates/ironclaw_product_workflow/src/reborn_services/llm_config.rs`
 - Facade: `LlmConfigService` field + `with_llm_config_service` + delegating
   methods in `crates/ironclaw_product_workflow/src/reborn_services.rs`
-- Impl: `crates/ironclaw_reborn_composition/src/llm_config_service.rs`
+- Impl: `crates/ironclaw_reborn_composition/src/llm_admin/llm_config_service.rs`
 - HTTP: `get_llm_config_descriptor()` in
   `crates/ironclaw_webui_v2/src/descriptors.rs` + handler in `handlers.rs`
 - Wiring: `build_llm_config_service` attach in
