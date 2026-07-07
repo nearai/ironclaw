@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use ironclaw_reborn_config::{RebornBootConfig, RebornConfigFile};
 
 use crate::LlmKeyStore;
-use crate::llm_catalog::{apply_stored_api_key, resolve_reborn_runtime_llm};
-use crate::llm_config_service::LlmReloadTrigger;
+use crate::llm_admin::llm_catalog::{apply_stored_api_key, resolve_reborn_runtime_llm};
+use crate::llm_admin::llm_config_service::LlmReloadTrigger;
 
 /// Live-reload adapter wired by the runtime. Re-resolves the LLM config from
 /// `config.toml` + `providers.json` + the stored key, then hot-swaps the
