@@ -55,6 +55,7 @@
   --v2-text-faint:  #8a9aab;
   --v2-inverse:     #ffffff;
   --v2-ink:         #0f1720;
+  --v2-chat-readable-max-width: 85%;
 
   /* Controls */
   --v2-select-chevron: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20width%3D%2712%27%20height%3D%2712%27%20viewBox%3D%270%200%2012%2012%27%20fill%3D%27none%27%20stroke%3D%27%235f7183%27%20stroke-width%3D%271.8%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27%3E%3Cpath%20d%3D%27M2.5%204.5%206%208l3.5-3.5%27/%3E%3C/svg%3E");
@@ -460,6 +461,21 @@ input:focus, select:focus, textarea:focus {
   background: transparent;
   color: var(--v2-text);
 }
+
+.v2-wrap-anywhere {
+  overflow-wrap: anywhere;
+}
+
+.v2-chat-readable-width {
+  max-width: 100%;
+}
+
+@media (min-width: 640px) {
+  .v2-chat-readable-width {
+    max-width: var(--v2-chat-readable-max-width);
+  }
+}
+
 .markdown-body .hljs-keyword,
 .markdown-body .hljs-selector-tag,
 .markdown-body .hljs-built_in,
@@ -496,4 +512,14 @@ input:focus, select:focus, textarea:focus {
 .markdown-body .hljs-meta,
 .markdown-body .hljs-doctag {
   color: var(--v2-danger-text);
+}
+
+/* ── Mobile responsive overrides ───────────────────────────────────── */
+@media (max-width: 639.98px) {
+  .markdown-body table {
+    display: block;
+    overflow-x: auto;
+    max-width: 100%;
+    table-layout: auto;
+  }
 }
