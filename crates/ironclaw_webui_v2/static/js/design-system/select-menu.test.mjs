@@ -81,6 +81,18 @@ function firstValueAfter(root, fragment) {
   return value;
 }
 
+function firstObjectWith(root, key) {
+  const value = collectObjects(root).find((candidate) => key in candidate);
+  assert.notEqual(value, undefined, `expected object with ${key}`);
+  return value;
+}
+
+function dependenciesChanged(previous, next) {
+  if (!previous || !next) return true;
+  if (previous.length !== next.length) return true;
+  return next.some((value, index) => !Object.is(value, previous[index]));
+}
+
 function keyEvent(key) {
   return {
     key,
@@ -106,16 +118,37 @@ const defaultOptions = [
 
 function createHarness() {
   const state = {
+    effectCursor: 0,
+    effects: [],
     hookCursor: 0,
     hooks: [],
+    listenerAdds: 0,
+    listenerRemoves: 0,
     listeners: {},
     refCursor: 0,
     refs: [],
   };
   const context = {
     React: {
-      useEffect(effect) {
-        return effect();
+      useEffect(effect, dependencies) {
+        const index = state.effectCursor;
+        state.effectCursor += 1;
+        const nextDependencies = dependencies ? Array.from(dependencies) : null;
+        const previous = state.effects[index];
+        if (
+          previous &&
+          nextDependencies &&
+          !dependenciesChanged(previous.dependencies, nextDependencies)
+        ) {
+          return undefined;
+        }
+        if (previous?.cleanup) previous.cleanup();
+        const cleanup = effect();
+        state.effects[index] = {
+          dependencies: nextDependencies,
+          cleanup: typeof cleanup === "function" ? cleanup : null,
+        };
+        return undefined;
       },
       useRef(initialValue) {
         const index = state.refCursor;
@@ -141,9 +174,11 @@ function createHarness() {
     },
     document: {
       addEventListener(type, listener) {
+        state.listenerAdds += 1;
         state.listeners[type] = listener;
       },
       removeEventListener(type, listener) {
+        state.listenerRemoves += 1;
         if (state.listeners[type] === listener) delete state.listeners[type];
       },
     },
@@ -161,6 +196,7 @@ function createHarness() {
     state,
     SelectMenu: exports.SelectMenu,
     render(props = {}) {
+      state.effectCursor = 0;
       state.hookCursor = 0;
       state.refCursor = 0;
       return exports.SelectMenu({
@@ -169,6 +205,32 @@ function createHarness() {
         "aria-label": "Tool permission",
         ...props,
       });
+    },
+    renderPair(firstProps = {}, secondProps = {}) {
+      state.effectCursor = 0;
+      state.hookCursor = 0;
+      state.refCursor = 0;
+      return [
+        exports.SelectMenu({
+          value: "default",
+          options: defaultOptions,
+          "aria-label": "First permission",
+          ...firstProps,
+        }),
+        exports.SelectMenu({
+          value: "default",
+          options: defaultOptions,
+          "aria-label": "Second permission",
+          ...secondProps,
+        }),
+      ];
+    },
+    unmount() {
+      for (const effect of state.effects) {
+        if (effect?.cleanup) effect.cleanup();
+      }
+      state.effects = [];
+      state.effectCursor = 0;
     },
   };
 }
@@ -179,6 +241,9 @@ test("SelectMenu renders a closed custom trigger with the selected label", () =>
 
   assert.match(collectTemplateText(rendered), /aria-haspopup="listbox"/);
   assert.equal(firstValueAfter(rendered, "aria-expanded="), "false");
+  const listboxProps = firstObjectWith(rendered, "aria-owns");
+  assert.match(listboxProps["aria-owns"], /^v2-select-menu-\d+-listbox$/);
+  assert.equal("aria-activedescendant" in listboxProps, false);
   assert.ok(collectScalars(rendered).includes("Follow global"));
   assert.doesNotMatch(collectTemplateText(rendered), /<select/);
   assert.doesNotMatch(collectTemplateText(rendered), /role="listbox"/);
@@ -188,11 +253,14 @@ test("SelectMenu opens, selects an option, and closes after selection", () => {
   const changes = [];
   const harness = createHarness();
 
-  firstValueAfter(harness.render({ onChange: (value) => changes.push(value) }), "onClick=")();
-  let rendered = harness.render({ onChange: (value) => changes.push(value) });
+  firstValueAfter(harness.render({ onChange: (...args) => changes.push(args) }), "onClick=")();
+  let rendered = harness.render({ onChange: (...args) => changes.push(args) });
   assert.equal(firstValueAfter(rendered, "aria-expanded="), "true");
   assert.match(collectTemplateText(rendered), /role="listbox"/);
-  assert.match(firstValueAfter(rendered, "aria-owns="), /^v2-select-menu-\d+-listbox$/);
+  const listboxProps = firstObjectWith(rendered, "aria-owns");
+  assert.match(listboxProps["aria-owns"], /^v2-select-menu-\d+-listbox$/);
+  assert.match(listboxProps["aria-controls"], /^v2-select-menu-\d+-listbox$/);
+  assert.match(listboxProps["aria-activedescendant"], /^v2-select-menu-\d+-option-0$/);
   assert.equal(valuesAfter(rendered, "aria-label=").length, 1);
   assert.ok(
     collectScalars(rendered).some(
@@ -204,9 +272,9 @@ test("SelectMenu opens, selects an option, and closes after selection", () => {
   assert.ok(collectScalars(rendered).includes("Always allow"));
 
   valuesAfter(rendered, "onClick=")[2]();
-  assert.deepEqual(changes, ["always_allow"]);
+  assert.deepEqual(changes, [["always_allow"]]);
 
-  rendered = harness.render({ value: "always_allow", onChange: (value) => changes.push(value) });
+  rendered = harness.render({ value: "always_allow", onChange: (...args) => changes.push(args) });
   assert.equal(firstValueAfter(rendered, "aria-expanded="), "false");
 });
 
@@ -266,7 +334,10 @@ test("SelectMenu syncs active index when option order changes", () => {
     options: defaultOptions,
     onChange: (value) => changes.push(value),
   });
-  assert.match(valuesAfter(rendered, "aria-activedescendant=")[0], /-option-2$/);
+  assert.match(
+    firstObjectWith(rendered, "aria-activedescendant")["aria-activedescendant"],
+    /-option-2$/
+  );
 
   harness.render({
     value: "ask_each_time",
@@ -278,7 +349,10 @@ test("SelectMenu syncs active index when option order changes", () => {
     options: reorderedOptions,
     onChange: (value) => changes.push(value),
   });
-  assert.match(valuesAfter(rendered, "aria-activedescendant=")[0], /-option-0$/);
+  assert.match(
+    firstObjectWith(rendered, "aria-activedescendant")["aria-activedescendant"],
+    /-option-0$/
+  );
 
   firstValueAfter(rendered, "onKeyDown=")(keyEvent("ArrowDown"));
   rendered = harness.render({
@@ -321,7 +395,10 @@ test("SelectMenu exposes the active descendant and restores trigger focus on clo
 
   firstValueAfter(rendered, "onClick=")();
   rendered = harness.render(props);
-  assert.match(valuesAfter(rendered, "aria-activedescendant=")[0], /-option-0$/);
+  assert.match(
+    firstObjectWith(rendered, "aria-activedescendant")["aria-activedescendant"],
+    /-option-0$/
+  );
 
   valuesAfter(rendered, "onClick=")[2]();
   harness.render({ value: "always_allow", ...props });
@@ -335,6 +412,12 @@ test("SelectMenu does not restore trigger focus after outside click close", () =
   const props = { onChange: () => {} };
 
   let rendered = harness.render(props);
+  harness.state.refs[0].current = {
+    contains() {
+      return false;
+    },
+    isConnected: true,
+  };
   harness.state.refs[1].current = {
     focus() {
       focusCalls.push("focus");
@@ -350,6 +433,45 @@ test("SelectMenu does not restore trigger focus after outside click close", () =
 
   assert.equal(firstValueAfter(rendered, "aria-expanded="), "false");
   assert.deepEqual(focusCalls, []);
+});
+
+test("SelectMenu shares and removes the document listener across concurrent menus", () => {
+  const harness = createHarness();
+  let rendered = harness.renderPair();
+  harness.state.refs[0].current = { contains: () => false, isConnected: true };
+  harness.state.refs[6].current = { contains: () => false, isConnected: true };
+  const [firstTriggerClick, secondTriggerClick] = valuesAfter(rendered, "onClick=");
+
+  firstTriggerClick();
+  rendered = harness.renderPair();
+  assert.equal(harness.state.listenerAdds, 1);
+
+  secondTriggerClick();
+  rendered = harness.renderPair();
+  assert.equal(harness.state.listenerAdds, 1);
+  assert.deepEqual(valuesAfter(rendered, "aria-expanded="), ["true", "true"]);
+
+  harness.state.listeners.mousedown({ target: {} });
+  rendered = harness.renderPair();
+
+  assert.deepEqual(valuesAfter(rendered, "aria-expanded="), ["false", "false"]);
+  assert.equal(harness.state.listenerRemoves, 1);
+  assert.equal(harness.state.listeners.mousedown, undefined);
+});
+
+test("SelectMenu removes the document listener when unmounted while open", () => {
+  const harness = createHarness();
+  const rendered = harness.render();
+  harness.state.refs[0].current = { contains: () => false, isConnected: true };
+
+  firstValueAfter(rendered, "onClick=")();
+  harness.render();
+  assert.equal(harness.state.listenerAdds, 1);
+
+  harness.unmount();
+
+  assert.equal(harness.state.listenerRemoves, 1);
+  assert.equal(harness.state.listeners.mousedown, undefined);
 });
 
 test("SelectMenu only passes safe root attributes through rest props", () => {
@@ -376,4 +498,18 @@ test("SelectMenu ignores disabled trigger clicks", () => {
 
   firstValueAfter(rendered, "onClick=")();
   assert.equal(harness.state.hooks[0], false);
+});
+
+test("SelectMenu does not open when every option is disabled", () => {
+  const harness = createHarness();
+  const disabledOptions = defaultOptions.map((option) => ({ ...option, disabled: true }));
+  const rendered = harness.render({ options: disabledOptions });
+  const arrowDown = keyEvent("ArrowDown");
+
+  assert.equal(firstValueAfter(rendered, "disabled="), true);
+  firstValueAfter(rendered, "onClick=")();
+  firstValueAfter(rendered, "onKeyDown=")(arrowDown);
+
+  assert.equal(harness.state.hooks[0], false);
+  assert.equal(arrowDown.preventDefaultCalls, 0);
 });

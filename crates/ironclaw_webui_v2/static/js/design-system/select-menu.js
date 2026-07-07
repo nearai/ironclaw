@@ -15,16 +15,30 @@ const toneDotClasses = {
   accent: "bg-[var(--v2-accent-text)]",
 };
 
+const alignClasses = {
+  left: "left-0",
+  right: "right-0",
+};
+
 function createSelectMenuId() {
   nextSelectMenuId += 1;
   return `v2-select-menu-${nextSelectMenuId}`;
 }
 
+function removeStaleOpenSelectMenuEntries() {
+  for (const entry of Array.from(openSelectMenuEntries)) {
+    const root = entry.rootRef.current;
+    if (!root || root.isConnected === false) openSelectMenuEntries.delete(entry);
+  }
+}
+
 function handleSharedDocumentMouseDown(event) {
+  removeStaleOpenSelectMenuEntries();
   for (const entry of Array.from(openSelectMenuEntries)) {
     if (entry.rootRef.current?.contains?.(event.target)) continue;
     entry.close();
   }
+  syncSharedDocumentListener();
 }
 
 function syncSharedDocumentListener() {
@@ -41,6 +55,7 @@ function syncSharedDocumentListener() {
 }
 
 function registerOpenSelectMenu(entry) {
+  removeStaleOpenSelectMenuEntries();
   openSelectMenuEntries.add(entry);
   syncSharedDocumentListener();
   return () => {
@@ -59,14 +74,15 @@ function selectedOptionIndex(options, value) {
 }
 
 function nextEnabledIndex(options, currentIndex, direction) {
-  if (!options.length) return -1;
+  const fallbackIndex = firstEnabledIndex(options);
+  if (fallbackIndex < 0) return -1;
   const start =
     currentIndex >= 0 ? currentIndex : direction > 0 ? -1 : options.length;
   for (let step = 1; step <= options.length; step += 1) {
     const index = (start + direction * step + options.length) % options.length;
     if (!options[index]?.disabled) return index;
   }
-  return currentIndex;
+  return fallbackIndex;
 }
 
 function edgeEnabledIndex(options, direction) {
@@ -81,6 +97,15 @@ function edgeEnabledIndex(options, direction) {
 
 function optionLabel(option, fallback = "") {
   return option?.label ?? option?.value ?? fallback;
+}
+
+function normalizeTone(tone) {
+  if (!tone) return null;
+  return Object.prototype.hasOwnProperty.call(toneDotClasses, tone) ? tone : "neutral";
+}
+
+function normalizeAlign(align) {
+  return Object.prototype.hasOwnProperty.call(alignClasses, align) ? align : "right";
 }
 
 function optionsIdentity(options) {
@@ -102,24 +127,31 @@ function safeRootProps(props) {
 }
 
 function ToneDot({ tone }) {
-  if (!tone) return null;
+  const normalizedTone = normalizeTone(tone);
+  if (!normalizedTone) return null;
   return html`
     <span
       aria-hidden="true"
       className=${cn(
         "h-1.5 w-1.5 shrink-0 rounded-full",
-        toneDotClasses[tone] ?? toneDotClasses.neutral
+        toneDotClasses[normalizedTone]
       )}
     />
   `;
 }
 
 /**
+ * @typedef {"neutral" | "positive" | "warning" | "danger" | "info" | "accent"} SelectMenuTone
+ * @typedef {"left" | "right"} SelectMenuAlign
+ * @typedef {{ value: string, label?: string, disabled?: boolean, tone?: SelectMenuTone }} SelectMenuOption
+ */
+
+/**
  * Custom listbox-backed select menu.
  *
- * `onChange` receives both the selected option value and the full option:
- * `onChange(value, option)`. Root passthrough props are limited to `id`,
- * `title`, `data-*`, and `aria-*`; event handlers are intentionally not spread.
+ * `onChange` receives the selected option value. Root passthrough props are
+ * limited to `id`, `title`, `data-*`, and `aria-*`; event handlers are
+ * intentionally not spread.
  */
 export function SelectMenu({
   value,
@@ -154,10 +186,20 @@ export function SelectMenu({
   const selectedLabel = optionLabel(selectedOption, placeholder);
   const listboxId = `${idRef.current}-listbox`;
   const activeOptionId =
-    open && activeIndex >= 0 ? `${idRef.current}-option-${activeIndex}` : undefined;
+    open && activeIndex >= 0 && activeIndex < options.length
+      ? `${idRef.current}-option-${activeIndex}`
+      : null;
   const effectiveAriaLabel = ariaLabel || ariaLabelProp;
+  const effectiveAlign = normalizeAlign(align);
+  const hasEnabledOption = firstEnabledIndex(options) >= 0;
+  const interactionDisabled = disabled || !hasEnabledOption;
   const optionsKey = optionsIdentity(options);
   const rootPassthroughProps = safeRootProps(rest);
+  const buttonListboxProps = {
+    "aria-owns": listboxId,
+    ...(open ? { "aria-controls": listboxId } : {}),
+    ...(activeOptionId ? { "aria-activedescendant": activeOptionId } : {}),
+  };
 
   const closeMenu = ({ restoreFocus = true } = {}) => {
     restoreFocusOnCloseRef.current = restoreFocus;
@@ -167,10 +209,12 @@ export function SelectMenu({
   if (!outsideClickEntryRef.current) {
     outsideClickEntryRef.current = {
       rootRef,
-      close: () => closeMenu({ restoreFocus: false }),
+      close: () => {
+        restoreFocusOnCloseRef.current = false;
+        setOpen(false);
+      },
     };
   }
-  outsideClickEntryRef.current.close = () => closeMenu({ restoreFocus: false });
 
   React.useEffect(() => {
     setActiveIndex(selectedOptionIndex(options, value));
@@ -192,17 +236,17 @@ export function SelectMenu({
   const chooseOption = (option) => {
     if (!option || option.disabled) return;
     closeMenu();
-    if (option.value !== value) onChange(option.value, option);
+    if (option.value !== value) onChange(option.value);
   };
 
   const openWithIndex = (index) => {
-    if (disabled) return;
-    setActiveIndex(index);
+    if (interactionDisabled || index < 0) return;
+    setActiveIndex(index < options.length ? index : firstEnabledIndex(options));
     setOpen(true);
   };
 
   const handleKeyDown = (event) => {
-    if (disabled) return;
+    if (interactionDisabled) return;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       const direction = event.key === "ArrowDown" ? 1 : -1;
@@ -251,14 +295,12 @@ export function SelectMenu({
         type="button"
         aria-haspopup="listbox"
         aria-expanded=${open ? "true" : "false"}
-        aria-controls=${open ? listboxId : undefined}
-        aria-activedescendant=${activeOptionId}
-        aria-owns=${listboxId}
         aria-label=${effectiveAriaLabel}
         aria-labelledby=${ariaLabelledBy}
-        disabled=${disabled}
+        ...${buttonListboxProps}
+        disabled=${interactionDisabled}
         onClick=${() =>
-          !disabled &&
+          !interactionDisabled &&
           setOpen((current) => {
             restoreFocusOnCloseRef.current = false;
             if (!current) setActiveIndex(selectedIndex);
@@ -300,7 +342,7 @@ export function SelectMenu({
             "bg-[color-mix(in_srgb,var(--v2-canvas-strong)_92%,var(--v2-surface))] p-1",
             "shadow-[0_30px_72px_-18px_rgba(0,0,0,0.86),0_10px_24px_-18px_rgba(0,0,0,0.68)]",
             "ring-1 ring-[color-mix(in_srgb,var(--v2-text-strong)_8%,transparent)]",
-            align === "left" ? "left-0" : "right-0",
+            alignClasses[effectiveAlign],
             menuClassName
           )}
         >
