@@ -212,7 +212,8 @@ async fn narrowed_allow_set_still_denies_non_allowlisted_tool_through_deferral()
         .expect("turn submits");
     // Scope rejection at the profile filter discards the whole provider
     // response (model_gateway validate-then-register), surfacing as a
-    // model_error-failed turn — coarse, but fails closed.
+    // model_unavailable-failed turn — coarse, but fails closed (#5692 renamed
+    // this category from the generic "model_error").
     let state = harness
         .wait_for_status(run_id, TurnStatus::Failed)
         .await
@@ -221,7 +222,7 @@ async fn narrowed_allow_set_still_denies_non_allowlisted_tool_through_deferral()
         .failure
         .as_ref()
         .expect("a Failed run must carry a failure detail");
-    assert_eq!(failure.category(), "model_error", "got {failure:?}");
+    assert_eq!(failure.category(), "model_unavailable", "got {failure:?}");
     // The load-bearing trust-boundary proof: the underlying tool NEVER
     // dispatched (github tools egress on the network lane).
     harness
