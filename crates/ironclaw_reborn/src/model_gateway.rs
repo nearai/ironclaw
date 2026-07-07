@@ -1366,10 +1366,29 @@ fn unavailable_requested_capability_guard(
         .iter()
         .map(|definition| definition.capability_id.as_str())
         .collect::<HashSet<_>>();
+    // Namespaces that actually exist on this agent (a visible capability shares
+    // the prefix, e.g. "builtin"). A genuine "that capability is unavailable"
+    // request targets a real namespace whose specific id is gated off — not an
+    // arbitrary dotted token. Without this, incidental code references phrased
+    // after a request verb (e.g. "use `playwright.sync_api`", a Python module)
+    // are mistaken for a disabled-capability request, and the guard suppresses
+    // the model's legitimate tool calls (write_file, etc.), ending the turn with
+    // a spurious "capability is unavailable" refusal.
+    let visible_namespaces = visible_capability_ids
+        .iter()
+        .filter_map(|id| id.split('.').next())
+        .collect::<HashSet<_>>();
 
     extract_explicit_capability_request_ids(&latest_user.content)
         .into_iter()
-        .find(|capability_id| !visible_capability_ids.contains(capability_id.as_str()))
+        .find(|capability_id| {
+            let id = capability_id.as_str();
+            !visible_capability_ids.contains(id)
+                && id
+                    .split('.')
+                    .next()
+                    .is_some_and(|namespace| visible_namespaces.contains(namespace))
+        })
         .map(|capability_id| UnavailableCapabilityGuard { capability_id })
 }
 
@@ -2023,6 +2042,51 @@ mod tests {
             provider: "test_provider".to_string(),
             reason: reason.to_string(),
         }
+    }
+
+    fn tool_def(capability_id: &str, name: &str) -> ProviderToolDefinition {
+        ProviderToolDefinition {
+            capability_id: CapabilityId::new(capability_id).unwrap(),
+            name: ProviderToolName::new(name).unwrap(),
+            description: String::new(),
+            parameters: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn guard_ignores_incidental_code_references() {
+        // The playwright/browser tasks literally instruct: "use `playwright.sync_api`"
+        // — a Python module named right after a request verb. That is NOT a
+        // capability request; the guard must not fire and suppress the model's
+        // legitimate write_file calls.
+        let messages = vec![ChatMessage::user(
+            "Read form.html, then use `playwright.sync_api` (Python sync API) to \
+             write an end-to-end test saved as test_form.py.",
+        )];
+        let tools = vec![
+            tool_def("builtin.write_file", "builtin__write_file"),
+            tool_def("builtin.read_file", "builtin__read_file"),
+        ];
+        assert!(
+            unavailable_requested_capability_guard(&messages, &tools).is_none(),
+            "guard must not misfire on the code reference `playwright.sync_api`"
+        );
+    }
+
+    #[test]
+    fn guard_still_fires_on_real_disabled_capability() {
+        // A genuine request for a real builtin capability that's gated off must
+        // still fire: namespace `builtin` exists but `builtin.http` isn't visible.
+        let messages = vec![ChatMessage::user(
+            "Fetch the page using the builtin.http capability.",
+        )];
+        let tools = vec![tool_def("builtin.write_file", "builtin__write_file")];
+        let guard = unavailable_requested_capability_guard(&messages, &tools);
+        assert!(
+            guard.is_some(),
+            "guard should still fire for a real builtin capability that is disabled"
+        );
+        assert_eq!(guard.unwrap().capability_id.as_str(), "builtin.http");
     }
 
     #[test]
