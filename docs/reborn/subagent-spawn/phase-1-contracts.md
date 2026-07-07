@@ -5,6 +5,14 @@
 **Parent:** [`README.md`](./README.md) (overarching design)
 **Scope:** `crates/ironclaw_turns`, `crates/ironclaw_agent_loop`, `crates/ironclaw_reborn`
 
+> **Status: partially superseded (2026-07).** The contracts below (lineage fields,
+> `CapabilityOutcome`/gate-kind variants, `prepare_turn`) are partially live in
+> production. The delivery/durability layer built on top of them — the gate-
+> resolution store, tombstone store, and restart reconciler described in later
+> sections — is replaced outright by
+> [`thread-harness-design.md`](./thread-harness-design.md) (canonical). The
+> contracts themselves remain accurate.
+
 This document is the detailed, implementer-facing spec for **Phase 1** of the
 subagent-spawn feature. Phase 1 lands the *contracts and isolated units* that
 Phase 2 (mechanisms) and Phase 3 (integration) build on. It is three

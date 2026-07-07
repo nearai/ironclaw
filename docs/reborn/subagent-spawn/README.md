@@ -278,7 +278,7 @@ spawn time and keyed by the coordinator-minted `TurnRunId`.
 | **Cancellation tombstone** | A child completing terminal during a subtree cancel **does not silently drop**. It writes a typed `SubagentResultTombstone { child_run_id, disposition: "discarded_by_parent_cancel", terminal_status }` so reconciliation can distinguish "intentionally discarded" from "lost in the gap". |
 | Idempotency | Child `submit_turn` key = `(parent_run_id, parent_turn_id, spawn-call ordinal)` — deterministic for replay, unique per spawn call even for identical-argument siblings. The `requested_run_id` further pins which `TurnRunId` the coordinator binds for replay. |
 | Tenancy | The child `TurnScope` copies `tenant_id`/`agent_id`/`project_id` **verbatim**; only `thread_id` differs (fresh). Test-enforced invariant. |
-| Child output trust | A child result crossing back to the parent is **untrusted data** — wrapped in a delimited block, channel-edge sanitised, and safety-scanned before it enters the parent thread. |
+| Child output trust | A child result crossing back to the parent is **untrusted data** — wrapped in a delimited block and channel-edge sanitised before it enters the parent thread. **Correction (2026-07):** this is framing + sanitisation, not a safety scan — Reborn's ingress has no `SafetyLayer` wiring for `submit_turn` today, for any caller, so no scan runs here either. The catastrophe backstop is gate-driven approval-bubbling to a human, not content scanning; see `thread-harness-design.md` §12 for the tracked platform-wide `SafetyLayer` ingress follow-up. |
 | Context seed | `Fresh` (goal only), `Handoff(String)` (goal + curated parent blob, re-materialised into the child scope). `Fork` reserved, unimplemented. |
 
 ## 7. Flows
@@ -406,9 +406,15 @@ mitigations below are **load-bearing**, not optional.
    delimited as task data — never the system message. The system message is the
    static, authored direction `.md` only.
 7. **Child output is untrusted.** A child's result crossing back to the parent
-   (tool result or inbound message) is wrapped in a delimited block, channel-edge
-   sanitised (host paths / internal identifiers stripped), and run through the
-   inbound `safety_layer` scan before it is stored in the parent thread.
+   (tool result or inbound message) is wrapped in a delimited block and channel-edge
+   sanitised (host paths / internal identifiers stripped) before it is stored in
+   the parent thread. **Correction (2026-07):** it is not additionally run through
+   an inbound safety scan — Reborn's `submit_turn` ingress has no `SafetyLayer`
+   wiring today, for any caller, so this path is no exception. Framing +
+   sanitisation plus gate-driven approval-bubbling to a human (the catastrophe
+   backstop) are the actual controls; see `thread-harness-design.md` §12 for the
+   tracked platform-wide `SafetyLayer` ingress follow-up that will eventually
+   cover this path too.
 8. **Tenancy invariant.** The child `TurnScope` copies `tenant_id`/`agent_id`/
    `project_id` verbatim; a spawn whose resolved scope deviates is rejected.
 9. **Idempotency keys** are derived from `(parent_run_id, parent_turn_id, ordinal)`
@@ -515,6 +521,11 @@ PHASE 3 — Integration                  (single workstream; needs all of Phase 
         end-to-end integration tests · quality gate
 ```
 
+> **Note (2026-07):** the `RestartReconciler` and tombstone-store items in
+> Phase 3 above are superseded by `thread-harness-design.md`'s await-edge
+> design (canonical) — see that doc's §7 staging table for the current
+> delivery/durability implementation plan.
+
 Detailed per-phase docs with pseudo code:
 [phase-1](./phase-1-contracts.md) · [phase-2](./phase-2-mechanisms.md) ·
 [phase-3](./phase-3-integration.md).
@@ -531,7 +542,9 @@ Detailed per-phase docs with pseudo code:
   delivery), blocking-interruption, and no-deadlock regression (child
   `thread_id` ≠ parent). Background E2E coverage, including
   autonomous-continuation-budget-stop, is deferred until #4147 defines durable
-  delivery.
+  delivery. (Note: the tombstone and restart-reconciliation cases above are
+  superseded by `thread-harness-design.md`'s await-edge tests, §7/§13 — that
+  doc is canonical for background delivery.)
 - **Quality gate:** `cargo fmt`; `cargo clippy --all --benches --tests --examples
   --all-features` (zero warnings); `cargo test`.
 - **Architecture guardrails:** `cargo test -p ironclaw_architecture --test

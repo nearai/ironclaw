@@ -9,6 +9,12 @@
 DB-backed store construction, root-provided projection sink wiring, and
 background task spawning.
 
+> **Status: superseded (2026-07).** This phase's delivery/durability wiring —
+> `RestartReconciler`, the durable tombstone store, and the DB-backed gate-
+> resolution store — is superseded outright by
+> [`thread-harness-design.md`](./thread-harness-design.md) (canonical), whose
+> §7 staging table (PR1-6) is the current implementation plan for this layer.
+
 > **Current implementation note.** Background subagents are disabled pending the
 > durable completion delivery design in
 > [#4147](https://github.com/nearai/ironclaw/issues/4147). The active public

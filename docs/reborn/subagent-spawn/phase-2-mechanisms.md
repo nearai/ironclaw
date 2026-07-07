@@ -5,6 +5,14 @@
 **Parent doc:** [`README.md`](./README.md) — read §5, §6, §8, §9, §11 first.
 **Depends on:** Phase 1 ([`phase-1-contracts.md`](./phase-1-contracts.md)).
 
+> **Status: partially superseded (2026-07).** The spawn-mechanics workstreams
+> (P2.A spawn handling, P2.B prompt composition, P2.C driver binding) remain
+> live and accurate. The delivery half of P2.D — writing a
+> `SubagentResultTombstone` and reconciler-facing gate delivery — is replaced
+> outright by [`thread-harness-design.md`](./thread-harness-design.md)
+> (canonical); that doc's `AwaitEdgeResolver` supersedes the tombstone/gate-
+> store path described below.
+
 > **Current implementation note.** Background subagents are disabled pending the
 > durable completion delivery design in
 > [#4147](https://github.com/nearai/ironclaw/issues/4147). The active public
