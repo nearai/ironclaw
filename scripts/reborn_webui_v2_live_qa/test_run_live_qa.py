@@ -351,6 +351,78 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             result.details["slack_oauth_start_url"],
         )
 
+    def test_slack_connect_case_fails_on_workspace_mismatch(self):
+        async def fail_if_page_opens(*_args, **_kwargs) -> None:
+            raise AssertionError("browser should not open with mismatched Slack teams")
+
+        def fake_expect(_selector: str) -> object:
+            raise AssertionError("expect should not be used with mismatched Slack teams")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            (output_dir / "preflight.json").write_text(
+                json.dumps(
+                    {
+                        "checks": {
+                            "slack": {
+                                "enabled_in_config": True,
+                                "env_present": True,
+                                "setup": {
+                                    "configured": True,
+                                    "team_id": "T-BOT",
+                                    "personal_oauth_ready": True,
+                                },
+                                "auth_test": {
+                                    "ok": True,
+                                    "team_id": "T-BOT",
+                                    "user_id": "U-BOT",
+                                },
+                            },
+                            "slack_personal_auth": {
+                                "ready": True,
+                                "configured_account_count": 1,
+                                "accounts": [{"id": "slack-account", "ready": True}],
+                                "auth_test": {
+                                    "ok": True,
+                                    "team_id": "T-PERSONAL",
+                                    "user_id": "U-PERSONAL",
+                                },
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            ctx = run_live_qa.LiveQaContext(
+                base_url="http://127.0.0.1:3000",
+                output_dir=output_dir,
+                reborn_home=output_dir / "reborn-home",
+                env={},
+            )
+
+            with (
+                patch.object(run_live_qa, "_with_page", new=fail_if_page_opens),
+                patch.object(run_live_qa, "_webui_json", new=fail_if_page_opens),
+                patch.dict(
+                    sys.modules,
+                    {
+                        "playwright": types.ModuleType("playwright"),
+                        "playwright.async_api": types.SimpleNamespace(expect=fake_expect),
+                    },
+                ),
+            ):
+                result = asyncio.run(
+                    run_live_qa._slack_connect_case(
+                        ctx,
+                        case_name="qa_3a_slack_connect",
+                    )
+                )
+
+        self.assertFalse(result.success)
+        self.assertIn("different workspaces", result.details["error"])
+        self.assertIn("bot_token team_id=T-BOT", result.details["error"])
+        self.assertIn("personal_oauth team_id=T-PERSONAL", result.details["error"])
+
     def test_slack_connect_case_fails_without_seeded_personal_account(self):
         async def fail_if_page_opens(*_args, **_kwargs) -> None:
             raise AssertionError("browser should not open without Slack product-auth account")
@@ -2952,6 +3024,80 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertNotIn("oauth-client-secret-value", error)
         self.assertNotIn("echoed", error)
 
+    def test_slack_setup_api_requires_configured_status(self):
+        class FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "configured": False,
+                    "installation_id": "install-123",
+                    "team_id": "T123",
+                    "api_app_id": "A123",
+                    "bot_token_configured": True,
+                    "signing_secret_configured": False,
+                    "oauth_client_id_configured": True,
+                    "oauth_client_secret_configured": False,
+                }
+
+        class FakeAsyncClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, _exc_type, _exc, _tb):
+                return None
+
+            async def put(self, *_args, **_kwargs):
+                return FakeResponse()
+
+        fake_httpx = types.SimpleNamespace(AsyncClient=FakeAsyncClient)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reborn_home = Path(tmpdir) / "reborn-home"
+            reborn_home.mkdir()
+            (reborn_home / "config.toml").write_text(
+                "[slack]\nenabled = true\n",
+                encoding="utf-8",
+            )
+            prepared = run_live_qa.PreparedRebornHome(path=reborn_home)
+            with (
+                patch.dict(sys.modules, {"httpx": fake_httpx}),
+                patch.object(
+                    run_live_qa,
+                    "_slack_setup_payload",
+                    return_value=(
+                        {
+                            "installation_id": "install-123",
+                            "team_id": "T123",
+                            "api_app_id": "A123",
+                            "bot_token": "xoxb-bot-token",
+                            "signing_secret": "signing-secret-value",
+                            "oauth_client_id": "oauth-client-id",
+                            "oauth_client_secret": "oauth-client-secret-value",
+                        },
+                        {},
+                    ),
+                ),
+                self.assertRaises(run_live_qa.LiveQaError) as raised,
+            ):
+                asyncio.run(
+                    run_live_qa._apply_slack_setup_api_after_start(
+                        base_url="http://127.0.0.1:38555",
+                        prepared_home=prepared,
+                    )
+                )
+
+        error = str(raised.exception)
+        self.assertIn("incomplete setup status", error)
+        self.assertIn("configured", error)
+        self.assertIn("signing_secret_configured", error)
+        self.assertIn("oauth_client_secret_configured", error)
+        self.assertNotIn("xoxb-bot-token", error)
+        self.assertNotIn("signing-secret-value", error)
+        self.assertNotIn("oauth-client-secret-value", error)
+
     def test_prepare_reborn_home_synthesizes_config_for_copied_db_home(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -3737,6 +3883,87 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "AUTH_LIVE_SLACK_ACCESS_TOKEN",
                 result["details"]["required_env"],
             )
+
+    def test_run_cases_blocks_slack_workspace_mismatch(self):
+        async def fake_case(_ctx: run_live_qa.LiveQaContext) -> run_live_qa.ProbeResult:
+            raise AssertionError("case should not run with mismatched Slack teams")
+
+        async def fail_start_reborn_server(*_args, **_kwargs):
+            raise AssertionError("server should not start with mismatched Slack teams")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_dir = root / "out"
+            binary = root / "ironclaw-reborn"
+            binary.touch()
+            prepared_home = root / "prepared-home"
+            prepared_home.mkdir()
+            args = argparse.Namespace(
+                all_cases=False,
+                non_telegram_qa_cases=False,
+                case=["case_slack_connect"],
+                output_dir=output_dir,
+                reborn_home=root / "missing-source-home",
+                skip_build=True,
+                require_slack_live=False,
+            )
+            cases = {
+                "case_slack_connect": run_live_qa.CaseSpec(
+                    fake_case,
+                    requires_slack=True,
+                    requires_slack_personal_auth=True,
+                )
+            }
+            prepared = run_live_qa.PreparedRebornHome(
+                path=prepared_home,
+                preflight={
+                    "slack": {
+                        "enabled_in_config": True,
+                        "env_present": True,
+                        "setup": {
+                            "configured": True,
+                            "team_id": "T-BOT",
+                        },
+                        "auth_test": {
+                            "ok": True,
+                            "team_id": "T-BOT",
+                        },
+                    },
+                    "slack_personal_auth": {
+                        "ready": True,
+                        "auth_test": {
+                            "ok": True,
+                            "team_id": "T-PERSONAL",
+                        },
+                    },
+                    "google_product_auth": {},
+                    "telegram": {},
+                    "github_auth": {},
+                },
+            )
+
+            with (
+                patch.object(run_live_qa, "CASES", cases),
+                patch.object(run_live_qa, "QA_SHEET_CASES", {}),
+                patch.object(run_live_qa, "_reborn_binary", return_value=binary),
+                patch.object(run_live_qa, "prepare_reborn_home", return_value=prepared),
+                patch.object(
+                    run_live_qa,
+                    "start_reborn_server",
+                    side_effect=fail_start_reborn_server,
+                ),
+                patch.object(run_live_qa, "stop_process"),
+            ):
+                status = asyncio.run(run_live_qa.run_cases(args))
+
+            self.assertEqual(status, 1)
+            payload = json.loads((output_dir / "results.json").read_text(encoding="utf-8"))
+            result = payload["results"][0]
+            self.assertFalse(result["success"])
+            self.assertTrue(result["details"]["blocked"])
+            self.assertIn("different workspaces", result["details"]["error"])
+            self.assertIn("bot_token team_id=T-BOT", result["details"]["error"])
+            self.assertIn("personal_oauth team_id=T-PERSONAL", result["details"]["error"])
 
 
 if __name__ == "__main__":

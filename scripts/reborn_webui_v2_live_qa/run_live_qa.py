@@ -836,6 +836,21 @@ async def _apply_slack_setup_api_after_start(
         raise LiveQaError(f"Slack setup API call failed: {type(exc).__name__}: {exc}") from exc
     if not isinstance(status, dict):
         raise LiveQaError(f"Slack setup API returned non-object JSON: {status!r}")
+    required_flags = ["configured", "bot_token_configured", "signing_secret_configured"]
+    if payload.get("oauth_client_id") or payload.get("oauth_client_secret"):
+        required_flags.extend(["oauth_client_id_configured", "oauth_client_secret_configured"])
+    missing_flags = [flag for flag in required_flags if status.get(flag) is not True]
+    mismatched_identity = [
+        key
+        for key in ("installation_id", "team_id", "api_app_id")
+        if str(status.get(key) or "") != str(payload.get(key) or "")
+    ]
+    if missing_flags or mismatched_identity:
+        raise LiveQaError(
+            "Slack setup API returned incomplete setup status: "
+            f"missing_flags={missing_flags!r} "
+            f"mismatched_identity={mismatched_identity!r}"
+        )
     return {
         "applied": True,
         "status_code": response.status_code,
@@ -2078,6 +2093,36 @@ def _slack_personal_auth_ready_account(personal_auth: dict[str, object]) -> dict
     return {}
 
 
+def _slack_workspace_mismatch_error(
+    slack: dict[str, object],
+    personal_auth: dict[str, object] | None = None,
+    *,
+    include_personal_auth: bool,
+) -> str | None:
+    team_ids: list[tuple[str, str]] = []
+    setup = slack.get("setup")
+    if isinstance(setup, dict):
+        team_id = str(setup.get("team_id") or "").strip()
+        if team_id:
+            team_ids.append(("setup", team_id))
+    auth_test = slack.get("auth_test")
+    if isinstance(auth_test, dict) and auth_test.get("ok"):
+        team_id = str(auth_test.get("team_id") or "").strip()
+        if team_id:
+            team_ids.append(("bot_token", team_id))
+    if include_personal_auth and isinstance(personal_auth, dict) and personal_auth.get("ready"):
+        personal_auth_test = personal_auth.get("auth_test")
+        if isinstance(personal_auth_test, dict) and personal_auth_test.get("ok"):
+            team_id = str(personal_auth_test.get("team_id") or "").strip()
+            if team_id:
+                team_ids.append(("personal_oauth", team_id))
+    unique_team_ids = {team_id for _, team_id in team_ids}
+    if len(unique_team_ids) <= 1:
+        return None
+    details = ", ".join(f"{source} team_id={team_id}" for source, team_id in team_ids)
+    return f"Slack credentials target different workspaces: {details}"
+
+
 async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeResult:
     from playwright.async_api import expect
 
@@ -2230,6 +2275,13 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
         if isinstance(personal_auth_test, dict):
             observed["slack_personal_auth_team_id"] = personal_auth_test.get("team_id")
             observed["slack_personal_auth_user_id"] = personal_auth_test.get("user_id")
+        mismatch = _slack_workspace_mismatch_error(
+            slack,
+            personal_auth,
+            include_personal_auth=True,
+        )
+        if mismatch:
+            raise AssertionError(mismatch)
         await _with_page(ctx.output_dir, case_name, action)
         return _result(case_name, True, started, observed)
     except Exception as exc:
@@ -4425,6 +4477,40 @@ async def run_cases(args: argparse.Namespace) -> int:
                 print(
                     f"[reborn-webui-v2-live-qa] case={name} success={result.success} "
                     f"latency_ms={result.latency_ms} blocked={blocked}",
+                    flush=True,
+                )
+                continue
+            mismatch = _slack_workspace_mismatch_error(
+                slack_preflight,
+                slack_personal_auth_preflight
+                if isinstance(slack_personal_auth_preflight, dict)
+                else None,
+                include_personal_auth=case_spec.requires_slack_personal_auth,
+            )
+            if mismatch:
+                started = time.monotonic()
+                result = _result(
+                    name,
+                    False,
+                    started,
+                    {
+                        "blocked": True,
+                        "error": mismatch,
+                        "required_env": [
+                            "REBORN_WEBUI_V2_LIVE_QA_SLACK_TEAM_ID",
+                            "IRONCLAW_REBORN_SLACK_BOT_TOKEN",
+                            SLACK_PERSONAL_ACCESS_TOKEN_ENV,
+                        ],
+                        "preflight": {
+                            "slack": slack_preflight,
+                            "slack_personal_auth": slack_personal_auth_preflight,
+                        },
+                    },
+                )
+                results.append(result)
+                print(
+                    f"[reborn-webui-v2-live-qa] case={name} success={result.success} "
+                    f"latency_ms={result.latency_ms} blocked=slack_workspace_mismatch",
                     flush=True,
                 )
                 continue
