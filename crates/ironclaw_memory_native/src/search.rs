@@ -37,6 +37,7 @@ pub struct MemorySearchRequest {
     min_score: f32,
     full_text_weight: f32,
     vector_weight: f32,
+    literal_phrase: bool,
 }
 
 impl MemorySearchRequest {
@@ -61,6 +62,7 @@ impl MemorySearchRequest {
             min_score: 0.0,
             full_text_weight: 0.5,
             vector_weight: 0.5,
+            literal_phrase: false,
         })
     }
 
@@ -133,6 +135,16 @@ impl MemorySearchRequest {
         self
     }
 
+    /// Mark the query as literal content rather than a free-form search
+    /// string: the full-text branch matches it as an exact phrase instead
+    /// of interpreting any query syntax it happens to contain. Used for
+    /// prompt-context recall, where the query is derived from a user
+    /// message the caller does not control.
+    pub fn with_literal_phrase(mut self, literal_phrase: bool) -> Self {
+        self.literal_phrase = literal_phrase;
+        self
+    }
+
     pub fn query(&self) -> &str {
         &self.query
     }
@@ -182,6 +194,10 @@ impl MemorySearchRequest {
 
     pub fn vector_weight(&self) -> f32 {
         self.vector_weight
+    }
+
+    pub fn literal_phrase(&self) -> bool {
+        self.literal_phrase
     }
 }
 

@@ -90,10 +90,16 @@ use ironclaw_turns::{
     TurnRunId, TurnRunRecord, TurnRunState, TurnRunWake, TurnScope, TurnSpawnTreeStateStore,
     TurnStatus,
     events::EventCursor,
-    run_profile::{LoopHostMilestoneSink, LoopRunContext},
+    run_profile::{
+        EmptyMemoryPromptContextService, LoopHostMilestoneSink, LoopRunContext,
+        MemoryPromptContextService,
+    },
 };
 
 use ironclaw_host_runtime::MemoryBackedUserProfileSource;
+use ironclaw_host_runtime::memory_context::ProductionMemoryPromptContextService;
+use ironclaw_memory::MemoryService;
+use ironclaw_memory_native::NativeMemoryService;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_product_workflow::{
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
@@ -3496,6 +3502,27 @@ pub async fn build_reborn_runtime(
                 })?,
             ) as Arc<dyn HostIdentityContextSource>,
             None => Arc::new(EmptyIdentityContextSource) as Arc<dyn HostIdentityContextSource>,
+        },
+        // Memory-recall snippets for the loop context bundle. Reuses the same raw
+        // `extension_filesystem` `MemoryBackedUserProfileSource` reads from, so a
+        // `builtin.memory_write` call and this recall path see the same backing
+        // store. Mirrors the `identity_context_source`/production-graph-defers-to-Empty
+        // shape directly above — the production-graph path (`local_runtime: None`)
+        // stays Empty here for the same reason it does for identity/profile.
+        memory_context_source: match local_runtime {
+            Some(local_runtime) => {
+                let memory_service: Arc<dyn MemoryService> =
+                    Arc::new(NativeMemoryService::from_filesystem(
+                        Arc::clone(&local_runtime.extension_filesystem)
+                            as Arc<dyn ironclaw_filesystem::RootFilesystem>,
+                        None,
+                    ));
+                Arc::new(ProductionMemoryPromptContextService::new(memory_service))
+                    as Arc<dyn MemoryPromptContextService>
+            }
+            None => {
+                Arc::new(EmptyMemoryPromptContextService) as Arc<dyn MemoryPromptContextService>
+            }
         },
         // Resolve the per-user agent-context profile (timezone/locale/location) from
         // `context/profile.json` via the workspace filesystem. When a local-dev workspace

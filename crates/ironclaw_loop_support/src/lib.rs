@@ -28,6 +28,7 @@ mod filesystem_skill_bundle_source;
 pub mod identity_context;
 mod input_port;
 mod input_queue;
+mod memory_context;
 mod model_capability_view;
 mod prompt_context_budget;
 mod skill_bundle_context_source;
@@ -139,13 +140,14 @@ use ironclaw_turns::{
         AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
         AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityBatchInvocation,
         CapabilityBatchOutcome, CapabilityDenied, CapabilityDeniedReasonKind, CapabilityInvocation,
-        CapabilityOutcome, CapabilitySurfaceVersion, FinalizeAssistantMessage,
-        InstructionMaterializationStore, LoopCapabilityPort, LoopContextBundle,
-        LoopContextCompactionKind, LoopContextCompactionMetadata, LoopContextMessage,
-        LoopContextPort, LoopContextRequest, LoopDriverNoteKind, LoopHostMilestoneEmitter,
-        LoopHostMilestoneSink, LoopInputCursor, LoopModelMessage, LoopModelPort, LoopModelRequest,
-        LoopModelResponse, LoopModelUsage, LoopPromptBundleAuthority, LoopRunContext,
-        LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput,
+        CapabilityOutcome, CapabilitySurfaceVersion, EmptyMemoryPromptContextService,
+        FinalizeAssistantMessage, InstructionMaterializationStore, LoopCapabilityPort,
+        LoopContextBundle, LoopContextCompactionKind, LoopContextCompactionMetadata,
+        LoopContextMessage, LoopContextPort, LoopContextRequest, LoopDriverNoteKind,
+        LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputCursor, LoopModelMessage,
+        LoopModelPort, LoopModelRequest, LoopModelResponse, LoopModelUsage,
+        LoopPromptBundleAuthority, LoopRunContext, LoopRunInfoPort, LoopSafeSummary,
+        LoopTranscriptPort, MemoryPromptContextService, ModelStreamChunk, ParentLoopOutput,
         PromptMode, UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
         sanitize_model_visible_text, sort_instruction_snippets_for_prompt,
     },
@@ -214,6 +216,7 @@ where
     max_messages: usize,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
+    memory_context_source: Arc<dyn MemoryPromptContextService>,
     identity_budget: IdentityBudget,
     prompt_context_budget: PromptContextTokenBudget,
     context_window_cache: Option<Arc<ThreadContextWindowCache>>,
@@ -281,6 +284,7 @@ where
             max_messages,
             skill_context_source: None,
             identity_context_source: None,
+            memory_context_source: Arc::new(EmptyMemoryPromptContextService),
             identity_budget: IdentityBudget::default(),
             prompt_context_budget: PromptContextTokenBudget::default(),
             context_window_cache: None,
@@ -299,6 +303,14 @@ where
         source: Arc<dyn HostIdentityContextSource>,
     ) -> Self {
         self.identity_context_source = Some(source);
+        self
+    }
+
+    pub fn with_memory_context_source(
+        mut self,
+        source: Arc<dyn MemoryPromptContextService>,
+    ) -> Self {
+        self.memory_context_source = source;
         self
     }
 
@@ -392,6 +404,12 @@ where
             }
             None => Vec::new(),
         };
+        let memory_snippets = memory_context::load_memory_snippets_for_run(
+            &context.messages,
+            &self.run_context,
+            self.memory_context_source.as_ref(),
+        )
+        .await;
 
         let compaction_message_index = context
             .messages
@@ -411,7 +429,7 @@ where
                 .collect(),
             compaction_message_index,
             instruction_snippets,
-            memory_snippets: Vec::new(),
+            memory_snippets,
         })
     }
 }

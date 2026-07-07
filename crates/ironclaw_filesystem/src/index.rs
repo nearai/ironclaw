@@ -297,6 +297,16 @@ pub enum Filter {
         key: IndexKey,
         query: String,
     },
+    /// Literal-phrase full-text search on a text-valued indexed `key`.
+    /// Requires the index to be `IndexKind::Fts`. Unlike [`Filter::Fts`],
+    /// `phrase` is never interpreted as query syntax — it is matched as
+    /// literal content. Each backend renders it in its native
+    /// literal-phrase dialect (a double-quoted FTS5 phrase on libSQL,
+    /// `phraseto_tsquery` on PostgreSQL).
+    FtsPhrase {
+        key: IndexKey,
+        phrase: String,
+    },
     /// Vector-similarity search on a vector-valued indexed `key`. Requires
     /// the index to be `IndexKind::Vector { dim }` with a matching `dim`.
     /// `embedding` is the query vector; results are ranked by descending

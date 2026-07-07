@@ -64,8 +64,8 @@ use ironclaw_turns::{
     TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
     run_profile::{
         CapabilityCallCandidate, CapabilityInputRef, CapabilityInvocation,
-        CapabilitySurfaceVersion, LoopHostMilestone, LoopHostMilestoneKind, ParentLoopOutput,
-        ProviderToolCallReplay,
+        CapabilitySurfaceVersion, EmptyMemoryPromptContextService, LoopHostMilestone,
+        LoopHostMilestoneKind, ParentLoopOutput, ProviderToolCallReplay,
     },
 };
 use serde_json::json;
@@ -776,6 +776,7 @@ impl RebornBinaryE2EHarness {
             input_queue: None,
             identity_context_source,
             user_profile_source: Arc::new(EmptyUserProfileSource),
+            memory_context_source: Arc::new(EmptyMemoryPromptContextService),
             model_policy_guard: None,
             model_budget_accountant: None,
             safety_context: None,

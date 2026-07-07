@@ -539,11 +539,14 @@ async fn libsql_ensure_index_accepts_fts_kind_and_filter_matches_text() {
     let prefix = VirtualPath::new("/memory").unwrap();
     let kind = RecordKind::new("chunk").unwrap();
     let content = IndexKey::new("content").unwrap();
-    // Insert before declaring the index so backfill kicks in.
+    // Insert before declaring the index so backfill kicks in. One row's
+    // content carries FTS5 metacharacters (quotes, a hyphenated compound, a
+    // colon) to exercise Filter::FtsPhrase's literal-content contract below.
     for (path, body) in [
         ("/memory/a", "the quick brown fox jumps"),
         ("/memory/b", "the lazy dog sleeps"),
         ("/memory/c", "a brown bear naps in the woods"),
+        ("/memory/d", r#"write the stale-ref file, please: say "hi""#),
     ] {
         let entry = Entry::record(kind.clone(), &serde_json::json!({}))
             .unwrap()
@@ -570,7 +573,7 @@ async fn libsql_ensure_index_accepts_fts_kind_and_filter_matches_text() {
         .query(
             &prefix,
             &Filter::Fts {
-                key: content,
+                key: content.clone(),
                 query: "brown".into(),
             },
             Page::default(),
@@ -578,6 +581,36 @@ async fn libsql_ensure_index_accepts_fts_kind_and_filter_matches_text() {
         .await
         .unwrap();
     assert_eq!(results.len(), 2);
+
+    // Filter::FtsPhrase treats its content as a literal phrase: the
+    // metacharacter-laden text round-trips exactly, never parsed as FTS5
+    // query syntax (column filters, NOT-prefix, boolean operators).
+    let phrase_results = filesystem
+        .query(
+            &prefix,
+            &Filter::FtsPhrase {
+                key: content.clone(),
+                phrase: r#"write the stale-ref file, please: say "hi""#.into(),
+            },
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(phrase_results.len(), 1);
+
+    // An empty phrase matches nothing.
+    let empty_phrase_results = filesystem
+        .query(
+            &prefix,
+            &Filter::FtsPhrase {
+                key: content,
+                phrase: "".into(),
+            },
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert!(empty_phrase_results.is_empty());
 }
 
 #[cfg(feature = "libsql")]
@@ -2129,10 +2162,15 @@ mod postgres_tests {
         fs.ensure_index(&prefix_path, &spec).await.unwrap();
         // Redeclaration is idempotent.
         fs.ensure_index(&prefix_path, &spec).await.unwrap();
+        // One row's content carries FTS5-style metacharacters (quotes, a
+        // hyphenated compound, a colon) to exercise Filter::FtsPhrase's
+        // literal-content contract below — postgres has no such dialect, but
+        // the phrase must still round-trip exactly through `phraseto_tsquery`.
         for (leaf, body) in [
             ("a", "the quick brown fox jumps"),
             ("b", "the lazy dog sleeps"),
             ("c", "a brown bear naps"),
+            ("d", r#"write the stale-ref file, please: say "hi""#),
         ] {
             let entry = Entry::record(kind.clone(), &serde_json::json!({}))
                 .unwrap()
@@ -2145,7 +2183,7 @@ mod postgres_tests {
             .query(
                 &prefix_path,
                 &Filter::Fts {
-                    key: content,
+                    key: content.clone(),
                     query: "brown".into(),
                 },
                 Page::default(),
@@ -2153,6 +2191,33 @@ mod postgres_tests {
             .await
             .unwrap();
         assert_eq!(results.len(), 2);
+
+        let phrase_results = fs
+            .query(
+                &prefix_path,
+                &Filter::FtsPhrase {
+                    key: content.clone(),
+                    phrase: r#"write the stale-ref file, please: say "hi""#.into(),
+                },
+                Page::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(phrase_results.len(), 1);
+
+        // An empty phrase matches nothing.
+        let empty_phrase_results = fs
+            .query(
+                &prefix_path,
+                &Filter::FtsPhrase {
+                    key: content,
+                    phrase: "".into(),
+                },
+                Page::default(),
+            )
+            .await
+            .unwrap();
+        assert!(empty_phrase_results.is_empty());
     }
 
     #[tokio::test]

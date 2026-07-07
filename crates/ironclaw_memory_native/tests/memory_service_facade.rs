@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_filesystem::InMemoryBackend;
@@ -92,6 +92,76 @@ async fn native_provider_reads_writes_lists_and_searches_through_memory_service(
         .expect("search through IronClaw memory facade");
     assert_eq!(search.results.len(), 1);
     assert_eq!(search.results[0].path, "notes/alpha.md");
+}
+
+#[tokio::test]
+async fn native_context_retrieve_matches_literal_phrase_while_search_matches_free_form() {
+    // `retrieve_context` (prompt-context recall) and `search` (the
+    // user-authored `builtin.memory_search` path) must diverge on query
+    // semantics: retrieve_context treats its query as literal phrase
+    // content, search treats it as a free-form (token-AND) query. Two
+    // documents distinguish the two: one contains the exact phrase, the
+    // other contains the same three tokens in a different order — a
+    // phrase match excludes the reordered document, a free-form match
+    // does not.
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+    let invocation = invocation();
+
+    for (target, content) in [
+        ("phrase-order.md", "shipment tracking id 12345"),
+        ("reordered.md", "id tracking shipment reversed"),
+    ] {
+        service
+            .write(
+                invocation.clone(),
+                MemoryServiceWriteRequest {
+                    target: target.to_string(),
+                    content: content.to_string(),
+                    append: false,
+                    old_string: None,
+                    new_string: None,
+                    replace_all: false,
+                    metadata: None,
+                    timezone: None,
+                },
+            )
+            .await
+            .expect("write through IronClaw memory facade");
+    }
+
+    let context = service
+        .retrieve_context(
+            invocation.clone(),
+            MemoryServiceContextRequest {
+                query: "shipment tracking id".to_string(),
+                max_snippets: 5,
+                context_profile_id: MemoryContextProfileId::new("default").unwrap(),
+            },
+        )
+        .await
+        .expect("retrieve_context through IronClaw memory facade");
+    assert_eq!(
+        context.len(),
+        1,
+        "literal-phrase recall must exclude the reordered document"
+    );
+    assert!(context[0].model_content.contains("shipment tracking id"));
+
+    let search = service
+        .search(
+            invocation,
+            MemoryServiceSearchRequest {
+                query: "shipment tracking id".to_string(),
+                limit: 5,
+            },
+        )
+        .await
+        .expect("search through IronClaw memory facade");
+    assert_eq!(
+        search.results.len(),
+        2,
+        "free-form search must match both documents on token presence alone"
+    );
 }
 
 #[tokio::test]
@@ -264,6 +334,40 @@ async fn native_context_retrieve_filters_non_finite_scores_before_ordering() {
     assert_eq!(
         snippets[0].safe_summary,
         "Untrusted memory content: finite score note"
+    );
+}
+
+#[tokio::test]
+async fn native_context_retrieve_bounds_pre_fusion_limit_relative_to_max_snippets() {
+    // Prompt-context recall asks for a handful of snippets per turn; left
+    // unbounded, `MemorySearchRequest`'s default `pre_fusion_limit` (50) is
+    // fetched from the backend regardless of `max_snippets`. It must be
+    // bounded to a small multiple of `max_snippets` instead.
+    let captured = Arc::new(Mutex::new(None));
+    let service = NativeMemoryService::new(Arc::new(PreFusionLimitSpyBackend {
+        captured_pre_fusion_limit: Arc::clone(&captured),
+    }));
+
+    service
+        .retrieve_context(
+            invocation(),
+            MemoryServiceContextRequest {
+                query: "planning".to_string(),
+                max_snippets: 5,
+                context_profile_id: MemoryContextProfileId::new("default").unwrap(),
+            },
+        )
+        .await
+        .expect("context retrieval through IronClaw memory facade");
+
+    let observed = captured
+        .lock()
+        .unwrap()
+        .expect("backend search must be invoked");
+    assert!(
+        (5..50).contains(&observed),
+        "pre_fusion_limit must be bounded below the 50-candidate default \
+         and at least max_snippets, got {observed}"
     );
 }
 
@@ -535,6 +639,31 @@ impl MemoryBackend for MockSearchBackend {
             });
         }
         Ok(self.results.clone())
+    }
+}
+
+/// Records the `pre_fusion_limit` of the `MemorySearchRequest` a `search`
+/// call was made with, so a test can assert `retrieve_context` bounds it.
+struct PreFusionLimitSpyBackend {
+    captured_pre_fusion_limit: Arc<Mutex<Option<usize>>>,
+}
+
+#[async_trait]
+impl MemoryBackend for PreFusionLimitSpyBackend {
+    fn capabilities(&self) -> MemoryBackendCapabilities {
+        MemoryBackendCapabilities {
+            full_text_search: true,
+            ..MemoryBackendCapabilities::default()
+        }
+    }
+
+    async fn search(
+        &self,
+        _context: &MemoryContext,
+        request: MemorySearchRequest,
+    ) -> Result<Vec<MemorySearchResult>, FilesystemError> {
+        *self.captured_pre_fusion_limit.lock().unwrap() = Some(request.pre_fusion_limit());
+        Ok(Vec::new())
     }
 }
 

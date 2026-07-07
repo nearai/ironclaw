@@ -52,11 +52,11 @@ use ironclaw_turns::{
         LoopInputCursor, LoopInputCursorToken, LoopModelCapabilityView, LoopModelMessage,
         LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopPromptBundle,
         LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort,
-        LoopRunContext, LoopTranscriptPort, ModelVisibleToolObservation, ObservationTrust,
-        ParentLoopOutput, PersonalContextPolicy, PromptMode, PromptSkillContextMetadata,
-        ProviderToolCallReference, ProviderToolDefinition, SkillVisibility, ToolObservationDetail,
-        ToolObservationStatus, UpdateAssistantDraft, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        LoopRunContext, LoopTranscriptPort, MemoryPromptContextRequest, MemoryPromptContextService,
+        ModelVisibleToolObservation, ObservationTrust, ParentLoopOutput, PersonalContextPolicy,
+        PromptMode, PromptSkillContextMetadata, ProviderToolCallReference, ProviderToolDefinition,
+        SkillVisibility, ToolObservationDetail, ToolObservationStatus, UpdateAssistantDraft,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 use tracing_test::traced_test;
@@ -412,12 +412,14 @@ async fn thread_context_port_accepts_explicit_owner_with_distinct_actor() {
         fixture.run_context.resolved_run_profile,
     )
     .with_actor(TurnActor::new(UserId::new("room-participant").unwrap()));
+    let memory_source = Arc::new(SpyMemoryContextSource::new());
     let adapter = ThreadBackedLoopContextPort::new(
         Arc::clone(&fixture.thread_service),
         fixture.thread_scope.clone(),
         run_context,
         16,
-    );
+    )
+    .with_memory_context_source(memory_source.clone());
 
     let bundle = adapter
         .load_loop_context(LoopContextRequest {
@@ -429,6 +431,153 @@ async fn thread_context_port_accepts_explicit_owner_with_distinct_actor() {
         .expect("explicit owner should allow actor/owner divergence");
 
     assert_eq!(bundle.messages.len(), 1);
+    // Memory recall must key off the thread's explicit owner, not the
+    // diverging submitting actor: a shared route's memory belongs to the
+    // thread it was written into, not to whoever is currently posting.
+    assert_eq!(
+        memory_source.captured_actor(),
+        fixture.thread_scope.owner_user_id
+    );
+}
+
+#[tokio::test]
+async fn thread_context_port_degrades_to_no_snippets_when_memory_context_source_errors() {
+    // Unlike the skill/identity sources (which fail closed — see
+    // `thread_context_port_fails_closed_when_visible_skill_content_is_missing`),
+    // memory recall is best-effort prompt enrichment: a backend error must not
+    // abort the whole turn, just omit the snippets.
+    let fixture = ThreadFixture::new().await;
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    )
+    .with_memory_context_source(Arc::new(ErroringMemoryContextSource));
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        })
+        .await
+        .expect("memory backend error must not fail context loading");
+
+    assert!(bundle.memory_snippets.is_empty());
+}
+
+#[tokio::test]
+async fn thread_context_port_memory_query_uses_latest_user_and_skips_without_user() {
+    // (a) A window with an assistant reply between two user messages must
+    // search on the latest user message, not an earlier one.
+    let fixture = ThreadFixture::new_with_user_content("first question").await;
+    ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    )
+    .finalize_assistant_message(FinalizeAssistantMessage {
+        reply: AssistantReply {
+            content: "here is an answer".to_string(),
+        },
+    })
+    .await
+    .unwrap();
+    fixture
+        .accept_user_message("event-2", "second question")
+        .await;
+    let latest_user_spy = Arc::new(SpyMemoryContextSource::new());
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    )
+    .with_memory_context_source(latest_user_spy.clone());
+
+    adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(latest_user_spy.call_count(), 1);
+    let query = latest_user_spy
+        .captured_query()
+        .expect("latest user message must drive a memory query");
+    assert!(query.contains("second question"));
+    assert!(!query.contains("first question"));
+
+    // (b) A window with no user message at all (assistant/summary-only) must
+    // skip memory recall entirely. A dedicated [user, assistant] fixture
+    // bounded to a window of size 1 scans only the trailing assistant reply.
+    let assistant_only_fixture = ThreadFixture::new_with_user_content("only question").await;
+    ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&assistant_only_fixture.thread_service),
+        assistant_only_fixture.thread_scope.clone(),
+        assistant_only_fixture.run_context.clone(),
+    )
+    .finalize_assistant_message(FinalizeAssistantMessage {
+        reply: AssistantReply {
+            content: "final answer".to_string(),
+        },
+    })
+    .await
+    .unwrap();
+    let assistant_only_spy = Arc::new(SpyMemoryContextSource::new());
+    let assistant_only_adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&assistant_only_fixture.thread_service),
+        assistant_only_fixture.thread_scope.clone(),
+        assistant_only_fixture.run_context.clone(),
+        16,
+    )
+    .with_memory_context_source(assistant_only_spy.clone());
+
+    assistant_only_adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 1,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        assistant_only_spy.call_count(),
+        0,
+        "a window with no user message must not trigger memory recall"
+    );
+
+    // (c) A whitespace-only user message carries no searchable content and
+    // must also skip memory recall.
+    let whitespace_fixture = ThreadFixture::new_with_user_content("   ").await;
+    let whitespace_spy = Arc::new(SpyMemoryContextSource::new());
+    let whitespace_adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&whitespace_fixture.thread_service),
+        whitespace_fixture.thread_scope.clone(),
+        whitespace_fixture.run_context.clone(),
+        16,
+    )
+    .with_memory_context_source(whitespace_spy.clone());
+
+    whitespace_adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        whitespace_spy.call_count(),
+        0,
+        "whitespace-only user message must not trigger memory recall"
+    );
 }
 
 #[tokio::test]
@@ -3848,6 +3997,69 @@ impl HostIdentityContextSource for StaticIdentityContextSource {
         message_ref: &LoopMessageRef,
     ) -> Result<Option<HostIdentityMessageContent>, HostIdentityContextBuildError> {
         Ok(self.content_by_ref.get(message_ref.as_str()).cloned())
+    }
+}
+
+/// Records the `actor` and `query` a `load_memory_snippets` call was made
+/// with (plus a call count), so a test can assert which user the port scoped
+/// memory recall to, which message text it searched for, and whether it was
+/// invoked at all.
+struct SpyMemoryContextSource {
+    captured_actor: Mutex<Option<UserId>>,
+    captured_query: Mutex<Option<String>>,
+    call_count: AtomicUsize,
+}
+
+impl SpyMemoryContextSource {
+    fn new() -> Self {
+        Self {
+            captured_actor: Mutex::new(None),
+            captured_query: Mutex::new(None),
+            call_count: AtomicUsize::new(0),
+        }
+    }
+
+    fn captured_actor(&self) -> Option<UserId> {
+        self.captured_actor.lock().unwrap().clone()
+    }
+
+    fn captured_query(&self) -> Option<String> {
+        self.captured_query.lock().unwrap().clone()
+    }
+
+    fn call_count(&self) -> usize {
+        self.call_count.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl MemoryPromptContextService for SpyMemoryContextSource {
+    async fn load_memory_snippets(
+        &self,
+        request: MemoryPromptContextRequest,
+    ) -> Result<Vec<LoopContextSnippet>, AgentLoopHostError> {
+        *self.captured_actor.lock().unwrap() = Some(request.actor.user_id);
+        *self.captured_query.lock().unwrap() = Some(request.query);
+        self.call_count.fetch_add(1, Ordering::SeqCst);
+        Ok(Vec::new())
+    }
+}
+
+/// Always fails, mirroring `StaticSkillContextSource`'s error path so the
+/// port's fail-closed behavior on a memory-backend error is pinned the same
+/// way the adjacent skill-context error tests pin theirs.
+struct ErroringMemoryContextSource;
+
+#[async_trait]
+impl MemoryPromptContextService for ErroringMemoryContextSource {
+    async fn load_memory_snippets(
+        &self,
+        _request: MemoryPromptContextRequest,
+    ) -> Result<Vec<LoopContextSnippet>, AgentLoopHostError> {
+        Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "memory backend unavailable",
+        ))
     }
 }
 

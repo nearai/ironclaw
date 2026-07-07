@@ -61,10 +61,10 @@ use ironclaw_turns::{
         AgentLoopHostError, CapabilityBatchInvocation, CapabilityBatchOutcome,
         CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
         CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, CapabilitySurfaceVersion,
-        ConcurrencyHint, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
-        LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken, LoopInputCursorToken,
-        LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard, ParentLoopOutput, PromptMode,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        ConcurrencyHint, EmptyMemoryPromptContextService, InMemoryLoopHostMilestoneSink,
+        InstructionSafetyContext, LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken,
+        LoopInputCursorToken, LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard,
+        ParentLoopOutput, PromptMode, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 use tokio::time::{sleep, timeout};
@@ -329,6 +329,7 @@ impl ProductLiveAgentLoopHarness {
             input_queue: Some(Arc::new(EmptyInputQueue)),
             identity_context_source: Arc::new(EmptyIdentityContextSource),
             user_profile_source: Arc::new(EmptyUserProfileSource),
+            memory_context_source: Arc::new(EmptyMemoryPromptContextService),
             model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
             model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
             safety_context: Some(test_safety_context()),

@@ -338,6 +338,188 @@ async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
     runtime.shutdown().await.unwrap();
 }
 
+/// Marker written by the first conversation and expected back, enveloped, in
+/// the second conversation's system prompt.
+const MEMORY_E2E_MARKER: &str = "runtime-memctx-marker-galleon-42";
+
+/// Scripted gateway for [`build_reborn_runtime_wires_memory_context_source_when_local_dev`]:
+/// call 0 writes a memory document via the real `builtin.memory_write`
+/// capability, call 1 is that turn's final reply, and call 2 (a second,
+/// unrelated conversation) captures the request it was sent so the test can
+/// inspect its system-role content for the memory-recall envelope.
+#[derive(Default)]
+struct MemoryRecallGateway {
+    call_count: AtomicUsize,
+    captured_request: std::sync::Mutex<Option<HostManagedModelRequest>>,
+}
+
+impl MemoryRecallGateway {
+    /// Every `System`-role message content the second (reader) turn's request
+    /// carried, concatenated for a substring search — mirrors
+    /// `assert_system_prompt_contains` in the integration harness.
+    fn captured_system_prompt(&self) -> String {
+        self.captured_request
+            .lock()
+            .expect("captured request lock poisoned")
+            .as_ref()
+            .expect("reader turn must have reached the gateway")
+            .messages
+            .iter()
+            .filter(|message| {
+                message.role == ironclaw_loop_support::HostManagedModelMessageRole::System
+            })
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+#[async_trait]
+impl HostManagedModelGateway for MemoryRecallGateway {
+    async fn stream_model(
+        &self,
+        _request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        Err(HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidRequest,
+            "MemoryRecallGateway requires the capability-aware model path",
+        ))
+    }
+
+    async fn stream_model_with_capabilities(
+        &self,
+        request: HostManagedModelRequest,
+        capabilities: Arc<dyn LoopCapabilityPort>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        match self.call_count.fetch_add(1, Ordering::SeqCst) {
+            0 => {
+                let write_id =
+                    CapabilityId::new("builtin.memory_write").expect("memory_write capability id");
+                let write_tool = capabilities
+                    .tool_definitions()
+                    .map_err(|err| {
+                        HostManagedModelError::safe(
+                            HostManagedModelErrorKind::InvalidRequest,
+                            format!("tool_definitions failed: {err}"),
+                        )
+                    })?
+                    .into_iter()
+                    .find(|def| def.capability_id == write_id)
+                    .expect("builtin.memory_write must be visible in local-dev capability surface");
+                let candidate = capabilities
+                    .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                        ProviderToolCall {
+                            provider_id: "memory-e2e-provider".to_string(),
+                            provider_model_id: "memory-e2e-model".to_string(),
+                            turn_id: Some("memory-e2e-write-turn".to_string()),
+                            id: "memory-e2e-write-1".to_string(),
+                            name: write_tool.name,
+                            arguments: json!({
+                                "target": "memory",
+                                "content": format!("the launch codename marker is {MEMORY_E2E_MARKER}"),
+                                "append": false
+                            }),
+                            response_reasoning: None,
+                            reasoning: None,
+                            signature: None,
+                        },
+                    ))
+                    .await
+                    .map_err(|err| {
+                        HostManagedModelError::safe(
+                            HostManagedModelErrorKind::InvalidRequest,
+                            format!("register_provider_tool_call(memory_write) failed: {err}"),
+                        )
+                    })?;
+                Ok(HostManagedModelResponse::capability_calls(
+                    vec![candidate],
+                    "",
+                ))
+            }
+            1 => Ok(HostManagedModelResponse::assistant_reply("saved")),
+            _ => {
+                *self
+                    .captured_request
+                    .lock()
+                    .expect("captured request lock poisoned") = Some(request);
+                Ok(HostManagedModelResponse::assistant_reply("noted"))
+            }
+        }
+    }
+}
+
+/// W4-MEMCTX-ENVELOPE: the harness-level
+/// `memory_write_reaches_system_prompt_enveloped_and_hijack_markers_are_dropped`
+/// test (`tests/integration/memory_prompt_context.rs`) drives a hand-mirrored
+/// `MemoryPromptContextService` built by the harness's own test support, not
+/// `build_reborn_runtime`'s production `Some(local_runtime) => ...` match arm
+/// (runtime.rs). This test drives THAT arm directly: a real `builtin.memory_write`
+/// call on one conversation, then a second conversation's system prompt is
+/// asserted to carry the seeded marker inside the `Untrusted memory content:`
+/// envelope, proving the production composition — not just its mirror — wires a
+/// working backend.
+#[tokio::test]
+async fn build_reborn_runtime_wires_memory_context_source_when_local_dev() {
+    let _guard = runtime_composition_test_guard().await;
+    let root = tempfile::tempdir().unwrap();
+    let gateway = Arc::new(MemoryRecallGateway::default());
+    let input = RebornRuntimeInput::from_services(
+        RebornBuildInput::local_dev("runtime-memctx-owner", root.path().join("local-dev"))
+            .with_runtime_policy(local_dev_runtime_policy()),
+    )
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: "runtime-memctx-tenant".to_string(),
+        agent_id: "runtime-memctx-agent".to_string(),
+        source_binding_id: "runtime-memctx-source".to_string(),
+        reply_target_binding_id: "runtime-memctx-reply".to_string(),
+    })
+    .with_poll_settings(PollSettings {
+        interval: Duration::from_millis(10),
+        max_total: Duration::from_secs(15),
+    })
+    .with_model_gateway_override(gateway.clone());
+
+    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+
+    let writer = runtime
+        .new_conversation()
+        .await
+        .expect("writer conversation");
+    let write_reply = tokio::time::timeout(
+        SEND_USER_MESSAGE_TIMEOUT,
+        runtime.send_user_message(&writer, "remember this marker"),
+    )
+    .await
+    .expect("write turn does not time out")
+    .expect("write turn completes");
+    assert_eq!(write_reply.status, TurnStatus::Completed);
+
+    let reader = runtime
+        .new_conversation()
+        .await
+        .expect("reader conversation");
+    let read_reply = tokio::time::timeout(
+        SEND_USER_MESSAGE_TIMEOUT,
+        runtime.send_user_message(&reader, "launch codename marker"),
+    )
+    .await
+    .expect("read turn does not time out")
+    .expect("read turn completes");
+    assert_eq!(read_reply.status, TurnStatus::Completed);
+
+    let system_prompt = gateway.captured_system_prompt();
+    assert!(
+        system_prompt.contains("Untrusted memory content:"),
+        "production memory_context_source must envelope recalled snippets; got: {system_prompt}"
+    );
+    assert!(
+        system_prompt.contains(MEMORY_E2E_MARKER),
+        "production memory_context_source must recall the seeded marker; got: {system_prompt}"
+    );
+
+    runtime.shutdown().await.unwrap();
+}
+
 /// Drives `build_reborn_runtime` through the third-party hook activation wiring
 /// (runtime.rs: third-party discovery input + projection registry + tenant
 /// threading) with BOTH flags on and a real `/system/extensions` manifest tree

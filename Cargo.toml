@@ -494,6 +494,10 @@ name = "reborn_integration_mcp"
 path = "tests/integration/mcp.rs"
 
 [[test]]
+name = "reborn_integration_memory_prompt_context"
+path = "tests/integration/memory_prompt_context.rs"
+
+[[test]]
 name = "reborn_integration_oauth_connect"
 path = "tests/integration/oauth_connect.rs"
 

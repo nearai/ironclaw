@@ -26,7 +26,7 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, CommunicationContextProvider, InstructionSafetyContext,
         LoopCapabilityPort, LoopHostMilestoneSink, LoopModelBudgetAccountant, LoopModelPolicyGuard,
-        LoopRunContext,
+        LoopRunContext, MemoryPromptContextService,
     },
     runner::TurnRunTransitionPort,
 };
@@ -313,6 +313,11 @@ where
     /// a no-op implementation, but the type signature always requires a valid
     /// identity context source.
     pub identity_context_source: Arc<dyn HostIdentityContextSource>,
+    /// Source for memory-recall snippets injected into the loop context bundle.
+    /// `EmptyMemoryPromptContextService` (always empty snippets, no error) is
+    /// acceptable for compositions that do not yet wire a memory backend —
+    /// mirrors `identity_context_source`'s required-with-no-op-fallback shape.
+    pub memory_context_source: Arc<dyn MemoryPromptContextService>,
     /// Source for the per-user agent-context profile (timezone/locale/location).
     /// Resolved once at loop start and stamped into `LoopRuntimeContext.user_profile`.
     /// `EmptyUserProfileSource` (always `None`) is acceptable for compositions
@@ -787,6 +792,7 @@ where
         host_factory = host_factory.with_hook_security_audit_sink(sink);
     }
     host_factory = host_factory.with_identity_context_source(parts.identity_context_source);
+    host_factory = host_factory.with_memory_context_source(parts.memory_context_source);
     host_factory = host_factory.with_user_profile_source(parts.user_profile_source);
     let host_factory = Arc::new(host_factory);
 

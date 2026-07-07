@@ -117,11 +117,12 @@ where
     }
 
     /// Declare the FTS and Vector indexes the search path needs. libSQL
-    /// and Postgres only translate `Filter::Fts` / `Filter::VectorNearest`
-    /// once a matching index has been registered; without this the search
-    /// silently degrades to `Unsupported`. Tolerates `Unsupported` for
-    /// backends that don't materialize indexes (the in-memory backend
-    /// still serves both filter kinds via in-memory scan).
+    /// and Postgres only translate `Filter::Fts` / `Filter::FtsPhrase` /
+    /// `Filter::VectorNearest` once a matching index has been registered;
+    /// without this the search silently degrades to `Unsupported`.
+    /// Tolerates `Unsupported` for backends that don't materialize indexes
+    /// (the in-memory backend still serves all three filter kinds via
+    /// in-memory scan).
     async fn ensure_search_indexes(
         &self,
         prefix: &VirtualPath,
@@ -931,9 +932,16 @@ where
             .await?;
 
         let full_text_results = if request.full_text() {
-            let filter = Filter::Fts {
-                key: Self::index_key(fs_keys::CONTENT),
-                query: request.query().to_string(),
+            let filter = if request.literal_phrase() {
+                Filter::FtsPhrase {
+                    key: Self::index_key(fs_keys::CONTENT),
+                    phrase: request.query().to_string(),
+                }
+            } else {
+                Filter::Fts {
+                    key: Self::index_key(fs_keys::CONTENT),
+                    query: request.query().to_string(),
+                }
             };
             let page = Page::new(
                 0,

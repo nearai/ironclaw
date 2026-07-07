@@ -753,7 +753,7 @@ impl RebornIntegrationGroupBuilder {
             Arc::clone(&scope_gateway) as Arc<dyn HostManagedModelGateway>;
         let user_profile_source: Arc<dyn HostUserProfileSource> =
             ironclaw_reborn_composition::test_support::build_user_profile_source_for_test(
-                capability_recorder.profile_filesystem(),
+                capability_recorder.local_dev_filesystem(),
             );
 
         // --- C-BUDGET: production budget accountant (wiring-liveness only) -----
@@ -838,6 +838,14 @@ impl RebornIntegrationGroupBuilder {
             skill_context_source: capability_recorder.skill_context_source(),
             input_queue: None,
             identity_context_source: Arc::new(EmptyIdentityContextSource),
+            // Memory-recall prompt injection: HostRuntime mode backs this with the
+            // same raw local-dev filesystem `builtin.memory_write` writes into, so a
+            // seeded document is discoverable via the envelope-wrapped snippet too;
+            // other backends fall back to `EmptyMemoryPromptContextService`.
+            memory_context_source:
+                ironclaw_reborn_composition::test_support::build_memory_context_source_for_test(
+                    capability_recorder.local_dev_filesystem(),
+                ),
             // E-PROFILE: HostRuntime mode backs this with the local-dev memory
             // filesystem so `profile_set` writes read back; other backends fall
             // back to `EmptyUserProfileSource`. Built as a local (not inline) so

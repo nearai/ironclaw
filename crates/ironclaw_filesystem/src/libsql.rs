@@ -1832,6 +1832,23 @@ fn translate_filter(
             ));
             Ok(())
         }
+        Filter::FtsPhrase { key, phrase } => {
+            let Some(fts_table) = fts_tables.get(key.as_str()) else {
+                return Err(FilesystemError::Unsupported {
+                    path: path.clone(),
+                    operation: FilesystemOperation::Query,
+                });
+            };
+            // The dialect boundary: free-form caller text becomes FTS5 query
+            // syntax only here, quoted as a single literal phrase so it can
+            // never be parsed as column filters or boolean operators.
+            params.push(libsql::Value::Text(fts5_quote_phrase(phrase)));
+            out.push_str(&format!(
+                "(path IN (SELECT path FROM {fts_table} WHERE {fts_table} MATCH ?{}))",
+                params.len()
+            ));
+            Ok(())
+        }
         Filter::VectorNearest { .. } => Err(FilesystemError::Unsupported {
             // VectorNearest is evaluated by the top-level `query` method,
             // not inside the WHERE fragment. Reaching the translator
@@ -1881,7 +1898,7 @@ fn translate_compound(
 #[cfg(feature = "libsql")]
 fn collect_fts_keys(filter: &Filter, out: &mut Vec<String>) {
     match filter {
-        Filter::Fts { key, .. } => {
+        Filter::Fts { key, .. } | Filter::FtsPhrase { key, .. } => {
             let k = key.as_str().to_string();
             if !out.contains(&k) {
                 out.push(k);
@@ -1894,6 +1911,14 @@ fn collect_fts_keys(filter: &Filter, out: &mut Vec<String>) {
         }
         _ => {}
     }
+}
+
+/// Render `phrase` as a literal FTS5 double-quoted phrase, doubling any
+/// embedded `"` per FTS5 escaping. Matched as literal content — never
+/// interpreted as query syntax.
+#[cfg(feature = "libsql")]
+fn fts5_quote_phrase(phrase: &str) -> String {
+    format!("\"{}\"", phrase.replace('"', "\"\""))
 }
 
 /// All ancestor paths of `path`, **most specific first**, ending at `/`.
