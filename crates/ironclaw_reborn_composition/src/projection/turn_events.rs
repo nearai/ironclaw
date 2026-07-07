@@ -989,10 +989,22 @@ pub(super) fn failure_explanation_user_prompt(input: &FailureExplanationInput) -
     // record. Re-run the value-scrubber as defense in depth even though the
     // producer is expected to have scrubbed secret VALUES already; skip the
     // line entirely when the detail is absent or scrubs to empty.
+    //
+    // Unlike `failure_category`/`fallback_summary` (host-authored, derived from
+    // the category), `detail` is untrusted provider/tool/runtime error text.
+    // `sanitize_model_visible_text` redacts credential-shaped tokens but keeps
+    // newlines and instruction-like content, so appending it raw would let a
+    // crafted error (e.g. from an MCP server or provider body) inject extra
+    // prompt fields or directives — a `\nfallback_summary: ...\nIgnore previous
+    // instructions...` — into the explainer, whose output becomes the public
+    // `failure_summary`. JSON-string-escape it so it stays a single quoted data
+    // value the model reads as data, never as prompt structure.
     if let Some(detail) = input.detail.as_deref() {
         let scrubbed = sanitize_model_visible_text(detail);
         if !scrubbed.trim().is_empty() {
-            prompt.push_str(&format!("detail: {scrubbed}\n"));
+            let quoted = serde_json::to_string(&scrubbed)
+                .unwrap_or_else(|_| "\"<undisplayable detail>\"".to_string());
+            prompt.push_str(&format!("detail: {quoted}\n"));
         }
     }
     prompt
