@@ -396,10 +396,13 @@ pub enum FilesystemError {
     SymlinkEscape { path: VirtualPath },
     MountConflict { path: VirtualPath },
     Backend { path: VirtualPath, operation: FilesystemOperation, reason: String },
+    NotFound { path: VirtualPath, operation: FilesystemOperation },
+    VersionMismatch { path: VirtualPath, expected: Option<RecordVersion>, found: Option<RecordVersion> },
+    Unsupported { path: VirtualPath, operation: FilesystemOperation },
 }
 ```
 
-Backend errors may keep raw errors for logs, but public/display errors should use scoped or virtual paths.
+Backend errors may keep raw errors for logs, but public/display errors should use scoped or virtual paths. `NotFound`/`VersionMismatch`/`Unsupported` back `delete_if_version` (§14.1) — absent path, stale version, and unsupported-backend cases respectively.
 
 ---
 
@@ -419,6 +422,11 @@ pub trait RootFilesystem {
     async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError>;
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError>;
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError>;
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        expected: CasExpectation,
+    ) -> Result<(), FilesystemError>;
 }
 
 pub struct CompositeRootFilesystem;
@@ -445,6 +453,19 @@ impl<F: RootFilesystem> ScopedFilesystem<F> {
 
 The implementation may start synchronous if the V1 local backend is synchronous, but the public trait should not block future async/remote backends.
 
+### 14.1 `delete_if_version` — CAS-guarded delete
+
+Additive method on `RootFilesystem` (default trait impl: `Unsupported`, same pattern as other optional CAS operations). `CasExpectation` (already used by the CAS'd write path): `Version(RecordVersion) | Any | Absent`.
+
+Rules:
+
+- version-guarded, single-key delete only — no subtree/cascade semantics
+- path absent -> `NotFound`
+- path present at a different version -> `VersionMismatch`
+- `CasExpectation::Absent` is not meaningful for delete -> `Unsupported`/fail-closed
+- requires `delete` permission at the `ScopedFilesystem` layer, same as `delete`
+- backends without CAS-delete support return `Unsupported` by default — fail-closed, never a silent unconditional delete
+
 ---
 
 ## 15. Minimum TDD coverage
@@ -468,6 +489,7 @@ Add tests through the caller-facing filesystem APIs, not only helper functions:
 - libSQL backend reads, writes, stats, overwrites, lists direct children, infers directories, and returns virtual-path-only missing-file errors
 - `/tmp` mount can be created per invocation and cleaned up
 - `/artifacts` writes are captured under approved virtual path only
+- `delete_if_version` distinguishes `NotFound` (absent path) from `VersionMismatch` (wrong version) and leaves the entry untouched on either error
 
 ---
 
