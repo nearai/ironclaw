@@ -2211,4 +2211,48 @@ mod tests {
         let busy_timeout: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
         assert_eq!(busy_timeout, 5000, "busy_timeout must remain 5000");
     }
+
+    /// A pool checkout that times out waiting for a free connection (every
+    /// slot held by another in-flight operation) must surface as a
+    /// `FilesystemOperation::Connect` infrastructure error through
+    /// `connect()`'s `other` match arm — not panic, hang past the
+    /// configured timeout, or lose the fact that this was a pool
+    /// exhaustion rather than some other backend failure. Uses the
+    /// `build_libsql_pool_with_config` test seam to build a deliberately
+    /// tiny (size-1), fast-timing-out pool so the test doesn't wait out
+    /// the real 10s production timeout.
+    #[tokio::test]
+    async fn connect_maps_pool_checkout_timeout_to_connect_infrastructure_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("checkout-timeout-test.db");
+        let db = std::sync::Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+        let fs = LibSqlRootFilesystem {
+            pool: crate::libsql_pool::build_libsql_pool_with_config(
+                db,
+                1,
+                std::time::Duration::from_millis(50),
+            ),
+        };
+        fs.run_migrations().await.unwrap();
+
+        // Hold the pool's only connection for the rest of the test.
+        let _held = fs.connect().await.unwrap();
+
+        // The pool has no free connection and none will be returned before
+        // the 50ms wait_timeout elapses, so this checkout must time out
+        // rather than hang or succeed.
+        let Err(err) = fs.connect().await else {
+            panic!("checkout must fail while the only connection is held");
+        };
+        match err {
+            FilesystemError::BackendInfrastructure { operation, reason } => {
+                assert_eq!(operation, FilesystemOperation::Connect);
+                assert!(
+                    !reason.is_empty(),
+                    "checkout-timeout reason must not be empty"
+                );
+            }
+            other => panic!("expected FilesystemError::BackendInfrastructure, got {other:?}"),
+        }
+    }
 }

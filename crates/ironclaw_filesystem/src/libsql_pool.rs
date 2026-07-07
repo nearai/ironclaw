@@ -133,11 +133,29 @@ impl Manager for LibSqlConnectionManager {
     }
 }
 
-/// Build the bounded pool for `db`.
+/// Build the bounded pool for `db`, using the production sizing/timeout
+/// constants.
 pub(crate) fn build_libsql_pool(db: Arc<libsql::Database>) -> LibSqlPool {
+    build_libsql_pool_with_config(
+        db,
+        LIBSQL_POOL_MAX_CONNECTIONS,
+        LIBSQL_POOL_CHECKOUT_TIMEOUT,
+    )
+}
+
+/// Test/config seam behind [`build_libsql_pool`]: builds a pool with an
+/// explicit `max_size`/`wait_timeout` instead of the production constants,
+/// so tests can construct a deliberately tiny, fast-timing-out pool (e.g.
+/// size 1) to exercise checkout-exhaustion behaviour without waiting out
+/// the real 10s production timeout.
+pub(crate) fn build_libsql_pool_with_config(
+    db: Arc<libsql::Database>,
+    max_size: usize,
+    wait_timeout: Duration,
+) -> LibSqlPool {
     match Pool::builder(LibSqlConnectionManager { db })
-        .max_size(LIBSQL_POOL_MAX_CONNECTIONS)
-        .wait_timeout(Some(LIBSQL_POOL_CHECKOUT_TIMEOUT))
+        .max_size(max_size)
+        .wait_timeout(Some(wait_timeout))
         .runtime(deadpool::Runtime::Tokio1)
         .build()
     {
@@ -152,9 +170,7 @@ pub(crate) fn build_libsql_pool(db: Arc<libsql::Database>) -> LibSqlPool {
 /// PRAGMAs. Concurrent writers wait on SQLite locks (`busy_timeout`);
 /// transient file-open races get a short retry budget before surfacing
 /// as infrastructure errors.
-pub(crate) async fn connect_with_retry<F>(
-    open: F,
-) -> Result<libsql::Connection, FilesystemError>
+pub(crate) async fn connect_with_retry<F>(open: F) -> Result<libsql::Connection, FilesystemError>
 where
     F: FnMut() -> Result<libsql::Connection, libsql::Error>,
 {
