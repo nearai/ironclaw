@@ -571,6 +571,37 @@ async fn libsql_delete_if_version_is_vulnerable_to_aba_across_delete_recreate_cy
     );
 }
 
+/// Round-C review (PR #5749): no test drove `delete_if_version` against an
+/// explicit directory row (`is_dir = TRUE`, via `create_dir_all`) to confirm
+/// the `is_dir = 0` scoping — shared with `put`'s Version arm and
+/// `current_version_libsql` — actually excludes it, the way
+/// `libsql_put_rejects_existing_directory`-style tests already pin for
+/// `put`. A directory-only path must diagnose as `NotFound` (no file-plane
+/// row at that path), never match/delete the directory row.
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_delete_if_version_excludes_explicit_directory_row() {
+    let filesystem = libsql_root().await;
+    let dir = VirtualPath::new("/secrets/leases/CAS-DEL-DIR").unwrap();
+    filesystem.create_dir_all(&dir).await.unwrap();
+
+    let err = filesystem
+        .delete_if_version(&dir, ironclaw_filesystem::RecordVersion::from_backend(1))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            FilesystemError::NotFound {
+                operation: FilesystemOperation::Delete,
+                ..
+            }
+        ),
+        "delete_if_version must not match an explicit directory row \
+         (is_dir = TRUE), got: {err:?}"
+    );
+}
+
 #[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_native_put_cas_any_increments_existing_version() {
@@ -1849,6 +1880,123 @@ mod postgres_tests {
         assert!(
             fs.get(&path).await.unwrap().is_none(),
             "stale version token wrongly matched and deleted the second incarnation"
+        );
+    }
+
+    /// Round-C review (PR #5749): mirrors `postgres_put_rejects_existing_directory`
+    /// but for `delete_if_version` — no test drove it against an explicit
+    /// directory row to confirm the `is_dir = FALSE` scoping (shared with
+    /// `DELETE_IF_VERSION_ATOMIC_SQL`'s `locked`/`deleted` CTEs and
+    /// `postgres_current_version_with_client`) actually excludes it. A
+    /// directory-only path must diagnose as `NotFound`, never match/delete
+    /// the directory row.
+    #[tokio::test]
+    async fn postgres_delete_if_version_excludes_explicit_directory_row() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let dir = vpath(&prefix, "cas_delete_dir");
+        fs.create_dir_all(&dir).await.unwrap();
+
+        let err = fs
+            .delete_if_version(&dir, ironclaw_filesystem::RecordVersion::from_backend(1))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                FilesystemError::NotFound {
+                    operation: FilesystemOperation::Delete,
+                    ..
+                }
+            ),
+            "delete_if_version must not match an explicit directory row \
+             (is_dir = TRUE), got: {err:?}"
+        );
+    }
+
+    /// Round-C review (PR #5749): the deterministic
+    /// `delete_if_version_statements_are_single_round_trip_and_single_key`
+    /// test (postgres.rs) only inspects the SQL string's substrings/statement
+    /// count — it cannot distinguish a genuinely atomic query from a
+    /// similar-looking one that isn't (e.g. `FOR UPDATE SKIP LOCKED` still
+    /// contains the substring `FOR UPDATE`). This test drives the real race
+    /// the atomicity fix targets against a live Postgres session: a
+    /// concurrent transaction that deletes-then-recreates the same path
+    /// while `delete_if_version` is mid-flight (blocked on the `FOR UPDATE`
+    /// row lock the uncommitted DELETE holds), and asserts the only
+    /// semantically correct outcome — `NotFound`, because at the row-lock
+    /// serialization point the row was gone — rather than the misclassified
+    /// `VersionMismatch` a non-atomic (separate DELETE, then separate
+    /// diagnosis SELECT) implementation would produce against the racer's
+    /// freshly-recreated row.
+    #[tokio::test]
+    async fn postgres_delete_if_version_stays_notfound_under_concurrent_delete_recreate_race() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let Some(racer_pool) = postgres_pool().await else {
+            return;
+        };
+        let path = vpath(&prefix, "cas_delete_race");
+        let v1 = fs
+            .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+            .await
+            .unwrap();
+
+        let racer_client = racer_pool
+            .get()
+            .await
+            .expect("racer connection must be available on the same reachable Postgres");
+        let path_str = path.as_str().to_string();
+        let (deleted_tx, deleted_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let racer = tokio::spawn(async move {
+            racer_client.batch_execute("BEGIN").await.unwrap();
+            racer_client
+                .execute(
+                    "DELETE FROM root_filesystem_entries WHERE path = $1 AND is_dir = FALSE",
+                    &[&path_str],
+                )
+                .await
+                .unwrap();
+            // Our DELETE now holds a tuple lock on the row; a concurrent
+            // `delete_if_version`'s `FOR UPDATE` on this path will block on
+            // it until we commit. Signal so the test doesn't call
+            // `delete_if_version` before this DELETE has actually run.
+            let _ = deleted_tx.send(());
+            // Give `delete_if_version` time to reach `FOR UPDATE` and start
+            // waiting on our uncommitted DELETE's row lock before we
+            // recreate + commit.
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            racer_client
+                .execute(
+                    "INSERT INTO root_filesystem_entries (path, version) VALUES ($1, 999)",
+                    &[&path_str],
+                )
+                .await
+                .unwrap();
+            racer_client.batch_execute("COMMIT").await.unwrap();
+        });
+
+        deleted_rx
+            .await
+            .expect("racer must signal after its DELETE runs");
+        // Head start so `delete_if_version`'s `FOR UPDATE` actually reaches
+        // and blocks on the racer's uncommitted DELETE before it recreates.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let result = fs.delete_if_version(&path, v1).await;
+
+        racer.await.expect("racer task must not panic");
+
+        assert!(
+            matches!(result, Err(FilesystemError::NotFound { .. })),
+            "expected NotFound (delete_if_version's row-lock wait serializes \
+             it before the racer's recreate, so the correct diagnosis is \
+             'already gone', never a VersionMismatch against the racer's new \
+             row) — got: {result:?}. A non-atomic (separate DELETE + \
+             diagnosis SELECT) implementation would misclassify this as \
+             VersionMismatch{{found: Some(999)}}."
         );
     }
 

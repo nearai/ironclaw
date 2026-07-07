@@ -178,6 +178,15 @@ pub trait RootFilesystem: Send + Sync {
     /// only for paths that are never recreated; callers that do recreate
     /// paths must pair every successful delete with an unconditional
     /// postcondition recheck.
+    ///
+    /// Takes a bare [`RecordVersion`] rather than [`put`](Self::put)'s
+    /// [`CasExpectation`]: `Absent`/`Any` are meaningless preconditions for a
+    /// delete (there is nothing to delete if the path is already absent, and
+    /// an unconditional delete is just [`delete`](Self::delete)), so the only
+    /// expressible precondition here is "at this version" — narrowing the
+    /// parameter type to `RecordVersion` makes that the only option, rather
+    /// than leaving two variants callers could pass but that would be
+    /// meaningless.
     async fn delete_if_version(
         &self,
         path: &VirtualPath,

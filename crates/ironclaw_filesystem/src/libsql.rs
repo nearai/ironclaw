@@ -819,8 +819,8 @@ impl RootFilesystem for LibSqlRootFilesystem {
         // idiom as `put`) so the DELETE and the follow-up SELECT run as one
         // unit on one connection — this also keeps the call stack to a
         // single checkout, matching the one-checkout-per-call-stack
-        // invariant the bounded pool in #5751 enforces (no nested
-        // `self.connect()`).
+        // invariant the bounded pool (see `libsql_pool`, issue #5466) enforces
+        // (no nested `self.connect()`).
         //
         // Round-A review: validate `expected_version` before taking the
         // pool checkout / write lock. An out-of-range version can never
@@ -2386,5 +2386,18 @@ mod tests {
             "expected VersionMismatch (proves the diagnosis ran to \
              completion without deadlocking on the size-1 pool), got: {err:?}"
         );
+
+        // Round-C review: the assertion above only proves the diagnosis
+        // didn't deadlock: `ROLLBACK` itself could still fail to run (or
+        // fail and leave the connection mid-transaction) without failing
+        // that assertion. Prove the connection actually came back to the
+        // size-1 pool in a clean, reusable state by checking it out again
+        // for a real CAS delete — a still-open transaction from the
+        // VersionMismatch path would make this second call either hang
+        // against the size-1 pool or fail on a nested-transaction error.
+        fs.delete_if_version(&path, v1)
+            .await
+            .expect("connection must return to the size-1 pool clean after a VersionMismatch, not deadlock or error on a leftover transaction");
+        assert!(fs.get(&path).await.unwrap().is_none());
     }
 }

@@ -495,6 +495,65 @@ async fn hosted_scoped_virtual_filesystem_delete_if_version_delegates_to_inner_b
     assert_permission_denied(denied, FilesystemOperation::Delete);
 }
 
+#[tokio::test]
+async fn hosted_scoped_virtual_filesystem_delete_if_version_denies_when_delete_missing() {
+    // Round-C review (PR #5749): the sibling `scoped/tests.rs` suite in
+    // ironclaw_filesystem already pins this at the ScopedFilesystem layer
+    // (`delete_if_version_denies_when_delete_missing`), but MountScopedRootFilesystem
+    // resolves permissions independently — mirror it here so a mount that
+    // grants read/write/list but not delete is rejected before any backend
+    // dispatch at this layer too, not just proven-by-shared-implementation.
+    use ironclaw_filesystem::{CasExpectation, Entry};
+
+    let resolver = resolver_with_filesystem(Arc::new(InMemoryBackend::new()));
+    let mut plan = plan(
+        ProcessBackendKind::None,
+        false,
+        false,
+        NetworkMode::Deny,
+        false,
+    );
+    plan.deployment = DeploymentMode::HostedMultiTenant;
+    plan.resolved_profile = RuntimeProfile::SecureDefault;
+    plan.requires_filesystem = true;
+    plan.filesystem_backend = FilesystemBackendKind::ScopedVirtual;
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/system/extensions".to_string()).expect("mount alias"),
+        VirtualPath::new("/system/extensions".to_string()).expect("virtual path"),
+        MountPermissions::read_write(),
+    )])
+    .expect("mount view");
+
+    let services = resolver
+        .resolve(InvocationServicesResolutionRequest {
+            plan: &plan,
+            scope: &ResourceScope::system(),
+            mounts: Some(&mounts),
+        })
+        .expect("hosted scoped virtual filesystem should resolve with explicit mounts");
+
+    let path = vpath("/system/extensions/catalog.json");
+    let version = services
+        .filesystem
+        .put(
+            &path,
+            Entry::bytes(b"{\"ok\":true}".to_vec()),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+
+    let denied = services
+        .filesystem
+        .delete_if_version(&path, version)
+        .await
+        .unwrap_err();
+    assert_permission_denied(denied, FilesystemOperation::Delete);
+
+    // The entry survives the denied delete.
+    assert!(services.filesystem.read_file(&path).await.is_ok());
+}
+
 #[test]
 fn local_resolver_rejects_hosted_scoped_virtual_filesystem_without_mounts() {
     let resolver = resolver_without_http();

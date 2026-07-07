@@ -2162,6 +2162,30 @@ mod tests {
              sequences lock-then-delete instead of running them \
              independently: {sql}"
         );
+        // Round-C review: a bare `contains("FOR UPDATE")` / `contains("version
+        // = $2")` check is fooled by two concrete, semantically-broken
+        // mutants that keep those substrings intact. Guard against both
+        // directly instead of relying on substring presence alone.
+        assert!(
+            !sql.contains("SKIP LOCKED"),
+            "delete_if_version's FOR UPDATE must block on a contending row, \
+             not skip it — `FOR UPDATE SKIP LOCKED` still satisfies a bare \
+             `contains(\"FOR UPDATE\")` check but would let a concurrent \
+             delete+recreate slip past the lock entirely, reopening the \
+             atomicity race this fix closes: {sql}"
+        );
+        let locked_clause_end = sql
+            .find("deleted AS (")
+            .expect("SQL must have a deleted CTE");
+        assert!(
+            !sql[..locked_clause_end].contains("version = $2"),
+            "the version guard must live in the `deleted` CTE's WHERE \
+             clause, not `locked`'s — moving it there still satisfies a \
+             bare `contains(\"version = $2\")` check, but would make \
+             `locked` (and thus the whole statement) find no row at all for \
+             a present-but-stale-version path, misclassifying a stale \
+             version as NotFound instead of VersionMismatch: {sql}"
+        );
     }
 
     /// The descendant range is the half-open `[prefix/, prefix0)` band that the
