@@ -381,7 +381,7 @@ struct ActiveLlmSelection {
 }
 
 /// Resolve which provider is *actually* active, mirroring the runtime's
-/// precedence in [`crate::llm_catalog::resolve_reborn_runtime_llm`]:
+/// precedence in [`crate::llm_admin::llm_catalog::resolve_reborn_runtime_llm`]:
 /// the persisted `config.toml [llm.default]` slot first, then the same
 /// environment fallback the chat-serving provider chain is built from
 /// (`LLM_BACKEND`, Codex CLI auth, or a provider whose env vars are set).
