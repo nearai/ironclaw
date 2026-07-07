@@ -33,7 +33,7 @@ use ironclaw_host_api::{
     RuntimeHttpEgressRequest, VirtualPath,
 };
 use ironclaw_llm::Role;
-use ironclaw_network::NetworkHttpRequest;
+use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
 use ironclaw_product_adapters::{ProductInboundAck, ProductTriggerReason, ProductWorkflow};
 use ironclaw_product_workflow::{
     DefaultProductWorkflow, ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
@@ -49,7 +49,9 @@ use ironclaw_turns::{
     TurnRunId, TurnRunState, TurnScope, TurnStateStore, TurnStatus,
 };
 
-use super::capability_backend::{MOCK_MCP_PROVIDER_ID, RebornCapabilityBackend, ShellMode};
+use super::capability_backend::{
+    CapabilityScriptingInputs, MOCK_MCP_PROVIDER_ID, RebornCapabilityBackend, ShellMode,
+};
 use super::group::{GroupCapability, GroupSharedStorage, RebornIntegrationGroup};
 use super::harness::{HarnessCapabilityRecorder, HarnessTurnBackend, RecordedCapabilityResult};
 use super::http_matcher::ScriptedHttpResponse;
@@ -100,6 +102,10 @@ pub struct RebornIntegrationHarnessBuilder {
     /// W4-AUTHGATE-WIRE: FIFO scripted statuses for the `GithubIssueTools`
     /// backend's **network**-egress lane (see `with_github_network_status`).
     github_network_statuses: Vec<u16>,
+    /// S1 seam: FIFO scripted response bodies for the real-egress-pipeline
+    /// backend's wire-level transport recorder (see
+    /// `with_real_egress_response_bodies`).
+    real_egress_response_bodies: Vec<Vec<u8>>,
     storage: StorageMode,
     safety_context: Option<InstructionSafetyContext>,
     /// How the `BuiltinHttpTools` backend wires `builtin.shell`. One enum instead
@@ -357,6 +363,30 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// S1 seam: wire the real first-party tool runtime over the REAL
+    /// production egress pipeline — `PolicyNetworkHttpEgress` (network-policy
+    /// enforcement + DNS/private-IP checks) and `HostHttpEgressService` (leak
+    /// scan) both run for real; only the wire-level transport is a recorder.
+    /// Distinct from [`with_builtin_http_tools`](Self::with_builtin_http_tools),
+    /// whose `RecordingRuntimeHttpEgress` bypasses both security layers.
+    pub fn with_real_egress_pipeline(mut self) -> Self {
+        self.capability = RebornCapabilityBackend::BuiltinHttpToolsRealEgress;
+        self
+    }
+
+    /// Like [`with_real_egress_pipeline`](Self::with_real_egress_pipeline),
+    /// but also installs FIFO scripted response bodies onto the wire-level
+    /// transport recorder — for scripting a response the real leak-scan
+    /// pipeline should react to.
+    pub fn with_real_egress_response_bodies(
+        mut self,
+        bodies: impl IntoIterator<Item = Vec<u8>>,
+    ) -> Self {
+        self.capability = RebornCapabilityBackend::BuiltinHttpToolsRealEgress;
+        self.real_egress_response_bodies = bodies.into_iter().collect();
+        self
+    }
+
     /// Wire the real MCP runtime backed by a loopback mock MCP server.
     ///
     /// `mcp_url` is the full mock endpoint URL (e.g. `server.mcp_url()`). The
@@ -391,9 +421,12 @@ impl RebornIntegrationHarnessBuilder {
             .capability
             .install(
                 self.shell_mode,
-                self.keyed_http_responses,
-                self.web_access_response_bodies,
-                self.github_network_statuses,
+                CapabilityScriptingInputs {
+                    keyed_http_responses: self.keyed_http_responses,
+                    web_access_response_bodies: self.web_access_response_bodies,
+                    github_network_statuses: self.github_network_statuses,
+                    real_egress_response_bodies: self.real_egress_response_bodies,
+                },
             )
             .await?;
 
@@ -517,6 +550,7 @@ impl RebornIntegrationHarness {
             keyed_http_responses: Vec::new(),
             web_access_response_bodies: Vec::new(),
             github_network_statuses: Vec::new(),
+            real_egress_response_bodies: Vec::new(),
             storage: StorageMode::default(),
             safety_context: None,
             shell_mode: ShellMode::default(),
@@ -717,6 +751,50 @@ impl RebornIntegrationHarness {
         Ok((run_id, gate_ref))
     }
 
+    /// Resolve a blocked approval gate via a REAL `submit_inbound(ApprovalResolution)`
+    /// — the dispatch arm a real adapter's "approve"/"deny" reply hits
+    /// (`ApprovalInteractionService::resolve`), unlike `approve_gate`/`deny_gate`
+    /// (which resume the coordinator directly, bypassing the interaction
+    /// service entirely). Only reaches a real resolution when the group was
+    /// built with `.with_real_gate_dispatch_services()` — otherwise the
+    /// workflow's default `RejectingApprovalInteractionService` rejects the
+    /// payload outright.
+    pub async fn submit_approval_resolution(
+        &self,
+        gate_ref: &GateRef,
+        decision: ironclaw_product_adapters::ApprovalDecision,
+    ) -> HarnessResult<ProductInboundAck> {
+        let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
+        let envelope = self.ingress.verified_approval_resolution_envelope(
+            &event_id,
+            &self.actor_id,
+            &self.conversation_id,
+            gate_ref.as_str(),
+            decision,
+        )?;
+        Ok(self.workflow.submit_inbound(envelope).await?)
+    }
+
+    /// Auth-side counterpart of [`submit_approval_resolution`](Self::submit_approval_resolution):
+    /// a REAL `submit_inbound(AuthResolution)`, dispatching through
+    /// `AuthInteractionService::resolve` instead of `resolve_auth_gate`/
+    /// `deny_auth_gate`'s direct coordinator resume.
+    pub async fn submit_auth_resolution(
+        &self,
+        gate_ref: &GateRef,
+        result: ironclaw_product_adapters::AuthResolutionResult,
+    ) -> HarnessResult<ProductInboundAck> {
+        let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
+        let envelope = self.ingress.verified_auth_resolution_envelope(
+            &event_id,
+            &self.actor_id,
+            &self.conversation_id,
+            gate_ref.as_str(),
+            result,
+        )?;
+        Ok(self.workflow.submit_inbound(envelope).await?)
+    }
+
     /// Assert the finalized assistant reply in thread history contains `text`.
     pub async fn assert_reply_contains(&self, text: &str) -> HarnessResult<()> {
         self.thread_harness
@@ -735,29 +813,12 @@ impl RebornIntegrationHarness {
     /// re-instantiation only, not durability (nothing on disk to read back).
     pub async fn assert_reply_persists_after_reopen(&self, text: &str) -> HarnessResult<()> {
         if let Some(db_path) = &self._shared.libsql_db_path {
-            // Open a fresh libsql connection — independent of the live composite.
+            // Open a fresh composite — independent of the live one.
             // `libsql::Builder::new_local` opens (or creates) the file at `db_path`;
             // under the M1 mutation (LibSql → InMemory) the file does not exist and
             // the fresh db is empty, so `list_thread_history` returns no messages and
             // `assert_final_reply` returns `Err(MissingFinalReply)`.
-            let db = Arc::new(
-                libsql::Builder::new_local(db_path)
-                    .build()
-                    .await
-                    .map_err(|e| format!("failed to open fresh libsql for reopen: {e}"))?,
-            );
-            let fresh_fs = Arc::new(LibSqlRootFilesystem::new(db));
-            // Migrations are idempotent — the schema already exists from `build()`.
-            fresh_fs
-                .run_migrations()
-                .await
-                .map_err(|e| format!("migrations on fresh libsql reopen: {e}"))?;
-            let mut fresh_composite = CompositeRootFilesystem::new();
-            ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
-                &mut fresh_composite,
-                fresh_fs,
-            )?;
-            let fresh_composite = Arc::new(fresh_composite);
+            let fresh_composite = reopen_fresh_libsql_composite(db_path).await?;
             let fresh_harness = RebornThreadHarness::filesystem_shared_composite(
                 self.thread_harness.scope.clone(),
                 fresh_composite,
@@ -774,6 +835,50 @@ impl RebornIntegrationHarness {
                 .assert_final_reply(self.binding.thread_id.clone(), text)
                 .await
                 .map_err(Into::into)
+        }
+    }
+
+    /// S2 seam: assert `run_id` is parked on `expected_gate_ref` in a
+    /// **genuinely fresh** turn-state store connection to the on-disk LibSql
+    /// file (mirrors [`assert_reply_persists_after_reopen`]'s reopen idiom,
+    /// but reads run/gate state instead of thread history). Requires
+    /// `StorageMode::LibSql` — errors otherwise, since there is no on-disk
+    /// file for an `InMemory` group to independently reopen.
+    pub async fn assert_gate_survives_reopen(
+        &self,
+        run_id: TurnRunId,
+        expected_gate_ref: &GateRef,
+    ) -> HarnessResult<()> {
+        let db_path = self
+            ._shared
+            .libsql_db_path
+            .as_ref()
+            .ok_or("assert_gate_survives_reopen requires StorageMode::LibSql")?;
+        let fresh_composite = reopen_fresh_libsql_composite(db_path).await?;
+        let fresh_turn_store = FilesystemTurnStateStore::new(scoped_turns_fs_composite(
+            fresh_composite,
+            &self._shared.canonical_binding,
+        )?);
+        let state = fresh_turn_store
+            .get_run_state(GetRunStateRequest {
+                scope: self.turn_scope.clone(),
+                run_id,
+            })
+            .await?;
+        if state.status != TurnStatus::BlockedApproval {
+            return Err(format!(
+                "expected BlockedApproval after reopen, got {:?}",
+                state.status
+            )
+            .into());
+        }
+        match state.gate_ref.as_ref().map(GateRef::as_str) {
+            Some(seen) if seen == expected_gate_ref.as_str() => Ok(()),
+            other => Err(format!(
+                "gate ref after reopen was {other:?}, expected {:?}",
+                expected_gate_ref.as_str()
+            )
+            .into()),
         }
     }
 
@@ -893,6 +998,33 @@ impl RebornIntegrationHarness {
         all[self.baseline_invocation_count..].to_vec()
     }
 
+    /// S2 seam: assert the named capability produced EXACTLY `expected`
+    /// recorded RESULTS (`captured_capability_results`) — the proof that a
+    /// gate resume dispatched the gated capability's real execution once,
+    /// not zero (lost gate) or twice (double-execution on resume). Reads the
+    /// result-write recorder, NOT `invocations()`: a gated call is recorded
+    /// as an invocation attempt before the gate parks the run (no result is
+    /// written yet), so `invocations()` legitimately counts 2 for any
+    /// gate-then-resume flow — that is not a double-execution signal.
+    pub async fn assert_capability_result_count(
+        &self,
+        capability_id: &str,
+        expected: usize,
+    ) -> HarnessResult<()> {
+        let results = self.captured_capability_results();
+        let actual = results
+            .iter()
+            .filter(|result| result.capability_id.as_str() == capability_id)
+            .count();
+        if actual == expected {
+            return Ok(());
+        }
+        Err(format!(
+            "expected capability {capability_id:?} to produce {expected} recorded result(s), saw {actual}"
+        )
+        .into())
+    }
+
     /// Assert a tool HTTP egress request was captured (Tier-2) whose URL contains
     /// `url_substr` — the proof that the tool crossed `RuntimeHttpEgress`.
     ///
@@ -984,6 +1116,15 @@ impl RebornIntegrationHarness {
     pub(super) fn captured_network_requests(&self) -> Vec<NetworkHttpRequest> {
         let mut all = self.capability_recorder.network_http_requests();
         all.split_off(self.baseline_network_count)
+    }
+
+    /// S1 seam: every request that reached the real-egress-pipeline's
+    /// wire-level transport recorder (`.with_real_egress_pipeline()`), in call
+    /// order. Empty (not baseline-sliced — this backend is single-shot, never
+    /// group-shared) both when the harness didn't opt in and when real
+    /// network-policy enforcement denied every call before the transport.
+    pub(super) fn real_egress_transport_requests(&self) -> Vec<NetworkTransportRequest> {
+        self.capability_recorder.real_egress_transport_requests()
     }
 
     /// Assert that a `builtin.shell` command was recorded by the inert process
@@ -1414,6 +1555,35 @@ impl RebornIntegrationHarness {
 // ---------------------------------------------------------------------------
 // Storage helpers
 // ---------------------------------------------------------------------------
+
+/// Open a **genuinely fresh** `CompositeRootFilesystem` connection to the
+/// on-disk LibSql file at `db_path`, independent of any live composite over
+/// the same file. Shared by every "survives an independent reopen" assertion
+/// (`assert_reply_persists_after_reopen`, `assert_gate_survives_reopen`) —
+/// each builds its own higher-level store (thread service, turn-state store)
+/// over the fresh composite this returns.
+async fn reopen_fresh_libsql_composite(
+    db_path: &Path,
+) -> HarnessResult<Arc<CompositeRootFilesystem>> {
+    let db = Arc::new(
+        libsql::Builder::new_local(db_path)
+            .build()
+            .await
+            .map_err(|e| format!("failed to open fresh libsql for reopen: {e}"))?,
+    );
+    let fresh_fs = Arc::new(LibSqlRootFilesystem::new(db));
+    // Migrations are idempotent — the schema already exists from `build()`.
+    fresh_fs
+        .run_migrations()
+        .await
+        .map_err(|e| format!("migrations on fresh libsql reopen: {e}"))?;
+    let mut fresh_composite = CompositeRootFilesystem::new();
+    ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
+        &mut fresh_composite,
+        fresh_fs,
+    )?;
+    Ok(Arc::new(fresh_composite))
+}
 
 /// Build the one `CompositeRootFilesystem` for a harness, selecting the durable
 /// backend by `mode`. `dir` is used only for `LibSql` (the SQLite file is
