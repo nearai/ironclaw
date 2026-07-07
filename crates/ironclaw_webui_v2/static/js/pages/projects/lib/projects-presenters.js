@@ -1,12 +1,56 @@
-function formatFallback(text, params = {}) {
-  return text.replace(/\{(\w+)\}/g, (match, name) =>
-    params[name] !== undefined ? params[name] : match
-  );
+import { interpolateParams } from "../../../lib/i18n-format.js";
+
+function tx(t, key, params = {}, fallback = key) {
+  return typeof t === "function" ? t(key, params) : interpolateParams(fallback, params);
 }
 
-function tx(t, key, params, fallback) {
-  return typeof t === "function" ? t(key, params) : formatFallback(fallback, params);
+function formatEnumLabel(value, t, config) {
+  const { labels, keyPrefix, defaultKey = "unknown", translationKeys = {}, unknownLabel } = config;
+  const key = String(value || defaultKey).toLowerCase();
+  const fallback = labels[key];
+
+  if (!fallback) {
+    return unknownLabel ? unknownLabel(value, labels[defaultKey]) : String(value || labels[defaultKey]);
+  }
+
+  return tx(t, translationKeys[key] || `${keyPrefix}.${key}`, {}, fallback);
 }
+
+const PROJECT_HEALTH_LABELS = {
+  green: "Healthy",
+  yellow: "Needs review",
+  red: "At risk",
+  muted: "Archived",
+  steady: "Steady",
+  unknown: "Unknown",
+};
+
+const MISSION_STATUS_LABELS = {
+  active: "Active",
+  paused: "Paused",
+  completed: "Completed",
+  failed: "Failed",
+  unknown: "Unknown",
+};
+
+const THREAD_STATE_LABELS = {
+  running: "Running",
+  done: "Done",
+  completed: "Completed",
+  failed: "Failed",
+  unknown: "Unknown",
+};
+
+const THREAD_TYPE_LABELS = {
+  mission_run: "Mission run",
+};
+
+const MESSAGE_ROLE_LABELS = {
+  system: "System",
+  user: "User",
+  assistant: "Assistant",
+  tool: "Tool",
+};
 
 export function formatProjectDate(iso, t, options = {}) {
   if (!iso) return tx(t, "projects.date.notAvailable", {}, "Not available");
@@ -82,32 +126,17 @@ export function threadTone(state) {
 }
 
 export function formatProjectHealth(health, t) {
-  const key = String(health || "unknown").toLowerCase();
-  const fallbackByKey = {
-    green: "Healthy",
-    yellow: "Needs review",
-    red: "At risk",
-    muted: "Archived",
-    steady: "Steady",
-    unknown: "Unknown",
-  };
-  const fallback = fallbackByKey[key];
-  if (!fallback) return String(health || fallbackByKey.unknown);
-  return tx(t, `projects.health.${key}`, {}, fallback);
+  return formatEnumLabel(health, t, {
+    labels: PROJECT_HEALTH_LABELS,
+    keyPrefix: "projects.health",
+  });
 }
 
 export function formatMissionStatus(status, t) {
-  const key = String(status || "unknown").toLowerCase();
-  const fallbackByKey = {
-    active: "Active",
-    paused: "Paused",
-    completed: "Completed",
-    failed: "Failed",
-    unknown: "Unknown",
-  };
-  const fallback = fallbackByKey[key];
-  if (!fallback) return String(status || fallbackByKey.unknown);
-  return tx(t, `projects.status.${key}`, {}, fallback);
+  return formatEnumLabel(status, t, {
+    labels: MISSION_STATUS_LABELS,
+    keyPrefix: "projects.status",
+  });
 }
 
 export function formatMissionCadence(mission, t) {
@@ -120,38 +149,28 @@ export function formatMissionCadence(mission, t) {
 }
 
 export function formatThreadState(state, t) {
-  const key = String(state || "unknown").toLowerCase();
-  const fallbackByKey = {
-    running: "Running",
-    done: "Done",
-    completed: "Completed",
-    failed: "Failed",
-    unknown: "Unknown",
-  };
-  const fallback = fallbackByKey[key];
-  if (!fallback) return String(state || fallbackByKey.unknown);
-  return tx(t, `projects.threadState.${key}`, {}, fallback);
+  return formatEnumLabel(state, t, {
+    labels: THREAD_STATE_LABELS,
+    keyPrefix: "projects.threadState",
+  });
 }
 
 export function formatThreadType(type, t) {
-  const key = String(type || "mission_run").toLowerCase();
-  if (key === "mission_run") {
-    return tx(t, "projects.thread.type.missionRun", {}, "Mission run");
-  }
-  return String(type || "").replace(/_/g, " ");
+  return formatEnumLabel(type, t, {
+    labels: THREAD_TYPE_LABELS,
+    keyPrefix: "projects.thread.type",
+    defaultKey: "mission_run",
+    translationKeys: { mission_run: "projects.thread.type.missionRun" },
+    unknownLabel: (value) => String(value || "").replace(/_/g, " "),
+  });
 }
 
 export function formatMessageRole(role, t) {
-  const key = String(role || "system").toLowerCase();
-  const fallbackByKey = {
-    system: "System",
-    user: "User",
-    assistant: "Assistant",
-    tool: "Tool",
-  };
-  const fallback = fallbackByKey[key];
-  if (!fallback) return String(role || fallbackByKey.system);
-  return tx(t, `projects.role.${key}`, {}, fallback);
+  return formatEnumLabel(role, t, {
+    labels: MESSAGE_ROLE_LABELS,
+    keyPrefix: "projects.role",
+    defaultKey: "system",
+  });
 }
 
 export function parseMissionRunGoal(goal) {

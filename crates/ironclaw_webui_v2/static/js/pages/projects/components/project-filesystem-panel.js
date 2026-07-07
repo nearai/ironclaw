@@ -39,6 +39,8 @@ function relSegments(path) {
 
 export function ProjectFilesystemPanel({ threadId }) {
   const t = useT();
+  const tRef = React.useRef(t);
+  tRef.current = t;
   const [path, setPath] = React.useState(undefined);
   const [downloadError, setDownloadError] = React.useState(null);
 
@@ -74,10 +76,10 @@ export function ProjectFilesystemPanel({ threadId }) {
         anchor.remove();
         URL.revokeObjectURL(url);
       } catch (error) {
-        setDownloadError(error?.message || t("projects.files.downloadError"));
+        setDownloadError(error?.message || tRef.current("projects.files.downloadError"));
       }
     },
-    [threadId, t]
+    [threadId]
   );
 
   const segments = relSegments(path);
