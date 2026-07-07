@@ -43,6 +43,12 @@ pub(super) enum RebornCapabilityBackend {
     /// web-access declares no `runtime_credentials`, so this wires the plain default
     /// `GrantAuthorizer` — no credential-injecting authorizer is needed.
     WebAccessTools,
+    /// S1 seam: real first-party tool runtime over the REAL production egress
+    /// pipeline (`PolicyNetworkHttpEgress` network-policy enforcement +
+    /// `HostHttpEgressService` leak scan) with only the wire-level transport
+    /// recorded. Distinct from `BuiltinHttpTools`, whose
+    /// `RecordingRuntimeHttpEgress` bypasses that whole pipeline.
+    BuiltinHttpToolsRealEgress,
 }
 
 /// Which process port the built `BuiltinHttpTools` runtime installs for
@@ -60,6 +66,19 @@ pub(super) enum ShellMode {
     Scripted(ScriptedProcessResult),
 }
 
+/// Per-backend scripted inputs threaded into [`RebornCapabilityBackend::install`],
+/// grouped by name instead of position. `web_access_response_bodies` and
+/// `real_egress_response_bodies` are both `Vec<Vec<u8>>` — as positional
+/// arguments, a swap between them would compile silently; naming the fields
+/// makes each call site self-describing and removes that risk.
+#[derive(Default)]
+pub(super) struct CapabilityScriptingInputs {
+    pub(super) keyed_http_responses: Vec<ScriptedHttpResponse>,
+    pub(super) web_access_response_bodies: Vec<Vec<u8>>,
+    pub(super) github_network_statuses: Vec<u16>,
+    pub(super) real_egress_response_bodies: Vec<Vec<u8>>,
+}
+
 impl RebornCapabilityBackend {
     /// Install this capability backend, producing the `GroupCapability` the
     /// harness's group/thread builder wires. Echo by default (records, executes
@@ -69,9 +88,7 @@ impl RebornCapabilityBackend {
     pub(super) async fn install(
         self,
         shell_mode: ShellMode,
-        keyed_http_responses: Vec<ScriptedHttpResponse>,
-        web_access_response_bodies: Vec<Vec<u8>>,
-        github_network_statuses: Vec<u16>,
+        scripting: CapabilityScriptingInputs,
         park_capability_gate: Option<ParkingCapabilityGate>,
     ) -> HarnessResult<GroupCapability> {
         // Fail fast rather than silently ignore: only `BuiltinHttpTools` wires
@@ -87,6 +104,12 @@ impl RebornCapabilityBackend {
                     .into(),
             );
         }
+        let CapabilityScriptingInputs {
+            keyed_http_responses,
+            web_access_response_bodies,
+            github_network_statuses,
+            real_egress_response_bodies,
+        } = scripting;
         Ok(match self {
             RebornCapabilityBackend::Echo => GroupCapability::Recording,
             RebornCapabilityBackend::BuiltinHttpTools => {
@@ -151,6 +174,15 @@ impl RebornCapabilityBackend {
                 // C-WEBACCESS — see the `WebAccessTools` variant docs above.
                 let host_runtime = super::harness::profiles::web_access::web_access_tools().await?;
                 host_runtime.install_web_access_responses(web_access_response_bodies)?;
+                GroupCapability::HostRuntime(Arc::new(host_runtime))
+            }
+            RebornCapabilityBackend::BuiltinHttpToolsRealEgress => {
+                // S1 — see the `BuiltinHttpToolsRealEgress` variant docs above.
+                let host_runtime = core_builtin::core_builtin_tools(
+                    CoreBuiltinOptions::default().with_real_egress_pipeline(),
+                )
+                .await?;
+                host_runtime.install_real_egress_response_bodies(real_egress_response_bodies)?;
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
         })

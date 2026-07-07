@@ -131,7 +131,7 @@ impl RebornIntegrationGroupBuilder {
 
     /// Shorten the group's turn-state store lease TTL (default 90s,
     /// `InMemoryTurnStateStoreLimits::default()`) for lease-expiry-under-a-
-    /// wedged-tool coverage (issue #5476, see `tests/integration/lease_wedge.rs`).
+    /// wedged-tool coverage (see `tests/integration/lease_wedge.rs`).
     /// `None` (default) leaves today's behavior byte-identical.
     pub fn with_runner_lease_ttl_for_test(mut self, ttl: chrono::Duration) -> Self {
         self.runner_lease_ttl_override = Some(ttl);
@@ -145,6 +145,21 @@ impl RebornIntegrationGroupBuilder {
     /// behavior byte-identical.
     pub fn with_lease_recovery_interval_for_test(mut self, interval: Duration) -> Self {
         self.lease_recovery_interval_override = Some(interval);
+        self
+    }
+
+    /// Wire the REAL approval/auth interaction services (via the group's
+    /// `HostRuntimeCapabilityHarness`'s retained `RebornServices`, over the
+    /// group's own shared turn-state store) into every thread's
+    /// `DefaultProductWorkflow`, so `submit_inbound(ApprovalResolution/
+    /// AuthResolution)` dispatches through the SAME arms a real adapter reply
+    /// hits, instead of every workflow's default `Rejecting*InteractionService`
+    /// stubs. Requires a `HostRuntime` capability backend built via
+    /// `new_with_options` (e.g. `live_approvals`, `live_auth_and_approval`) —
+    /// `RebornThreadBuilder::build()` errors otherwise. Defaults off (every
+    /// other group keeps today's Rejecting-stub behavior).
+    pub fn with_real_gate_dispatch_services(mut self) -> Self {
+        self.real_gate_dispatch_services = true;
         self
     }
 }

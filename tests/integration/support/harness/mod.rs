@@ -39,7 +39,7 @@ use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilitySurfaceProfileResolver, HostRuntimeLoopCapabilityPortFactory,
     LoopCapabilityPortFactory, LoopCapabilityResultWriter,
 };
-use ironclaw_network::NetworkHttpRequest;
+use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
 use ironclaw_product_workflow::{ProjectService, ResolvedBinding};
 use ironclaw_reborn_composition::test_support::SkillActivationTestSource;
 use ironclaw_reborn_composition::{
@@ -61,13 +61,14 @@ pub(crate) use super::doubles::{
     HostRuntimeHarnessCapabilityPortFactory, ParkingCapabilityGate, ParkingHostRuntime,
     RecordingApprovalRequestStore, RecordingCapabilityResultWriter,
     RecordingDelegatingCapabilityPort, RecordingHostRuntime, RecordingNetworkHttpEgress,
-    RecordingRuntimeHttpEgress, RecordingTestCapabilityPort,
+    RecordingNetworkHttpTransport, RecordingRuntimeHttpEgress, RecordingTestCapabilityPort,
     StaticCapabilitySurfaceProfileResolver,
 };
 pub(crate) use assembly::{
     LocalDevRootMounts, bundled_extension_provider_trust, capability_ids_from_strs,
     copy_dir_recursive, host_runtime_storage_roots, http_test_policy, local_dev_all_effects,
     local_dev_host_runtime_with_http_egress, local_dev_host_runtime_with_live_http_egress,
+    local_dev_host_runtime_with_real_egress_pipeline,
     local_dev_host_runtime_with_registry_and_egress, local_dev_mount_descriptor,
     local_dev_root_filesystem, memory_mounts, qa_smoke_mounts, skill_mounts, wildcard_test_policy,
     workspace_mounts,
@@ -168,6 +169,12 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     results: Arc<Mutex<Vec<RecordedCapabilityResult>>>,
     http_egress: Option<Arc<RecordingRuntimeHttpEgress>>,
     network_egress: Option<Arc<RecordingNetworkHttpEgress>>,
+    /// S1 seam: wire-level transport recorder installed only by
+    /// `.with_real_egress_pipeline()`. Sits BELOW the real
+    /// `PolicyNetworkHttpEgress` (network-policy enforcement) and the real
+    /// `HostHttpEgressService` (leak scan) — both run for real before a
+    /// request reaches this double. `None` for every other construction.
+    real_egress_transport: Option<Arc<RecordingNetworkHttpTransport>>,
     /// Inert recording process port. `Some` when the harness injected a
     /// `RecordingProcessPort`; `None` when the live `LocalHostProcessPort` was
     /// used (`.with_live_shell()` path).
@@ -248,6 +255,13 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// Read via `trigger_repository_for_test` to wire
     /// `RebornAutomationProductFacade` over the same repo a prior turn used.
     trigger_repository: Option<Arc<dyn ironclaw_triggers::TriggerRepository>>,
+    /// The full `RebornServices` bundle this harness's `new_with_options` built
+    /// (`build_reborn_services`), retained so a group can build the REAL
+    /// approval/auth interaction services over it instead of the harness's
+    /// piecewise test-support accessors. `Some` only for `new_with_options`-built
+    /// harnesses; `None` for the lower-level constructors and the Echo backend.
+    /// Read via `reborn_services_for_test`.
+    reborn_services: Option<ironclaw_reborn_composition::RebornServices>,
 }
 
 impl HostRuntimeCapabilityHarness {
@@ -528,8 +542,12 @@ impl HostRuntimeCapabilityHarness {
             None => None,
         };
         let pending_approval_scopes = Arc::new(Mutex::new(HashMap::new()));
+        // `.clone()` (not a move) so `services` survives intact below —
+        // `reborn_services_for_test` needs the WHOLE `RebornServices` value,
+        // not just the pieces already extracted above.
         let runtime = services
             .host_runtime
+            .clone()
             .ok_or("local-dev Reborn services missing host runtime")?;
         let runtime = Arc::new(RecordingHostRuntime::new(
             runtime,
@@ -557,6 +575,7 @@ impl HostRuntimeCapabilityHarness {
             results: Arc::new(Mutex::new(Vec::new())),
             http_egress: None,
             network_egress: None,
+            real_egress_transport: None,
             process_port: None,
             profile_filesystem,
             project_service,
@@ -569,6 +588,7 @@ impl HostRuntimeCapabilityHarness {
             tool_permission_overrides,
             persistent_approval_policies,
             trigger_repository,
+            reborn_services: Some(services),
         })
     }
 
@@ -582,6 +602,18 @@ impl HostRuntimeCapabilityHarness {
     pub(crate) fn park_capability_dispatch(mut self, gate: ParkingCapabilityGate) -> Self {
         self.runtime = Arc::new(ParkingHostRuntime::new(self.runtime, gate));
         self
+    }
+
+    /// The full `RebornServices` bundle this harness was built from, if built
+    /// via `new_with_options`. Lets a caller build the REAL approval/auth
+    /// interaction services over this harness's own local-dev composition
+    /// (`RebornServices::local_dev_approval_interaction_service_with_turn_state_for_test`
+    /// et al.), e.g. so a group can wire genuine `submit_inbound`-driven
+    /// gate dispatch instead of the harness's direct-resume test shortcut.
+    pub(crate) fn reborn_services_for_test(
+        &self,
+    ) -> Option<&ironclaw_reborn_composition::RebornServices> {
+        self.reborn_services.as_ref()
     }
 
     pub(crate) fn capability_factory(
@@ -699,6 +731,33 @@ impl HostRuntimeCapabilityHarness {
             .as_ref()
             .map(|egress| egress.requests())
             .unwrap_or_default()
+    }
+
+    /// Every request that reached the S1 wire-level transport recorder, in
+    /// call order. Empty (not an error) for every harness that did not opt
+    /// into `.with_real_egress_pipeline()`.
+    pub(crate) fn real_egress_transport_requests(&self) -> Vec<NetworkTransportRequest> {
+        self.real_egress_transport
+            .as_ref()
+            .map(|transport| transport.requests())
+            .unwrap_or_default()
+    }
+
+    /// Install FIFO scripted response bodies (S1 seam) onto the real-egress
+    /// transport recorder, consumed ahead of its default body. Errors if this
+    /// harness did not wire the real-egress pipeline.
+    pub(crate) fn install_real_egress_response_bodies(
+        &self,
+        bodies: impl IntoIterator<Item = Vec<u8>>,
+    ) -> HarnessResult<()> {
+        let transport = self
+            .real_egress_transport
+            .as_ref()
+            .ok_or("host runtime harness has no real-egress transport to script")?;
+        for body in bodies {
+            transport.push_response_body(body);
+        }
+        Ok(())
     }
 
     pub(crate) fn workspace_file_path(&self, relative: &str) -> PathBuf {

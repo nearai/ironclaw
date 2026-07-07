@@ -114,6 +114,7 @@ use crate::outbound::{
     RebornOutboundPreferencesFacade, outbound_delivery_synthetic_provider,
 };
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
+use crate::turn_run_snapshot::TurnRunSnapshotSource;
 
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone)]
@@ -139,9 +140,8 @@ use crate::runtime_input::{
 use crate::trigger_poller::TenantScopedTrustedTriggerFireAuthorizer;
 use crate::trigger_poller::{
     AccessCheckerTriggerFireAuthorizer, ConversationContentRefMaterializer,
-    LocalTriggerTurnSnapshotSource, SnapshotActiveRunLookup, TRIGGER_POLLER_SHUTDOWN_TIMEOUT,
-    TriggerPollerCompositionDeps, TriggerPollerRuntimeHandle, TriggerTurnSnapshotSource,
-    spawn_trigger_poller,
+    SnapshotActiveRunLookup, TRIGGER_POLLER_SHUTDOWN_TIMEOUT, TriggerPollerCompositionDeps,
+    TriggerPollerRuntimeHandle, spawn_trigger_poller,
 };
 use crate::{
     RebornBuildError, RebornCompositionProfile, RebornProductAuthServices, RebornReadiness,
@@ -579,16 +579,43 @@ impl RegistryPersistentApprovalGranteeResolver {
 /// so the two never drift (W5-WEBUI-API-2 follow-up). `audit_sink` is `None` from the
 /// test accessor: production wires one for audit-log observability only, not
 /// correctness the test needs. Propagates policy/resolver construction failures
-/// instead of collapsing them to `None`.
+/// instead of collapsing them to `None`. Thin wrapper over
+/// `build_local_dev_approval_interaction_service_with_turn_run_source` using
+/// `local_runtime.turn_state` as the turn-run snapshot source — production
+/// behavior is unchanged by the seam below.
 pub(crate) fn build_local_dev_approval_interaction_service(
     local_runtime: &crate::factory::RebornLocalRuntimeServices,
     local_dev_capability_policy: Arc<LocalDevCapabilityPolicy>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     audit_sink: Option<Arc<dyn ironclaw_events::AuditSink>>,
 ) -> Result<Arc<dyn ApprovalInteractionService>, RebornRuntimeError> {
-    let approval_turn_runs = Arc::new(LocalDevApprovalTurnRunLocator::new(Arc::clone(
-        &local_runtime.turn_state,
-    )));
+    build_local_dev_approval_interaction_service_with_turn_run_source(
+        local_runtime,
+        local_dev_capability_policy,
+        turn_coordinator,
+        audit_sink,
+        Arc::clone(&local_runtime.turn_state) as Arc<dyn TurnRunSnapshotSource>,
+    )
+}
+
+/// Identical to [`build_local_dev_approval_interaction_service`]
+/// except the approval turn-run locator reads `turn_run_source` instead of
+/// always deriving it from `local_runtime.turn_state`. Lets a caller whose
+/// real runs live in a DIFFERENT `TurnStateStore` composition (e.g.
+/// `RebornIntegrationGroup`'s own `build_default_planned_runtime`, whose runs
+/// are invisible to this crate's `local_runtime.turn_state`) substitute its
+/// own store. `build_local_dev_approval_interaction_service` is the
+/// production entry point and is a thin wrapper over this function with
+/// `local_runtime.turn_state` as the source, so production behavior is
+/// unchanged.
+pub(crate) fn build_local_dev_approval_interaction_service_with_turn_run_source(
+    local_runtime: &crate::factory::RebornLocalRuntimeServices,
+    local_dev_capability_policy: Arc<LocalDevCapabilityPolicy>,
+    turn_coordinator: Arc<dyn TurnCoordinator>,
+    audit_sink: Option<Arc<dyn ironclaw_events::AuditSink>>,
+    turn_run_source: Arc<dyn TurnRunSnapshotSource>,
+) -> Result<Arc<dyn ApprovalInteractionService>, RebornRuntimeError> {
+    let approval_turn_runs = Arc::new(LocalDevApprovalTurnRunLocator::new(turn_run_source));
     let approval_read_model = Arc::new(RunStateApprovalInteractionReadModel::new(
         local_runtime.approval_requests.clone(),
         approval_turn_runs,
@@ -815,48 +842,33 @@ where
 fn build_trigger_active_run_lookup(
     turn_state_store: Arc<LocalDevTurnStateStore>,
 ) -> Arc<dyn ironclaw_triggers::TriggerActiveRunLookup> {
-    let snapshot_source: Arc<dyn TriggerTurnSnapshotSource> =
-        Arc::new(LocalTriggerTurnSnapshotSource::new(turn_state_store));
+    let snapshot_source = turn_state_store as Arc<dyn TurnRunSnapshotSource>;
     Arc::new(SnapshotActiveRunLookup::new(snapshot_source))
 }
 
 struct LocalDevApprovalTurnRunLocator {
-    turn_state: Arc<LocalDevTurnStateStore>,
+    /// A trait object (not the concrete `LocalDevTurnStateStore`) so a
+    /// caller can substitute a different turn-state store's snapshot view —
+    /// see `turn_run_snapshot::TurnRunSnapshotSource` and
+    /// `build_local_dev_approval_interaction_service_with_turn_run_source`.
+    turn_state: Arc<dyn TurnRunSnapshotSource>,
 }
 
 impl LocalDevApprovalTurnRunLocator {
-    fn new(turn_state: Arc<LocalDevTurnStateStore>) -> Self {
+    fn new(turn_state: Arc<dyn TurnRunSnapshotSource>) -> Self {
         Self { turn_state }
     }
 
     async fn snapshot(
         &self,
     ) -> Result<TurnPersistenceSnapshot, ironclaw_product_workflow::ProductWorkflowError> {
-        // Durable filesystem store: async `Result`; in-memory authority
-        // (no-DB builds or `inmemory-turn-state`): sync infallible.
-        #[cfg(all(
-            any(feature = "libsql", feature = "postgres"),
-            not(feature = "inmemory-turn-state")
-        ))]
-        {
-            self.turn_state
-                .persistence_snapshot()
-                .await
-                .map_err(|error| {
-                    tracing::debug!(
-                        %error,
-                        "approval turn-run locator could not read turn persistence snapshot"
-                    );
-                    approval_turn_locator_unavailable()
-                })
-        }
-        #[cfg(any(
-            feature = "inmemory-turn-state",
-            not(any(feature = "libsql", feature = "postgres"))
-        ))]
-        {
-            Ok(self.turn_state.persistence_snapshot())
-        }
+        self.turn_state.turn_run_snapshot().await.map_err(|error| {
+            tracing::debug!(
+                %error,
+                "approval turn-run locator could not read turn persistence snapshot"
+            );
+            approval_turn_locator_unavailable()
+        })
     }
 }
 
@@ -1102,12 +1114,6 @@ fn snapshot_run_actor_matches(
     })
 }
 
-// Only referenced by the durable filesystem snapshot path (async `Result`);
-// the in-memory authority's snapshot is infallible.
-#[cfg(all(
-    any(feature = "libsql", feature = "postgres"),
-    not(feature = "inmemory-turn-state")
-))]
 fn approval_turn_locator_unavailable() -> ironclaw_product_workflow::ProductWorkflowError {
     ironclaw_product_workflow::ProductWorkflowError::Transient {
         reason: "approval turn-run locator unavailable".to_string(),
@@ -3776,9 +3782,31 @@ pub async fn build_reborn_runtime(
     })
 }
 
+/// Thin wrapper over
+/// `build_webui_auth_interaction_service_with_turn_run_source` using
+/// `turn_state_store` (production always passes `local_runtime.turn_state`)
+/// as the turn-run snapshot source — production behavior is unchanged by the
+/// seam below.
 fn build_webui_auth_interaction_service(
     product_auth: Option<&RebornProductAuthServices>,
     turn_state_store: Arc<LocalDevTurnStateStore>,
+    turn_coordinator: Arc<dyn TurnCoordinator>,
+) -> Arc<dyn AuthInteractionService> {
+    build_webui_auth_interaction_service_with_turn_run_source(
+        product_auth,
+        turn_state_store as Arc<dyn TurnRunSnapshotSource>,
+        turn_coordinator,
+    )
+}
+
+/// Identical to [`build_webui_auth_interaction_service`] except
+/// the auth read model reads `turn_run_source` instead of a hardcoded
+/// `LocalDevTurnStateStore`. See
+/// `build_local_dev_approval_interaction_service_with_turn_run_source`'s doc
+/// for why this seam exists.
+fn build_webui_auth_interaction_service_with_turn_run_source(
+    product_auth: Option<&RebornProductAuthServices>,
+    turn_run_source: Arc<dyn TurnRunSnapshotSource>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
 ) -> Arc<dyn AuthInteractionService> {
     // `AuthFlowRecordSource` is optional on the product-auth bundle because
@@ -3794,7 +3822,7 @@ fn build_webui_auth_interaction_service(
     };
     Arc::new(DefaultAuthInteractionService::new(
         Arc::new(auth_interaction::LocalDevAuthInteractionReadModel::new(
-            turn_state_store,
+            turn_run_source,
             flow_records,
         )),
         product_auth.flow_manager(),
