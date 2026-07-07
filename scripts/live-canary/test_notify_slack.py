@@ -727,5 +727,70 @@ class RebornQaSlackReportTests(unittest.TestCase):
         self.assertTrue(any("continued" in text for text in section_texts[1:]))
 
 
+class NotifySlackMainTests(unittest.TestCase):
+    def test_missing_slack_webhook_still_creates_issues(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lane_dir = Path(tmpdir) / "public-smoke" / "openai" / "20260706T000000Z"
+            lane_dir.mkdir(parents=True)
+            (lane_dir / "results.json").write_text(
+                json.dumps(
+                    {
+                        "results": [
+                            {
+                                "provider": "openai",
+                                "mode": "public-smoke",
+                                "success": False,
+                                "latency_ms": 25,
+                                "details": {"error": "expected failure"},
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            issue_calls = []
+
+            def fake_create_canary_issues(reports, **kwargs):
+                issue_calls.append((reports, kwargs))
+                return ["https://github.com/nearai/ironclaw/issues/123"]
+
+            def fail_slack_post(*_args, **_kwargs):
+                raise AssertionError("missing Slack webhook should not post to Slack")
+
+            argv = [
+                "notify_slack.py",
+                "--artifacts-dir",
+                tmpdir,
+                "--repo",
+                "nearai/ironclaw",
+                "--github-token",
+                "token-1",
+                "--create-issues",
+                "--run-url",
+                "https://github.com/nearai/ironclaw/actions/runs/123",
+                "--commit",
+                "abcdef0123456789",
+            ]
+            with (
+                mock.patch.dict(notify.os.environ, {}, clear=True),
+                mock.patch.object(notify.sys, "argv", argv),
+                mock.patch.object(notify, "post_json", fail_slack_post),
+                mock.patch.object(
+                    notify,
+                    "create_canary_issues",
+                    fake_create_canary_issues,
+                ),
+            ):
+                exit_code = notify.main()
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(issue_calls), 1)
+        reports, kwargs = issue_calls[0]
+        self.assertEqual([report.status for report in reports], ["fail"])
+        self.assertEqual(kwargs["repo"], "nearai/ironclaw")
+        self.assertEqual(kwargs["github_token"], "token-1")
+
+
 if __name__ == "__main__":
     unittest.main()

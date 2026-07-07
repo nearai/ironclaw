@@ -14,7 +14,7 @@ use ironclaw_product_workflow::{
 
 use crate::{
     RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest, RebornProductAuthServices,
-    product_auth_runtime_credentials::RuntimeCredentialAccountSelectionRequest,
+    product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest,
 };
 
 const EXTENSION_CREDENTIAL_SETUP_TTL_SECONDS: i64 = 300;

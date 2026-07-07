@@ -24,7 +24,8 @@ use ironclaw_slack_v2_adapter::{SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID};
 use ironclaw_turns::ReplyTargetBindingRef;
 use thiserror::Error;
 
-use crate::outbound::{OutboundDeliveryTargetEntry, OutboundDeliveryTargetProvider};
+use crate::outbound::OutboundDeliveryTargetProvider;
+use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
 use crate::slack_channel_routes::{
     SlackChannelRouteError, SlackChannelRouteKey, SlackChannelRouteStore,
 };

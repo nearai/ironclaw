@@ -1,7 +1,7 @@
 export const EXTENSIONS_TABS = [
-  { id: "registry", label: "Registry", icon: "plus" },
-  { id: "channels", label: "Channels", icon: "send" },
-  { id: "mcp", label: "MCP Servers", icon: "pulse" },
+  { id: "registry", labelKey: "extensions.registry", icon: "plus" },
+  { id: "channels", labelKey: "extensions.channels", icon: "send" },
+  { id: "mcp", labelKey: "extensions.mcp", icon: "pulse" },
 ];
 
 export const KIND_LABELS = {

@@ -1,5 +1,6 @@
 import { React, html } from "../../../lib/html.js";
 import { Button } from "../../../design-system/button.js";
+import { useT } from "../../../lib/i18n.js";
 import { channelConnectionDisplayName } from "../../../lib/channel-connection-events.js";
 
 // Strategies whose in-chat affordance is "paste a code". OAuth gets a direct
@@ -13,6 +14,7 @@ function acceptsPastedCode(strategy) {
 }
 
 export function OnboardingPairingCard({ onboarding, onSubmit, onConfigure, onCancel }) {
+  const t = useT();
   const [code, setCode] = React.useState("");
   const [error, setError] = React.useState("");
   // "idle" -> "submitting" (redeem in flight) -> "resuming" (redeem succeeded;
@@ -32,7 +34,7 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onConfigure, onCan
       setIsConfiguring(false);
     }
   }
-  const copy = pairingCardCopy(onboarding);
+  const copy = pairingCardCopy(onboarding, t);
   const busy = status !== "idle";
 
   const submit = async () => {
@@ -88,7 +90,7 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onConfigure, onCan
               onClick=${configure}
               disabled=${isConfiguring}
             >
-              ${isConfiguring && spinnerGlyph()}
+              ${isConfiguring && spinnerGlyph(t)}
               ${isConfiguring ? copy.submittingLabel : copy.submitLabel}
             <//>
           `}
@@ -99,14 +101,14 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onConfigure, onCan
               className="h-9 px-3 text-xs"
               onClick=${onCancel}
             >
-              Dismiss
+              ${t("common.dismiss")}
             <//>
           `}
         </div>
         ${!onConfigure &&
         html`
           <p className="mt-2 text-xs leading-5 text-iron-400">
-            Connect ${copy.displayName} from the Extensions page to continue.
+            ${t("pairing.connectFromExtensions", { name: copy.displayName })}
           </p>
         `}
         ${error &&
@@ -142,7 +144,7 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onConfigure, onCan
           onClick=${submit}
           disabled=${busy || !code.trim()}
         >
-          ${busy && spinnerGlyph()}
+          ${busy && spinnerGlyph(t)}
           ${busy ? copy.submittingLabel : copy.submitLabel}
         <//>
         ${onCancel &&
@@ -153,7 +155,7 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onConfigure, onCan
             onClick=${onCancel}
             disabled=${busy}
           >
-            Cancel
+            ${t("common.cancel")}
           <//>
         `}
       </div>
@@ -164,14 +166,14 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onConfigure, onCan
   `;
 }
 
-function spinnerGlyph() {
+function spinnerGlyph(t) {
   return html`
     <svg
       className="h-3.5 w-3.5 v2-spin text-current"
       viewBox="0 0 24 24"
       fill="none"
       role="status"
-      aria-label="Connecting"
+      aria-label=${t("connection.connecting")}
     >
       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
       <path
@@ -183,21 +185,21 @@ function spinnerGlyph() {
   `;
 }
 
-function pairingCardCopy(onboarding) {
+function pairingCardCopy(onboarding, t) {
   const displayName = channelConnectionDisplayName(onboarding?.extensionName);
   return {
     displayName,
-    title: `Connect ${displayName}`,
+    title: t("pairing.connectTitle", { name: displayName }),
     instructions:
       onboarding?.instructions ||
       onboarding?.message ||
-      `Open ${displayName}, get the pairing code, and paste it here.`,
-    placeholder: onboarding?.inputPlaceholder || "Enter pairing code",
-    submitLabel: onboarding?.submitLabel || "Connect",
-    submittingLabel: onboarding?.submittingLabel || "Connecting...",
-    errorMessage: onboarding?.errorMessage || "Pairing failed. Check the code and try again.",
+      t("pairing.openAndPaste", { name: displayName }),
+    placeholder: onboarding?.inputPlaceholder || t("pairing.placeholder"),
+    submitLabel: onboarding?.submitLabel || t("pairing.connect"),
+    submittingLabel: onboarding?.submittingLabel || t("connection.connecting"),
+    errorMessage: onboarding?.errorMessage || t("pairing.checkCodeAndRetry"),
     resumeFailedMessage:
       onboarding?.resumeFailedMessage ||
-      `${displayName} connected, but this chat couldn't continue. Reload the page to keep going.`,
+      t("pairing.resumeFailed", { name: displayName }),
   };
 }

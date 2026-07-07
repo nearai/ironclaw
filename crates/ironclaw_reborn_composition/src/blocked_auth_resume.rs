@@ -33,8 +33,8 @@ use ironclaw_turns::{
 };
 use uuid::Uuid;
 
-use crate::auth::RebornAuthContinuationDispatcher;
 use crate::factory::LocalDevTurnStateStore;
+use crate::product_auth::api::auth::RebornAuthContinuationDispatcher;
 
 /// Source of the durable turn-state snapshot the fan-out scans. Split out so
 /// tests can hand-build snapshots without a filesystem-backed store.

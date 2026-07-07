@@ -254,9 +254,11 @@ function BuiltinRow({
   enabled,
   detail,
   children,
-  statusLabel = enabled ? "on" : "off",
+  statusLabel,
   statusTone = enabled ? "success" : "muted",
 }) {
+  const t = useT();
+  const effectiveStatusLabel = statusLabel || (enabled ? t("channels.statusOn") : t("channels.statusOff"));
   return html`
     <div
       className="border-t border-white/[0.06] py-4 first:border-0 first:pt-0"
@@ -267,7 +269,7 @@ function BuiltinRow({
             <span className="text-sm font-medium text-iron-200">${name}</span>
             <${StatusPill}
               tone=${statusTone}
-              label=${statusLabel}
+              label=${effectiveStatusLabel}
             />
           </div>
           <div className="mt-1 text-xs text-iron-300">${description}</div>

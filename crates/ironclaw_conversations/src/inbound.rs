@@ -442,6 +442,7 @@ fn should_rotate_submit_key(error: &TurnError) -> bool {
         | TurnError::InvalidRequest { .. }
         | TurnError::CapacityExceeded { .. }
         | TurnError::Conflict { .. }
+        | TurnError::RunNotRetryable { .. }
         | TurnError::InvalidTransition { .. }
         | TurnError::LeaseMismatch
         | TurnError::InvalidRunOriginAdapter => false,
@@ -542,10 +543,10 @@ mod tests {
     use ironclaw_turns::{
         AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
         CancelRunResponse, EventCursor, GetRunStateRequest, ReplyTargetBindingRef,
-        ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileRequest, RunProfileVersion,
-        SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnCapacityResource,
-        TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId, TurnRunState, TurnScope,
-        TurnStatus, TurnSurfaceType,
+        ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, RunProfileId,
+        RunProfileRequest, RunProfileVersion, SourceBindingRef, SubmitTurnRequest,
+        SubmitTurnResponse, ThreadBusy, TurnCapacityResource, TurnCoordinator, TurnError, TurnId,
+        TurnOriginKind, TurnRunId, TurnRunState, TurnScope, TurnStatus, TurnSurfaceType,
     };
 
     use super::{
@@ -1389,6 +1390,13 @@ mod tests {
             unimplemented!("not used by inbound facade tests")
         }
 
+        async fn retry_turn(
+            &self,
+            _request: RetryTurnRequest,
+        ) -> Result<RetryTurnResponse, TurnError> {
+            unimplemented!("not used by inbound facade tests")
+        }
+
         async fn cancel_run(
             &self,
             _request: CancelRunRequest,
@@ -1522,6 +1530,13 @@ mod tests {
             &self,
             _request: ResumeTurnRequest,
         ) -> Result<ResumeTurnResponse, TurnError> {
+            unimplemented!("not used by submit-key rotation tests")
+        }
+
+        async fn retry_turn(
+            &self,
+            _request: RetryTurnRequest,
+        ) -> Result<RetryTurnResponse, TurnError> {
             unimplemented!("not used by submit-key rotation tests")
         }
 

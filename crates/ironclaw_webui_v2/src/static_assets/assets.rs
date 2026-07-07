@@ -240,30 +240,42 @@ mod tests {
         assert!(!renderer.contains("codeEl.style.whiteSpace"));
 
         let styles = asset_text("styles/app.css");
-        assert!(styles.contains(".markdown-body {\n  max-width: 100%;\n  min-width: 0;\n}"));
+        assert!(styles.contains(".markdown-body {\n  max-width: 100%;\n  min-width: 0;"));
+        assert!(styles.contains("overflow-wrap: anywhere;"));
         assert!(styles.contains(".markdown-code-frame {\n  position: relative;"));
         assert!(styles.contains("width: 100%;\n  max-width: 100%;\n  min-width: 0;"));
         assert!(styles.contains("overflow: hidden;"));
         assert!(styles.contains("border-radius: 8px; box-sizing: border-box; width: 100%;"));
         assert!(styles.contains("overflow-x: auto; white-space: pre; margin-bottom: 0.75em;"));
+        assert!(styles.contains("overflow-wrap: normal;\n  word-break: normal;"));
         assert!(styles.contains("display: inline; background: transparent; padding: 0;"));
         assert!(styles.contains("font-size: 0.9em; line-height: 1.65; white-space: inherit;"));
+        assert!(!styles.contains("word-break: break-word"));
+        assert!(!styles.contains("white-space: pre-wrap"));
+        assert!(!styles.contains("word-break: break-all"));
         assert!(!styles.contains("width: max-content"));
+        assert!(styles.contains("--v2-chat-readable-max-width:"));
+        assert!(styles.contains(".v2-chat-readable-width {\n  max-width: 100%;\n}"));
+        assert!(styles.contains("@media (min-width: 640px) {"));
+        assert!(styles.contains("max-width: var(--v2-chat-readable-max-width);"));
+        assert!(styles.contains("@media (max-width: 639.98px) {"));
+        assert!(!styles.contains("@media (max-width: 768px)"));
 
         let message_list = asset_text("js/pages/chat/components/message-list.js");
         assert!(message_list.contains("relative flex min-h-0 min-w-0 flex-1"));
-        assert!(message_list.contains("flex min-w-0 flex-1 overflow-y-auto"));
-        assert!(!message_list.contains("overflow-x-hidden"));
+        assert!(message_list.contains("flex min-w-0 flex-1 overflow-y-auto overflow-x-hidden"));
         assert!(message_list.contains("mx-auto flex w-full min-w-0 max-w-5xl flex-col"));
 
         let message_bubble = asset_text("js/pages/chat/components/message-bubble.js");
         assert!(message_bubble.contains("group flex w-full min-w-0 flex-col"));
-        assert!(message_bubble.contains(
-            "const bubbleWidthClass = isUser ? \"max-w-[85%]\" : isNotice ? \"mx-auto max-w-[85%]\" : \"w-full max-w-[85%]\";"
-        ));
+        assert!(message_bubble.contains("const bubbleWidthClass = isUser"));
+        assert!(message_bubble.contains("\"v2-chat-readable-width\""));
+        assert!(message_bubble.contains("\"mx-auto v2-chat-readable-width\""));
+        assert!(message_bubble.contains("\"w-full v2-chat-readable-width\""));
+        assert!(!message_bubble.contains("sm:max-w-["));
         assert!(
             message_bubble.contains(
-                "const contentWidthClass = isUser ? \"\" : \"w-full min-w-0 max-w-full\";"
+                "const contentWidthClass = isUser ? \"min-w-0 max-w-full\" : \"w-full min-w-0 max-w-full\";"
             )
         );
         assert!(message_bubble.contains("contentWidthClass,"));
@@ -475,9 +487,11 @@ mod tests {
     fn desktop_sidebar_toggle_assets_are_wired() {
         let header = asset_text("js/components/page-header.js");
         assert!(header.contains("type=\"button\""));
-        assert!(header.contains("aria-label=\"Toggle sidebar\""));
+        assert!(header.contains(r#"const toggleSidebarLabel = t("sidebar.toggle")"#));
+        assert!(header.contains("aria-label=${toggleSidebarLabel}"));
         assert!(header.contains("aria-controls=\"gateway-sidebar\""));
         assert!(header.contains("aria-expanded=${sidebarOpen ? \"true\" : \"false\"}"));
+        assert!(header.contains("title=${toggleSidebarLabel}"));
         assert!(!header.contains("md:hidden"));
 
         let sidebar = asset_text("js/components/sidebar.js");

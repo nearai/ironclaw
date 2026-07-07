@@ -1,38 +1,39 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "../design-system/button.js";
 import { React, html } from "../lib/html.js";
+import { useT } from "../lib/i18n.js";
 import { getSlackSetup, saveSlackSetup, slackSetupError } from "../lib/slack-setup-api.js";
 import { SlackChannelPicker } from "./slack-channel-picker.js";
 
 const QUERY_KEY = ["slack-setup"];
 const FIELD_HELP = {
   installationId: {
-    body: "Local IronClaw name for this Slack install. Choose one and keep it stable.",
-    example: "Example: local-slack",
+    bodyKey: "slackSetup.help.installationId",
+    exampleKey: "slackSetup.example.localSlack",
   },
   teamId: {
-    body: "Slack workspace/team ID from the workspace that installed the app.",
-    example: "Example: T0123456789",
+    bodyKey: "slackSetup.help.teamId",
+    exampleKey: "slackSetup.example.teamId",
   },
   appId: {
-    body: "Slack app Basic Information > App Credentials.",
-    example: "Example: A0123456789",
+    bodyKey: "slackSetup.help.appId",
+    exampleKey: "slackSetup.example.appId",
   },
   botUser: {
-    body: "Optional Reborn user. Blank uses the current WebUI operator.",
-    example: "Example: user:operator",
+    bodyKey: "slackSetup.help.botUser",
+    exampleKey: "slackSetup.example.botUser",
   },
   sharedSubject: {
-    body: "Optional default team agent for shared channel turns. Usually blank.",
-    example: "Example: user:slack-shared",
+    bodyKey: "slackSetup.help.sharedSubject",
+    exampleKey: "slackSetup.example.sharedSubject",
   },
   botToken: {
-    body: "Slack app OAuth & Permissions > Bot User OAuth Token.",
-    example: "Example: xoxb-...",
+    bodyKey: "slackSetup.help.botToken",
+    exampleKey: "slackSetup.example.botToken",
   },
   signingSecret: {
-    body: "Slack app Basic Information > App Credentials > Signing Secret.",
-    example: "",
+    bodyKey: "slackSetup.help.signingSecret",
+    exampleKey: "",
   },
   oauthClientId: {
     body: "Slack app OAuth & Permissions > App Credentials > Client ID. Required for personal (user-token) OAuth.",
@@ -60,12 +61,13 @@ export function SlackAdminManagedSection({ action }) {
 }
 
 export function SlackSetupPanel({ action, setupQuery }) {
+  const t = useT();
   const queryClient = useQueryClient();
   const [form, setForm] = React.useState(emptyForm());
   const initializedRef = React.useRef(false);
   const dirtyRef = React.useRef(false);
   const status = setupQuery.data;
-  const copy = slackSetupCopy(action);
+  const copy = slackSetupCopy(action, t);
 
   React.useEffect(() => {
     if (!status || initializedRef.current || dirtyRef.current) return;
@@ -115,50 +117,69 @@ export function SlackSetupPanel({ action, setupQuery }) {
         </div>
         ${status?.configured &&
         html`<span className="shrink-0 rounded-md border border-emerald-400/20 px-2 py-1 text-[10px] text-emerald-300">
-          Configured
+          ${t("common.configured")}
         </span>`}
       </div>
 
       <div className="grid gap-3 sm:grid-cols-3">
         ${textInput(
-          "Installation ID",
+          t("slackSetup.field.installationId"),
           form.installation_id,
           update("installation_id"),
           "",
           FIELD_HELP.installationId,
+          t,
         )}
-        ${textInput("Team ID", form.team_id, update("team_id"), "", FIELD_HELP.teamId)}
-        ${textInput("App ID", form.api_app_id, update("api_app_id"), "", FIELD_HELP.appId)}
         ${textInput(
-          "Bot user",
+          t("slackSetup.field.teamId"),
+          form.team_id,
+          update("team_id"),
+          "",
+          FIELD_HELP.teamId,
+          t,
+        )}
+        ${textInput(
+          t("slackSetup.field.appId"),
+          form.api_app_id,
+          update("api_app_id"),
+          "",
+          FIELD_HELP.appId,
+          t,
+        )}
+        ${textInput(
+          t("slackSetup.field.botUser"),
           form.user_id,
           update("user_id"),
-          "default operator",
+          t("slackSetup.placeholder.defaultOperator"),
           FIELD_HELP.botUser,
+          t,
         )}
         ${textInput(
-          "Shared subject",
+          t("slackSetup.field.sharedSubject"),
           form.shared_subject_user_id,
           update("shared_subject_user_id"),
-          "optional",
+          t("common.optional"),
           FIELD_HELP.sharedSubject,
+          t,
         )}
       </div>
 
       <div className="mt-3 grid gap-3 sm:grid-cols-2">
         ${secretInput(
-          "Bot token",
+          t("slackSetup.field.botToken"),
           form.bot_token,
           update("bot_token"),
           status?.bot_token_configured,
           FIELD_HELP.botToken,
+          t,
         )}
         ${secretInput(
-          "Signing secret",
+          t("slackSetup.field.signingSecret"),
           form.signing_secret,
           update("signing_secret"),
           status?.signing_secret_configured,
           FIELD_HELP.signingSecret,
+          t,
         )}
         ${textInput(
           "OAuth client ID",
@@ -184,7 +205,7 @@ export function SlackSetupPanel({ action, setupQuery }) {
           onClick=${save}
           disabled=${!canSave || saveMutation.isPending}
         >
-          ${saveMutation.isPending ? "Saving..." : copy.submitLabel}
+          ${saveMutation.isPending ? t("common.saving") : copy.submitLabel}
         <//>
         ${setupQuery.isError &&
         html`<p className="text-xs text-red-300">
@@ -229,7 +250,11 @@ function emptyForm() {
   };
 }
 
-function textInput(label, value, onChange, placeholder = "", help = null) {
+function translateOptional(t, key, fallback) {
+  return typeof t === "function" ? t(key) : fallback;
+}
+
+function textInput(label, value, onChange, placeholder = "", help = null, t = null) {
   return html`
     <label className="min-w-0">
       <span className="mb-1 block text-[11px] text-iron-500">${label}</span>
@@ -240,12 +265,12 @@ function textInput(label, value, onChange, placeholder = "", help = null) {
         placeholder=${placeholder}
         className="h-9 w-full min-w-0 rounded-md border border-white/12 bg-white/[0.04] px-3 font-mono text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
       />
-      <${FieldHint} help=${help} />
+      <${FieldHint} help=${help} t=${t} />
     </label>
   `;
 }
 
-function secretInput(label, value, onChange, configured, help = null) {
+function secretInput(label, value, onChange, configured, help = null, t = null) {
   return html`
     <label className="min-w-0">
       <span className="mb-1 block text-[11px] text-iron-500">${label}</span>
@@ -256,31 +281,33 @@ function secretInput(label, value, onChange, configured, help = null) {
         spellCheck=${false}
         value=${value}
         onChange=${onChange}
-        placeholder=${configured ? "Configured; leave blank to keep" : ""}
+        placeholder=${configured ? translateOptional(t, "slackSetup.placeholder.keepSecret", "") : ""}
         className="h-9 w-full min-w-0 rounded-md border border-white/12 bg-white/[0.04] px-3 text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
       />
-      <${FieldHint} help=${help} />
+      <${FieldHint} help=${help} t=${t} />
     </label>
   `;
 }
 
-function FieldHint({ help }) {
+function FieldHint({ help, t }) {
   if (!help) return null;
+  const body = help.bodyKey ? translateOptional(t, help.bodyKey, help.body) : help.body;
+  const example = help.exampleKey ? translateOptional(t, help.exampleKey, help.example) : help.example;
   return html`
     <p className="mt-1.5 min-h-8 text-[11px] leading-4 text-iron-400">
-      <span className="block">${help.body}</span>
-      ${help.example &&
-      html`<span className="mt-0.5 block font-mono text-iron-300">${help.example}</span>`}
+      <span className="block">${body}</span>
+      ${example &&
+      html`<span className="mt-0.5 block font-mono text-iron-300">${example}</span>`}
     </p>
   `;
 }
 
-function slackSetupCopy(action) {
+function slackSetupCopy(action, t) {
   return {
-    title: "Slack setup",
-    instructions: action?.instructions || "Configure the Slack app before assigning channels.",
-    submitLabel: "Save setup",
-    successMessage: "Slack setup saved.",
-    errorMessage: "Slack setup update failed.",
+    title: action?.title || t("slackSetup.title"),
+    instructions: action?.instructions || t("slackSetup.instructions"),
+    submitLabel: action?.submit_label || t("slackSetup.save"),
+    successMessage: action?.success_message || t("slackSetup.saved"),
+    errorMessage: action?.error_message || t("slackSetup.saveFailed"),
   };
 }
