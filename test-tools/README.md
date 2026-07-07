@@ -50,13 +50,16 @@ and rejects non-WASM runtimes.
 ## Building
 
 ```bash
-rustup target add wasm32-wasip1          # once
+rustup target add wasm32-wasip2          # once
 bash scripts/build-test-tools.sh         # all tools
 bash scripts/build-test-tools.sh market-data   # one tool
 ```
 
-The script builds each `wasm-src/` for `wasm32-wasip1` (release), copies the
-artifact to the manifest's `[runtime].module` path, and produces
-`test-tools/<tool>.zip`. The `.zip` files and `wasm-src/target/` are
-git-ignored build artifacts — only sources, manifests, schemas, and prompts
-are tracked.
+The script builds each `wasm-src/` for `wasm32-wasip2` (release) — this
+target emits a **WASI component**, which is what the runtime loads
+(`wasmtime::component::Component::new`); a `wasm32-wasip1` core module
+imports fine but fails at dispatch with "the tool manifest is invalid".
+The script verifies the component header, copies the artifact to the
+manifest's `[runtime].module` path, and produces `test-tools/<tool>.zip`.
+The `.zip` files and `wasm-src/target/` are git-ignored build artifacts —
+only sources, manifests, schemas, and prompts are tracked.

@@ -1668,6 +1668,30 @@ pub(crate) fn imported_extension_package(
             )));
         }
     }
+    // The runtime loads WASM tools as WASI COMPONENTS
+    // (`wasmtime::component::Component::new`). A wasip1 core module imports,
+    // installs, and activates cleanly and then fails EVERY dispatch with the
+    // redacted "the tool manifest is invalid" — reject it here with an
+    // actionable message instead. Component binaries carry layer `01 00` at
+    // bytes 6..8 after the `\0asm` magic; core modules carry `00 00` there
+    // (version `01 00 00 00`).
+    if let ironclaw_extensions::ExtensionRuntimeV2::Wasm { module } = &record.manifest().runtime {
+        let module_bytes = files
+            .iter()
+            .find(|(path, _)| path == module)
+            .map(|(_, bytes)| bytes.as_slice())
+            .unwrap_or_default();
+        let is_component = module_bytes.len() >= 8
+            && module_bytes[..4] == *b"\0asm"
+            && module_bytes[6..8] == [0x01, 0x00];
+        if !is_component {
+            return Err(map_binding_error(format!(
+                "imported wasm module `{module}` is not a WASI component; the runtime cannot \
+                 load core modules — build with `--target wasm32-wasip2` (or componentize a \
+                 wasip1 module with `wasm-tools component new`)"
+            )));
+        }
+    }
     let assets = files
         .into_iter()
         .map(|(path, bytes)| bytes_asset(&path, &bytes))
@@ -2637,11 +2661,38 @@ prompt_doc_ref = "prompts/run.md"
         );
         vec![
             ("manifest.toml".to_string(), manifest.into_bytes()),
-            ("wasm/tool.wasm".to_string(), b"\0asm\x01\0\0\0".to_vec()),
+            // Component header (`\0asm` + version/layer `0d 00 01 00`): the
+            // import path rejects core modules, which the runtime cannot load.
+            ("wasm/tool.wasm".to_string(), b"\0asm\x0d\0\x01\0".to_vec()),
             ("schemas/run.input.json".to_string(), b"{}".to_vec()),
             ("schemas/run.output.json".to_string(), b"{}".to_vec()),
             ("prompts/run.md".to_string(), b"# run".to_vec()),
         ]
+    }
+
+    /// The runtime loads WASM tools as WASI components; a core module would
+    /// import/install/activate cleanly and then fail every dispatch with the
+    /// redacted "the tool manifest is invalid". The import path must reject it
+    /// with an actionable error instead.
+    #[test]
+    fn imported_extension_package_rejects_core_module_wasm() {
+        let files = importable_tool_bundle_files("uploaded-tool")
+            .into_iter()
+            .map(|(path, bytes)| {
+                if path == "wasm/tool.wasm" {
+                    // Core-module header: version `01 00 00 00`, layer 0.
+                    (path, b"\0asm\x01\0\0\0".to_vec())
+                } else {
+                    (path, bytes)
+                }
+            })
+            .collect::<Vec<_>>();
+        let error = imported_extension_package(files)
+            .expect_err("core-module wasm must be rejected at import, not at dispatch");
+        assert!(
+            format!("{error}").contains("not a WASI component"),
+            "unexpected error: {error}"
+        );
     }
 
     /// The `test-tools/` fixture bundles are what the live QA scripts zip and

@@ -1957,7 +1957,8 @@ output_schema_ref = "schemas/run.output.json"
         );
         zip_bundle(&[
             ("manifest.toml", manifest.as_bytes()),
-            ("wasm/tool.wasm", b"\0asm\x01\0\0\0".as_slice()),
+            // Component header — the import path rejects core modules.
+            ("wasm/tool.wasm", b"\0asm\x0d\0\x01\0".as_slice()),
             ("schemas/run.input.json", b"{}".as_slice()),
             ("schemas/run.output.json", b"{}".as_slice()),
         ])
