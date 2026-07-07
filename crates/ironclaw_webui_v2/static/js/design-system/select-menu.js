@@ -196,7 +196,6 @@ export function SelectMenu({
   const optionsKey = optionsIdentity(options);
   const rootPassthroughProps = safeRootProps(rest);
   const buttonListboxProps = {
-    "aria-owns": listboxId,
     ...(open ? { "aria-controls": listboxId } : {}),
     ...(activeOptionId ? { "aria-activedescendant": activeOptionId } : {}),
   };

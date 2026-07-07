@@ -241,9 +241,12 @@ test("SelectMenu renders a closed custom trigger with the selected label", () =>
 
   assert.match(collectTemplateText(rendered), /aria-haspopup="listbox"/);
   assert.equal(firstValueAfter(rendered, "aria-expanded="), "false");
-  const listboxProps = firstObjectWith(rendered, "aria-owns");
-  assert.match(listboxProps["aria-owns"], /^v2-select-menu-\d+-listbox$/);
-  assert.equal("aria-activedescendant" in listboxProps, false);
+  assert.equal(collectObjects(rendered).some((value) => "aria-owns" in value), false);
+  assert.equal(collectObjects(rendered).some((value) => "aria-controls" in value), false);
+  assert.equal(
+    collectObjects(rendered).some((value) => "aria-activedescendant" in value),
+    false
+  );
   assert.ok(collectScalars(rendered).includes("Follow global"));
   assert.doesNotMatch(collectTemplateText(rendered), /<select/);
   assert.doesNotMatch(collectTemplateText(rendered), /role="listbox"/);
@@ -257,8 +260,8 @@ test("SelectMenu opens, selects an option, and closes after selection", () => {
   let rendered = harness.render({ onChange: (...args) => changes.push(args) });
   assert.equal(firstValueAfter(rendered, "aria-expanded="), "true");
   assert.match(collectTemplateText(rendered), /role="listbox"/);
-  const listboxProps = firstObjectWith(rendered, "aria-owns");
-  assert.match(listboxProps["aria-owns"], /^v2-select-menu-\d+-listbox$/);
+  const listboxProps = firstObjectWith(rendered, "aria-controls");
+  assert.equal("aria-owns" in listboxProps, false);
   assert.match(listboxProps["aria-controls"], /^v2-select-menu-\d+-listbox$/);
   assert.match(listboxProps["aria-activedescendant"], /^v2-select-menu-\d+-option-0$/);
   assert.equal(valuesAfter(rendered, "aria-label=").length, 1);

@@ -200,7 +200,7 @@ def _permission_button(page, name: str):
 async def _choose_permission(page, name: str, label: str):
     button = _permission_button(page, name)
     await button.click()
-    listbox_id = await button.get_attribute("aria-owns")
+    listbox_id = await button.get_attribute("aria-controls")
     assert listbox_id
     listbox = page.locator(f"#{listbox_id}")
     await expect(listbox).to_be_visible(timeout=5000)
