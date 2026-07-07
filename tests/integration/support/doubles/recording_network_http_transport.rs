@@ -12,8 +12,8 @@ use std::{
 };
 
 use ironclaw_network::{
-    NetworkHttpError, NetworkHttpResponse, NetworkHttpTransport, NetworkTransportRequest,
-    NetworkUsage,
+    DEFAULT_RESPONSE_BODY_LIMIT, NetworkHttpError, NetworkHttpResponse, NetworkHttpTransport,
+    NetworkTransportRequest, NetworkUsage,
 };
 
 #[derive(Debug, Clone)]
@@ -64,13 +64,40 @@ impl NetworkHttpTransport for RecordingNetworkHttpTransport {
         let mut state = self.inner.lock().unwrap();
         let request_bytes = request.body.len() as u64;
         state.requests.push(request.clone());
-        let body = state
+        let mut body = state
             .response_bodies
             .pop_front()
             .unwrap_or_else(|| state.default_body.clone());
+        let headers = vec![("content-type".to_string(), "application/json".to_string())];
+        // Mirror `ReqwestNetworkTransport`: a body over the effective response
+        // limit is truncated to the limit and surfaced as a `ResponseBodyLimit`
+        // error carrying the partial response.
+        let limit = request
+            .response_body_limit
+            .unwrap_or(DEFAULT_RESPONSE_BODY_LIMIT)
+            .min(DEFAULT_RESPONSE_BODY_LIMIT);
+        if body.len() as u64 > limit {
+            body.truncate(limit as usize);
+            let response_bytes = limit.saturating_add(1);
+            return Err(NetworkHttpError::ResponseBodyLimit {
+                limit,
+                request_bytes,
+                response_bytes,
+                partial_response: Some(NetworkHttpResponse {
+                    status: 200,
+                    headers,
+                    body,
+                    usage: NetworkUsage {
+                        request_bytes,
+                        response_bytes,
+                        resolved_ip: None,
+                    },
+                }),
+            });
+        }
         Ok(NetworkHttpResponse {
             status: 200,
-            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            headers,
             body: body.clone(),
             usage: NetworkUsage {
                 request_bytes,
