@@ -48,7 +48,7 @@ export function ProjectMissionsColumn({ missions, selectedMissionId, onSelectMis
                 </div>
                 <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-400">
                   <span>${formatMissionCadence(mission, t)}</span>
-                  <span>${t("projects.missions.threadCount", { count: mission.thread_count })}</span>
+                  <span>${t("projects.missions.threadCount", { count: mission.thread_count || 0 })}</span>
                   <span>${t("projects.missions.updated", { date: formatProjectDate(mission.updated_at, t) })}</span>
                 </div>
               </button>
