@@ -170,13 +170,12 @@ impl RootFilesystem for InMemoryBackend {
     async fn delete_if_version(
         &self,
         path: &VirtualPath,
-        expected: CasExpectation,
+        expected_version: RecordVersion,
     ) -> Result<(), FilesystemError> {
         // Deliberately not `check_cas`: its Version arm collapses an absent
         // row into VersionMismatch{found: None}, but delete callers must see
         // absent as NotFound (already gone) vs present-at-another-version as
         // VersionMismatch (gone stale). Single-key: no subtree/log sweep.
-        let required_version = expected.required_delete_version(path)?;
         let mut state = self.state.lock().await;
         let Some(current) = state.entries.get(path).map(|stored| stored.version) else {
             return Err(FilesystemError::NotFound {
@@ -184,19 +183,15 @@ impl RootFilesystem for InMemoryBackend {
                 operation: FilesystemOperation::Delete,
             });
         };
-        match required_version {
-            Some(expected_version) if expected_version != current => {
-                Err(FilesystemError::VersionMismatch {
-                    path: path.clone(),
-                    expected: Some(expected_version),
-                    found: Some(current),
-                })
-            }
-            _ => {
-                state.entries.remove(path);
-                Ok(())
-            }
+        if expected_version != current {
+            return Err(FilesystemError::VersionMismatch {
+                path: path.clone(),
+                expected: Some(expected_version),
+                found: Some(current),
+            });
         }
+        state.entries.remove(path);
+        Ok(())
     }
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
@@ -820,10 +815,7 @@ mod tests {
 
         // Missing path is NotFound (already gone), never VersionMismatch.
         let err = fs
-            .delete_if_version(
-                &path,
-                CasExpectation::Version(RecordVersion::from_backend(1)),
-            )
+            .delete_if_version(&path, RecordVersion::from_backend(1))
             .await
             .unwrap_err();
         assert!(matches!(
@@ -846,10 +838,7 @@ mod tests {
             .put(&path, Entry::bytes(vec![2]), CasExpectation::Version(v1))
             .await
             .unwrap();
-        let err = fs
-            .delete_if_version(&path, CasExpectation::Version(v1))
-            .await
-            .unwrap_err();
+        let err = fs.delete_if_version(&path, v1).await.unwrap_err();
         match err {
             FilesystemError::VersionMismatch {
                 expected, found, ..
@@ -865,47 +854,11 @@ mod tests {
 
         // Correct version deletes exactly the entry — single-key, so the
         // event log at the same path survives (blind delete would sweep it).
-        fs.delete_if_version(&path, CasExpectation::Version(v2))
-            .await
-            .unwrap();
+        fs.delete_if_version(&path, v2).await.unwrap();
         assert!(fs.get(&path).await.unwrap().is_none());
         let log = fs.tail(&path, SeqNo::ZERO).await.unwrap();
         assert_eq!(log.len(), 1);
         assert_eq!(log[0].seq, log_seq);
-
-        // Absent has no meaning for a delete — fail closed.
-        let err = fs
-            .delete_if_version(&path, CasExpectation::Absent)
-            .await
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            FilesystemError::Unsupported {
-                operation: FilesystemOperation::Delete,
-                ..
-            }
-        ));
-    }
-
-    #[tokio::test]
-    async fn delete_if_version_any_deletes_single_key_unconditionally() {
-        let fs = InMemoryBackend::new();
-        let path = vpath("/secrets/leases/cas-delete-any");
-        fs.put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
-            .await
-            .unwrap();
-        fs.put(&path, Entry::bytes(vec![2]), CasExpectation::Any)
-            .await
-            .unwrap();
-        fs.delete_if_version(&path, CasExpectation::Any)
-            .await
-            .unwrap();
-        assert!(fs.get(&path).await.unwrap().is_none());
-        let err = fs
-            .delete_if_version(&path, CasExpectation::Any)
-            .await
-            .unwrap_err();
-        assert!(matches!(err, FilesystemError::NotFound { .. }));
     }
 
     #[tokio::test]

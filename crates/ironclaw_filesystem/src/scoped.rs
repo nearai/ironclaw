@@ -536,18 +536,21 @@ where
         result
     }
 
-    /// Delete the single entry at `path` only when its version satisfies
-    /// `expected`. See [`RootFilesystem::delete_if_version`].
+    /// Delete the single entry at `path` only when its version equals
+    /// `expected_version`. See [`RootFilesystem::delete_if_version`].
     pub async fn delete_if_version(
         &self,
         scope: &ResourceScope,
         path: &ScopedPath,
-        expected: CasExpectation,
+        expected_version: RecordVersion,
     ) -> Result<(), FilesystemError> {
         let started_at = live_latency_started_at();
         let virtual_path =
             self.resolve_with_permission(scope, path, FilesystemOperation::Delete)?;
-        let result = self.root.delete_if_version(&virtual_path, expected).await;
+        let result = self
+            .root
+            .delete_if_version(&virtual_path, expected_version)
+            .await;
         trace_fs_latency("delete_if_version", path, started_at, &result, None);
         result
     }

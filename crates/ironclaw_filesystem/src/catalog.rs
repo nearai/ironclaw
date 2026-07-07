@@ -364,11 +364,11 @@ impl RootFilesystem for CompositeRootFilesystem {
     async fn delete_if_version(
         &self,
         path: &VirtualPath,
-        expected: CasExpectation,
+        expected_version: RecordVersion,
     ) -> Result<(), FilesystemError> {
         self.matching_mount(path)?
             .backend
-            .delete_if_version(path, expected)
+            .delete_if_version(path, expected_version)
             .await
     }
 

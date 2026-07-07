@@ -326,17 +326,12 @@ async fn composite_routes_delete_if_version_to_matching_backend() {
         .unwrap();
 
     let err = root
-        .delete_if_version(
-            &path,
-            CasExpectation::Version(RecordVersion::from_backend(v1.get() + 1)),
-        )
+        .delete_if_version(&path, RecordVersion::from_backend(v1.get() + 1))
         .await
         .unwrap_err();
     assert!(matches!(err, FilesystemError::VersionMismatch { .. }));
 
-    root.delete_if_version(&path, CasExpectation::Version(v1))
-        .await
-        .unwrap();
+    root.delete_if_version(&path, v1).await.unwrap();
     assert!(specific.get(&path).await.unwrap().is_none());
 }
 

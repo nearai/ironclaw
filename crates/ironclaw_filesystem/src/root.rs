@@ -164,17 +164,24 @@ pub trait RootFilesystem: Send + Sync {
     }
 
     /// Deletes the single entry at `path` only when its current version
-    /// satisfies `expected` — the CAS counterpart of [`delete`](Self::delete),
-    /// never sweeping a subtree, event logs, or sequence counters. An absent
-    /// row surfaces [`FilesystemError::NotFound`] (already gone, benign), a
-    /// row at another version surfaces [`FilesystemError::VersionMismatch`],
-    /// and the meaningless-for-delete `CasExpectation::Absent` is rejected
-    /// with [`FilesystemError::Unsupported`]. Default impl is `Unsupported`,
+    /// equals `expected_version` — the CAS counterpart of
+    /// [`delete`](Self::delete), never sweeping a subtree, event logs, or
+    /// sequence counters. An absent row surfaces [`FilesystemError::NotFound`]
+    /// (already gone, benign); a row at another version surfaces
+    /// [`FilesystemError::VersionMismatch`]. Default impl is `Unsupported`,
     /// same as [`put`](Self::put): backends opt in natively.
+    ///
+    /// Version tokens are not generation-stable: a path's version restarts at
+    /// 1 on a fresh put after a prior delete. An `expected_version` captured
+    /// before a delete+recreate cycle can match a different incarnation of
+    /// the same path (ABA). This method is a sound standalone precondition
+    /// only for paths that are never recreated; callers that do recreate
+    /// paths must pair every successful delete with an unconditional
+    /// postcondition recheck.
     async fn delete_if_version(
         &self,
         path: &VirtualPath,
-        _expected: CasExpectation,
+        _expected_version: RecordVersion,
     ) -> Result<(), FilesystemError> {
         unsupported(path, FilesystemOperation::Delete)
     }

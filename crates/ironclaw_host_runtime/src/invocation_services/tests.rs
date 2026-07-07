@@ -420,6 +420,81 @@ async fn hosted_scoped_virtual_filesystem_services_enforce_mount_permissions() {
     assert_permission_denied(denied, FilesystemOperation::WriteFile);
 }
 
+#[tokio::test]
+async fn hosted_scoped_virtual_filesystem_delete_if_version_delegates_to_inner_backend() {
+    // Review fix (PR #5749, round 3): MountScopedRootFilesystem must forward
+    // delete_if_version to the inner backend (after the same permission
+    // resolution as `delete`) instead of falling through to the
+    // RootFilesystem trait default `Unsupported`.
+    use ironclaw_filesystem::{CasExpectation, Entry};
+
+    let resolver = resolver_with_filesystem(Arc::new(InMemoryBackend::new()));
+    let mut plan = plan(
+        ProcessBackendKind::None,
+        false,
+        false,
+        NetworkMode::Deny,
+        false,
+    );
+    plan.deployment = DeploymentMode::HostedMultiTenant;
+    plan.resolved_profile = RuntimeProfile::SecureDefault;
+    plan.requires_filesystem = true;
+    plan.filesystem_backend = FilesystemBackendKind::ScopedVirtual;
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/system/extensions".to_string()).expect("mount alias"),
+        VirtualPath::new("/system/extensions".to_string()).expect("virtual path"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+
+    let services = resolver
+        .resolve(InvocationServicesResolutionRequest {
+            plan: &plan,
+            scope: &ResourceScope::system(),
+            mounts: Some(&mounts),
+        })
+        .expect("hosted scoped virtual filesystem should resolve with explicit mounts");
+
+    let path = vpath("/system/extensions/catalog.json");
+    let version = services
+        .filesystem
+        .put(
+            &path,
+            Entry::bytes(b"{\"ok\":true}".to_vec()),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+
+    // Wrong version is rejected with VersionMismatch, proving the call
+    // actually reached the inner backend's CAS logic rather than a stub or
+    // an Unsupported fallthrough.
+    let other_version = version.next();
+    let err = services
+        .filesystem
+        .delete_if_version(&path, other_version)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, FilesystemError::VersionMismatch { .. }));
+
+    // Correct version deletes.
+    services
+        .filesystem
+        .delete_if_version(&path, version)
+        .await
+        .unwrap();
+    assert!(services.filesystem.read_file(&path).await.is_err());
+
+    // Out-of-mount path is denied before it ever reaches the inner backend.
+    let out_of_mount = vpath("/users/user_test/private.txt");
+    let denied = services
+        .filesystem
+        .delete_if_version(&out_of_mount, version)
+        .await
+        .unwrap_err();
+    assert_permission_denied(denied, FilesystemOperation::Delete);
+}
+
 #[test]
 fn local_resolver_rejects_hosted_scoped_virtual_filesystem_without_mounts() {
     let resolver = resolver_without_http();

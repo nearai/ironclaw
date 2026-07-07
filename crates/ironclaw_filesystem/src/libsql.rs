@@ -905,36 +905,25 @@ impl RootFilesystem for LibSqlRootFilesystem {
     async fn delete_if_version(
         &self,
         path: &VirtualPath,
-        expected: CasExpectation,
+        expected_version: RecordVersion,
     ) -> Result<(), FilesystemError> {
         // Single-key CAS delete: unlike `delete`, no subtree/event/sequence
         // sweep. `is_dir = 0` scopes it to the record plane, matching `put`'s
-        // Version arm and `current_version`.
-        let required_version = expected.required_delete_version(path)?;
+        // Version arm and `current_version_libsql`.
+        let expected_raw = record_version_to_i64(path, expected_version)?;
         let conn = self.connect().await?;
-        let deleted = match required_version {
-            Some(expected_version) => {
-                let expected_raw = record_version_to_i64(path, expected_version)?;
-                conn.execute(
-                    "DELETE FROM root_filesystem_entries \
-                     WHERE path = ?1 AND is_dir = 0 AND version = ?2",
-                    libsql::params![path.as_str(), expected_raw],
-                )
-                .await
-            }
-            None => {
-                conn.execute(
-                    "DELETE FROM root_filesystem_entries WHERE path = ?1 AND is_dir = 0",
-                    libsql::params![path.as_str()],
-                )
-                .await
-            }
-        }
-        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
+        let deleted = conn
+            .execute(
+                "DELETE FROM root_filesystem_entries \
+                 WHERE path = ?1 AND is_dir = 0 AND version = ?2",
+                libsql::params![path.as_str(), expected_raw],
+            )
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
         if deleted > 0 {
             return Ok(());
         }
-        // Review fix (PR #5749): `current_version` below opens its own
+        // Review fix (PR #5749): the diagnosis below opens its own
         // connection via `self.connect()`. Drop this call's connection first
         // so the diagnosis never holds two checkouts at once — the bounded
         // pool landing in PR #5751 enforces one checkout per call stack, and
@@ -946,9 +935,8 @@ impl RootFilesystem for LibSqlRootFilesystem {
         // 0 rows: absent row → NotFound (already gone, benign); row present
         // at another version → VersionMismatch (gone stale). Distinct from
         // put's diagnosis, which collapses absent into VersionMismatch.
-        if let Some(expected_version) = required_version
-            && let Some(found) = self.current_version(path).await?
-        {
+        let conn = self.connect().await?;
+        if let Some(found) = current_version_libsql(&conn, path).await? {
             return Err(FilesystemError::VersionMismatch {
                 path: path.clone(),
                 expected: Some(expected_version),

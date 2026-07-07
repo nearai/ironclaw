@@ -424,10 +424,7 @@ async fn libsql_delete_if_version_deletes_current_and_rejects_stale_or_missing()
 
     // Missing path → NotFound (already gone, benign), never VersionMismatch.
     let err = filesystem
-        .delete_if_version(
-            &path,
-            CasExpectation::Version(ironclaw_filesystem::RecordVersion::from_backend(1)),
-        )
+        .delete_if_version(&path, ironclaw_filesystem::RecordVersion::from_backend(1))
         .await
         .unwrap_err();
     assert!(matches!(
@@ -450,10 +447,7 @@ async fn libsql_delete_if_version_deletes_current_and_rejects_stale_or_missing()
         .put(&path, Entry::bytes(vec![2]), CasExpectation::Version(v1))
         .await
         .unwrap();
-    let err = filesystem
-        .delete_if_version(&path, CasExpectation::Version(v1))
-        .await
-        .unwrap_err();
+    let err = filesystem.delete_if_version(&path, v1).await.unwrap_err();
     match err {
         FilesystemError::VersionMismatch {
             expected, found, ..
@@ -469,86 +463,11 @@ async fn libsql_delete_if_version_deletes_current_and_rejects_stale_or_missing()
 
     // Correct version deletes exactly the entry; single-key, so the event
     // log at the same path survives (blind `delete` sweeps it).
-    filesystem
-        .delete_if_version(&path, CasExpectation::Version(v2))
-        .await
-        .unwrap();
+    filesystem.delete_if_version(&path, v2).await.unwrap();
     assert!(filesystem.get(&path).await.unwrap().is_none());
     let log = filesystem.tail(&path, SeqNo::ZERO).await.unwrap();
     assert_eq!(log.len(), 1);
     assert_eq!(log[0].seq, log_seq);
-}
-
-#[cfg(feature = "libsql")]
-#[tokio::test]
-async fn libsql_delete_if_version_any_deletes_single_key_unconditionally() {
-    let filesystem = libsql_root().await;
-    let path = VirtualPath::new("/secrets/leases/CAS-DEL-ANY").unwrap();
-
-    let _v1 = filesystem
-        .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
-        .await
-        .unwrap();
-    let log_seq = filesystem.append(&path, b"kept".to_vec()).await.unwrap();
-
-    // Any deletes regardless of the current version.
-    filesystem
-        .delete_if_version(&path, CasExpectation::Any)
-        .await
-        .unwrap();
-    assert!(filesystem.get(&path).await.unwrap().is_none());
-
-    // Single-key: the event log at the same path survives (blind `delete`
-    // sweeps it; `delete_if_version` never does).
-    let log = filesystem.tail(&path, SeqNo::ZERO).await.unwrap();
-    assert_eq!(log.len(), 1);
-    assert_eq!(log[0].seq, log_seq);
-
-    // Second Any delete against the now-absent row is NotFound, not a
-    // silent no-op success — matches the Version-branch's "already gone"
-    // semantics.
-    let err = filesystem
-        .delete_if_version(&path, CasExpectation::Any)
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        err,
-        FilesystemError::NotFound {
-            operation: FilesystemOperation::Delete,
-            ..
-        }
-    ));
-}
-
-#[cfg(feature = "libsql")]
-#[tokio::test]
-async fn libsql_delete_if_version_rejects_absent_expectation() {
-    // Review fix (PR #5749 round 2): `CasExpectation::Absent` is meaningless
-    // for a delete (there's nothing to assert "not present") and must fail
-    // closed with `Unsupported` rather than silently falling through to an
-    // unconditional delete. The entry must survive untouched.
-    let filesystem = libsql_root().await;
-    let path = VirtualPath::new("/secrets/leases/CAS-DEL-ABSENT").unwrap();
-    let version = filesystem
-        .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
-        .await
-        .unwrap();
-
-    let err = filesystem
-        .delete_if_version(&path, CasExpectation::Absent)
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        err,
-        FilesystemError::Unsupported {
-            operation: FilesystemOperation::Delete,
-            ..
-        }
-    ));
-
-    let got = filesystem.get(&path).await.unwrap().unwrap();
-    assert_eq!(got.version, version);
-    assert_eq!(got.entry.body, vec![1]);
 }
 
 #[cfg(feature = "libsql")]
@@ -1713,10 +1632,7 @@ mod postgres_tests {
 
         // Missing path → NotFound (already gone, benign), never VersionMismatch.
         let err = fs
-            .delete_if_version(
-                &path,
-                CasExpectation::Version(ironclaw_filesystem::RecordVersion::from_backend(1)),
-            )
+            .delete_if_version(&path, ironclaw_filesystem::RecordVersion::from_backend(1))
             .await
             .unwrap_err();
         assert!(matches!(
@@ -1739,10 +1655,7 @@ mod postgres_tests {
             .put(&path, Entry::bytes(vec![2]), CasExpectation::Version(v1))
             .await
             .unwrap();
-        let err = fs
-            .delete_if_version(&path, CasExpectation::Version(v1))
-            .await
-            .unwrap_err();
+        let err = fs.delete_if_version(&path, v1).await.unwrap_err();
         match err {
             FilesystemError::VersionMismatch {
                 expected, found, ..
@@ -1758,87 +1671,11 @@ mod postgres_tests {
 
         // Correct version deletes exactly the entry; single-key, so the
         // event log at the same path survives (blind `delete` sweeps it).
-        fs.delete_if_version(&path, CasExpectation::Version(v2))
-            .await
-            .unwrap();
+        fs.delete_if_version(&path, v2).await.unwrap();
         assert!(fs.get(&path).await.unwrap().is_none());
         let log = fs.tail(&path, SeqNo::ZERO).await.unwrap();
         assert_eq!(log.len(), 1);
         assert_eq!(log[0].seq, log_seq);
-    }
-
-    #[tokio::test]
-    async fn postgres_delete_if_version_any_deletes_single_key_unconditionally() {
-        let Some((fs, prefix)) = postgres_root().await else {
-            return;
-        };
-        let path = vpath(&prefix, "cas_delete_any");
-
-        let _v1 = fs
-            .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
-            .await
-            .unwrap();
-        let log_seq = fs.append(&path, b"kept".to_vec()).await.unwrap();
-
-        // Any deletes regardless of the current version.
-        fs.delete_if_version(&path, CasExpectation::Any)
-            .await
-            .unwrap();
-        assert!(fs.get(&path).await.unwrap().is_none());
-
-        // Single-key: the event log at the same path survives (blind
-        // `delete` sweeps it; `delete_if_version` never does).
-        let log = fs.tail(&path, SeqNo::ZERO).await.unwrap();
-        assert_eq!(log.len(), 1);
-        assert_eq!(log[0].seq, log_seq);
-
-        // Second Any delete against the now-absent row is NotFound, not a
-        // silent no-op success — matches the Version-branch's "already gone"
-        // semantics.
-        let err = fs
-            .delete_if_version(&path, CasExpectation::Any)
-            .await
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            FilesystemError::NotFound {
-                operation: FilesystemOperation::Delete,
-                ..
-            }
-        ));
-    }
-
-    #[tokio::test]
-    async fn postgres_delete_if_version_rejects_absent_expectation() {
-        // Review fix (PR #5749 round 2): `CasExpectation::Absent` is
-        // meaningless for a delete (there's nothing to assert "not present")
-        // and must fail closed with `Unsupported` rather than silently
-        // falling through to an unconditional delete. The entry must survive
-        // untouched.
-        let Some((fs, prefix)) = postgres_root().await else {
-            return;
-        };
-        let path = vpath(&prefix, "cas_delete_absent");
-        let version = fs
-            .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
-            .await
-            .unwrap();
-
-        let err = fs
-            .delete_if_version(&path, CasExpectation::Absent)
-            .await
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            FilesystemError::Unsupported {
-                operation: FilesystemOperation::Delete,
-                ..
-            }
-        ));
-
-        let got = fs.get(&path).await.unwrap().unwrap();
-        assert_eq!(got.version, version);
-        assert_eq!(got.entry.body, vec![1]);
     }
 
     #[tokio::test]

@@ -537,7 +537,7 @@ async fn delete_if_version_denies_when_delete_missing() {
     // the gate must reject before any backend dispatch.
     let scoped = scoped_in_memory(no_op(true, true, true, false));
     let path = ScopedPath::new("/workspace/a").unwrap();
-    scoped
+    let version = scoped
         .put(
             &test_scope(),
             &path,
@@ -549,7 +549,7 @@ async fn delete_if_version_denies_when_delete_missing() {
 
     let err = expect_err(
         scoped
-            .delete_if_version(&test_scope(), &path, CasExpectation::Any)
+            .delete_if_version(&test_scope(), &path, version)
             .await,
     );
     assert!(matches!(
@@ -563,10 +563,10 @@ async fn delete_if_version_denies_when_delete_missing() {
 
 #[tokio::test]
 async fn delete_if_version_rejects_stale_version_and_preserves_entry() {
-    // Review fix (PR #5749 round 2): prove `expected` is actually forwarded
-    // to the backend through the scoped boundary, not swallowed en route. A
-    // stale `CasExpectation::Version` must surface `VersionMismatch` and the
-    // entry must remain in place afterward.
+    // Review fix (PR #5749 round 2): prove `expected_version` is actually
+    // forwarded to the backend through the scoped boundary, not swallowed en
+    // route. A stale version must surface `VersionMismatch` and the entry
+    // must remain in place afterward.
     let scoped = scoped_in_memory(no_op(true, true, true, true));
     let path = ScopedPath::new("/workspace/a").unwrap();
     let v1 = scoped
@@ -588,11 +588,7 @@ async fn delete_if_version_rejects_stale_version_and_preserves_entry() {
         .await
         .unwrap();
 
-    let err = expect_err(
-        scoped
-            .delete_if_version(&test_scope(), &path, CasExpectation::Version(v1))
-            .await,
-    );
+    let err = expect_err(scoped.delete_if_version(&test_scope(), &path, v1).await);
     match err {
         FilesystemError::VersionMismatch {
             expected, found, ..
@@ -629,7 +625,7 @@ async fn delete_if_version_succeeds_with_delete_and_routes_to_backend() {
         .unwrap();
 
     scoped
-        .delete_if_version(&test_scope(), &path, CasExpectation::Version(version))
+        .delete_if_version(&test_scope(), &path, version)
         .await
         .unwrap();
 

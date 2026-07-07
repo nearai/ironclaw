@@ -669,10 +669,10 @@ impl RootFilesystem for PostgresRootFilesystem {
     async fn delete_if_version(
         &self,
         path: &VirtualPath,
-        expected: CasExpectation,
+        expected_version: RecordVersion,
     ) -> Result<(), FilesystemError> {
         let client = self.client().await?;
-        postgres_delete_if_version_with_client(&client, path, expected).await
+        postgres_delete_if_version_with_client(&client, path, expected_version).await
     }
 
     async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
@@ -1620,18 +1620,12 @@ async fn postgres_delete_with_client(
     Ok(())
 }
 
-/// `CasExpectation::Version` delete: remove the single file row at `path`
-/// only when it still holds the expected version. Single-key by design —
-/// no subtree band, unlike blind delete's `path = $1 OR (path >= $2 ...)`.
+/// Guarded delete: remove the single file row at `path` only when it still
+/// holds the expected version. Single-key by design — no subtree band,
+/// unlike blind delete's `path = $1 OR (path >= $2 ...)`.
 #[cfg(feature = "postgres")]
 const DELETE_IF_VERSION_VERSION_SQL: &str =
     "DELETE FROM root_filesystem_entries WHERE path = $1 AND is_dir = FALSE AND version = $2";
-
-/// `CasExpectation::Any` delete: remove the single file row at `path`
-/// unconditionally. Single-key, record-plane only (`is_dir = FALSE`).
-#[cfg(feature = "postgres")]
-const DELETE_IF_VERSION_ANY_SQL: &str =
-    "DELETE FROM root_filesystem_entries WHERE path = $1 AND is_dir = FALSE";
 
 /// CAS delete for the Postgres backend: one statement on the happy path,
 /// mirroring the put round-trip budget. The rare 0-row outcome pays one
@@ -1643,28 +1637,20 @@ const DELETE_IF_VERSION_ANY_SQL: &str =
 async fn postgres_delete_if_version_with_client(
     client: &deadpool_postgres::Object,
     path: &VirtualPath,
-    expected: CasExpectation,
+    expected_version: RecordVersion,
 ) -> Result<(), FilesystemError> {
-    let required_version = expected.required_delete_version(path)?;
-    let deleted = match required_version {
-        Some(expected_version) => {
-            let expected_raw = record_version_to_i64(path, expected_version)?;
-            cached_execute(
-                client,
-                DELETE_IF_VERSION_VERSION_SQL,
-                &[&path.as_str(), &expected_raw],
-            )
-            .await
-        }
-        None => cached_execute(client, DELETE_IF_VERSION_ANY_SQL, &[&path.as_str()]).await,
-    }
+    let expected_raw = record_version_to_i64(path, expected_version)?;
+    let deleted = cached_execute(
+        client,
+        DELETE_IF_VERSION_VERSION_SQL,
+        &[&path.as_str(), &expected_raw],
+    )
+    .await
     .map_err(|error| db_error(path.clone(), FilesystemOperation::Delete, error))?;
     if deleted > 0 {
         return Ok(());
     }
-    if let Some(expected_version) = required_version
-        && let Some(found) = postgres_current_version_with_client(client, path).await?
-    {
+    if let Some(found) = postgres_current_version_with_client(client, path).await? {
         return Err(FilesystemError::VersionMismatch {
             path: path.clone(),
             expected: Some(expected_version),
@@ -2108,21 +2094,17 @@ mod tests {
     /// cascade to unguarded descendants.
     #[test]
     fn delete_if_version_statements_are_single_round_trip_and_single_key() {
-        for (name, sql) in [
-            ("version", DELETE_IF_VERSION_VERSION_SQL),
-            ("any", DELETE_IF_VERSION_ANY_SQL),
-        ] {
-            assert_eq!(
-                top_level_statement_count(sql),
-                1,
-                "{name} delete_if_version must be a single statement. Got: {sql}"
-            );
-            assert!(
-                !sql.contains(" OR "),
-                "{name} delete_if_version must stay single-key (no subtree band): {sql}"
-            );
-            assert!(sql.contains("is_dir = FALSE"));
-        }
+        let sql = DELETE_IF_VERSION_VERSION_SQL;
+        assert_eq!(
+            top_level_statement_count(sql),
+            1,
+            "delete_if_version must be a single statement. Got: {sql}"
+        );
+        assert!(
+            !sql.contains(" OR "),
+            "delete_if_version must stay single-key (no subtree band): {sql}"
+        );
+        assert!(sql.contains("is_dir = FALSE"));
         assert!(DELETE_IF_VERSION_VERSION_SQL.contains("version = $2"));
     }
 

@@ -115,7 +115,7 @@ impl RootFilesystem for HsmBackend {
     async fn delete_if_version(
         &self,
         path: &VirtualPath,
-        expected: CasExpectation,
+        expected_version: RecordVersion,
     ) -> Result<(), FilesystemError> {
         // Review fix (PR #5749): the HSM declares `Delete` + `TxnCapability::Cas`
         // (see `declared_capabilities` above), so it must actually serve
@@ -123,7 +123,7 @@ impl RootFilesystem for HsmBackend {
         // `Unsupported` — that combination would pass mount-time capability
         // validation but fail at call time. Delegate to the inner backend,
         // same as every other unified-entry-plane method on this wrapper.
-        self.inner.delete_if_version(path, expected).await
+        self.inner.delete_if_version(path, expected_version).await
     }
 }
 
@@ -254,22 +254,17 @@ mod tests {
         // actually reached the inner backend's CAS logic rather than a stub.
         let other_version = version.next();
         let err = hsm
-            .delete_if_version(&path, CasExpectation::Version(other_version))
+            .delete_if_version(&path, other_version)
             .await
             .unwrap_err();
         assert!(matches!(err, FilesystemError::VersionMismatch { .. }));
 
         // Correct version deletes.
-        hsm.delete_if_version(&path, CasExpectation::Version(version))
-            .await
-            .unwrap();
+        hsm.delete_if_version(&path, version).await.unwrap();
         assert!(hsm.get(&path).await.unwrap().is_none());
 
         // Now absent: NotFound, not Unsupported.
-        let err = hsm
-            .delete_if_version(&path, CasExpectation::Version(version))
-            .await
-            .unwrap_err();
+        let err = hsm.delete_if_version(&path, version).await.unwrap_err();
         assert!(matches!(err, FilesystemError::NotFound { .. }));
     }
 
