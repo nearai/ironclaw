@@ -15,6 +15,30 @@ paths:
 
 Run `bash scripts/check-boundaries.sh` to verify test tier gating.
 
+## Integration-First Coverage (Reborn)
+
+New or changed Reborn behavior that is production-wired ships with a
+test in `tests/integration/` (authoring guide:
+`tests/integration/CLAUDE.md`) — driven through the harness and
+asserting at a seam (captured model request, egress recorder, store
+reopen), not `wait_for_status(Completed)` alone.
+
+- **Tier fallback:** crate-tier tests are acceptable only when the
+  integration tier cannot reach the path; state why in the PR.
+- **Don't wire the unwired:** never add test-only wiring for paths
+  production doesn't wire — defer the scenario instead. A harness seam
+  must cite the production call site it mirrors or exposes.
+- **No skipped tests:** no `#[ignore]`d or TODO-pinned tests; every
+  landed test runs and passes in CI. RED regression pins belong in the
+  fix PR that turns them green.
+- **Consolidate:** extend an existing suite before creating a new one
+  (see CLAUDE.md Testing Discipline rule 2).
+- **Coverage ratchet:** Reborn integration-tier coverage is also gated
+  by a committed ratchet floor
+  (`tests/integration/coverage-floor.toml`) — dry-run only until the
+  post-#5656 recapture PR sets `enforce = true`; see the floor file's
+  own header for the same-PR floor-raise workflow.
+
 ## Key Patterns
 
 - Unit tests in `mod tests {}` at the bottom of each file
