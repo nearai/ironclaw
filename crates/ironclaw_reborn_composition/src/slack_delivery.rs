@@ -1499,7 +1499,20 @@ impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
         let Some(ack) = rejection_ack_for_workflow_error(&error) else {
             return;
         };
-        self.post_rejection_hint_if_authorized(&envelope, &ack)
+        // An unbound user's first inbound resolves as a `BindingRequired`
+        // workflow *error*, surfaced here — NOT as an `Ok(Rejected)` ack in
+        // `observe_workflow_ack`. `post_rejection_hint_if_authorized` is a
+        // guaranteed no-op for them (its binding lookup fails by definition),
+        // so without the connect nudge an unbound 1:1 DM gets total silence.
+        // Mirror the ack-path ordering: authorized rejection hint first, then
+        // the connect nudge for unbound DMs.
+        if self
+            .post_rejection_hint_if_authorized(&envelope, &ack)
+            .await
+        {
+            return;
+        }
+        self.post_connect_nudge_if_unbound_user_message(&envelope, &ack)
             .await;
     }
 }
@@ -4438,6 +4451,64 @@ mod tests {
         assert!(
             posted.is_empty(),
             "an unbound app-mention in a shared channel must NOT get a connect nudge posted into the channel, got: {posted:?}"
+        );
+    }
+
+    /// Regression (connect-nudge wiring): the coverage that was missing. In
+    /// production an unbound user's first-contact DM does NOT arrive at
+    /// `observe_workflow_ack` as an `Ok(Rejected)` ack — the workflow returns
+    /// `BindingRequired` as an ERROR (`ScopeNotFound`, status 404), so the
+    /// runner routes it to `observe_workflow_error`. The connect nudge must
+    /// fire on THAT path too. Before the fix this posted nothing (the nudge was
+    /// wired only into `observe_workflow_ack`); the ack-path unit test above
+    /// masked the gap by calling the ack method directly with a synthetic ack
+    /// instead of driving the real error path a live unbound DM takes.
+    #[tokio::test]
+    async fn unbound_user_message_via_workflow_error_posts_connect_nudge() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "1000.1"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::Running,
+        ));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+        let env = envelope(user_message_payload());
+        // The production shape: an unbound scope resolves as a BindingRequired
+        // workflow rejection ERROR (ScopeNotFound -> BindingRequired), surfaced
+        // through `observe_workflow_error`, NOT an `Ok(Rejected)` ack.
+        let error = ProductAdapterError::WorkflowRejected {
+            kind: ProductWorkflowRejectionKind::ScopeNotFound,
+            status_code: 404,
+            retryable: false,
+            reason: ironclaw_product_adapters::RedactedString::new("scope not found"),
+        };
+
+        observer.observe_workflow_error(env, error).await;
+
+        let posted: Vec<String> = egress
+            .calls()
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .map(|c| String::from_utf8_lossy(&c.body).to_string())
+            .collect();
+        assert_eq!(
+            posted.len(),
+            1,
+            "an unbound first-contact DM must get the connect nudge via the ERROR observer path (the real production path), got: {posted:?}"
+        );
+        assert!(
+            posted[0].contains("connect your Slack account"),
+            "the connect nudge must tell the user to connect, got: {}",
+            posted[0]
         );
     }
 
