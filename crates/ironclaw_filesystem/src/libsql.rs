@@ -821,11 +821,20 @@ impl RootFilesystem for LibSqlRootFilesystem {
         // single checkout, matching the one-checkout-per-call-stack
         // invariant the bounded pool in #5751 enforces (no nested
         // `self.connect()`).
+        //
+        // Round-A review: validate `expected_version` before taking the
+        // pool checkout / write lock. An out-of-range version can never
+        // match a real row, so failing closed here avoids holding a
+        // contended connection (and SQLite's write lock) for a call
+        // destined to error — relevant under the concurrent CAS storms
+        // this pool exists to survive.
+        let expected_raw = record_version_to_i64(path, expected_version)?;
         let conn = self.connect().await?;
         conn.execute("BEGIN IMMEDIATE", ())
             .await
             .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
-        let result = delete_if_version_libsql_inner(&conn, path, expected_version).await;
+        let result =
+            delete_if_version_libsql_inner(&conn, path, expected_version, expected_raw).await;
         match result {
             Ok(()) => conn
                 .execute("COMMIT", ())
@@ -1362,8 +1371,8 @@ async fn delete_if_version_libsql_inner(
     conn: &libsql::Connection,
     path: &VirtualPath,
     expected_version: RecordVersion,
+    expected_raw: i64,
 ) -> Result<(), FilesystemError> {
-    let expected_raw = record_version_to_i64(path, expected_version)?;
     let deleted = conn
         .execute(
             "DELETE FROM root_filesystem_entries \

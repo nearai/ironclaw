@@ -826,9 +826,12 @@ mod tests {
             }
         ));
 
-        // A concurrent-writer interleaving: the version the deleter read (v1)
-        // is bumped by a put before the delete lands. The stale delete loses
-        // with the observed version and the entry survives at v2.
+        // Simulates the state a concurrent writer would leave behind (this
+        // is a sequential script, not a real race — see
+        // concurrent_cas_storm.rs for genuine parallel coverage): the
+        // version the deleter read (v1) is bumped by a put before the
+        // delete lands. The stale delete loses with the observed version
+        // and the entry survives at v2.
         let v1 = fs
             .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
             .await
@@ -859,6 +862,51 @@ mod tests {
         let log = fs.tail(&path, SeqNo::ZERO).await.unwrap();
         assert_eq!(log.len(), 1);
         assert_eq!(log[0].seq, log_seq);
+    }
+
+    /// Pins the ABA hazard `delete_if_version`'s doc comment warns about:
+    /// version tokens are not generation-stable, so a version captured
+    /// before a delete+recreate cycle can match a *different* incarnation
+    /// of the same path. This is documented, known behavior — not a bug —
+    /// but was previously asserted only in prose. Round-A review finding
+    /// (PR #5749): pin it with a real assertion so a future change to this
+    /// contract (e.g. generation-stable versions) breaks a test loudly
+    /// instead of silently.
+    #[tokio::test]
+    async fn delete_if_version_is_vulnerable_to_aba_across_delete_recreate_cycles() {
+        let fs = InMemoryBackend::new();
+        let path = vpath("/secrets/leases/cas-delete-aba");
+
+        // First incarnation: created and fully deleted.
+        let v1_first = fs
+            .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+            .await
+            .unwrap();
+        fs.delete_if_version(&path, v1_first).await.unwrap();
+        assert!(fs.get(&path).await.unwrap().is_none());
+
+        // Second incarnation restarts the version counter at the same raw
+        // value as the first (version is not generation-stable).
+        let v1_second = fs
+            .put(&path, Entry::bytes(vec![2]), CasExpectation::Absent)
+            .await
+            .unwrap();
+        assert_eq!(
+            v1_first, v1_second,
+            "version must restart after a full delete, or this ABA hazard doesn't apply"
+        );
+
+        // The stale `v1_first` token — captured against the first
+        // incarnation — incorrectly authorizes deleting the second
+        // incarnation's live data. This is the documented hazard, not a
+        // regression: callers that recreate paths must pair every
+        // successful delete with an unconditional postcondition recheck,
+        // per the trait doc comment.
+        fs.delete_if_version(&path, v1_first).await.unwrap();
+        assert!(
+            fs.get(&path).await.unwrap().is_none(),
+            "stale version token wrongly matched and deleted the second incarnation"
+        );
     }
 
     #[tokio::test]

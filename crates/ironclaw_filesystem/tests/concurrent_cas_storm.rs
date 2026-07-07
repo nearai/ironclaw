@@ -17,9 +17,11 @@
 //! parallelism so the two database backends have an in-process control.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ironclaw_filesystem::{
-    CasApply, ContentType, Entry, InMemoryBackend, RootFilesystem, ScopedFilesystem, cas_update,
+    CasApply, CasExpectation, ContentType, Entry, FilesystemError, InMemoryBackend, RootFilesystem,
+    ScopedFilesystem, cas_update,
 };
 use ironclaw_host_api::{
     MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, ScopedPath, VirtualPath,
@@ -27,6 +29,7 @@ use ironclaw_host_api::{
 
 const WRITERS: u64 = 16;
 const ITERATIONS: u64 = 100;
+const DELETE_STORM_ROUNDS: u64 = 25;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 struct Counter {
@@ -108,10 +111,71 @@ async fn run_storm<F: RootFilesystem + 'static>(fs: Arc<ScopedFilesystem<F>>) {
     );
 }
 
+/// `WRITERS`-way contention on `delete_if_version` itself, repeated over
+/// `DELETE_STORM_ROUNDS` recreate/delete cycles. Round-A review finding
+/// (PR #5749): the earlier CAS storm only ever exercised `put`/`cas_update`
+/// concurrency — `delete_if_version` (the operation this PR adds, and the
+/// one the `BEGIN IMMEDIATE`/`FOR UPDATE` atomicity fix targets) had no
+/// concurrency coverage at all. Each round recreates the shared path at a
+/// known version, then `WRITERS` tasks race to `delete_if_version` it at
+/// that exact version: CAS-delete atomicity guarantees exactly one winner
+/// per round, and every loser must observe a well-formed `NotFound` (the
+/// row it raced for is already gone) — never a backend/infrastructure
+/// error, a panic, or more than one reported success, which would indicate
+/// the pool exhausted/deadlocked or the delete lost its atomicity under
+/// `WRITERS`-way contention.
+async fn run_delete_storm<F: RootFilesystem + 'static>(fs: Arc<ScopedFilesystem<F>>) {
+    let scope = ResourceScope::system();
+    let path = ScopedPath::new("/counters/delete-storm.json").unwrap();
+    let total_wins = Arc::new(AtomicU64::new(0));
+
+    for _ in 0..DELETE_STORM_ROUNDS {
+        let version = fs
+            .put(&scope, &path, Entry::bytes(vec![1]), CasExpectation::Any)
+            .await
+            .expect("round setup put must succeed");
+
+        let mut handles = Vec::new();
+        for _ in 0..WRITERS {
+            let fs = Arc::clone(&fs);
+            let scope = scope.clone();
+            let path = path.clone();
+            let total_wins = Arc::clone(&total_wins);
+            handles.push(tokio::spawn(async move {
+                match fs.delete_if_version(&scope, &path, version).await {
+                    Ok(()) => {
+                        total_wins.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Err(FilesystemError::NotFound { .. }) => {}
+                    Err(other) => panic!(
+                        "concurrent delete_if_version must only ever return Ok or NotFound \
+                         for racers on the same known version, got: {other:?}"
+                    ),
+                }
+            }));
+        }
+        for handle in handles {
+            handle.await.expect("delete-storm racer must not panic");
+        }
+    }
+
+    assert_eq!(
+        total_wins.load(Ordering::SeqCst),
+        DELETE_STORM_ROUNDS,
+        "exactly one delete_if_version racer must win each round (no lost or duplicated deletes)"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn in_memory_concurrent_cas_storm_has_no_lost_updates() {
     let fs = Arc::new(scoped(Arc::new(InMemoryBackend::new()), "/engine/counters"));
     run_storm(fs).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn in_memory_concurrent_delete_if_version_storm_has_exactly_one_winner_per_round() {
+    let fs = Arc::new(scoped(Arc::new(InMemoryBackend::new()), "/engine/counters"));
+    run_delete_storm(fs).await;
 }
 
 #[cfg(feature = "libsql")]
@@ -126,46 +190,64 @@ async fn libsql_concurrent_cas_storm_has_no_errors_or_lost_updates() {
     run_storm(fs).await;
 }
 
+#[cfg(feature = "libsql")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn libsql_concurrent_delete_if_version_storm_has_exactly_one_winner_per_round() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("delete-cas-storm.db");
+    let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+    let root = Arc::new(ironclaw_filesystem::LibSqlRootFilesystem::new(db));
+    root.run_migrations().await.unwrap();
+    let fs = Arc::new(scoped(root, "/engine/counters"));
+    run_delete_storm(fs).await;
+}
+
+/// Connects to a locally-configured Postgres for the storm tests, or
+/// returns `None` if the environment has none reachable/usable. Mirrors
+/// `db_root_filesystem_contract.rs`'s skip-when-unreachable pattern so
+/// environments without Postgres pass vacuously rather than failing CI on
+/// infrastructure this test doesn't own.
+#[cfg(feature = "postgres")]
+async fn connect_postgres_for_storm() -> Option<Arc<ironclaw_filesystem::PostgresRootFilesystem>> {
+    if std::env::var("IRONCLAW_SKIP_POSTGRES_TESTS").is_ok() {
+        return None;
+    }
+    let url = std::env::var("IRONCLAW_FILESYSTEM_POSTGRES_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .ok()?;
+    let config = url.parse::<tokio_postgres::Config>().ok()?;
+    let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
+    let pool = deadpool_postgres::Pool::builder(manager)
+        .max_size(4)
+        .build()
+        .ok()?;
+    let root = Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(pool));
+    if root.run_migrations().await.is_err() {
+        return None;
+    }
+    Some(root)
+}
+
 #[cfg(feature = "postgres")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn postgres_concurrent_cas_storm_has_no_errors_or_lost_updates() {
-    // Mirrors `db_root_filesystem_contract.rs`'s skip-when-unreachable
-    // pattern so environments without Postgres pass vacuously.
-    if std::env::var("IRONCLAW_SKIP_POSTGRES_TESTS").is_ok() {
-        return;
-    }
-    // silent-ok: no Postgres URL configured means the environment has no
-    // Postgres to test against; skip vacuously rather than fail CI.
-    let Ok(url) = std::env::var("IRONCLAW_FILESYSTEM_POSTGRES_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-    else {
+    let Some(root) = connect_postgres_for_storm().await else {
         return;
     };
-    // silent-ok: an unparsable URL means the environment's Postgres config
-    // isn't usable here; skip rather than fail on a config format issue
-    // this test doesn't own.
-    let Ok(config) = url.parse::<tokio_postgres::Config>() else {
-        return;
-    };
-    let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
-    // silent-ok: pool construction failure means the environment can't
-    // stand up a Postgres pool right now; skip rather than fail this
-    // storm test on infrastructure it doesn't own.
-    let Ok(pool) = deadpool_postgres::Pool::builder(manager)
-        .max_size(4)
-        .build()
-    else {
-        return;
-    };
-    let root = Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(pool));
-    // silent-ok: an unreachable/misconfigured Postgres fails migrations;
-    // skip rather than fail this storm test on connectivity it doesn't own.
-    if root.run_migrations().await.is_err() {
-        return;
-    }
     // Unique prefix per run: CAS storms against a shared database must
     // not contend with a previous run's leftover snapshot.
     let target = format!("/engine/cas_storm_{}", uuid::Uuid::new_v4().simple());
     let fs = Arc::new(scoped(root, &target));
     run_storm(fs).await;
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn postgres_concurrent_delete_if_version_storm_has_exactly_one_winner_per_round() {
+    let Some(root) = connect_postgres_for_storm().await else {
+        return;
+    };
+    let target = format!("/engine/delete_cas_storm_{}", uuid::Uuid::new_v4().simple());
+    let fs = Arc::new(scoped(root, &target));
+    run_delete_storm(fs).await;
 }

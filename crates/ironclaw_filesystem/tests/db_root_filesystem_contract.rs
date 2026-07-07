@@ -464,7 +464,9 @@ async fn libsql_delete_if_version_deletes_current_and_rejects_stale_or_missing()
         }
     ));
 
-    // Concurrent-writer interleaving: the v1 the deleter read is bumped to v2
+    // Simulates the state a concurrent writer would leave behind (this is a
+    // sequential script, not a real race — see concurrent_cas_storm.rs for
+    // genuine parallel coverage): the v1 the deleter read is bumped to v2
     // before the delete lands → the stale delete loses with the observed
     // version and the entry survives at v2.
     let v1 = filesystem
@@ -1704,9 +1706,12 @@ mod postgres_tests {
             }
         ));
 
-        // Concurrent-writer interleaving: the v1 the deleter read is bumped
-        // to v2 before the delete lands → the stale delete loses with the
-        // observed version and the entry survives at v2.
+        // Simulates the state a concurrent writer would leave behind (this
+        // is a sequential script, not a real race — see
+        // concurrent_cas_storm.rs for genuine parallel coverage): the v1
+        // the deleter read is bumped to v2 before the delete lands → the
+        // stale delete loses with the observed version and the entry
+        // survives at v2.
         let v1 = fs
             .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
             .await
