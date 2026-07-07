@@ -1,10 +1,8 @@
 //! Durable-store test support for capability-produced state that outlives a
-//! process restart: extension installs (E-DURABLE seam), and approval
-//! requests + triggers (C-DURABLE seam). All three reopen at the SAME
-//! on-disk local-dev `storage_root` — the capability harness's always-real
-//! filesystem, independent of the integration harness's own `StorageMode`
-//! (which governs only the SEPARATE thread/turn composite; see
-//! `assert_reply_persists_after_reopen` for that one).
+//! process restart: extension installs (E-DURABLE), approval requests +
+//! triggers (C-DURABLE), outbound preferences (W6-COLD-SPOTS), and
+//! tool-permission/auto-approve/approval-policy settings (W5-WEBUI-API-1).
+//! All reopen at the SAME on-disk local-dev `storage_root`.
 
 /// Test-support entry point (E-DURABLE seam): reopen a fresh, independent
 /// extension-installation store at an existing local-dev `storage_root`. Lets
@@ -42,6 +40,20 @@ pub async fn open_local_dev_trigger_repository_for_test(
     storage_root: &std::path::Path,
 ) -> Result<std::sync::Arc<dyn ironclaw_triggers::TriggerRepository>, crate::RebornBuildError> {
     crate::factory::open_local_dev_trigger_repository_for_test(storage_root).await
+}
+
+/// Test-support entry point (W6-COLD-SPOTS): reopen a fresh, independent
+/// `CommunicationPreferenceRepository` at an existing local-dev `storage_root`.
+/// Mirrors [`open_local_dev_approval_request_store_for_test`] for outbound
+/// preferences instead of approval-gate records. Tests only.
+#[cfg(all(feature = "test-support", feature = "libsql"))]
+pub async fn open_local_dev_outbound_preferences_store_for_test(
+    storage_root: &std::path::Path,
+) -> Result<
+    std::sync::Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository>,
+    crate::RebornBuildError,
+> {
+    crate::factory::open_local_dev_outbound_preferences_store_for_test(storage_root).await
 }
 
 /// Test-support entry point (W5-WEBUI-API-1 seam): reopen FRESH, independent

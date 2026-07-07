@@ -31,7 +31,8 @@ use ironclaw_wasm::{WitToolHost, WitToolRuntimeConfig};
 
 use super::super::doubles::{
     FixedRuntimeCredentialAccountResolver, GithubHarnessAuthorizer, RecordingNetworkHttpEgress,
-    RecordingRuntimeHttpEgress, StaticSecretStore,
+    RecordingNetworkHttpTransport, RecordingRuntimeHttpEgress, StaticNetworkResolver,
+    StaticSecretStore,
 };
 use super::HarnessResult;
 
@@ -158,6 +159,53 @@ pub(crate) fn local_dev_host_runtime_with_live_http_egress(
         ))
     })?
     .with_trust_policy(Arc::new(first_party_trust_policy()?));
+
+    Ok(Arc::new(services.host_runtime_for_local_testing()))
+}
+
+/// S1 seam: wires the REAL production egress pipeline —
+/// `PolicyNetworkHttpEgress` (network-policy enforcement + DNS/private-IP
+/// checks) over `HostHttpEgressService` (leak scan) — with only the
+/// wire-level transport swapped for `RecordingNetworkHttpTransport`. Mirrors
+/// [`local_dev_host_runtime_with_live_http_egress`] exactly, but the
+/// transport records instead of making a real network call, and DNS
+/// resolution is faked via `StaticNetworkResolver` so the pipeline stays
+/// hermetic.
+pub(crate) fn local_dev_host_runtime_with_real_egress_pipeline(
+    storage_root: PathBuf,
+    network_transport: RecordingNetworkHttpTransport,
+    process_port: Option<Arc<dyn RuntimeProcessPort>>,
+) -> HarnessResult<Arc<dyn HostRuntime>> {
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(builtin_first_party_package()?)?;
+
+    let mut services = HostRuntimeServices::new(
+        Arc::new(registry),
+        local_dev_root_filesystem(storage_root, LocalDevRootMounts::core_builtins())?,
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        HostRuntimeCapabilitySurfaceVersion::new("reborn-app-v1")?,
+    )
+    .with_secret_store(Arc::new(InMemorySecretStore::new()))
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers(Arc::new(
+        ironclaw_triggers::InMemoryTriggerRepository::default(),
+    ))?))
+    .try_with_host_http_egress(PolicyNetworkHttpEgress::new_with_resolver(
+        network_transport,
+        StaticNetworkResolver,
+    ))
+    .map_err(|report| {
+        std::io::Error::other(format!(
+            "real egress pipeline production wiring failed: {report:?}"
+        ))
+    })?
+    .with_trust_policy(Arc::new(first_party_trust_policy()?));
+    // Inject the recording process port when provided; `None` defaults to
+    // `LocalHostProcessPort` (real execution).
+    if let Some(port) = process_port {
+        services = services.with_runtime_process_port_dyn(port);
+    }
 
     Ok(Arc::new(services.host_runtime_for_local_testing()))
 }

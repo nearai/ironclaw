@@ -115,8 +115,12 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
   const timeLabel = formatTimestamp(timestamp);
   const showActions = role === "user" || (role === "assistant" && !isOptimistic);
   const isNotice = role === "system" || role === "error";
-  const bubbleWidthClass = isUser ? "max-w-[85%]" : isNotice ? "mx-auto max-w-[85%]" : "w-full max-w-[85%]";
-  const contentWidthClass = isUser ? "" : "w-full min-w-0 max-w-full";
+  const bubbleWidthClass = isUser
+    ? "v2-chat-readable-width"
+    : isNotice
+    ? "mx-auto v2-chat-readable-width"
+    : "w-full v2-chat-readable-width";
+  const contentWidthClass = isUser ? "min-w-0 max-w-full" : "w-full min-w-0 max-w-full";
   const showRetryAction = status === "error" && onRetry;
   const showMetaRow = showActions || showRetryAction || timeLabel;
 
@@ -136,7 +140,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
         >
           ${role === "assistant" || role === "system" || role === "error"
             ? html`<${MarkdownRenderer} content=${content} />`
-            : html`<div className="whitespace-pre-wrap">${content}</div>`}
+            : html`<div className="v2-wrap-anywhere whitespace-pre-wrap break-words">${content}</div>`}
 
           ${status === "error" && html`
             <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-red-300">
@@ -175,7 +179,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
       ${showMetaRow && html`
         <div
           className=${[
-            "mt-1 flex min-h-7 w-max max-w-[85%] flex-nowrap items-center gap-3 px-1 text-iron-400 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100",
+            "mt-1 flex min-h-7 w-max v2-chat-readable-width flex-nowrap items-center gap-3 px-1 text-iron-400 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100",
             isUser ? "self-end justify-end" : isNotice ? "self-center justify-center" : "self-start justify-start",
           ].join(" ")}
         >

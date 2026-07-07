@@ -281,6 +281,9 @@ ironclaw_extensions = { path = "crates/ironclaw_extensions", version = "0.1.0" }
 ironclaw_filesystem = { path = "crates/ironclaw_filesystem", version = "0.1.0" }
 ironclaw_mcp = { path = "crates/ironclaw_mcp", version = "0.1.0" }
 ironclaw_first_party_extensions = { path = "crates/ironclaw_first_party_extensions", version = "0.1.0" }
+# W6-COLD-SPOTS: `CommunicationPreferenceRecord`/`CommunicationPreferenceKey`
+# for the outbound-store-durability reopen test.
+ironclaw_outbound = { path = "crates/ironclaw_outbound", version = "0.1.0" }
 # Recording hook doubles + `HookDispatcherBuilderFactory` builders for the
 # C-HOOKS / E-HOOK-INFRA int-tier coverage (tests/integration/support/hooks.rs).
 ironclaw_hooks = { path = "crates/ironclaw_hooks", version = "0.1.0" }
@@ -327,6 +330,9 @@ ironclaw_triggers = { path = "crates/ironclaw_triggers", version = "0.1.0", feat
 ironclaw_conversations = { path = "crates/ironclaw_conversations", version = "0.1.0" }
 ironclaw_trust = { path = "crates/ironclaw_trust", version = "0.1.0" }
 ironclaw_wasm = { path = "crates/ironclaw_wasm", version = "0.1.0" }
+# `InMemoryTriggeredRunDeliveryStore` for the triggered-delivery outcome-seam
+# int-tier proof (asserting a real `TriggeredRunDeliveryDriver`'s recorded
+# outcome via the same public store the composition factory accepts).
 # Same idea for embeddings: `MockEmbeddings` is only reachable in dev builds.
 ironclaw_embeddings = { path = "crates/ironclaw_embeddings", version = "0.1.0", features = ["testing"] }
 # Named `#[case]` parametrization for the storage-backend matrix tests (slice 3).
@@ -416,6 +422,10 @@ path = "tests/integration/oauth_refresh.rs"
 required-features = ["libsql"]
 
 [[test]]
+name = "reborn_integration_triggered_delivery_outcome"
+path = "tests/integration/triggered_delivery_outcome.rs"
+
+[[test]]
 name = "reborn_integration_attach"
 path = "tests/integration/attach.rs"
 
@@ -448,6 +458,10 @@ name = "reborn_integration_durable"
 path = "tests/integration/durable.rs"
 
 [[test]]
+name = "reborn_integration_extension_visibility"
+path = "tests/integration/extension_visibility.rs"
+
+[[test]]
 name = "reborn_integration_golden_payload"
 path = "tests/integration/golden_payload.rs"
 
@@ -472,12 +486,20 @@ name = "reborn_integration_identity_resolution_smoke"
 path = "tests/integration/identity_resolution_smoke.rs"
 
 [[test]]
+name = "reborn_integration_lease_wedge"
+path = "tests/integration/lease_wedge.rs"
+
+[[test]]
 name = "reborn_integration_mcp"
 path = "tests/integration/mcp.rs"
 
 [[test]]
 name = "reborn_integration_oauth_connect"
 path = "tests/integration/oauth_connect.rs"
+
+[[test]]
+name = "reborn_integration_outbound_store_durability"
+path = "tests/integration/outbound_store_durability.rs"
 
 [[test]]
 name = "reborn_integration_outbound_target"
@@ -494,6 +516,14 @@ path = "tests/integration/profile.rs"
 [[test]]
 name = "reborn_integration_project_create"
 path = "tests/integration/project_create.rs"
+
+[[test]]
+name = "reborn_integration_real_egress_pipeline"
+path = "tests/integration/real_egress_pipeline.rs"
+
+[[test]]
+name = "reborn_integration_reopen_resume_through_gate"
+path = "tests/integration/reopen_resume_through_gate.rs"
 
 [[test]]
 name = "reborn_integration_safety"

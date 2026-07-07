@@ -121,8 +121,11 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
   `GithubHarnessAuthorizer`, `StaticSecretStore`,
   `StaticCapabilitySurfaceProfileResolver`,
   `FixedRuntimeCredentialAccountResolver`, `EmptyIdentityContextSource`,
-  `HarnessCapabilityPortFactory`, `HostRuntimeHarnessCapabilityPortFactory`),
-  re-exported from `doubles/mod.rs`.
+  `HarnessCapabilityPortFactory`, `HostRuntimeHarnessCapabilityPortFactory`,
+  `ParkingCapabilityGate`/`ParkingHostRuntime` — the tool-path analog of
+  `ParkingModelGate`/`ParkingLlm`; parks a `HostRuntime` capability dispatch
+  until released, used by `lease_wedge.rs`), re-exported from
+  `doubles/mod.rs`.
 - `group_constructors.rs` — the per-capability `RebornIntegrationGroup` /
   `RebornIntegrationGroupBuilder` preset constructors (`live_approvals`,
   `builtin_tools`, `extension_lifecycle`, `skill_management_tools`, etc.), a

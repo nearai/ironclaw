@@ -1026,6 +1026,8 @@ mod learning {
                 kind,
                 blocked_gate: None,
                 sanitized_reason: None,
+                detail: None,
+                retryable: None,
             }
         }
 

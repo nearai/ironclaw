@@ -22,8 +22,9 @@
 //!    without duplicating the wiring logic.
 //! 4. [`project_create`] — `project_create` synthetic-capability test support
 //!    (E-PROJ seam).
-//! 5. [`durable`] — extension-installation, approval-request, and trigger
-//!    durable-store test support (E-DURABLE / C-DURABLE seam).
+//! 5. [`durable`] — extension-installation, approval-request, trigger,
+//!    outbound-preferences, and approval-settings durable-store test support
+//!    (E-DURABLE / C-DURABLE / W6-COLD-SPOTS / W5-WEBUI-API-1 seam).
 //! 6. [`skill_activation`] — `skill_activate` synthetic-capability test
 //!    support (E-SKILL seam).
 //! 7. [`user_profile`] — `HostUserProfileSource` test support (E-PROFILE
@@ -72,7 +73,8 @@ pub use durable::open_local_dev_extension_installation_store_for_test;
 #[cfg(all(feature = "test-support", feature = "libsql"))]
 pub use durable::{
     open_local_dev_approval_request_store_for_test,
-    open_local_dev_approval_settings_stores_for_test, open_local_dev_trigger_repository_for_test,
+    open_local_dev_approval_settings_stores_for_test,
+    open_local_dev_outbound_preferences_store_for_test, open_local_dev_trigger_repository_for_test,
 };
 pub use local_dev_boot::LOCAL_DEV_DB_FILENAME;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
