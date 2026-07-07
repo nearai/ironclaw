@@ -28,6 +28,17 @@ use crate::provider::{
     strip_unsupported_completion_params, strip_unsupported_tool_params,
 };
 
+/// Map an HTTP error status + response body to a context-length error when it
+/// indicates the prompt exceeded the model's context window.
+///
+/// Returns `Some(LlmError::ContextLengthExceeded { .. })` for HTTP 413 or for
+/// an HTTP 400 whose body matches a context-overflow pattern, and `None`
+/// otherwise. Delegates to the shared `crate::error::context_length_error`
+/// helper so detection stays consistent across direct-HTTP providers.
+fn context_length_error_for_status(status_code: u16, response_text: &str) -> Option<LlmError> {
+    crate::error::context_length_error(status_code, response_text)
+}
+
 /// GitHub Copilot provider with automatic token exchange.
 pub(crate) struct GithubCopilotProvider {
     client: Client,
@@ -179,6 +190,14 @@ impl GithubCopilotProvider {
                     provider: "github_copilot".to_string(),
                     retry_after,
                 });
+            }
+            // A too-large prompt (HTTP 413, or a 400 whose body says the context
+            // window was exceeded) must map to ContextLengthExceeded so the
+            // loop's context-shrink recovery can compact and retry instead of
+            // borking on a generic RequestFailed.
+            if let Some(error) = context_length_error_for_status(status.as_u16(), &response_text) {
+                tracing::warn!("Copilot: context length exceeded");
+                return Err(error);
             }
             let truncated = ironclaw_common::truncate_for_preview(&response_text, 512);
             return Err(LlmError::RequestFailed {
@@ -619,6 +638,40 @@ fn extract_choice_content(choice: &OpenAiChoice) -> (Option<String>, Vec<ToolCal
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_overflow_413_maps_to_context_length_exceeded() {
+        // A raw HTTP 413 (payload too large) must become ContextLengthExceeded
+        // so the loop's context-shrink recovery fires.
+        match context_length_error_for_status(413, "Request Entity Too Large") {
+            Some(LlmError::ContextLengthExceeded { .. }) => {}
+            other => panic!("expected ContextLengthExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn context_overflow_400_body_maps_to_context_length_exceeded() {
+        let body = r#"{"error":{"message":"This model's maximum context length is 128000 tokens. However, your messages resulted in 150000 tokens.","code":"context_length_exceeded"}}"#;
+        match context_length_error_for_status(400, body) {
+            Some(LlmError::ContextLengthExceeded { .. }) => {}
+            other => panic!("expected ContextLengthExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unrelated_400_is_not_context_overflow() {
+        // A plain bad-request (e.g. invalid tool schema) must NOT be classified
+        // as context overflow — the caller falls through to RequestFailed.
+        assert!(
+            context_length_error_for_status(400, r#"{"error":{"message":"invalid tool schema"}}"#)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn unrelated_5xx_is_not_context_overflow() {
+        assert!(context_length_error_for_status(500, "internal server error").is_none());
+    }
 
     #[test]
     fn test_convert_messages_basic() {

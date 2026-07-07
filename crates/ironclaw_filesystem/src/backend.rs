@@ -18,7 +18,10 @@
 use async_trait::async_trait;
 use ironclaw_host_api::VirtualPath;
 
-use crate::{CasExpectation, Entry, FilesystemError, RecordVersion, SeqNo, VersionedEntry};
+use crate::{
+    CasExpectation, Entry, FilesystemError, FilesystemOperation, RecordVersion, SeqNo,
+    VersionedEntry,
+};
 
 /// Multi-key transactional handle returned by [`RootFilesystem::begin`].
 ///
@@ -40,6 +43,13 @@ pub trait StorageTxn: Send {
 
     async fn delete(&mut self, path: &VirtualPath) -> Result<(), FilesystemError>;
 
+    async fn reserve_sequence(&mut self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        Err(FilesystemError::Unsupported {
+            path: path.clone(),
+            operation: FilesystemOperation::ReserveSeq,
+        })
+    }
+
     async fn commit(self: Box<Self>) -> Result<(), FilesystemError>;
 
     async fn rollback(self: Box<Self>);
@@ -58,5 +68,64 @@ pub struct EventRecord {
 impl EventRecord {
     pub fn new(seq: SeqNo, payload: Vec<u8>) -> Self {
         Self { seq, payload }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct DummyTxn;
+
+    #[async_trait]
+    impl StorageTxn for DummyTxn {
+        async fn put(
+            &mut self,
+            path: &VirtualPath,
+            _entry: Entry,
+            _cas: CasExpectation,
+        ) -> Result<RecordVersion, FilesystemError> {
+            Err(FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: FilesystemOperation::WriteFile,
+            })
+        }
+
+        async fn get(
+            &mut self,
+            path: &VirtualPath,
+        ) -> Result<Option<VersionedEntry>, FilesystemError> {
+            Err(FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: FilesystemOperation::ReadFile,
+            })
+        }
+
+        async fn delete(&mut self, path: &VirtualPath) -> Result<(), FilesystemError> {
+            Err(FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: FilesystemOperation::Delete,
+            })
+        }
+
+        async fn commit(self: Box<Self>) -> Result<(), FilesystemError> {
+            Ok(())
+        }
+
+        async fn rollback(self: Box<Self>) {}
+    }
+
+    #[tokio::test]
+    async fn storage_txn_reserve_sequence_fails_closed_by_default() {
+        let path = VirtualPath::new("/events/log").unwrap();
+        let mut txn = DummyTxn;
+
+        let err = txn.reserve_sequence(&path).await.unwrap_err();
+
+        assert!(matches!(
+            err,
+            FilesystemError::Unsupported { path: actual, operation: FilesystemOperation::ReserveSeq }
+                if actual == path
+        ));
     }
 }

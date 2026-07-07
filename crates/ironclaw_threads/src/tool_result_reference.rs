@@ -18,25 +18,20 @@ const MODEL_OBSERVATION_REPAIRS_MAX: usize = 16;
 const MODEL_OBSERVATION_INPUT_ISSUES_MAX: usize = 16;
 const MODEL_OBSERVATION_TEXT_MAX_BYTES: usize = 512;
 const RAW_PAYLOAD_OR_PATH_DELIMITERS: [char; 9] = ['{', '}', '[', ']', '`', '<', '>', '/', '\\'];
-const SENSITIVE_SUMMARY_MARKERS: [&str; 18] = [
+// Only credential markers are banned. Descriptive error vocabulary
+// ("provider error", "stack trace", "tool input", "traceback", "host path",
+// "raw runtime") is allowed — the raw cause rides the model-visible detail
+// channel, which redacts secret VALUES rather than banning ordinary words.
+const SENSITIVE_SUMMARY_MARKERS: [&str; 9] = [
     "access token",
     "api key",
     "api_key",
     "apikey",
     "authorization:",
     "bearer ",
-    "host path",
-    "invalid api key",
-    "invalid_api_key",
     "password",
     "passwd",
-    "provider error",
-    "raw runtime",
     "secret",
-    "stack trace",
-    "tool input",
-    "tool_input",
-    "traceback",
 ];
 const SENSITIVE_OBSERVATION_MARKERS: [&str; 20] = [
     "access token",
@@ -955,8 +950,38 @@ mod tests {
         let summary = ToolResultSafeSummary::new(INPUT_ENCODE_HUMAN_SUMMARY)
             .expect("fixed host-authored input encode summary is safe");
         assert_eq!(summary.as_str(), INPUT_ENCODE_HUMAN_SUMMARY);
+    }
 
-        assert!(ToolResultSafeSummary::new("tool input contained raw payload").is_err());
+    #[test]
+    fn safe_summary_accepts_ordinary_error_vocabulary() {
+        for accepted in [
+            "provider error occurred during the call",
+            "stack trace was captured for diagnosis",
+            "the tool input was malformed",
+            "a traceback is available for review",
+            "host path resolution did not complete",
+            "raw runtime returned an unexpected status",
+        ] {
+            ToolResultSafeSummary::new(accepted)
+                .unwrap_or_else(|error| panic!("`{accepted}` should be accepted: {error}"));
+        }
+    }
+
+    #[test]
+    fn safe_summary_still_rejects_credentials_and_delimiters() {
+        for rejected in [
+            "leaked sk-LIVEsecretvalue token",
+            "authorization header bearer abc123",
+            "the api key was exposed",
+            "user password was logged",
+            "a secret slipped into the message",
+            "missing schema at /system/extensions",
+        ] {
+            assert!(
+                ToolResultSafeSummary::new(rejected).is_err(),
+                "`{rejected}` must still be rejected"
+            );
+        }
     }
 
     #[test]
