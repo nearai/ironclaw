@@ -88,7 +88,7 @@ def _slack_enabled(config_text: str) -> bool:
     return False
 
 
-def _has_live_slack_env(config_text: str, extra_env: dict[str, str] | None = None) -> bool:
+def _has_live_slack_env(extra_env: dict[str, str] | None = None) -> bool:
     return _env_present(SLACK_SIGNING_SECRET_ENV, extra_env) and _env_present(
         SLACK_BOT_TOKEN_ENV,
         extra_env,
@@ -451,13 +451,12 @@ def _slack_setup_from_reborn_home(reborn_home: Path) -> dict[str, object] | None
 
 
 def _slack_setup_field(
-    reborn_home: Path,
+    setup: dict[str, object],
     config_text: str,
     field: str,
     env_name: str,
     default: str = "",
 ) -> str | None:
-    setup = _slack_setup_from_reborn_home(reborn_home) or {}
     value = str(setup.get(field) or "").strip()
     if value:
         return value
@@ -475,30 +474,28 @@ def _slack_setup_preflight(
     config_text: str,
     extra_env: dict[str, str] | None = None,
 ) -> dict[str, object]:
-    setup = _slack_setup_from_reborn_home(reborn_home)
+    setup = _slack_setup_from_reborn_home(reborn_home) or {}
     installation_id = _slack_setup_field(
-        reborn_home,
+        setup,
         config_text,
         "installation_id",
         "REBORN_WEBUI_V2_LIVE_QA_SLACK_INSTALLATION_ID",
     )
     team_id = _slack_setup_field(
-        reborn_home,
+        setup,
         config_text,
         "team_id",
         "REBORN_WEBUI_V2_LIVE_QA_SLACK_TEAM_ID",
     )
     api_app_id = _slack_setup_field(
-        reborn_home,
+        setup,
         config_text,
         "api_app_id",
         "REBORN_WEBUI_V2_LIVE_QA_SLACK_API_APP_ID",
     )
-    oauth_client_id = (
-        str((setup or {}).get("oauth_client_id") or "").strip()
-        or _env_value(SLACK_OAUTH_CLIENT_ID_ENV, extra_env)
-        or None
-    )
+    stored_oauth_client_id = str(setup.get("oauth_client_id") or "").strip()
+    env_oauth_client_id = (_env_value(SLACK_OAUTH_CLIENT_ID_ENV, extra_env) or "").strip()
+    oauth_client_id = env_oauth_client_id or stored_oauth_client_id or None
     return {
         "source": "reborn_home" if setup else "env",
         "configured": bool(
@@ -675,14 +672,15 @@ def _seed_slack_personal_dm_target(
     slack_user_id: str,
     dm_channel_id: str,
 ) -> dict[str, object]:
+    setup = _slack_setup_from_reborn_home(reborn_home) or {}
     installation_id = _slack_setup_field(
-        reborn_home,
+        setup,
         config_text,
         "installation_id",
         "REBORN_WEBUI_V2_LIVE_QA_SLACK_INSTALLATION_ID",
     )
     team_id = _slack_setup_field(
-        reborn_home,
+        setup,
         config_text,
         "team_id",
         "REBORN_WEBUI_V2_LIVE_QA_SLACK_TEAM_ID",
@@ -920,14 +918,20 @@ def _slack_personal_auth_preflight(
             preflight["reason"] = "no Slack personal product-auth DB is present"
         return preflight
 
+    account_path_prefix = (
+        f"/tenants/reborn-cli/users/{user_id}/secrets/agents/reborn-cli-agent/"
+        "product-auth/"
+    )
+    account_pattern = f"{account_path_prefix}%/accounts/%.json"
     with closing(sqlite3.connect(db_path)) as db:
         try:
             rows = db.execute(
                 """
                 SELECT path, contents FROM root_filesystem_entries
-                WHERE path LIKE '%product-auth/callback/accounts/%.json'
+                WHERE path LIKE ?
                 ORDER BY path
-                """
+                """,
+                (account_pattern,),
             ).fetchall()
         except sqlite3.Error:
             rows = []
@@ -938,6 +942,8 @@ def _slack_personal_auth_preflight(
 
     accounts: list[dict[str, object]] = []
     for path, raw in rows:
+        if not str(path).startswith(account_path_prefix):
+            continue
         try:
             account = json.loads(raw)
         except (TypeError, json.JSONDecodeError):
@@ -951,7 +957,7 @@ def _slack_personal_auth_preflight(
             if isinstance(resource, dict)
             else ""
         )
-        if account_user_id and account_user_id != user_id:
+        if account_user_id != user_id:
             continue
         access_handle = str(
             account.get("access_secret") or account.get("access_secret_handle") or ""

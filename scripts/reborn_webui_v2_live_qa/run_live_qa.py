@@ -515,7 +515,7 @@ def prepare_reborn_home(
     )
     telegram_env, telegram_env_preflight = _materialize_telegram_env_for_reborn()
 
-    if _slack_enabled(config) and not _has_live_slack_env(config):
+    if _slack_enabled(config) and not _has_live_slack_env():
         secret_env, secret_preflight = _materialize_slack_env_from_reborn_home(
             prepared_home,
             config,
@@ -531,7 +531,7 @@ def prepare_reborn_home(
     if (
         needs_slack_target
         and _slack_enabled(config)
-        and _has_live_slack_env(config, process_env)
+        and _has_live_slack_env(process_env)
         and not _has_slack_delivery_target(config, prepared_home, auth_user_id)
     ):
         slack_route_discovery = _discover_slack_dm_route_channel(process_env)
@@ -567,7 +567,7 @@ def prepare_reborn_home(
     slack_target_present = _has_slack_delivery_target(config, prepared_home, auth_user_id)
     slack_auth = (
         _slack_auth_test(config, process_env)
-        if slack_enabled and _has_live_slack_env(config, process_env)
+        if slack_enabled and _has_live_slack_env(process_env)
         else {"checked": False, "ok": False, "error": "Slack env unavailable"}
     )
     if args.require_slack_live and needs_slack and not slack_enabled:
@@ -575,7 +575,7 @@ def prepare_reborn_home(
             "selected cases require live Slack, but [slack].enabled is not true "
             "in the prepared Reborn config."
         )
-    if slack_enabled and not _has_live_slack_env(config, process_env):
+    if slack_enabled and not _has_live_slack_env(process_env):
         if args.require_slack_live:
             raise LiveQaError(
                 "Reborn config enables Slack, but live Slack env vars are missing "
@@ -630,7 +630,7 @@ def prepare_reborn_home(
         preflight={
             "slack": {
                 "enabled_in_config": slack_enabled,
-                "env_present": _has_live_slack_env(config, process_env),
+                "env_present": _has_live_slack_env(process_env),
                 "requires_slack": needs_slack,
                 "requires_delivery_target": needs_slack_target,
                 "delivery_target_present": slack_target_present,
@@ -748,8 +748,23 @@ async def start_reborn_server(
         process_extra_env["IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI"] = (
             f"{base_url}/api/reborn/product-auth/oauth/google/callback"
         )
+    slack_oauth_client_configured = _env_present(
+        SLACK_OAUTH_CLIENT_ID_ENV,
+        process_extra_env,
+    )
+    config_path = reborn_home / "config.toml"
+    if not slack_oauth_client_configured and config_path.exists():
+        config_text = _config_text(config_path)
+        if _slack_enabled(config_text):
+            slack_oauth_client_configured = bool(
+                _slack_setup_preflight(
+                    reborn_home,
+                    config_text,
+                    process_extra_env,
+                ).get("oauth_client_id_configured")
+            )
     if (
-        _env_present(SLACK_OAUTH_CLIENT_ID_ENV, process_extra_env)
+        slack_oauth_client_configured
         and _env_present(SLACK_OAUTH_CLIENT_SECRET_ENV, process_extra_env)
         and not _env_present(
             "IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI",
@@ -1853,7 +1868,7 @@ async def _resolve_webui_approval_gate(
     return result
 
 
-def _slack_bot_token(config_text: str, extra_env: dict[str, str]) -> str | None:
+def _slack_bot_token(extra_env: dict[str, str]) -> str | None:
     return _env_value(SLACK_BOT_TOKEN_ENV, extra_env)
 
 
@@ -1912,7 +1927,7 @@ async def _slack_history_contains_marker(
 ) -> dict[str, object]:
     import httpx
 
-    token = _slack_bot_token(_config_text(ctx.reborn_home / "config.toml"), ctx.env)
+    token = _slack_bot_token(ctx.env)
     if not token:
         return {"checked": False, "found": False, "error": "bot token unavailable"}
     params = {
@@ -3510,7 +3525,7 @@ async def case_qa_5a_slack_connect(ctx: LiveQaContext) -> ProbeResult:
     return await _slack_connect_case(ctx, case_name="qa_5a_slack_connect")
 
 
-def _slack_signing_secret(config_text: str, extra_env: dict[str, str]) -> str | None:
+def _slack_signing_secret(extra_env: dict[str, str]) -> str | None:
     return _env_value(SLACK_SIGNING_SECRET_ENV, extra_env)
 
 
@@ -3539,8 +3554,7 @@ async def _post_signed_slack_dm_event(
 ) -> dict[str, object]:
     import httpx
 
-    config_text = _config_text(ctx.reborn_home / "config.toml")
-    signing_secret = _slack_signing_secret(config_text, ctx.env)
+    signing_secret = _slack_signing_secret(ctx.env)
     if not signing_secret:
         raise AssertionError("Slack signing secret is unavailable for signed webhook injection")
     slack = _slack_preflight(ctx)
@@ -4591,10 +4605,33 @@ async def run_cases(args: argparse.Namespace) -> int:
                 env=prepared_home.env,
             )
             if case_spec.requires_slack and isinstance(slack_preflight, dict):
+                setup_started = time.monotonic()
                 setup_api = await _apply_slack_setup_api_after_start(
                     base_url=base_url,
                     prepared_home=prepared_home,
                 )
+                if not setup_api.get("applied"):
+                    blocked_preflight = {**slack_preflight, "setup_api": setup_api}
+                    result = _result(
+                        name,
+                        False,
+                        setup_started,
+                        {
+                            "blocked": True,
+                            "error": (
+                                "Slack setup API was not applied: "
+                                f"{setup_api.get('reason') or 'unknown'}"
+                            ),
+                            "preflight": blocked_preflight,
+                        },
+                    )
+                    results.append(result)
+                    print(
+                        f"[reborn-webui-v2-live-qa] case={name} success={result.success} "
+                        f"latency_ms={result.latency_ms} blocked=slack_setup_not_applied",
+                        flush=True,
+                    )
+                    continue
                 slack_preflight["setup_api"] = setup_api
                 setup_status = setup_api.get("status") if isinstance(setup_api, dict) else None
                 if isinstance(setup_status, dict):
