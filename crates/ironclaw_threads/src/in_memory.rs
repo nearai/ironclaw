@@ -248,13 +248,17 @@ impl SessionThreadService for InMemorySessionThreadService {
         let mut state = self.state.lock().await;
         let message = get_message_mut(&mut state, scope, thread_id, message_id)?;
         ensure_user_accepted(message, "mark_message_submitted")?;
-        let before = message.clone();
+        let before_created_at = message.created_at;
+        let before_updated_at = message.updated_at;
         message.status = MessageStatus::Submitted;
         message.turn_id = Some(turn_id);
         message.turn_run_id = Some(turn_run_id);
-        crate::contract::validate_message_timestamps_not_cleared(
-            &before,
-            message,
+        crate::contract::validate_message_timestamp_fields_not_cleared(
+            message.message_id,
+            before_created_at,
+            before_updated_at,
+            message.created_at,
+            message.updated_at,
             "mark_message_submitted",
         )?;
         Ok(message.clone())
@@ -269,13 +273,17 @@ impl SessionThreadService for InMemorySessionThreadService {
         let mut state = self.state.lock().await;
         let message = get_message_mut(&mut state, scope, thread_id, message_id)?;
         ensure_user_accepted(message, "mark_message_rejected_busy")?;
-        let before = message.clone();
+        let before_created_at = message.created_at;
+        let before_updated_at = message.updated_at;
         message.status = MessageStatus::RejectedBusy;
         message.turn_id = None;
         message.turn_run_id = None;
-        crate::contract::validate_message_timestamps_not_cleared(
-            &before,
-            message,
+        crate::contract::validate_message_timestamp_fields_not_cleared(
+            message.message_id,
+            before_created_at,
+            before_updated_at,
+            message.created_at,
+            message.updated_at,
             "mark_message_rejected_busy",
         )?;
         Ok(message.clone())
@@ -335,14 +343,18 @@ impl SessionThreadService for InMemorySessionThreadService {
         }) {
             if existing.status == MessageStatus::Draft {
                 let now = Utc::now();
-                let before = existing.clone();
+                let before_created_at = existing.created_at;
+                let before_updated_at = existing.updated_at;
                 existing.status = MessageStatus::Finalized;
                 existing.content = Some(request.content.into_text());
                 existing.attachments = Vec::new();
                 existing.updated_at = Some(now);
-                crate::contract::validate_message_timestamps_not_cleared(
-                    &before,
-                    existing,
+                crate::contract::validate_message_timestamp_fields_not_cleared(
+                    existing.message_id,
+                    before_created_at,
+                    before_updated_at,
+                    existing.created_at,
+                    existing.updated_at,
                     "append_finalized_assistant_message",
                 )?;
                 thread.record.updated_at = Some(now);
@@ -398,7 +410,8 @@ impl SessionThreadService for InMemorySessionThreadService {
                 && message.tool_result_ref.as_deref() == Some(envelope.result_ref.as_str())
         }) {
             let now = Utc::now();
-            let before = existing.clone();
+            let before_created_at = existing.created_at;
+            let before_updated_at = existing.updated_at;
             let mut changed = false;
             if let Some(provider_call) = provider_call.as_ref() {
                 provider_call
@@ -438,9 +451,12 @@ impl SessionThreadService for InMemorySessionThreadService {
             if changed {
                 existing.updated_at = Some(now);
             }
-            crate::contract::validate_message_timestamps_not_cleared(
-                &before,
-                existing,
+            crate::contract::validate_message_timestamp_fields_not_cleared(
+                existing.message_id,
+                before_created_at,
+                before_updated_at,
+                existing.created_at,
+                existing.updated_at,
                 "append_tool_result_reference",
             )?;
             let updated = existing.clone();
@@ -563,7 +579,8 @@ impl SessionThreadService for InMemorySessionThreadService {
                         request.result_ref, request.thread_id
                     ))
                 })?;
-            let before = message.clone();
+            let before_created_at = message.created_at;
+            let before_updated_at = message.updated_at;
             let content = message.content.as_deref().ok_or_else(|| {
                 SessionThreadError::Serialization(
                     "tool result reference content is missing".to_string(),
@@ -577,9 +594,12 @@ impl SessionThreadService for InMemorySessionThreadService {
                     .map_err(|error| SessionThreadError::Serialization(error.to_string()))?,
             );
             message.updated_at = Some(now);
-            crate::contract::validate_message_timestamps_not_cleared(
-                &before,
-                message,
+            crate::contract::validate_message_timestamp_fields_not_cleared(
+                message.message_id,
+                before_created_at,
+                before_updated_at,
+                message.created_at,
+                message.updated_at,
                 "update_tool_result_reference",
             )?;
             message.clone()
@@ -604,16 +624,20 @@ impl SessionThreadService for InMemorySessionThreadService {
                     message_id: request.message_id,
                 })?;
             ensure_draft(message)?;
-            let before = message.clone();
+            let before_created_at = message.created_at;
+            let before_updated_at = message.updated_at;
             message.content = Some(request.content.into_text());
             // Keep content and attachments in lockstep (as redaction does): an
             // assistant draft carries no attachments, so a content update must not
             // leave stale refs behind if a future draft path ever sets them.
             message.attachments = Vec::new();
             message.updated_at = Some(now);
-            crate::contract::validate_message_timestamps_not_cleared(
-                &before,
-                message,
+            crate::contract::validate_message_timestamp_fields_not_cleared(
+                message.message_id,
+                before_created_at,
+                before_updated_at,
+                message.created_at,
+                message.updated_at,
                 "update_assistant_draft",
             )?;
             message.clone()
@@ -638,14 +662,18 @@ impl SessionThreadService for InMemorySessionThreadService {
             .ok_or(SessionThreadError::UnknownMessage { message_id })?;
         ensure_draft(message)?;
         let now = Utc::now();
-        let before = message.clone();
+        let before_created_at = message.created_at;
+        let before_updated_at = message.updated_at;
         message.status = MessageStatus::Finalized;
         message.content = Some(content.into_text());
         message.attachments = Vec::new();
         message.updated_at = Some(now);
-        crate::contract::validate_message_timestamps_not_cleared(
-            &before,
-            message,
+        crate::contract::validate_message_timestamp_fields_not_cleared(
+            message.message_id,
+            before_created_at,
+            before_updated_at,
+            message.created_at,
+            message.updated_at,
             "finalize_assistant_message",
         )?;
         thread.record.updated_at = Some(now);
@@ -667,16 +695,20 @@ impl SessionThreadService for InMemorySessionThreadService {
                 .ok_or(SessionThreadError::UnknownMessage {
                     message_id: request.message_id,
                 })?;
-            let before = message.clone();
+            let before_created_at = message.created_at;
+            let before_updated_at = message.updated_at;
             message.status = MessageStatus::Redacted;
             message.content = None;
             message.attachments = Vec::new();
             message.tool_result_provider_call = None;
             message.redaction_ref = Some(request.redaction_ref);
             message.updated_at = Some(now);
-            crate::contract::validate_message_timestamps_not_cleared(
-                &before,
-                message,
+            crate::contract::validate_message_timestamp_fields_not_cleared(
+                message.message_id,
+                before_created_at,
+                before_updated_at,
+                message.created_at,
+                message.updated_at,
                 "redact_message",
             )?;
             message.clone()

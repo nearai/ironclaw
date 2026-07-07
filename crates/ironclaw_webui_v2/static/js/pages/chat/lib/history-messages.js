@@ -158,9 +158,9 @@ function roleForRecord(record) {
 }
 
 function timestampForRecord(record) {
-  // Prefer durable server-side timestamps from the timeline. Finalized rows
-  // can be updated after creation, so their latest durable update is the
-  // user-visible receive/completion time.
+  // Prefer durable server-side timestamps from the timeline. For finalized
+  // rows, `updated_at` captures the durable receive/finalization time shown in
+  // chat history.
   if (record.received_at) return record.received_at;
   const status = record.status || "";
   if (status === "finalized") {

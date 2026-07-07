@@ -188,9 +188,11 @@ pub struct SessionThreadRecord {
     /// before activity timestamps existed; such records sort oldest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
-    /// Last time the thread saw activity (a message was appended). Drives
-    /// the sidebar "Recent" ordering — newest activity first. Bumped on
-    /// every append; `None` for legacy records (sorts oldest).
+    /// Last time the thread saw durable user-visible transcript activity.
+    /// Drives the sidebar "Recent" ordering — newest activity first. Writers
+    /// that touch both a message and the thread activity stamp reuse one
+    /// timestamp for that logical change; pure idempotent replays remain
+    /// side-effect-free. `None` for legacy records (sorts oldest).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<DateTime<Utc>>,
 }
@@ -209,7 +211,8 @@ pub struct ThreadMessageRecord {
     pub created_at: Option<DateTime<Utc>>,
     /// Last time the message row was materially changed. Draft finalization
     /// updates this so UI refreshes can show the reply completion time instead
-    /// of the browser refresh time.
+    /// of the browser refresh time. Writers capture one timestamp per logical
+    /// message mutation so related message/thread stamps stay atomic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<DateTime<Utc>>,
     pub actor_id: Option<String>,
@@ -253,16 +256,22 @@ pub(crate) fn validate_new_message_timestamps(
 /// stamp, mutation paths may update it but must not erase it. This keeps
 /// legacy `None` values compatible while catching accidental nullification of
 /// newly-written rows.
-pub(crate) fn validate_message_timestamps_not_cleared(
-    before: &ThreadMessageRecord,
-    after: &ThreadMessageRecord,
+/// Lightweight timestamp-only variant for hot mutation paths. Callers usually
+/// already hold a mutable message and should not clone large payloads just to
+/// prove timestamp metadata was not erased.
+pub(crate) fn validate_message_timestamp_fields_not_cleared(
+    message_id: ThreadMessageId,
+    before_created_at: Option<DateTime<Utc>>,
+    before_updated_at: Option<DateTime<Utc>>,
+    after_created_at: Option<DateTime<Utc>>,
+    after_updated_at: Option<DateTime<Utc>>,
     context: &'static str,
 ) -> Result<(), crate::error::SessionThreadError> {
-    let created_at_cleared = before.created_at.is_some() && after.created_at.is_none();
-    let updated_at_cleared = before.updated_at.is_some() && after.updated_at.is_none();
+    let created_at_cleared = before_created_at.is_some() && after_created_at.is_none();
+    let updated_at_cleared = before_updated_at.is_some() && after_updated_at.is_none();
     if created_at_cleared || updated_at_cleared {
         return Err(crate::error::SessionThreadError::InvalidMessageTimestamp {
-            message_id: after.message_id,
+            message_id,
             context,
             violation: crate::error::TimestampViolation::ClearedDurableTimestamps,
         });
@@ -725,13 +734,20 @@ mod tests {
     }
 
     #[test]
-    fn validate_message_timestamps_not_cleared_rejects_nullification() {
+    fn validate_message_timestamp_fields_not_cleared_rejects_nullification() {
         let before = sample_message();
         let mut after = before.clone();
         after.updated_at = None;
 
-        let err = validate_message_timestamps_not_cleared(&before, &after, "test update")
-            .expect_err("message updates must not clear existing timestamps");
+        let err = validate_message_timestamp_fields_not_cleared(
+            after.message_id,
+            before.created_at,
+            before.updated_at,
+            after.created_at,
+            after.updated_at,
+            "test update",
+        )
+        .expect_err("message updates must not clear existing timestamps");
 
         assert!(matches!(
             err,

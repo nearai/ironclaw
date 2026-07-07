@@ -1260,11 +1260,15 @@ where
                     (record, CasExpectation::Absent)
                 }
             };
-            let before = message.clone();
+            let before_created_at = message.created_at;
+            let before_updated_at = message.updated_at;
             mutate(&mut message)?;
-            crate::contract::validate_message_timestamps_not_cleared(
-                &before,
-                &message,
+            crate::contract::validate_message_timestamp_fields_not_cleared(
+                message.message_id,
+                before_created_at,
+                before_updated_at,
+                message.created_at,
+                message.updated_at,
                 "filesystem message update",
             )?;
             let entry = Self::message_entry(&message)?;
