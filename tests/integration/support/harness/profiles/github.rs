@@ -180,5 +180,6 @@ fn github_issue_tools_with_credential_result(
         tool_permission_overrides: None,
         persistent_approval_policies: None,
         trigger_repository: None,
+        reborn_services: None,
     })
 }

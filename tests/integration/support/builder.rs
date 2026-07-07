@@ -717,6 +717,50 @@ impl RebornIntegrationHarness {
         Ok((run_id, gate_ref))
     }
 
+    /// Resolve a blocked approval gate via a REAL `submit_inbound(ApprovalResolution)`
+    /// — the dispatch arm a real adapter's "approve"/"deny" reply hits
+    /// (`ApprovalInteractionService::resolve`), unlike `approve_gate`/`deny_gate`
+    /// (which resume the coordinator directly, bypassing the interaction
+    /// service entirely). Only reaches a real resolution when the group was
+    /// built with `.with_real_gate_dispatch_services()` — otherwise the
+    /// workflow's default `RejectingApprovalInteractionService` rejects the
+    /// payload outright.
+    pub async fn submit_approval_resolution(
+        &self,
+        gate_ref: &GateRef,
+        decision: ironclaw_product_adapters::ApprovalDecision,
+    ) -> HarnessResult<ProductInboundAck> {
+        let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
+        let envelope = self.ingress.verified_approval_resolution_envelope(
+            &event_id,
+            &self.actor_id,
+            &self.conversation_id,
+            gate_ref.as_str(),
+            decision,
+        )?;
+        Ok(self.workflow.submit_inbound(envelope).await?)
+    }
+
+    /// Auth-side counterpart of [`submit_approval_resolution`](Self::submit_approval_resolution):
+    /// a REAL `submit_inbound(AuthResolution)`, dispatching through
+    /// `AuthInteractionService::resolve` instead of `resolve_auth_gate`/
+    /// `deny_auth_gate`'s direct coordinator resume.
+    pub async fn submit_auth_resolution(
+        &self,
+        gate_ref: &GateRef,
+        result: ironclaw_product_adapters::AuthResolutionResult,
+    ) -> HarnessResult<ProductInboundAck> {
+        let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
+        let envelope = self.ingress.verified_auth_resolution_envelope(
+            &event_id,
+            &self.actor_id,
+            &self.conversation_id,
+            gate_ref.as_str(),
+            result,
+        )?;
+        Ok(self.workflow.submit_inbound(envelope).await?)
+    }
+
     /// Assert the finalized assistant reply in thread history contains `text`.
     pub async fn assert_reply_contains(&self, text: &str) -> HarnessResult<()> {
         self.thread_harness

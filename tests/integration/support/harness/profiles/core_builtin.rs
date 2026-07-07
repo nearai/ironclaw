@@ -232,5 +232,6 @@ fn core_builtin_tools_from_runtime(
         tool_permission_overrides: None,
         persistent_approval_policies: None,
         trigger_repository: None,
+        reborn_services: None,
     })
 }
