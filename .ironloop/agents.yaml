@@ -3,6 +3,7 @@ reviewers:
   - id: reviewer
     display_name: ironloop/common-reviewer
     instructions: .ironloop/agents/common-reviewer/AGENTS.md
+    network_access: true
     auto_review:
       enabled: true
       on_update: false
@@ -12,15 +13,13 @@ developers:
     display_name: ironloop/small-fix-implementer
     instructions: .ironloop/agents/small-fix-implementer/AGENTS.md
     actions: ["implement"]
-    execution:
-      network_access: true
+    network_access: true
 
   - id: resolver
     display_name: ironloop/small-fix-resolver
     instructions: .ironloop/agents/small-fix-resolver/AGENTS.md
     actions: ["resolve"]
-    execution:
-      network_access: true
+    network_access: true
     auto_resolve:
       enabled: true
       quiet_period_seconds: 300
