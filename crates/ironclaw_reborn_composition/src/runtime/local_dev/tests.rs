@@ -48,7 +48,7 @@ mod tests {
         },
     };
 
-    use crate::extension_lifecycle_capabilities::{
+    use crate::extension_host::extension_lifecycle_capabilities::{
         EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
         EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
     };
@@ -170,7 +170,7 @@ mod tests {
         run_context: &LoopRunContext,
         fallback_user_id: &UserId,
     ) -> HostVisibleCapabilityRequest {
-        let policy = crate::local_dev_capability_policy::local_dev_capability_policy()
+        let policy = crate::extension_host::local_dev_capability_policy::local_dev_capability_policy()
             .expect("policy parses");
         let empty_mounts = MountView::default();
 
@@ -485,7 +485,7 @@ mod tests {
             Arc::new(InMemorySessionThreadService::default()),
             UserId::new(user).expect("user id"),
             Arc::new(
-                crate::local_dev_capability_policy::local_dev_capability_policy()
+                crate::extension_host::local_dev_capability_policy::local_dev_capability_policy()
                     .expect("policy parses"),
             ),
             Arc::new(UnavailableModelGateway),
@@ -523,7 +523,7 @@ mod tests {
             .as_ref()
             .expect("extension management")
             .clone();
-        let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
+        let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
             local_runtime.skill_management.clone(),
         )
         .with_extension_management(extension_management)
@@ -971,7 +971,7 @@ mod tests {
 
     #[test]
     fn local_dev_builtin_surface_grants_capability_classes() {
-        let policy = crate::local_dev_capability_policy::local_dev_capability_policy()
+        let policy = crate::extension_host::local_dev_capability_policy::local_dev_capability_policy()
             .expect("policy parses");
         let capability_ids = policy
             .capability_ids()
@@ -995,7 +995,7 @@ mod tests {
             EffectKind::WriteFilesystem,
         ];
         let local_dev_shell_network_policy =
-            crate::local_dev_capability_policy::local_dev_wildcard_network_policy();
+            crate::extension_host::local_dev_capability_policy::local_dev_wildcard_network_policy();
         assert_eq!(
             local_dev_allowed_effects,
             vec![
@@ -1274,7 +1274,7 @@ mod tests {
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let policy = Arc::new(
-            crate::local_dev_capability_policy::local_dev_capability_policy()
+            crate::extension_host::local_dev_capability_policy::local_dev_capability_policy()
                 .expect("policy parses"),
         );
         let factory = LocalDevLoopCapabilityPortFactory {
@@ -1391,7 +1391,7 @@ mod tests {
         )
         .expect("skill context source");
         let policy = Arc::new(
-            crate::local_dev_capability_policy::local_dev_capability_policy()
+            crate::extension_host::local_dev_capability_policy::local_dev_capability_policy()
                 .expect("policy parses"),
         );
         let wiring = capability_wiring(
@@ -1464,7 +1464,7 @@ mod tests {
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let policy = Arc::new(
-            crate::local_dev_capability_policy::local_dev_capability_policy()
+            crate::extension_host::local_dev_capability_policy::local_dev_capability_policy()
                 .expect("policy parses"),
         );
         let factory = LocalDevLoopCapabilityPortFactory {
@@ -1947,7 +1947,7 @@ mod tests {
         let missing_approval = local_runtime
             .capability_policy
             .lease_approval_for(
-                crate::local_dev_capability_policy::LocalDevApprovalPolicyAction::Dispatch {
+                crate::extension_host::local_dev_capability_policy::LocalDevApprovalPolicyAction::Dispatch {
                     capability: &set_capability_id,
                 },
                 &local_runtime.workspace_mounts,
@@ -2073,7 +2073,7 @@ mod tests {
         let approval = local_runtime
             .capability_policy
             .lease_approval_for(
-                crate::local_dev_capability_policy::LocalDevApprovalPolicyAction::Dispatch {
+                crate::extension_host::local_dev_capability_policy::LocalDevApprovalPolicyAction::Dispatch {
                     capability: &set_capability_id,
                 },
                 &local_runtime.workspace_mounts,
@@ -2428,7 +2428,7 @@ mod tests {
             .as_ref()
             .expect("local runtime substrate");
         let policy = Arc::new(
-            crate::local_dev_capability_policy::local_dev_capability_policy()
+            crate::extension_host::local_dev_capability_policy::local_dev_capability_policy()
                 .expect("policy parses"),
         );
         let capability_io = Arc::new(LocalDevCapabilityIo::default());
@@ -2539,7 +2539,7 @@ mod tests {
             .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
         let workspace_mounts = local_runtime.workspace_mounts.clone();
         let policy = Arc::new(
-            crate::local_dev_capability_policy::local_dev_capability_policy()
+            crate::extension_host::local_dev_capability_policy::local_dev_capability_policy()
                 .expect("policy parses"),
         );
         let capability_io = Arc::new(LocalDevCapabilityIo::default());
@@ -2784,7 +2784,7 @@ mod tests {
             .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
         let workspace_mounts = local_runtime.workspace_mounts.clone();
         let policy = Arc::new(
-            crate::local_dev_capability_policy::local_dev_capability_policy()
+            crate::extension_host::local_dev_capability_policy::local_dev_capability_policy()
                 .expect("policy parses"),
         );
         let capability_io = Arc::new(LocalDevCapabilityIo::default());
@@ -2898,7 +2898,7 @@ mod tests {
             .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
         let workspace_mounts = local_runtime.workspace_mounts.clone();
         let policy = Arc::new(
-            crate::local_dev_capability_policy::local_dev_capability_policy()
+            crate::extension_host::local_dev_capability_policy::local_dev_capability_policy()
                 .expect("policy parses"),
         );
         let capability_io = Arc::new(LocalDevCapabilityIo::default());
@@ -3046,7 +3046,7 @@ mod tests {
                 .as_ref()
                 .expect("extension management")
                 .clone();
-            let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
+            let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
                 local_runtime.skill_management.clone(),
             )
             .with_extension_management(extension_management)
@@ -3083,7 +3083,7 @@ mod tests {
             Arc::new(InMemorySessionThreadService::default()),
             UserId::new("local-dev-github-user").expect("user id"),
             Arc::new(
-                crate::local_dev_capability_policy::local_dev_capability_policy()
+                crate::extension_host::local_dev_capability_policy::local_dev_capability_policy()
                     .expect("policy parses"),
             ),
             Arc::new(UnavailableModelGateway),
@@ -3112,7 +3112,7 @@ mod tests {
             Arc::new(InMemorySessionThreadService::default()),
             UserId::new("local-dev-live-github-user").expect("user id"),
             Arc::new(
-                crate::local_dev_capability_policy::local_dev_capability_policy()
+                crate::extension_host::local_dev_capability_policy::local_dev_capability_policy()
                     .expect("policy parses"),
             ),
             Arc::new(UnavailableModelGateway),
@@ -3150,7 +3150,7 @@ mod tests {
             .as_ref()
             .expect("extension management")
             .clone();
-        let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
+        let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
             local_runtime.skill_management.clone(),
         )
         .with_extension_management(extension_management)
@@ -3233,7 +3233,7 @@ mod tests {
             Arc::new(InMemorySessionThreadService::default()),
             UserId::new("local-dev-extension-search-user").expect("user id"),
             Arc::new(
-                crate::local_dev_capability_policy::local_dev_capability_policy()
+                crate::extension_host::local_dev_capability_policy::local_dev_capability_policy()
                     .expect("policy parses"),
             ),
             Arc::new(UnavailableModelGateway),
@@ -3303,7 +3303,7 @@ mod tests {
             Arc::new(InMemorySessionThreadService::default()),
             UserId::new("local-dev-mid-response-user").expect("user id"),
             Arc::new(
-                crate::local_dev_capability_policy::local_dev_capability_policy()
+                crate::extension_host::local_dev_capability_policy::local_dev_capability_policy()
                     .expect("policy parses"),
             ),
             Arc::new(UnavailableModelGateway),
@@ -3342,7 +3342,7 @@ mod tests {
             .as_ref()
             .expect("extension management")
             .clone();
-        let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
+        let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
             local_runtime.skill_management.clone(),
         )
         .with_extension_management(extension_management)

@@ -41,7 +41,7 @@ use ironclaw_turns::{
 use crate::local_dev_authorization::{
     StoreApprovalSettingsProvider, local_dev_effects_require_approval,
 };
-use crate::local_dev_capability_policy::LocalDevCapabilityPolicy;
+use crate::extension_host::local_dev_capability_policy::LocalDevCapabilityPolicy;
 use crate::local_dev_mounts::scoped_skill_management_mount_view;
 use crate::profile_approval_authorization::ApprovalSettingsProvider;
 use crate::{

@@ -9,7 +9,7 @@ use ironclaw_product_workflow::{
     ProductWorkflowError,
 };
 
-use crate::local_dev_capability_policy::{
+use crate::extension_host::local_dev_capability_policy::{
     LocalDevApprovalPolicyAction, LocalDevCapabilityPolicy, LocalDevCapabilityPolicyError,
     local_dev_one_shot_lease_approval,
 };
@@ -226,12 +226,10 @@ mod tests {
     use ironclaw_product_workflow::approval_gate_ref;
     use ironclaw_turns::{GateRef, TurnRunId};
 
-    use crate::{
-        extension_lifecycle::ActiveExtensionCapability,
-        local_dev_capability_policy::local_dev_capability_policy,
-        runtime::local_dev::extension_surface::{
-            LocalDevExtensionSurface, LocalDevExtensionSurfaceSource,
-        },
+    use crate::extension_host::extension_lifecycle::ActiveExtensionCapability;
+    use crate::extension_host::local_dev_capability_policy::local_dev_capability_policy;
+    use crate::runtime::local_dev::extension_surface::{
+        LocalDevExtensionSurface, LocalDevExtensionSurfaceSource,
     };
 
     use super::*;
