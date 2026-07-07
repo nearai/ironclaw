@@ -330,6 +330,9 @@ ironclaw_triggers = { path = "crates/ironclaw_triggers", version = "0.1.0", feat
 ironclaw_conversations = { path = "crates/ironclaw_conversations", version = "0.1.0" }
 ironclaw_trust = { path = "crates/ironclaw_trust", version = "0.1.0" }
 ironclaw_wasm = { path = "crates/ironclaw_wasm", version = "0.1.0" }
+# `InMemoryTriggeredRunDeliveryStore` for the triggered-delivery outcome-seam
+# int-tier proof (asserting a real `TriggeredRunDeliveryDriver`'s recorded
+# outcome via the same public store the composition factory accepts).
 # Same idea for embeddings: `MockEmbeddings` is only reachable in dev builds.
 ironclaw_embeddings = { path = "crates/ironclaw_embeddings", version = "0.1.0", features = ["testing"] }
 # Named `#[case]` parametrization for the storage-backend matrix tests (slice 3).
@@ -419,6 +422,10 @@ path = "tests/integration/oauth_refresh.rs"
 required-features = ["libsql"]
 
 [[test]]
+name = "reborn_integration_triggered_delivery_outcome"
+path = "tests/integration/triggered_delivery_outcome.rs"
+
+[[test]]
 name = "reborn_integration_attach"
 path = "tests/integration/attach.rs"
 
@@ -501,6 +508,14 @@ path = "tests/integration/profile.rs"
 [[test]]
 name = "reborn_integration_project_create"
 path = "tests/integration/project_create.rs"
+
+[[test]]
+name = "reborn_integration_real_egress_pipeline"
+path = "tests/integration/real_egress_pipeline.rs"
+
+[[test]]
+name = "reborn_integration_reopen_resume_through_gate"
+path = "tests/integration/reopen_resume_through_gate.rs"
 
 [[test]]
 name = "reborn_integration_safety"
