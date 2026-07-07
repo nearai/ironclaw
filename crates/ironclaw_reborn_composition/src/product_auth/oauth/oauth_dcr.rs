@@ -28,14 +28,14 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex as AsyncMutex, RwLock};
 
 use crate::AuthChallengeView;
-use crate::oauth_dcr_protocol::{
+use crate::product_auth::oauth::oauth_dcr_protocol::{
     AuthorizationServerMetadata, DcrRegistrationRequest, DcrRegistrationResponse,
     ProtectedResourceMetadata, StoredDcrClientMaterial, authorization_server_metadata_url,
     authorization_server_metadata_url_from_issuer, callback_base_url, flow_secret_handle,
     protected_resource_metadata_url, refresh_secret_handle, scope_text, validate_callback_origin,
     validate_endpoint_origin, validate_issuer_related_to_resource,
 };
-use crate::oauth_provider_client::{
+use crate::product_auth::oauth::oauth_provider_client::{
     HostOAuthProviderSpec, OAuthClientMaterial, OAuthClientMaterialSource, authorize_oauth_egress,
     oauth_endpoint_host, oauth_network_policy,
 };
@@ -1168,7 +1168,7 @@ mod tests {
                     secret_handle_prefix: "notion",
                     resource: Some("https://mcp.notion.com/mcp"),
                     exchange_scope_policy:
-                        crate::oauth_provider_client::ExchangeScopePolicy::FallbackToRequested,
+                        crate::product_auth::oauth::oauth_provider_client::ExchangeScopePolicy::FallbackToRequested,
                 },
                 callback_origin: "http://127.0.0.1:3000".to_string(),
                 client_name: "Ironclaw".to_string(),
@@ -1613,7 +1613,7 @@ mod tests {
                     secret_handle_prefix: "notion",
                     resource: Some("https://mcp.notion.com/mcp"),
                     exchange_scope_policy:
-                        crate::oauth_provider_client::ExchangeScopePolicy::FallbackToRequested,
+                        crate::product_auth::oauth::oauth_provider_client::ExchangeScopePolicy::FallbackToRequested,
                 },
                 callback_origin: "http://127.0.0.1:3000".to_string(),
                 client_name: "Ironclaw".to_string(),
@@ -1675,7 +1675,7 @@ mod tests {
                 secret_handle_prefix: "notion",
                 resource: Some("https://mcp.notion.com/mcp"),
                 exchange_scope_policy:
-                    crate::oauth_provider_client::ExchangeScopePolicy::FallbackToRequested,
+                    crate::product_auth::oauth::oauth_provider_client::ExchangeScopePolicy::FallbackToRequested,
             },
             callback_origin: "http://127.0.0.1:3000".to_string(),
             client_name: "Ironclaw".to_string(),

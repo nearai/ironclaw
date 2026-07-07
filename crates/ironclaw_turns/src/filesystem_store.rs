@@ -69,11 +69,14 @@ use crate::{
 mod io;
 mod profile_resolver;
 mod projection;
+mod row_store;
 mod runner_lease;
 
 use io::{deserialize_snapshot, fs_error, snapshot_entry, snapshot_path};
 use profile_resolver::PreResolvedRunProfileResolver;
 use runner_lease::{RunnerLeaseMemory, RunnerLeaseOverlay, RunnerLeaseRecord, RunnerLeaseStore};
+
+pub use row_store::FilesystemTurnStateRowStore;
 
 #[cfg(test)]
 mod tests;
@@ -628,6 +631,51 @@ where
     }
 }
 
+/// Concrete filesystem turn-state store selected by composition.
+///
+/// Keeping this as a concrete enum, rather than a bundle of trait objects,
+/// lets production wiring retain component type checks while allowing
+/// filesystem-backed deployments to choose the row/append layout explicitly
+/// while retaining the blob layout for compatibility tests and rollback seams.
+pub enum FilesystemTurnStateStoreKind<F>
+where
+    F: RootFilesystem,
+{
+    // arch-exempt: large_file, boxed enum variant clippy fix in existing store facade, plan #5662
+    Blob(Box<FilesystemTurnStateStore<F>>),
+    Row(Box<FilesystemTurnStateRowStore<F>>),
+}
+
+impl<F> FilesystemTurnStateStoreKind<F>
+where
+    F: RootFilesystem,
+{
+    pub fn blob(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
+        Self::Blob(Box::new(FilesystemTurnStateStore::new(filesystem)))
+    }
+
+    pub fn row(filesystem: Arc<ScopedFilesystem<F>>) -> Self
+    where
+        F: 'static,
+    {
+        Self::Row(Box::new(FilesystemTurnStateRowStore::new(filesystem)))
+    }
+
+    pub fn with_limits(self, limits: InMemoryTurnStateStoreLimits) -> Self {
+        match self {
+            Self::Blob(store) => Self::Blob(Box::new((*store).with_limits(limits))),
+            Self::Row(store) => Self::Row(Box::new((*store).with_limits(limits))),
+        }
+    }
+
+    pub async fn persistence_snapshot(&self) -> Result<TurnPersistenceSnapshot, TurnError> {
+        match self {
+            Self::Blob(store) => store.persistence_snapshot().await,
+            Self::Row(store) => store.persistence_snapshot().await,
+        }
+    }
+}
+
 /// Map a [`CasUpdateError`] into a [`TurnError`].
 fn map_cas_error(error: CasUpdateError<TurnError>) -> TurnError {
     match error {
@@ -642,6 +690,312 @@ fn map_cas_error(error: CasUpdateError<TurnError>) -> TurnError {
             reason: "turn state filesystem backend must support versioned CAS".to_string(),
         },
         CasUpdateError::Backend(fs) => fs_error(fs),
+    }
+}
+
+#[async_trait]
+impl<F> TurnStateStore for FilesystemTurnStateStoreKind<F>
+where
+    F: RootFilesystem,
+{
+    async fn submit_turn(
+        &self,
+        request: SubmitTurnRequest,
+        admission_policy: &dyn TurnAdmissionPolicy,
+        run_profile_resolver: &dyn RunProfileResolver,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        match self {
+            Self::Blob(store) => {
+                store
+                    .submit_turn(request, admission_policy, run_profile_resolver)
+                    .await
+            }
+            Self::Row(store) => {
+                store
+                    .submit_turn(request, admission_policy, run_profile_resolver)
+                    .await
+            }
+        }
+    }
+
+    async fn resume_turn(
+        &self,
+        request: ResumeTurnRequest,
+    ) -> Result<ResumeTurnResponse, TurnError> {
+        match self {
+            Self::Blob(store) => store.resume_turn(request).await,
+            Self::Row(store) => store.resume_turn(request).await,
+        }
+    }
+
+    async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
+        match self {
+            Self::Blob(store) => store.retry_turn(request).await,
+            Self::Row(store) => store.retry_turn(request).await,
+        }
+    }
+
+    async fn request_cancel(
+        &self,
+        request: CancelRunRequest,
+    ) -> Result<CancelRunResponse, TurnError> {
+        match self {
+            Self::Blob(store) => store.request_cancel(request).await,
+            Self::Row(store) => store.request_cancel(request).await,
+        }
+    }
+
+    async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        match self {
+            Self::Blob(store) => store.get_run_state(request).await,
+            Self::Row(store) => store.get_run_state(request).await,
+        }
+    }
+}
+
+#[async_trait]
+impl<F> TurnSpawnTreeStateStore for FilesystemTurnStateStoreKind<F>
+where
+    F: RootFilesystem,
+{
+    async fn submit_child_turn(
+        &self,
+        request: SubmitChildRunRequest,
+        admission_policy: &dyn TurnAdmissionPolicy,
+        run_profile_resolver: &dyn RunProfileResolver,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        match self {
+            Self::Blob(store) => {
+                store
+                    .submit_child_turn(request, admission_policy, run_profile_resolver)
+                    .await
+            }
+            Self::Row(store) => {
+                store
+                    .submit_child_turn(request, admission_policy, run_profile_resolver)
+                    .await
+            }
+        }
+    }
+
+    async fn children_of(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<Vec<TurnRunRecord>, TurnError> {
+        match self {
+            Self::Blob(store) => store.children_of(scope, run_id).await,
+            Self::Row(store) => store.children_of(scope, run_id).await,
+        }
+    }
+
+    async fn get_run_record(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<Option<TurnRunRecord>, TurnError> {
+        match self {
+            Self::Blob(store) => store.get_run_record(scope, run_id).await,
+            Self::Row(store) => store.get_run_record(scope, run_id).await,
+        }
+    }
+
+    async fn reserve_tree_descendants(
+        &self,
+        scope: &TurnScope,
+        root_run_id: TurnRunId,
+        delta: u32,
+        cap: u32,
+    ) -> Result<SpawnTreeReservation, TurnError> {
+        match self {
+            Self::Blob(store) => {
+                store
+                    .reserve_tree_descendants(scope, root_run_id, delta, cap)
+                    .await
+            }
+            Self::Row(store) => {
+                store
+                    .reserve_tree_descendants(scope, root_run_id, delta, cap)
+                    .await
+            }
+        }
+    }
+
+    async fn release_tree_descendants(
+        &self,
+        scope: &TurnScope,
+        root_run_id: TurnRunId,
+        delta: u32,
+    ) -> Result<(), TurnError> {
+        match self {
+            Self::Blob(store) => {
+                store
+                    .release_tree_descendants(scope, root_run_id, delta)
+                    .await
+            }
+            Self::Row(store) => {
+                store
+                    .release_tree_descendants(scope, root_run_id, delta)
+                    .await
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl<F> TurnEventProjectionSource for FilesystemTurnStateStoreKind<F>
+where
+    F: RootFilesystem,
+{
+    async fn read_turn_events_after(
+        &self,
+        scope: &TurnScope,
+        owner_user_id: Option<&UserId>,
+        after: Option<EventCursor>,
+        limit: usize,
+    ) -> Result<TurnEventPage, TurnError> {
+        match self {
+            Self::Blob(store) => {
+                store
+                    .read_turn_events_after(scope, owner_user_id, after, limit)
+                    .await
+            }
+            Self::Row(store) => {
+                store
+                    .read_turn_events_after(scope, owner_user_id, after, limit)
+                    .await
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl<F> LoopCheckpointStore for FilesystemTurnStateStoreKind<F>
+where
+    F: RootFilesystem,
+{
+    async fn put_loop_checkpoint(
+        &self,
+        request: PutLoopCheckpointRequest,
+    ) -> Result<LoopCheckpointRecord, TurnError> {
+        match self {
+            Self::Blob(store) => store.put_loop_checkpoint(request).await,
+            Self::Row(store) => store.put_loop_checkpoint(request).await,
+        }
+    }
+
+    async fn get_loop_checkpoint(
+        &self,
+        request: GetLoopCheckpointRequest,
+    ) -> Result<Option<LoopCheckpointRecord>, TurnError> {
+        match self {
+            Self::Blob(store) => store.get_loop_checkpoint(request).await,
+            Self::Row(store) => store.get_loop_checkpoint(request).await,
+        }
+    }
+}
+
+#[async_trait]
+impl<F> TurnRunTransitionPort for FilesystemTurnStateStoreKind<F>
+where
+    F: RootFilesystem,
+{
+    async fn claim_next_run(
+        &self,
+        request: ClaimRunRequest,
+    ) -> Result<Option<ClaimedTurnRun>, TurnError> {
+        match self {
+            Self::Blob(store) => store.claim_next_run(request).await,
+            Self::Row(store) => store.claim_next_run(request).await,
+        }
+    }
+
+    async fn heartbeat(&self, request: HeartbeatRequest) -> Result<EventCursor, TurnError> {
+        match self {
+            Self::Blob(store) => store.heartbeat(request).await,
+            Self::Row(store) => store.heartbeat(request).await,
+        }
+    }
+
+    async fn recover_expired_leases(
+        &self,
+        request: RecoverExpiredLeasesRequest,
+    ) -> Result<RecoverExpiredLeasesResponse, TurnError> {
+        match self {
+            Self::Blob(store) => store.recover_expired_leases(request).await,
+            Self::Row(store) => store.recover_expired_leases(request).await,
+        }
+    }
+
+    async fn record_model_route_snapshot(
+        &self,
+        request: RecordModelRouteSnapshotRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        match self {
+            Self::Blob(store) => store.record_model_route_snapshot(request).await,
+            Self::Row(store) => store.record_model_route_snapshot(request).await,
+        }
+    }
+
+    async fn block_run(&self, request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
+        match self {
+            Self::Blob(store) => store.block_run(request).await,
+            Self::Row(store) => store.block_run(request).await,
+        }
+    }
+
+    async fn complete_run(&self, request: CompleteRunRequest) -> Result<TurnRunState, TurnError> {
+        match self {
+            Self::Blob(store) => store.complete_run(request).await,
+            Self::Row(store) => store.complete_run(request).await,
+        }
+    }
+
+    async fn cancel_run(
+        &self,
+        request: CancelRunCompletionRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        match self {
+            Self::Blob(store) => store.cancel_run(request).await,
+            Self::Row(store) => store.cancel_run(request).await,
+        }
+    }
+
+    async fn fail_run(&self, request: FailRunRequest) -> Result<TurnRunState, TurnError> {
+        match self {
+            Self::Blob(store) => store.fail_run(request).await,
+            Self::Row(store) => store.fail_run(request).await,
+        }
+    }
+
+    async fn record_runner_failure(
+        &self,
+        request: RecordRunnerFailureRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        match self {
+            Self::Blob(store) => store.record_runner_failure(request).await,
+            Self::Row(store) => store.record_runner_failure(request).await,
+        }
+    }
+
+    async fn relinquish_run(
+        &self,
+        request: RelinquishRunRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        match self {
+            Self::Blob(store) => store.relinquish_run(request).await,
+            Self::Row(store) => store.relinquish_run(request).await,
+        }
+    }
+
+    async fn apply_validated_loop_exit(
+        &self,
+        request: ApplyValidatedLoopExitRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        match self {
+            Self::Blob(store) => store.apply_validated_loop_exit(request).await,
+            Self::Row(store) => store.apply_validated_loop_exit(request).await,
+        }
     }
 }
 

@@ -503,7 +503,7 @@ pub struct RebornRuntime {
     trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     credential_refresh_worker_handle:
-        Option<crate::credential_refresh_worker::CredentialRefreshWorkerRuntimeHandle>,
+        Option<crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshWorkerRuntimeHandle>,
     trace_flush_worker: crate::observability::trace_capture::TraceQueueFlushWorkerHandle,
     #[cfg(feature = "root-llm-provider")]
     skill_learning_extraction_tasks:
@@ -2262,7 +2262,7 @@ impl RebornRuntime {
         if let Some(credential_refresh_worker) = self.credential_refresh_worker_handle {
             credential_refresh_worker
                 .shutdown(
-                    crate::credential_refresh_worker::CREDENTIAL_REFRESH_WORKER_SHUTDOWN_TIMEOUT,
+                    crate::product_auth::credentials::credential_refresh_worker::CREDENTIAL_REFRESH_WORKER_SHUTDOWN_TIMEOUT,
                 )
                 .await;
         }
@@ -3695,9 +3695,9 @@ pub async fn build_reborn_runtime(
             candidate_source,
             leader_lock,
             refresh_port,
-        } => crate::credential_refresh_worker::spawn_credential_refresh_worker(
+        } => crate::product_auth::credentials::credential_refresh_worker::spawn_credential_refresh_worker(
             credential_refresh,
-            crate::credential_refresh_worker::CredentialRefreshWorkerDeps {
+            crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshWorkerDeps {
                 candidate_source,
                 refresh_port,
                 leader_lock: std::sync::Arc::new(leader_lock),
@@ -10419,7 +10419,7 @@ output_schema_ref = "schemas/write.output.json"
     struct MultiToolConfiguredCredentials;
 
     #[async_trait]
-    impl crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionService
+    impl crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService
         for MultiToolConfiguredCredentials
     {
         async fn select_configured_account_for_binding(
@@ -10432,7 +10432,7 @@ output_schema_ref = "schemas/write.output.json"
 
         async fn select_unique_configured_runtime_account(
             &self,
-            _request: crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionRequest,
+            _request: crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest,
         ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
             let now = chrono::Utc::now();
             Ok(ironclaw_auth::CredentialAccount {

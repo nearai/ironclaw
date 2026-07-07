@@ -13,7 +13,7 @@ use secrecy::SecretString;
 use tokio::task::JoinSet;
 
 use super::*;
-use crate::product_auth_runtime_credentials::{
+use crate::product_auth::credentials::runtime_credentials::{
     ProductAuthRuntimeCredentialAccountSelector, ProductAuthRuntimeCredentialResolver,
     RuntimeCredentialAccountSelectionRequest, RuntimeCredentialAccountSelectionService,
 };
