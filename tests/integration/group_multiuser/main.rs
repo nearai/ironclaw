@@ -17,6 +17,7 @@ mod support;
 
 mod scenario_auto_approve_isolation_across_actors;
 mod scenario_memory_isolation_across_actors;
+mod scenario_turn_state_isolation_across_actors;
 mod scenario_two_actors_own_threads;
 
 use reborn_support::group::{RebornIntegrationGroup, ScenarioReport};
@@ -54,6 +55,15 @@ async fn multiuser_group_e2e() {
     report.record(
         "auto_approve_isolation_across_actors",
         scenario_auto_approve_isolation_across_actors::run(&approvals_group).await,
+    );
+
+    // Scenario 4 (C-MULTIUSER): per-actor turn/run-state isolation — see
+    // scenario_turn_state_isolation_across_actors for the seam. Reuses the
+    // plain `builtin_tools` group (no gate needed): the store's own
+    // scope-equality gate is what's under test.
+    report.record(
+        "turn_state_isolation_across_actors",
+        scenario_turn_state_isolation_across_actors::run(&g).await,
     );
 
     report.assert_all_passed();
