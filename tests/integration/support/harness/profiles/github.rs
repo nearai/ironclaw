@@ -168,6 +168,7 @@ fn github_issue_tools_with_credential_result(
         results: Arc::new(Mutex::new(Vec::new())),
         http_egress: Some(runtime_http_egress),
         network_egress: Some(network_egress),
+        real_egress_transport: None,
         process_port: None,
         profile_filesystem: None,
         project_service: None,
@@ -180,5 +181,6 @@ fn github_issue_tools_with_credential_result(
         tool_permission_overrides: None,
         persistent_approval_policies: None,
         trigger_repository: None,
+        reborn_services: None,
     })
 }
