@@ -129,7 +129,7 @@ async fn shell_timeout_surfaces_recoverable_failed() {
 /// the default `#[tokio::test]` thread stack in a debug build.
 #[test]
 fn live_shell_uses_local_process_port() {
-    run_with_larger_stack(async {
+    reborn_support::stack::run_with_larger_stack("live_shell_uses_local_process_port", async {
         let h = RebornIntegrationHarness::test_default()
             .with_live_shell()
             .script([
@@ -154,28 +154,4 @@ fn live_shell_uses_local_process_port() {
             .await
             .expect("final reply finalized");
     });
-}
-
-/// Spawns `test` on a dedicated 16MB-stack thread with a current-thread tokio
-/// runtime. See the doc comment on `live_shell_uses_local_process_port` for
-/// why this one test needs it (matches the existing fix in
-/// `tests/reborn_qa_smoke_scenarios_e2e.rs::run_async_test_with_stack`).
-fn run_with_larger_stack<F>(test: F)
-where
-    F: std::future::Future<Output = ()> + Send + 'static,
-{
-    let handle = std::thread::Builder::new()
-        .name("live_shell_uses_local_process_port".to_string())
-        .stack_size(16 * 1024 * 1024)
-        .spawn(move || {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("tokio test runtime")
-                .block_on(test);
-        })
-        .expect("spawn stack-sized test thread");
-    if let Err(panic) = handle.join() {
-        std::panic::resume_unwind(panic);
-    }
 }

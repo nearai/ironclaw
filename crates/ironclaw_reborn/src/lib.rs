@@ -17,6 +17,7 @@
 //! the boundary tests are designed to prevent.
 
 pub mod app_loop_family;
+mod capability_io_pruner;
 mod context_shadow;
 pub mod driver_registry;
 pub mod failure_categories;

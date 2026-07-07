@@ -38,6 +38,7 @@ use ironclaw_host_runtime::{
 
 use crate::{
     app_loop_family::build_loop_family_registry_with_default_iteration_limit,
+    capability_io_pruner::CapabilityIoTerminalPruner,
     driver_registry::{DriverRegistry, DriverRegistryError},
     loop_driver_host::{
         HookDispatcherBuilderFactory, RebornLoopDriverHostFactory, TextOnlyLoopHostConfig,
@@ -640,6 +641,20 @@ where
                 DefaultPlannedRuntimeBuildError::SubagentCompletion(error.to_string())
             })?;
     }
+    // Reclaims capability I/O a writer retained for a run (e.g. non-consuming
+    // staged inputs kept around for the executor's bounded capability retry)
+    // once that run reaches a terminal status. Capability retries all happen
+    // while the run is still `Running`, so this never races a live retry.
+    // Subscribed AFTER the subagent completion observer: required observers
+    // run in subscription order, so a child run's terminal event is fully
+    // processed (its outcome written into the parent's staged result) before
+    // that child's staged io is released.
+    let capability_io_pruner: Arc<dyn TurnCommittedEventObserver> = Arc::new(
+        CapabilityIoTerminalPruner::new(Arc::clone(&parts.capability_result_writer)),
+    );
+    lifecycle_bus
+        .subscribe_required(capability_io_pruner)
+        .map_err(|error| DefaultPlannedRuntimeBuildError::SubagentCompletion(error.to_string()))?;
     let turn_state = Arc::new(LifecyclePublishingTurnStateStore::new(
         Arc::clone(&parts.turn_state),
         lifecycle_bus,

@@ -21,7 +21,9 @@ mod support;
 use ironclaw_product_workflow::{ProjectCaller, RebornListProjectsRequest};
 use reborn_support::assertions::ToolErrorClass;
 use reborn_support::group::RebornIntegrationGroup;
-use reborn_support::project_service_fault::FAULT_INJECT_DENIED_PROJECT_NAME;
+use reborn_support::project_service_fault::{
+    FAULT_INJECT_DENIED_PROJECT_NAME, FAULT_INJECT_UNAVAILABLE_ONCE_PROJECT_NAME,
+};
 use reborn_support::reply::RebornScriptedReply;
 
 #[tokio::test]
@@ -134,12 +136,6 @@ async fn project_create_invalid_input_routes_to_recoverable_tool_error() {
 /// delegates everything else to the real store. `project_service_outcome`'s
 /// `Denied` arm maps this to a recoverable `Failed(PolicyDenied)` tool error on
 /// the FIRST attempt — not the terminal `Internal` arm.
-///
-/// Deliberately NOT `Unavailable`/`Internal`: both route through the
-/// capability-retry branch, whose retry re-dispatch hits an unrelated,
-/// independently confirmed bug for provider-tool-call-originated invocations
-/// under local-dev composition (issue #5608) that collapses the "retry twice,
-/// then Failed" contract into an immediate `driver_unavailable`.
 #[tokio::test]
 async fn project_create_denied_fault_routes_to_recoverable_tool_error() {
     let group = RebornIntegrationGroup::project_lifecycle_fault_injected()
@@ -175,4 +171,67 @@ async fn project_create_denied_fault_routes_to_recoverable_tool_error() {
         .assert_reply_contains("not permitted")
         .await
         .expect("run recovered and finalized instead of dying at the fault");
+}
+
+/// Retry-category coverage (#5608): `project_create` fails `Unavailable` on the
+/// FIRST attempt only (`FAULT_INJECT_UNAVAILABLE_ONCE_PROJECT_NAME`), so
+/// `DefaultRecoveryStrategy` retries the capability call — proving the retry
+/// re-dispatch resolves the SAME run-scoped `input_ref` a second time and
+/// completes, rather than dying at a terminal `driver_unavailable`.
+///
+/// Runs on a larger-stack thread (`support::stack`): the retry re-dispatch
+/// nests a second full capability-invocation state machine on top of the
+/// standard chain, overflowing the default test stack in debug.
+#[test]
+fn project_create_unavailable_fault_retries_and_completes() {
+    reborn_support::stack::run_with_larger_stack(
+        "project_create_unavailable_fault_retries_and_completes",
+        async {
+            let group = RebornIntegrationGroup::project_lifecycle_fault_injected()
+                .await
+                .expect("project-lifecycle fault-injection group builds");
+            let harness = group
+                .thread("conv-project-create-retry")
+                .script([
+                    RebornScriptedReply::tool_call(
+                        "builtin.project_create",
+                        serde_json::json!({"name": FAULT_INJECT_UNAVAILABLE_ONCE_PROJECT_NAME}),
+                    ),
+                    RebornScriptedReply::text("created your project after a retry"),
+                ])
+                .build()
+                .await
+                .expect("thread builds");
+
+            harness
+                .submit_turn("create a project that will hit a transient service fault")
+                .await
+                .expect("turn completes after the capability retries and succeeds");
+
+            harness
+                .assert_tool_invocation_count("builtin.project_create", 2)
+                .await
+                .expect(
+                    "project_create must be dispatched exactly twice: the failed first attempt \
+                     plus the recovery retry",
+                );
+            harness
+                .assert_tool_result_contains(FAULT_INJECT_UNAVAILABLE_ONCE_PROJECT_NAME)
+                .await
+                .expect(
+                    "the retried attempt reaches the real store and returns the created project",
+                );
+            harness
+                .assert_reply_contains("after a retry")
+                .await
+                .expect("run completes normally instead of terminating at driver_unavailable");
+            // Inputs are retained (not consumed) so the retry above can
+            // re-resolve them — but only for the life of the run: the terminal
+            // transition must release them back to the io's shared budget.
+            harness
+                .assert_capability_io_pruned()
+                .await
+                .expect("staged capability inputs are released once the run is terminal");
+        },
+    );
 }

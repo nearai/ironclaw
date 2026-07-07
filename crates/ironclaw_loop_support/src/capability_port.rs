@@ -276,6 +276,12 @@ pub trait LoopCapabilityResultWriter: Send + Sync {
         _summary: &str,
     ) {
     }
+
+    /// Releases any capability I/O this writer retained for `run_id` now that
+    /// its run has reached a terminal status. Default no-op: only writers that
+    /// stage inputs for same-run retry re-reads (rather than consuming them on
+    /// first read) need to reclaim that retained state once the run is done.
+    fn prune_run(&self, _run_id: &str) {}
 }
 
 /// Maximum number of input issues rendered into a failure display preview.

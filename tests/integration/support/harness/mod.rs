@@ -715,6 +715,12 @@ impl HostRuntimeCapabilityHarness {
         self.results.lock().unwrap().clone()
     }
 
+    /// Staged capability inputs currently retained by the shared io, across
+    /// all runs. Zero once every terminal run has been pruned.
+    pub(crate) fn staged_capability_input_count(&self) -> usize {
+        self.io.staged_input_count()
+    }
+
     pub(crate) fn runtime_http_requests(&self) -> Vec<RuntimeHttpEgressRequest> {
         self.http_egress
             .as_ref()

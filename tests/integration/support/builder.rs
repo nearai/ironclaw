@@ -978,8 +978,7 @@ impl RebornIntegrationHarness {
     /// Checks only the `[baseline_invocation_count..]` delta so a group thread
     /// never spuriously passes on a prior thread's entry (R2).
     pub async fn assert_tool_invoked(&self, capability_id: &str) -> HarnessResult<()> {
-        let all = self.capability_recorder.invocations();
-        let delta = &all[self.baseline_invocation_count..];
+        let delta = self.captured_invocations();
         if delta
             .iter()
             .any(|invocation| invocation.capability_id.as_str() == capability_id)
@@ -1012,6 +1011,64 @@ impl RebornIntegrationHarness {
             .map(|invocation| invocation.capability_id.as_str())
             .collect();
         Err(format!("capability {capability_id:?} was invoked; saw {seen:?}").into())
+    }
+
+    /// Assert the named capability was dispatched through the real capability
+    /// path exactly `expected` times. Distinguishes a single dispatch from a
+    /// retried one — a capability that fails transiently once then succeeds
+    /// records TWO invocations at this recorder seam for one model tool call.
+    pub async fn assert_tool_invocation_count(
+        &self,
+        capability_id: &str,
+        expected: usize,
+    ) -> HarnessResult<()> {
+        let actual = self
+            .captured_invocations()
+            .iter()
+            .filter(|invocation| invocation.capability_id.as_str() == capability_id)
+            .count();
+        if actual == expected {
+            return Ok(());
+        }
+        Err(format!(
+            "capability {capability_id:?} was invoked {actual} time(s), expected {expected}"
+        )
+        .into())
+    }
+
+    /// Assert the shared capability io retains no staged inputs — every
+    /// terminal run's staged io was pruned. Staged inputs draw from a global
+    /// budget shared by all runs on the io, so leaked entries eventually fail
+    /// unrelated tool calls with `BudgetExceeded`. Polls briefly: terminal
+    /// lifecycle publication (which triggers pruning) can commit just after
+    /// the terminal status becomes visible to `submit_turn`.
+    pub async fn assert_capability_io_pruned(&self) -> HarnessResult<()> {
+        let mut remaining = usize::MAX;
+        for _ in 0..100 {
+            match self.capability_recorder.staged_capability_input_count() {
+                None => {
+                    return Err(
+                        "staged-input introspection requires a HostRuntime-mode harness".into(),
+                    );
+                }
+                Some(0) => return Ok(()),
+                Some(count) => remaining = count,
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        Err(format!(
+            "staged capability inputs were not pruned after the run reached terminal; \
+             {remaining} still staged"
+        )
+        .into())
+    }
+
+    /// This thread's recorded capability invocations, in dispatch order — the
+    /// `[baseline_invocation_count..]` delta so a group thread never reads a
+    /// prior thread's entries (R2). Mirrors `captured_egress_requests`.
+    fn captured_invocations(&self) -> Vec<ironclaw_turns::run_profile::CapabilityInvocation> {
+        let all = self.capability_recorder.invocations();
+        all[self.baseline_invocation_count..].to_vec()
     }
 
     /// S2 seam: assert the named capability produced EXACTLY `expected`
