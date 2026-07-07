@@ -217,7 +217,14 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
         // in-chat OAuth connection panel from structured state.
         let connection_preview = channel_connection_display_preview(&response);
         let output = serde_json::to_value(without_model_visible_connection_chrome(response))
-            .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OutputDecode))?;
+            .map_err(|error| {
+                tracing::debug!(
+                    target: "ironclaw::reborn::extension_lifecycle",
+                    ?error,
+                    "extension lifecycle output serialization failed"
+                );
+                FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OutputDecode)
+            })?;
         Ok(
             FirstPartyCapabilityResult::new(output, resource_usage(started))
                 .with_display_preview(connection_preview),
@@ -240,7 +247,17 @@ fn channel_connection_display_preview(
     else {
         return None;
     };
-    let output_preview = serde_json::to_string(requirement).ok()?;
+    let output_preview = match serde_json::to_string(requirement) {
+        Ok(preview) => preview,
+        Err(error) => {
+            tracing::debug!(
+                target: "ironclaw::reborn::extension_lifecycle",
+                ?error,
+                "failed to serialize channel-connection requirement; skipping in-chat connection preview"
+            );
+            return None;
+        }
+    };
     Some(CapabilityDisplayOutputPreview {
         output_summary: Some(format!(
             "Connect {} to continue.",
