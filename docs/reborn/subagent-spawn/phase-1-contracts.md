@@ -11,7 +11,11 @@
 > resolution store, tombstone store, and restart reconciler described in later
 > sections — is replaced outright by
 > [`thread-harness-design.md`](./thread-harness-design.md) (canonical). The
-> contracts themselves remain accurate.
+> contracts themselves remain accurate, **except §3.3's flavor table below**,
+> which is historical: v1's two flavors (`general`, `researcher`) shipped as
+> four (`General`, `Explorer`, `Coder`, `Planner`,
+> `crates/ironclaw_reborn/src/subagent/flavors.rs`) — `thread-harness-design.md`
+> §10 is canonical for the current flavor set and naming.
 
 This document is the detailed, implementer-facing spec for **Phase 1** of the
 subagent-spawn feature. Phase 1 lands the *contracts and isolated units* that
@@ -1657,6 +1661,14 @@ direction prompt `.md` files, the goal-store contract plus production/test
 implementations, and the static built-in flavor table. No driver, no observer,
 no runtime wiring (those are Phase 2/3).
 
+**Flavor naming below is historical (v1 proposal: `general`/`researcher`,
+§3.2/§3.3/§3.6).** The shipped set is four flavors — `General`, `Explorer`,
+`Coder`, `Planner` (`crates/ironclaw_reborn/src/subagent/flavors.rs`,
+`.../directions/{general,explorer,coder,planner}.md`) — per
+`thread-harness-design.md` §10, which is canonical for flavor naming. The
+goal-store contract (§3.4) is unaffected by this and remains accurate as
+written.
+
 ### 3.1 Files to create
 
 | File | Purpose |
@@ -1744,6 +1756,14 @@ by the flavor table (in-process), not persisted on the wire. If Phase 2 needs it
 on a wire contract, add `Serialize`/`Deserialize` then.
 
 ### 3.3 `subagent/flavors.rs` — the static built-in flavor table
+
+**Historical — v1 proposal, superseded by the shipped 4-flavor table.** This
+subsection describes the original two-flavor proposal (`general`,
+`researcher`). The shipped table has four flavors (`General`, `Explorer`,
+`Coder`, `Planner`) — see `thread-harness-design.md` §10 for the current,
+canonical flavor set and naming. Retained below for the still-accurate shape
+(direction id, tool allowlist, budget, `allow_nesting` — §10(c)/(d) extend
+this schema with per-flavor budget/model override).
 
 A **flavor** is a built-in subagent kind. v1 has exactly two: `general` and
 `researcher` (README §6 "Flavors"). The table is a compile-time `&[…]` — no

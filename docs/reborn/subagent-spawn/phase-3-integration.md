@@ -96,7 +96,7 @@ divergence is logged in the PR description.
 | **P2.C** | `subagent_planned_driver()` building a `PlannedDriver` over the `subagent` family with its own descriptor + checkpoint schema | `planned_driver_factory.rs` |
 | **P2.A** | The spawn-capable capability port type (call it `SpawnCapableLoopCapabilityPort` / its factory) and its `spawn_subagent` capability-id constant | `subagent_runtime.rs` |
 | **P2.B** | prompt composition (direction system message + `## Task` user message) — internal to the capability port / context port; Phase 3 only asserts the *effect* (child sees the goal) |
-| **P1.C** | `SubagentFlavorTable` (built-in static table: `general`, `researcher`), direction `.md` files, the `SubagentGoalStore` trait, the in-process `BoundedSubagentGoalStore`, and the **durable, DB-backed** `DbBackedSubagentGoalStore` (piggybacks on the turn-state DB connection — README §6 "Goal durability (DB-backed)"). Also the `SubagentResultTombstoneStore` trait + DB-backed impl (`DbBackedSubagentResultTombstoneStore`) keyed by child `TurnRunId` (README §6, §7.5). | `subagent_runtime.rs` |
+| **P1.C** | `SubagentFlavorTable` (built-in static table: v1 proposal `general`, `researcher` — historical naming, shipped as `General`/`Explorer`/`Coder`/`Planner`, `thread-harness-design.md` §10 is canonical), direction `.md` files, the `SubagentGoalStore` trait, the in-process `BoundedSubagentGoalStore`, and the **durable, DB-backed** `DbBackedSubagentGoalStore` (piggybacks on the turn-state DB connection — README §6 "Goal durability (DB-backed)"). Also the `SubagentResultTombstoneStore` trait + DB-backed impl (`DbBackedSubagentResultTombstoneStore`) keyed by child `TurnRunId` (README §6, §7.5). | `subagent_runtime.rs` |
 | **P2.D** | `SubagentCompletionObserver` implementing `TurnEventSink`, constructed from `(coordinator, turn_state_store, thread_service, goal_store, tombstone_store, autonomous_continuation_budget, safety_layer)`. The observer (i) emits `AutonomousContinuationStopped` via the existing typed source-log event surface when the budget halts a tree, (ii) writes a `SubagentResultTombstone` via the tombstone store when a child completes terminal mid-cancel. | `subagent_runtime.rs` |
 | **P2.D** | `AutonomousContinuationBudget` type (per-tree wake-turn quota + per-rolling-window rate-limit). Constructed in `subagent_runtime.rs` from configuration; injected into the observer (README §7.4, §8). | `subagent_runtime.rs` |
 
@@ -444,7 +444,9 @@ pub struct SubagentRuntimeParts {
     /// product-live readiness check rejects it.
     pub goal_store_backend: SubagentGoalStoreBackend,
 
-    /// Built-in static flavor table (`general`, `researcher`).
+    /// Built-in static flavor table (v1 proposal: `general`, `researcher` —
+    /// historical naming, shipped as `General`/`Explorer`/`Coder`/`Planner`,
+    /// `thread-harness-design.md` §10 is canonical).
     pub flavor_table: Arc<SubagentFlavorTable>,
 
     /// Caps enforced before `submit_turn` (README §8.2).
@@ -641,7 +643,9 @@ The model-supplied input (resolved through `CapabilityInputRef` →
 ```rust
 #[derive(Debug, Clone, Deserialize)]
 pub struct SpawnSubagentInput {
-    /// Flavor selector — `general` | `researcher`. Resolved against the static
+    /// Flavor selector — v1 proposal: `general` | `researcher` (historical
+    /// naming; shipped set is `general`/`explorer`/`coder`/`planner`, see
+    /// `thread-harness-design.md` §10). Resolved against the static
     /// SubagentFlavorTable; an unknown value is a `Denied` outcome.
     pub agent_type: String,
     /// The child's task. Becomes the child's first USER message under

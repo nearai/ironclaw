@@ -138,7 +138,10 @@ pub struct TurnRunRecord {
 ```rust
 // ironclaw_reborn/src/subagent/flavor.rs  (P1.C)
 pub struct SubagentFlavor {
-    pub flavor_id: SubagentFlavorId,         // "general" | "researcher"
+    pub flavor_id: SubagentFlavorId,         // v1 proposal: "general" | "researcher" —
+                                              // historical naming, shipped as General |
+                                              // Explorer | Coder | Planner (thread-
+                                              // harness-design.md §10 is canonical)
     pub direction_id: DirectionId,           // selects the .md
     pub tool_allowlist: BTreeSet<CapabilityId>,
     pub model_profile_id: ModelProfileId,
