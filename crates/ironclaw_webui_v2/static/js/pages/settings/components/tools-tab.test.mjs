@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import vm from "node:vm";
 
-import { sourceForTest } from "../../../test-utils/source-for-test.mjs";
+import { runVmModuleForTest } from "../../../test-support/vm-module-harness.test.mjs";
 
 function html(strings, ...values) {
   return { strings: Array.from(strings), values };
@@ -88,7 +87,6 @@ function renderToolsModule({ tools = [], translations = {}, toolError = null } =
     Badge: "Badge",
     Card: "Card",
     Icon: "Icon",
-    globalThis: {},
     html,
     matchesSearch: (query, values) =>
       !query || values.some((value) => String(value || "").includes(query)),
@@ -101,16 +99,13 @@ function renderToolsModule({ tools = [], translations = {}, toolError = null } =
       error: toolError,
     }),
   };
-  vm.runInNewContext(
-    sourceForTest(import.meta.url, "./tools-tab.js", [
-      "ToolsTab",
-      "AutoApproveCard",
-      "Switch",
-      "ToolRow",
-    ]),
-    context
+  const exports = runVmModuleForTest(
+    "./tools-tab.js",
+    ["ToolsTab", "AutoApproveCard", "Switch", "ToolRow"],
+    context,
+    import.meta.url
   );
-  return { exports: context.globalThis.__testExports, saved };
+  return { exports, saved };
 }
 
 test("Tools tab renders global auto-approve control and saves the operator key", () => {

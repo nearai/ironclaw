@@ -281,6 +281,9 @@ ironclaw_extensions = { path = "crates/ironclaw_extensions", version = "0.1.0" }
 ironclaw_filesystem = { path = "crates/ironclaw_filesystem", version = "0.1.0" }
 ironclaw_mcp = { path = "crates/ironclaw_mcp", version = "0.1.0" }
 ironclaw_first_party_extensions = { path = "crates/ironclaw_first_party_extensions", version = "0.1.0" }
+# W6-COLD-SPOTS: `CommunicationPreferenceRecord`/`CommunicationPreferenceKey`
+# for the outbound-store-durability reopen test.
+ironclaw_outbound = { path = "crates/ironclaw_outbound", version = "0.1.0" }
 # Recording hook doubles + `HookDispatcherBuilderFactory` builders for the
 # C-HOOKS / E-HOOK-INFRA int-tier coverage (tests/integration/support/hooks.rs).
 ironclaw_hooks = { path = "crates/ironclaw_hooks", version = "0.1.0" }
@@ -296,15 +299,28 @@ ironclaw_reborn = { path = "crates/ironclaw_reborn", version = "0.1.0", features
 # int-tier coverage lane (identity_resolution_smoke / webui_v2_router_smoke);
 # feature unification compiles them into every int-tier build, behaviorally
 # inert for suites that never call them.
-ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support", "libsql", "webui-v2-beta"] }
+# W5-SLACK-PAIR: `slack-v2-host-beta` grows the lcov denominator by ~42k lines
+# of feature-gated slack_*.rs modules (previously invisible, not 0%) and
+# unlocks composing them in int-tier tests. Feature unification recompiles
+# all 17 gated modules into every int-tier test binary — real, one-time
+# build-time cost for the lane, behaviorally inert for suites that never
+# reference Slack types.
+ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support", "libsql", "webui-v2-beta", "slack-v2-host-beta"] }
 # Direct dev-dep: composition deliberately does NOT re-export the bare
 # `webui_v2_router`/`WebUiV2State` (facade-only rule), and the router smoke
 # drives the bare router, not the `webui_v2_app` wrapper.
 ironclaw_webui_v2 = { path = "crates/ironclaw_webui_v2", version = "0.1.0", features = ["webui-v2-beta"] }
+# Direct dev-dep for the same reason as ironclaw_webui_v2 above: composition's
+# facade-only rule means it re-exports no SLACK_V2_ADAPTER_ID/SLACK_USER_ACTOR_KIND-style
+# constants; Slack pairing/actor-resolution int-tier tests need them directly.
+ironclaw_slack_v2_adapter = { path = "crates/ironclaw_slack_v2_adapter", version = "0.1.0" }
 ironclaw_reborn_config = { path = "crates/ironclaw_reborn_config", version = "0.1.0" }
 ironclaw_reborn_openai_compat = { path = "crates/ironclaw_reborn_openai_compat", version = "0.1.0", features = ["openai-compat-beta"] }
 ironclaw_run_state = { path = "crates/ironclaw_run_state", version = "0.1.0" }
 ironclaw_threads = { path = "crates/ironclaw_threads", version = "0.1.0" }
+# `InMemoryDurableEventLog` for the W5-WEBUI-API-1 SSE scenario's test-local
+# `ProjectionStream` wiring (`build_webui_event_stream_for_test`).
+ironclaw_events = { path = "crates/ironclaw_events", version = "0.1.0" }
 # `test-support` unlocks `TrustedTriggerSubmitRequest::new_for_test` (E-TRIGGERED-SUBMIT
 # harness seam) — cfg(test) does not propagate from an integration-test binary into its deps.
 ironclaw_triggers = { path = "crates/ironclaw_triggers", version = "0.1.0", features = ["test-support"] }
@@ -314,6 +330,9 @@ ironclaw_triggers = { path = "crates/ironclaw_triggers", version = "0.1.0", feat
 ironclaw_conversations = { path = "crates/ironclaw_conversations", version = "0.1.0" }
 ironclaw_trust = { path = "crates/ironclaw_trust", version = "0.1.0" }
 ironclaw_wasm = { path = "crates/ironclaw_wasm", version = "0.1.0" }
+# `InMemoryTriggeredRunDeliveryStore` for the triggered-delivery outcome-seam
+# int-tier proof (asserting a real `TriggeredRunDeliveryDriver`'s recorded
+# outcome via the same public store the composition factory accepts).
 # Same idea for embeddings: `MockEmbeddings` is only reachable in dev builds.
 ironclaw_embeddings = { path = "crates/ironclaw_embeddings", version = "0.1.0", features = ["testing"] }
 # Named `#[case]` parametrization for the storage-backend matrix tests (slice 3).
@@ -403,6 +422,10 @@ path = "tests/integration/oauth_refresh.rs"
 required-features = ["libsql"]
 
 [[test]]
+name = "reborn_integration_triggered_delivery_outcome"
+path = "tests/integration/triggered_delivery_outcome.rs"
+
+[[test]]
 name = "reborn_integration_attach"
 path = "tests/integration/attach.rs"
 
@@ -435,6 +458,10 @@ name = "reborn_integration_durable"
 path = "tests/integration/durable.rs"
 
 [[test]]
+name = "reborn_integration_extension_visibility"
+path = "tests/integration/extension_visibility.rs"
+
+[[test]]
 name = "reborn_integration_golden_payload"
 path = "tests/integration/golden_payload.rs"
 
@@ -451,8 +478,16 @@ name = "reborn_integration_http_matcher"
 path = "tests/integration/http_matcher.rs"
 
 [[test]]
+name = "reborn_integration_idempotent_replay"
+path = "tests/integration/idempotent_replay.rs"
+
+[[test]]
 name = "reborn_integration_identity_resolution_smoke"
 path = "tests/integration/identity_resolution_smoke.rs"
+
+[[test]]
+name = "reborn_integration_lease_wedge"
+path = "tests/integration/lease_wedge.rs"
 
 [[test]]
 name = "reborn_integration_mcp"
@@ -461,6 +496,10 @@ path = "tests/integration/mcp.rs"
 [[test]]
 name = "reborn_integration_oauth_connect"
 path = "tests/integration/oauth_connect.rs"
+
+[[test]]
+name = "reborn_integration_outbound_store_durability"
+path = "tests/integration/outbound_store_durability.rs"
 
 [[test]]
 name = "reborn_integration_outbound_target"
@@ -479,6 +518,14 @@ name = "reborn_integration_project_create"
 path = "tests/integration/project_create.rs"
 
 [[test]]
+name = "reborn_integration_real_egress_pipeline"
+path = "tests/integration/real_egress_pipeline.rs"
+
+[[test]]
+name = "reborn_integration_reopen_resume_through_gate"
+path = "tests/integration/reopen_resume_through_gate.rs"
+
+[[test]]
 name = "reborn_integration_safety"
 path = "tests/integration/safety.rs"
 
@@ -493,6 +540,17 @@ path = "tests/integration/secrets.rs"
 [[test]]
 name = "reborn_integration_skill_activate"
 path = "tests/integration/skill_activate.rs"
+
+[[test]]
+name = "reborn_integration_slack_pairing_actor_resolution"
+path = "tests/integration/slack_pairing_actor_resolution.rs"
+
+[[test]]
+name = "reborn_integration_slack_pairing_redeem"
+path = "tests/integration/slack_pairing_redeem.rs"
+# Drives the real durable backend (`LibSqlRootFilesystem`) — the store's
+# consume path needs versioned CAS, which plain LocalFilesystem lacks.
+required-features = ["libsql"]
 
 [[test]]
 name = "reborn_integration_tool_call"
@@ -517,6 +575,10 @@ path = "tests/integration/triggered_submit.rs"
 [[test]]
 name = "reborn_integration_web_access"
 path = "tests/integration/web_access.rs"
+
+[[test]]
+name = "reborn_integration_webui_v2_product_api"
+path = "tests/integration/webui_v2_product_api.rs"
 
 [[test]]
 name = "reborn_integration_webui_v2_router_smoke"

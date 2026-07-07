@@ -1,33 +1,14 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
-import vm from "node:vm";
 
 import { groupProvidersByStatus } from "../lib/llm-providers.js";
+import { runVmModuleForTest } from "../../../test-support/vm-module-harness.test.mjs";
 
 const PROVIDER_GROUP_LABELS = [
   "llm.groupActive",
   "llm.groupReady",
   "llm.groupSetup",
 ];
-
-function sourceForTest(path, exportNames) {
-  const source = readFileSync(new URL(path, import.meta.url), "utf8");
-  const lines = [];
-  let skippingImport = false;
-  for (const line of source.split("\n")) {
-    if (!skippingImport && line.startsWith("import ")) {
-      skippingImport = !line.trimEnd().endsWith(";");
-      continue;
-    }
-    if (skippingImport) {
-      skippingImport = !line.trimEnd().endsWith(";");
-      continue;
-    }
-    lines.push(line.replace(/^export function /, "function "));
-  }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { ${exportNames.join(", ")} };`;
-}
 
 function html(strings, ...values) {
   return { strings: Array.from(strings), values };
@@ -168,7 +149,6 @@ function renderProviderManagement({ providers, activeProviderId = "nearai", sear
     ProviderDialog: "ProviderDialog",
     ProviderLoginStatus: "ProviderLoginStatus",
     SettingsSearchEmpty: "SettingsSearchEmpty",
-    globalThis: {},
     groupProvidersByStatus,
     html,
     useProviderManagementActions: useProviderManagementActionsStub({
@@ -185,11 +165,13 @@ function renderProviderManagement({ providers, activeProviderId = "nearai", sear
     useT: () => (key) => key,
   };
 
-  vm.runInNewContext(
-    sourceForTest("./provider-management.js", ["ProviderManagement"]),
-    context
+  const exports = runVmModuleForTest(
+    "./provider-management.js",
+    ["ProviderManagement"],
+    context,
+    import.meta.url
   );
-  const rendered = context.globalThis.__testExports.ProviderManagement({
+  const rendered = exports.ProviderManagement({
     settings: {},
     gatewayStatus: {},
     searchQuery,
@@ -201,15 +183,16 @@ function renderProviderManagement({ providers, activeProviderId = "nearai", sear
 }
 
 function evalIsLocalDevOrigin({ hostname }) {
-  const context = { globalThis: {} };
+  const context = {};
   if (hostname !== undefined) {
     context.window = { location: { hostname } };
   }
-  vm.runInNewContext(
-    sourceForTest("../hooks/useProviderLogin.js", ["isLocalDevOrigin"]),
-    context
-  );
-  return context.globalThis.__testExports.isLocalDevOrigin();
+  return runVmModuleForTest(
+    "../hooks/useProviderLogin.js",
+    ["isLocalDevOrigin"],
+    context,
+    import.meta.url
+  ).isLocalDevOrigin();
 }
 
 function groupLabels(rendered) {
@@ -276,7 +259,6 @@ function createProviderCardHarness() {
     Icon: "Icon",
     React: createReactStateStub(state),
     adapterLabel: (adapter) => adapter,
-    globalThis: {},
     html,
     isProviderConfigured: (provider) => provider.configured !== false,
     providerAcceptsApiKey: (provider) => provider.accepts_api_key !== false,
@@ -286,15 +268,17 @@ function createProviderCardHarness() {
     useT: () => (key) => key,
   };
 
-  vm.runInNewContext(
-    sourceForTest("./provider-card.js", ["ProviderCard"]),
-    context
+  const exports = runVmModuleForTest(
+    "./provider-card.js",
+    ["ProviderCard"],
+    context,
+    import.meta.url
   );
 
   return {
     state,
     render: (props) =>
-      context.globalThis.__testExports.ProviderCard({
+      exports.ProviderCard({
         activeProviderId: "nearai",
         selectedModel: "active-model",
         builtinOverrides: {},
@@ -327,20 +311,21 @@ function createNearAiSetupMenuHarness() {
         if (state.listeners?.[type] === handler) delete state.listeners[type];
       },
     },
-    globalThis: {},
     html,
   };
 
-  vm.runInNewContext(
-    sourceForTest("../../onboarding/onboarding-page.js", ["NearAiSetupMenu"]),
-    context
+  const exports = runVmModuleForTest(
+    "../../onboarding/onboarding-page.js",
+    ["NearAiSetupMenu"],
+    context,
+    import.meta.url
   );
 
   return {
     calls,
     state,
     render: (props = {}) =>
-      context.globalThis.__testExports.NearAiSetupMenu({
+      exports.NearAiSetupMenu({
         provider: builtinProvider("nearai", { adapter: "nearai" }),
         isBusy: false,
         login: {
@@ -709,10 +694,11 @@ function runProviderLogin({ hostname, activeProviderId = null, popupClosed = fal
       crypto: { randomUUID: () => "uuid" },
     },
   };
-  context.globalThis = context;
-  vm.runInNewContext(
-    sourceForTest("../hooks/useProviderLogin.js", ["useProviderLogin"]),
-    context
+  const exports = runVmModuleForTest(
+    "../hooks/useProviderLogin.js",
+    ["useProviderLogin"],
+    context,
+    import.meta.url
   );
   // useState order in the hook: nearaiBusy(0), nearaiError(1), codexBusy(2),
   // codexError(3), codexCode(4).
@@ -721,7 +707,7 @@ function runProviderLogin({ hostname, activeProviderId = null, popupClosed = fal
   const CODEX_BUSY_SLOT = 2;
   const CODEX_ERROR_SLOT = 3;
   return {
-    hook: context.globalThis.__testExports.useProviderLogin({}),
+    hook: exports.useProviderLogin({}),
     httpCalls,
     openedUrls,
     popups,

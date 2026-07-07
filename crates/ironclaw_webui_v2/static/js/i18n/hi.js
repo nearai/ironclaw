@@ -368,18 +368,6 @@ registerPack("hi", {
   "llm.missingBaseUrl": "गुम आधार यूआरएल",
   "llm.addApiKey": "एपीआई कुंजी जोड़ें",
 
-  // Settings — inference groups
-  "settings.group.embeddings": "एंबेडिंग्स",
-  "settings.group.sampling": "सैंपलिंग",
-  "settings.field.embeddingsEnabled": "Embeddings सक्षम करें",
-  "settings.field.embeddingsEnabledDesc": "वर्कस्पेस मेमोरी पर semantic search",
-  "settings.field.embeddingsProvider": "प्रदाता",
-  "settings.field.embeddingsProviderDesc": "Embedding मॉडल provider",
-  "settings.field.embeddingsModel": "मॉडल",
-  "settings.field.embeddingsModelDesc": "Embedding मॉडल identifier",
-  "settings.field.temperature": "तापमान",
-  "settings.field.temperatureDesc": "डिफ़ॉल्ट sampling temperature (0.0–2.0)",
-
   // Settings — agent groups
   "settings.group.core": "कोर",
   "settings.group.heartbeat": "दिल की धड़कन",

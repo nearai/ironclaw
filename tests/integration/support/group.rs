@@ -96,7 +96,8 @@ use ironclaw_turns::run_profile::{
 };
 use ironclaw_turns::{
     FilesystemTurnStateStore, InMemoryCheckpointStateStore, InMemoryTurnEventSink,
-    LoopCheckpointStore, TurnCoordinator, TurnEventSink, TurnScope, TurnStateStore,
+    InMemoryTurnStateStoreLimits, LoopCheckpointStore, TurnCoordinator, TurnEventSink, TurnScope,
+    TurnStateStore,
 };
 
 use super::builder::{
@@ -190,6 +191,11 @@ pub(crate) struct GroupSharedStorage {
     /// `FilesystemTurnStateStore` (isolation is by `run_id`, not by path —
     /// see `turns_scope_path`, which has no `thread_id` component).
     pub(crate) turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>>,
+    /// S2 seam: the SAME canonical binding `turn_store`'s `/turns` mount is
+    /// scoped to (`scoped_turns_fs_composite`). Retained so a reopen can
+    /// rebuild the identical scoped path independently, instead of
+    /// re-deriving it from a second binding resolution.
+    pub(crate) canonical_binding: ResolvedBinding,
     /// The group's single capability recorder, shared by `Arc` with the real
     /// capability factory wired into the one planned runtime. Every thread
     /// clones this (cheap — `HarnessCapabilityRecorder` is `Clone` over
@@ -226,6 +232,10 @@ pub(crate) struct GroupSharedStorage {
     /// consumes the struct by value) so a parity test can read back the
     /// harness's REAL wiring shape, not a re-derived approximation.
     pub(crate) planned_runtime_parts_shape: DefaultPlannedRuntimePartsShape,
+    /// See `RebornIntegrationGroupBuilder::with_real_gate_dispatch_services`.
+    /// Read by `RebornThreadBuilder::build()` to decide whether to wire the
+    /// real approval/auth interaction services into the thread's workflow.
+    pub(crate) real_gate_dispatch_services: bool,
 }
 
 impl GroupSharedStorage {
@@ -341,6 +351,9 @@ impl RebornIntegrationGroup {
             budget: false,
             communication_context_provider: None,
             hook_dispatcher_builder_factory: None,
+            runner_lease_ttl_override: None,
+            lease_recovery_interval_override: None,
+            real_gate_dispatch_services: false,
         }
     }
 
@@ -529,6 +542,20 @@ pub struct RebornIntegrationGroupBuilder {
     /// lifecycle points on a coordinator-path turn. Default `None` (hook
     /// framework dormant, matching today's behavior).
     hook_dispatcher_builder_factory: Option<HookDispatcherBuilderFactory>,
+    /// Lease-wedge coverage: overrides the turn-state store's
+    /// `runner_lease_ttl` (default 90s) when set. Builder method lives in
+    /// `group_options.rs`. Default `None` (today's behavior, byte-identical).
+    runner_lease_ttl_override: Option<chrono::Duration>,
+    /// Lease-wedge coverage: overrides the scheduler's
+    /// `lease_recovery_interval` (default 10s) when set. Builder method lives
+    /// in `group_options.rs`. Default `None` (today's behavior, byte-identical).
+    lease_recovery_interval_override: Option<Duration>,
+    /// When `true`, wire the REAL approval/auth interaction services into
+    /// every thread's `DefaultProductWorkflow` (see
+    /// `with_real_gate_dispatch_services`). Default `false` (every workflow
+    /// keeps the `Rejecting*InteractionService` stubs, matching today's
+    /// behavior byte-for-byte).
+    real_gate_dispatch_services: bool,
 }
 
 impl RebornIntegrationGroupBuilder {
@@ -605,11 +632,23 @@ impl RebornIntegrationGroupBuilder {
     ) -> HarnessResult<RebornIntegrationGroup> {
         let scope_gateway = Arc::new(ScopeRegistryGateway::new());
 
-        let turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>> =
-            Arc::new(FilesystemTurnStateStore::new(scoped_turns_fs_composite(
+        // Issue #5476 lease-wedge coverage: `.with_limits` is the store's own
+        // public builder method (`ironclaw_turns::filesystem_store`); this only
+        // calls it a second time with a shortened `runner_lease_ttl` when a test
+        // opts in via `with_runner_lease_ttl_for_test`. `None` (default) leaves
+        // `InMemoryTurnStateStoreLimits::default()` untouched, byte-identical to
+        // today's behavior.
+        let mut turn_state_limits = InMemoryTurnStateStoreLimits::default();
+        if let Some(ttl) = self.runner_lease_ttl_override {
+            turn_state_limits.runner_lease_ttl = ttl;
+        }
+        let turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>> = Arc::new(
+            FilesystemTurnStateStore::new(scoped_turns_fs_composite(
                 Arc::clone(&base.composite),
                 &base.canonical_binding,
-            )?));
+            )?)
+            .with_limits(turn_state_limits),
+        );
         let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
         let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
 
@@ -771,6 +810,9 @@ impl RebornIntegrationGroupBuilder {
             loop_exit_evidence,
             config: DefaultPlannedRuntimeConfig {
                 poll_interval: Duration::from_millis(10),
+                lease_recovery_interval: self
+                    .lease_recovery_interval_override
+                    .unwrap_or(DefaultPlannedRuntimeConfig::default().lease_recovery_interval),
                 // Enabler (b): explicit builder opt-in wins; otherwise resolve
                 // via `from_env()` exactly like `DefaultPlannedRuntimeConfig`'s
                 // own `Default` impl — never mutate the process env from a
@@ -837,6 +879,7 @@ impl RebornIntegrationGroupBuilder {
                 scheduler_handle: composition.scheduler_handle,
                 scope_gateway,
                 turn_store,
+                canonical_binding: base.canonical_binding,
                 capability_recorder,
                 user_profile_source,
                 turn_event_sink: self.turn_event_sink,
@@ -844,6 +887,7 @@ impl RebornIntegrationGroupBuilder {
                 budget_governor,
                 budget_account,
                 planned_runtime_parts_shape,
+                real_gate_dispatch_services: self.real_gate_dispatch_services,
             }),
         })
     }
@@ -1115,7 +1159,47 @@ impl<'g> RebornThreadBuilder<'g> {
         let inbound: Arc<dyn InboundTurnService> = Arc::new(inbound_service);
         let ledger: Arc<dyn IdempotencyLedger> =
             Arc::new(shared.product_harness.idempotency_ledger());
-        let workflow = DefaultProductWorkflow::new(inbound, ledger, binding_service);
+        let mut workflow = DefaultProductWorkflow::new(inbound, ledger, binding_service);
+
+        // Real gate-dispatch seam: wire the harness's own local-dev interaction
+        // services, but over the GROUP's shared `turn_store` (not the harness's
+        // own disjoint `local_runtime.turn_state`) — otherwise their turn-run
+        // locator can never see this group's real runs. Only when the builder
+        // opted in (`with_real_gate_dispatch_services`); every other group's
+        // workflow keeps the default Rejecting stubs.
+        if shared.real_gate_dispatch_services {
+            let harness = match &shared.capability {
+                GroupCapability::HostRuntime(arc) => arc,
+                GroupCapability::Recording => {
+                    return Err(
+                        "with_real_gate_dispatch_services requires a HostRuntime capability backend"
+                            .into(),
+                    );
+                }
+            };
+            let reborn_services = harness.reborn_services_for_test().ok_or(
+                "with_real_gate_dispatch_services requires a harness built via new_with_options",
+            )?;
+            let approval_interaction_service = reborn_services
+                .local_dev_approval_interaction_service_with_turn_state_for_test(
+                    Arc::clone(&shared.coordinator),
+                    Arc::clone(&shared.turn_store),
+                )?
+                .ok_or(
+                    "local-dev approval interaction service unavailable (harness has no local runtime)",
+                )?;
+            let auth_interaction_service = reborn_services
+                .local_dev_auth_interaction_service_with_turn_state_for_test(
+                    Arc::clone(&shared.coordinator),
+                    Arc::clone(&shared.turn_store),
+                )
+                .ok_or(
+                    "local-dev auth interaction service unavailable (harness has no local runtime)",
+                )?;
+            workflow = workflow
+                .with_approval_interaction_service(approval_interaction_service)
+                .with_auth_interaction_service(auth_interaction_service);
+        }
 
         // Register the gateway only now that every fallible (`?`) step above has
         // succeeded — registering earlier risks leaving the scope registered

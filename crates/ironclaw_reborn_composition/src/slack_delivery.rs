@@ -2997,9 +2997,9 @@ mod tests {
     use ironclaw_triggers::{TriggerFire, TriggerFireIdentity, TriggerId};
     use ironclaw_turns::{
         EventCursor, GateRef, GetRunStateRequest, ReplyTargetBindingRef, ResumeTurnRequest,
-        ResumeTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef, SubmitTurnRequest,
-        SubmitTurnResponse, TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope,
-        TurnStatus,
+        ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, RunProfileId, RunProfileVersion,
+        SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator, TurnError,
+        TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
     };
 
     // --- Minimal inline fakes ------------------------------------------------
@@ -3116,6 +3116,15 @@ mod tests {
         ) -> Result<ResumeTurnResponse, TurnError> {
             Err(TurnError::Unavailable {
                 reason: "ScriptedTurnCoordinator does not support resume_turn".to_string(),
+            })
+        }
+
+        async fn retry_turn(
+            &self,
+            _request: ironclaw_turns::RetryTurnRequest,
+        ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+            Err(TurnError::Unavailable {
+                reason: "ScriptedTurnCoordinator does not support retry_turn".to_string(),
             })
         }
 
@@ -3941,6 +3950,65 @@ mod tests {
                 .iter()
                 .any(|c| c.path == "/api/chat.postMessage"),
             "no chat.postMessage egress expected for timed-out run"
+        );
+    }
+
+    /// `RecoveryRequired` is terminal (`TurnStatus::is_terminal`) but has no explicit
+    /// arm in `triggered_notification_for_state`, so it falls through the catch-all
+    /// `_ => Ok(None)` (#5713: intentionally kept, not a bug). The driver must record
+    /// `Skipped` and never build or send a Slack message.
+    #[tokio::test]
+    async fn driver_terminal_recovery_required_run_records_skipped_without_egress() {
+        let install = "test-install";
+        let scope = personal_turn_scope();
+        let run_id = TurnRunId::new();
+
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::RecoveryRequired,
+        ));
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+
+        let delivery_store = Arc::new(InMemoryTriggeredRunDeliveryStore::default());
+        let route_store = Arc::new(InMemoryDeliveredGateRouteStore::default());
+        let services = make_services(
+            coordinator,
+            thread_service,
+            egress.clone(),
+            outbound,
+            install,
+        );
+        let settings = SlackFinalReplyDeliverySettings {
+            poll_interval: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::from_secs(5),
+            max_concurrent_deliveries: NonZeroUsize::new(1).unwrap(),
+            max_pending_deliveries: NonZeroUsize::new(8).unwrap(),
+        };
+        let driver = TriggeredRunDeliveryDriver::with_settings(
+            services,
+            settings,
+            delivery_store.clone(),
+            route_store,
+            scope.agent_id.clone().expect("test scope has agent"),
+        );
+
+        let fire = minimal_trigger_fire(None);
+        driver.on_trigger_submitted(fire, run_id, scope).await;
+
+        let record = wait_for_delivery_record(&delivery_store, run_id).await;
+        assert_eq!(
+            record.outcome,
+            TriggeredRunDeliveryOutcomeKind::Skipped,
+            "terminal RecoveryRequired run must be recorded as Skipped, not Failed"
+        );
+        assert!(
+            !egress
+                .calls()
+                .iter()
+                .any(|c| c.path == "/api/chat.postMessage"),
+            "no chat.postMessage egress expected for a skipped delivery"
         );
     }
 
@@ -7233,6 +7301,15 @@ mod tests {
             })
         }
 
+        async fn retry_turn(
+            &self,
+            _request: RetryTurnRequest,
+        ) -> Result<RetryTurnResponse, TurnError> {
+            Err(TurnError::Unavailable {
+                reason: "ErroringTurnCoordinator".to_string(),
+            })
+        }
+
         async fn get_run_state(
             &self,
             _request: GetRunStateRequest,
@@ -7579,6 +7656,13 @@ mod tests {
                 req: ResumeTurnRequest,
             ) -> Result<ResumeTurnResponse, TurnError> {
                 self.inner.resume_turn(req).await
+            }
+
+            async fn retry_turn(
+                &self,
+                req: RetryTurnRequest,
+            ) -> Result<RetryTurnResponse, TurnError> {
+                self.inner.retry_turn(req).await
             }
             async fn get_run_state(
                 &self,

@@ -264,6 +264,13 @@ const SYNTHETIC_CAPABILITY_SKIP_LIST: &[(&str, &str)] = &[
          ironclaw_reborn_composition::test_support), not part of builtin_first_party_package(); \
          skill_management_tools_profile()'s ids in the same file ARE checked below",
     ),
+    (
+        "extension",
+        "extension_visibility_probe_tools_profile()'s visprobe.* ids \
+         (harness/profiles/extension.rs) belong to a synthetic fixture package published \
+         only via test-support publish, never part of any production manifest; \
+         extension_lifecycle_tools_profile()'s ids in the same file ARE checked below",
+    ),
 ];
 
 /// The production capability surface: `builtin_first_party_package()`'s

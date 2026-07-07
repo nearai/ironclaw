@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import vm from "node:vm";
 
-import { sourceForTest } from "../../../test-utils/source-for-test.mjs";
+import { runVmModuleForTest } from "../../../test-support/vm-module-harness.test.mjs";
 
 function loadUseTools({ mutationError = null } = {}) {
   const calls = [];
@@ -30,11 +29,11 @@ function loadUseTools({ mutationError = null } = {}) {
     }),
   };
 
-  vm.runInNewContext(sourceForTest(import.meta.url, "./useTools.js", ["useTools"]), context);
+  const exports = runVmModuleForTest("./useTools.js", ["useTools"], context, import.meta.url);
 
   return {
     calls,
-    useTools: context.globalThis.__testExports.useTools,
+    useTools: exports.useTools,
   };
 }
 
