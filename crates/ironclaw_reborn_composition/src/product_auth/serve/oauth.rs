@@ -2,11 +2,11 @@
 // arch-exempt: large_file, product-auth OAuth start/callback serve surface; Slack-OAuth audit MJ4 will unify Slack personal-OAuth start here and shrink this file, plan #5604
 
 use super::*;
+#[cfg(feature = "slack-v2-host-beta")]
+use crate::available_extensions::{SLACK_EXTENSION_ID, slack_personal_oauth_setup_scopes};
 use crate::product_auth::api::auth::OAuthProviderIdentityCheck;
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::product_auth::api::auth::OAuthProviderIdentityCheckFuture;
-#[cfg(feature = "slack-v2-host-beta")]
-use crate::available_extensions::{SLACK_EXTENSION_ID, slack_personal_oauth_setup_scopes};
 use crate::product_auth::oauth::oauth_dcr::DcrOAuthCallbackState;
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::slack_personal_binding::{
@@ -818,7 +818,8 @@ async fn bind_slack_personal_oauth_identity_for_callback(
     state: &ProductAuthRouteState,
     callback_scope: &AuthProductScope,
     provider_identity: Option<&OAuthProviderIdentity>,
-) -> Result<crate::product_auth::api::auth::OAuthProviderIdentityBindingRollback, AuthProductError> {
+) -> Result<crate::product_auth::api::auth::OAuthProviderIdentityBindingRollback, AuthProductError>
+{
     // Fail closed: the Slack callback descriptor is only mounted when Slack
     // personal OAuth is wired, so a missing binding config here is a
     // composition bug. Silently skipping would store a live xoxp token with no
