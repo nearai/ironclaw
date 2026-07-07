@@ -53,7 +53,7 @@ export function AutomationDetailPanel({
     setIsEditingName(false);
     setDraftName(automation?.display_name || "");
     setNameError("");
-  }, [automation?.automation_id, automation?.display_name]);
+  }, [automation?.automation_id]);
 
   if (!automation) {
     return html`

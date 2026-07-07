@@ -262,3 +262,27 @@ test("AutomationDetailPanel keeps the editor open and reports blank names", () =
   assert.deepEqual(calls, []);
   assert.ok(collectScalars(rendered).includes("Enter a name."));
 });
+
+test("AutomationDetailPanel preserves rename drafts across same automation refresh", () => {
+  const harness = createHarness();
+
+  let rendered = harness.render();
+  const editButton = componentProps(rendered, harness.Button).find(
+    (button) => button["aria-label"] === "Rename: Daily status",
+  );
+  editButton.onClick();
+
+  rendered = harness.render();
+  let [input] = componentProps(rendered, harness.Input);
+  input.onInput({ currentTarget: { value: "Draft in progress" } });
+
+  const refreshedAutomation = {
+    ...automation(),
+    display_name: "Server refreshed status",
+  };
+  rendered = harness.render({ automation: refreshedAutomation });
+  rendered = harness.render({ automation: refreshedAutomation });
+
+  [input] = componentProps(rendered, harness.Input);
+  assert.equal(input.value, "Draft in progress");
+});
