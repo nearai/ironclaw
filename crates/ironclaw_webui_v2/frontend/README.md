@@ -15,7 +15,7 @@ Run it when you want a local `../static/dist/` preview, or when upgrading a
 pinned vendored dependency:
 
 ```bash
-./build.sh              # re-vendor CDN assets + npm ci + esbuild bundle
+./build.sh              # re-vendor CDN assets + pnpm install + esbuild bundle
 ./build.sh --no-vendor  # just re-bundle (skip re-downloading vendored deps)
 ```
 
