@@ -753,12 +753,25 @@ impl RebornLocalExtensionManagementPort {
     /// Credential providers the extension declares, captured before removal (its
     /// manifest is gone afterward). Best-effort: on error returns empty so the
     /// removal still proceeds without cleanup.
-    async fn removed_extension_providers(&self, package_ref: &LifecyclePackageRef) -> Vec<String> {
+    async fn removed_extension_providers(
+        &self,
+        package_ref: &LifecyclePackageRef,
+    ) -> Vec<AuthProviderId> {
         match self.activation_credential_requirements(package_ref).await {
             Ok(requirements) => {
-                let mut providers: Vec<String> = Vec::new();
+                let mut providers: Vec<AuthProviderId> = Vec::new();
                 for requirement in requirements {
-                    let provider = requirement.provider.as_str().to_string();
+                    let provider = match AuthProviderId::new(requirement.provider.as_str()) {
+                        Ok(provider) => provider,
+                        Err(error) => {
+                            tracing::debug!(
+                                %error,
+                                provider = %requirement.provider,
+                                "runtime credential provider id invalid for credential cleanup"
+                            );
+                            continue;
+                        }
+                    };
                     if !providers.contains(&provider) {
                         providers.push(provider);
                     }
@@ -785,7 +798,7 @@ impl RebornLocalExtensionManagementPort {
         &self,
         scope: &ResourceScope,
         removed_extension_id: &str,
-        removed_providers: &[String],
+        removed_providers: &[AuthProviderId],
     ) {
         let Some(cleanup) = self.credential_cleanup.as_ref() else {
             return;
@@ -808,23 +821,16 @@ impl RebornLocalExtensionManagementPort {
                 // Shared with another installed extension; preserve the account.
                 continue;
             }
-            let auth_provider = match AuthProviderId::new(provider.as_str()) {
-                Ok(auth_provider) => auth_provider,
-                Err(error) => {
-                    tracing::debug!(%error, provider, "provider id invalid for credential cleanup");
-                    continue;
-                }
-            };
             let request = SecretCleanupRequest {
                 scope: AuthProductScope::credential_owner(scope, AuthSurface::Callback),
                 extension_id: extension_id.clone(),
-                provider: Some(auth_provider),
+                provider: Some(provider.clone()),
                 action: SecretCleanupAction::Uninstall,
             };
             if let Err(error) = cleanup.cleanup_for_lifecycle(request).await {
                 tracing::debug!(
                     %error,
-                    provider,
+                    %provider,
                     "extension removal credential cleanup failed; continuing"
                 );
             }
@@ -835,7 +841,7 @@ impl RebornLocalExtensionManagementPort {
     /// removal. Returns `None` when the set cannot be resolved so the caller
     /// fails safe and skips revocation rather than risk deleting a shared
     /// credential.
-    async fn providers_still_in_use(&self) -> Option<BTreeSet<String>> {
+    async fn providers_still_in_use(&self) -> Option<BTreeSet<AuthProviderId>> {
         let response = match self.list_installed().await {
             Ok(response) => response,
             Err(error) => {
@@ -858,7 +864,18 @@ impl RebornLocalExtensionManagementPort {
             {
                 Ok(requirements) => {
                     for requirement in requirements {
-                        providers.insert(requirement.provider.as_str().to_string());
+                        let provider = match AuthProviderId::new(requirement.provider.as_str()) {
+                            Ok(provider) => provider,
+                            Err(error) => {
+                                tracing::debug!(
+                                    %error,
+                                    provider = %requirement.provider,
+                                    "remaining extension provider id invalid for credential cleanup"
+                                );
+                                return None;
+                            }
+                        };
+                        providers.insert(provider);
                     }
                 }
                 Err(error) => {

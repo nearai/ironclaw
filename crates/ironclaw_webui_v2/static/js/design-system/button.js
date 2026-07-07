@@ -86,6 +86,18 @@ export function Button({
   const sizeClass  = SIZES[size] ?? SIZES.md;
   const fullClass  = fullWidth ? "w-full" : "";
   const isDisabled = disabled || loading;
+  const isAnchor = Tag === "a";
+  const disabledAnchorClass = isAnchor && isDisabled ? "cursor-not-allowed opacity-50" : "";
+  const elementProps =
+    isAnchor && isDisabled
+      ? {
+          ...rest,
+          onClick: (event) => {
+            event?.preventDefault?.();
+            event?.stopPropagation?.();
+          },
+        }
+      : rest;
 
   /* ── Primary: gradient + hover overlay ──────────────────────────── */
   if (variant === "primary") {
@@ -99,13 +111,16 @@ export function Button({
           BASE,
           sizeClass,
           fullClass,
+          disabledAnchorClass,
           "relative overflow-hidden text-white group",
           "hover:shadow-[0_24px_24px_-20px_rgba(76,167,230,0.55)]",
           className
         )}
         disabled=${isDisabled}
+        aria-disabled=${isAnchor && isDisabled ? true : undefined}
         aria-busy=${loading || undefined}
-        ...${rest}
+        tabIndex=${isAnchor && isDisabled ? -1 : undefined}
+        ...${elementProps}
       >
         <span
           aria-hidden="true"
@@ -125,10 +140,12 @@ export function Button({
 
   return html`
     <${Tag}
-      className=${cn(BASE, sizeClass, fullClass, variantClass, className)}
+      className=${cn(BASE, sizeClass, fullClass, disabledAnchorClass, variantClass, className)}
       disabled=${isDisabled}
+      aria-disabled=${isAnchor && isDisabled ? true : undefined}
       aria-busy=${loading || undefined}
-      ...${rest}
+      tabIndex=${isAnchor && isDisabled ? -1 : undefined}
+      ...${elementProps}
     >
       ${loading
         ? html`<span className="inline-flex items-center gap-2">

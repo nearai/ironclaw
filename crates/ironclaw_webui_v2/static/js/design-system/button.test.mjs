@@ -57,6 +57,10 @@ function propValue(node, prop) {
   return undefined;
 }
 
+function forwardedProps(node) {
+  return node.values.find((value) => value && typeof value === "object" && "onClick" in value);
+}
+
 for (const variant of ["primary", "secondary"]) {
   test(`Button loading (${variant}) renders a spinner, disables, and sets aria-busy`, () => {
     const { tree, spinnerMarker } = renderButton({
@@ -78,6 +82,39 @@ for (const variant of ["primary", "secondary"]) {
     assert.ok(!treeIncludesComponent(tree, spinnerMarker), "no spinner when idle");
     assert.equal(propValue(tree, "disabled"), false, "enabled when idle");
     assert.equal(propValue(tree, "aria-busy"), undefined, "no aria-busy when idle");
+  });
+
+  test(`Button loading anchor (${variant}) blocks clicks and marks itself disabled`, () => {
+    let clicked = false;
+    let prevented = false;
+    let stopped = false;
+    const { tree } = renderButton({
+      as: "a",
+      href: "https://example.com/auth",
+      variant,
+      loading: true,
+      onClick: () => {
+        clicked = true;
+      },
+      children: "Connect",
+    });
+
+    const props = forwardedProps(tree);
+    assert.ok(props, "anchor props are forwarded");
+    props.onClick({
+      preventDefault: () => {
+        prevented = true;
+      },
+      stopPropagation: () => {
+        stopped = true;
+      },
+    });
+
+    assert.equal(clicked, false, "disabled anchor must not invoke caller onClick");
+    assert.equal(prevented, true, "disabled anchor prevents navigation");
+    assert.equal(stopped, true, "disabled anchor stops bubbling");
+    assert.equal(propValue(tree, "aria-disabled"), true);
+    assert.equal(propValue(tree, "tabIndex"), -1);
   });
 }
 
