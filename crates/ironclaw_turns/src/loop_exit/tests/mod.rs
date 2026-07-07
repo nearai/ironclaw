@@ -458,6 +458,150 @@ fn iteration_limit_failure_maps_to_stable_sanitized_runner_failure_after_host_ve
 }
 
 #[test]
+fn loop_failed_legacy_payload_deserializes_and_empty_new_fields_serialize_to_legacy_shape() {
+    let legacy = json!({
+        "reason_kind": "iteration_limit",
+        "checkpoint_id": null,
+        "usage_summary_ref": null,
+        "diagnostic_ref": null,
+        "exit_id": "exit:legacy-failed"
+    });
+
+    let failed = serde_json::from_value::<LoopFailed>(legacy.clone()).unwrap();
+
+    assert_eq!(failed.reason_kind, LoopFailureKind::IterationLimit);
+    assert!(failed.explanation_message_refs.is_empty());
+    assert_eq!(failed.safe_summary, None);
+    assert_eq!(serde_json::to_value(&failed).unwrap(), legacy);
+}
+
+#[test]
+fn verified_failed_exit_carries_safe_summary() {
+    let final_checkpoint_id = TurnCheckpointId::new();
+    let explanation_ref = message_ref("msg:failure-explanation");
+    let safe_summary = SanitizedFailure::new("model_credits_exhausted").unwrap();
+    let decision = LoopExit::Failed(LoopFailed {
+        reason_kind: LoopFailureKind::ModelError,
+        checkpoint_id: Some(final_checkpoint_id),
+        usage_summary_ref: None,
+        diagnostic_ref: None,
+        exit_id: exit_id("exit:verified-failed"),
+        explanation_message_refs: vec![explanation_ref.clone()],
+        safe_summary: Some(safe_summary.clone()),
+    })
+    .validate(LoopExitValidationPolicy::default().with_host_verified_failure_evidence());
+
+    assert_eq!(decision.violation, None);
+    assert_eq!(
+        decision.mapping,
+        TurnRunnerOutcome::Failed {
+            failure: safe_summary,
+        }
+        .into()
+    );
+}
+
+#[test]
+fn verified_failed_exit_does_not_reuse_final_checkpoint_as_resume_checkpoint() {
+    let final_checkpoint_id = TurnCheckpointId::new();
+    let decision = LoopExit::Failed(LoopFailed {
+        reason_kind: LoopFailureKind::IterationLimit,
+        checkpoint_id: Some(final_checkpoint_id),
+        usage_summary_ref: None,
+        diagnostic_ref: None,
+        exit_id: exit_id("exit:final-only-failed"),
+        explanation_message_refs: Vec::new(),
+        safe_summary: None,
+    })
+    .validate(LoopExitValidationPolicy::default().with_host_verified_failure_evidence());
+
+    assert_eq!(decision.violation, None);
+    assert_eq!(
+        decision.mapping,
+        TurnRunnerOutcome::Failed {
+            failure: SanitizedFailure::new("iteration_limit").unwrap(),
+        }
+        .into()
+    );
+}
+
+#[test]
+fn unverified_failed_exit_drops_explanation_refs_and_keeps_existing_violation_behavior() {
+    let decision = LoopExit::Failed(LoopFailed {
+        reason_kind: LoopFailureKind::ModelError,
+        checkpoint_id: Some(TurnCheckpointId::new()),
+        usage_summary_ref: None,
+        diagnostic_ref: None,
+        exit_id: exit_id("exit:unverified-failed"),
+        explanation_message_refs: vec![message_ref("msg:unverified-explanation")],
+        safe_summary: Some(SanitizedFailure::new("model_credits_exhausted").unwrap()),
+    })
+    .validate(LoopExitValidationPolicy::default());
+
+    assert_eq!(
+        decision.violation.as_ref().map(LoopExitViolation::kind),
+        Some(LoopExitViolationKind::UnverifiedFailureEvidence)
+    );
+    assert_eq!(
+        decision.mapping,
+        TurnRunnerOutcome::Failed {
+            failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
+        }
+        .into()
+    );
+}
+
+#[test]
+fn strict_final_checkpoint_policy_trusts_failed_exit_only_after_verification() {
+    let checkpoint_id = TurnCheckpointId::new();
+    let exit = LoopExit::Failed(LoopFailed {
+        reason_kind: LoopFailureKind::IterationLimit,
+        checkpoint_id: Some(checkpoint_id),
+        usage_summary_ref: None,
+        diagnostic_ref: None,
+        exit_id: exit_id("exit:strict-failed-checkpoint"),
+        explanation_message_refs: Vec::new(),
+        safe_summary: None,
+    });
+
+    // Before the final checkpoint is host-verified the failed exit is a
+    // protocol violation.
+    let rejected = exit.clone().validate(LoopExitValidationPolicy {
+        require_final_checkpoint: true,
+        failure_evidence_verified: true,
+        ..LoopExitValidationPolicy::default()
+    });
+    assert_eq!(
+        rejected.violation.as_ref().map(LoopExitViolation::kind),
+        Some(LoopExitViolationKind::MissingFinalCheckpoint)
+    );
+    assert_eq!(
+        rejected.mapping,
+        TurnRunnerOutcome::Failed {
+            failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
+        }
+        .into()
+    );
+
+    // After verification, the trusted failed outcome surfaces the sanitized
+    // failure category.
+    let accepted = exit.validate(LoopExitValidationPolicy {
+        require_final_checkpoint: true,
+        final_checkpoint_verified: true,
+        failure_evidence_verified: true,
+        ..LoopExitValidationPolicy::default()
+    });
+    assert_eq!(accepted.violation, None);
+    assert_eq!(
+        accepted.mapping,
+        TurnRunnerOutcome::Failed {
+            failure: SanitizedFailure::new("iteration_limit").unwrap(),
+        }
+        .into()
+    );
+}
+
+#[test]
 fn failed_exit_requires_host_verified_failure_evidence_before_trusted_mapping() {
     let decision = LoopExit::failed(LoopFailureKind::DriverBug, exit_id("exit:driver-bug"))
         .validate(LoopExitValidationPolicy::default());
@@ -788,6 +932,11 @@ fn blocked_variants_map_to_correct_blocked_reason() {
 
 #[test]
 fn all_failure_kinds_produce_stable_sanitized_category_strings() {
+    // matrix: docs/plans/2026-07-03-loop-failure-matrix.md — this table must
+    // stay exhaustive over LoopFailureKind. `ContextBuildFailed` and
+    // `InterruptedUnexpectedly` currently have no production constructor
+    // (category-string lock only); the rest are exercised at their real
+    // origins by the executor failure matrix in `ironclaw_agent_loop`.
     let variants: &[(LoopFailureKind, &str)] = &[
         (LoopFailureKind::ModelError, "model_error"),
         (LoopFailureKind::ContextBuildFailed, "context_build_failed"),
@@ -799,6 +948,10 @@ fn all_failure_kinds_produce_stable_sanitized_category_strings() {
         (LoopFailureKind::InvalidModelOutput, "invalid_model_output"),
         (LoopFailureKind::CheckpointRejected, "checkpoint_rejected"),
         (
+            LoopFailureKind::CheckpointUnavailable,
+            "checkpoint_unavailable",
+        ),
+        (
             LoopFailureKind::TranscriptWriteFailed,
             "transcript_write_failed",
         ),
@@ -809,7 +962,38 @@ fn all_failure_kinds_produce_stable_sanitized_category_strings() {
         ),
         (LoopFailureKind::NoProgressDetected, "no_progress_detected"),
         (LoopFailureKind::PolicyDenied, "policy_denied"),
+        (
+            LoopFailureKind::CompactionUnavailable,
+            "compaction_unavailable",
+        ),
     ];
+
+    // Exhaustiveness guard: adding a LoopFailureKind variant breaks this match
+    // (same-crate, so #[non_exhaustive] does not apply). When it fires, add a
+    // table row above AND extend this match with the new variant's expected
+    // category, keeping both in lockstep.
+    let expected_by_guard = |kind: LoopFailureKind| match kind {
+        LoopFailureKind::ModelError => "model_error",
+        LoopFailureKind::ContextBuildFailed => "context_build_failed",
+        LoopFailureKind::CapabilityProtocolError => "capability_protocol_error",
+        LoopFailureKind::IterationLimit => "iteration_limit",
+        LoopFailureKind::InvalidModelOutput => "invalid_model_output",
+        LoopFailureKind::CheckpointRejected => "checkpoint_rejected",
+        LoopFailureKind::CheckpointUnavailable => "checkpoint_unavailable",
+        LoopFailureKind::TranscriptWriteFailed => "transcript_write_failed",
+        LoopFailureKind::DriverBug => "driver_bug",
+        LoopFailureKind::InterruptedUnexpectedly => "interrupted_unexpectedly",
+        LoopFailureKind::NoProgressDetected => "no_progress_detected",
+        LoopFailureKind::PolicyDenied => "policy_denied",
+        LoopFailureKind::CompactionUnavailable => "compaction_unavailable",
+    };
+    for (kind, expected_category) in variants {
+        assert_eq!(
+            expected_by_guard(*kind),
+            *expected_category,
+            "guard/table category drift for {kind:?}"
+        );
+    }
 
     for (kind, expected_category) in variants {
         let decision = LoopExit::failed(*kind, exit_id("exit:failure-variant")).validate(

@@ -36,6 +36,8 @@ async fn webui_event_stream_enriches_auth_prompt_through_projection_stream() {
                     credential_requirements: Vec::new(),
                 }),
                 sanitized_reason: Some("GitHub authentication required".to_string()),
+                detail: None,
+                retryable: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator {
@@ -130,6 +132,8 @@ async fn webui_event_stream_uses_credential_requirement_for_manual_token_auth_pr
                     credential_requirements: credential_requirements.clone(),
                 }),
                 sanitized_reason: Some("GitHub authentication required".to_string()),
+                detail: None,
+                retryable: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator {
@@ -228,6 +232,8 @@ async fn webui_event_stream_renders_channel_pairing_requirement_as_manual_token_
                     credential_requirements: credential_requirements.clone(),
                 }),
                 sanitized_reason: Some("Slack connection required".to_string()),
+                retryable: None,
+                detail: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator {
@@ -327,6 +333,8 @@ async fn webui_event_stream_keeps_oauth_requirement_as_oauth_prompt_without_url(
                     credential_requirements: credential_requirements.clone(),
                 }),
                 sanitized_reason: Some("Google authentication required".to_string()),
+                detail: None,
+                retryable: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator {
@@ -398,6 +406,8 @@ async fn webui_event_stream_surfaces_auth_challenge_lookup_failure() {
                     credential_requirements: Vec::new(),
                 }),
                 sanitized_reason: Some("GitHub authentication required".to_string()),
+                detail: None,
+                retryable: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator {
@@ -425,8 +435,12 @@ async fn webui_event_stream_surfaces_auth_challenge_lookup_failure() {
 #[tokio::test]
 async fn webui_event_stream_creates_google_oauth_prompt_for_runtime_credential_gate() {
     use crate::OAuthClientConfig;
-    use crate::auth::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
-    use crate::oauth_gate::{GoogleOAuthGateProvider, GoogleOAuthGateProviderRegistry};
+    use crate::product_auth::api::auth::{
+        RebornAuthContinuationDispatcher, RebornProductAuthServices,
+    };
+    use crate::product_auth::oauth::oauth_gate::{
+        GoogleOAuthGateProvider, GoogleOAuthGateProviderRegistry,
+    };
     use async_trait::async_trait;
     use ironclaw_auth::{AuthContinuationEvent, InMemoryAuthProductServices};
     use ironclaw_secrets::InMemorySecretStore;
@@ -505,6 +519,8 @@ async fn webui_event_stream_creates_google_oauth_prompt_for_runtime_credential_g
                     credential_requirements: credential_requirements.clone(),
                 }),
                 sanitized_reason: Some("Google authentication required".to_string()),
+                detail: None,
+                retryable: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator {
@@ -543,8 +559,12 @@ async fn webui_event_stream_creates_google_oauth_prompt_for_runtime_credential_g
 
 #[tokio::test]
 async fn webui_event_stream_creates_notion_dcr_oauth_prompt_for_runtime_credential_gate() {
-    use crate::auth::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
-    use crate::oauth_dcr::{OAuthDcrProvider, OAuthDcrProviderConfig, OAuthDcrProviderRegistry};
+    use crate::product_auth::api::auth::{
+        RebornAuthContinuationDispatcher, RebornProductAuthServices,
+    };
+    use crate::product_auth::oauth::oauth_dcr::{
+        OAuthDcrProvider, OAuthDcrProviderConfig, OAuthDcrProviderRegistry,
+    };
     use async_trait::async_trait;
     use ironclaw_auth::{
         AuthContinuationEvent, CredentialAccountLabel, InMemoryAuthProductServices,
@@ -637,7 +657,7 @@ async fn webui_event_stream_creates_notion_dcr_oauth_prompt_for_runtime_credenti
     let dcr_provider = Arc::new(
         OAuthDcrProvider::new(
             OAuthDcrProviderConfig {
-                spec: crate::notion_oauth::notion_provider_spec(),
+                spec: crate::product_auth::oauth::notion_oauth::notion_provider_spec(),
                 callback_origin: "http://127.0.0.1:3000".to_string(),
                 client_name: "Ironclaw".to_string(),
                 account_label: CredentialAccountLabel::new("notion").unwrap(),
@@ -677,6 +697,8 @@ async fn webui_event_stream_creates_notion_dcr_oauth_prompt_for_runtime_credenti
                     credential_requirements: credential_requirements.clone(),
                 }),
                 sanitized_reason: Some("Notion authentication required".to_string()),
+                detail: None,
+                retryable: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator {

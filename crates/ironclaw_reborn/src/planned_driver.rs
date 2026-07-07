@@ -149,7 +149,7 @@ impl AgentLoopDriver for PlannedDriver {
             payload.payload.as_bytes(),
             checkpoint_kind,
         ) {
-            Ok(initial) => initial,
+            Ok(initial) => initial.rebase_for_run(run_context),
             Err(error) => {
                 log_resume_payload_error(error);
                 return checkpoint_unavailable_exit(run_context.run_id);
@@ -315,6 +315,7 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
             safe_summary,
             reason_kind,
             diagnostic_ref,
+            detail,
         } => {
             tracing::warn!(
                 stage = ?stage,
@@ -327,22 +328,36 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
             if let Some(category) =
                 model_stage_failure_category(stage == HostStage::Model, kind, reason_kind)
             {
+                // Prefer the secret-scrubbed model-visible detail; fall back to
+                // the bounded safe summary so the explainer still gets the real
+                // cause rather than only the category.
+                let detail = detail.or_else(|| Some(safe_summary.as_str().to_string()));
                 return AgentLoopDriverError::Failed {
                     reason_kind: category.to_string(),
+                    detail,
                 };
             }
             AgentLoopDriverError::Unavailable {
                 reason: format!("{}: {safe_summary}", host_stage_name(stage)),
             }
         }
-        AgentLoopExecutorError::PlannerContract { detail } => AgentLoopDriverError::Failed {
-            reason_kind: format!("driver_bug:{detail}"),
-        },
-        AgentLoopExecutorError::CheckpointFailed { stage } => AgentLoopDriverError::Failed {
-            reason_kind: format!("checkpoint_rejected:{}", checkpoint_kind_name(stage)),
-        },
+        AgentLoopExecutorError::PlannerContract { detail } => {
+            tracing::warn!(detail = %detail, "planned driver planner contract failed");
+            AgentLoopDriverError::Failed {
+                reason_kind: "driver_bug".to_string(),
+                detail: None,
+            }
+        }
+        AgentLoopExecutorError::CheckpointFailed { stage } => {
+            tracing::warn!(stage = ?stage, "planned driver checkpoint failed");
+            AgentLoopDriverError::Failed {
+                reason_kind: "checkpoint_rejected".to_string(),
+                detail: None,
+            }
+        }
         AgentLoopExecutorError::Cancelled => AgentLoopDriverError::Failed {
             reason_kind: "interrupted_unexpectedly".to_string(),
+            detail: None,
         },
     }
 }
@@ -362,6 +377,7 @@ fn checkpoint_unavailable_exit(
         LoopExitId::new(format!("exit:{run_id}-checkpoint-unavailable")).map_err(|_| {
             AgentLoopDriverError::Failed {
                 reason_kind: "driver_bug".to_string(),
+                detail: None,
             }
         })?;
     Ok(LoopExit::failed(
@@ -378,15 +394,6 @@ fn host_stage_name(stage: HostStage) -> &'static str {
         HostStage::Transcript => "Transcript",
         HostStage::Checkpoint => "Checkpoint",
         HostStage::Input => "Input",
-    }
-}
-
-fn checkpoint_kind_name(kind: CheckpointKind) -> &'static str {
-    match kind {
-        CheckpointKind::BeforeModel => "before_model",
-        CheckpointKind::BeforeSideEffect => "before_side_effect",
-        CheckpointKind::BeforeBlock => "before_block",
-        CheckpointKind::Final => "final",
     }
 }
 
@@ -512,8 +519,48 @@ mod tests {
         assert_eq!(
             mapped,
             AgentLoopDriverError::Failed {
-                reason_kind: "interrupted_unexpectedly".to_string()
+                reason_kind: "interrupted_unexpectedly".to_string(),
+                detail: None,
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn run_inflight_model_cancelled_maps_to_interrupted_unexpectedly_without_cancel_signal() {
+        let registry = build_loop_family_registry().expect("registry");
+        let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
+        let context = run_context_for_driver(&driver);
+        let (host, _checkpoints) = MockAgentLoopDriverHost::builder()
+            .run_context(context.clone())
+            .fail_model_with(AgentLoopHostErrorKind::Cancelled)
+            .build();
+
+        let result = driver
+            .run(
+                AgentLoopDriverRunRequest {
+                    turn_id: context.turn_id,
+                    run_id: context.run_id,
+                    resolved_run_profile: context.resolved_run_profile.clone(),
+                },
+                &host,
+            )
+            .await;
+
+        assert_eq!(
+            result,
+            Err(AgentLoopDriverError::Failed {
+                reason_kind: "interrupted_unexpectedly".to_string(),
+                detail: None,
+            })
+        );
+        assert_eq!(
+            host.observe_cancellation(),
+            None,
+            "scripted in-flight model cancellation must not depend on cooperative cancellation"
+        );
+        assert!(
+            host.call_log().contains(&MockHostCall::StreamModel),
+            "the driver must reach the in-flight model call before mapping cancellation"
         );
     }
 
@@ -525,12 +572,15 @@ mod tests {
             safe_summary: LoopSafeSummary::new("model credentials are unavailable").expect("safe"),
             reason_kind: None,
             diagnostic_ref: None,
+            detail: None,
         });
 
         assert_eq!(
             mapped,
             AgentLoopDriverError::Failed {
-                reason_kind: MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY.to_string()
+                reason_kind: MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY.to_string(),
+                // No upstream detail: the bounded safe summary is the fallback.
+                detail: Some("model credentials are unavailable".to_string()),
             }
         );
     }
@@ -544,14 +594,35 @@ mod tests {
                 .expect("safe"),
             reason_kind: Some(MODEL_CREDITS_EXHAUSTED_REASON_KIND),
             diagnostic_ref: None,
+            detail: None,
         });
 
         assert_eq!(
             mapped,
             AgentLoopDriverError::Failed {
-                reason_kind: MODEL_CREDITS_EXHAUSTED_CATEGORY.to_string()
+                reason_kind: MODEL_CREDITS_EXHAUSTED_CATEGORY.to_string(),
+                detail: Some("safe summary wording is display-only".to_string()),
             }
         );
+    }
+
+    #[test]
+    fn executor_model_diagnostics_carry_detail_into_failed() {
+        let mapped = map_executor_error(AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Model,
+            kind: AgentLoopHostErrorKind::CredentialUnavailable,
+            safe_summary: LoopSafeSummary::new("model credentials are unavailable").expect("safe"),
+            reason_kind: None,
+            diagnostic_ref: None,
+            detail: Some("HTTP 404 model not found".to_string()),
+        });
+
+        match mapped {
+            AgentLoopDriverError::Failed { detail, .. } => {
+                assert_eq!(detail.as_deref(), Some("HTTP 404 model not found"));
+            }
+            other => panic!("expected Failed with detail, got {other:?}"),
+        }
     }
 
     #[test]
@@ -563,6 +634,7 @@ mod tests {
             safe_summary: LoopSafeSummary::new(CREDIT_SUMMARY).expect("safe"),
             reason_kind: Some(MODEL_CREDITS_EXHAUSTED_REASON_KIND),
             diagnostic_ref: None,
+            detail: None,
         });
 
         assert_eq!(
@@ -582,6 +654,7 @@ mod tests {
             safe_summary: LoopSafeSummary::new(CREDENTIAL_SUMMARY).expect("safe"),
             reason_kind: None,
             diagnostic_ref: None,
+            detail: None,
         });
 
         assert_eq!(
@@ -622,8 +695,14 @@ mod tests {
         let registry = build_loop_family_registry().expect("registry");
         let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
         let context = run_context_for_driver(&driver);
-        let mut restored_state = LoopExecutionState::initial_for_run(&context);
+        let source_context = test_run_context("planned-driver-source-run");
+        let mut restored_state = LoopExecutionState::initial_for_run(&source_context);
         restored_state.iteration = 7;
+        restored_state.input_cursor = LoopInputCursor::from_host_token(
+            &source_context,
+            ironclaw_turns::run_profile::LoopInputCursorToken::new("input-cursor:source-seen")
+                .expect("valid cursor"),
+        );
         let checkpoint_id = TurnCheckpointId::new();
         let loaded = LoadedCheckpointPayload {
             kind: LoopCheckpointKind::BeforeModel,
@@ -852,6 +931,7 @@ mod tests {
         match result.expect("resume should return a terminal failed loop exit") {
             LoopExit::Failed(failed) => {
                 assert_eq!(failed.reason_kind, LoopFailureKind::CheckpointUnavailable);
+                assert_eq!(failed.reason_kind.as_str(), "checkpoint_unavailable");
                 assert!(
                     failed.exit_id.as_str().ends_with("-checkpoint-unavailable"),
                     "checkpoint resume failures should use a checkpoint-specific exit id"

@@ -189,28 +189,67 @@ impl BlockedReason {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SanitizedFailure {
     category: String,
+    /// Secret-scrubbed, model-visible raw cause for this failure (e.g.
+    /// `"HTTP 404 model not found"`). Unlike `category`, this is free-form text
+    /// — the producer is responsible for scrubbing secret VALUES upstream (see
+    /// [`crate::run_profile::sanitize_model_visible_text`]). Optional and
+    /// serialized only when present so persisted pre-detail rows round-trip
+    /// without migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
 }
 
 impl SanitizedFailure {
     pub fn new(category: impl Into<String>) -> Result<Self, String> {
         let category = category.into();
         validate_sanitized_category("failure_category", &category)?;
-        Ok(Self { category })
+        Ok(Self {
+            category,
+            detail: None,
+        })
     }
 
     pub(crate) fn from_trusted_static(category: &'static str) -> Self {
         debug_assert!(validate_sanitized_category("failure_category", category).is_ok());
         Self {
             category: category.to_string(),
+            detail: None,
         }
+    }
+
+    /// Attach a secret-scrubbed, model-visible detail string. The caller is
+    /// responsible for scrubbing secret VALUES before calling this (see
+    /// [`Self::detail`]).
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
     }
 
     pub fn category(&self) -> &str {
         &self.category
     }
 
+    pub fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
+    }
+
     pub fn into_category(self) -> String {
         self.category
+    }
+
+    /// A copy of this failure with the model-visible `detail` stripped.
+    ///
+    /// `detail` is free-form, model-visible raw cause text intended only for
+    /// the failure-explainer prompt — it can carry backend diagnostics (paths,
+    /// provider errors, internal context) and is scrubbed for secret VALUES,
+    /// not for public exposure. Public/WebUI surfaces must serialize this
+    /// projection instead of the raw failure so that internal detail never
+    /// reaches the browser; `category` (the user-facing signal) is retained.
+    pub fn public_projection(&self) -> Self {
+        Self {
+            category: self.category.clone(),
+            detail: None,
+        }
     }
 }
 
@@ -222,10 +261,31 @@ impl<'de> Deserialize<'de> for SanitizedFailure {
         #[derive(Deserialize)]
         struct WireFailure {
             category: String,
+            #[serde(default)]
+            detail: Option<String>,
         }
 
         let wire = WireFailure::deserialize(deserializer)?;
-        Self::new(wire.category).map_err(serde::de::Error::custom)
+        // Backward compatibility: historical rows used the colon-delimited
+        // category `host_stage_unavailable:model` (one colon between two
+        // non-empty parts) before the charset was tightened to reject `:`.
+        // Normalize *only* that exact shape on the read path so loading a
+        // persisted snapshot never borks — a failed deserialize here would
+        // defeat the whole no-borking-failures goal. Any other colon payload
+        // (`a::b`, `:model`, `host_stage_unavailable:`, `:`) is passed through
+        // untouched so `Self::new` still rejects it; we must not mint values the
+        // strict write path could never produce. The write path stays strict.
+        let normalized = match wire.category.split_once(':') {
+            Some((left, right))
+                if !left.is_empty() && !right.is_empty() && !right.contains(':') =>
+            {
+                format!("{left}_{right}")
+            }
+            _ => wire.category,
+        };
+        let mut failure = Self::new(normalized).map_err(serde::de::Error::custom)?;
+        failure.detail = wire.detail;
+        Ok(failure)
     }
 }
 
@@ -415,6 +475,8 @@ pub enum TurnError {
         resource: TurnCapacityResource,
         cap: u64,
     },
+    #[error("turn run {run_id} is not retryable")]
+    RunNotRetryable { run_id: TurnRunId },
     #[error("invalid turn transition from {from:?} to {to:?}")]
     InvalidTransition { from: TurnStatus, to: TurnStatus },
     #[error("turn run lease mismatch")]
@@ -440,9 +502,10 @@ impl TurnError {
             Self::Unauthorized => TurnErrorCategory::Unauthorized,
             Self::InvalidRequest { .. } => TurnErrorCategory::InvalidRequest,
             Self::Unavailable { .. } => TurnErrorCategory::Unavailable,
-            Self::Conflict { .. } | Self::InvalidTransition { .. } | Self::LeaseMismatch => {
-                TurnErrorCategory::Conflict
-            }
+            Self::Conflict { .. }
+            | Self::RunNotRetryable { .. }
+            | Self::InvalidTransition { .. }
+            | Self::LeaseMismatch => TurnErrorCategory::Conflict,
             Self::CapacityExceeded { .. } => TurnErrorCategory::CapacityExceeded,
             Self::InvalidRunOriginAdapter => TurnErrorCategory::InvalidRequest,
         }
@@ -501,5 +564,105 @@ mod tests {
         let json = serde_json::to_string(&reason).expect("serialize");
         let decoded: BlockedReason = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded, reason);
+    }
+
+    #[test]
+    fn sanitized_failure_accepts_snake_case_category() {
+        let failure =
+            SanitizedFailure::new("host_stage_unavailable_model").expect("category is valid");
+        assert_eq!(failure.category(), "host_stage_unavailable_model");
+    }
+
+    #[test]
+    fn sanitized_failure_rejects_colons() {
+        for invalid in [
+            "host_stage_unavailable:model",
+            "a::b",
+            ":model",
+            "host_stage_unavailable:",
+            ":",
+        ] {
+            assert!(
+                SanitizedFailure::new(invalid).is_err(),
+                "category {invalid:?} with a colon must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitized_failure_deserialize_normalizes_legacy_colon_categories() {
+        // Historical persisted rows used the single-colon category
+        // `host_stage_unavailable:model`. The strict write path rejects it, but
+        // loading a snapshot must not fail — the read path normalizes that exact
+        // shape so old data stays loadable.
+        let failure: SanitizedFailure =
+            serde_json::from_str(r#"{"category":"host_stage_unavailable:model"}"#)
+                .expect("legacy colon category must deserialize");
+        assert_eq!(failure.category(), "host_stage_unavailable_model");
+    }
+
+    #[test]
+    fn sanitized_failure_deserialize_rejects_malformed_colon_categories() {
+        // Normalization is restricted to the one legacy shape. Malformed colon
+        // payloads must still be rejected, not silently minted into values the
+        // strict write path could never produce (e.g. `a::b` -> `a__b`).
+        for malformed in ["a::b", ":model", "host_stage_unavailable:", ":", "a:b:c"] {
+            let json = format!(r#"{{"category":"{malformed}"}}"#);
+            assert!(
+                serde_json::from_str::<SanitizedFailure>(&json).is_err(),
+                "malformed colon category {malformed:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitized_failure_legacy_row_without_detail_round_trips() {
+        // Pre-detail persisted rows omit the field. `serde(default)` must
+        // rehydrate them as `detail == None`, and re-serializing must not
+        // re-introduce a `detail` key (`skip_serializing_if`).
+        let failure: SanitizedFailure = serde_json::from_str(r#"{"category":"model_unavailable"}"#)
+            .expect("legacy row without detail must deserialize");
+        assert_eq!(failure.category(), "model_unavailable");
+        assert_eq!(failure.detail(), None);
+
+        let reserialized = serde_json::to_string(&failure).expect("serialize");
+        assert_eq!(reserialized, r#"{"category":"model_unavailable"}"#);
+    }
+
+    #[test]
+    fn sanitized_failure_with_detail_round_trips() {
+        let failure = SanitizedFailure::new("model_unavailable")
+            .expect("category")
+            .with_detail("HTTP 404 model not found");
+        assert_eq!(failure.detail(), Some("HTTP 404 model not found"));
+
+        let json = serde_json::to_string(&failure).expect("serialize");
+        let restored: SanitizedFailure = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored, failure);
+        assert_eq!(restored.detail(), Some("HTTP 404 model not found"));
+    }
+
+    #[test]
+    fn public_projection_strips_detail_and_keeps_category() {
+        let failure = SanitizedFailure::new("model_unavailable")
+            .expect("category")
+            .with_detail("HTTP 500 from provider at /internal/models/route-xyz");
+
+        let public = failure.public_projection();
+        assert_eq!(public.category(), "model_unavailable");
+        assert_eq!(
+            public.detail(),
+            None,
+            "public projection must not carry the model-visible detail"
+        );
+
+        // Serialized public shape omits the detail key entirely, and the
+        // original is left untouched (projection is a copy).
+        let rendered = serde_json::to_string(&public).expect("serialize");
+        assert_eq!(rendered, r#"{"category":"model_unavailable"}"#);
+        assert_eq!(
+            failure.detail(),
+            Some("HTTP 500 from provider at /internal/models/route-xyz")
+        );
     }
 }

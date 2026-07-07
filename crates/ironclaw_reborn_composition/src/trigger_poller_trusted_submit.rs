@@ -381,6 +381,7 @@ fn classify_materializer_inbound_error(error: InboundTurnError) -> TriggerError 
                 TurnError::ScopeNotFound
                 | TurnError::Unauthorized
                 | TurnError::InvalidRequest { .. }
+                | TurnError::RunNotRetryable { .. }
                 | TurnError::InvalidTransition { .. }
                 | TurnError::LeaseMismatch
                 | TurnError::InvalidRunOriginAdapter,
@@ -971,6 +972,13 @@ mod tests {
             unreachable!("trigger submitter tests do not resume turns")
         }
 
+        async fn retry_turn(
+            &self,
+            _request: ironclaw_turns::RetryTurnRequest,
+        ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+            unreachable!("trigger submitter tests do not retry turns")
+        }
+
         async fn cancel_run(
             &self,
             _request: CancelRunRequest,
@@ -1019,6 +1027,13 @@ mod tests {
             _request: ResumeTurnRequest,
         ) -> Result<ResumeTurnResponse, TurnError> {
             unreachable!("trigger submitter tests do not resume turns")
+        }
+
+        async fn retry_turn(
+            &self,
+            _request: ironclaw_turns::RetryTurnRequest,
+        ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+            unreachable!("trigger submitter tests do not retry turns")
         }
 
         async fn cancel_run(
@@ -1308,6 +1323,19 @@ mod tests {
 
         assert!(
             matches!(error, TriggerError::InvalidMaterialization { reason } if reason == "trusted trigger inbound request rejected")
+        );
+    }
+
+    #[test]
+    fn run_not_retryable_is_terminal_materialization_failure() {
+        let error = classify_materializer_inbound_error(InboundTurnError::TurnSubmissionFailed {
+            error: TurnError::RunNotRetryable {
+                run_id: TurnRunId::new(),
+            },
+        });
+
+        assert!(
+            matches!(error, TriggerError::InvalidMaterialization { reason } if reason == "trusted trigger submit rejected")
         );
     }
 
