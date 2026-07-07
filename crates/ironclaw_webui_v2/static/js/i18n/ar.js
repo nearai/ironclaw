@@ -196,6 +196,7 @@ registerPack("ar", {
   "authGate.expiresAt": "انتهاء الصلاحية",
   "authGate.oauthProviderFallback": "الموفر",
   "authGate.serviceUnavailable": "الخدمة غير متوفرة",
+  "authGate.popupBlocked": "تم حظر النافذة المنبثقة للتفويض.",
   "authGate.pillAuthorize": "التفويض",
   "authGate.pillEnterToken": "أدخل الرمز المميز",
   "authGate.unsupportedChallenge": "افتح الإعدادات لإكمال خطوة المصادقة هذه.",

@@ -185,11 +185,11 @@ async fn webui_event_stream_uses_credential_requirement_for_manual_token_auth_pr
 }
 
 #[tokio::test]
-async fn webui_event_stream_renders_channel_pairing_requirement_as_manual_token_with_connection() {
-    // A channel-pairing credential requirement (Slack) blocks on the same
-    // auth-gate rail as GitHub, but the projection renders it as a `manual_token`
-    // challenge carrying channel-connection context (the render copy + resolve
-    // route), so one paste card serves both a stored secret and a pairing code.
+async fn webui_event_stream_keeps_retired_channel_pairing_requirement_generic() {
+    // Legacy persisted channel-pairing setup records now deserialize as
+    // `Retired`. They still produce a generic auth prompt so the blocked state
+    // remains visible, but they must not advertise the removed pairing-code
+    // challenge or channel-connection UI.
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
     let agent_id = AgentId::new("webui-events-agent").unwrap();
@@ -204,9 +204,7 @@ async fn webui_event_stream_renders_channel_pairing_requirement_as_manual_token_
     );
     let credential_requirements = vec![RuntimeCredentialAuthRequirement {
         provider: RuntimeCredentialAccountProviderId::new("slack").unwrap(),
-        setup: RuntimeCredentialAccountSetup::ChannelPairing {
-            channel: "slack".to_string(),
-        },
+        setup: RuntimeCredentialAccountSetup::Retired,
         requester_extension: ExtensionId::new("slack").unwrap(),
         provider_scopes: Vec::new(),
     }];
@@ -258,17 +256,9 @@ async fn webui_event_stream_renders_channel_pairing_requirement_as_manual_token_
         event.payload(),
         ProductOutboundPayload::AuthPrompt(prompt)
             if prompt.turn_run_id == turn_run
-                && prompt.challenge_kind == Some(AuthPromptChallengeKind::ManualToken)
-                && prompt.connection.as_ref().is_some_and(|connection| {
-                    connection.channel == "slack"
-                        && connection.strategy.as_deref() == Some("inbound_proof_code")
-                        && connection.input_placeholder.as_deref()
-                            == Some("Enter Slack pairing code...")
-                        && connection
-                            .error_message
-                            .as_deref()
-                            .is_some_and(|message| message.contains("/pair"))
-                })
+                && prompt.provider.as_deref() == Some("slack")
+                && prompt.challenge_kind.is_none()
+                && prompt.connection.is_none()
     )));
     assert!(events.iter().any(|event| matches!(
         event.payload(),
@@ -277,14 +267,10 @@ async fn webui_event_stream_renders_channel_pairing_requirement_as_manual_token_
                 item,
                 ProductProjectionItem::Gate {
                     gate_kind,
-                    auth_context: Some(context),
+                    auth_context,
                     ..
                 } if *gate_kind == ProductGateKind::Auth
-                    && context.challenge_kind == AuthPromptChallengeKind::ManualToken
-                    && context
-                        .connection
-                        .as_ref()
-                        .is_some_and(|connection| connection.channel == "slack")
+                    && auth_context.is_none()
             ))
     )));
 }

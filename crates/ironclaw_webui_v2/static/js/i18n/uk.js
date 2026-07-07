@@ -196,6 +196,7 @@ registerPack("uk", {
   "authGate.expiresAt": "Термін дії закінчується",
   "authGate.oauthProviderFallback": "постачальник",
   "authGate.serviceUnavailable": "Сервіс недоступний",
+  "authGate.popupBlocked": "Спливаюче вікно авторизації заблоковано.",
   "authGate.pillAuthorize": "Авторизуватися",
   "authGate.pillEnterToken": "Введіть маркер",
   "authGate.unsupportedChallenge": "Відкрийте налаштування, щоб завершити цей крок автентифікації.",

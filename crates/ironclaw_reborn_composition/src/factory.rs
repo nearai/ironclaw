@@ -3769,7 +3769,7 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
         "/system/extensions/slack_user/manifest.toml".to_string(),
         Some(slack_user_manifest_digest()),
         HostTrustAssignment::first_party(),
-        gsuite_allowed_effects(),
+        slack_user_allowed_effects(),
         None,
     ));
     HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries(entries))]).map_err(|error| {
@@ -3780,6 +3780,16 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
 }
 
 fn gsuite_allowed_effects() -> Vec<EffectKind> {
+    vec![
+        EffectKind::DispatchCapability,
+        EffectKind::Network,
+        EffectKind::UseSecret,
+        EffectKind::ExternalWrite,
+    ]
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+fn slack_user_allowed_effects() -> Vec<EffectKind> {
     vec![
         EffectKind::DispatchCapability,
         EffectKind::Network,

@@ -201,6 +201,7 @@ registerPack("en", {
   "authGate.expiresAt": "Expires",
   "authGate.oauthProviderFallback": "the provider",
   "authGate.serviceUnavailable": "Service unavailable",
+  "authGate.popupBlocked": "Authorization popup was blocked.",
   "authGate.pillAuthorize": "Authorize",
   "authGate.pillEnterToken": "Enter token",
   "authGate.unsupportedChallenge": "Open settings to complete this authentication step.",

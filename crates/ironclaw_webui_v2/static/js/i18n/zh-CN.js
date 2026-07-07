@@ -196,6 +196,7 @@ registerPack("zh-CN", {
   "authGate.expiresAt": "过期时间",
   "authGate.oauthProviderFallback": "该提供商",
   "authGate.serviceUnavailable": "服务不可用",
+  "authGate.popupBlocked": "授权弹出窗口已被拦截。",
   "authGate.pillAuthorize": "授权",
   "authGate.pillEnterToken": "Enter token",
   "authGate.unsupportedChallenge": "请打开设置完成此身份验证步骤。",

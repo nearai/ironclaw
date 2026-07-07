@@ -196,6 +196,7 @@ registerPack("fr", {
   "authGate.expiresAt": "Expire",
   "authGate.oauthProviderFallback": "le fournisseur",
   "authGate.serviceUnavailable": "Service indisponible",
+  "authGate.popupBlocked": "La fenêtre contextuelle d'autorisation a été bloquée.",
   "authGate.pillAuthorize": "Autoriser",
   "authGate.pillEnterToken": "Entrer le jeton",
   "authGate.unsupportedChallenge": "Ouvrir les paramètres pour terminer cette étape d'authentification.",

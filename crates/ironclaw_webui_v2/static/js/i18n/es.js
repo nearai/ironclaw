@@ -196,6 +196,7 @@ registerPack("es", {
   "authGate.expiresAt": "Caduca",
   "authGate.oauthProviderFallback": "el proveedor",
   "authGate.serviceUnavailable": "Servicio no disponible",
+  "authGate.popupBlocked": "La ventana emergente de autorización fue bloqueada.",
   "authGate.pillAuthorize": "Autorizar",
   "authGate.pillEnterToken": "Ingresar token",
   "authGate.unsupportedChallenge": "Abrir configuración para completar este paso de autenticación.",
