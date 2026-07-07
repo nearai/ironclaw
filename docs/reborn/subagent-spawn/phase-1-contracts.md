@@ -11,11 +11,23 @@
 > resolution store, tombstone store, and restart reconciler described in later
 > sections — is replaced outright by
 > [`thread-harness-design.md`](./thread-harness-design.md) (canonical). The
-> contracts themselves remain accurate, **except §3.3's flavor table below**,
-> which is historical: v1's two flavors (`general`, `researcher`) shipped as
-> four (`General`, `Explorer`, `Coder`, `Planner`,
-> `crates/ironclaw_reborn/src/subagent/flavors.rs`) — `thread-harness-design.md`
-> §10 is canonical for the current flavor set and naming.
+> contracts themselves remain accurate, **except the flavor naming that runs
+> through §3.2/§3.3/§3.6** (direction files, the flavor table, and its tests —
+> the same scope §3's own intro note flags), which is historical: v1's two
+> flavors (`general`, `researcher`) shipped as four (`General`, `Explorer`,
+> `Coder`, `Planner`, `crates/ironclaw_reborn/src/subagent/flavors.rs`) —
+> `thread-harness-design.md` §10 is canonical for the current flavor set and
+> naming.
+>
+> **Code citations are point-in-time (2026-05) and have drifted.** Several APIs
+> proposed below shipped under different names, shapes, or paths — e.g. the
+> `CapabilityOutcome` variants landed with additional fields, the coordinator
+> event hook shipped as `TurnLifecycleEventBus::subscribe_required` (not
+> `DefaultTurnCoordinator::with_event_sink`), and P0's engine
+> `PendingGateStore`/`/src/gate/pending.rs` was since removed with engine v2
+> while the projection P0 proposes now ships in `ironclaw_event_projections`.
+> Line numbers refer to the 2026-05 worktree. Verify every symbol against the
+> live code before implementing from this doc.
 
 This document is the detailed, implementer-facing spec for **Phase 1** of the
 subagent-spawn feature. Phase 1 lands the *contracts and isolated units* that

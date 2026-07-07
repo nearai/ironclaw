@@ -12,13 +12,24 @@
 > outright by [`thread-harness-design.md`](./thread-harness-design.md)
 > (canonical); that doc's `AwaitEdgeResolver` supersedes the tombstone/gate-
 > store path described below.
+>
+> **Code citations are point-in-time (2026-05) and have drifted.** Implemented
+> reality differs in places the banner above does not cover: the family
+> registry already binds `families::subagent()` (`app_loop_family.rs`),
+> `subagent/completion_observer.rs` already exists, the flavor/payload files
+> shipped as `flavors.rs`/`spawn_result.rs` with different struct shapes, and
+> the coordinator event hook shipped as
+> `TurnLifecycleEventBus::subscribe_required`, not
+> `DefaultTurnCoordinator::with_event_sink`. Verify every symbol against the
+> live code before implementing from this doc.
 
 > **Current implementation note.** Background subagents are disabled pending the
-> durable completion delivery design in
-> [#4147](https://github.com/nearai/ironclaw/issues/4147). The active public
-> `spawn_subagent` schema exposes `flavor_id`, `task`, and optional `handoff`;
-> omitted mode defaults to blocking. Background-related mechanisms below are
-> historical design context, not active behavior.
+> *implementation* of the durable completion delivery layer — the design itself
+> now exists ([`thread-harness-design.md`](./thread-harness-design.md),
+> canonical for [#4147](https://github.com/nearai/ironclaw/issues/4147)). The
+> active public `spawn_subagent` schema exposes `flavor_id`, `task`, and
+> optional `handoff`; omitted mode defaults to blocking. Background-related
+> mechanisms below are historical design context, not active behavior.
 
 Phase 2 builds the four *mechanisms* of subagent spawn on top of the Phase 1
 contracts. The four workstreams are independently reviewable PRs and run in
@@ -169,6 +180,9 @@ pub trait SubagentGoalStore: Send + Sync {
 }
 // Note: no `rekey(staging, real)` — `prepare_turn` makes it unnecessary.
 
+// SUPERSEDED (2026-07): gate_resolution.rs and tombstone_store.rs below are
+// replaced outright by thread-harness-design.md's AwaitEdge files (canonical).
+// Historical context only — do not build against these.
 // ironclaw_reborn/src/subagent/gate_resolution.rs  (P1.C)
 //   - AwaitedChildSet: the set of child run ids one gate awaits, + recorded
 //     child results; persisted; supports "all terminal?" reconciliation.
@@ -224,6 +238,9 @@ pub enum SubagentSpawnMode { Blocking, Background }
 #[serde(rename_all = "snake_case")]
 pub enum SubagentSpawnStatus { Spawned, Completed, Failed, Cancelled }
 
+// SUPERSEDED (2026-07): continuation_budget.rs below was never built —
+// thread-harness-design.md §8.3's derived System-wake streak cap subsumes it
+// (its production-readiness field is retired by that doc's §3). Historical.
 // ironclaw_reborn/src/subagent/continuation_budget.rs  (P1.C)
 //
 // README §6 + §7.4 "Autonomous-continuation budget": bounds per-spawn-tree

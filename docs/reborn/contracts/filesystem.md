@@ -432,7 +432,9 @@ pub trait RootFilesystem {
         let _ = expected_version;
         Err(FilesystemError::Unsupported {
             path: path.clone(),
-            operation: FilesystemOperation::DeleteIfVersion,
+            // reuses the existing `Delete` operation tag — no new
+            // `FilesystemOperation` variant is introduced for this method
+            operation: FilesystemOperation::Delete,
         })
     }
 }
