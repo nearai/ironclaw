@@ -9660,6 +9660,7 @@ output_schema_ref = "schemas/write.output.json"
         .with_model_gateway_override(gateway);
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        stop_turn_runner_worker_for_manual_state_test(&runtime).await;
         let bundle = build_webui_services(&runtime, None).expect("webui bundle");
         let caller = WebUiAuthenticatedCaller::new(
             TenantId::new("runtime-webui-audit-tenant").unwrap(),

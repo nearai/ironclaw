@@ -6019,25 +6019,29 @@ mod tests {
         .await
         .expect("submit through production turn-state store");
 
-        let configured_path =
-            VirtualPath::new("/tenants/configured-tenant/users/configured-owner/turns/state.json")
-                .expect("configured turn-state path");
-        let system_path = VirtualPath::new("/tenants/__system__/users/__system__/turns/state.json")
-            .expect("system turn-state path");
+        let configured_path = VirtualPath::new(
+            "/tenants/configured-tenant/users/configured-owner/turns/rows/v1/deltas/log",
+        )
+        .expect("configured turn-state row delta log path");
+        let system_path =
+            VirtualPath::new("/tenants/__system__/users/__system__/turns/rows/v1/deltas/log")
+                .expect("system turn-state row delta log path");
 
         assert!(
-            assertion_filesystem
-                .get(&configured_path)
-                .await
-                .expect("configured turn-state read")
-                .is_some()
+            append_log_has_entries(
+                &assertion_filesystem,
+                &configured_path,
+                "configured turn-state row delta log read"
+            )
+            .await
         );
         assert!(
-            assertion_filesystem
-                .get(&system_path)
-                .await
-                .expect("system turn-state read")
-                .is_none()
+            !append_log_has_entries(
+                &assertion_filesystem,
+                &system_path,
+                "system turn-state row delta log read"
+            )
+            .await
         );
     }
 
@@ -6094,10 +6098,11 @@ mod tests {
             }
         };
         let default_path =
-            VirtualPath::new("/tenants/reborn-cli/users/default-owner/turns/state.json")
-                .expect("default turn-state path");
-        let system_path = VirtualPath::new("/tenants/__system__/users/__system__/turns/state.json")
-            .expect("system turn-state path");
+            VirtualPath::new("/tenants/reborn-cli/users/default-owner/turns/rows/v1/deltas/log")
+                .expect("default turn-state row delta log path");
+        let system_path =
+            VirtualPath::new("/tenants/__system__/users/__system__/turns/rows/v1/deltas/log")
+                .expect("system turn-state row delta log path");
         let default_identity = RebornRuntimeIdentity::reborn_cli();
         let default_tenant = TenantId::new(default_identity.tenant_id).expect("default tenant");
         let scope = ironclaw_turns::TurnScope::new_with_owner(
@@ -6138,19 +6143,36 @@ mod tests {
         .expect("submit through production turn-state store");
 
         assert!(
-            assertion_filesystem
-                .get(&default_path)
-                .await
-                .expect("default turn-state read")
-                .is_some()
+            append_log_has_entries(
+                &assertion_filesystem,
+                &default_path,
+                "default turn-state row delta log read"
+            )
+            .await
         );
         assert!(
-            assertion_filesystem
-                .get(&system_path)
-                .await
-                .expect("system turn-state read")
-                .is_none()
+            !append_log_has_entries(
+                &assertion_filesystem,
+                &system_path,
+                "system turn-state row delta log read"
+            )
+            .await
         );
+    }
+
+    #[cfg(feature = "libsql")]
+    async fn append_log_has_entries<F>(filesystem: &F, path: &VirtualPath, label: &str) -> bool
+    where
+        F: RootFilesystem,
+    {
+        match filesystem
+            .tail(path, ironclaw_filesystem::SeqNo::ZERO)
+            .await
+        {
+            Ok(entries) => !entries.is_empty(),
+            Err(ironclaw_filesystem::FilesystemError::NotFound { .. }) => false,
+            Err(error) => panic!("{label}: {error}"),
+        }
     }
 
     #[cfg(feature = "libsql")]
