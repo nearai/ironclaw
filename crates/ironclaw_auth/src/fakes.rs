@@ -49,6 +49,7 @@ struct AuthState {
     refresh_fails: HashSet<CredentialAccountId>,
     refresh_backend_fails: HashSet<CredentialAccountId>,
     refresh_invalid_grants: HashSet<CredentialAccountId>,
+    refresh_no_rotation: HashSet<CredentialAccountId>,
     refresh_races: HashMap<CredentialAccountId, (SecretHandle, SecretHandle)>,
     quarantines: HashMap<CredentialAccountId, SecretCleanupQuarantineReason>,
 }
@@ -91,6 +92,14 @@ impl InMemoryAuthProductServices {
 
     pub fn invalid_grant_next_refresh_for_tests(&self, account_id: CredentialAccountId) {
         self.lock_state().refresh_invalid_grants.insert(account_id);
+    }
+
+    /// Arm the next `refresh_token` call for `account_id` to model a
+    /// non-rotating provider (e.g. Google): it succeeds with a new access
+    /// secret but omits `refresh_secret` from the response, as real
+    /// providers do when they don't rotate the refresh token.
+    pub fn no_rotation_next_refresh_for_tests(&self, account_id: CredentialAccountId) {
+        self.lock_state().refresh_no_rotation.insert(account_id);
     }
 
     pub fn complete_refresh_during_next_provider_call_for_tests(
@@ -962,11 +971,12 @@ impl AuthProviderClient for InMemoryAuthProductServices {
         &self,
         request: OAuthProviderRefreshRequest,
     ) -> Result<OAuthProviderRefresh, AuthProductError> {
-        let should_fail = {
+        let (should_fail, should_no_rotation) = {
             let mut state = self.lock_state();
             let should_fail = state.refresh_fails.remove(&request.account_id);
             let should_backend_fail = state.refresh_backend_fails.remove(&request.account_id);
             let should_invalid_grant = state.refresh_invalid_grants.remove(&request.account_id);
+            let should_no_rotation = state.refresh_no_rotation.remove(&request.account_id);
             if let Some((access_secret, refresh_secret)) =
                 state.refresh_races.remove(&request.account_id)
                 && let Some(account) = state.accounts.get_mut(&request.account_id)
@@ -976,7 +986,10 @@ impl AuthProviderClient for InMemoryAuthProductServices {
                 account.status = CredentialAccountStatus::Configured;
                 account.updated_at = Utc::now();
             }
-            (should_fail, should_backend_fail, should_invalid_grant)
+            (
+                (should_fail, should_backend_fail, should_invalid_grant),
+                should_no_rotation,
+            )
         };
         if should_fail.0 {
             return Err(AuthProductError::RefreshFailed);
@@ -990,7 +1003,11 @@ impl AuthProviderClient for InMemoryAuthProductServices {
         Ok(OAuthProviderRefresh {
             provider: request.provider,
             access_secret: generated_secret_handle("oauth-refreshed-access")?,
-            refresh_secret: Some(generated_secret_handle("oauth-refreshed-refresh")?),
+            refresh_secret: if should_no_rotation {
+                None
+            } else {
+                Some(generated_secret_handle("oauth-refreshed-refresh")?)
+            },
             scopes: request.scopes,
         })
     }

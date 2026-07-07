@@ -36,8 +36,8 @@ use crate::product_auth::oauth::oauth_dcr_protocol::{
     validate_endpoint_origin, validate_issuer_related_to_resource,
 };
 use crate::product_auth::oauth::oauth_provider_client::{
-    HostOAuthProviderSpec, OAuthClientMaterial, OAuthClientMaterialSource, authorize_oauth_egress,
-    oauth_endpoint_host, oauth_network_policy,
+    HostOAuthProviderSpec, OAuthClientMaterial, OAuthClientMaterialSource, OAuthErrorResponseBody,
+    authorize_oauth_egress, oauth_endpoint_host, oauth_network_policy,
 };
 
 const DCR_RESPONSE_BODY_LIMIT: u64 = 32 * 1024;
@@ -344,12 +344,13 @@ impl OAuthDcrProvider {
         )
         .encode()?;
         let redirect_uri = self.callback_redirect_uri(scope, flow_id, account_label)?;
+        // discover_authorization_server already rejects None/empty
+        // registration_endpoint, so this is defensive rather than reachable.
+        let registration_endpoint = metadata
+            .registration_endpoint()
+            .ok_or(AuthProductError::BackendUnavailable)?;
         let registration = self
-            .register_client(
-                &scope.resource,
-                &metadata.registration_endpoint,
-                &redirect_uri,
-            )
+            .register_client(&scope.resource, registration_endpoint, &redirect_uri)
             .await?;
         let client_id = OAuthClientId::new(registration.client_id.clone())?;
         let authorization_endpoint =
@@ -449,18 +450,15 @@ impl OAuthDcrProvider {
                 DCR_RESPONSE_BODY_LIMIT,
             )
             .await?;
-        if metadata.registration_endpoint.trim().is_empty() {
+        let Some(registration_endpoint) = metadata.registration_endpoint() else {
             return Err(AuthProductError::BackendUnavailable);
-        }
+        };
         validate_endpoint_origin(
             &metadata.authorization_endpoint,
             &authorization_server_metadata,
         )?;
         validate_endpoint_origin(&metadata.token_endpoint, &authorization_server_metadata)?;
-        validate_endpoint_origin(
-            &metadata.registration_endpoint,
-            &authorization_server_metadata,
-        )?;
+        validate_endpoint_origin(registration_endpoint, &authorization_server_metadata)?;
         *self.metadata_cache.write().await = Some(CachedAuthorizationServerMetadata {
             metadata: metadata.clone(),
             expires_at: Instant::now() + Duration::from_secs(DCR_FLOW_TTL_SECONDS as u64),
@@ -733,6 +731,24 @@ impl OAuthDcrProvider {
             .await
             .map_err(|_| AuthProductError::BackendUnavailable)?;
         if !(200..300).contains(&response.status) {
+            if (500..600).contains(&response.status) {
+                return Err(AuthProductError::BackendUnavailable);
+            }
+            // RFC 7591 §3.2.2: DCR (and metadata) 4xx error bodies carry an
+            // `error` code. REDACTION: extract only that code — never log,
+            // serialize, or return the raw body or `error_description`.
+            let error_code = serde_json::from_slice::<OAuthErrorResponseBody>(&response.body)
+                .ok()
+                .and_then(|body| body.error);
+            if let Some(error_code) = error_code {
+                tracing::warn!(
+                    provider = self.spec.provider_id,
+                    status = response.status,
+                    oauth_error_code = %error_code,
+                    "DCR/metadata endpoint rejected request"
+                );
+                return Err(AuthProductError::ProviderDenied);
+            }
             return Err(AuthProductError::BackendUnavailable);
         }
         serde_json::from_slice(&response.body).map_err(|_| AuthProductError::BackendUnavailable)
@@ -1390,8 +1406,8 @@ mod tests {
             .expect("issuer fallback metadata");
 
         assert_eq!(
-            metadata.registration_endpoint,
-            "https://mcp.notion.com/register"
+            metadata.registration_endpoint.as_deref(),
+            Some("https://mcp.notion.com/register")
         );
     }
 
@@ -1404,6 +1420,25 @@ mod tests {
             .discover_authorization_server(&sample_resource_scope())
             .await
             .expect_err("empty registration endpoint must fail");
+
+        assert_eq!(
+            error.code(),
+            ironclaw_auth::AuthErrorCode::BackendUnavailable
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_authorization_server_missing_registration_endpoint_returns_backend_unavailable()
+     {
+        // RFC 8414 §2 makes registration_endpoint OPTIONAL; a spec-legal
+        // metadata document that omits the field entirely must still be
+        // rejected here since DCR cannot proceed without it.
+        let provider = test_provider(Arc::new(DcrDiscoveryEgress::missing_registration_endpoint()));
+
+        let error = provider
+            .discover_authorization_server(&sample_resource_scope())
+            .await
+            .expect_err("missing registration endpoint must fail");
 
         assert_eq!(
             error.code(),
@@ -1591,6 +1626,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dcr_registration_4xx_error_body_maps_to_provider_denied() {
+        // RFC 7591 error responses on the register POST were collapsed into
+        // opaque BackendUnavailable; a 4xx with a parseable `error` code
+        // must surface as a diagnosable ProviderDenied instead.
+        let provider = test_provider(Arc::new(DcrRegistrationErrorEgress));
+        let auth = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
+        let flow_manager: Arc<dyn AuthFlowManager> = auth.clone();
+        let flow_source: Arc<dyn AuthFlowRecordSource> = auth.clone();
+        let scope = sample_turn_scope();
+        let owner = ironclaw_host_api::UserId::new("user").unwrap();
+        let run_id = TurnRunId::new();
+        let gate_ref =
+            AuthGateRef::new("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string()).unwrap();
+
+        let error = provider
+            .challenge_for_blocked_gate(
+                &flow_manager,
+                &flow_source,
+                &scope,
+                &owner,
+                run_id,
+                &gate_ref,
+            )
+            .await
+            .expect_err("4xx DCR registration error must be diagnosable");
+
+        assert_eq!(error.code(), ironclaw_auth::AuthErrorCode::ProviderDenied);
+    }
+
+    #[tokio::test]
     async fn pkce_verifier_for_flow_returns_none_when_secret_not_found() {
         let provider = test_provider(Arc::new(TestEgress));
 
@@ -1728,6 +1793,7 @@ mod tests {
         EmptyAuthorizationServers,
         ResourceMetadataFails,
         EmptyRegistrationEndpoint,
+        MissingRegistrationEndpoint,
     }
 
     #[derive(Debug)]
@@ -1751,6 +1817,12 @@ mod tests {
         fn empty_registration_endpoint() -> Self {
             Self {
                 case: DcrDiscoveryCase::EmptyRegistrationEndpoint,
+            }
+        }
+
+        fn missing_registration_endpoint() -> Self {
+            Self {
+                case: DcrDiscoveryCase::MissingRegistrationEndpoint,
             }
         }
     }
@@ -1793,6 +1865,20 @@ mod tests {
                 ) => (
                     200,
                     br#"{"authorization_endpoint":"https://oauth.notion.com/authorize","token_endpoint":"https://oauth.notion.com/token","registration_endpoint":""}"#.to_vec(),
+                ),
+                (
+                    DcrDiscoveryCase::MissingRegistrationEndpoint,
+                    "https://mcp.notion.com/mcp/.well-known/oauth-protected-resource",
+                ) => (
+                    200,
+                    br#"{"authorization_servers":["https://oauth.notion.com"]}"#.to_vec(),
+                ),
+                (
+                    DcrDiscoveryCase::MissingRegistrationEndpoint,
+                    "https://oauth.notion.com/.well-known/oauth-authorization-server",
+                ) => (
+                    200,
+                    br#"{"authorization_endpoint":"https://oauth.notion.com/authorize","token_endpoint":"https://oauth.notion.com/token"}"#.to_vec(),
                 ),
                 other => panic!("unexpected DCR discovery egress URL: {other:?}"),
             };
@@ -1953,6 +2039,45 @@ mod tests {
             };
             Ok(ironclaw_host_api::RuntimeHttpEgressResponse {
                 status: 200,
+                headers: Vec::new(),
+                request_bytes: request.body.len() as u64,
+                response_bytes: body.len() as u64,
+                body,
+                saved_body: None,
+                redaction_applied: false,
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct DcrRegistrationErrorEgress;
+
+    #[async_trait]
+    impl RuntimeHttpEgress for DcrRegistrationErrorEgress {
+        async fn execute(
+            &self,
+            request: RuntimeHttpEgressRequest,
+        ) -> Result<
+            ironclaw_host_api::RuntimeHttpEgressResponse,
+            ironclaw_host_api::RuntimeHttpEgressError,
+        > {
+            let (status, body) = match request.url.as_str() {
+                "https://mcp.notion.com/mcp/.well-known/oauth-protected-resource" => (
+                    200,
+                    br#"{"authorization_servers":["https://oauth.notion.com"]}"#.to_vec(),
+                ),
+                "https://oauth.notion.com/.well-known/oauth-authorization-server" => (
+                    200,
+                    br#"{"authorization_endpoint":"https://oauth.notion.com/authorize","token_endpoint":"https://oauth.notion.com/token","registration_endpoint":"https://oauth.notion.com/register"}"#.to_vec(),
+                ),
+                "https://oauth.notion.com/register" => (
+                    400,
+                    br#"{"error":"invalid_redirect_uri","error_description":"redirect_uri not allowed for this client"}"#.to_vec(),
+                ),
+                other => panic!("unexpected DCR registration-error egress URL: {other}"),
+            };
+            Ok(ironclaw_host_api::RuntimeHttpEgressResponse {
+                status,
                 headers: Vec::new(),
                 request_bytes: request.body.len() as u64,
                 response_bytes: body.len() as u64,

@@ -20,7 +20,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_secrets::SecretStore;
 use secrecy::{ExposeSecret, SecretString};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 const DEFAULT_TIMEOUT_MS: u32 = 30_000;
 const DEFAULT_RESPONSE_BODY_LIMIT: u64 = 16 * 1024;
@@ -589,11 +589,13 @@ struct StoredOAuthTokens {
 }
 
 /// Minimal OAuth error response — we extract only the `error` code field.
-/// The full body is never logged or returned to callers.
+/// The full body is never logged or returned to callers. Shared by the
+/// token endpoint (RFC 6749 §5.2) and DCR/metadata endpoints (RFC 7591
+/// §3.2.2): both error bodies carry `error` as the only field we read.
 #[derive(Debug, Deserialize)]
-struct OAuthErrorResponseBody {
+pub(crate) struct OAuthErrorResponseBody {
     #[serde(default)]
-    error: Option<String>,
+    pub(crate) error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -604,10 +606,34 @@ struct TokenResponseBody {
     refresh_token: Option<SecretString>,
     #[serde(default)]
     scope: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_u64_or_string")]
     expires_in: Option<u64>,
     #[serde(default)]
     token_type: Option<String>,
+}
+
+/// Some providers report `expires_in` as a JSON string (e.g. `"3600"`)
+/// rather than a number, which spec-following clients must still accept.
+/// Accepts a JSON number, a numeric string, or null/absent (-> `None`);
+/// rejects non-numeric strings.
+fn deserialize_optional_u64_or_string<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum U64OrString {
+        Number(u64),
+        Text(String),
+    }
+
+    match Option::<U64OrString>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(U64OrString::Number(value)) => Ok(Some(value)),
+        Some(U64OrString::Text(text)) => text.parse::<u64>().map(Some).map_err(|e| {
+            serde::de::Error::custom(format!("expires_in string is not a valid u64: {e}"))
+        }),
+    }
 }
 
 fn parse_token_response(body: &[u8]) -> Result<OAuthTokenResponse, AuthProductError> {

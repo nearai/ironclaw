@@ -196,22 +196,10 @@ pub async fn wait_for_callback(
                 && path.starts_with(&path_prefix)
                 && let Some(query) = path.split('?').nth(1)
             {
-                // Check for error first
-                if query.contains("error=") {
-                    let html = landing_html(&display_name, false);
-                    let response = format!(
-                        "HTTP/1.1 400 Bad Request\r\n\
-                         Content-Type: text/html; charset=utf-8\r\n\
-                         Connection: close\r\n\
-                         \r\n\
-                         {}",
-                        html
-                    );
-                    let _ = socket.write_all(response.as_bytes()).await;
-                    return Err(OAuthCallbackError::Denied);
-                }
-
-                // Parse all query params into a map for validation
+                // Parse all query params into a map first, so the error check below
+                // looks at the structured `error` key rather than a raw substring
+                // (a `state` or other param VALUE may legitimately contain the text
+                // "error=" without an `error` param being present — see GAP 17).
                 let params: HashMap<&str, String> = query
                     .split('&')
                     .filter_map(|p| {
@@ -226,6 +214,22 @@ pub async fn wait_for_callback(
                         ))
                     })
                     .collect();
+
+                // Check for a genuine top-level `error` query parameter (RFC 6749
+                // §4.1.2.1) first.
+                if params.contains_key("error") {
+                    let html = landing_html(&display_name, false);
+                    let response = format!(
+                        "HTTP/1.1 400 Bad Request\r\n\
+                         Content-Type: text/html; charset=utf-8\r\n\
+                         Connection: close\r\n\
+                         \r\n\
+                         {}",
+                        html
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    return Err(OAuthCallbackError::Denied);
+                }
 
                 // Validate CSRF state parameter
                 if let Some(ref expected) = expected_state {
@@ -450,6 +454,79 @@ mod tests {
         assert!(
             err.contains("wildcard"),
             "error should mention wildcard: {err}"
+        );
+    }
+
+    // GAP 17: a `state` (or other) query param whose VALUE happens to contain the
+    // literal substring "error=" must not be misclassified as a provider denial.
+    // Only a genuine top-level `error` query key (RFC 6749 §4.1.2.1) should deny.
+    #[tokio::test]
+    async fn callback_state_containing_error_substring_is_not_misclassified_as_denial() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral listener");
+        let addr = listener.local_addr().expect("local addr");
+
+        // Chosen so the raw query string contains the literal substring "error="
+        // inside the `state` value, without an actual `error` key being present.
+        let expected_state = "abcerror=xyz";
+        let handle = tokio::spawn(wait_for_callback(
+            listener,
+            "/callback",
+            "code",
+            "Test",
+            Some(expected_state),
+        ));
+
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect to callback listener");
+        let request =
+            format!("GET /callback?state={expected_state}&code=goodcode HTTP/1.1\r\n\r\n");
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("write request");
+
+        let result = handle.await.expect("task join");
+        assert_eq!(
+            result.expect("callback should succeed, not be misclassified as denied"),
+            "goodcode",
+            "expected extracted code param"
+        );
+    }
+
+    // Regression guard: a genuine top-level `error` param must still deny, and
+    // must still short-circuit before CSRF state validation (matching prior
+    // behavior), regardless of whether `state` matches `expected_state`.
+    #[tokio::test]
+    async fn callback_real_error_param_is_still_denied() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral listener");
+        let addr = listener.local_addr().expect("local addr");
+
+        let handle = tokio::spawn(wait_for_callback(
+            listener,
+            "/callback",
+            "code",
+            "Test",
+            Some("expected-state-does-not-matter"),
+        ));
+
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect to callback listener");
+        let request = "GET /callback?error=access_denied&state=nomatch HTTP/1.1\r\n\r\n";
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("write request");
+
+        let result = handle.await.expect("task join");
+        assert!(
+            matches!(result, Err(OAuthCallbackError::Denied)),
+            "real error param must still be classified as denial, got {result:?}"
         );
     }
 }

@@ -135,6 +135,64 @@ async fn credential_refresh_updates_account_through_provider_boundary() {
 }
 
 #[tokio::test]
+async fn credential_refresh_preserves_refresh_secret_when_provider_omits_rotation() {
+    // Non-rotating providers (e.g. Google) return only a new access token on
+    // refresh and omit `refresh_secret` from the response. The real driver
+    // (`ProviderBackedCredentialAccountService::refresh_account` in
+    // credential.rs) must fall back to the account's existing refresh secret
+    // in that case rather than dropping it. Exercise the real caller, not the
+    // fallback expression in isolation.
+    let services = Arc::new(InMemoryAuthProductServices::new());
+    let auth = provider_backed_auth(services.clone());
+    let owner = scope("alice");
+    let original_access = SecretHandle::new("github-no-rotation-old-access").unwrap();
+    let original_refresh = SecretHandle::new("github-no-rotation-old-refresh").unwrap();
+    let account = auth
+        .create_account(NewCredentialAccount {
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("work"),
+            status: CredentialAccountStatus::Expired,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(original_access.clone()),
+            refresh_secret: Some(original_refresh.clone()),
+            scopes: provider_scopes(&["repo"]),
+        })
+        .await
+        .expect("expired account");
+
+    services.no_rotation_next_refresh_for_tests(account.id);
+
+    let report = auth
+        .refresh_account(CredentialRefreshRequest::new(
+            owner.clone(),
+            provider(),
+            account.id,
+        ))
+        .await
+        .expect("non-rotating provider refresh succeeds");
+
+    assert!(report.refreshed);
+    assert_eq!(report.account.status, CredentialAccountStatus::Configured);
+
+    let refreshed = services
+        .get_account(CredentialAccountLookupRequest::new(
+            owner.clone(),
+            account.id,
+        ))
+        .await
+        .expect("lookup")
+        .expect("refreshed account");
+    assert_eq!(refreshed.status, CredentialAccountStatus::Configured);
+    // Access secret is still rotated on every successful refresh.
+    assert_ne!(refreshed.access_secret, Some(original_access));
+    // The provider omitted a new refresh secret, so the old one must survive.
+    assert_eq!(refreshed.refresh_secret, Some(original_refresh));
+}
+
+#[tokio::test]
 async fn credential_refresh_failure_becomes_recoverable_status() {
     let services = Arc::new(InMemoryAuthProductServices::new());
     let auth = provider_backed_auth(services.clone());

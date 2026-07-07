@@ -19,7 +19,20 @@ pub(super) struct ProtectedResourceMetadata {
 pub(super) struct AuthorizationServerMetadata {
     pub(super) authorization_endpoint: String,
     pub(super) token_endpoint: String,
-    pub(super) registration_endpoint: String,
+    /// RFC 8414 §2 marks this OPTIONAL — a well-formed authorization server
+    /// metadata document may omit it entirely (e.g. servers that don't
+    /// support dynamic client registration).
+    #[serde(default)]
+    pub(super) registration_endpoint: Option<String>,
+}
+
+impl AuthorizationServerMetadata {
+    /// Registration endpoint, treating a blank string the same as absent.
+    pub(super) fn registration_endpoint(&self) -> Option<&str> {
+        self.registration_endpoint
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -255,6 +268,16 @@ mod tests {
 
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("super-secret"));
+    }
+
+    #[test]
+    fn authorization_server_metadata_deserializes_without_registration_endpoint() {
+        // RFC 8414 §2 marks `registration_endpoint` OPTIONAL; a metadata
+        // document that omits it entirely must still deserialize.
+        let json = br#"{"authorization_endpoint":"https://oauth.example.com/authorize","token_endpoint":"https://oauth.example.com/token"}"#;
+        let metadata: AuthorizationServerMetadata = serde_json::from_slice(json)
+            .expect("RFC 8414 registration_endpoint is OPTIONAL and may be omitted");
+        assert_eq!(metadata.registration_endpoint, None);
     }
 
     #[test]
