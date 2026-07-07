@@ -5,6 +5,7 @@ import {
   CONNECTION_LOST_RUN_FAILURE_MESSAGE,
   failureMessageForRunStatus,
   rewriteConnectionLostRunFailures,
+  upsertConnectionLostRunFailure,
 } from "./failureMessages.js";
 import { CONNECTION_STATUS } from "./connection-status.js";
 
@@ -139,4 +140,56 @@ test("rewriteConnectionLostRunFailures leaves history alone without a run id", (
 
   assert.equal(rewriteConnectionLostRunFailures(messages, { runId: null }), messages);
   assert.equal(rewriteConnectionLostRunFailures(messages, {}), messages);
+});
+
+test("upsertConnectionLostRunFailure appends scoped connection error", () => {
+  const messages = [
+    {
+      id: "err-old-run",
+      role: "error",
+      content:
+        "The run failed because the execution driver was temporarily unavailable.",
+      failureCategory: "driver_unavailable",
+    },
+  ];
+
+  const next = upsertConnectionLostRunFailure(messages, {
+    runId: "run-1",
+    timestamp: "2026-06-02T00:00:00.000Z",
+  });
+
+  assert.equal(messages.length, 1);
+  assert.equal(next.length, 2);
+  assert.equal(next[0].content, messages[0].content);
+  assert.deepEqual(next[1], {
+    id: "err-run-1",
+    role: "error",
+    content: CONNECTION_LOST_RUN_FAILURE_MESSAGE,
+    timestamp: "2026-06-02T00:00:00.000Z",
+    failureStatus: "failed",
+    failureCategory: "connection_lost",
+    failureSummary: CONNECTION_LOST_RUN_FAILURE_MESSAGE,
+  });
+});
+
+test("upsertConnectionLostRunFailure does not rewrite history when run id is unknown", () => {
+  const historicalFailure =
+    "The run failed because the execution driver was temporarily unavailable.";
+  const messages = [
+    {
+      id: "err-old-run",
+      role: "error",
+      content: historicalFailure,
+      failureCategory: "driver_unavailable",
+    },
+  ];
+
+  const next = upsertConnectionLostRunFailure(messages, {
+    timestamp: "2026-06-02T00:00:00.000Z",
+  });
+
+  assert.equal(next.length, 2);
+  assert.equal(next[0].content, historicalFailure);
+  assert.equal(next[1].id, "err-connection-lost");
+  assert.equal(next[1].content, CONNECTION_LOST_RUN_FAILURE_MESSAGE);
 });

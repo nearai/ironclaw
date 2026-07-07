@@ -19,6 +19,7 @@ import {
 import {
   CONNECTION_LOST_RUN_FAILURE_MESSAGE,
   rewriteConnectionLostRunFailures,
+  upsertConnectionLostRunFailure,
 } from "./failureMessages.js";
 import {
   CONNECTION_STATUS,
@@ -68,6 +69,7 @@ function runUseChatSource(context) {
     resetToolActivityState,
     timelineMessageIdFromAcceptedRef,
     rewriteConnectionLostRunFailures,
+    upsertConnectionLostRunFailure,
     CONNECTION_STATUS,
     isConnectionLostStatus,
   });
@@ -146,6 +148,7 @@ function createReactStub({
 
 test("useChat: disconnected SSE rewrites an active driver_unavailable error", () => {
   const threadId = "thread-1";
+  const setCalls = [];
   let renderedMessages = [
     {
       id: "err-run-1",
@@ -168,7 +171,7 @@ test("useChat: disconnected SSE rewrites an active driver_unavailable error", ()
     Error,
     Map,
     Math,
-    React: createReactStub({ initialByIndex, runEffects: true }),
+    React: createReactStub({ initialByIndex, setCalls, runEffects: true }),
     addPending,
     toRenderAttachment,
     toWireAttachment,
@@ -212,11 +215,21 @@ test("useChat: disconnected SSE rewrites an active driver_unavailable error", ()
   const chat = context.globalThis.__testExports.useChat(threadId);
 
   assert.equal(chat.sseStatus, CONNECTION_STATUS.DISCONNECTED);
+  assert.equal(renderedMessages.length, 1);
   assert.equal(renderedMessages[0].content, CONNECTION_LOST_RUN_FAILURE_MESSAGE);
+  assert.equal(
+    stateUpdatesFor(setCalls, STATE_SLOT.isProcessing).at(-1)?.value,
+    false,
+  );
+  assert.equal(
+    stateUpdatesFor(setCalls, STATE_SLOT.activeRun).at(-1)?.value,
+    null,
+  );
 });
 
-test("useChat: disconnected SSE does not rewrite history before run id is known", () => {
+test("useChat: disconnected SSE surfaces connection error before run id is known", () => {
   const threadId = "thread-1";
+  const setCalls = [];
   const historicalFailure =
     "The run failed because the execution driver was temporarily unavailable.";
   let renderedMessages = [
@@ -236,7 +249,7 @@ test("useChat: disconnected SSE does not rewrite history before run id is known"
     Error,
     Map,
     Math,
-    React: createReactStub({ initialByIndex, runEffects: true }),
+    React: createReactStub({ initialByIndex, setCalls, runEffects: true }),
     addPending,
     toRenderAttachment,
     toWireAttachment,
@@ -280,7 +293,18 @@ test("useChat: disconnected SSE does not rewrite history before run id is known"
   const chat = context.globalThis.__testExports.useChat(threadId);
 
   assert.equal(chat.sseStatus, CONNECTION_STATUS.DISCONNECTED);
+  assert.equal(renderedMessages.length, 2);
   assert.equal(renderedMessages[0].content, historicalFailure);
+  assert.equal(renderedMessages[1].id, "err-connection-lost");
+  assert.equal(renderedMessages[1].content, CONNECTION_LOST_RUN_FAILURE_MESSAGE);
+  assert.equal(
+    stateUpdatesFor(setCalls, STATE_SLOT.isProcessing).at(-1)?.value,
+    false,
+  );
+  assert.equal(
+    stateUpdatesFor(setCalls, STATE_SLOT.activeRun).at(-1)?.value,
+    null,
+  );
 });
 
 test("useChat.send: accepted ref reconciles pending message on timeline reload", async () => {

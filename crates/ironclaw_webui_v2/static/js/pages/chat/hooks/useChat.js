@@ -23,7 +23,10 @@ import {
   failGateToolActivity,
   resetToolActivityState,
 } from "../lib/tool-activity-state.js";
-import { rewriteConnectionLostRunFailures } from "../lib/failureMessages.js";
+import {
+  rewriteConnectionLostRunFailures,
+  upsertConnectionLostRunFailure,
+} from "../lib/failureMessages.js";
 import {
   CONNECTION_STATUS,
   isConnectionLostStatus,
@@ -427,16 +430,33 @@ export function useChat(threadId) {
 
   React.useEffect(() => {
     connectionStatusRef.current = sseStatus;
-    if (!isConnectionLostStatus(sseStatus)) return;
+    if (sseStatus !== CONNECTION_STATUS.DISCONNECTED) return;
     const runId = activeRunRef.current?.runId || null;
+    const wasProcessing = isProcessingRef.current;
     if (runId) {
       connectionInterruptedRunIdsRef.current.add(runId);
-    } else if (isProcessingRef.current) {
+    } else if (wasProcessing) {
       connectionInterruptedUnknownRef.current = true;
     }
-    if (!runId) return;
-    setMessages((prev) => rewriteConnectionLostRunFailures(prev, { runId }));
-  }, [sseStatus, setMessages]);
+    if (!runId && !wasProcessing) return;
+    setIsProcessing(false);
+    setActiveRun(null);
+    const localRunAdmission = localRunAdmissionRef.current;
+    if (
+      localRunAdmission &&
+      (!runId ||
+        localRunAdmission.runId === runId ||
+        localRunAdmission.threadId === threadId)
+    ) {
+      localRunAdmissionRef.current = null;
+    }
+    setMessages((prev) =>
+      upsertConnectionLostRunFailure(
+        runId ? rewriteConnectionLostRunFailures(prev, { runId }) : prev,
+        { runId },
+      ),
+    );
+  }, [sseStatus, setMessages, setIsProcessing, setActiveRun, threadId]);
 
   // Accepts the composer call shape `{ attachments, threadId }`. The
   // `attachments` are staged objects from `lib/attachments.js`

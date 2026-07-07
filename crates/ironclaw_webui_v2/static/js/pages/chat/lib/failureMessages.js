@@ -80,3 +80,32 @@ export function rewriteConnectionLostRunFailures(messages, { runId } = {}) {
   });
   return changed ? next : messages;
 }
+
+export function upsertConnectionLostRunFailure(
+  messages,
+  { runId, timestamp } = {},
+) {
+  if (!Array.isArray(messages)) return messages;
+  const messageId = `err-${runId || "connection-lost"}`;
+  const nextMessage = {
+    id: messageId,
+    role: "error",
+    content: CONNECTION_LOST_RUN_FAILURE_MESSAGE,
+    timestamp: timestamp || new Date().toISOString(),
+    failureStatus: "failed",
+    failureCategory: "connection_lost",
+    failureSummary: CONNECTION_LOST_RUN_FAILURE_MESSAGE,
+  };
+  const existing = messages.findIndex((message) => message?.id === messageId);
+  if (existing < 0) return [...messages, nextMessage];
+  if (messages[existing]?.content === CONNECTION_LOST_RUN_FAILURE_MESSAGE) {
+    return messages;
+  }
+  const next = [...messages];
+  next[existing] = {
+    ...messages[existing],
+    ...nextMessage,
+    timestamp: messages[existing].timestamp || nextMessage.timestamp,
+  };
+  return next;
+}
