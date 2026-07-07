@@ -333,7 +333,12 @@ impl RebornIntegrationHarness {
             }
         }
         if !found {
-            return Err(format!("no captured tool definition named {name:?}").into());
+            let seen: Vec<String> = definitions
+                .iter()
+                .flatten()
+                .map(|definition| definition.name.clone())
+                .collect();
+            return Err(format!("no captured tool definition named {name:?}; saw {seen:?}").into());
         }
         Ok(())
     }
