@@ -132,7 +132,6 @@ export function AutomationDetailPanel({
                       <${Input}
                         size="sm"
                         value=${draftName}
-                        maxLength=${AUTOMATION_NAME_MAX_BYTES}
                         data-testid="automation-rename-input"
                         aria-label=${t("automations.rename.nameLabel")}
                         disabled=${isMutating}

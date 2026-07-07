@@ -120,8 +120,7 @@ pub const WEBUI_V2_PATTERN_RESUME_AUTOMATION: &str =
     "/api/webchat/v2/automations/{automation_id}/resume";
 // Intentional dual-method resource path: POST renames an automation and DELETE
 // removes it. Keep the route ids separate so host policy/audit stays action-specific.
-pub const WEBUI_V2_PATTERN_RENAME_AUTOMATION: &str = "/api/webchat/v2/automations/{automation_id}";
-pub const WEBUI_V2_PATTERN_DELETE_AUTOMATION: &str = "/api/webchat/v2/automations/{automation_id}";
+pub const WEBUI_V2_PATTERN_AUTOMATION_DETAIL: &str = "/api/webchat/v2/automations/{automation_id}";
 pub const WEBUI_V2_PATTERN_TRACE_CREDITS: &str = "/api/webchat/v2/traces/credit";
 pub const WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE: &str =
     "/api/webchat/v2/traces/holds/{submission_id}/authorize";
@@ -713,7 +712,7 @@ fn rename_automation_descriptor() -> IngressRouteDescriptor {
     descriptor(
         WEBUI_V2_ROUTE_RENAME_AUTOMATION,
         NetworkMethod::Post,
-        WEBUI_V2_PATTERN_RENAME_AUTOMATION,
+        WEBUI_V2_PATTERN_AUTOMATION_DETAIL,
         mutation_policy(
             body_limit_kib(4),
             mutation_rate_limit(),
@@ -727,7 +726,7 @@ fn delete_automation_descriptor() -> IngressRouteDescriptor {
     descriptor(
         WEBUI_V2_ROUTE_DELETE_AUTOMATION,
         NetworkMethod::Delete,
-        WEBUI_V2_PATTERN_DELETE_AUTOMATION,
+        WEBUI_V2_PATTERN_AUTOMATION_DETAIL,
         mutation_policy(
             BodyLimitPolicy::NoBody,
             mutation_rate_limit(),
