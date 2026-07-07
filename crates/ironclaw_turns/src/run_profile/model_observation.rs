@@ -10,11 +10,23 @@ const MODEL_OBSERVATION_INPUT_ISSUES_MAX: usize = 16;
 const MODEL_OBSERVATION_TEXT_MAX_BYTES: usize = 512;
 pub const MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION: u32 = 1;
 
+/// Maximum size of a model-visible free-text diagnostic. Larger than the
+/// summary cap because the diagnostic carries raw (secret-scrubbed) error text.
+pub const MODEL_OBSERVATION_DETAIL_MAX_BYTES: usize = 4096;
+
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CapabilityFailureDetail {
-    InvalidInput { issues: Vec<CapabilityInputIssue> },
+    InvalidInput {
+        issues: Vec<CapabilityInputIssue>,
+    },
+    /// Free-text, secret-scrubbed raw cause carried to the model. Allows path
+    /// and payload delimiters (`/ { } [ ] < >`) that the strict summary
+    /// validator rejects — the producer redacts secret VALUES instead.
+    Diagnostic {
+        text: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,8 +88,18 @@ pub enum ToolObservationStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolObservationDetail {
-    InvalidInput { issues: Vec<CapabilityInputIssue> },
-    GenericFailure { failure_kind: CapabilityFailureKind },
+    InvalidInput {
+        issues: Vec<CapabilityInputIssue>,
+    },
+    GenericFailure {
+        failure_kind: CapabilityFailureKind,
+        /// Bounded, secret-scrubbed raw cause shown to the model alongside the
+        /// fixed-template summary. Validated leniently — path and payload
+        /// delimiters are allowed; only NUL/control chars and length are
+        /// rejected. The producer is responsible for redacting secret VALUES.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
 }
 
 impl ToolObservationDetail {
@@ -94,9 +116,35 @@ impl ToolObservationDetail {
                 }
                 Ok(())
             }
-            Self::GenericFailure { .. } => Ok(()),
+            Self::GenericFailure { detail, .. } => {
+                if let Some(detail) = detail {
+                    validate_model_observation_detail(detail)?;
+                }
+                Ok(())
+            }
         }
     }
+}
+
+/// Lenient validation for the model-visible free-text diagnostic channel.
+///
+/// Unlike the strict safe-summary validator, this ALLOWS path and payload
+/// delimiters (`/ { } [ ] < >`) so the model can see the real cause (paths,
+/// schema refs, codes). It only rejects NUL/disallowed control characters and
+/// caps length. Secret VALUE redaction is the producer's responsibility.
+pub fn validate_model_observation_detail(value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err("model observation detail must not be empty".to_string());
+    }
+    if value.len() > MODEL_OBSERVATION_DETAIL_MAX_BYTES {
+        return Err(format!(
+            "model observation detail exceeds {MODEL_OBSERVATION_DETAIL_MAX_BYTES} bytes"
+        ));
+    }
+    if value.chars().any(is_disallowed_control_character) {
+        return Err("model observation detail must not contain NUL/control characters".to_string());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -324,5 +372,70 @@ mod tests {
             serde_json::json!("provide_required_field")
         );
         assert_eq!(value["trust"], "untrusted_tool_output");
+    }
+
+    #[test]
+    fn generic_failure_detail_allows_paths_and_payload_delimiters() {
+        let path = "missing input_schema_ref at /system/extensions/google-calendar/schemas/google-calendar/list_calendars.input.v1.json";
+        let observation = ModelVisibleToolObservation {
+            schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+            status: ToolObservationStatus::Error,
+            summary: "Capability failed with missing_runtime.".to_string(),
+            detail: ToolObservationDetail::GenericFailure {
+                failure_kind: CapabilityFailureKind::MissingRuntime,
+                detail: Some(path.to_string()),
+            },
+            artifacts: Vec::new(),
+            recovery: None,
+            trust: ObservationTrust::UntrustedToolOutput,
+        };
+
+        observation
+            .validate()
+            .expect("path-bearing diagnostic detail must validate");
+
+        let value = serde_json::to_value(&observation).expect("serialize");
+        assert_eq!(value["detail"]["detail"], serde_json::json!(path));
+    }
+
+    #[test]
+    fn validate_model_observation_detail_rejects_control_chars() {
+        validate_model_observation_detail("clean /path/ok").expect("ordinary text ok");
+        validate_model_observation_detail("bad\u{0}null").expect_err("NUL must be rejected");
+        validate_model_observation_detail("").expect_err("empty must be rejected");
+    }
+
+    #[test]
+    fn generic_failure_deserializes_legacy_json_without_detail() {
+        // Legacy wire payloads predate the `detail` field; they must still
+        // deserialize (defaulting `detail` to None).
+        let legacy = serde_json::json!({
+            "kind": "generic_failure",
+            "failure_kind": "backend"
+        });
+        let detail: ToolObservationDetail =
+            serde_json::from_value(legacy).expect("legacy generic_failure deserializes");
+        assert!(matches!(
+            detail,
+            ToolObservationDetail::GenericFailure {
+                failure_kind: CapabilityFailureKind::Backend,
+                detail: None
+            }
+        ));
+    }
+
+    #[test]
+    fn capability_failure_detail_diagnostic_round_trips() {
+        let detail = CapabilityFailureDetail::Diagnostic {
+            text: "missing input_schema_ref at /system/extensions/x.json".to_string(),
+        };
+        let value = serde_json::to_value(&detail).expect("serialize");
+        assert_eq!(value["kind"], "diagnostic");
+        assert_eq!(
+            value["text"],
+            serde_json::json!("missing input_schema_ref at /system/extensions/x.json")
+        );
+        let back: CapabilityFailureDetail = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(back, detail);
     }
 }

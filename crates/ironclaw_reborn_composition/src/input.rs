@@ -28,10 +28,10 @@ use ironclaw_reborn_event_store::{PostgresPoolTlsOptions, RebornPostgresSslMode}
 
 #[cfg(feature = "postgres")]
 use crate::RebornBuildError;
-use crate::google_oauth::google_provider_spec;
-use crate::notion_oauth::notion_provider_spec;
-use crate::oauth_dcr::OAuthDcrProviderConfig;
-use crate::oauth_provider_client::HostOAuthProviderSpec;
+use crate::product_auth::oauth::google_oauth::google_provider_spec;
+use crate::product_auth::oauth::notion_oauth::notion_provider_spec;
+use crate::product_auth::oauth::oauth_dcr::OAuthDcrProviderConfig;
+use crate::product_auth::oauth::oauth_provider_client::HostOAuthProviderSpec;
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::slack_setup::SlackPersonalSetupServiceSlot;
 use crate::{RebornCompositionProfile, RebornProductAuthServicePorts};
@@ -193,7 +193,8 @@ pub struct RebornBuildInput {
     pub(crate) oauth_dcr_provider_configs: Vec<OAuthDcrProviderBackendConfig>,
     #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) slack_personal_oauth_lazy_slot: Option<SlackPersonalSetupServiceSlot>,
-    pub(crate) nearai_mcp_bootstrap_config: Option<crate::nearai_mcp::NearAiMcpBootstrapConfig>,
+    pub(crate) nearai_mcp_bootstrap_config:
+        Option<crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
     /// Concurrency limits applied to the in-memory turn-state store.
     /// Defaults to no limits (all caps `None` / unlimited).
     pub(crate) turn_state_store_limits: InMemoryTurnStateStoreLimits,
@@ -592,7 +593,7 @@ impl RebornBuildInput {
 
     pub fn with_nearai_mcp_bootstrap_config(
         mut self,
-        config: crate::nearai_mcp::NearAiMcpBootstrapConfig,
+        config: crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig,
     ) -> Self {
         self.nearai_mcp_bootstrap_config = Some(config);
         self
@@ -600,7 +601,7 @@ impl RebornBuildInput {
 
     pub fn with_optional_nearai_mcp_bootstrap_config(
         mut self,
-        config: Option<crate::nearai_mcp::NearAiMcpBootstrapConfig>,
+        config: Option<crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
     ) -> Self {
         self.nearai_mcp_bootstrap_config = config;
         self

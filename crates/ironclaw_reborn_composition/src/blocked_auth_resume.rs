@@ -33,8 +33,8 @@ use ironclaw_turns::{
 };
 use uuid::Uuid;
 
-use crate::auth::RebornAuthContinuationDispatcher;
 use crate::factory::LocalDevTurnStateStore;
+use crate::product_auth::api::auth::RebornAuthContinuationDispatcher;
 
 /// Source of the durable turn-state snapshot the fan-out scans. Split out so
 /// tests can hand-build snapshots without a filesystem-backed store.
@@ -98,7 +98,10 @@ impl BlockedAuthResumeFanout {
 
     async fn fan_out(&self, event: &AuthContinuationEvent) {
         let primary_run_id = primary_run_id(&event.continuation);
+        // silent-ok: snapshot source logs underlying read failures; auth
+        // continuation fan-out is best-effort.
         let Some(snapshot) = self.snapshot_source.snapshot().await else {
+            tracing::debug!("blocked-auth fan-out skipped: no turn snapshot available");
             return;
         };
         let tenant_id = &event.scope.resource.tenant_id;
@@ -305,6 +308,13 @@ mod tests {
                 status: TurnStatus::Queued,
                 event_cursor: EventCursor(1),
             })
+        }
+
+        async fn retry_turn(
+            &self,
+            _request: ironclaw_turns::RetryTurnRequest,
+        ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+            unreachable!("fan-out tests do not retry turns")
         }
 
         async fn cancel_run(

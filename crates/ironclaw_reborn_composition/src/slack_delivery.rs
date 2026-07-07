@@ -50,7 +50,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use tokio::sync::Semaphore;
 
-use crate::auth_prompt::{BlockedAuthPromptRequest, auth_prompt_view_for_blocked_auth};
+use crate::product_auth::api::auth_prompt::{
+    BlockedAuthPromptRequest, auth_prompt_view_for_blocked_auth,
+};
 use crate::slack_outbound_targets::{
     slack_conversation_id_from_reply_target_binding_ref, slack_reply_target_is_personal_dm,
 };
@@ -3091,9 +3093,9 @@ mod tests {
     use ironclaw_triggers::{TriggerFire, TriggerFireIdentity, TriggerId};
     use ironclaw_turns::{
         EventCursor, GateRef, GetRunStateRequest, ReplyTargetBindingRef, ResumeTurnRequest,
-        ResumeTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef, SubmitTurnRequest,
-        SubmitTurnResponse, TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope,
-        TurnStatus,
+        ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, RunProfileId, RunProfileVersion,
+        SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator, TurnError,
+        TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
     };
 
     // --- Minimal inline fakes ------------------------------------------------
@@ -3210,6 +3212,15 @@ mod tests {
         ) -> Result<ResumeTurnResponse, TurnError> {
             Err(TurnError::Unavailable {
                 reason: "ScriptedTurnCoordinator does not support resume_turn".to_string(),
+            })
+        }
+
+        async fn retry_turn(
+            &self,
+            _request: ironclaw_turns::RetryTurnRequest,
+        ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+            Err(TurnError::Unavailable {
+                reason: "ScriptedTurnCoordinator does not support retry_turn".to_string(),
             })
         }
 
@@ -6931,17 +6942,22 @@ mod tests {
             _run_id: TurnRunId,
             _gate_ref: &str,
             _credential_requirements: &[ironclaw_host_api::RuntimeCredentialAuthRequirement],
-        ) -> Result<Option<crate::auth_prompt::AuthChallengeView>, ironclaw_auth::AuthProductError>
-        {
-            Ok(Some(crate::auth_prompt::AuthChallengeView {
-                kind: ironclaw_product_adapters::AuthPromptChallengeKind::OAuthUrl,
-                provider: ironclaw_auth::AuthProviderId::new("test-provider").expect("provider"),
-                account_label: None,
-                authorization_url: Some(
-                    ironclaw_auth::OAuthAuthorizationUrl::new(self.url.clone()).expect("url"),
-                ),
-                expires_at: None,
-            }))
+        ) -> Result<
+            Option<crate::product_auth::api::auth_prompt::AuthChallengeView>,
+            ironclaw_auth::AuthProductError,
+        > {
+            Ok(Some(
+                crate::product_auth::api::auth_prompt::AuthChallengeView {
+                    kind: ironclaw_product_adapters::AuthPromptChallengeKind::OAuthUrl,
+                    provider: ironclaw_auth::AuthProviderId::new("test-provider")
+                        .expect("provider"),
+                    account_label: None,
+                    authorization_url: Some(
+                        ironclaw_auth::OAuthAuthorizationUrl::new(self.url.clone()).expect("url"),
+                    ),
+                    expires_at: None,
+                },
+            ))
         }
     }
 
@@ -7504,6 +7520,15 @@ mod tests {
             })
         }
 
+        async fn retry_turn(
+            &self,
+            _request: RetryTurnRequest,
+        ) -> Result<RetryTurnResponse, TurnError> {
+            Err(TurnError::Unavailable {
+                reason: "ErroringTurnCoordinator".to_string(),
+            })
+        }
+
         async fn get_run_state(
             &self,
             _request: GetRunStateRequest,
@@ -7850,6 +7875,13 @@ mod tests {
                 req: ResumeTurnRequest,
             ) -> Result<ResumeTurnResponse, TurnError> {
                 self.inner.resume_turn(req).await
+            }
+
+            async fn retry_turn(
+                &self,
+                req: RetryTurnRequest,
+            ) -> Result<RetryTurnResponse, TurnError> {
+                self.inner.retry_turn(req).await
             }
             async fn get_run_state(
                 &self,

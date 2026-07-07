@@ -609,6 +609,14 @@ impl OAuthProviderIdentitySubject {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub fn as_ref(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
 }
 
 impl TryFrom<String> for OAuthProviderIdentitySubject {

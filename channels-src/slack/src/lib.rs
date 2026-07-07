@@ -876,8 +876,18 @@ fn check_sender_permission(user_id: &str, channel_id: &str, is_dm: bool) -> bool
 
     // 3. Check configured allow list.
     let allowed: Vec<String> = host_workspace_read(ALLOW_FROM_PATH)
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
+        .map(|s| {
+            serde_json::from_str(&s).unwrap_or_else(|error| {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!(
+                        "Failed to parse Slack allow_from state, treating as empty: {error}"
+                    ),
+                );
+                Vec::new()
+            })
+        })
+        .unwrap_or_default(); // silent-ok: unset allow_from means no explicit allowlist yet.
 
     // 4. Check sender (Slack events only have user ID, not username)
     let is_allowed = allowed.contains(&"*".to_string()) || allowed.contains(&user_id.to_string());

@@ -337,6 +337,7 @@ async fn drive_model_reply_milestones_and_assert_projection(
         .unwrap();
     let model_response = success_host
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: success_prompt.messages,
             surface_version: None,
             model_preference: None,
@@ -412,6 +413,7 @@ async fn drive_model_reply_milestones_and_assert_projection(
         .unwrap();
     let error = failure_host
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: failure_prompt.messages,
             surface_version: None,
             model_preference: None,
@@ -706,6 +708,16 @@ impl TurnStateStore for StaticTurnStateStore {
         _request: ResumeTurnRequest,
     ) -> Result<ironclaw_turns::ResumeTurnResponse, TurnError> {
         panic!("resume_turn should not be called by static test turn state store")
+    }
+
+    async fn retry_turn(
+        &self,
+        request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        // WS-3 implements this.
+        Err(TurnError::RunNotRetryable {
+            run_id: request.run_id,
+        })
     }
 
     async fn request_cancel(
