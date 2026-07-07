@@ -59,8 +59,9 @@ use ironclaw_turns::{
     CancelRunRequest, FilesystemTurnStateStore, GateRef, GetLoopCheckpointRequest,
     GetRunStateRequest, IdempotencyKey, InMemoryCheckpointStateStore, LoopBlockedKind,
     LoopCheckpointKind, LoopCheckpointStore, ReplyTargetBindingRef, ResumeTurnRequest,
-    SanitizedCancelReason, SourceBindingRef, TurnActor, TurnCoordinator, TurnError, TurnRunId,
-    TurnRunRecord, TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
+    RetryTurnRequest, RetryTurnResponse, SanitizedCancelReason, SourceBindingRef, TurnActor,
+    TurnCoordinator, TurnError, TurnRunId, TurnRunRecord, TurnRunState, TurnScope,
+    TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
     run_profile::{
         CapabilityCallCandidate, CapabilityInputRef, CapabilityInvocation,
         CapabilitySurfaceVersion, LoopHostMilestone, LoopHostMilestoneKind, ParentLoopOutput,
@@ -1144,6 +1145,20 @@ impl RebornBinaryE2EHarness {
     pub async fn run_state(&self, run_id: TurnRunId) -> HarnessResult<TurnRunState> {
         self.run_state_in_scope(self.turn_scope.clone(), run_id)
             .await
+    }
+
+    pub async fn retry_turn(&self, run_id: TurnRunId) -> HarnessResult<RetryTurnResponse> {
+        Ok(self
+            .coordinator
+            .retry_turn(RetryTurnRequest {
+                scope: self.turn_scope.clone(),
+                actor: TurnActor::new(self.binding.actor_user_id.clone()),
+                run_id,
+                source_binding_ref: SourceBindingRef::new("src:retry")?,
+                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:retry")?,
+                idempotency_key: IdempotencyKey::new(format!("retry-{run_id}"))?,
+            })
+            .await?)
     }
 
     pub async fn run_state_in_scope(

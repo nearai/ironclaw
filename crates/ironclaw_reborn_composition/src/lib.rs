@@ -22,18 +22,12 @@ use std::sync::Arc;
 
 #[cfg(test)]
 mod approval_test_support;
-mod auth;
-#[cfg(test)]
-mod auth_dcr_tests;
-mod auth_prompt;
 mod automation;
 mod available_extensions;
 mod bundled_skills;
 #[cfg(feature = "slack-v2-host-beta")]
 mod channel_connection_resume;
 mod communication_context;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-mod credential_refresh_worker;
 mod default_system_prompt;
 mod error;
 mod extension_activation_credentials;
@@ -45,8 +39,8 @@ mod extension_lifecycle_capabilities;
 mod extension_lifecycle_capabilities_auth_tests;
 mod extension_lifecycle_command;
 mod factory;
+mod failure_lane;
 mod failure_summary;
-mod google_oauth;
 mod gsuite;
 mod input;
 mod lifecycle;
@@ -55,35 +49,26 @@ mod local_dev_authorization;
 mod local_dev_capability_policy;
 mod local_dev_mounts;
 mod local_runtime_profile;
-mod manual_token_flow;
 mod mcp;
 mod mcp_discovery;
-mod notion_oauth;
-mod oauth_dcr;
-mod oauth_dcr_protocol;
-mod oauth_gate;
-mod oauth_provider_client;
 mod observability;
 mod outbound;
-mod product_auth_durable;
-mod product_auth_providers;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-mod product_auth_refresh_lock;
-mod product_auth_runtime_credentials;
-#[cfg(feature = "webui-v2-beta")]
-mod product_auth_serve;
+mod product_auth;
 mod product_live_adapters;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 mod production_runtime_policy;
 mod profile;
 mod profile_approval_authorization;
 mod projection;
-pub use auth_prompt::{AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller};
+pub use product_auth::api::auth_prompt::{
+    AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller,
+};
 #[cfg(feature = "slack-v2-host-beta")]
 mod delivered_gate_routing;
 #[cfg(feature = "slack-v2-host-beta")]
 mod host_ingress;
 mod readiness;
+mod retry_disposition;
 mod runtime;
 mod runtime_input;
 mod runtime_profile_approval_policy;
@@ -129,6 +114,7 @@ mod support;
 pub mod test_support;
 mod trigger_poller;
 mod trigger_poller_trusted_submit;
+mod turn_run_snapshot;
 mod web_access;
 mod webui;
 #[cfg(feature = "webui-v2-beta")]
@@ -145,13 +131,6 @@ mod webui_serve;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_ws_origin;
 
-pub use auth::{
-    RebornAuthContinuationDispatcher, RebornAuthProductError, RebornCredentialLifecycleError,
-    RebornManualTokenChallenge, RebornManualTokenError, RebornManualTokenSetupRequest,
-    RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse, RebornOAuthCallbackError,
-    RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
-    RebornProductAuthServicePorts, RebornProductAuthServices,
-};
 pub use automation::RebornAutomationProductFacade;
 pub use error::RebornBuildError;
 pub use extension_lifecycle_command::{
@@ -165,6 +144,7 @@ pub use factory::RebornLocalDevApprovalTestParts;
 #[cfg(feature = "migration-support")]
 pub use factory::extension_installation_store_for_migration;
 pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
+pub use failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
 pub use failure_summary::reborn_failure_summary_for_category;
 pub use gsuite::{bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers};
 pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
@@ -228,6 +208,13 @@ pub use observability::operator_logs::{
     OperatorLogLayer, capture_tracing_log, operator_log_buffer,
 };
 pub use observability::trajectory_observer::RebornTrajectoryObserver;
+pub use product_auth::api::auth::{
+    RebornAuthContinuationDispatcher, RebornAuthProductError, RebornCredentialLifecycleError,
+    RebornManualTokenChallenge, RebornManualTokenError, RebornManualTokenSetupRequest,
+    RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse, RebornOAuthCallbackError,
+    RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
+    RebornProductAuthServicePorts, RebornProductAuthServices,
+};
 pub use product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
     ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
@@ -242,6 +229,7 @@ pub use readiness::{
     RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
     RebornReadinessDiagnosticStatus, RebornReadinessState, RebornWorkerReadiness,
 };
+pub use retry_disposition::{RetryDisposition, retry_disposition};
 #[cfg(any(test, feature = "test-support"))]
 pub use runtime::RebornTurnDriveOutcome;
 pub use runtime::{

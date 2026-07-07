@@ -9,7 +9,7 @@ use std::{
 };
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use crate::product_auth_durable::{FilesystemAuthProductServices, UnavailableAuthProviderClient};
+use crate::product_auth::durable::{FilesystemAuthProductServices, UnavailableAuthProviderClient};
 use crate::support::fs::RebornProjectService;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_approvals::{
@@ -155,8 +155,10 @@ use crate::local_dev_mounts::{
     skill_management_mount_view, system_extensions_lifecycle_mount_view, workspace_mount_view,
 };
 use crate::mcp::hosted_http_mcp_runtime;
-use crate::product_auth_providers::{OAuthProviderComposition, compose_provider_client};
-use crate::product_auth_runtime_credentials::ProductAuthRuntimeCredentialResolver;
+use crate::product_auth::credentials::product_auth_providers::{
+    OAuthProviderComposition, compose_provider_client,
+};
+use crate::product_auth::credentials::runtime_credentials::ProductAuthRuntimeCredentialResolver;
 use crate::runtime_input::RebornRuntimeIdentity;
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
@@ -497,8 +499,8 @@ pub(crate) enum CredentialRefreshWorkerReady {
     /// the worker; the `enabled` policy flag still gates the actual spawn.
     Ready {
         candidate_source:
-            Arc<dyn crate::credential_refresh_worker::CredentialRefreshCandidateSource>,
-        leader_lock: crate::product_auth_refresh_lock::CredentialRefreshLeaderLock,
+            Arc<dyn crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshCandidateSource>,
+        leader_lock: crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock,
         refresh_port: Arc<RebornProductAuthServices>,
     },
     /// Deps intentionally absent: local-dev (single-user, no cross-owner
@@ -611,6 +613,51 @@ impl RebornServices {
         Some(Arc::clone(&local_runtime.project_service))
     }
 
+    /// Test-support access to the local-dev communication-preference repository
+    /// (W6-COLD-SPOTS seam). This is the SAME `Arc` that `build_local_dev_store_graph`
+    /// wires into `RebornLocalRuntimeServices::outbound_preferences` via
+    /// `local_dev_outbound_store`, for tests only. Returns `None` for
+    /// production-profile compositions without a local-dev runtime.
+    #[cfg(feature = "test-support")]
+    pub fn local_dev_outbound_preferences_for_test(
+        &self,
+    ) -> Option<Arc<dyn CommunicationPreferenceRepository>> {
+        let local_runtime = self.local_runtime.as_ref()?;
+        Some(Arc::clone(&local_runtime.outbound_preferences))
+    }
+
+    /// Test-support access to the on-disk local-dev storage root (W6-COLD-SPOTS
+    /// seam), for tests only — mirrors the same `local_runtime.local_dev_storage_root`
+    /// that `build_local_dev_store_graph` establishes in production. Used to reopen
+    /// a fresh outbound-preferences store at the same root (see
+    /// `open_local_dev_outbound_preferences_store_for_test`). Returns `None` for
+    /// production-profile compositions without a local-dev runtime.
+    #[cfg(feature = "test-support")]
+    pub fn local_dev_storage_root_for_test(&self) -> Option<PathBuf> {
+        let local_runtime = self.local_runtime.as_ref()?;
+        Some(local_runtime.local_dev_storage_root.clone())
+    }
+
+    /// Single owner of the `ProjectScopedAttachmentReader` construction recipe
+    /// over `local_runtime.workspace_filesystem` (mirrors the
+    /// `read_write_workspace_filesystem` "single owner" pattern above). The
+    /// concrete reader implements both `LoopAttachmentReadPort` and
+    /// `InboundAttachmentReader`, so callers cast the same `Arc` into whichever
+    /// trait object they need instead of re-deriving the recipe. Test-support
+    /// only; zero bytes shipped in production builds.
+    #[cfg(feature = "test-support")]
+    fn local_dev_workspace_attachment_reader_for_test(
+        &self,
+    ) -> Option<Arc<crate::support::fs::ProjectScopedAttachmentReader<LocalDevRootFilesystem>>>
+    {
+        let local_runtime = self.local_runtime.as_ref()?;
+        Some(Arc::new(
+            crate::support::fs::ProjectScopedAttachmentReader::new(Arc::clone(
+                &local_runtime.workspace_filesystem,
+            )),
+        ))
+    }
+
     /// Test-support access to the attachment read port + inbound lander backing
     /// the C-ATTACH seam. The read port is built over `local_runtime.workspace_filesystem`,
     /// exactly like production's `attachment_read_port` (`runtime.rs` ~line 3328) —
@@ -625,12 +672,11 @@ impl RebornServices {
     /// production-profile compositions without a local-dev runtime.
     #[cfg(feature = "test-support")]
     pub fn local_dev_attachment_test_support_for_test(&self) -> Option<AttachmentTestSupport> {
-        let local_runtime = self.local_runtime.as_ref()?;
+        let read_port = self.local_dev_workspace_attachment_reader_for_test()?
+            as Arc<dyn ironclaw_loop_support::LoopAttachmentReadPort>;
         let read_write_workspace_filesystem = self.read_write_workspace_filesystem()?;
         Some(AttachmentTestSupport {
-            read_port: Arc::new(crate::support::fs::ProjectScopedAttachmentReader::new(
-                Arc::clone(&local_runtime.workspace_filesystem),
-            )),
+            read_port,
             lander: Arc::new(crate::support::fs::ProjectScopedAttachmentLander::new(
                 read_write_workspace_filesystem,
             )),
@@ -665,6 +711,36 @@ impl RebornServices {
         let policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore> =
             local_runtime.persistent_approval_policies.clone();
         Some(policies)
+    }
+
+    /// SAME live trigger repository `local_dev_trigger_repository` builds and
+    /// capability dispatch uses (the `trigger_repository` binding in
+    /// `build_local_runtime`, above) — not a fresh reopen. Contrast
+    /// [`open_local_dev_trigger_repository_for_test`] (independent reopened
+    /// repo, for persistence/reopen tests). Backs the cold-LIST scenario
+    /// (W5-WEBUI-API-1 Enabler B.1). Test-support only; zero bytes shipped in
+    /// production builds. `None` w/o local-dev runtime.
+    #[cfg(feature = "test-support")]
+    pub fn local_dev_shared_trigger_repository_for_test(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_triggers::TriggerRepository>> {
+        let local_runtime = self.local_runtime.as_ref()?;
+        Some(Arc::clone(&local_runtime.trigger_repository))
+    }
+
+    /// WebUI-facing `InboundAttachmentReader` view over the local-dev
+    /// workspace filesystem, mirroring production's `webui.rs`
+    /// (`ProjectScopedAttachmentReader` construction at `webui.rs` ~line 153).
+    /// Shares [`Self::local_dev_workspace_attachment_reader_for_test`]'s
+    /// construction recipe with [`Self::local_dev_attachment_test_support_for_test`]
+    /// rather than re-deriving it. Test-support only; zero bytes shipped in
+    /// production builds. `None` w/o a local-dev runtime.
+    #[cfg(feature = "test-support")]
+    pub fn local_dev_inbound_attachment_reader_for_test(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_product_workflow::InboundAttachmentReader>> {
+        Some(self.local_dev_workspace_attachment_reader_for_test()?
+            as Arc<dyn ironclaw_product_workflow::InboundAttachmentReader>)
     }
 
     /// C-JOURNEY: publish a bundled first-party WASM extension package (e.g.
@@ -2756,6 +2832,62 @@ pub(crate) async fn open_local_dev_approval_request_store_for_test(
     Ok(Arc::new(FilesystemApprovalRequestStore::new(scoped)))
 }
 
+/// W6-COLD-SPOTS: fresh `CommunicationPreferenceRepository` reopen, mirrors
+/// [`open_local_dev_approval_request_store_for_test`]. Reuses
+/// [`local_dev_outbound_store`] — the same composition-owned construction the
+/// production `build_local_dev_store_graph` path uses — so the reopen path
+/// never drifts from production and needs no `disallowed_methods` exception.
+/// Tests only.
+#[cfg(all(feature = "test-support", feature = "libsql"))]
+pub(crate) async fn open_local_dev_outbound_preferences_store_for_test(
+    storage_root: &Path,
+) -> Result<Arc<dyn CommunicationPreferenceRepository>, RebornBuildError> {
+    let mut composite = CompositeRootFilesystem::new();
+    mount_default_local_dev_database_roots(storage_root, &mut composite).await?;
+    Ok(local_dev_outbound_store(Arc::new(composite)).outbound_preferences)
+}
+
+/// Test-only (W5-WEBUI-API-1 seam): open FRESH, independent
+/// [`ironclaw_approvals::ToolPermissionOverrideStore`] /
+/// [`ironclaw_approvals::AutoApproveSettingStore`] /
+/// [`ironclaw_approvals::PersistentApprovalPolicyStore`] handles at an
+/// existing local-dev `storage_root`, paralleling
+/// [`open_local_dev_approval_request_store_for_test`] (same on-disk root;
+/// sibling capability stores). Reuses [`mount_default_local_dev_database_roots`]
+/// plus the production [`crate::wrap_scoped`] so the reopen mounts and scopes
+/// the SAME way `build_local_dev_store_graph` does when it first builds
+/// `tool_permission_overrides` / `auto_approve_settings` /
+/// `persistent_approval_policies` (above) — the reopen path never drifts from
+/// production. Tests only; zero bytes in production builds.
+#[cfg(all(feature = "test-support", feature = "libsql"))]
+pub(crate) async fn open_local_dev_approval_settings_stores_for_test(
+    storage_root: &Path,
+) -> Result<
+    (
+        Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore>,
+        Arc<dyn ironclaw_approvals::AutoApproveSettingStore>,
+        Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore>,
+    ),
+    RebornBuildError,
+> {
+    let mut composite = CompositeRootFilesystem::new();
+    mount_default_local_dev_database_roots(storage_root, &mut composite).await?;
+    let scoped = crate::wrap_scoped(Arc::new(composite));
+    let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
+        Arc::new(LocalDevToolPermissionOverrideStore::new(Arc::clone(
+            &scoped,
+        )));
+    let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
+        Arc::new(LocalDevAutoApproveSettingStore::new(Arc::clone(&scoped)));
+    let persistent_approval_policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore> =
+        Arc::new(FilesystemPersistentApprovalPolicyStore::new(scoped));
+    Ok((
+        tool_permission_overrides,
+        auto_approve_settings,
+        persistent_approval_policies,
+    ))
+}
+
 /// Test-only (C-DURABLE seam): open a FRESH, independent
 /// [`ironclaw_triggers::TriggerRepository`] at an existing local-dev
 /// `storage_root`, paralleling [`open_local_dev_extension_installation_store_for_test`].
@@ -4154,7 +4286,7 @@ async fn build_backend_production<F>(
     // Leader lock for the background credential keepalive worker. The worker
     // uses this to elect one process per tick as the sweep leader. `None`
     // pool → always-leader (libsql / single-process). Stays private.
-    leader_lock: crate::product_auth_refresh_lock::CredentialRefreshLeaderLock,
+    leader_lock: crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock,
 ) -> Result<RebornServices, RebornBuildError>
 where
     F: RootFilesystem + 'static,
@@ -4298,7 +4430,7 @@ where
     // instance here, so the candidate source is None (worker finds no
     // candidates, which is safe for override/test callers).
     let credential_refresh_candidate_source: Option<
-        Arc<dyn crate::credential_refresh_worker::CredentialRefreshCandidateSource>,
+        Arc<dyn crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshCandidateSource>,
     >;
     let product_auth_ports = match product_auth_ports {
         Some(ports) => {
@@ -4312,7 +4444,7 @@ where
                 Arc::clone(&secret_store),
             ));
             credential_refresh_candidate_source = Some(Arc::clone(&durable)
-                as Arc<dyn crate::credential_refresh_worker::CredentialRefreshCandidateSource>);
+                as Arc<dyn crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshCandidateSource>);
             RebornProductAuthServicePorts::from_shared_with_provider(
                 durable,
                 provider_composition
@@ -4434,11 +4566,11 @@ async fn build_libsql_production(
         {
             #[cfg(feature = "postgres")]
             {
-                crate::product_auth_refresh_lock::CredentialRefreshLeaderLock::new(None)
+                crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock::new(None)
             }
             #[cfg(not(feature = "postgres"))]
             {
-                crate::product_auth_refresh_lock::CredentialRefreshLeaderLock::always_leader()
+                crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock::always_leader()
             }
         },
     )
@@ -4482,7 +4614,7 @@ async fn build_postgres_production(
         stores,
         trigger_repository,
         RebornProductionRuntimeServices::Postgres,
-        crate::product_auth_refresh_lock::CredentialRefreshLeaderLock::new(Some(
+        crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock::new(Some(
             pool_for_refresh_lock,
         )),
     )
@@ -5662,7 +5794,12 @@ mod tests {
             panic!("expected fail-closed handler outcome, got {outcome:?}");
         };
         assert_eq!(failure.capability_id.as_str(), "web-access.search");
-        assert_eq!(failure.kind, RuntimeFailureKind::Backend);
+        // A capability the model named with no registered first-party handler
+        // is a model-fixable, model-visible failure (#5389 reclassified the
+        // missing-handler dispatch failure from Backend to InvalidInput so it
+        // does not burn the retry budget on a call that can never resolve). The
+        // capability still fails closed — only the disposition changed.
+        assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
     }
 
     fn nearai_bootstrap_input_with_base(

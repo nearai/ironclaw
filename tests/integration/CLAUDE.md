@@ -121,8 +121,11 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
   `GithubHarnessAuthorizer`, `StaticSecretStore`,
   `StaticCapabilitySurfaceProfileResolver`,
   `FixedRuntimeCredentialAccountResolver`, `EmptyIdentityContextSource`,
-  `HarnessCapabilityPortFactory`, `HostRuntimeHarnessCapabilityPortFactory`),
-  re-exported from `doubles/mod.rs`.
+  `HarnessCapabilityPortFactory`, `HostRuntimeHarnessCapabilityPortFactory`,
+  `ParkingCapabilityGate`/`ParkingHostRuntime` — the tool-path analog of
+  `ParkingModelGate`/`ParkingLlm`; parks a `HostRuntime` capability dispatch
+  until released, used by `lease_wedge.rs`), re-exported from
+  `doubles/mod.rs`.
 - `group_constructors.rs` — the per-capability `RebornIntegrationGroup` /
   `RebornIntegrationGroupBuilder` preset constructors (`live_approvals`,
   `builtin_tools`, `extension_lifecycle`, `skill_management_tools`, etc.), a
@@ -374,7 +377,14 @@ On a harness built from a `live_approvals` group:
 
 - `build_local_dev_secret_store_for_test(root, scoped)` — constructs the `LocalDevSecretStore` used by production local-dev composition; for store read-back in secrets tests.
 
-Both are zero-byte in production builds (gated on the `test-support` feature).
+`RebornServices` (returned by `build_reborn_services`/exposed via `RebornRuntime::services()`, methods defined in `crates/ironclaw_reborn_composition/src/runtime/test_support.rs`) exposes:
+
+- `local_dev_approval_interaction_service_for_test(turn_coordinator)` — real `DefaultApprovalInteractionService` wired like `build_reborn_runtime`. `None` without a local-dev runtime.
+- `local_dev_auth_interaction_service_for_test(turn_coordinator)` — WebUI auth-interaction service via the same `build_webui_auth_interaction_service` helper production uses. `None` only without a local-dev runtime; falls back to `UnavailableAuthInteractionService` when `product_auth` has no flow-record source.
+
+Both take `turn_coordinator: Arc<dyn TurnCoordinator>` explicitly rather than reading `self.turn_coordinator` — a `RebornServices` from `build_reborn_services` alone carries a different coordinator instance than a caller-built planned runtime; pass the coordinator your harness's turns actually run against.
+
+All of the above are zero-byte in production builds (gated on the `test-support` feature).
 
 ## Group tests
 

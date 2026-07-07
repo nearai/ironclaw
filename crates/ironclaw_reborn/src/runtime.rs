@@ -155,6 +155,11 @@ impl ToolDisclosureMode {
 pub struct DefaultPlannedRuntimeConfig {
     pub heartbeat_interval: std::time::Duration,
     pub poll_interval: std::time::Duration,
+    /// How often the scheduler sweeps for runs whose lease has expired
+    /// (`TurnRunSchedulerConfig::lease_recovery_interval`). Defaults to the
+    /// scheduler's own 10s default so leaving this untouched is byte-identical
+    /// to today's behavior.
+    pub lease_recovery_interval: std::time::Duration,
     /// Number of concurrent turn-runner slots (the scheduler semaphore permit
     /// count). `None` = unlimited — the semaphore is sized to
     /// [`tokio::sync::Semaphore::MAX_PERMITS`]. See [`scheduler_permit_count`].
@@ -173,6 +178,7 @@ impl Default for DefaultPlannedRuntimeConfig {
         Self {
             heartbeat_interval: std::time::Duration::from_secs(10),
             poll_interval: std::time::Duration::from_secs(5),
+            lease_recovery_interval: std::time::Duration::from_secs(10),
             worker_count: Some(DEFAULT_TURN_RUNNER_WORKER_COUNT),
             disabled_capability_ids: default_disabled_capability_ids(),
             text_only_driver: TextOnlyModelReplyDriverConfig::default(),
@@ -797,7 +803,8 @@ where
     let scheduler_config = TurnRunSchedulerConfig::default()
         .with_max_concurrent_runs(scheduler_permit_count(parts.config.worker_count))
         .with_runner_heartbeat_interval(parts.config.heartbeat_interval)
-        .with_poll_interval(parts.config.poll_interval);
+        .with_poll_interval(parts.config.poll_interval)
+        .with_lease_recovery_interval(parts.config.lease_recovery_interval);
     let scheduler = TurnRunScheduler::new(Arc::clone(&transition_port), executor, scheduler_config);
     let scheduler_handle = wake_wiring.start(scheduler);
 
