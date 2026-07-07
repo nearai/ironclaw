@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "case_id": "mig_dev_identities_oauth",
+  "profile": "migration",
+  "title": "OAuth user_identities adopt",
+  "setup": {
+    "secrets": [],
+    "profile_extra": {
+      "seed": {
+        "backend": "libsql",
+        "users": [
+          {
+            "ref": "u1",
+            "user_id": "jon",
+            "email": "jon@lfdseed.example",
+            "display_name": "Jale",
+            "identities": [
+              {
+                "provider": "google",
+                "provider_user_id": "g-sub-1",
+                "email_verified": true
+              }
+            ],
+            "channels": []
+          }
+        ],
+        "conversations": [],
+        "routines": [],
+        "missions": [],
+        "memory_docs": [],
+        "settings": [],
+        "secrets": [],
+        "jobs": [],
+        "extensions": []
+      },
+      "run": {
+        "mode": "wet"
+      }
+    }
+  },
+  "state_queries": [
+    {
+      "id": "v1_intact",
+      "kind": "v1_db_digest",
+      "params": {}
+    },
+    {
+      "id": "recon",
+      "kind": "migration_report",
+      "params": {
+        "run": "wet",
+        "view": "reconciliation"
+      }
+    },
+    {
+      "id": "proj_identities",
+      "kind": "migration_projection",
+      "params": {
+        "domain": "identities"
+      }
+    }
+  ],
+  "live": false
+}

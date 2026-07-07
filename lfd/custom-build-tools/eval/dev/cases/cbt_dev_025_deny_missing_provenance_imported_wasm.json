@@ -1,0 +1,129 @@
+{
+  "schema_version": 1,
+  "case_id": "cbt_dev_025_deny_missing_provenance_imported_wasm",
+  "profile": "custom_build_tools",
+  "title": "denies imported wasm with no source request provenance",
+  "setup": {
+    "extensions": [
+      "custom_tool_builder"
+    ],
+    "secrets": [
+      {
+        "credential_name": "vendor_token",
+        "value": "test-secret-cbt_dev_025_deny_missing_provenance_imported_wasm"
+      }
+    ],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [
+      {
+        "key": "imported_vendor_blob.DENY./deny",
+        "status": 400,
+        "body": {
+          "denied": true
+        }
+      }
+    ],
+    "profile_extra": {
+      "task": {
+        "request_id": "cbt_dev_025_deny_missing_provenance_imported_wasm",
+        "shape": "credentialed_http_api_wrapper",
+        "mode": "deny",
+        "user_request": "Install this vendor.wasm as a custom tool; I do not know how it was built.",
+        "api_docs": {
+          "malformed_or_unsupported": true,
+          "reason": "Uploaded module has no request id, docs hash, or template provenance."
+        },
+        "expected_tool_name": "imported_vendor_blob",
+        "invocation": {
+          "input": {
+            "sample": "not-used"
+          }
+        },
+        "fake_api": {
+          "host": "should-not-call.cbt.test",
+          "method": "GET",
+          "path": "/deny",
+          "response": {
+            "denied": true
+          }
+        }
+      }
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.custom_tool.build_http_wrapper",
+          "params": {
+            "request_id": "cbt_dev_025_deny_missing_provenance_imported_wasm",
+            "profile": "custom_build_tools"
+          }
+        },
+        {
+          "text": "I cannot build imported_vendor_blob: Uploaded module has no request id, docs hash, or template provenance."
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "text": "Install this vendor.wasm as a custom tool; I do not know how it was built.",
+        "user_id": "UCBT1002"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "spec",
+      "kind": "custom_tool_spec",
+      "params": {
+        "request_id": "cbt_dev_025_deny_missing_provenance_imported_wasm",
+        "tool_name": "imported_vendor_blob"
+      }
+    },
+    {
+      "id": "artifact",
+      "kind": "tool_artifact",
+      "params": {
+        "request_id": "cbt_dev_025_deny_missing_provenance_imported_wasm",
+        "tool_name": "imported_vendor_blob"
+      }
+    },
+    {
+      "id": "install",
+      "kind": "extension_lifecycle",
+      "params": {
+        "request_id": "cbt_dev_025_deny_missing_provenance_imported_wasm",
+        "tool_name": "imported_vendor_blob"
+      }
+    },
+    {
+      "id": "invoke",
+      "kind": "generated_tool_invocation",
+      "params": {
+        "request_id": "cbt_dev_025_deny_missing_provenance_imported_wasm",
+        "tool_name": "imported_vendor_blob"
+      }
+    },
+    {
+      "id": "diagnostic",
+      "kind": "tool_builder_diagnostic",
+      "params": {
+        "request_id": "cbt_dev_025_deny_missing_provenance_imported_wasm"
+      }
+    },
+    {
+      "id": "network",
+      "kind": "fake_api_egress",
+      "params": {
+        "request_id": "cbt_dev_025_deny_missing_provenance_imported_wasm"
+      }
+    }
+  ],
+  "live": false
+}

@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "case_id": "mini_002",
+  "profile": "selftest_profile",
+  "title": "thread record persists tenant scope and transcript",
+  "setup": {
+    "extensions": ["slack"],
+    "secrets": [],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {}
+  },
+  "llm_script": [
+    {"turn": 1, "steps": [
+      {"tool": "builtin.time", "params": {}},
+      {"text": "done"}
+    ]}
+  ],
+  "inbound": [
+    {"channel": "slack", "payload": {"type": "message", "user": "U123AB", "text": "capture the meeting notes"}}
+  ],
+  "state_queries": [
+    {"id": "thread_scope", "kind": "thread_record", "params": {"index": 0}},
+    {"id": "transcript", "kind": "transcript_text", "params": {"index": 0}}
+  ],
+  "live": false
+}

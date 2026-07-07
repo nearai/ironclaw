@@ -1,0 +1,98 @@
+{
+  "_doc": {
+    "about": "Lane-10 user-voice-model lint/status config. Consumed by lfd/_shared/scorer/lint_core.py + status_core.py.",
+    "scope_note": "Caps are diff-scoped against the LFD branch base and target voice-adjacent product/test files so existing unrelated ignored/live tests do not trip this lane.",
+    "cap_rationale": {
+      "no_eval_case_id_branching": "Blocks hardcoded behavior keyed to dev/holdout case ids.",
+      "no_voice_fixture_hash_branching": "Blocks keyed lookup by generated audio fixture hashes outside pinned runner support.",
+      "no_plain_transcript_seed_literals": "Blocks adding a transcript fixture table in product code; the mock table belongs in pinned profile support only.",
+      "no_external_stt_in_dev": "Dev eval must use deterministic mock providers and no non-stub transcription egress.",
+      "no_test_weakening": "Stage-0 tests/profile cannot be disabled to satisfy the eval."
+    }
+  },
+  "schema_version": 1,
+  "base_ref": "d9eaae2bb",
+  "caps": [
+    {
+      "name": "no_eval_case_id_branching",
+      "scope": "diff",
+      "paths": [
+        "src/**/*.rs",
+        "crates/**/*.rs",
+        "tests/**/*.rs"
+      ],
+      "pattern": "uvm_dev_|uvm_hold_",
+      "max_count": 0
+    },
+    {
+      "name": "no_voice_fixture_hash_branching",
+      "scope": "diff",
+      "paths": [
+        "src/**/*.rs",
+        "crates/**/*.rs",
+        "tests/**/*.rs"
+      ],
+      "pattern": "(?i)audio_sha|fixture_sha|content_hash.*(uvm|voice)|sha256.*voice",
+      "max_count": 0
+    },
+    {
+      "name": "no_plain_transcript_seed_literals",
+      "scope": "diff",
+      "paths": [
+        "src/**/*.rs",
+        "crates/**/*.rs"
+      ],
+      "pattern": "(?i)renew the build certificate|onboarding checklist|launch blockers|billing migration is green|payroll export|release checklist|violet lantern orbit six",
+      "max_count": 0
+    },
+    {
+      "name": "no_external_stt_in_dev",
+      "scope": "diff",
+      "paths": [
+        "crates/**/*.rs",
+        "src/**/*.rs",
+        "tests/**/*.rs"
+      ],
+      "pattern": "(?i)api\\.openai\\.com/v1/audio|openrouter\\.ai/api|/v1/audio/transcriptions",
+      "max_count": 0
+    },
+    {
+      "name": "no_test_weakening_voice_ignore",
+      "scope": "diff",
+      "paths": [
+        "tests/integration/lfd/profiles/user_voice_model.rs",
+        "crates/ironclaw_llm/src/transcription/**/*.rs",
+        "crates/ironclaw_attachments/**/*.rs",
+        "crates/ironclaw_extractors/**/*.rs"
+      ],
+      "pattern": "#\\[ignore",
+      "max_count": 0
+    },
+    {
+      "name": "no_test_weakening_voice_cfg_never",
+      "scope": "diff",
+      "paths": [
+        "tests/integration/lfd/profiles/user_voice_model.rs",
+        "crates/ironclaw_llm/src/transcription/**/*.rs",
+        "crates/ironclaw_attachments/**/*.rs",
+        "crates/ironclaw_extractors/**/*.rs"
+      ],
+      "pattern": "#\\[cfg\\(never\\)\\]",
+      "max_count": 0
+    },
+    {
+      "name": "no_binary_voice_fixtures_in_product_tree",
+      "scope": "diff",
+      "paths": [
+        "src/**/*",
+        "crates/**/*"
+      ],
+      "pattern": "(?i)\\.(wav|aiff|ogg|opus|mp3|m4a|flac|webm|silk)",
+      "max_count": 0
+    }
+  ],
+  "holdout_canaries": [
+    "LFDH-user-voice-7b4e1d9c6a2f0b13"
+  ],
+  "spend_ceiling_usd": 20.0
+}

@@ -1,0 +1,237 @@
+{
+  "case_id": "mis_dev_022_failed_tool_records_blocker",
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "request": {
+          "allowed_action_classes": [
+            "read_memory",
+            "fake_tool",
+            "write_checkpoint",
+            "schedule_routine",
+            "schedule_task"
+          ],
+          "budget": {
+            "model_call_limit": 40,
+            "requires_explicit_approval_for_overrun": true,
+            "usd_limit": 5,
+            "wall_clock_minutes": 100
+          },
+          "definition_of_done": "Customer-impact classification completed or blocker is reported with retry evidence",
+          "forbidden_action_classes": [
+            "live_external_send",
+            "unapproved_paid_api"
+          ],
+          "goal": "Resolve Helio customer-impact followup despite flaky webhook",
+          "mission_kind": "finite",
+          "mission_ref": "tool-blocker-20260719",
+          "trigger_ref": "trg-tool-blocker-20260719",
+          "trigger_source": "event"
+        },
+        "submitted_at": "2026-07-07T09:00:00Z",
+        "type": "mission_request",
+        "user_id": "U505587"
+      }
+    },
+    {
+      "channel": "scheduler",
+      "payload": {
+        "fire_slot": "2026-07-07T09:00:00Z",
+        "mission_ref": "tool-blocker-20260719",
+        "trigger_ref": "trg-tool-blocker-20260719",
+        "type": "trigger_fire"
+      }
+    }
+  ],
+  "live": false,
+  "llm_script": [
+    {
+      "steps": [
+        {
+          "params": {
+            "definition_of_done": "Customer-impact classification completed or blocker is reported with retry evidence",
+            "goal": "Resolve Helio customer-impact followup despite flaky webhook",
+            "kind": "finite",
+            "mission_ref": "tool-blocker-20260719"
+          },
+          "tool": "mission.plan"
+        },
+        {
+          "params": {
+            "count": 1,
+            "mission_ref": "tool-blocker-20260719"
+          },
+          "tool": "mission.schedule_task"
+        },
+        {
+          "params": {
+            "mission_ref": "tool-blocker-20260719",
+            "reason": "webhook_timeout"
+          },
+          "tool": "mission.record_blocker"
+        },
+        {
+          "params": {
+            "mission_ref": "tool-blocker-20260719",
+            "next_focus": "report webhook blocker"
+          },
+          "tool": "mission.update_next_focus"
+        },
+        {
+          "params": {
+            "checkpoint_kind": "durable_progress",
+            "mission_ref": "tool-blocker-20260719"
+          },
+          "tool": "mission.checkpoint"
+        },
+        {
+          "text": "Mission tool-blocker-20260719: report webhook blocker"
+        }
+      ],
+      "turn": 1
+    }
+  ],
+  "profile": "missions",
+  "schema_version": 1,
+  "setup": {
+    "extensions": [],
+    "http_stubs": [
+      {
+        "body": {
+          "ok": true
+        },
+        "key": "fake.mission_tool",
+        "status": 200
+      }
+    ],
+    "memory_docs": [
+      {
+        "content": "lfdmission incident followup: capture customer impact, retry failed status-page pulls once, then mark blocked with webhook_timeout evidence.",
+        "path": "/projects/helio-incident/after-action.md",
+        "title": "Helio incident lessons"
+      }
+    ],
+    "profile_extra": {
+      "agent_id": "agent-missions",
+      "clock_start": "2026-07-07T09:00:00Z",
+      "expected_failure_direction": true,
+      "mission_ref": "tool-blocker-20260719",
+      "mission_request": {
+        "allowed_action_classes": [
+          "read_memory",
+          "fake_tool",
+          "write_checkpoint",
+          "schedule_routine",
+          "schedule_task"
+        ],
+        "budget": {
+          "model_call_limit": 40,
+          "requires_explicit_approval_for_overrun": true,
+          "usd_limit": 5,
+          "wall_clock_minutes": 100
+        },
+        "definition_of_done": "Customer-impact classification completed or blocker is reported with retry evidence",
+        "forbidden_action_classes": [
+          "live_external_send",
+          "unapproved_paid_api"
+        ],
+        "goal": "Resolve Helio customer-impact followup despite flaky webhook",
+        "mission_kind": "finite",
+        "mission_ref": "tool-blocker-20260719",
+        "trigger_ref": "trg-tool-blocker-20260719",
+        "trigger_source": "event"
+      },
+      "project_id": "project-incident",
+      "tenant_id": "tenant-lfdmission-blue",
+      "timeline": [
+        {
+          "at": "2026-07-07T09:00:00Z",
+          "mission_ref": "tool-blocker-20260719",
+          "op": "mission_request"
+        },
+        {
+          "at": "2026-07-07T09:00:00Z",
+          "fire_slot": "2026-07-07T09:00:00Z",
+          "op": "fire_trigger",
+          "trigger_ref": "trg-tool-blocker-20260719"
+        },
+        {
+          "at": "2026-07-07T09:12:00Z",
+          "failure_category": "webhook_timeout",
+          "ok": false,
+          "op": "fake_tool_result"
+        }
+      ]
+    },
+    "secrets": [],
+    "triggers": [
+      {
+        "completion_policy": "complete_after_done",
+        "mission_ref": "tool-blocker-20260719",
+        "source": "event",
+        "trigger_ref": "trg-tool-blocker-20260719"
+      }
+    ]
+  },
+  "state_queries": [
+    {
+      "id": "mission",
+      "kind": "mission_record",
+      "params": {
+        "mission_ref": "tool-blocker-20260719"
+      }
+    },
+    {
+      "id": "plan",
+      "kind": "mission_plan",
+      "params": {
+        "mission_ref": "tool-blocker-20260719"
+      }
+    },
+    {
+      "id": "checkpoints",
+      "kind": "checkpoint_log",
+      "params": {
+        "mission_ref": "tool-blocker-20260719"
+      }
+    },
+    {
+      "id": "budget",
+      "kind": "budget_ledger",
+      "params": {
+        "mission_ref": "tool-blocker-20260719"
+      }
+    },
+    {
+      "id": "decisions",
+      "kind": "scheduler_decisions",
+      "params": {
+        "mission_ref": "tool-blocker-20260719"
+      }
+    },
+    {
+      "id": "prompt",
+      "kind": "prompt_envelope",
+      "params": {
+        "fire_index": 1,
+        "mission_ref": "tool-blocker-20260719"
+      }
+    },
+    {
+      "id": "progress",
+      "kind": "mission_progress",
+      "params": {
+        "mission_ref": "tool-blocker-20260719"
+      }
+    },
+    {
+      "id": "status",
+      "kind": "status_report",
+      "params": {
+        "mission_ref": "tool-blocker-20260719"
+      }
+    }
+  ],
+  "title": "failed tool call is visible as blocker rather than hidden as in progress"
+}

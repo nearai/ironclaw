@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "case_id": "slack_dev_003_thread_reply_continuity",
+  "profile": "slack_channel",
+  "title": "Thread reply continues the existing channel-agent conversation",
+  "setup": {
+    "extensions": ["slack"],
+    "secrets": [{"credential_name": "slack_bot_token", "value": "xoxb-dev-slice-003"}],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [{"key": "slack.postMessage", "status": 200, "body": {"ok": true}}],
+    "profile_extra": {
+      "slack_fixture": {
+        "tenant_id": "tenant:slack-dev-a",
+        "installation_id": "slack-install-dev-a",
+        "team_id": "T03DEVA01",
+        "api_app_id": "A03DEVA01",
+        "bot_user_id": "UBOTDEV03",
+        "operator_user_id": "user:ops-dev",
+        "default_personal_agent_id": "agent:personal-dev",
+        "channel_routes": [{"channel_id": "C03ALPHA1", "subject_user_id": "user:team-alpha-dev", "agent_id": "agent:team-alpha-dev"}],
+        "identity_bindings": [{"slack_user_id": "U03CASEY1", "user_id": "user:casey-dev", "dm_channel_id": "D03CASEY1"}],
+        "connection": {"configured": true, "caller_connected": true},
+        "admission": {"workspace_allowed": true, "channels_allowed": ["C03ALPHA1"]},
+        "delivery_script": [{"status": 200, "body": {"ok": true}}],
+        "existing_threads": [{"channel_id": "C03ALPHA1", "thread_ts": "1771000000.000300", "subject_user_id": "user:team-alpha-dev", "agent_id": "agent:team-alpha-dev"}]
+      }
+    }
+  },
+  "llm_script": [{"turn": 1, "steps": [{"text": "continuing in the deployment thread"}]}],
+  "inbound": [{
+    "channel": "slack",
+    "payload": {
+      "type": "event_callback",
+      "team_id": "T03DEVA01",
+      "event_id": "Ev03D003",
+      "event": {"type": "message", "user": "U03CASEY1", "channel": "C03ALPHA1", "text": "add the rollback owner too", "thread_ts": "1771000000.000300", "ts": "1771000000.000301"}
+    }
+  }],
+  "state_queries": [
+    {"id": "turn", "kind": "slack_turn", "params": {"event_id": "Ev03D003"}},
+    {"id": "route", "kind": "slack_route_resolution", "params": {"event_id": "Ev03D003"}},
+    {"id": "delivery", "kind": "slack_delivery", "params": {"event_id": "Ev03D003"}},
+    {"id": "thread", "kind": "slack_thread_scope", "params": {"channel_id": "C03ALPHA1", "thread_ts": "1771000000.000300"}},
+    {"id": "isolation", "kind": "slack_isolation_audit", "params": {"event_id": "Ev03D003"}}
+  ],
+  "live": false
+}

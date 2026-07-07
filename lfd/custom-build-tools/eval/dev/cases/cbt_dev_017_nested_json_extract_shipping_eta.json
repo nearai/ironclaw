@@ -1,0 +1,217 @@
+{
+  "schema_version": 1,
+  "case_id": "cbt_dev_017_nested_json_extract_shipping_eta",
+  "profile": "custom_build_tools",
+  "title": "nested JSON wrapper extracts delivery eta text",
+  "setup": {
+    "extensions": [
+      "custom_tool_builder"
+    ],
+    "secrets": [
+      {
+        "credential_name": "parcelpeak_token",
+        "value": "test-secret-cbt_dev_017_nested_json_extract_shipping_eta"
+      }
+    ],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [
+      {
+        "key": "ParcelPeak.GET./tracking/PK-3",
+        "status": 200,
+        "body": {
+          "tracking": {
+            "legs": [
+              {
+                "city": "SFO"
+              },
+              {
+                "city": "SEA"
+              }
+            ],
+            "eta": {
+              "date": "2026-07-19",
+              "confidence": "high"
+            }
+          }
+        }
+      }
+    ],
+    "profile_extra": {
+      "task": {
+        "request_id": "cbt_dev_017_nested_json_extract_shipping_eta",
+        "shape": "credentialed_http_api_wrapper",
+        "mode": "create",
+        "user_request": "Build a credentialed HTTP API wrapper named parcelpeak_eta for ParcelPeak. Use credential parcelpeak_token; call GET https://parcelpeak.cbt-dev.test/tracking/PK-3; transform the provider response with nested_eta.",
+        "api_docs": {
+          "service": "ParcelPeak",
+          "base_url": "https://parcelpeak.cbt-dev.test",
+          "auth": {
+            "method": "bearer",
+            "placement": "header",
+            "header": "Authorization",
+            "prefix": "Bearer ",
+            "credential_name": "parcelpeak_token"
+          },
+          "operation": {
+            "method": "GET",
+            "path": "/tracking/PK-3",
+            "input_schema": {
+              "type": "object",
+              "example": {
+                "tracking_id": "PK-3"
+              }
+            },
+            "response_example": {
+              "tracking": {
+                "legs": [
+                  {
+                    "city": "SFO"
+                  },
+                  {
+                    "city": "SEA"
+                  }
+                ],
+                "eta": {
+                  "date": "2026-07-19",
+                  "confidence": "high"
+                }
+              }
+            },
+            "transform": "nested_eta"
+          },
+          "sandbox": {
+            "network_allowlist": [
+              "parcelpeak.cbt-dev.test"
+            ],
+            "host_network": false,
+            "shell": false
+          }
+        },
+        "expected_tool_name": "parcelpeak_eta",
+        "invocation": {
+          "input": {
+            "tracking_id": "PK-3"
+          }
+        },
+        "fake_api": {
+          "host": "parcelpeak.cbt-dev.test",
+          "method": "GET",
+          "path": "/tracking/PK-3",
+          "response": {
+            "tracking": {
+              "legs": [
+                {
+                  "city": "SFO"
+                },
+                {
+                  "city": "SEA"
+                }
+              ],
+              "eta": {
+                "date": "2026-07-19",
+                "confidence": "high"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.custom_tool.build_http_wrapper",
+          "params": {
+            "request_id": "cbt_dev_017_nested_json_extract_shipping_eta",
+            "profile": "custom_build_tools"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.validate_artifact",
+          "params": {
+            "tool_name": "parcelpeak_eta"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.install",
+          "params": {
+            "tool_name": "parcelpeak_eta"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.invoke_generated_tool",
+          "params": {
+            "tool_name": "parcelpeak_eta",
+            "input": {
+              "tracking_id": "PK-3"
+            }
+          }
+        },
+        {
+          "text": "Built and verified parcelpeak_eta."
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "text": "Build a credentialed HTTP API wrapper named parcelpeak_eta for ParcelPeak. Use credential parcelpeak_token; call GET https://parcelpeak.cbt-dev.test/tracking/PK-3; transform the provider response with nested_eta.",
+        "user_id": "UCBT1001"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "spec",
+      "kind": "custom_tool_spec",
+      "params": {
+        "request_id": "cbt_dev_017_nested_json_extract_shipping_eta",
+        "tool_name": "parcelpeak_eta"
+      }
+    },
+    {
+      "id": "artifact",
+      "kind": "tool_artifact",
+      "params": {
+        "request_id": "cbt_dev_017_nested_json_extract_shipping_eta",
+        "tool_name": "parcelpeak_eta"
+      }
+    },
+    {
+      "id": "install",
+      "kind": "extension_lifecycle",
+      "params": {
+        "request_id": "cbt_dev_017_nested_json_extract_shipping_eta",
+        "tool_name": "parcelpeak_eta"
+      }
+    },
+    {
+      "id": "invoke",
+      "kind": "generated_tool_invocation",
+      "params": {
+        "request_id": "cbt_dev_017_nested_json_extract_shipping_eta",
+        "tool_name": "parcelpeak_eta"
+      }
+    },
+    {
+      "id": "diagnostic",
+      "kind": "tool_builder_diagnostic",
+      "params": {
+        "request_id": "cbt_dev_017_nested_json_extract_shipping_eta"
+      }
+    },
+    {
+      "id": "network",
+      "kind": "fake_api_egress",
+      "params": {
+        "request_id": "cbt_dev_017_nested_json_extract_shipping_eta"
+      }
+    }
+  ],
+  "live": false
+}

@@ -1,0 +1,93 @@
+{
+  "_doc": {
+    "about": "Lane-16 memory-placement-product-layer lint/status config. Consumed by lfd/_shared/scorer/lint_core.py and status_core.py.",
+    "cap_rationale": {
+      "no_eval_case_id_branching": "Blocks branches on visible dev/holdout case ids.",
+      "no_dev_seed_literals": "Blocks copying mpseed-visible dev literals into product code.",
+      "provider_specific_branches_product": "The brief permits only a tiny transition budget for provider-specific product branches; widening this is evidence of native special-casing.",
+      "no_native_reexports_from_product": "A product/provider boundary is not a re-export of native internals.",
+      "no_direct_native_dependency_from_product": "Product, composition, and host policy routing must depend on ironclaw_memory contracts, not ironclaw_memory_native internals. Native factory wiring belongs in provider setup, not product logic.",
+      "no_test_weakening_ignore": "Stage-0 protection.",
+      "no_test_weakening_cfg_never": "Stage-0 protection."
+    }
+  },
+  "schema_version": 1,
+  "base_ref": "d9eaae2bb",
+  "caps": [
+    {
+      "name": "no_eval_case_id_branching",
+      "scope": "diff",
+      "paths": ["src/**/*.rs", "crates/**/*.rs", "tests/**/*.rs"],
+      "pattern": "mem_place_dev_|mem_place_hold_",
+      "max_count": 0
+    },
+    {
+      "name": "no_dev_seed_literals",
+      "scope": "diff",
+      "paths": ["src/**/*.rs", "crates/**/*.rs", "tests/**/*.rs"],
+      "pattern": "(?i)mpseed",
+      "max_count": 0
+    },
+    {
+      "name": "provider_specific_branches_product",
+      "scope": "diff",
+      "paths": [
+        "crates/ironclaw_product_workflow/**/*.rs",
+        "crates/ironclaw_reborn_composition/**/*.rs",
+        "crates/ironclaw_host_runtime/**/*.rs"
+      ],
+      "pattern": "(?i)\\b(provider_id|provider|memory_provider)\\b.*\\b(native|fake_echo|fake_counter|fake_shadow|fake_holdout)\\b|\\b(native|fake_echo|fake_counter|fake_shadow|fake_holdout)\\b.*\\b(provider_id|provider|memory_provider)\\b",
+      "max_count": 5
+    },
+    {
+      "name": "no_native_reexports_from_product",
+      "scope": "diff",
+      "paths": [
+        "crates/ironclaw_product_workflow/**/*.rs",
+        "crates/ironclaw_reborn_composition/**/*.rs",
+        "crates/ironclaw_host_runtime/**/*.rs"
+      ],
+      "pattern": "pub\\s+use\\s+ironclaw_memory_native::",
+      "max_count": 0
+    },
+    {
+      "name": "no_direct_native_dependency_from_product",
+      "scope": "diff",
+      "paths": [
+        "crates/ironclaw_product_workflow/**/*.rs",
+        "crates/ironclaw_reborn_composition/**/*.rs",
+        "crates/ironclaw_host_runtime/**/*.rs"
+      ],
+      "pattern": "(?<!provider_factory::)(ironclaw_memory_native::|use\\s+ironclaw_memory_native::)",
+      "max_count": 0
+    },
+    {
+      "name": "no_test_weakening_ignore",
+      "scope": "diff",
+      "paths": [
+        "crates/ironclaw_memory/**/*.rs",
+        "crates/ironclaw_memory_native/**/*.rs",
+        "crates/ironclaw_product_workflow/**/*.rs",
+        "tests/integration/group_memory/**/*.rs",
+        "tests/integration/lfd/**/*.rs"
+      ],
+      "pattern": "#\\[ignore",
+      "max_count": 0
+    },
+    {
+      "name": "no_test_weakening_cfg_never",
+      "scope": "diff",
+      "paths": [
+        "crates/ironclaw_memory/**/*.rs",
+        "crates/ironclaw_memory_native/**/*.rs",
+        "crates/ironclaw_product_workflow/**/*.rs",
+        "tests/integration/group_memory/**/*.rs",
+        "tests/integration/lfd/**/*.rs"
+      ],
+      "pattern": "#\\[cfg\\(never\\)\\]",
+      "max_count": 0
+    }
+  ],
+  "holdout_canaries": ["LFDH-memory-placement-a4c9137e6b20d58f"],
+  "spend_ceiling_usd": 10.0
+}

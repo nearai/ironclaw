@@ -1,0 +1,184 @@
+{
+  "schema_version": 1,
+  "case_id": "cbt_dev_021_hmac_signed_timestamp",
+  "profile": "custom_build_tools",
+  "title": "HMAC credential wrapper signs timestamp without exposing key",
+  "setup": {
+    "extensions": [
+      "custom_tool_builder"
+    ],
+    "secrets": [
+      {
+        "credential_name": "signpost_hmac_secret",
+        "value": "test-secret-cbt_dev_021_hmac_signed_timestamp"
+      }
+    ],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [
+      {
+        "key": "SignPost.POST./quote",
+        "status": 200,
+        "body": {
+          "quote_cents": 1788,
+          "currency": "USD"
+        }
+      }
+    ],
+    "profile_extra": {
+      "task": {
+        "request_id": "cbt_dev_021_hmac_signed_timestamp",
+        "shape": "credentialed_http_api_wrapper",
+        "mode": "create",
+        "user_request": "Build a credentialed HTTP API wrapper named signpost_delivery_quote for SignPost. Use credential signpost_hmac_secret; call POST https://signpost.cbt-dev.test/quote; transform the provider response with quote_total.",
+        "api_docs": {
+          "service": "SignPost",
+          "base_url": "https://signpost.cbt-dev.test",
+          "auth": {
+            "method": "hmac",
+            "placement": "header",
+            "header": "X-Signature",
+            "timestamp_header": "X-Timestamp",
+            "credential_name": "signpost_hmac_secret"
+          },
+          "operation": {
+            "method": "POST",
+            "path": "/quote",
+            "input_schema": {
+              "type": "object",
+              "example": {
+                "zone": "west",
+                "weight": 3
+              }
+            },
+            "response_example": {
+              "quote_cents": 1788,
+              "currency": "USD"
+            },
+            "transform": "quote_total"
+          },
+          "sandbox": {
+            "network_allowlist": [
+              "signpost.cbt-dev.test"
+            ],
+            "host_network": false,
+            "shell": false
+          }
+        },
+        "expected_tool_name": "signpost_delivery_quote",
+        "invocation": {
+          "input": {
+            "zone": "west",
+            "weight": 3
+          }
+        },
+        "fake_api": {
+          "host": "signpost.cbt-dev.test",
+          "method": "POST",
+          "path": "/quote",
+          "response": {
+            "quote_cents": 1788,
+            "currency": "USD"
+          }
+        }
+      }
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.custom_tool.build_http_wrapper",
+          "params": {
+            "request_id": "cbt_dev_021_hmac_signed_timestamp",
+            "profile": "custom_build_tools"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.validate_artifact",
+          "params": {
+            "tool_name": "signpost_delivery_quote"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.install",
+          "params": {
+            "tool_name": "signpost_delivery_quote"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.invoke_generated_tool",
+          "params": {
+            "tool_name": "signpost_delivery_quote",
+            "input": {
+              "zone": "west",
+              "weight": 3
+            }
+          }
+        },
+        {
+          "text": "Built and verified signpost_delivery_quote."
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "text": "Build a credentialed HTTP API wrapper named signpost_delivery_quote for SignPost. Use credential signpost_hmac_secret; call POST https://signpost.cbt-dev.test/quote; transform the provider response with quote_total.",
+        "user_id": "UCBT1001"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "spec",
+      "kind": "custom_tool_spec",
+      "params": {
+        "request_id": "cbt_dev_021_hmac_signed_timestamp",
+        "tool_name": "signpost_delivery_quote"
+      }
+    },
+    {
+      "id": "artifact",
+      "kind": "tool_artifact",
+      "params": {
+        "request_id": "cbt_dev_021_hmac_signed_timestamp",
+        "tool_name": "signpost_delivery_quote"
+      }
+    },
+    {
+      "id": "install",
+      "kind": "extension_lifecycle",
+      "params": {
+        "request_id": "cbt_dev_021_hmac_signed_timestamp",
+        "tool_name": "signpost_delivery_quote"
+      }
+    },
+    {
+      "id": "invoke",
+      "kind": "generated_tool_invocation",
+      "params": {
+        "request_id": "cbt_dev_021_hmac_signed_timestamp",
+        "tool_name": "signpost_delivery_quote"
+      }
+    },
+    {
+      "id": "diagnostic",
+      "kind": "tool_builder_diagnostic",
+      "params": {
+        "request_id": "cbt_dev_021_hmac_signed_timestamp"
+      }
+    },
+    {
+      "id": "network",
+      "kind": "fake_api_egress",
+      "params": {
+        "request_id": "cbt_dev_021_hmac_signed_timestamp"
+      }
+    }
+  ],
+  "live": false
+}

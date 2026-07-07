@@ -1,0 +1,187 @@
+{
+  "schema_version": 1,
+  "case_id": "cbt_dev_010_error_mapping_404_typed",
+  "profile": "custom_build_tools",
+  "title": "404 response maps to typed not-found diagnostic without install failure",
+  "setup": {
+    "extensions": [
+      "custom_tool_builder"
+    ],
+    "secrets": [
+      {
+        "credential_name": "assetfox_token",
+        "value": "test-secret-cbt_dev_010_error_mapping_404_typed"
+      }
+    ],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [
+      {
+        "key": "AssetFox.GET./assets/A-404",
+        "status": 400,
+        "body": {
+          "error": {
+            "code": "not_found",
+            "message": "asset missing"
+          }
+        }
+      }
+    ],
+    "profile_extra": {
+      "task": {
+        "request_id": "cbt_dev_010_error_mapping_404_typed",
+        "shape": "credentialed_http_api_wrapper",
+        "mode": "create",
+        "user_request": "Build a credentialed HTTP API wrapper named assetfox_lookup for AssetFox. Use credential assetfox_token; call GET https://assetfox.cbt-dev.test/assets/A-404; transform the provider response with typed_not_found.",
+        "api_docs": {
+          "service": "AssetFox",
+          "base_url": "https://assetfox.cbt-dev.test",
+          "auth": {
+            "method": "bearer",
+            "placement": "header",
+            "header": "Authorization",
+            "prefix": "Bearer ",
+            "credential_name": "assetfox_token"
+          },
+          "operation": {
+            "method": "GET",
+            "path": "/assets/A-404",
+            "input_schema": {
+              "type": "object",
+              "example": {
+                "asset_id": "A-404"
+              }
+            },
+            "response_example": {
+              "error": {
+                "code": "not_found",
+                "message": "asset missing"
+              }
+            },
+            "transform": "typed_not_found"
+          },
+          "sandbox": {
+            "network_allowlist": [
+              "assetfox.cbt-dev.test"
+            ],
+            "host_network": false,
+            "shell": false
+          }
+        },
+        "expected_tool_name": "assetfox_lookup",
+        "invocation": {
+          "input": {
+            "asset_id": "A-404"
+          }
+        },
+        "fake_api": {
+          "host": "assetfox.cbt-dev.test",
+          "method": "GET",
+          "path": "/assets/A-404",
+          "response": {
+            "error": {
+              "code": "not_found",
+              "message": "asset missing"
+            }
+          }
+        }
+      }
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.custom_tool.build_http_wrapper",
+          "params": {
+            "request_id": "cbt_dev_010_error_mapping_404_typed",
+            "profile": "custom_build_tools"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.validate_artifact",
+          "params": {
+            "tool_name": "assetfox_lookup"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.install",
+          "params": {
+            "tool_name": "assetfox_lookup"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.invoke_generated_tool",
+          "params": {
+            "tool_name": "assetfox_lookup",
+            "input": {
+              "asset_id": "A-404"
+            }
+          }
+        },
+        {
+          "text": "Built and verified assetfox_lookup."
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "text": "Build a credentialed HTTP API wrapper named assetfox_lookup for AssetFox. Use credential assetfox_token; call GET https://assetfox.cbt-dev.test/assets/A-404; transform the provider response with typed_not_found.",
+        "user_id": "UCBT1001"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "spec",
+      "kind": "custom_tool_spec",
+      "params": {
+        "request_id": "cbt_dev_010_error_mapping_404_typed",
+        "tool_name": "assetfox_lookup"
+      }
+    },
+    {
+      "id": "artifact",
+      "kind": "tool_artifact",
+      "params": {
+        "request_id": "cbt_dev_010_error_mapping_404_typed",
+        "tool_name": "assetfox_lookup"
+      }
+    },
+    {
+      "id": "install",
+      "kind": "extension_lifecycle",
+      "params": {
+        "request_id": "cbt_dev_010_error_mapping_404_typed",
+        "tool_name": "assetfox_lookup"
+      }
+    },
+    {
+      "id": "invoke",
+      "kind": "generated_tool_invocation",
+      "params": {
+        "request_id": "cbt_dev_010_error_mapping_404_typed",
+        "tool_name": "assetfox_lookup"
+      }
+    },
+    {
+      "id": "diagnostic",
+      "kind": "tool_builder_diagnostic",
+      "params": {
+        "request_id": "cbt_dev_010_error_mapping_404_typed"
+      }
+    },
+    {
+      "id": "network",
+      "kind": "fake_api_egress",
+      "params": {
+        "request_id": "cbt_dev_010_error_mapping_404_typed"
+      }
+    }
+  ],
+  "live": false
+}

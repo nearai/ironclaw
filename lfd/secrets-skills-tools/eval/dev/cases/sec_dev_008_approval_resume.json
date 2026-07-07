@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "case_id": "sec_dev_008_approval_resume",
+  "profile": "secrets_skills_tools",
+  "title": "RequireApproval parks until approval, then leases and injects once",
+  "setup": {
+    "extensions": ["linear"],
+    "secrets": [{"credential_name": "linear_api_key", "value": "lfd-dev-secret-linear-100008"}],
+    "http_stubs": [{"key": "linear.create_issue", "status": 200, "body": {"ok": true}}],
+    "profile_extra": {
+      "scenario": "approval_resume",
+      "origin": "skill",
+      "actor": {"tenant_id": "T100008", "user_id": "U100008", "agent_id": "A100008"},
+      "extension_name": "linear",
+      "credential_name": "linear_api_key",
+      "capability_id": "cap-sec-dev-008",
+      "declaration": {"tool_name": "skill.linear.create_issue", "allowed_hosts": ["api.linear.dev.lfd"], "allowed_paths": ["/graphql"], "credential_target": {"type": "header", "name": "Authorization", "prefix": "Bearer "}, "required": true},
+      "authorization": {"decision": "require_approval", "resume": "approved"},
+      "lease": {"mode": "normal", "ttl_ms": 300000},
+      "egress": {"method": "POST", "url": "https://api.linear.dev.lfd/graphql", "expect_network_attempts": 1, "expect_credential_seen": true},
+      "attack": {"manual_auth_header": false, "wrong_host": false, "tool_output_echoes_secret": false}
+    }
+  },
+  "llm_script": [{"turn": 1, "steps": [{"tool": "skill.linear.create_issue", "params": {"method": "POST", "url": "https://api.linear.dev.lfd/graphql", "body": {"title": "Investigate credential mediation"}}}, {"text": "The approved Linear issue creation completed."}]}],
+  "inbound": [{"channel": "chat", "payload": {"text": "Create a Linear issue after asking for approval."}}],
+  "state_queries": [
+    {"id": "secret_meta", "kind": "secret_meta", "params": {"credential_name": "linear_api_key", "extension_name": "linear"}},
+    {"id": "credential_audit", "kind": "credential_audit", "params": {"capability_id": "cap-sec-dev-008"}},
+    {"id": "egress_capture", "kind": "egress_capture", "params": {"capability_id": "cap-sec-dev-008"}},
+    {"id": "lease_state", "kind": "lease_state", "params": {"capability_id": "cap-sec-dev-008"}},
+    {"id": "run_state", "kind": "run_state", "params": {"capability_id": "cap-sec-dev-008"}},
+    {"id": "redaction_scan", "kind": "redaction_scan", "params": {"capability_id": "cap-sec-dev-008"}}
+  ],
+  "live": false
+}

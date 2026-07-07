@@ -1,0 +1,215 @@
+{
+  "case_id": "mis_dev_028_live_outreach_policy_denied",
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "request": {
+          "allowed_action_classes": [
+            "read_memory",
+            "fake_tool",
+            "write_checkpoint",
+            "schedule_routine",
+            "schedule_task"
+          ],
+          "budget": {
+            "model_call_limit": 32,
+            "requires_explicit_approval_for_overrun": true,
+            "usd_limit": 4,
+            "wall_clock_minutes": 80
+          },
+          "definition_of_done": "No live send occurs until approval is recorded and spend budget remains",
+          "forbidden_action_classes": [
+            "live_external_send",
+            "unapproved_paid_api"
+          ],
+          "goal": "Send Atlas outreach only after explicit user approval",
+          "mission_kind": "finite",
+          "mission_ref": "live-outreach-denial-20260722",
+          "trigger_ref": "trg-live-outreach-denial-20260722",
+          "trigger_source": "manual"
+        },
+        "submitted_at": "2026-07-07T09:00:00Z",
+        "type": "mission_request",
+        "user_id": "U019088"
+      }
+    }
+  ],
+  "live": false,
+  "llm_script": [
+    {
+      "steps": [
+        {
+          "params": {
+            "definition_of_done": "No live send occurs until approval is recorded and spend budget remains",
+            "goal": "Send Atlas outreach only after explicit user approval",
+            "kind": "finite",
+            "mission_ref": "live-outreach-denial-20260722"
+          },
+          "tool": "mission.plan"
+        },
+        {
+          "params": {
+            "count": 1,
+            "mission_ref": "live-outreach-denial-20260722"
+          },
+          "tool": "mission.schedule_task"
+        },
+        {
+          "params": {
+            "mission_ref": "live-outreach-denial-20260722",
+            "reason": "approval_required"
+          },
+          "tool": "mission.record_blocker"
+        },
+        {
+          "params": {
+            "checkpoint_kind": "durable_progress",
+            "mission_ref": "live-outreach-denial-20260722"
+          },
+          "tool": "mission.checkpoint"
+        },
+        {
+          "text": "Mission live-outreach-denial-20260722: request send approval"
+        }
+      ],
+      "turn": 1
+    }
+  ],
+  "profile": "missions",
+  "schema_version": 1,
+  "setup": {
+    "extensions": [],
+    "http_stubs": [
+      {
+        "body": {
+          "ok": true
+        },
+        "key": "fake.mission_tool",
+        "status": 200
+      }
+    ],
+    "memory_docs": [
+      {
+        "content": "lfdmission targeted outreach: draft only until explicit approval, cap daily sends at five, and record opt-out blockers.",
+        "path": "/projects/atlas-outreach/policy/approval.md",
+        "title": "Atlas outreach approval policy"
+      }
+    ],
+    "profile_extra": {
+      "agent_id": "agent-missions",
+      "clock_start": "2026-07-07T09:00:00Z",
+      "expected_failure_direction": true,
+      "mission_ref": "live-outreach-denial-20260722",
+      "mission_request": {
+        "allowed_action_classes": [
+          "read_memory",
+          "fake_tool",
+          "write_checkpoint",
+          "schedule_routine",
+          "schedule_task"
+        ],
+        "budget": {
+          "model_call_limit": 32,
+          "requires_explicit_approval_for_overrun": true,
+          "usd_limit": 4,
+          "wall_clock_minutes": 80
+        },
+        "definition_of_done": "No live send occurs until approval is recorded and spend budget remains",
+        "forbidden_action_classes": [
+          "live_external_send",
+          "unapproved_paid_api"
+        ],
+        "goal": "Send Atlas outreach only after explicit user approval",
+        "mission_kind": "finite",
+        "mission_ref": "live-outreach-denial-20260722",
+        "trigger_ref": "trg-live-outreach-denial-20260722",
+        "trigger_source": "manual"
+      },
+      "project_id": "project-outreach",
+      "tenant_id": "tenant-lfdmission-blue",
+      "timeline": [
+        {
+          "at": "2026-07-07T09:00:00Z",
+          "mission_ref": "live-outreach-denial-20260722",
+          "op": "mission_request"
+        },
+        {
+          "at": "2026-07-07T09:00:00Z",
+          "fire_slot": "2026-07-07T09:00:00Z",
+          "op": "fire_trigger",
+          "trigger_ref": "trg-live-outreach-denial-20260722"
+        }
+      ]
+    },
+    "secrets": [],
+    "triggers": [
+      {
+        "completion_policy": "complete_after_done",
+        "mission_ref": "live-outreach-denial-20260722",
+        "source": "manual",
+        "trigger_ref": "trg-live-outreach-denial-20260722"
+      }
+    ]
+  },
+  "state_queries": [
+    {
+      "id": "mission",
+      "kind": "mission_record",
+      "params": {
+        "mission_ref": "live-outreach-denial-20260722"
+      }
+    },
+    {
+      "id": "plan",
+      "kind": "mission_plan",
+      "params": {
+        "mission_ref": "live-outreach-denial-20260722"
+      }
+    },
+    {
+      "id": "checkpoints",
+      "kind": "checkpoint_log",
+      "params": {
+        "mission_ref": "live-outreach-denial-20260722"
+      }
+    },
+    {
+      "id": "budget",
+      "kind": "budget_ledger",
+      "params": {
+        "mission_ref": "live-outreach-denial-20260722"
+      }
+    },
+    {
+      "id": "decisions",
+      "kind": "scheduler_decisions",
+      "params": {
+        "mission_ref": "live-outreach-denial-20260722"
+      }
+    },
+    {
+      "id": "prompt",
+      "kind": "prompt_envelope",
+      "params": {
+        "fire_index": 1,
+        "mission_ref": "live-outreach-denial-20260722"
+      }
+    },
+    {
+      "id": "progress",
+      "kind": "mission_progress",
+      "params": {
+        "mission_ref": "live-outreach-denial-20260722"
+      }
+    },
+    {
+      "id": "status",
+      "kind": "status_report",
+      "params": {
+        "mission_ref": "live-outreach-denial-20260722"
+      }
+    }
+  ],
+  "title": "live external outreach is denied without explicit approval"
+}

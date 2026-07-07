@@ -1,0 +1,231 @@
+{
+  "case_id": "mis_dev_010_event_trigger_payload_digest",
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "request": {
+          "allowed_action_classes": [
+            "read_memory",
+            "fake_tool",
+            "write_checkpoint",
+            "schedule_routine",
+            "schedule_task"
+          ],
+          "budget": {
+            "model_call_limit": 48,
+            "requires_explicit_approval_for_overrun": true,
+            "usd_limit": 6,
+            "wall_clock_minutes": 120
+          },
+          "definition_of_done": "Every customer-impact event is classified and a blocker is recorded when data is missing",
+          "forbidden_action_classes": [
+            "live_external_send",
+            "unapproved_paid_api"
+          ],
+          "goal": "Follow up on Helio customer-impact events",
+          "mission_kind": "standing",
+          "mission_ref": "event-payload-20260713",
+          "trigger_ref": "trg-event-payload-20260713",
+          "trigger_source": "event"
+        },
+        "submitted_at": "2026-07-07T09:00:00Z",
+        "type": "mission_request",
+        "user_id": "U141061"
+      }
+    },
+    {
+      "channel": "scheduler",
+      "payload": {
+        "fire_slot": "2026-07-07T09:00:00Z",
+        "mission_ref": "event-payload-20260713",
+        "trigger_ref": "trg-event-payload-20260713",
+        "type": "trigger_fire"
+      }
+    }
+  ],
+  "live": false,
+  "llm_script": [
+    {
+      "steps": [
+        {
+          "params": {
+            "definition_of_done": "Every customer-impact event is classified and a blocker is recorded when data is missing",
+            "goal": "Follow up on Helio customer-impact events",
+            "kind": "standing",
+            "mission_ref": "event-payload-20260713"
+          },
+          "tool": "mission.plan"
+        },
+        {
+          "params": {
+            "count": 1,
+            "mission_ref": "event-payload-20260713",
+            "trigger_ref": "trg-event-payload-20260713"
+          },
+          "tool": "mission.schedule_routine"
+        },
+        {
+          "params": {
+            "count": 1,
+            "mission_ref": "event-payload-20260713"
+          },
+          "tool": "mission.schedule_task"
+        },
+        {
+          "params": {
+            "checkpoint_kind": "durable_progress",
+            "mission_ref": "event-payload-20260713"
+          },
+          "tool": "mission.checkpoint"
+        },
+        {
+          "text": "Mission event-payload-20260713: classify impact event"
+        }
+      ],
+      "turn": 1
+    }
+  ],
+  "profile": "missions",
+  "schema_version": 1,
+  "setup": {
+    "extensions": [],
+    "http_stubs": [
+      {
+        "body": {
+          "ok": true
+        },
+        "key": "fake.mission_tool",
+        "status": 200
+      }
+    ],
+    "memory_docs": [
+      {
+        "content": "lfdmission incident followup: capture customer impact, retry failed status-page pulls once, then mark blocked with webhook_timeout evidence.",
+        "path": "/projects/helio-incident/after-action.md",
+        "title": "Helio incident lessons"
+      }
+    ],
+    "profile_extra": {
+      "agent_id": "agent-missions",
+      "clock_start": "2026-07-07T09:00:00Z",
+      "expected_failure_direction": false,
+      "mission_ref": "event-payload-20260713",
+      "mission_request": {
+        "allowed_action_classes": [
+          "read_memory",
+          "fake_tool",
+          "write_checkpoint",
+          "schedule_routine",
+          "schedule_task"
+        ],
+        "budget": {
+          "model_call_limit": 48,
+          "requires_explicit_approval_for_overrun": true,
+          "usd_limit": 6,
+          "wall_clock_minutes": 120
+        },
+        "definition_of_done": "Every customer-impact event is classified and a blocker is recorded when data is missing",
+        "forbidden_action_classes": [
+          "live_external_send",
+          "unapproved_paid_api"
+        ],
+        "goal": "Follow up on Helio customer-impact events",
+        "mission_kind": "standing",
+        "mission_ref": "event-payload-20260713",
+        "trigger_ref": "trg-event-payload-20260713",
+        "trigger_source": "event"
+      },
+      "project_id": "project-incident",
+      "tenant_id": "tenant-lfdmission-blue",
+      "timeline": [
+        {
+          "at": "2026-07-07T09:00:00Z",
+          "mission_ref": "event-payload-20260713",
+          "op": "mission_request"
+        },
+        {
+          "at": "2026-07-07T09:00:00Z",
+          "fire_slot": "2026-07-07T09:00:00Z",
+          "op": "fire_trigger",
+          "trigger_ref": "trg-event-payload-20260713"
+        },
+        {
+          "at": "2026-07-07T09:00:00Z",
+          "event_id": "evt-event-payload-20260713",
+          "op": "external_event",
+          "payload_digest_required": true
+        }
+      ]
+    },
+    "secrets": [],
+    "triggers": [
+      {
+        "completion_policy": "recurring",
+        "mission_ref": "event-payload-20260713",
+        "source": "event",
+        "trigger_ref": "trg-event-payload-20260713"
+      }
+    ]
+  },
+  "state_queries": [
+    {
+      "id": "mission",
+      "kind": "mission_record",
+      "params": {
+        "mission_ref": "event-payload-20260713"
+      }
+    },
+    {
+      "id": "plan",
+      "kind": "mission_plan",
+      "params": {
+        "mission_ref": "event-payload-20260713"
+      }
+    },
+    {
+      "id": "checkpoints",
+      "kind": "checkpoint_log",
+      "params": {
+        "mission_ref": "event-payload-20260713"
+      }
+    },
+    {
+      "id": "budget",
+      "kind": "budget_ledger",
+      "params": {
+        "mission_ref": "event-payload-20260713"
+      }
+    },
+    {
+      "id": "decisions",
+      "kind": "scheduler_decisions",
+      "params": {
+        "mission_ref": "event-payload-20260713"
+      }
+    },
+    {
+      "id": "prompt",
+      "kind": "prompt_envelope",
+      "params": {
+        "fire_index": 1,
+        "mission_ref": "event-payload-20260713"
+      }
+    },
+    {
+      "id": "progress",
+      "kind": "mission_progress",
+      "params": {
+        "mission_ref": "event-payload-20260713"
+      }
+    },
+    {
+      "id": "status",
+      "kind": "status_report",
+      "params": {
+        "mission_ref": "event-payload-20260713"
+      }
+    }
+  ],
+  "title": "event trigger payload is folded into meta-prompt and mission state"
+}

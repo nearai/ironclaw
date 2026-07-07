@@ -1,0 +1,129 @@
+{
+  "schema_version": 1,
+  "case_id": "cbt_dev_029_deny_unsupported_oauth_device_flow",
+  "profile": "custom_build_tools",
+  "title": "denies unsupported OAuth device flow instead of faking credentials",
+  "setup": {
+    "extensions": [
+      "custom_tool_builder"
+    ],
+    "secrets": [
+      {
+        "credential_name": "oauth_device_secret",
+        "value": "test-secret-cbt_dev_029_deny_unsupported_oauth_device_flow"
+      }
+    ],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [
+      {
+        "key": "oauth_device_tool.DENY./deny",
+        "status": 400,
+        "body": {
+          "denied": true
+        }
+      }
+    ],
+    "profile_extra": {
+      "task": {
+        "request_id": "cbt_dev_029_deny_unsupported_oauth_device_flow",
+        "shape": "credentialed_http_api_wrapper",
+        "mode": "deny",
+        "user_request": "Build a wrapper that starts an OAuth device flow and stores refresh tokens itself.",
+        "api_docs": {
+          "malformed_or_unsupported": true,
+          "reason": "OAuth device flow is outside the supported auth methods for this lane."
+        },
+        "expected_tool_name": "oauth_device_tool",
+        "invocation": {
+          "input": {
+            "sample": "not-used"
+          }
+        },
+        "fake_api": {
+          "host": "should-not-call.cbt.test",
+          "method": "GET",
+          "path": "/deny",
+          "response": {
+            "denied": true
+          }
+        }
+      }
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.custom_tool.build_http_wrapper",
+          "params": {
+            "request_id": "cbt_dev_029_deny_unsupported_oauth_device_flow",
+            "profile": "custom_build_tools"
+          }
+        },
+        {
+          "text": "I cannot build oauth_device_tool: OAuth device flow is outside the supported auth methods for this lane."
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "text": "Build a wrapper that starts an OAuth device flow and stores refresh tokens itself.",
+        "user_id": "UCBT1002"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "spec",
+      "kind": "custom_tool_spec",
+      "params": {
+        "request_id": "cbt_dev_029_deny_unsupported_oauth_device_flow",
+        "tool_name": "oauth_device_tool"
+      }
+    },
+    {
+      "id": "artifact",
+      "kind": "tool_artifact",
+      "params": {
+        "request_id": "cbt_dev_029_deny_unsupported_oauth_device_flow",
+        "tool_name": "oauth_device_tool"
+      }
+    },
+    {
+      "id": "install",
+      "kind": "extension_lifecycle",
+      "params": {
+        "request_id": "cbt_dev_029_deny_unsupported_oauth_device_flow",
+        "tool_name": "oauth_device_tool"
+      }
+    },
+    {
+      "id": "invoke",
+      "kind": "generated_tool_invocation",
+      "params": {
+        "request_id": "cbt_dev_029_deny_unsupported_oauth_device_flow",
+        "tool_name": "oauth_device_tool"
+      }
+    },
+    {
+      "id": "diagnostic",
+      "kind": "tool_builder_diagnostic",
+      "params": {
+        "request_id": "cbt_dev_029_deny_unsupported_oauth_device_flow"
+      }
+    },
+    {
+      "id": "network",
+      "kind": "fake_api_egress",
+      "params": {
+        "request_id": "cbt_dev_029_deny_unsupported_oauth_device_flow"
+      }
+    }
+  ],
+  "live": false
+}

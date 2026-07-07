@@ -1,0 +1,181 @@
+{
+  "schema_version": 1,
+  "case_id": "cbt_dev_014_remove_tool_revokes_extension",
+  "profile": "custom_build_tools",
+  "title": "remove flow revokes installed wrapper and leaves audit state",
+  "setup": {
+    "extensions": [
+      "custom_tool_builder"
+    ],
+    "secrets": [
+      {
+        "credential_name": "cleanroom_token",
+        "value": "test-secret-cbt_dev_014_remove_tool_revokes_extension"
+      }
+    ],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [
+      {
+        "key": "CleanRoom.GET./deletes/D-4",
+        "status": 200,
+        "body": {
+          "safe_after_days": 7,
+          "approver": "ops"
+        }
+      }
+    ],
+    "profile_extra": {
+      "task": {
+        "request_id": "cbt_dev_014_remove_tool_revokes_extension",
+        "shape": "credentialed_http_api_wrapper",
+        "mode": "remove_after_invoke",
+        "user_request": "Build a credentialed HTTP API wrapper named cleanroom_delete_check for CleanRoom. Use credential cleanroom_token; call GET https://cleanroom.cbt-dev.test/deletes/D-4; transform the provider response with delete_window.",
+        "api_docs": {
+          "service": "CleanRoom",
+          "base_url": "https://cleanroom.cbt-dev.test",
+          "auth": {
+            "method": "bearer",
+            "placement": "header",
+            "header": "Authorization",
+            "prefix": "Bearer ",
+            "credential_name": "cleanroom_token"
+          },
+          "operation": {
+            "method": "GET",
+            "path": "/deletes/D-4",
+            "input_schema": {
+              "type": "object",
+              "example": {
+                "delete_id": "D-4"
+              }
+            },
+            "response_example": {
+              "safe_after_days": 7,
+              "approver": "ops"
+            },
+            "transform": "delete_window"
+          },
+          "sandbox": {
+            "network_allowlist": [
+              "cleanroom.cbt-dev.test"
+            ],
+            "host_network": false,
+            "shell": false
+          }
+        },
+        "expected_tool_name": "cleanroom_delete_check",
+        "invocation": {
+          "input": {
+            "delete_id": "D-4"
+          }
+        },
+        "fake_api": {
+          "host": "cleanroom.cbt-dev.test",
+          "method": "GET",
+          "path": "/deletes/D-4",
+          "response": {
+            "safe_after_days": 7,
+            "approver": "ops"
+          }
+        }
+      }
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.custom_tool.build_http_wrapper",
+          "params": {
+            "request_id": "cbt_dev_014_remove_tool_revokes_extension",
+            "profile": "custom_build_tools"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.validate_artifact",
+          "params": {
+            "tool_name": "cleanroom_delete_check"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.install",
+          "params": {
+            "tool_name": "cleanroom_delete_check"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.invoke_generated_tool",
+          "params": {
+            "tool_name": "cleanroom_delete_check",
+            "input": {
+              "delete_id": "D-4"
+            }
+          }
+        },
+        {
+          "text": "Built and verified cleanroom_delete_check."
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "text": "Build a credentialed HTTP API wrapper named cleanroom_delete_check for CleanRoom. Use credential cleanroom_token; call GET https://cleanroom.cbt-dev.test/deletes/D-4; transform the provider response with delete_window.",
+        "user_id": "UCBT1001"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "spec",
+      "kind": "custom_tool_spec",
+      "params": {
+        "request_id": "cbt_dev_014_remove_tool_revokes_extension",
+        "tool_name": "cleanroom_delete_check"
+      }
+    },
+    {
+      "id": "artifact",
+      "kind": "tool_artifact",
+      "params": {
+        "request_id": "cbt_dev_014_remove_tool_revokes_extension",
+        "tool_name": "cleanroom_delete_check"
+      }
+    },
+    {
+      "id": "install",
+      "kind": "extension_lifecycle",
+      "params": {
+        "request_id": "cbt_dev_014_remove_tool_revokes_extension",
+        "tool_name": "cleanroom_delete_check"
+      }
+    },
+    {
+      "id": "invoke",
+      "kind": "generated_tool_invocation",
+      "params": {
+        "request_id": "cbt_dev_014_remove_tool_revokes_extension",
+        "tool_name": "cleanroom_delete_check"
+      }
+    },
+    {
+      "id": "diagnostic",
+      "kind": "tool_builder_diagnostic",
+      "params": {
+        "request_id": "cbt_dev_014_remove_tool_revokes_extension"
+      }
+    },
+    {
+      "id": "network",
+      "kind": "fake_api_egress",
+      "params": {
+        "request_id": "cbt_dev_014_remove_tool_revokes_extension"
+      }
+    }
+  ],
+  "live": false
+}

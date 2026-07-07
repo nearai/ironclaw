@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "case_id": "mig_dev_edge_unicode",
+  "profile": "migration",
+  "title": "unicode content migrates intact",
+  "setup": {
+    "secrets": [],
+    "profile_extra": {
+      "seed": {
+        "backend": "libsql",
+        "users": [
+          {
+            "ref": "u1",
+            "user_id": "yui",
+            "email": "yui@lfdseed.example",
+            "display_name": "Kaan",
+            "identities": [],
+            "channels": []
+          }
+        ],
+        "conversations": [
+          {
+            "ref": "c1",
+            "channel": "gateway",
+            "user": "u1",
+            "messages": [
+              {
+                "role": "user",
+                "content": "こんにちは 🌸 café naïve"
+              },
+              {
+                "role": "assistant",
+                "content": "résumé — Ω≈日本語"
+              }
+            ]
+          }
+        ],
+        "routines": [],
+        "missions": [],
+        "memory_docs": [
+          {
+            "ref": "d1",
+            "path": "context/ünïcode.md",
+            "content": "# 標題\ncontent",
+            "versions": 0
+          }
+        ],
+        "settings": [],
+        "secrets": [],
+        "jobs": [],
+        "extensions": []
+      },
+      "run": {
+        "mode": "wet"
+      }
+    }
+  },
+  "state_queries": [
+    {
+      "id": "v1_intact",
+      "kind": "v1_db_digest",
+      "params": {}
+    },
+    {
+      "id": "recon",
+      "kind": "migration_report",
+      "params": {
+        "run": "wet",
+        "view": "reconciliation"
+      }
+    },
+    {
+      "id": "proj_messages",
+      "kind": "migration_projection",
+      "params": {
+        "domain": "messages"
+      }
+    },
+    {
+      "id": "proj_memory",
+      "kind": "migration_projection",
+      "params": {
+        "domain": "memory"
+      }
+    }
+  ],
+  "live": false
+}

@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "case_id": "mem_place_dev_003",
+  "profile": "memory_placement",
+  "title": "fake provider write has native-equivalent product result shape",
+  "setup": {
+    "extensions": [],
+    "secrets": [],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {
+      "scenario": "fake_write_parity",
+      "case_kind": "positive",
+      "provider": {
+        "default": "native",
+        "active": "fake_echo",
+        "compare_with": "native",
+        "fake_provider_pinned_in_support": true
+      },
+      "policy": {
+        "decision": "allow",
+        "constraints": []
+      },
+      "operation": {
+        "family": "write",
+        "target": "notes/mpseed-charlie.md",
+        "content": "mpseed charlie fake provider write",
+        "append": false
+      },
+      "seed": {
+        "tenant_id": "T703MP",
+        "user_id": "U703MP",
+        "project_id": "proj-charlie",
+        "docs": [],
+        "versions": [],
+        "retention_records": []
+      },
+      "contract_markers": [
+        "mpseed-charlie",
+        "fake-parity"
+      ]
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.memory_write",
+          "params": {
+            "target": "notes/mpseed-charlie.md",
+            "content": "mpseed charlie fake provider write",
+            "append": false
+          }
+        },
+        {
+          "text": "memory placement scenario mem_place_dev_003 completed"
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "lfd_memory",
+      "payload": {
+        "text": "Run memory placement scenario mem_place_dev_003 for write"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "boundary",
+      "kind": "memory_provider_boundary",
+      "params": {
+        "operation_ref": "fake_write",
+        "provider": "fake_echo"
+      }
+    },
+    {
+      "id": "parity",
+      "kind": "memory_provider_parity",
+      "params": {
+        "operation_ref": "fake_write",
+        "baseline_provider": "native",
+        "candidate_provider": "fake_echo"
+      }
+    },
+    {
+      "id": "dependency",
+      "kind": "memory_dependency_boundary",
+      "params": {
+        "surface": "product"
+      }
+    }
+  ],
+  "live": false
+}

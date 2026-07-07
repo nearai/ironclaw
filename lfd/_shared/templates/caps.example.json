@@ -1,0 +1,23 @@
+{
+  "_doc": {
+    "about": "Per-feature lint/status config, lives at lfd/<feature>/harness/caps.json. Every field below is consumed by lint_core.py or status_core.py. Deleting caps.json or any of the required keys (base_ref, caps, holdout_canaries) is itself a lint VIOLATION (anti-tamper), so generators must always emit all three even when empty.",
+    "base_ref": "Git ref the optimizer branched from. lint check 2 diff-scoped caps scan added lines from `git diff <base_ref> --` plus untracked-file contents treated as fully-added lines. lint check 4 (answer-literal overlap) scans `git diff <base_ref>..HEAD -- 'src/**' 'crates/**' 'tests/**' ':!tests/integration/lfd/profiles'` added lines for string literals (>= 8 chars) taken from sealed matcher values; literals also present in the visible dev case inputs are skipped.",
+    "caps": "Capacity caps, lint check 2. Each entry: name (label for the report), paths (repo-root-relative glob list, ** supported), pattern (Python regex), max_count, optional scope. scope `diff` (default) counts regex matches only in added lines from base_ref to the current working tree, restricted to the entry's path globs, with untracked files counted as fully added. scope `files` counts regex matches across whole globbed files for caps that intentionally need whole-file semantics, such as committed fixture/binary guards. Feature briefs define these, e.g. forbidding per-case branching in src/**.",
+    "holdout_canaries": "Canary TOKENS (only tokens, never answers) planted in the holdout answer set. lint check 1 greps the repo working tree for each; any hit outside this caps.json file is a violation. The dev canary (answers.dev.json canary_token) is scanned automatically and is only allowed inside answers.dev.json itself.",
+    "spend_ceiling_usd": "Budget ceiling displayed by status_core against the sum of 'usd' fields in <state_root>/spend/<feature>.jsonl.",
+    "schema_version": "Bump on breaking changes to this file's shape."
+  },
+  "schema_version": 1,
+  "base_ref": "main",
+  "caps": [
+    {
+      "name": "no_per_case_branching",
+      "paths": ["src/**/*.rs", "crates/**/*.rs"],
+      "pattern": "(?i)case_id|slack_dev_",
+      "max_count": 0,
+      "scope": "diff"
+    }
+  ],
+  "holdout_canaries": ["LFDH-__FEATURE__-0000000000000000"],
+  "spend_ceiling_usd": 100.0
+}

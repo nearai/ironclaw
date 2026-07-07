@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "case_id": "mem_place_dev_006",
+  "profile": "memory_placement",
+  "title": "read-only constraint denies write but preserves host policy shape",
+  "setup": {
+    "extensions": [],
+    "secrets": [],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {
+      "scenario": "constrain_read_only_write",
+      "case_kind": "failure_denial",
+      "provider": {
+        "default": "native",
+        "active": "native",
+        "compare_with": "native",
+        "fake_provider_pinned_in_support": true
+      },
+      "policy": {
+        "decision": "constrain",
+        "constraints": [
+          "read_only"
+        ],
+        "denial_reason": "read_only"
+      },
+      "operation": {
+        "family": "write",
+        "target": "notes/mpseed-foxtrot.md",
+        "content": "mpseed foxtrot read only write",
+        "append": false
+      },
+      "seed": {
+        "tenant_id": "T706MP",
+        "user_id": "U706MP",
+        "project_id": "proj-foxtrot",
+        "docs": [],
+        "versions": [],
+        "retention_records": []
+      },
+      "contract_markers": [
+        "mpseed-foxtrot",
+        "read-only-constraint"
+      ]
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.memory_write",
+          "params": {
+            "target": "notes/mpseed-foxtrot.md",
+            "content": "mpseed foxtrot read only write",
+            "append": false
+          }
+        },
+        {
+          "text": "memory placement scenario mem_place_dev_006 completed"
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "lfd_memory",
+      "payload": {
+        "text": "Run memory placement scenario mem_place_dev_006 for write"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "policy",
+      "kind": "memory_policy_decision",
+      "params": {
+        "operation_ref": "constrain_read_only_write"
+      }
+    },
+    {
+      "id": "storage",
+      "kind": "memory_storage_placement",
+      "params": {
+        "operation_ref": "constrain_read_only_write"
+      }
+    },
+    {
+      "id": "host",
+      "kind": "memory_host_mediation",
+      "params": {
+        "operation_ref": "constrain_read_only_write"
+      }
+    }
+  ],
+  "live": false
+}

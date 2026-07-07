@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "case_id": "uvm_dev_002",
+  "profile": "user_voice_model",
+  "title": "Telegram OGG-shaped voice note keeps attachment and voice metadata",
+  "setup": {
+    "extensions": [],
+    "secrets": [],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {
+      "mode": "telegram_voice",
+      "transcription": {
+        "provider": "mock_primary",
+        "mock_table": "pinned_content_hash",
+        "allowed_language": "en-US",
+        "tts_enabled": false,
+        "retain_original_audio": true
+      },
+      "audio": {
+        "fixture": {
+          "path": "lfd/user-voice-model/eval/fixtures/dev/c439a52d1bf94427.wav",
+          "sha256": "c439a52d1bf9442792c275a17faa5697e627465d4ced91df57e13ae1a8714566",
+          "bytes": 130350,
+          "format": "wav",
+          "voice": "Samantha"
+        },
+        "source_kind": "telegram_voice",
+        "attachment_id": "att_uvm_dev_002",
+        "mime_type": "audio/wav",
+        "duration_ms_hint": 4200
+      },
+      "expected_route_family": "task.create"
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.tasks.create",
+          "params": {
+            "assignee": "Mira",
+            "topic": "review the onboarding checklist",
+            "due": "2026-07-10"
+          }
+        },
+        {
+          "text": "Done."
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "telegram",
+      "payload": {
+        "message_id": "msg_uvm_dev_002",
+        "user_id": "voice-user-10",
+        "team_id": "tenant-voice-10",
+        "thread_id": "thread_uvm_dev_002",
+        "text": "[Voice note]",
+        "attachments": [
+          {
+            "id": "att_uvm_dev_002",
+            "kind": "audio",
+            "mime_type": "audio/wav",
+            "path": "lfd/user-voice-model/eval/fixtures/dev/c439a52d1bf94427.wav",
+            "sha256": "c439a52d1bf9442792c275a17faa5697e627465d4ced91df57e13ae1a8714566",
+            "size_bytes": 130350
+          }
+        ],
+        "chat_id": 701002,
+        "voice": {
+          "file_id": "tg_file_uvm_dev_002",
+          "mime_type": "audio/wav"
+        }
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "transcript",
+      "kind": "transcript",
+      "params": {
+        "case_id": "uvm_dev_002"
+      }
+    },
+    {
+      "id": "turn_envelope",
+      "kind": "turn_envelope",
+      "params": {
+        "case_id": "uvm_dev_002"
+      }
+    },
+    {
+      "id": "route_comparison",
+      "kind": "route_comparison",
+      "params": {
+        "case_id": "uvm_dev_002"
+      }
+    },
+    {
+      "id": "attachment_record",
+      "kind": "attachment_record",
+      "params": {
+        "case_id": "uvm_dev_002"
+      }
+    },
+    {
+      "id": "privacy_audit",
+      "kind": "privacy_audit",
+      "params": {
+        "case_id": "uvm_dev_002"
+      }
+    }
+  ],
+  "live": false
+}

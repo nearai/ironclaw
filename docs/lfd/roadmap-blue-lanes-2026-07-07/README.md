@@ -4,9 +4,25 @@ Source: Notion database `NEAR AI Consolidated Roadmap`, view `36e29a65-26bf-80df
 
 Interpretation: "blue lanes" means roadmap rows where `Initiative` includes `IronClaw core`, the blue initiative option in the database. Blue status values are not used as the selector.
 
-Use one lane directory per implementation agent. Each lane has a `goal.md` written as an LFD launch document, not as a conventional feature spec. The assigned agent should copy that lane's `goal.md` into its working directory, materialize `spec.md`, `harness/`, `eval/dev`, `eval/holdout`, and `LOG.md`, then run the LFD loop.
+Use one lane directory per implementation agent. Each lane has a `goal.md` written as an LFD launch document, not as a conventional feature spec.
 
 All lanes inherit [COMMON.md](COMMON.md). A lane `goal.md` may tighten the shared rules but must not weaken them.
+
+**Amendments (2026-07-07 review — read before assigning any lane):**
+
+- [REVIEW-2026-07-07.md](REVIEW-2026-07-07.md) — design review of this
+  portfolio; the launch-blocking finding is that lanes as originally
+  written had each implementation agent author its own scorer and eval
+  answers (a self-graded loss function).
+- [INSTRUMENTS.md](INSTRUMENTS.md) — **overrides the paragraph above about
+  agents materializing `harness/` and `eval/`**: instruments are
+  designer-owned and pre-built in-tree (`lfd/_shared/` +
+  `tests/integration/lfd/`); the implementation agent receives them
+  read-only along with one writable runner-profile file. No lane launches
+  before its INSTRUMENTS launch checklist passes.
+- [LANE-ADDENDA.md](LANE-ADDENDA.md) — per-lane path corrections, Stage-0
+  test suites, bindings to the designer briefs in `lfd/_briefs/`, and the
+  launch waves / surface-conflict table for running lanes concurrently.
 
 ## Lane index
 

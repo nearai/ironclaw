@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "case_id": "mem_place_dev_007",
+  "profile": "memory_placement",
+  "title": "no-embeddings constraint prevents provider-direct embedding egress",
+  "setup": {
+    "extensions": [],
+    "secrets": [],
+    "memory_docs": [
+      {
+        "path": "notes/mpseed-golf.md",
+        "content": "mpseed golf vector-only query"
+      }
+    ],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {
+      "scenario": "constrain_no_embeddings_search",
+      "case_kind": "failure_denial",
+      "provider": {
+        "default": "native",
+        "active": "native",
+        "compare_with": "native",
+        "fake_provider_pinned_in_support": true
+      },
+      "policy": {
+        "decision": "constrain",
+        "constraints": [
+          "no_embeddings"
+        ],
+        "denial_reason": "no_embeddings"
+      },
+      "operation": {
+        "family": "search",
+        "query": "mpseed golf vector-only query",
+        "target": "memory/search"
+      },
+      "seed": {
+        "tenant_id": "T707MP",
+        "user_id": "U707MP",
+        "project_id": "proj-golf",
+        "docs": [
+          {
+            "path": "notes/mpseed-golf.md",
+            "content": "mpseed golf vector-only query"
+          }
+        ],
+        "versions": [],
+        "retention_records": []
+      },
+      "contract_markers": [
+        "mpseed-golf",
+        "no-embeddings"
+      ]
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.memory_search",
+          "params": {
+            "query": "mpseed golf vector-only query",
+            "limit": 5
+          }
+        },
+        {
+          "text": "memory placement scenario mem_place_dev_007 completed"
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "lfd_memory",
+      "payload": {
+        "text": "Run memory placement scenario mem_place_dev_007 for search"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "policy",
+      "kind": "memory_policy_decision",
+      "params": {
+        "operation_ref": "constrain_no_embeddings_search"
+      }
+    },
+    {
+      "id": "host",
+      "kind": "memory_host_mediation",
+      "params": {
+        "operation_ref": "constrain_no_embeddings_search"
+      }
+    },
+    {
+      "id": "boundary",
+      "kind": "memory_provider_boundary",
+      "params": {
+        "operation_ref": "constrain_no_embeddings_search",
+        "provider": "native"
+      }
+    }
+  ],
+  "live": false
+}

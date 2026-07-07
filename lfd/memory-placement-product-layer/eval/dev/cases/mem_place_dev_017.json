@@ -1,0 +1,115 @@
+{
+  "schema_version": 1,
+  "case_id": "mem_place_dev_017",
+  "profile": "memory_placement",
+  "title": "fake provider tree parity catches native-only tree branches",
+  "setup": {
+    "extensions": [],
+    "secrets": [],
+    "memory_docs": [
+      {
+        "path": "notes/mpseed-papa/a.md",
+        "content": "mpseed papa tree"
+      }
+    ],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {
+      "scenario": "fake_tree_parity",
+      "case_kind": "positive",
+      "provider": {
+        "default": "native",
+        "active": "fake_counter",
+        "compare_with": "native",
+        "fake_provider_pinned_in_support": true
+      },
+      "policy": {
+        "decision": "allow",
+        "constraints": []
+      },
+      "operation": {
+        "family": "tree",
+        "target": "notes",
+        "depth": 2
+      },
+      "seed": {
+        "tenant_id": "T717MP",
+        "user_id": "U717MP",
+        "project_id": "proj-fake-tree",
+        "docs": [
+          {
+            "path": "notes/mpseed-papa/a.md",
+            "content": "mpseed papa tree"
+          }
+        ],
+        "versions": [],
+        "retention_records": []
+      },
+      "contract_markers": [
+        "mpseed-papa",
+        "fake-tree-parity",
+        "memory.document_written",
+        "memory.search_performed",
+        "memory.prompt_context_built",
+        "memory.provider_denied",
+        "memory.provider_constrained",
+        "memory.safety_rejected",
+        "memory.profile_updated",
+        "host-network/memory-embeddings",
+        "memory_provider_repository"
+      ]
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.memory_tree",
+          "params": {
+            "path": "notes",
+            "depth": 2
+          }
+        },
+        {
+          "text": "memory placement scenario mem_place_dev_017 completed"
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "lfd_memory",
+      "payload": {
+        "text": "Execute fake_tree_parity for lane 16 memory placement"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "boundary",
+      "kind": "memory_provider_boundary",
+      "params": {
+        "operation_ref": "fake_tree_parity",
+        "provider": "fake_counter"
+      }
+    },
+    {
+      "id": "parity",
+      "kind": "memory_provider_parity",
+      "params": {
+        "operation_ref": "fake_tree_parity",
+        "baseline_provider": "native",
+        "candidate_provider": "fake_counter"
+      }
+    },
+    {
+      "id": "dependency",
+      "kind": "memory_dependency_boundary",
+      "params": {
+        "surface": "product"
+      }
+    }
+  ],
+  "live": false
+}

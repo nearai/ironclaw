@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "case_id": "uvm_dev_005",
+  "profile": "user_voice_model",
+  "title": "Voice-origin approval workflow preserves approval gate ordering",
+  "setup": {
+    "extensions": [],
+    "secrets": [],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {
+      "mode": "approval_voice",
+      "transcription": {
+        "provider": "mock_primary",
+        "mock_table": "pinned_content_hash",
+        "allowed_language": "en-US",
+        "tts_enabled": false,
+        "retain_original_audio": true
+      },
+      "audio": {
+        "fixture": {
+          "path": "lfd/user-voice-model/eval/fixtures/dev/f95f5d26055e9e63.wav",
+          "sha256": "f95f5d26055e9e63fd7b97881f3483d1137e1d011eedebee9b613b4df82c0265",
+          "bytes": 103012,
+          "format": "wav",
+          "voice": "Samantha"
+        },
+        "source_kind": "approval_voice",
+        "attachment_id": "att_uvm_dev_005",
+        "mime_type": "audio/wav",
+        "duration_ms_hint": 4200
+      },
+      "expected_route_family": "email.send",
+      "approval": {
+        "required": true,
+        "kind": "tool_execution"
+      }
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.email.send",
+          "params": {
+            "recipient_group": "finance",
+            "artifact": "payroll export"
+          }
+        },
+        {
+          "text": "Done."
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "webui",
+      "payload": {
+        "message_id": "msg_uvm_dev_005",
+        "user_id": "voice-user-10",
+        "team_id": "tenant-voice-10",
+        "thread_id": "thread_uvm_dev_005",
+        "text": "[Voice note]",
+        "attachments": [
+          {
+            "id": "att_uvm_dev_005",
+            "kind": "audio",
+            "mime_type": "audio/wav",
+            "path": "lfd/user-voice-model/eval/fixtures/dev/f95f5d26055e9e63.wav",
+            "sha256": "f95f5d26055e9e63fd7b97881f3483d1137e1d011eedebee9b613b4df82c0265",
+            "size_bytes": 103012
+          }
+        ]
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "transcript",
+      "kind": "transcript",
+      "params": {
+        "case_id": "uvm_dev_005"
+      }
+    },
+    {
+      "id": "turn_envelope",
+      "kind": "turn_envelope",
+      "params": {
+        "case_id": "uvm_dev_005"
+      }
+    },
+    {
+      "id": "route_comparison",
+      "kind": "route_comparison",
+      "params": {
+        "case_id": "uvm_dev_005"
+      }
+    },
+    {
+      "id": "attachment_record",
+      "kind": "attachment_record",
+      "params": {
+        "case_id": "uvm_dev_005"
+      }
+    },
+    {
+      "id": "approval_audit",
+      "kind": "approval_audit",
+      "params": {
+        "case_id": "uvm_dev_005"
+      }
+    },
+    {
+      "id": "privacy_audit",
+      "kind": "privacy_audit",
+      "params": {
+        "case_id": "uvm_dev_005"
+      }
+    }
+  ],
+  "live": false
+}

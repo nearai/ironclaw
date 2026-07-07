@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "case_id": "mig_dev_cron_triggers",
+  "profile": "migration",
+  "title": "cron routines migrate to cron triggers",
+  "setup": {
+    "secrets": [],
+    "profile_extra": {
+      "seed": {
+        "backend": "libsql",
+        "users": [
+          {
+            "ref": "u1",
+            "user_id": "bob",
+            "email": "bob@lfdseed.example",
+            "display_name": "Boran",
+            "identities": [],
+            "channels": []
+          }
+        ],
+        "conversations": [],
+        "routines": [
+          {
+            "ref": "r1",
+            "name": "cron-light",
+            "user": "u1",
+            "trigger": {
+              "kind": "cron",
+              "expr": "0 9 * * *",
+              "tz": "UTC"
+            },
+            "action": "lightweight",
+            "enabled": true,
+            "status": "ok",
+            "runs": 0
+          },
+          {
+            "ref": "r2",
+            "name": "cron-report",
+            "user": "u1",
+            "trigger": {
+              "kind": "cron",
+              "expr": "0 18 * * MON-FRI",
+              "tz": "UTC"
+            },
+            "action": "full_job",
+            "enabled": false,
+            "status": "ok",
+            "runs": 0
+          }
+        ],
+        "missions": [],
+        "memory_docs": [],
+        "settings": [],
+        "secrets": [],
+        "jobs": [],
+        "extensions": []
+      },
+      "run": {
+        "mode": "wet"
+      }
+    }
+  },
+  "state_queries": [
+    {
+      "id": "v1_intact",
+      "kind": "v1_db_digest",
+      "params": {}
+    },
+    {
+      "id": "recon",
+      "kind": "migration_report",
+      "params": {
+        "run": "wet",
+        "view": "reconciliation"
+      }
+    },
+    {
+      "id": "proj_triggers",
+      "kind": "migration_projection",
+      "params": {
+        "domain": "triggers"
+      }
+    }
+  ],
+  "live": false
+}

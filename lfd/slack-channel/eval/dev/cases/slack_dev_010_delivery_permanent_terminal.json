@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "case_id": "slack_dev_010_delivery_permanent_terminal",
+  "profile": "slack_channel",
+  "title": "Permanent Slack delivery failure records terminal blocked state without infinite retry",
+  "setup": {
+    "extensions": ["slack"],
+    "secrets": [{"credential_name": "slack_bot_token", "value": "xoxb-dev-slice-010"}],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [{"key": "slack.postMessage", "status": 200, "body": {"ok": false, "error": "channel_not_found"}}],
+    "profile_extra": {
+      "slack_fixture": {
+        "tenant_id": "tenant:slack-dev-a",
+        "installation_id": "slack-install-dev-a",
+        "team_id": "T03DEVA01",
+        "api_app_id": "A03DEVA01",
+        "bot_user_id": "UBOTDEV03",
+        "operator_user_id": "user:ops-dev",
+        "default_personal_agent_id": "agent:personal-dev",
+        "channel_routes": [{"channel_id": "C03MISSING", "subject_user_id": "user:team-missing-dev", "agent_id": "agent:team-missing-dev"}],
+        "identity_bindings": [{"slack_user_id": "U03JULE01", "user_id": "user:jule-dev", "dm_channel_id": "D03JULE01"}],
+        "connection": {"configured": true, "caller_connected": true},
+        "admission": {"workspace_allowed": true, "channels_allowed": ["C03MISSING"]},
+        "delivery_script": [{"status": 200, "body": {"ok": false, "error": "channel_not_found"}}],
+        "existing_threads": []
+      }
+    }
+  },
+  "llm_script": [{"turn": 1, "steps": [{"text": "this final reply cannot be delivered"}]}],
+  "inbound": [{
+    "channel": "slack",
+    "payload": {
+      "type": "event_callback",
+      "team_id": "T03DEVA01",
+      "event_id": "Ev03D010",
+      "event": {"type": "app_mention", "user": "U03JULE01", "channel": "C03MISSING", "text": "<@UBOTDEV03> answer in missing channel", "ts": "1771000000.000010"}
+    }
+  }],
+  "state_queries": [
+    {"id": "turn", "kind": "slack_turn", "params": {"event_id": "Ev03D010"}},
+    {"id": "route", "kind": "slack_route_resolution", "params": {"event_id": "Ev03D010"}},
+    {"id": "delivery", "kind": "slack_delivery", "params": {"event_id": "Ev03D010"}},
+    {"id": "admission", "kind": "slack_admission", "params": {"event_id": "Ev03D010"}},
+    {"id": "isolation", "kind": "slack_isolation_audit", "params": {"event_id": "Ev03D010"}}
+  ],
+  "live": false
+}

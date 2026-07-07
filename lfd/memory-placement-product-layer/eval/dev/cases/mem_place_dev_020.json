@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "case_id": "mem_place_dev_020",
+  "profile": "memory_placement",
+  "title": "composition dependency boundary has no native reexports",
+  "setup": {
+    "extensions": [],
+    "secrets": [],
+    "memory_docs": [
+      {
+        "path": "notes/mpseed-sierra.md",
+        "content": "mpseed sierra dependency"
+      }
+    ],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {
+      "scenario": "composition_dependency_boundary",
+      "case_kind": "failure_denial",
+      "provider": {
+        "default": "native",
+        "active": "native",
+        "compare_with": "native",
+        "fake_provider_pinned_in_support": true
+      },
+      "policy": {
+        "decision": "allow",
+        "constraints": []
+      },
+      "operation": {
+        "family": "read",
+        "target": "notes/mpseed-sierra.md"
+      },
+      "seed": {
+        "tenant_id": "T720MP",
+        "user_id": "U720MP",
+        "project_id": "proj-dep",
+        "docs": [
+          {
+            "path": "notes/mpseed-sierra.md",
+            "content": "mpseed sierra dependency"
+          }
+        ],
+        "versions": [],
+        "retention_records": []
+      },
+      "contract_markers": [
+        "mpseed-sierra",
+        "dependency-boundary",
+        "memory.document_written",
+        "memory.search_performed",
+        "memory.prompt_context_built",
+        "memory.provider_denied",
+        "memory.provider_constrained",
+        "memory.safety_rejected",
+        "memory.profile_updated",
+        "host-network/memory-embeddings",
+        "memory_provider_repository"
+      ]
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.memory_read",
+          "params": {
+            "path": "notes/mpseed-sierra.md"
+          }
+        },
+        {
+          "text": "memory placement scenario mem_place_dev_020 completed"
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "lfd_memory",
+      "payload": {
+        "text": "Execute composition_dependency_boundary for lane 16 memory placement"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "dependency",
+      "kind": "memory_dependency_boundary",
+      "params": {
+        "surface": "composition"
+      }
+    },
+    {
+      "id": "boundary",
+      "kind": "memory_provider_boundary",
+      "params": {
+        "operation_ref": "composition_dependency_boundary",
+        "provider": "native"
+      }
+    }
+  ],
+  "live": false
+}

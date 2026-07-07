@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "case_id": "mig_dev_extension_wasm_binary",
+  "profile": "migration",
+  "title": "extension manifest+WASM binary carried (gap closed)",
+  "setup": {
+    "secrets": [],
+    "profile_extra": {
+      "seed": {
+        "backend": "libsql",
+        "users": [
+          {
+            "ref": "u1",
+            "user_id": "mae",
+            "email": "mae@lfdseed.example",
+            "display_name": "Arlen",
+            "identities": [],
+            "channels": []
+          }
+        ],
+        "conversations": [],
+        "routines": [],
+        "missions": [],
+        "memory_docs": [],
+        "settings": [],
+        "secrets": [],
+        "jobs": [],
+        "extensions": [
+          {
+            "ref": "x1",
+            "name": "translator",
+            "version": "2.1.0",
+            "status": "active",
+            "wasm_len": 4096,
+            "allowed_secrets": []
+          }
+        ]
+      },
+      "run": {
+        "mode": "wet"
+      }
+    }
+  },
+  "state_queries": [
+    {
+      "id": "v1_intact",
+      "kind": "v1_db_digest",
+      "params": {}
+    },
+    {
+      "id": "recon",
+      "kind": "migration_report",
+      "params": {
+        "run": "wet",
+        "view": "reconciliation"
+      }
+    },
+    {
+      "id": "proj_extensions",
+      "kind": "migration_projection",
+      "params": {
+        "domain": "extensions"
+      }
+    }
+  ],
+  "live": false
+}

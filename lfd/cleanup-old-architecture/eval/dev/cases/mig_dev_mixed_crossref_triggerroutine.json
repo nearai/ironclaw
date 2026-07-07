@@ -1,0 +1,209 @@
+{
+  "schema_version": 1,
+  "case_id": "mig_dev_mixed_crossref_triggerroutine",
+  "profile": "migration",
+  "title": "mixed realistic seed, cross-refs intact",
+  "setup": {
+    "secrets": [
+      {
+        "credential_name": "openai_api_key",
+        "value": "sk-live-lfdseedplaintextwes"
+      }
+    ],
+    "profile_extra": {
+      "seed": {
+        "backend": "libsql",
+        "users": [
+          {
+            "ref": "u_wes",
+            "user_id": "wes",
+            "email": "wes@lfdseed.example",
+            "display_name": "Gizem",
+            "identities": [
+              {
+                "provider": "google",
+                "provider_user_id": "g-wes",
+                "email_verified": true
+              }
+            ],
+            "channels": [
+              {
+                "channel": "telegram",
+                "external_id": "tg-wes"
+              }
+            ]
+          }
+        ],
+        "conversations": [
+          {
+            "ref": "c_gw_wes",
+            "channel": "gateway",
+            "user": "u_wes",
+            "messages": [
+              {
+                "role": "user",
+                "content": "hi"
+              },
+              {
+                "role": "assistant",
+                "content": "hello"
+              },
+              {
+                "role": "system",
+                "content": "started"
+              }
+            ]
+          }
+        ],
+        "routines": [
+          {
+            "ref": "cr_wes",
+            "name": "cron-wes",
+            "user": "u_wes",
+            "trigger": {
+              "kind": "cron",
+              "expr": "0 9 * * *",
+              "tz": "UTC"
+            },
+            "action": "lightweight",
+            "enabled": true,
+            "status": "ok",
+            "runs": 4
+          },
+          {
+            "ref": "ev_wes",
+            "name": "event-wes",
+            "user": "u_wes",
+            "trigger": {
+              "kind": "event",
+              "pattern": "deploy"
+            },
+            "action": "lightweight",
+            "enabled": true,
+            "status": "ok",
+            "runs": 0
+          }
+        ],
+        "missions": [
+          {
+            "ref": "m_wes",
+            "name": "digest-wes",
+            "user": "u_wes",
+            "cadence": {
+              "kind": "cron",
+              "expr": "0 7 * * *",
+              "tz": "UTC"
+            },
+            "status": "ok",
+            "thread_messages": [
+              {
+                "role": "user",
+                "content": "go"
+              },
+              {
+                "role": "assistant",
+                "content": "ok"
+              }
+            ]
+          }
+        ],
+        "memory_docs": [
+          {
+            "ref": "d_wes",
+            "path": "context/wes.md",
+            "content": "# ctx",
+            "versions": 2
+          }
+        ],
+        "settings": [
+          {
+            "key": "model",
+            "value": "gpt-4"
+          },
+          {
+            "key": "timezone",
+            "value": "UTC"
+          }
+        ],
+        "secrets": [
+          {
+            "ref": "s_wes",
+            "name": "openai_api_key",
+            "provider": "openai",
+            "value": "sk-live-lfdseedplaintextwes",
+            "expires_at": null,
+            "decryptable": true
+          }
+        ],
+        "jobs": [
+          {
+            "ref": "j_wes",
+            "title": "report",
+            "conversation": "c_gw_wes",
+            "actions": 2,
+            "events": 3
+          }
+        ],
+        "extensions": [
+          {
+            "ref": "x_wes",
+            "name": "tool-wes",
+            "version": "1.0.0",
+            "status": "active",
+            "wasm_len": 512,
+            "allowed_secrets": [
+              "openai_api_key"
+            ]
+          }
+        ]
+      },
+      "run": {
+        "mode": "wet"
+      }
+    }
+  },
+  "state_queries": [
+    {
+      "id": "v1_intact",
+      "kind": "v1_db_digest",
+      "params": {}
+    },
+    {
+      "id": "recon",
+      "kind": "migration_report",
+      "params": {
+        "run": "wet",
+        "view": "reconciliation"
+      }
+    },
+    {
+      "id": "proj_threads",
+      "kind": "migration_projection",
+      "params": {
+        "domain": "threads"
+      }
+    },
+    {
+      "id": "proj_triggers",
+      "kind": "migration_projection",
+      "params": {
+        "domain": "triggers"
+      }
+    },
+    {
+      "id": "proj_secrets",
+      "kind": "migration_projection",
+      "params": {
+        "domain": "secrets"
+      }
+    },
+    {
+      "id": "proj_jobs",
+      "kind": "migration_projection",
+      "params": {
+        "domain": "jobs"
+      }
+    }
+  ],
+  "live": false
+}

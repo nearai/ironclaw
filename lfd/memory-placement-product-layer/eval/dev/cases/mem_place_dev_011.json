@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "case_id": "mem_place_dev_011",
+  "profile": "memory_placement",
+  "title": "native tree/list goes through MemoryService boundary",
+  "setup": {
+    "extensions": [],
+    "secrets": [],
+    "memory_docs": [
+      {
+        "path": "notes/mpseed-kappa/a.md",
+        "content": "mpseed kappa tree a"
+      },
+      {
+        "path": "notes/mpseed-kappa/b.md",
+        "content": "mpseed kappa tree b"
+      }
+    ],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {
+      "scenario": "native_tree_boundary",
+      "case_kind": "positive",
+      "provider": {
+        "default": "native",
+        "active": "native",
+        "compare_with": "native",
+        "fake_provider_pinned_in_support": true
+      },
+      "policy": {
+        "decision": "allow",
+        "constraints": []
+      },
+      "operation": {
+        "family": "tree",
+        "target": "notes",
+        "depth": 3
+      },
+      "seed": {
+        "tenant_id": "T711MP",
+        "user_id": "U711MP",
+        "project_id": "proj-tree",
+        "docs": [
+          {
+            "path": "notes/mpseed-kappa/a.md",
+            "content": "mpseed kappa tree a"
+          },
+          {
+            "path": "notes/mpseed-kappa/b.md",
+            "content": "mpseed kappa tree b"
+          }
+        ],
+        "versions": [],
+        "retention_records": []
+      },
+      "contract_markers": [
+        "mpseed-kappa",
+        "tree-boundary",
+        "memory.document_written",
+        "memory.search_performed",
+        "memory.prompt_context_built",
+        "memory.provider_denied",
+        "memory.provider_constrained",
+        "memory.safety_rejected",
+        "memory.profile_updated",
+        "host-network/memory-embeddings",
+        "memory_provider_repository"
+      ]
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.memory_tree",
+          "params": {
+            "path": "notes",
+            "depth": 3
+          }
+        },
+        {
+          "text": "memory placement scenario mem_place_dev_011 completed"
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "lfd_memory",
+      "payload": {
+        "text": "Execute native_tree_boundary for lane 16 memory placement"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "boundary",
+      "kind": "memory_provider_boundary",
+      "params": {
+        "operation_ref": "native_tree_boundary",
+        "provider": "native"
+      }
+    },
+    {
+      "id": "storage",
+      "kind": "memory_storage_placement",
+      "params": {
+        "operation_ref": "native_tree_boundary"
+      }
+    }
+  ],
+  "live": false
+}

@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "case_id": "slack_dev_009_delivery_retry_429",
+  "profile": "slack_channel",
+  "title": "Retryable Slack 429 delivery retries once then records delivered",
+  "setup": {
+    "extensions": ["slack"],
+    "secrets": [{"credential_name": "slack_bot_token", "value": "xoxb-dev-slice-009"}],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [
+      {"key": "slack.postMessage", "status": 429, "body": {"ok": false, "error": "ratelimited"}},
+      {"key": "slack.postMessage", "status": 200, "body": {"ok": true}}
+    ],
+    "profile_extra": {
+      "slack_fixture": {
+        "tenant_id": "tenant:slack-dev-a",
+        "installation_id": "slack-install-dev-a",
+        "team_id": "T03DEVA01",
+        "api_app_id": "A03DEVA01",
+        "bot_user_id": "UBOTDEV03",
+        "operator_user_id": "user:ops-dev",
+        "default_personal_agent_id": "agent:personal-dev",
+        "channel_routes": [{"channel_id": "C03RETRY1", "subject_user_id": "user:team-retry-dev", "agent_id": "agent:team-retry-dev"}],
+        "identity_bindings": [{"slack_user_id": "U03IRIS01", "user_id": "user:iris-dev", "dm_channel_id": "D03IRIS01"}],
+        "connection": {"configured": true, "caller_connected": true},
+        "admission": {"workspace_allowed": true, "channels_allowed": ["C03RETRY1"]},
+        "delivery_script": [{"status": 429, "body": {"ok": false, "error": "ratelimited"}}, {"status": 200, "body": {"ok": true}}],
+        "existing_threads": []
+      }
+    }
+  },
+  "llm_script": [{"turn": 1, "steps": [{"text": "retry succeeded after rate limit"}]}],
+  "inbound": [{
+    "channel": "slack",
+    "payload": {
+      "type": "event_callback",
+      "team_id": "T03DEVA01",
+      "event_id": "Ev03D009",
+      "event": {"type": "app_mention", "user": "U03IRIS01", "channel": "C03RETRY1", "text": "<@UBOTDEV03> post after retry", "ts": "1771000000.000009"}
+    }
+  }],
+  "state_queries": [
+    {"id": "turn", "kind": "slack_turn", "params": {"event_id": "Ev03D009"}},
+    {"id": "route", "kind": "slack_route_resolution", "params": {"event_id": "Ev03D009"}},
+    {"id": "delivery", "kind": "slack_delivery", "params": {"event_id": "Ev03D009"}},
+    {"id": "admission", "kind": "slack_admission", "params": {"event_id": "Ev03D009"}},
+    {"id": "isolation", "kind": "slack_isolation_audit", "params": {"event_id": "Ev03D009"}}
+  ],
+  "live": false
+}

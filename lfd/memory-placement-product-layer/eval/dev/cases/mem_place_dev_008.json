@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "case_id": "mem_place_dev_008",
+  "profile": "memory_placement",
+  "title": "embedding search uses host network mediation, not provider direct egress",
+  "setup": {
+    "extensions": [],
+    "secrets": [],
+    "memory_docs": [
+      {
+        "path": "notes/mpseed-hotel.md",
+        "content": "mpseed hotel host mediated embeddings"
+      }
+    ],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {
+      "scenario": "host_mediated_embedding_search",
+      "case_kind": "positive",
+      "provider": {
+        "default": "native",
+        "active": "native",
+        "compare_with": "native",
+        "fake_provider_pinned_in_support": true
+      },
+      "policy": {
+        "decision": "allow",
+        "constraints": []
+      },
+      "operation": {
+        "family": "search",
+        "query": "mpseed hotel host mediated embeddings",
+        "target": "memory/search"
+      },
+      "seed": {
+        "tenant_id": "T708MP",
+        "user_id": "U708MP",
+        "project_id": "proj-hotel",
+        "docs": [
+          {
+            "path": "notes/mpseed-hotel.md",
+            "content": "mpseed hotel host mediated embeddings"
+          }
+        ],
+        "versions": [],
+        "retention_records": []
+      },
+      "contract_markers": [
+        "mpseed-hotel",
+        "host-network"
+      ]
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.memory_search",
+          "params": {
+            "query": "mpseed hotel host mediated embeddings",
+            "limit": 5
+          }
+        },
+        {
+          "text": "memory placement scenario mem_place_dev_008 completed"
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "lfd_memory",
+      "payload": {
+        "text": "Run memory placement scenario mem_place_dev_008 for search"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "boundary",
+      "kind": "memory_provider_boundary",
+      "params": {
+        "operation_ref": "host_mediated_embedding_search",
+        "provider": "native"
+      }
+    },
+    {
+      "id": "host",
+      "kind": "memory_host_mediation",
+      "params": {
+        "operation_ref": "host_mediated_embedding_search"
+      }
+    }
+  ],
+  "live": false
+}

@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "case_id": "mig_dev_edge_dangling_fk",
+  "profile": "migration",
+  "title": "dangling FK rows enumerated as typed skips, never silently dropped",
+  "setup": {
+    "secrets": [],
+    "profile_extra": {
+      "seed": {
+        "backend": "libsql",
+        "users": [
+          {
+            "ref": "u1",
+            "user_id": "amy",
+            "email": "amy@lfdseed.example",
+            "display_name": "Arlen",
+            "identities": [],
+            "channels": []
+          }
+        ],
+        "conversations": [
+          {
+            "ref": "c_ok",
+            "channel": "gateway",
+            "user": "u1",
+            "messages": [
+              {
+                "role": "user",
+                "content": "hi"
+              },
+              {
+                "role": "assistant",
+                "content": "yo"
+              }
+            ]
+          },
+          {
+            "ref": "c_bad",
+            "channel": "gateway",
+            "user": "u_missing",
+            "user_valid": false,
+            "messages": [
+              {
+                "role": "user",
+                "content": "orphan"
+              },
+              {
+                "role": "assistant",
+                "content": "orphan2"
+              }
+            ]
+          }
+        ],
+        "routines": [],
+        "missions": [],
+        "memory_docs": [],
+        "settings": [],
+        "secrets": [],
+        "jobs": [],
+        "extensions": []
+      },
+      "run": {
+        "mode": "wet"
+      }
+    }
+  },
+  "state_queries": [
+    {
+      "id": "v1_intact",
+      "kind": "v1_db_digest",
+      "params": {}
+    },
+    {
+      "id": "recon",
+      "kind": "migration_report",
+      "params": {
+        "run": "wet",
+        "view": "reconciliation"
+      }
+    },
+    {
+      "id": "lossy",
+      "kind": "migration_report",
+      "params": {
+        "run": "wet",
+        "view": "lossy"
+      }
+    },
+    {
+      "id": "proj_threads",
+      "kind": "migration_projection",
+      "params": {
+        "domain": "threads"
+      }
+    }
+  ],
+  "live": false
+}

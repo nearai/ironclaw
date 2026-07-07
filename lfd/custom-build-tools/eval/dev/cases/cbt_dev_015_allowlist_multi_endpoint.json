@@ -1,0 +1,180 @@
+{
+  "schema_version": 1,
+  "case_id": "cbt_dev_015_allowlist_multi_endpoint",
+  "profile": "custom_build_tools",
+  "title": "multi-endpoint wrapper restricts network to one host",
+  "setup": {
+    "extensions": [
+      "custom_tool_builder"
+    ],
+    "secrets": [
+      {
+        "credential_name": "catalogkit_key",
+        "value": "test-secret-cbt_dev_015_allowlist_multi_endpoint"
+      }
+    ],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [
+      {
+        "key": "CatalogKit.GET./items/I-9/margin",
+        "status": 200,
+        "body": {
+          "price": 200,
+          "cost": 150
+        }
+      }
+    ],
+    "profile_extra": {
+      "task": {
+        "request_id": "cbt_dev_015_allowlist_multi_endpoint",
+        "shape": "credentialed_http_api_wrapper",
+        "mode": "create",
+        "user_request": "Build a credentialed HTTP API wrapper named catalogkit_item_margin for CatalogKit. Use credential catalogkit_key; call GET https://catalogkit.cbt-dev.test/items/I-9/margin; transform the provider response with margin_percent.",
+        "api_docs": {
+          "service": "CatalogKit",
+          "base_url": "https://catalogkit.cbt-dev.test",
+          "auth": {
+            "method": "api_key",
+            "placement": "header",
+            "header": "X-API-Key",
+            "credential_name": "catalogkit_key"
+          },
+          "operation": {
+            "method": "GET",
+            "path": "/items/I-9/margin",
+            "input_schema": {
+              "type": "object",
+              "example": {
+                "item_id": "I-9"
+              }
+            },
+            "response_example": {
+              "price": 200,
+              "cost": 150
+            },
+            "transform": "margin_percent"
+          },
+          "sandbox": {
+            "network_allowlist": [
+              "catalogkit.cbt-dev.test"
+            ],
+            "host_network": false,
+            "shell": false
+          }
+        },
+        "expected_tool_name": "catalogkit_item_margin",
+        "invocation": {
+          "input": {
+            "item_id": "I-9"
+          }
+        },
+        "fake_api": {
+          "host": "catalogkit.cbt-dev.test",
+          "method": "GET",
+          "path": "/items/I-9/margin",
+          "response": {
+            "price": 200,
+            "cost": 150
+          }
+        }
+      }
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.custom_tool.build_http_wrapper",
+          "params": {
+            "request_id": "cbt_dev_015_allowlist_multi_endpoint",
+            "profile": "custom_build_tools"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.validate_artifact",
+          "params": {
+            "tool_name": "catalogkit_item_margin"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.install",
+          "params": {
+            "tool_name": "catalogkit_item_margin"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.invoke_generated_tool",
+          "params": {
+            "tool_name": "catalogkit_item_margin",
+            "input": {
+              "item_id": "I-9"
+            }
+          }
+        },
+        {
+          "text": "Built and verified catalogkit_item_margin."
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "text": "Build a credentialed HTTP API wrapper named catalogkit_item_margin for CatalogKit. Use credential catalogkit_key; call GET https://catalogkit.cbt-dev.test/items/I-9/margin; transform the provider response with margin_percent.",
+        "user_id": "UCBT1001"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "spec",
+      "kind": "custom_tool_spec",
+      "params": {
+        "request_id": "cbt_dev_015_allowlist_multi_endpoint",
+        "tool_name": "catalogkit_item_margin"
+      }
+    },
+    {
+      "id": "artifact",
+      "kind": "tool_artifact",
+      "params": {
+        "request_id": "cbt_dev_015_allowlist_multi_endpoint",
+        "tool_name": "catalogkit_item_margin"
+      }
+    },
+    {
+      "id": "install",
+      "kind": "extension_lifecycle",
+      "params": {
+        "request_id": "cbt_dev_015_allowlist_multi_endpoint",
+        "tool_name": "catalogkit_item_margin"
+      }
+    },
+    {
+      "id": "invoke",
+      "kind": "generated_tool_invocation",
+      "params": {
+        "request_id": "cbt_dev_015_allowlist_multi_endpoint",
+        "tool_name": "catalogkit_item_margin"
+      }
+    },
+    {
+      "id": "diagnostic",
+      "kind": "tool_builder_diagnostic",
+      "params": {
+        "request_id": "cbt_dev_015_allowlist_multi_endpoint"
+      }
+    },
+    {
+      "id": "network",
+      "kind": "fake_api_egress",
+      "params": {
+        "request_id": "cbt_dev_015_allowlist_multi_endpoint"
+      }
+    }
+  ],
+  "live": false
+}

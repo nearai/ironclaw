@@ -1,0 +1,188 @@
+{
+  "schema_version": 1,
+  "case_id": "mig_dev_dryrun_writes_nothing",
+  "profile": "migration",
+  "title": "dry-run reports fully but writes nothing",
+  "setup": {
+    "secrets": [
+      {
+        "credential_name": "openai_api_key",
+        "value": "sk-live-lfdseedplaintextdwn"
+      }
+    ],
+    "profile_extra": {
+      "seed": {
+        "backend": "libsql",
+        "users": [
+          {
+            "ref": "u_dw",
+            "user_id": "dwn",
+            "email": "dwn@lfdseed.example",
+            "display_name": "Emre",
+            "identities": [
+              {
+                "provider": "google",
+                "provider_user_id": "g-dwn",
+                "email_verified": true
+              }
+            ],
+            "channels": [
+              {
+                "channel": "telegram",
+                "external_id": "tg-dwn"
+              }
+            ]
+          }
+        ],
+        "conversations": [
+          {
+            "ref": "c_gw_dwn",
+            "channel": "gateway",
+            "user": "u_dw",
+            "messages": [
+              {
+                "role": "user",
+                "content": "hi"
+              },
+              {
+                "role": "assistant",
+                "content": "hello"
+              },
+              {
+                "role": "system",
+                "content": "started"
+              }
+            ]
+          }
+        ],
+        "routines": [
+          {
+            "ref": "cr_dwn",
+            "name": "cron-dwn",
+            "user": "u_dw",
+            "trigger": {
+              "kind": "cron",
+              "expr": "0 9 * * *",
+              "tz": "UTC"
+            },
+            "action": "lightweight",
+            "enabled": true,
+            "status": "ok",
+            "runs": 4
+          },
+          {
+            "ref": "ev_dwn",
+            "name": "event-dwn",
+            "user": "u_dw",
+            "trigger": {
+              "kind": "event",
+              "pattern": "deploy"
+            },
+            "action": "lightweight",
+            "enabled": true,
+            "status": "ok",
+            "runs": 0
+          }
+        ],
+        "missions": [
+          {
+            "ref": "m_dwn",
+            "name": "digest-dwn",
+            "user": "u_dw",
+            "cadence": {
+              "kind": "cron",
+              "expr": "0 7 * * *",
+              "tz": "UTC"
+            },
+            "status": "ok",
+            "thread_messages": [
+              {
+                "role": "user",
+                "content": "go"
+              },
+              {
+                "role": "assistant",
+                "content": "ok"
+              }
+            ]
+          }
+        ],
+        "memory_docs": [
+          {
+            "ref": "d_dwn",
+            "path": "context/dwn.md",
+            "content": "# ctx",
+            "versions": 2
+          }
+        ],
+        "settings": [
+          {
+            "key": "model",
+            "value": "gpt-4"
+          },
+          {
+            "key": "timezone",
+            "value": "UTC"
+          }
+        ],
+        "secrets": [
+          {
+            "ref": "s_dwn",
+            "name": "openai_api_key",
+            "provider": "openai",
+            "value": "sk-live-lfdseedplaintextdwn",
+            "expires_at": null,
+            "decryptable": true
+          }
+        ],
+        "jobs": [
+          {
+            "ref": "j_dwn",
+            "title": "report",
+            "conversation": "c_gw_dwn",
+            "actions": 2,
+            "events": 3
+          }
+        ],
+        "extensions": [
+          {
+            "ref": "x_dwn",
+            "name": "tool-dwn",
+            "version": "1.0.0",
+            "status": "active",
+            "wasm_len": 512,
+            "allowed_secrets": [
+              "openai_api_key"
+            ]
+          }
+        ]
+      },
+      "run": {
+        "mode": "dry"
+      }
+    }
+  },
+  "state_queries": [
+    {
+      "id": "v1_intact",
+      "kind": "v1_db_digest",
+      "params": {}
+    },
+    {
+      "id": "recon",
+      "kind": "migration_report",
+      "params": {
+        "run": "wet",
+        "view": "reconciliation"
+      }
+    },
+    {
+      "id": "proj_threads",
+      "kind": "migration_projection",
+      "params": {
+        "domain": "threads"
+      }
+    }
+  ],
+  "live": false
+}

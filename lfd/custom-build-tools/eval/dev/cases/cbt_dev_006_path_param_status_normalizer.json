@@ -1,0 +1,181 @@
+{
+  "schema_version": 1,
+  "case_id": "cbt_dev_006_path_param_status_normalizer",
+  "profile": "custom_build_tools",
+  "title": "path parameter wrapper normalizes shipment status",
+  "setup": {
+    "extensions": [
+      "custom_tool_builder"
+    ],
+    "secrets": [
+      {
+        "credential_name": "shipyard_token",
+        "value": "test-secret-cbt_dev_006_path_param_status_normalizer"
+      }
+    ],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [
+      {
+        "key": "ShipYard.GET./shipments/SHP-220/status",
+        "status": 200,
+        "body": {
+          "status": "in_transit",
+          "eta_days": 3
+        }
+      }
+    ],
+    "profile_extra": {
+      "task": {
+        "request_id": "cbt_dev_006_path_param_status_normalizer",
+        "shape": "credentialed_http_api_wrapper",
+        "mode": "create",
+        "user_request": "Build a credentialed HTTP API wrapper named shipyard_status_normalizer for ShipYard. Use credential shipyard_token; call GET https://shipyard.cbt-dev.test/shipments/SHP-220/status; transform the provider response with status_bucket.",
+        "api_docs": {
+          "service": "ShipYard",
+          "base_url": "https://shipyard.cbt-dev.test",
+          "auth": {
+            "method": "bearer",
+            "placement": "header",
+            "header": "Authorization",
+            "prefix": "Bearer ",
+            "credential_name": "shipyard_token"
+          },
+          "operation": {
+            "method": "GET",
+            "path": "/shipments/SHP-220/status",
+            "input_schema": {
+              "type": "object",
+              "example": {
+                "shipment_id": "SHP-220"
+              }
+            },
+            "response_example": {
+              "status": "in_transit",
+              "eta_days": 3
+            },
+            "transform": "status_bucket"
+          },
+          "sandbox": {
+            "network_allowlist": [
+              "shipyard.cbt-dev.test"
+            ],
+            "host_network": false,
+            "shell": false
+          }
+        },
+        "expected_tool_name": "shipyard_status_normalizer",
+        "invocation": {
+          "input": {
+            "shipment_id": "SHP-220"
+          }
+        },
+        "fake_api": {
+          "host": "shipyard.cbt-dev.test",
+          "method": "GET",
+          "path": "/shipments/SHP-220/status",
+          "response": {
+            "status": "in_transit",
+            "eta_days": 3
+          }
+        }
+      }
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.custom_tool.build_http_wrapper",
+          "params": {
+            "request_id": "cbt_dev_006_path_param_status_normalizer",
+            "profile": "custom_build_tools"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.validate_artifact",
+          "params": {
+            "tool_name": "shipyard_status_normalizer"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.install",
+          "params": {
+            "tool_name": "shipyard_status_normalizer"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.invoke_generated_tool",
+          "params": {
+            "tool_name": "shipyard_status_normalizer",
+            "input": {
+              "shipment_id": "SHP-220"
+            }
+          }
+        },
+        {
+          "text": "Built and verified shipyard_status_normalizer."
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "text": "Build a credentialed HTTP API wrapper named shipyard_status_normalizer for ShipYard. Use credential shipyard_token; call GET https://shipyard.cbt-dev.test/shipments/SHP-220/status; transform the provider response with status_bucket.",
+        "user_id": "UCBT1001"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "spec",
+      "kind": "custom_tool_spec",
+      "params": {
+        "request_id": "cbt_dev_006_path_param_status_normalizer",
+        "tool_name": "shipyard_status_normalizer"
+      }
+    },
+    {
+      "id": "artifact",
+      "kind": "tool_artifact",
+      "params": {
+        "request_id": "cbt_dev_006_path_param_status_normalizer",
+        "tool_name": "shipyard_status_normalizer"
+      }
+    },
+    {
+      "id": "install",
+      "kind": "extension_lifecycle",
+      "params": {
+        "request_id": "cbt_dev_006_path_param_status_normalizer",
+        "tool_name": "shipyard_status_normalizer"
+      }
+    },
+    {
+      "id": "invoke",
+      "kind": "generated_tool_invocation",
+      "params": {
+        "request_id": "cbt_dev_006_path_param_status_normalizer",
+        "tool_name": "shipyard_status_normalizer"
+      }
+    },
+    {
+      "id": "diagnostic",
+      "kind": "tool_builder_diagnostic",
+      "params": {
+        "request_id": "cbt_dev_006_path_param_status_normalizer"
+      }
+    },
+    {
+      "id": "network",
+      "kind": "fake_api_egress",
+      "params": {
+        "request_id": "cbt_dev_006_path_param_status_normalizer"
+      }
+    }
+  ],
+  "live": false
+}

@@ -1,0 +1,224 @@
+{
+  "schema_version": 1,
+  "case_id": "mig_dev_mixed_crossref_jobconv",
+  "profile": "migration",
+  "title": "mixed realistic seed, cross-refs intact",
+  "setup": {
+    "secrets": [
+      {
+        "credential_name": "openai_api_key",
+        "value": "sk-live-lfdseedplaintextvic"
+      }
+    ],
+    "profile_extra": {
+      "seed": {
+        "backend": "libsql",
+        "users": [
+          {
+            "ref": "u_vic",
+            "user_id": "vic",
+            "email": "vic@lfdseed.example",
+            "display_name": "Ferda",
+            "identities": [
+              {
+                "provider": "google",
+                "provider_user_id": "g-vic",
+                "email_verified": true
+              }
+            ],
+            "channels": [
+              {
+                "channel": "telegram",
+                "external_id": "tg-vic"
+              }
+            ]
+          }
+        ],
+        "conversations": [
+          {
+            "ref": "c_gw_vic",
+            "channel": "gateway",
+            "user": "u_vic",
+            "messages": [
+              {
+                "role": "user",
+                "content": "hi"
+              },
+              {
+                "role": "assistant",
+                "content": "hello"
+              },
+              {
+                "role": "system",
+                "content": "started"
+              }
+            ]
+          },
+          {
+            "ref": "c_tg_vic",
+            "channel": "telegram",
+            "user": "u_vic",
+            "messages": [
+              {
+                "role": "user",
+                "content": "cal?"
+              },
+              {
+                "role": "assistant",
+                "content": "2 meetings"
+              }
+            ]
+          }
+        ],
+        "routines": [
+          {
+            "ref": "cr_vic",
+            "name": "cron-vic",
+            "user": "u_vic",
+            "trigger": {
+              "kind": "cron",
+              "expr": "0 9 * * *",
+              "tz": "UTC"
+            },
+            "action": "lightweight",
+            "enabled": true,
+            "status": "ok",
+            "runs": 4
+          },
+          {
+            "ref": "ev_vic",
+            "name": "event-vic",
+            "user": "u_vic",
+            "trigger": {
+              "kind": "event",
+              "pattern": "deploy"
+            },
+            "action": "lightweight",
+            "enabled": true,
+            "status": "ok",
+            "runs": 0
+          }
+        ],
+        "missions": [
+          {
+            "ref": "m_vic",
+            "name": "digest-vic",
+            "user": "u_vic",
+            "cadence": {
+              "kind": "cron",
+              "expr": "0 7 * * *",
+              "tz": "UTC"
+            },
+            "status": "ok",
+            "thread_messages": [
+              {
+                "role": "user",
+                "content": "go"
+              },
+              {
+                "role": "assistant",
+                "content": "ok"
+              }
+            ]
+          }
+        ],
+        "memory_docs": [
+          {
+            "ref": "d_vic",
+            "path": "context/vic.md",
+            "content": "# ctx",
+            "versions": 2
+          }
+        ],
+        "settings": [
+          {
+            "key": "model",
+            "value": "gpt-4"
+          },
+          {
+            "key": "timezone",
+            "value": "UTC"
+          }
+        ],
+        "secrets": [
+          {
+            "ref": "s_vic",
+            "name": "openai_api_key",
+            "provider": "openai",
+            "value": "sk-live-lfdseedplaintextvic",
+            "expires_at": null,
+            "decryptable": true
+          }
+        ],
+        "jobs": [
+          {
+            "ref": "j_vic",
+            "title": "report",
+            "conversation": "c_gw_vic",
+            "actions": 2,
+            "events": 3
+          }
+        ],
+        "extensions": [
+          {
+            "ref": "x_vic",
+            "name": "tool-vic",
+            "version": "1.0.0",
+            "status": "active",
+            "wasm_len": 512,
+            "allowed_secrets": [
+              "openai_api_key"
+            ]
+          }
+        ]
+      },
+      "run": {
+        "mode": "wet"
+      }
+    }
+  },
+  "state_queries": [
+    {
+      "id": "v1_intact",
+      "kind": "v1_db_digest",
+      "params": {}
+    },
+    {
+      "id": "recon",
+      "kind": "migration_report",
+      "params": {
+        "run": "wet",
+        "view": "reconciliation"
+      }
+    },
+    {
+      "id": "proj_threads",
+      "kind": "migration_projection",
+      "params": {
+        "domain": "threads"
+      }
+    },
+    {
+      "id": "proj_triggers",
+      "kind": "migration_projection",
+      "params": {
+        "domain": "triggers"
+      }
+    },
+    {
+      "id": "proj_secrets",
+      "kind": "migration_projection",
+      "params": {
+        "domain": "secrets"
+      }
+    },
+    {
+      "id": "proj_jobs",
+      "kind": "migration_projection",
+      "params": {
+        "domain": "jobs"
+      }
+    }
+  ],
+  "live": false
+}

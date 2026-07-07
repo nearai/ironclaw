@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "case_id": "mig_dev_agent_jobs_chain",
+  "profile": "migration",
+  "title": "agent_jobs + actions + events migrate (gap closed)",
+  "setup": {
+    "secrets": [],
+    "profile_extra": {
+      "seed": {
+        "backend": "libsql",
+        "users": [
+          {
+            "ref": "u1",
+            "user_id": "fin",
+            "email": "fin@lfdseed.example",
+            "display_name": "Ferda",
+            "identities": [],
+            "channels": []
+          }
+        ],
+        "conversations": [
+          {
+            "ref": "c1",
+            "channel": "gateway",
+            "user": "u1",
+            "messages": [
+              {
+                "role": "user",
+                "content": "run report"
+              },
+              {
+                "role": "assistant",
+                "content": "done"
+              }
+            ]
+          }
+        ],
+        "routines": [],
+        "missions": [],
+        "memory_docs": [],
+        "settings": [],
+        "secrets": [],
+        "jobs": [
+          {
+            "ref": "j1",
+            "title": "Nightly report",
+            "conversation": "c1",
+            "actions": 3,
+            "events": 5
+          }
+        ],
+        "extensions": []
+      },
+      "run": {
+        "mode": "wet"
+      }
+    }
+  },
+  "state_queries": [
+    {
+      "id": "v1_intact",
+      "kind": "v1_db_digest",
+      "params": {}
+    },
+    {
+      "id": "recon",
+      "kind": "migration_report",
+      "params": {
+        "run": "wet",
+        "view": "reconciliation"
+      }
+    },
+    {
+      "id": "proj_jobs",
+      "kind": "migration_projection",
+      "params": {
+        "domain": "jobs"
+      }
+    }
+  ],
+  "live": false
+}

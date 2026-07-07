@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "case_id": "mem_place_dev_005",
+  "profile": "memory_placement",
+  "title": "host policy deny fails closed before provider write",
+  "setup": {
+    "extensions": [],
+    "secrets": [],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {
+      "scenario": "deny_provider_write",
+      "case_kind": "failure_denial",
+      "provider": {
+        "default": "native",
+        "active": "native",
+        "compare_with": "native",
+        "fake_provider_pinned_in_support": true
+      },
+      "policy": {
+        "decision": "deny",
+        "constraints": [],
+        "denial_reason": "provider_denied"
+      },
+      "operation": {
+        "family": "write",
+        "target": "notes/mpseed-echo.md",
+        "content": "mpseed echo denied write",
+        "append": false
+      },
+      "seed": {
+        "tenant_id": "T705MP",
+        "user_id": "U705MP",
+        "project_id": "proj-echo",
+        "docs": [],
+        "versions": [],
+        "retention_records": []
+      },
+      "contract_markers": [
+        "mpseed-echo",
+        "deny-provider-write"
+      ]
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.memory_write",
+          "params": {
+            "target": "notes/mpseed-echo.md",
+            "content": "mpseed echo denied write",
+            "append": false
+          }
+        },
+        {
+          "text": "memory placement scenario mem_place_dev_005 completed"
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "lfd_memory",
+      "payload": {
+        "text": "Run memory placement scenario mem_place_dev_005 for write"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "policy",
+      "kind": "memory_policy_decision",
+      "params": {
+        "operation_ref": "deny_provider_write"
+      }
+    },
+    {
+      "id": "boundary",
+      "kind": "memory_provider_boundary",
+      "params": {
+        "operation_ref": "deny_provider_write",
+        "provider": "native"
+      }
+    },
+    {
+      "id": "host",
+      "kind": "memory_host_mediation",
+      "params": {
+        "operation_ref": "deny_provider_write"
+      }
+    }
+  ],
+  "live": false
+}

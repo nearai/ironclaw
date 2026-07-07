@@ -1,0 +1,177 @@
+{
+  "schema_version": 1,
+  "case_id": "cbt_dev_018_enum_status_mapping",
+  "profile": "custom_build_tools",
+  "title": "provider status enum maps to stable local enum",
+  "setup": {
+    "extensions": [
+      "custom_tool_builder"
+    ],
+    "secrets": [
+      {
+        "credential_name": "formgrid_key",
+        "value": "test-secret-cbt_dev_018_enum_status_mapping"
+      }
+    ],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [
+      {
+        "key": "FormGrid.GET./submissions/S-5",
+        "status": 200,
+        "body": {
+          "status": "WAITING_ON_CUSTOMER"
+        }
+      }
+    ],
+    "profile_extra": {
+      "task": {
+        "request_id": "cbt_dev_018_enum_status_mapping",
+        "shape": "credentialed_http_api_wrapper",
+        "mode": "create",
+        "user_request": "Build a credentialed HTTP API wrapper named formgrid_submission_status for FormGrid. Use credential formgrid_key; call GET https://formgrid.cbt-dev.test/submissions/S-5; transform the provider response with status_enum.",
+        "api_docs": {
+          "service": "FormGrid",
+          "base_url": "https://formgrid.cbt-dev.test",
+          "auth": {
+            "method": "api_key",
+            "placement": "header",
+            "header": "X-API-Key",
+            "credential_name": "formgrid_key"
+          },
+          "operation": {
+            "method": "GET",
+            "path": "/submissions/S-5",
+            "input_schema": {
+              "type": "object",
+              "example": {
+                "submission_id": "S-5"
+              }
+            },
+            "response_example": {
+              "status": "WAITING_ON_CUSTOMER"
+            },
+            "transform": "status_enum"
+          },
+          "sandbox": {
+            "network_allowlist": [
+              "formgrid.cbt-dev.test"
+            ],
+            "host_network": false,
+            "shell": false
+          }
+        },
+        "expected_tool_name": "formgrid_submission_status",
+        "invocation": {
+          "input": {
+            "submission_id": "S-5"
+          }
+        },
+        "fake_api": {
+          "host": "formgrid.cbt-dev.test",
+          "method": "GET",
+          "path": "/submissions/S-5",
+          "response": {
+            "status": "WAITING_ON_CUSTOMER"
+          }
+        }
+      }
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.custom_tool.build_http_wrapper",
+          "params": {
+            "request_id": "cbt_dev_018_enum_status_mapping",
+            "profile": "custom_build_tools"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.validate_artifact",
+          "params": {
+            "tool_name": "formgrid_submission_status"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.install",
+          "params": {
+            "tool_name": "formgrid_submission_status"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.invoke_generated_tool",
+          "params": {
+            "tool_name": "formgrid_submission_status",
+            "input": {
+              "submission_id": "S-5"
+            }
+          }
+        },
+        {
+          "text": "Built and verified formgrid_submission_status."
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "text": "Build a credentialed HTTP API wrapper named formgrid_submission_status for FormGrid. Use credential formgrid_key; call GET https://formgrid.cbt-dev.test/submissions/S-5; transform the provider response with status_enum.",
+        "user_id": "UCBT1001"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "spec",
+      "kind": "custom_tool_spec",
+      "params": {
+        "request_id": "cbt_dev_018_enum_status_mapping",
+        "tool_name": "formgrid_submission_status"
+      }
+    },
+    {
+      "id": "artifact",
+      "kind": "tool_artifact",
+      "params": {
+        "request_id": "cbt_dev_018_enum_status_mapping",
+        "tool_name": "formgrid_submission_status"
+      }
+    },
+    {
+      "id": "install",
+      "kind": "extension_lifecycle",
+      "params": {
+        "request_id": "cbt_dev_018_enum_status_mapping",
+        "tool_name": "formgrid_submission_status"
+      }
+    },
+    {
+      "id": "invoke",
+      "kind": "generated_tool_invocation",
+      "params": {
+        "request_id": "cbt_dev_018_enum_status_mapping",
+        "tool_name": "formgrid_submission_status"
+      }
+    },
+    {
+      "id": "diagnostic",
+      "kind": "tool_builder_diagnostic",
+      "params": {
+        "request_id": "cbt_dev_018_enum_status_mapping"
+      }
+    },
+    {
+      "id": "network",
+      "kind": "fake_api_egress",
+      "params": {
+        "request_id": "cbt_dev_018_enum_status_mapping"
+      }
+    }
+  ],
+  "live": false
+}

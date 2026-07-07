@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "case_id": "mig_dev_settings_kv",
+  "profile": "migration",
+  "title": "settings KV migrates (gap closed)",
+  "setup": {
+    "secrets": [],
+    "profile_extra": {
+      "seed": {
+        "backend": "libsql",
+        "users": [
+          {
+            "ref": "u1",
+            "user_id": "eve",
+            "email": "eve@lfdseed.example",
+            "display_name": "Emre",
+            "identities": [],
+            "channels": []
+          }
+        ],
+        "conversations": [],
+        "routines": [],
+        "missions": [],
+        "memory_docs": [],
+        "settings": [
+          {
+            "key": "model",
+            "value": "gpt-4"
+          },
+          {
+            "key": "timezone",
+            "value": "UTC"
+          }
+        ],
+        "secrets": [],
+        "jobs": [],
+        "extensions": []
+      },
+      "run": {
+        "mode": "wet"
+      }
+    }
+  },
+  "state_queries": [
+    {
+      "id": "v1_intact",
+      "kind": "v1_db_digest",
+      "params": {}
+    },
+    {
+      "id": "recon",
+      "kind": "migration_report",
+      "params": {
+        "run": "wet",
+        "view": "reconciliation"
+      }
+    },
+    {
+      "id": "proj_settings",
+      "kind": "migration_projection",
+      "params": {
+        "domain": "settings"
+      }
+    }
+  ],
+  "live": false
+}

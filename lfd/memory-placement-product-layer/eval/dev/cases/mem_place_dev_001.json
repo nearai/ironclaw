@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "case_id": "mem_place_dev_001",
+  "profile": "memory_placement",
+  "title": "native default write routes through MemoryService and native backend",
+  "setup": {
+    "extensions": [],
+    "secrets": [],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {
+      "scenario": "native_default_write_boundary",
+      "case_kind": "positive",
+      "provider": {
+        "default": "native",
+        "active": "native",
+        "compare_with": "native",
+        "fake_provider_pinned_in_support": true
+      },
+      "policy": {
+        "decision": "allow",
+        "constraints": []
+      },
+      "operation": {
+        "family": "write",
+        "target": "notes/mpseed-alpha.md",
+        "content": "mpseed alpha native boundary note",
+        "append": false
+      },
+      "seed": {
+        "tenant_id": "T701MP",
+        "user_id": "U701MP",
+        "project_id": "proj-alpha",
+        "docs": [],
+        "versions": [],
+        "retention_records": []
+      },
+      "contract_markers": [
+        "mpseed-alpha",
+        "native-default-write"
+      ]
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.memory_write",
+          "params": {
+            "target": "notes/mpseed-alpha.md",
+            "content": "mpseed alpha native boundary note",
+            "append": false
+          }
+        },
+        {
+          "text": "memory placement scenario mem_place_dev_001 completed"
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "lfd_memory",
+      "payload": {
+        "text": "Run memory placement scenario mem_place_dev_001 for write"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "boundary",
+      "kind": "memory_provider_boundary",
+      "params": {
+        "operation_ref": "native_default_write",
+        "provider": "native"
+      }
+    },
+    {
+      "id": "host",
+      "kind": "memory_host_mediation",
+      "params": {
+        "operation_ref": "native_default_write"
+      }
+    },
+    {
+      "id": "storage",
+      "kind": "memory_storage_placement",
+      "params": {
+        "operation_ref": "native_default_write"
+      }
+    }
+  ],
+  "live": false
+}

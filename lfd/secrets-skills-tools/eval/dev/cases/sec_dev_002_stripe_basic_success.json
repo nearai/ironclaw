@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "case_id": "sec_dev_002_stripe_basic_success",
+  "profile": "secrets_skills_tools",
+  "title": "Stripe-like generic HTTP tool injects basic auth at host boundary",
+  "setup": {
+    "extensions": ["stripe"],
+    "secrets": [{"credential_name": "stripe_secret_key", "value": "lfd-dev-secret-stripe-100002"}],
+    "http_stubs": [{"key": "stripe.customers", "status": 200, "body": {"ok": true}}],
+    "profile_extra": {
+      "scenario": "happy_path",
+      "origin": "tool",
+      "actor": {"tenant_id": "T100002", "user_id": "U100002", "agent_id": "A100002"},
+      "extension_name": "stripe",
+      "credential_name": "stripe_secret_key",
+      "capability_id": "cap-sec-dev-002",
+      "declaration": {"tool_name": "builtin.http_request", "allowed_hosts": ["api.stripe.dev.lfd"], "allowed_paths": ["/v1/customers"], "credential_target": {"type": "header", "name": "Authorization", "prefix": "Basic "}, "required": true},
+      "authorization": {"decision": "allow", "resume": "none"},
+      "lease": {"mode": "normal", "ttl_ms": 300000},
+      "egress": {"method": "POST", "url": "https://api.stripe.dev.lfd/v1/customers", "expect_network_attempts": 1, "expect_credential_seen": true},
+      "attack": {"manual_auth_header": false, "wrong_host": false, "tool_output_echoes_secret": false}
+    }
+  },
+  "llm_script": [{"turn": 1, "steps": [{"tool": "builtin.http_request", "params": {"method": "POST", "url": "https://api.stripe.dev.lfd/v1/customers", "body": {"limit": 1}}}, {"text": "The customer lookup completed through mediated auth."}]}],
+  "inbound": [{"channel": "chat", "payload": {"text": "Use the Stripe tool to check one customer record."}}],
+  "state_queries": [
+    {"id": "secret_meta", "kind": "secret_meta", "params": {"credential_name": "stripe_secret_key", "extension_name": "stripe"}},
+    {"id": "credential_audit", "kind": "credential_audit", "params": {"capability_id": "cap-sec-dev-002"}},
+    {"id": "egress_capture", "kind": "egress_capture", "params": {"capability_id": "cap-sec-dev-002"}},
+    {"id": "lease_state", "kind": "lease_state", "params": {"capability_id": "cap-sec-dev-002"}},
+    {"id": "redaction_scan", "kind": "redaction_scan", "params": {"capability_id": "cap-sec-dev-002"}}
+  ],
+  "live": false
+}

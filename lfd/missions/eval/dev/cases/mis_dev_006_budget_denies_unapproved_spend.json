@@ -1,0 +1,215 @@
+{
+  "case_id": "mis_dev_006_budget_denies_unapproved_spend",
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "request": {
+          "allowed_action_classes": [
+            "read_memory",
+            "fake_tool",
+            "write_checkpoint",
+            "schedule_routine",
+            "schedule_task"
+          ],
+          "budget": {
+            "model_call_limit": 16,
+            "requires_explicit_approval_for_overrun": true,
+            "usd_limit": 2,
+            "wall_clock_minutes": 40
+          },
+          "definition_of_done": "Prospects enriched only when spend remains inside the approved budget",
+          "forbidden_action_classes": [
+            "live_external_send",
+            "unapproved_paid_api"
+          ],
+          "goal": "Enrich Atlas prospect list without exceeding the approved budget",
+          "mission_kind": "finite",
+          "mission_ref": "atlas-budget-denial-20260711",
+          "trigger_ref": "trg-atlas-budget-denial-20260711",
+          "trigger_source": "manual"
+        },
+        "submitted_at": "2026-07-07T09:00:00Z",
+        "type": "mission_request",
+        "user_id": "U136685"
+      }
+    }
+  ],
+  "live": false,
+  "llm_script": [
+    {
+      "steps": [
+        {
+          "params": {
+            "definition_of_done": "Prospects enriched only when spend remains inside the approved budget",
+            "goal": "Enrich Atlas prospect list without exceeding the approved budget",
+            "kind": "finite",
+            "mission_ref": "atlas-budget-denial-20260711"
+          },
+          "tool": "mission.plan"
+        },
+        {
+          "params": {
+            "count": 1,
+            "mission_ref": "atlas-budget-denial-20260711"
+          },
+          "tool": "mission.schedule_task"
+        },
+        {
+          "params": {
+            "mission_ref": "atlas-budget-denial-20260711",
+            "reason": "budget_exhausted"
+          },
+          "tool": "mission.record_blocker"
+        },
+        {
+          "params": {
+            "checkpoint_kind": "durable_progress",
+            "mission_ref": "atlas-budget-denial-20260711"
+          },
+          "tool": "mission.checkpoint"
+        },
+        {
+          "text": "Mission atlas-budget-denial-20260711: ask user for budget approval"
+        }
+      ],
+      "turn": 1
+    }
+  ],
+  "profile": "missions",
+  "schema_version": 1,
+  "setup": {
+    "extensions": [],
+    "http_stubs": [
+      {
+        "body": {
+          "ok": true
+        },
+        "key": "fake.mission_tool",
+        "status": 200
+      }
+    ],
+    "memory_docs": [
+      {
+        "content": "lfdmission targeted outreach: draft only until explicit approval, cap daily sends at five, and record opt-out blockers.",
+        "path": "/projects/atlas-outreach/policy/approval.md",
+        "title": "Atlas outreach approval policy"
+      }
+    ],
+    "profile_extra": {
+      "agent_id": "agent-missions",
+      "clock_start": "2026-07-07T09:00:00Z",
+      "expected_failure_direction": true,
+      "mission_ref": "atlas-budget-denial-20260711",
+      "mission_request": {
+        "allowed_action_classes": [
+          "read_memory",
+          "fake_tool",
+          "write_checkpoint",
+          "schedule_routine",
+          "schedule_task"
+        ],
+        "budget": {
+          "model_call_limit": 16,
+          "requires_explicit_approval_for_overrun": true,
+          "usd_limit": 2,
+          "wall_clock_minutes": 40
+        },
+        "definition_of_done": "Prospects enriched only when spend remains inside the approved budget",
+        "forbidden_action_classes": [
+          "live_external_send",
+          "unapproved_paid_api"
+        ],
+        "goal": "Enrich Atlas prospect list without exceeding the approved budget",
+        "mission_kind": "finite",
+        "mission_ref": "atlas-budget-denial-20260711",
+        "trigger_ref": "trg-atlas-budget-denial-20260711",
+        "trigger_source": "manual"
+      },
+      "project_id": "project-outreach",
+      "tenant_id": "tenant-lfdmission-blue",
+      "timeline": [
+        {
+          "at": "2026-07-07T09:00:00Z",
+          "mission_ref": "atlas-budget-denial-20260711",
+          "op": "mission_request"
+        },
+        {
+          "at": "2026-07-07T09:00:00Z",
+          "fire_slot": "2026-07-07T09:00:00Z",
+          "op": "fire_trigger",
+          "trigger_ref": "trg-atlas-budget-denial-20260711"
+        }
+      ]
+    },
+    "secrets": [],
+    "triggers": [
+      {
+        "completion_policy": "complete_after_done",
+        "mission_ref": "atlas-budget-denial-20260711",
+        "source": "manual",
+        "trigger_ref": "trg-atlas-budget-denial-20260711"
+      }
+    ]
+  },
+  "state_queries": [
+    {
+      "id": "mission",
+      "kind": "mission_record",
+      "params": {
+        "mission_ref": "atlas-budget-denial-20260711"
+      }
+    },
+    {
+      "id": "plan",
+      "kind": "mission_plan",
+      "params": {
+        "mission_ref": "atlas-budget-denial-20260711"
+      }
+    },
+    {
+      "id": "checkpoints",
+      "kind": "checkpoint_log",
+      "params": {
+        "mission_ref": "atlas-budget-denial-20260711"
+      }
+    },
+    {
+      "id": "budget",
+      "kind": "budget_ledger",
+      "params": {
+        "mission_ref": "atlas-budget-denial-20260711"
+      }
+    },
+    {
+      "id": "decisions",
+      "kind": "scheduler_decisions",
+      "params": {
+        "mission_ref": "atlas-budget-denial-20260711"
+      }
+    },
+    {
+      "id": "prompt",
+      "kind": "prompt_envelope",
+      "params": {
+        "fire_index": 1,
+        "mission_ref": "atlas-budget-denial-20260711"
+      }
+    },
+    {
+      "id": "progress",
+      "kind": "mission_progress",
+      "params": {
+        "mission_ref": "atlas-budget-denial-20260711"
+      }
+    },
+    {
+      "id": "status",
+      "kind": "status_report",
+      "params": {
+        "mission_ref": "atlas-budget-denial-20260711"
+      }
+    }
+  ],
+  "title": "budget gate blocks an unapproved paid enrichment request"
+}

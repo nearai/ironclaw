@@ -1,0 +1,229 @@
+{
+  "schema_version": 1,
+  "case_id": "cbt_dev_005_pagination_collect_incidents",
+  "profile": "custom_build_tools",
+  "title": "cursor pagination wrapper collects open incident ids",
+  "setup": {
+    "extensions": [
+      "custom_tool_builder"
+    ],
+    "secrets": [
+      {
+        "credential_name": "pagerlake_token",
+        "value": "test-secret-cbt_dev_005_pagination_collect_incidents"
+      }
+    ],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [
+      {
+        "key": "PagerLake.GET./incidents",
+        "status": 200,
+        "body": {
+          "pages": [
+            [
+              {
+                "id": "INC-9",
+                "state": "open"
+              },
+              {
+                "id": "INC-8",
+                "state": "closed"
+              }
+            ],
+            [
+              {
+                "id": "INC-10",
+                "state": "open"
+              }
+            ]
+          ]
+        }
+      }
+    ],
+    "profile_extra": {
+      "task": {
+        "request_id": "cbt_dev_005_pagination_collect_incidents",
+        "shape": "credentialed_http_api_wrapper",
+        "mode": "create",
+        "user_request": "Build a credentialed HTTP API wrapper named pagerlake_open_incidents for PagerLake. Use credential pagerlake_token; call GET https://pagerlake.cbt-dev.test/incidents; transform the provider response with paginate_open_ids.",
+        "api_docs": {
+          "service": "PagerLake",
+          "base_url": "https://pagerlake.cbt-dev.test",
+          "auth": {
+            "method": "bearer",
+            "placement": "header",
+            "header": "Authorization",
+            "prefix": "Bearer ",
+            "credential_name": "pagerlake_token"
+          },
+          "operation": {
+            "method": "GET",
+            "path": "/incidents",
+            "input_schema": {
+              "type": "object",
+              "example": {
+                "team": "ops"
+              }
+            },
+            "response_example": {
+              "pages": [
+                [
+                  {
+                    "id": "INC-9",
+                    "state": "open"
+                  },
+                  {
+                    "id": "INC-8",
+                    "state": "closed"
+                  }
+                ],
+                [
+                  {
+                    "id": "INC-10",
+                    "state": "open"
+                  }
+                ]
+              ]
+            },
+            "transform": "paginate_open_ids"
+          },
+          "sandbox": {
+            "network_allowlist": [
+              "pagerlake.cbt-dev.test"
+            ],
+            "host_network": false,
+            "shell": false
+          }
+        },
+        "expected_tool_name": "pagerlake_open_incidents",
+        "invocation": {
+          "input": {
+            "team": "ops"
+          }
+        },
+        "fake_api": {
+          "host": "pagerlake.cbt-dev.test",
+          "method": "GET",
+          "path": "/incidents",
+          "response": {
+            "pages": [
+              [
+                {
+                  "id": "INC-9",
+                  "state": "open"
+                },
+                {
+                  "id": "INC-8",
+                  "state": "closed"
+                }
+              ],
+              [
+                {
+                  "id": "INC-10",
+                  "state": "open"
+                }
+              ]
+            ]
+          }
+        }
+      }
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.custom_tool.build_http_wrapper",
+          "params": {
+            "request_id": "cbt_dev_005_pagination_collect_incidents",
+            "profile": "custom_build_tools"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.validate_artifact",
+          "params": {
+            "tool_name": "pagerlake_open_incidents"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.install",
+          "params": {
+            "tool_name": "pagerlake_open_incidents"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.invoke_generated_tool",
+          "params": {
+            "tool_name": "pagerlake_open_incidents",
+            "input": {
+              "team": "ops"
+            }
+          }
+        },
+        {
+          "text": "Built and verified pagerlake_open_incidents."
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "text": "Build a credentialed HTTP API wrapper named pagerlake_open_incidents for PagerLake. Use credential pagerlake_token; call GET https://pagerlake.cbt-dev.test/incidents; transform the provider response with paginate_open_ids.",
+        "user_id": "UCBT1001"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "spec",
+      "kind": "custom_tool_spec",
+      "params": {
+        "request_id": "cbt_dev_005_pagination_collect_incidents",
+        "tool_name": "pagerlake_open_incidents"
+      }
+    },
+    {
+      "id": "artifact",
+      "kind": "tool_artifact",
+      "params": {
+        "request_id": "cbt_dev_005_pagination_collect_incidents",
+        "tool_name": "pagerlake_open_incidents"
+      }
+    },
+    {
+      "id": "install",
+      "kind": "extension_lifecycle",
+      "params": {
+        "request_id": "cbt_dev_005_pagination_collect_incidents",
+        "tool_name": "pagerlake_open_incidents"
+      }
+    },
+    {
+      "id": "invoke",
+      "kind": "generated_tool_invocation",
+      "params": {
+        "request_id": "cbt_dev_005_pagination_collect_incidents",
+        "tool_name": "pagerlake_open_incidents"
+      }
+    },
+    {
+      "id": "diagnostic",
+      "kind": "tool_builder_diagnostic",
+      "params": {
+        "request_id": "cbt_dev_005_pagination_collect_incidents"
+      }
+    },
+    {
+      "id": "network",
+      "kind": "fake_api_egress",
+      "params": {
+        "request_id": "cbt_dev_005_pagination_collect_incidents"
+      }
+    }
+  ],
+  "live": false
+}

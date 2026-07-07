@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "case_id": "mig_dev_noncron_triggers",
+  "profile": "migration",
+  "title": "non-cron routine triggers migrate (gap closed)",
+  "setup": {
+    "secrets": [],
+    "profile_extra": {
+      "seed": {
+        "backend": "libsql",
+        "users": [
+          {
+            "ref": "u1",
+            "user_id": "cara",
+            "email": "cara@lfdseed.example",
+            "display_name": "Ceren",
+            "identities": [],
+            "channels": []
+          }
+        ],
+        "conversations": [],
+        "routines": [
+          {
+            "ref": "r1",
+            "name": "event-r",
+            "user": "u1",
+            "trigger": {
+              "kind": "event",
+              "pattern": "deploy"
+            },
+            "action": "lightweight",
+            "enabled": true,
+            "status": "ok",
+            "runs": 0
+          },
+          {
+            "ref": "r2",
+            "name": "webhook-r",
+            "user": "u1",
+            "trigger": {
+              "kind": "webhook",
+              "path": "gh"
+            },
+            "action": "lightweight",
+            "enabled": true,
+            "status": "ok",
+            "runs": 0
+          },
+          {
+            "ref": "r3",
+            "name": "manual-r",
+            "user": "u1",
+            "trigger": {
+              "kind": "manual"
+            },
+            "action": "lightweight",
+            "enabled": true,
+            "status": "ok",
+            "runs": 0
+          }
+        ],
+        "missions": [],
+        "memory_docs": [],
+        "settings": [],
+        "secrets": [],
+        "jobs": [],
+        "extensions": []
+      },
+      "run": {
+        "mode": "wet"
+      }
+    }
+  },
+  "state_queries": [
+    {
+      "id": "v1_intact",
+      "kind": "v1_db_digest",
+      "params": {}
+    },
+    {
+      "id": "recon",
+      "kind": "migration_report",
+      "params": {
+        "run": "wet",
+        "view": "reconciliation"
+      }
+    },
+    {
+      "id": "proj_triggers",
+      "kind": "migration_projection",
+      "params": {
+        "domain": "triggers"
+      }
+    }
+  ],
+  "live": false
+}

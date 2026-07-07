@@ -1,0 +1,215 @@
+{
+  "case_id": "mis_dev_020_budget_exhaustion_terminal",
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "request": {
+          "allowed_action_classes": [
+            "read_memory",
+            "fake_tool",
+            "write_checkpoint",
+            "schedule_routine",
+            "schedule_task"
+          ],
+          "budget": {
+            "model_call_limit": 8,
+            "requires_explicit_approval_for_overrun": true,
+            "usd_limit": 1,
+            "wall_clock_minutes": 30
+          },
+          "definition_of_done": "Analysis either completes or stops with budget-exhausted terminal report",
+          "forbidden_action_classes": [
+            "live_external_send",
+            "unapproved_paid_api"
+          ],
+          "goal": "Finish Aurora cohort analysis inside remaining query budget",
+          "mission_kind": "finite",
+          "mission_ref": "budget-terminal-20260718",
+          "trigger_ref": "trg-budget-terminal-20260718",
+          "trigger_source": "manual"
+        },
+        "submitted_at": "2026-07-07T09:00:00Z",
+        "type": "mission_request",
+        "user_id": "U565069"
+      }
+    }
+  ],
+  "live": false,
+  "llm_script": [
+    {
+      "steps": [
+        {
+          "params": {
+            "definition_of_done": "Analysis either completes or stops with budget-exhausted terminal report",
+            "goal": "Finish Aurora cohort analysis inside remaining query budget",
+            "kind": "finite",
+            "mission_ref": "budget-terminal-20260718"
+          },
+          "tool": "mission.plan"
+        },
+        {
+          "params": {
+            "count": 1,
+            "mission_ref": "budget-terminal-20260718"
+          },
+          "tool": "mission.schedule_task"
+        },
+        {
+          "params": {
+            "mission_ref": "budget-terminal-20260718",
+            "reason": "budget_exhausted"
+          },
+          "tool": "mission.record_blocker"
+        },
+        {
+          "params": {
+            "checkpoint_kind": "durable_progress",
+            "mission_ref": "budget-terminal-20260718"
+          },
+          "tool": "mission.checkpoint"
+        },
+        {
+          "text": "Mission budget-terminal-20260718: stop and report budget exhaustion"
+        }
+      ],
+      "turn": 1
+    }
+  ],
+  "profile": "missions",
+  "schema_version": 1,
+  "setup": {
+    "extensions": [],
+    "http_stubs": [
+      {
+        "body": {
+          "ok": true
+        },
+        "key": "fake.mission_tool",
+        "status": 200
+      }
+    ],
+    "memory_docs": [
+      {
+        "content": "lfdmission analytics: compare Monday cohort deltas, explain attribution drift, and checkpoint spend before warehouse queries.",
+        "path": "/projects/aurora-analytics/checks.md",
+        "title": "Aurora analytics checks"
+      }
+    ],
+    "profile_extra": {
+      "agent_id": "agent-missions",
+      "clock_start": "2026-07-07T09:00:00Z",
+      "expected_failure_direction": true,
+      "mission_ref": "budget-terminal-20260718",
+      "mission_request": {
+        "allowed_action_classes": [
+          "read_memory",
+          "fake_tool",
+          "write_checkpoint",
+          "schedule_routine",
+          "schedule_task"
+        ],
+        "budget": {
+          "model_call_limit": 8,
+          "requires_explicit_approval_for_overrun": true,
+          "usd_limit": 1,
+          "wall_clock_minutes": 30
+        },
+        "definition_of_done": "Analysis either completes or stops with budget-exhausted terminal report",
+        "forbidden_action_classes": [
+          "live_external_send",
+          "unapproved_paid_api"
+        ],
+        "goal": "Finish Aurora cohort analysis inside remaining query budget",
+        "mission_kind": "finite",
+        "mission_ref": "budget-terminal-20260718",
+        "trigger_ref": "trg-budget-terminal-20260718",
+        "trigger_source": "manual"
+      },
+      "project_id": "project-analytics",
+      "tenant_id": "tenant-lfdmission-blue",
+      "timeline": [
+        {
+          "at": "2026-07-07T09:00:00Z",
+          "mission_ref": "budget-terminal-20260718",
+          "op": "mission_request"
+        },
+        {
+          "at": "2026-07-07T09:00:00Z",
+          "fire_slot": "2026-07-07T09:00:00Z",
+          "op": "fire_trigger",
+          "trigger_ref": "trg-budget-terminal-20260718"
+        }
+      ]
+    },
+    "secrets": [],
+    "triggers": [
+      {
+        "completion_policy": "complete_after_done",
+        "mission_ref": "budget-terminal-20260718",
+        "source": "manual",
+        "trigger_ref": "trg-budget-terminal-20260718"
+      }
+    ]
+  },
+  "state_queries": [
+    {
+      "id": "mission",
+      "kind": "mission_record",
+      "params": {
+        "mission_ref": "budget-terminal-20260718"
+      }
+    },
+    {
+      "id": "plan",
+      "kind": "mission_plan",
+      "params": {
+        "mission_ref": "budget-terminal-20260718"
+      }
+    },
+    {
+      "id": "checkpoints",
+      "kind": "checkpoint_log",
+      "params": {
+        "mission_ref": "budget-terminal-20260718"
+      }
+    },
+    {
+      "id": "budget",
+      "kind": "budget_ledger",
+      "params": {
+        "mission_ref": "budget-terminal-20260718"
+      }
+    },
+    {
+      "id": "decisions",
+      "kind": "scheduler_decisions",
+      "params": {
+        "mission_ref": "budget-terminal-20260718"
+      }
+    },
+    {
+      "id": "prompt",
+      "kind": "prompt_envelope",
+      "params": {
+        "fire_index": 1,
+        "mission_ref": "budget-terminal-20260718"
+      }
+    },
+    {
+      "id": "progress",
+      "kind": "mission_progress",
+      "params": {
+        "mission_ref": "budget-terminal-20260718"
+      }
+    },
+    {
+      "id": "status",
+      "kind": "status_report",
+      "params": {
+        "mission_ref": "budget-terminal-20260718"
+      }
+    }
+  ],
+  "title": "budget exhaustion marks mission blocked and prevents more side effects"
+}

@@ -416,6 +416,12 @@ path = "tests/integration/group_skills/main.rs"
 name = "reborn_group_journeys"
 path = "tests/integration/group_journeys/main.rs"
 
+# LFD eval runner (lfd/_shared/SCHEMA.md): data-driven batch executor over the
+# Reborn integration harness. No-op unless LFD_CASES/LFD_OUT are set.
+[[test]]
+name = "reborn_lfd_runner"
+path = "tests/integration/lfd/main.rs"
+
 [[test]]
 name = "reborn_integration_oauth_refresh"
 path = "tests/integration/oauth_refresh.rs"

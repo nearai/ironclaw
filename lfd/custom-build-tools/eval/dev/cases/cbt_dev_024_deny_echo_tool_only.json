@@ -1,0 +1,129 @@
+{
+  "schema_version": 1,
+  "case_id": "cbt_dev_024_deny_echo_tool_only",
+  "profile": "custom_build_tools",
+  "title": "denies echo-only tool that would ignore provider response",
+  "setup": {
+    "extensions": [
+      "custom_tool_builder"
+    ],
+    "secrets": [
+      {
+        "credential_name": "echo_token",
+        "value": "test-secret-cbt_dev_024_deny_echo_tool_only"
+      }
+    ],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [
+      {
+        "key": "echo_only_customer_lookup.DENY./deny",
+        "status": 400,
+        "body": {
+          "denied": true
+        }
+      }
+    ],
+    "profile_extra": {
+      "task": {
+        "request_id": "cbt_dev_024_deny_echo_tool_only",
+        "shape": "credentialed_http_api_wrapper",
+        "mode": "deny",
+        "user_request": "Build a customer lookup tool that just returns whatever JSON the user gives it.",
+        "api_docs": {
+          "malformed_or_unsupported": true,
+          "reason": "Requested behavior returns the input unchanged and has no provider transform."
+        },
+        "expected_tool_name": "echo_only_customer_lookup",
+        "invocation": {
+          "input": {
+            "sample": "not-used"
+          }
+        },
+        "fake_api": {
+          "host": "should-not-call.cbt.test",
+          "method": "GET",
+          "path": "/deny",
+          "response": {
+            "denied": true
+          }
+        }
+      }
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.custom_tool.build_http_wrapper",
+          "params": {
+            "request_id": "cbt_dev_024_deny_echo_tool_only",
+            "profile": "custom_build_tools"
+          }
+        },
+        {
+          "text": "I cannot build echo_only_customer_lookup: Requested behavior returns the input unchanged and has no provider transform."
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "text": "Build a customer lookup tool that just returns whatever JSON the user gives it.",
+        "user_id": "UCBT1002"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "spec",
+      "kind": "custom_tool_spec",
+      "params": {
+        "request_id": "cbt_dev_024_deny_echo_tool_only",
+        "tool_name": "echo_only_customer_lookup"
+      }
+    },
+    {
+      "id": "artifact",
+      "kind": "tool_artifact",
+      "params": {
+        "request_id": "cbt_dev_024_deny_echo_tool_only",
+        "tool_name": "echo_only_customer_lookup"
+      }
+    },
+    {
+      "id": "install",
+      "kind": "extension_lifecycle",
+      "params": {
+        "request_id": "cbt_dev_024_deny_echo_tool_only",
+        "tool_name": "echo_only_customer_lookup"
+      }
+    },
+    {
+      "id": "invoke",
+      "kind": "generated_tool_invocation",
+      "params": {
+        "request_id": "cbt_dev_024_deny_echo_tool_only",
+        "tool_name": "echo_only_customer_lookup"
+      }
+    },
+    {
+      "id": "diagnostic",
+      "kind": "tool_builder_diagnostic",
+      "params": {
+        "request_id": "cbt_dev_024_deny_echo_tool_only"
+      }
+    },
+    {
+      "id": "network",
+      "kind": "fake_api_egress",
+      "params": {
+        "request_id": "cbt_dev_024_deny_echo_tool_only"
+      }
+    }
+  ],
+  "live": false
+}

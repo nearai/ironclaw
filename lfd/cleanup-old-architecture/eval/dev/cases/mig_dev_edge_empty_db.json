@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "case_id": "mig_dev_edge_empty_db",
+  "profile": "migration",
+  "title": "empty DB migrates cleanly, all counts zero",
+  "setup": {
+    "secrets": [],
+    "profile_extra": {
+      "seed": {
+        "backend": "libsql",
+        "users": [],
+        "conversations": [],
+        "routines": [],
+        "missions": [],
+        "memory_docs": [],
+        "settings": [],
+        "secrets": [],
+        "jobs": [],
+        "extensions": []
+      },
+      "run": {
+        "mode": "wet"
+      }
+    }
+  },
+  "state_queries": [
+    {
+      "id": "v1_intact",
+      "kind": "v1_db_digest",
+      "params": {}
+    },
+    {
+      "id": "recon",
+      "kind": "migration_report",
+      "params": {
+        "run": "wet",
+        "view": "reconciliation"
+      }
+    },
+    {
+      "id": "proj_threads",
+      "kind": "migration_projection",
+      "params": {
+        "domain": "threads"
+      }
+    },
+    {
+      "id": "proj_triggers",
+      "kind": "migration_projection",
+      "params": {
+        "domain": "triggers"
+      }
+    }
+  ],
+  "live": false
+}

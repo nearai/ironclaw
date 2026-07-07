@@ -1,0 +1,66 @@
+{
+  "_doc": {
+    "about": "Lane-06 (cleanup-old-architecture) lint/status config. Consumed by lfd/_shared/scorer/lint_core.py + status_core.py. Deleting this file or the required keys (base_ref, caps, holdout_canaries) is itself a lint violation.",
+    "scope_note": "Every cap entry declares \"scope\": \"diff\" — the cap is a budget on what the OPTIMIZER ADDS relative to base_ref, per the brief. lint_core's capacity engine scans the working tree via the entry's paths/pattern; each entry's paths+pattern are therefore written so the base_ref tree matches 0 times (verified at package time), making the tree count equal to the diff count. The answer-literal overlap check (check 4) independently scans `git diff <base_ref>..HEAD`.",
+    "cap_rationale": {
+      "no_eval_case_id_branching": "Common cheat 2: special-case branching on eval-distinctive case ids in product/test code. Dev+holdout case ids all start mig_dev_/mig_hold_.",
+      "no_dev_seed_literals": "Brief extra: dev-seed literal values in the crates/src diff = max 0. All seed-distinctive literals embed the marker 'lfdseed' (emails @lfdseed.example, secret plaintexts sk-live-lfdseed...), so one pattern covers every seed literal without enumerating answers.",
+      "no_v1_store_mutation": "Brief extra: DELETE FROM / DROP TABLE / TRUNCATE TABLE additions targeting v1 stores in migration code = max 0. The migration reads v1, never mutates it; the eval also pins this behaviorally via the v1_db_digest contract in every case.",
+      "no_test_weakening_ignore": "Stage-0 protection: #[ignore] additions = 0 in the migration crate, the reborn CLI crate, and the LFD runner tree.",
+      "no_test_weakening_cfg_never": "Stage-0 protection: #[cfg(never)]-style disabling = 0 in the same tree.",
+      "test_deletion_note": "Deleted-test-function count in diff has no capacity-cap mechanism (caps scan tree contents, not deletions); it is enforced by the designer diff review at acceptance per INSTRUMENTS, and stated as a hard rule in goal.md."
+    }
+  },
+  "schema_version": 1,
+  "base_ref": "d9eaae2bb",
+  "caps": [
+    {
+      "name": "no_eval_case_id_branching",
+      "scope": "diff",
+      "paths": ["src/**/*.rs", "crates/**/*.rs", "tests/**/*.rs"],
+      "pattern": "mig_dev_|mig_hold_",
+      "max_count": 0
+    },
+    {
+      "name": "no_dev_seed_literals",
+      "scope": "diff",
+      "paths": ["src/**/*.rs", "crates/**/*.rs"],
+      "pattern": "(?i)lfdseed",
+      "max_count": 0
+    },
+    {
+      "name": "no_v1_store_mutation",
+      "scope": "diff",
+      "paths": [
+        "crates/ironclaw_reborn_migration/**/*.rs",
+        "crates/ironclaw_reborn_cli/**/*.rs"
+      ],
+      "pattern": "(?i)\\b(DELETE\\s+FROM|DROP\\s+TABLE|TRUNCATE\\s+TABLE)\\b",
+      "max_count": 0
+    },
+    {
+      "name": "no_test_weakening_ignore",
+      "scope": "diff",
+      "paths": [
+        "crates/ironclaw_reborn_migration/**/*.rs",
+        "crates/ironclaw_reborn_cli/**/*.rs",
+        "tests/integration/lfd/**/*.rs"
+      ],
+      "pattern": "#\\[ignore",
+      "max_count": 0
+    },
+    {
+      "name": "no_test_weakening_cfg_never",
+      "scope": "diff",
+      "paths": [
+        "crates/ironclaw_reborn_migration/**/*.rs",
+        "crates/ironclaw_reborn_cli/**/*.rs",
+        "tests/integration/lfd/**/*.rs"
+      ],
+      "pattern": "#\\[cfg\\(never\\)\\]",
+      "max_count": 0
+    }
+  ],
+  "holdout_canaries": ["LFDH-cleanup-9d2a6f1c4b7e0358"],
+  "spend_ceiling_usd": 5.0
+}

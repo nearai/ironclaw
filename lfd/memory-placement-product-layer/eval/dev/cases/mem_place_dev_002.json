@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "case_id": "mem_place_dev_002",
+  "profile": "memory_placement",
+  "title": "native read uses provider boundary without product native internals",
+  "setup": {
+    "extensions": [],
+    "secrets": [],
+    "memory_docs": [
+      {
+        "path": "notes/mpseed-bravo.md",
+        "content": "mpseed bravo read content"
+      }
+    ],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {
+      "scenario": "native_read_boundary",
+      "case_kind": "positive",
+      "provider": {
+        "default": "native",
+        "active": "native",
+        "compare_with": "native",
+        "fake_provider_pinned_in_support": true
+      },
+      "policy": {
+        "decision": "allow",
+        "constraints": []
+      },
+      "operation": {
+        "family": "read",
+        "target": "notes/mpseed-bravo.md"
+      },
+      "seed": {
+        "tenant_id": "T702MP",
+        "user_id": "U702MP",
+        "project_id": "proj-bravo",
+        "docs": [
+          {
+            "path": "notes/mpseed-bravo.md",
+            "content": "mpseed bravo read content"
+          }
+        ],
+        "versions": [],
+        "retention_records": []
+      },
+      "contract_markers": [
+        "mpseed-bravo",
+        "read-boundary"
+      ]
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.memory_read",
+          "params": {
+            "path": "notes/mpseed-bravo.md"
+          }
+        },
+        {
+          "text": "memory placement scenario mem_place_dev_002 completed"
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "lfd_memory",
+      "payload": {
+        "text": "Run memory placement scenario mem_place_dev_002 for read"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "boundary",
+      "kind": "memory_provider_boundary",
+      "params": {
+        "operation_ref": "native_read",
+        "provider": "native"
+      }
+    },
+    {
+      "id": "dependency",
+      "kind": "memory_dependency_boundary",
+      "params": {
+        "surface": "product"
+      }
+    }
+  ],
+  "live": false
+}

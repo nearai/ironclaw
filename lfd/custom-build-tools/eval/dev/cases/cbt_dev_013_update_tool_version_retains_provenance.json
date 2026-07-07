@@ -1,0 +1,190 @@
+{
+  "schema_version": 1,
+  "case_id": "cbt_dev_013_update_tool_version_retains_provenance",
+  "profile": "custom_build_tools",
+  "title": "update flow increments version and keeps source provenance",
+  "setup": {
+    "extensions": [
+      "custom_tool_builder"
+    ],
+    "secrets": [
+      {
+        "credential_name": "renewalops_token",
+        "value": "test-secret-cbt_dev_013_update_tool_version_retains_provenance"
+      }
+    ],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [
+      {
+        "key": "RenewalOps.GET./renewals/R-8",
+        "status": 200,
+        "body": {
+          "score": 0.82,
+          "drivers": [
+            "usage_drop",
+            "late_payment"
+          ]
+        }
+      }
+    ],
+    "profile_extra": {
+      "task": {
+        "request_id": "cbt_dev_013_update_tool_version_retains_provenance",
+        "shape": "credentialed_http_api_wrapper",
+        "mode": "update",
+        "user_request": "Build a credentialed HTTP API wrapper named renewalops_risk_score for RenewalOps. Use credential renewalops_token; call GET https://renewalops.cbt-dev.test/renewals/R-8; transform the provider response with risk_band.",
+        "api_docs": {
+          "service": "RenewalOps",
+          "base_url": "https://renewalops.cbt-dev.test",
+          "auth": {
+            "method": "bearer",
+            "placement": "header",
+            "header": "Authorization",
+            "prefix": "Bearer ",
+            "credential_name": "renewalops_token"
+          },
+          "operation": {
+            "method": "GET",
+            "path": "/renewals/R-8",
+            "input_schema": {
+              "type": "object",
+              "example": {
+                "renewal_id": "R-8"
+              }
+            },
+            "response_example": {
+              "score": 0.82,
+              "drivers": [
+                "usage_drop",
+                "late_payment"
+              ]
+            },
+            "transform": "risk_band"
+          },
+          "sandbox": {
+            "network_allowlist": [
+              "renewalops.cbt-dev.test"
+            ],
+            "host_network": false,
+            "shell": false
+          }
+        },
+        "expected_tool_name": "renewalops_risk_score",
+        "invocation": {
+          "input": {
+            "renewal_id": "R-8"
+          }
+        },
+        "fake_api": {
+          "host": "renewalops.cbt-dev.test",
+          "method": "GET",
+          "path": "/renewals/R-8",
+          "response": {
+            "score": 0.82,
+            "drivers": [
+              "usage_drop",
+              "late_payment"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.custom_tool.build_http_wrapper",
+          "params": {
+            "request_id": "cbt_dev_013_update_tool_version_retains_provenance",
+            "profile": "custom_build_tools"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.validate_artifact",
+          "params": {
+            "tool_name": "renewalops_risk_score"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.install",
+          "params": {
+            "tool_name": "renewalops_risk_score"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.invoke_generated_tool",
+          "params": {
+            "tool_name": "renewalops_risk_score",
+            "input": {
+              "renewal_id": "R-8"
+            }
+          }
+        },
+        {
+          "text": "Built and verified renewalops_risk_score."
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "text": "Build a credentialed HTTP API wrapper named renewalops_risk_score for RenewalOps. Use credential renewalops_token; call GET https://renewalops.cbt-dev.test/renewals/R-8; transform the provider response with risk_band.",
+        "user_id": "UCBT1001"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "spec",
+      "kind": "custom_tool_spec",
+      "params": {
+        "request_id": "cbt_dev_013_update_tool_version_retains_provenance",
+        "tool_name": "renewalops_risk_score"
+      }
+    },
+    {
+      "id": "artifact",
+      "kind": "tool_artifact",
+      "params": {
+        "request_id": "cbt_dev_013_update_tool_version_retains_provenance",
+        "tool_name": "renewalops_risk_score"
+      }
+    },
+    {
+      "id": "install",
+      "kind": "extension_lifecycle",
+      "params": {
+        "request_id": "cbt_dev_013_update_tool_version_retains_provenance",
+        "tool_name": "renewalops_risk_score"
+      }
+    },
+    {
+      "id": "invoke",
+      "kind": "generated_tool_invocation",
+      "params": {
+        "request_id": "cbt_dev_013_update_tool_version_retains_provenance",
+        "tool_name": "renewalops_risk_score"
+      }
+    },
+    {
+      "id": "diagnostic",
+      "kind": "tool_builder_diagnostic",
+      "params": {
+        "request_id": "cbt_dev_013_update_tool_version_retains_provenance"
+      }
+    },
+    {
+      "id": "network",
+      "kind": "fake_api_egress",
+      "params": {
+        "request_id": "cbt_dev_013_update_tool_version_retains_provenance"
+      }
+    }
+  ],
+  "live": false
+}

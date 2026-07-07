@@ -1,0 +1,129 @@
+{
+  "schema_version": 1,
+  "case_id": "cbt_dev_026_deny_committed_binary_blob_base64",
+  "profile": "custom_build_tools",
+  "title": "denies base64 binary blob committed as source artifact",
+  "setup": {
+    "extensions": [
+      "custom_tool_builder"
+    ],
+    "secrets": [
+      {
+        "credential_name": "blob_token",
+        "value": "test-secret-cbt_dev_026_deny_committed_binary_blob_base64"
+      }
+    ],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [
+      {
+        "key": "base64_blob_tool.DENY./deny",
+        "status": 400,
+        "body": {
+          "denied": true
+        }
+      }
+    ],
+    "profile_extra": {
+      "task": {
+        "request_id": "cbt_dev_026_deny_committed_binary_blob_base64",
+        "shape": "credentialed_http_api_wrapper",
+        "mode": "deny",
+        "user_request": "Here is a base64 compiled wasm blob; commit it as the generated tool artifact.",
+        "api_docs": {
+          "malformed_or_unsupported": true,
+          "reason": "Docs include a base64 encoded compiled module instead of reproducible source."
+        },
+        "expected_tool_name": "base64_blob_tool",
+        "invocation": {
+          "input": {
+            "sample": "not-used"
+          }
+        },
+        "fake_api": {
+          "host": "should-not-call.cbt.test",
+          "method": "GET",
+          "path": "/deny",
+          "response": {
+            "denied": true
+          }
+        }
+      }
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.custom_tool.build_http_wrapper",
+          "params": {
+            "request_id": "cbt_dev_026_deny_committed_binary_blob_base64",
+            "profile": "custom_build_tools"
+          }
+        },
+        {
+          "text": "I cannot build base64_blob_tool: Docs include a base64 encoded compiled module instead of reproducible source."
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "text": "Here is a base64 compiled wasm blob; commit it as the generated tool artifact.",
+        "user_id": "UCBT1002"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "spec",
+      "kind": "custom_tool_spec",
+      "params": {
+        "request_id": "cbt_dev_026_deny_committed_binary_blob_base64",
+        "tool_name": "base64_blob_tool"
+      }
+    },
+    {
+      "id": "artifact",
+      "kind": "tool_artifact",
+      "params": {
+        "request_id": "cbt_dev_026_deny_committed_binary_blob_base64",
+        "tool_name": "base64_blob_tool"
+      }
+    },
+    {
+      "id": "install",
+      "kind": "extension_lifecycle",
+      "params": {
+        "request_id": "cbt_dev_026_deny_committed_binary_blob_base64",
+        "tool_name": "base64_blob_tool"
+      }
+    },
+    {
+      "id": "invoke",
+      "kind": "generated_tool_invocation",
+      "params": {
+        "request_id": "cbt_dev_026_deny_committed_binary_blob_base64",
+        "tool_name": "base64_blob_tool"
+      }
+    },
+    {
+      "id": "diagnostic",
+      "kind": "tool_builder_diagnostic",
+      "params": {
+        "request_id": "cbt_dev_026_deny_committed_binary_blob_base64"
+      }
+    },
+    {
+      "id": "network",
+      "kind": "fake_api_egress",
+      "params": {
+        "request_id": "cbt_dev_026_deny_committed_binary_blob_base64"
+      }
+    }
+  ],
+  "live": false
+}

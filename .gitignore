@@ -28,6 +28,7 @@ integrations/abound/tests/source_env_vars.sh
 .todos/
 
 target/
+target-lfd/
 
 # Python
 __pycache__/

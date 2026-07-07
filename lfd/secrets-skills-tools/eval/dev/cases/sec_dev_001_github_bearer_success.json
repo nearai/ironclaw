@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "case_id": "sec_dev_001_github_bearer_success",
+  "profile": "secrets_skills_tools",
+  "title": "GitHub-like skill uses bearer credential through staged host egress",
+  "setup": {
+    "extensions": ["github"],
+    "secrets": [{"credential_name": "github_token", "value": "lfd-dev-secret-github-100001"}],
+    "http_stubs": [{"key": "github.issues", "status": 200, "body": {"ok": true}}],
+    "profile_extra": {
+      "scenario": "happy_path",
+      "origin": "skill",
+      "actor": {"tenant_id": "T100001", "user_id": "U100001", "agent_id": "A100001"},
+      "extension_name": "github",
+      "credential_name": "github_token",
+      "capability_id": "cap-sec-dev-001",
+      "declaration": {"tool_name": "skill.github.list_issues", "allowed_hosts": ["api.github.dev.lfd"], "allowed_paths": ["/repos/nearai/ironclaw/issues"], "credential_target": {"type": "header", "name": "Authorization", "prefix": "Bearer "}, "required": true},
+      "authorization": {"decision": "allow", "resume": "none"},
+      "lease": {"mode": "normal", "ttl_ms": 300000},
+      "egress": {"method": "GET", "url": "https://api.github.dev.lfd/repos/nearai/ironclaw/issues", "expect_network_attempts": 1, "expect_credential_seen": true},
+      "attack": {"manual_auth_header": false, "wrong_host": false, "tool_output_echoes_secret": false}
+    }
+  },
+  "llm_script": [{"turn": 1, "steps": [{"tool": "skill.github.list_issues", "params": {"method": "GET", "url": "https://api.github.dev.lfd/repos/nearai/ironclaw/issues"}}, {"text": "I fetched the issue list without seeing the credential."}]}],
+  "inbound": [{"channel": "chat", "payload": {"text": "List the latest IronClaw issues using the GitHub skill."}}],
+  "state_queries": [
+    {"id": "secret_meta", "kind": "secret_meta", "params": {"credential_name": "github_token", "extension_name": "github"}},
+    {"id": "credential_audit", "kind": "credential_audit", "params": {"capability_id": "cap-sec-dev-001"}},
+    {"id": "egress_capture", "kind": "egress_capture", "params": {"capability_id": "cap-sec-dev-001"}},
+    {"id": "lease_state", "kind": "lease_state", "params": {"capability_id": "cap-sec-dev-001"}},
+    {"id": "redaction_scan", "kind": "redaction_scan", "params": {"capability_id": "cap-sec-dev-001"}}
+  ],
+  "live": false
+}

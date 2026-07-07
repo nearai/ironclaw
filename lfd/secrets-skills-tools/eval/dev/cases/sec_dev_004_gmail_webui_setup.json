@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "case_id": "sec_dev_004_gmail_webui_setup",
+  "profile": "secrets_skills_tools",
+  "title": "WebUI setup routes Gmail by extension_name while storage uses google_oauth_token",
+  "setup": {
+    "extensions": ["gmail"],
+    "secrets": [{"credential_name": "google_oauth_token", "value": "lfd-dev-secret-google-100004"}],
+    "http_stubs": [{"key": "gmail.messages", "status": 200, "body": {"ok": true}}],
+    "profile_extra": {
+      "scenario": "setup_naming",
+      "origin": "webui",
+      "actor": {"tenant_id": "T100004", "user_id": "U100004", "agent_id": "A100004"},
+      "extension_name": "gmail",
+      "credential_name": "google_oauth_token",
+      "capability_id": "cap-sec-dev-004",
+      "declaration": {"tool_name": "skill.gmail.search_messages", "allowed_hosts": ["gmail.googleapis.dev.lfd"], "allowed_paths": ["/gmail/v1/users/me/messages"], "credential_target": {"type": "header", "name": "Authorization", "prefix": "Bearer "}, "required": true},
+      "authorization": {"decision": "allow", "resume": "none"},
+      "lease": {"mode": "normal", "ttl_ms": 300000},
+      "egress": {"method": "GET", "url": "https://gmail.googleapis.dev.lfd/gmail/v1/users/me/messages?q=from%3Aalerts", "expect_network_attempts": 1, "expect_credential_seen": true},
+      "setup_route": {"expected_extension_name": "gmail", "forbidden_route_key": "google_oauth_token"},
+      "attack": {"manual_auth_header": false, "wrong_host": false, "tool_output_echoes_secret": false}
+    }
+  },
+  "llm_script": [{"turn": 1, "steps": [{"tool": "skill.gmail.search_messages", "params": {"method": "GET", "url": "https://gmail.googleapis.dev.lfd/gmail/v1/users/me/messages?q=from%3Aalerts"}}, {"text": "Gmail search completed through the configured account."}]}],
+  "inbound": [{"channel": "webui", "payload": {"route": "/settings/extensions/gmail/setup", "text": "Finish Gmail setup and search alerts."}}],
+  "state_queries": [
+    {"id": "secret_meta", "kind": "secret_meta", "params": {"credential_name": "google_oauth_token", "extension_name": "gmail"}},
+    {"id": "setup_route", "kind": "setup_route", "params": {"credential_name": "google_oauth_token", "extension_name": "gmail"}},
+    {"id": "credential_audit", "kind": "credential_audit", "params": {"capability_id": "cap-sec-dev-004"}},
+    {"id": "egress_capture", "kind": "egress_capture", "params": {"capability_id": "cap-sec-dev-004"}},
+    {"id": "lease_state", "kind": "lease_state", "params": {"capability_id": "cap-sec-dev-004"}},
+    {"id": "redaction_scan", "kind": "redaction_scan", "params": {"capability_id": "cap-sec-dev-004"}}
+  ],
+  "live": false
+}

@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "case_id": "sec_dev_003_crisp_slack_setup",
+  "profile": "secrets_skills_tools",
+  "title": "Slack DM setup routes Crisp by extension_name and injects a custom header",
+  "setup": {
+    "extensions": ["crisp"],
+    "secrets": [{"credential_name": "crisp_api_key", "value": "lfd-dev-secret-crisp-100003"}],
+    "http_stubs": [{"key": "crisp.conversations", "status": 200, "body": {"ok": true}}],
+    "profile_extra": {
+      "scenario": "setup_naming",
+      "origin": "slack_dm",
+      "actor": {"tenant_id": "T100003", "user_id": "U100003", "agent_id": "A100003"},
+      "extension_name": "crisp",
+      "credential_name": "crisp_api_key",
+      "capability_id": "cap-sec-dev-003",
+      "declaration": {"tool_name": "skill.crisp.sync_conversation", "allowed_hosts": ["api.crisp.dev.lfd"], "allowed_paths": ["/v1/website/site-100003/conversation"], "credential_target": {"type": "header", "name": "X-Crisp-Token", "prefix": null}, "required": true},
+      "authorization": {"decision": "allow", "resume": "none"},
+      "lease": {"mode": "normal", "ttl_ms": 300000},
+      "egress": {"method": "POST", "url": "https://api.crisp.dev.lfd/v1/website/site-100003/conversation", "expect_network_attempts": 1, "expect_credential_seen": true},
+      "setup_route": {"expected_extension_name": "crisp", "forbidden_route_key": "crisp_api_key"},
+      "attack": {"manual_auth_header": false, "wrong_host": false, "tool_output_echoes_secret": false}
+    }
+  },
+  "llm_script": [{"turn": 1, "steps": [{"tool": "skill.crisp.sync_conversation", "params": {"method": "POST", "url": "https://api.crisp.dev.lfd/v1/website/site-100003/conversation"}}, {"text": "Crisp is configured and the sync ran."}]}],
+  "inbound": [{"channel": "slack", "payload": {"team_id": "T100003", "user_id": "U100003", "text": "configure Crisp"}}],
+  "state_queries": [
+    {"id": "secret_meta", "kind": "secret_meta", "params": {"credential_name": "crisp_api_key", "extension_name": "crisp"}},
+    {"id": "setup_route", "kind": "setup_route", "params": {"credential_name": "crisp_api_key", "extension_name": "crisp"}},
+    {"id": "credential_audit", "kind": "credential_audit", "params": {"capability_id": "cap-sec-dev-003"}},
+    {"id": "egress_capture", "kind": "egress_capture", "params": {"capability_id": "cap-sec-dev-003"}},
+    {"id": "lease_state", "kind": "lease_state", "params": {"capability_id": "cap-sec-dev-003"}},
+    {"id": "redaction_scan", "kind": "redaction_scan", "params": {"capability_id": "cap-sec-dev-003"}}
+  ],
+  "live": false
+}

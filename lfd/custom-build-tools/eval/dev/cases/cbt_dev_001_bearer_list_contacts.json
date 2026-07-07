@@ -1,0 +1,199 @@
+{
+  "schema_version": 1,
+  "case_id": "cbt_dev_001_bearer_list_contacts",
+  "profile": "custom_build_tools",
+  "title": "bearer token GET wrapper lists contacts and uppercases names",
+  "setup": {
+    "extensions": [
+      "custom_tool_builder"
+    ],
+    "secrets": [
+      {
+        "credential_name": "mooncrm_api_token",
+        "value": "test-secret-cbt_dev_001_bearer_list_contacts"
+      }
+    ],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [
+      {
+        "key": "MoonCRM.GET./v1/contacts",
+        "status": 200,
+        "body": {
+          "contacts": [
+            {
+              "name": "Ada"
+            },
+            {
+              "name": "Lin"
+            }
+          ]
+        }
+      }
+    ],
+    "profile_extra": {
+      "task": {
+        "request_id": "cbt_dev_001_bearer_list_contacts",
+        "shape": "credentialed_http_api_wrapper",
+        "mode": "create",
+        "user_request": "Build a credentialed HTTP API wrapper named mooncrm_contact_names for MoonCRM. Use credential mooncrm_api_token; call GET https://api.mooncrm.cbt-dev.test/v1/contacts; transform the provider response with map_upper_names.",
+        "api_docs": {
+          "service": "MoonCRM",
+          "base_url": "https://api.mooncrm.cbt-dev.test",
+          "auth": {
+            "method": "bearer",
+            "placement": "header",
+            "header": "Authorization",
+            "prefix": "Bearer ",
+            "credential_name": "mooncrm_api_token"
+          },
+          "operation": {
+            "method": "GET",
+            "path": "/v1/contacts",
+            "input_schema": {
+              "type": "object",
+              "example": {
+                "company_id": "acme-42"
+              }
+            },
+            "response_example": {
+              "contacts": [
+                {
+                  "name": "Ada"
+                },
+                {
+                  "name": "Lin"
+                }
+              ]
+            },
+            "transform": "map_upper_names"
+          },
+          "sandbox": {
+            "network_allowlist": [
+              "api.mooncrm.cbt-dev.test"
+            ],
+            "host_network": false,
+            "shell": false
+          }
+        },
+        "expected_tool_name": "mooncrm_contact_names",
+        "invocation": {
+          "input": {
+            "company_id": "acme-42"
+          }
+        },
+        "fake_api": {
+          "host": "api.mooncrm.cbt-dev.test",
+          "method": "GET",
+          "path": "/v1/contacts",
+          "response": {
+            "contacts": [
+              {
+                "name": "Ada"
+              },
+              {
+                "name": "Lin"
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.custom_tool.build_http_wrapper",
+          "params": {
+            "request_id": "cbt_dev_001_bearer_list_contacts",
+            "profile": "custom_build_tools"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.validate_artifact",
+          "params": {
+            "tool_name": "mooncrm_contact_names"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.install",
+          "params": {
+            "tool_name": "mooncrm_contact_names"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.invoke_generated_tool",
+          "params": {
+            "tool_name": "mooncrm_contact_names",
+            "input": {
+              "company_id": "acme-42"
+            }
+          }
+        },
+        {
+          "text": "Built and verified mooncrm_contact_names."
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "text": "Build a credentialed HTTP API wrapper named mooncrm_contact_names for MoonCRM. Use credential mooncrm_api_token; call GET https://api.mooncrm.cbt-dev.test/v1/contacts; transform the provider response with map_upper_names.",
+        "user_id": "UCBT1001"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "spec",
+      "kind": "custom_tool_spec",
+      "params": {
+        "request_id": "cbt_dev_001_bearer_list_contacts",
+        "tool_name": "mooncrm_contact_names"
+      }
+    },
+    {
+      "id": "artifact",
+      "kind": "tool_artifact",
+      "params": {
+        "request_id": "cbt_dev_001_bearer_list_contacts",
+        "tool_name": "mooncrm_contact_names"
+      }
+    },
+    {
+      "id": "install",
+      "kind": "extension_lifecycle",
+      "params": {
+        "request_id": "cbt_dev_001_bearer_list_contacts",
+        "tool_name": "mooncrm_contact_names"
+      }
+    },
+    {
+      "id": "invoke",
+      "kind": "generated_tool_invocation",
+      "params": {
+        "request_id": "cbt_dev_001_bearer_list_contacts",
+        "tool_name": "mooncrm_contact_names"
+      }
+    },
+    {
+      "id": "diagnostic",
+      "kind": "tool_builder_diagnostic",
+      "params": {
+        "request_id": "cbt_dev_001_bearer_list_contacts"
+      }
+    },
+    {
+      "id": "network",
+      "kind": "fake_api_egress",
+      "params": {
+        "request_id": "cbt_dev_001_bearer_list_contacts"
+      }
+    }
+  ],
+  "live": false
+}

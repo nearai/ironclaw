@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "case_id": "smoke_dev_reply",
+  "profile": "smoke_builtin_tools",
+  "title": "scripted text reply is persisted and extracted",
+  "setup": {},
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "text": "pilot smoke reply complete"
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "pilot",
+      "payload": {
+        "text": "please produce the pilot smoke reply"
+      }
+    }
+  ],
+  "state_queries": [],
+  "live": false
+}

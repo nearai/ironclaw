@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "case_id": "uvm_dev_006",
+  "profile": "user_voice_model",
+  "title": "TTS flag renders assistant reply audio and keeps text state",
+  "setup": {
+    "extensions": [],
+    "secrets": [],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {
+      "mode": "tts_enabled",
+      "transcription": {
+        "provider": "mock_primary",
+        "mock_table": "pinned_content_hash",
+        "allowed_language": "en-US",
+        "tts_enabled": true,
+        "retain_original_audio": true
+      },
+      "audio": {
+        "fixture": {
+          "path": "lfd/user-voice-model/eval/fixtures/dev/40c874f2c7d6fae3.wav",
+          "sha256": "40c874f2c7d6fae300dab70a0022c032f8595c3c537c00fec237bb8f8eb9f3a4",
+          "bytes": 103660,
+          "format": "wav",
+          "voice": "Samantha"
+        },
+        "source_kind": "tts_enabled",
+        "attachment_id": "att_uvm_dev_006",
+        "mime_type": "audio/wav",
+        "duration_ms_hint": 4200
+      },
+      "expected_route_family": "status.readout"
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.release.check_status",
+          "params": {
+            "checklist": "release",
+            "speak": true
+          }
+        },
+        {
+          "text": "Release checklist has no blockers."
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "webui",
+      "payload": {
+        "message_id": "msg_uvm_dev_006",
+        "user_id": "voice-user-10",
+        "team_id": "tenant-voice-10",
+        "thread_id": "thread_uvm_dev_006",
+        "text": "[Voice note]",
+        "attachments": [
+          {
+            "id": "att_uvm_dev_006",
+            "kind": "audio",
+            "mime_type": "audio/wav",
+            "path": "lfd/user-voice-model/eval/fixtures/dev/40c874f2c7d6fae3.wav",
+            "sha256": "40c874f2c7d6fae300dab70a0022c032f8595c3c537c00fec237bb8f8eb9f3a4",
+            "size_bytes": 103660
+          }
+        ]
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "transcript",
+      "kind": "transcript",
+      "params": {
+        "case_id": "uvm_dev_006"
+      }
+    },
+    {
+      "id": "turn_envelope",
+      "kind": "turn_envelope",
+      "params": {
+        "case_id": "uvm_dev_006"
+      }
+    },
+    {
+      "id": "route_comparison",
+      "kind": "route_comparison",
+      "params": {
+        "case_id": "uvm_dev_006"
+      }
+    },
+    {
+      "id": "tts_artifact",
+      "kind": "tts_artifact",
+      "params": {
+        "case_id": "uvm_dev_006"
+      }
+    },
+    {
+      "id": "privacy_audit",
+      "kind": "privacy_audit",
+      "params": {
+        "case_id": "uvm_dev_006"
+      }
+    }
+  ],
+  "live": false
+}

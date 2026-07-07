@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "case_id": "slack_dev_001_dm_personal_agent",
+  "profile": "slack_channel",
+  "title": "DM from a paired Slack user routes to the user's personal agent",
+  "setup": {
+    "extensions": ["slack"],
+    "secrets": [{"credential_name": "slack_bot_token", "value": "xoxb-dev-slice-001"}],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [{"key": "slack.postMessage", "status": 200, "body": {"ok": true}}],
+    "profile_extra": {
+      "slack_fixture": {
+        "tenant_id": "tenant:slack-dev-a",
+        "installation_id": "slack-install-dev-a",
+        "team_id": "T03DEVA01",
+        "api_app_id": "A03DEVA01",
+        "bot_user_id": "UBOTDEV03",
+        "operator_user_id": "user:ops-dev",
+        "default_personal_agent_id": "agent:personal-dev",
+        "channel_routes": [],
+        "identity_bindings": [{"slack_user_id": "U03ALICE1", "user_id": "user:alice-dev", "dm_channel_id": "D03ALICE1"}],
+        "connection": {"configured": true, "caller_connected": true},
+        "admission": {"workspace_allowed": true, "channels_allowed": ["D03ALICE1"]},
+        "delivery_script": [{"status": 200, "body": {"ok": true}}],
+        "existing_threads": []
+      }
+    }
+  },
+  "llm_script": [{"turn": 1, "steps": [{"text": "morning brief queued for Slack"}]}],
+  "inbound": [{
+    "channel": "slack",
+    "payload": {
+      "type": "event_callback",
+      "team_id": "T03DEVA01",
+      "event_id": "Ev03D001",
+      "event": {"type": "message", "channel_type": "im", "user": "U03ALICE1", "channel": "D03ALICE1", "text": "what changed overnight?", "ts": "1771000000.000001"}
+    }
+  }],
+  "state_queries": [
+    {"id": "turn", "kind": "slack_turn", "params": {"event_id": "Ev03D001"}},
+    {"id": "route", "kind": "slack_route_resolution", "params": {"event_id": "Ev03D001"}},
+    {"id": "identity", "kind": "slack_identity", "params": {"installation_id": "slack-install-dev-a", "slack_user_id": "U03ALICE1"}},
+    {"id": "delivery", "kind": "slack_delivery", "params": {"event_id": "Ev03D001"}},
+    {"id": "admission", "kind": "slack_admission", "params": {"event_id": "Ev03D001"}},
+    {"id": "isolation", "kind": "slack_isolation_audit", "params": {"event_id": "Ev03D001"}}
+  ],
+  "live": false
+}

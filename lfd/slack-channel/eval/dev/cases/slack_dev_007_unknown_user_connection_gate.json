@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "case_id": "slack_dev_007_unknown_user_connection_gate",
+  "profile": "slack_channel",
+  "title": "Unknown Slack DM user is blocked on pairing instead of treated as admin",
+  "setup": {
+    "extensions": ["slack"],
+    "secrets": [{"credential_name": "slack_bot_token", "value": "xoxb-dev-slice-007"}],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [{"key": "slack.postMessage", "status": 200, "body": {"ok": true}}],
+    "profile_extra": {
+      "slack_fixture": {
+        "tenant_id": "tenant:slack-dev-a",
+        "installation_id": "slack-install-dev-a",
+        "team_id": "T03DEVA01",
+        "api_app_id": "A03DEVA01",
+        "bot_user_id": "UBOTDEV03",
+        "operator_user_id": "user:ops-dev",
+        "default_personal_agent_id": "agent:personal-dev",
+        "channel_routes": [],
+        "identity_bindings": [],
+        "connection": {"configured": true, "caller_connected": false},
+        "admission": {"workspace_allowed": true, "channels_allowed": ["D03GHOST1"]},
+        "delivery_script": [],
+        "existing_threads": []
+      }
+    }
+  },
+  "llm_script": [],
+  "inbound": [{
+    "channel": "slack",
+    "payload": {
+      "type": "event_callback",
+      "team_id": "T03DEVA01",
+      "event_id": "Ev03D007",
+      "event": {"type": "message", "channel_type": "im", "user": "U03GHOST1", "channel": "D03GHOST1", "text": "pair me before answering", "ts": "1771000000.000007"}
+    }
+  }],
+  "state_queries": [
+    {"id": "turn", "kind": "slack_turn", "params": {"event_id": "Ev03D007"}},
+    {"id": "identity", "kind": "slack_identity", "params": {"installation_id": "slack-install-dev-a", "slack_user_id": "U03GHOST1"}},
+    {"id": "gate", "kind": "slack_gate", "params": {"event_id": "Ev03D007"}},
+    {"id": "delivery", "kind": "slack_delivery", "params": {"event_id": "Ev03D007"}},
+    {"id": "isolation", "kind": "slack_isolation_audit", "params": {"event_id": "Ev03D007"}}
+  ],
+  "live": false
+}

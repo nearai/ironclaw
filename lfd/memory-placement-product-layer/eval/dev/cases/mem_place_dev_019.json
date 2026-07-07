@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "case_id": "mem_place_dev_019",
+  "profile": "memory_placement",
+  "title": "patch write preserves old version through provider boundary",
+  "setup": {
+    "extensions": [],
+    "secrets": [],
+    "memory_docs": [
+      {
+        "path": "notes/mpseed-romeo.md",
+        "content": "mpseed romeo draft after boundary"
+      }
+    ],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {
+      "scenario": "patch_write_versions_boundary",
+      "case_kind": "failure_denial",
+      "provider": {
+        "default": "native",
+        "active": "native",
+        "compare_with": "native",
+        "fake_provider_pinned_in_support": true
+      },
+      "policy": {
+        "decision": "allow",
+        "constraints": []
+      },
+      "operation": {
+        "family": "write",
+        "target": "notes/mpseed-romeo.md",
+        "content": "mpseed romeo patched after boundary",
+        "old_string": "draft",
+        "new_string": "patched"
+      },
+      "seed": {
+        "tenant_id": "T719MP",
+        "user_id": "U719MP",
+        "project_id": "proj-patch",
+        "docs": [
+          {
+            "path": "notes/mpseed-romeo.md",
+            "content": "mpseed romeo draft after boundary"
+          }
+        ],
+        "versions": [
+          {
+            "path": "notes/mpseed-romeo.md",
+            "content": "mpseed romeo original"
+          }
+        ],
+        "retention_records": [
+          {
+            "path": "notes/mpseed-romeo.md",
+            "version": 1
+          }
+        ]
+      },
+      "contract_markers": [
+        "mpseed-romeo",
+        "patch-version",
+        "memory.document_written",
+        "memory.search_performed",
+        "memory.prompt_context_built",
+        "memory.provider_denied",
+        "memory.provider_constrained",
+        "memory.safety_rejected",
+        "memory.profile_updated",
+        "host-network/memory-embeddings",
+        "memory_provider_repository"
+      ]
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.memory_write",
+          "params": {
+            "target": "notes/mpseed-romeo.md",
+            "old_string": "draft",
+            "new_string": "patched",
+            "append": false
+          }
+        },
+        {
+          "text": "memory placement scenario mem_place_dev_019 completed"
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "lfd_memory",
+      "payload": {
+        "text": "Execute patch_write_versions_boundary for lane 16 memory placement"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "boundary",
+      "kind": "memory_provider_boundary",
+      "params": {
+        "operation_ref": "patch_write_versions_boundary",
+        "provider": "native"
+      }
+    },
+    {
+      "id": "versions",
+      "kind": "memory_retention_versions",
+      "params": {
+        "path": "notes/mpseed-romeo.md"
+      }
+    },
+    {
+      "id": "storage",
+      "kind": "memory_storage_placement",
+      "params": {
+        "operation_ref": "patch_write_versions_boundary"
+      }
+    }
+  ],
+  "live": false
+}

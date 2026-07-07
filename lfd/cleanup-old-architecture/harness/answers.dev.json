@@ -1,0 +1,1816 @@
+{
+  "schema_version": 1,
+  "canary_token": "LFDC-cleanup-7c4e9a2f",
+  "contracts": [
+    {
+      "case_id": "mig_dev_conversations",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "v1_intact",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": true
+        },
+        {
+          "id": "all_accounted",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": true
+        },
+        {
+          "id": "t",
+          "type": "state_eq",
+          "weight": 1,
+          "query": "proj_threads",
+          "eq": {
+            "count": 2,
+            "refs": [
+              "c_gw",
+              "c_tg"
+            ]
+          }
+        },
+        {
+          "id": "m_floor",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_messages",
+          "path": "count",
+          "gte": 4
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "state_pred",
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": false
+        }
+      ]
+    },
+    {
+      "case_id": "mig_dev_cron_triggers",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "v1_intact",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": true
+        },
+        {
+          "id": "all_accounted",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": true
+        },
+        {
+          "id": "t",
+          "type": "state_eq",
+          "weight": 1,
+          "query": "proj_triggers",
+          "eq": {
+            "count": 2,
+            "refs": [
+              "cron-light",
+              "cron-report"
+            ]
+          }
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "state_pred",
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": false
+        }
+      ]
+    },
+    {
+      "case_id": "mig_dev_noncron_triggers",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "v1_intact",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": true
+        },
+        {
+          "id": "all_accounted",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": true
+        },
+        {
+          "id": "t_count",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "proj_triggers",
+          "path": "count",
+          "gte": 3
+        },
+        {
+          "id": "t_event",
+          "type": "state_pred",
+          "weight": 1,
+          "query": "proj_triggers",
+          "path": "refs",
+          "contains": "event-r"
+        },
+        {
+          "id": "t_webhook",
+          "type": "state_pred",
+          "weight": 1,
+          "query": "proj_triggers",
+          "path": "refs",
+          "contains": "webhook-r"
+        },
+        {
+          "id": "t_manual",
+          "type": "state_pred",
+          "weight": 1,
+          "query": "proj_triggers",
+          "path": "refs",
+          "contains": "manual-r"
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "state_pred",
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "domains.routine.migrated_count",
+          "lt": 3
+        }
+      ]
+    },
+    {
+      "case_id": "mig_dev_routine_runs",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "v1_intact",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": true
+        },
+        {
+          "id": "all_accounted",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": true
+        },
+        {
+          "id": "rr",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "proj_routine_runs",
+          "path": "count",
+          "gte": 7
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "state_pred",
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "domains.routine_runs.source_count",
+          "eq": 0
+        }
+      ]
+    },
+    {
+      "case_id": "mig_dev_settings_kv",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "v1_intact",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": true
+        },
+        {
+          "id": "all_accounted",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": true
+        },
+        {
+          "id": "s",
+          "type": "state_eq",
+          "weight": 1,
+          "query": "proj_settings",
+          "eq": {
+            "count": 2,
+            "keys": [
+              "model",
+              "timezone"
+            ]
+          }
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "state_pred",
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "domains.setting.skipped_count",
+          "gt": 0
+        }
+      ]
+    },
+    {
+      "case_id": "mig_dev_agent_jobs_chain",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "v1_intact",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": true
+        },
+        {
+          "id": "all_accounted",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": true
+        },
+        {
+          "id": "j",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_jobs",
+          "path": "count",
+          "gte": 1
+        },
+        {
+          "id": "j_actions",
+          "type": "state_pred",
+          "weight": 1,
+          "query": "proj_jobs",
+          "path": "actions",
+          "gte": 3
+        },
+        {
+          "id": "j_events",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_jobs",
+          "path": "events",
+          "gte": 5
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "state_pred",
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "proj_jobs",
+          "path": "events_dropped",
+          "gt": 0
+        }
+      ]
+    },
+    {
+      "case_id": "mig_dev_memory_docs",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "v1_intact",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": true
+        },
+        {
+          "id": "all_accounted",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": true
+        },
+        {
+          "id": "mem",
+          "type": "state_eq",
+          "weight": 1,
+          "query": "proj_memory",
+          "eq": {
+            "count": 2,
+            "paths": [
+              "context/priorities.md",
+              "context/vision.md"
+            ]
+          }
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "state_pred",
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": false
+        }
+      ]
+    },
+    {
+      "case_id": "mig_dev_memory_versions",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "v1_intact",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": true
+        },
+        {
+          "id": "all_accounted",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": true
+        },
+        {
+          "id": "mv",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "proj_memory_versions",
+          "path": "count",
+          "gte": 3
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "state_pred",
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "domains.memory_versions.migrated_count",
+          "eq": 0
+        }
+      ]
+    },
+    {
+      "case_id": "mig_dev_secrets_reencrypt",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "v1_intact",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": true
+        },
+        {
+          "id": "all_accounted",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": true
+        },
+        {
+          "id": "sec",
+          "type": "state_eq",
+          "weight": 1,
+          "query": "proj_secrets",
+          "eq": {
+            "count": 1,
+            "secrets": [
+              {
+                "ref": "openai_api_key",
+                "provider": "openai",
+                "decryptable": true,
+                "has_plaintext": false,
+                "expires_at": null
+              }
+            ]
+          }
+        },
+        {
+          "id": "sec_dec",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_secrets",
+          "path": "secrets.0.decryptable",
+          "eq": true
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "state_pred",
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "proj_secrets",
+          "path": "secrets.0.has_plaintext",
+          "eq": true
+        }
+      ]
+    },
+    {
+      "case_id": "mig_dev_identities_oauth",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "v1_intact",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": true
+        },
+        {
+          "id": "all_accounted",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": true
+        },
+        {
+          "id": "id",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_identities",
+          "path": "oauth",
+          "gte": 1
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "state_pred",
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": false
+        }
+      ]
+    },
+    {
+      "case_id": "mig_dev_identities_channel",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "v1_intact",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": true
+        },
+        {
+          "id": "all_accounted",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": true
+        },
+        {
+          "id": "id",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_identities",
+          "path": "channels",
+          "gte": 1
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "state_pred",
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": false
+        }
+      ]
+    },
+    {
+      "case_id": "mig_dev_extension_install",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "v1_intact",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": true
+        },
+        {
+          "id": "all_accounted",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": true
+        },
+        {
+          "id": "x_count",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_extensions",
+          "path": "count",
+          "gte": 1
+        },
+        {
+          "id": "x_ref",
+          "type": "state_pred",
+          "weight": 1,
+          "query": "proj_extensions",
+          "path": "refs",
+          "contains": "weather"
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "state_pred",
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": false
+        }
+      ]
+    },
+    {
+      "case_id": "mig_dev_extension_wasm_binary",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "v1_intact",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": true
+        },
+        {
+          "id": "all_accounted",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": true
+        },
+        {
+          "id": "x_wasm",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "proj_extensions",
+          "path": "wasm_binary_carried",
+          "eq": true
+        },
+        {
+          "id": "x_manifest",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_extensions",
+          "path": "manifest_fidelity_carried",
+          "eq": true
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "state_pred",
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "domains.extension.skipped_count",
+          "gt": 0
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "domains.extension.degraded_count",
+          "gt": 0
+        }
+      ]
+    },
+    {
+      "case_id": "mig_dev_mission_cron",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "v1_intact",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": true
+        },
+        {
+          "id": "all_accounted",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": true
+        },
+        {
+          "id": "t",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_triggers",
+          "path": "refs",
+          "contains": "daily-digest"
+        },
+        {
+          "id": "th",
+          "type": "state_pred",
+          "weight": 1,
+          "query": "proj_threads",
+          "path": "count",
+          "gte": 1
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "state_pred",
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": false
+        }
+      ]
+    },
+    {
+      "case_id": "mig_dev_mixed_small",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "v1_intact",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": true
+        },
+        {
+          "id": "all_accounted",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": true
+        },
+        {
+          "id": "th",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_threads",
+          "path": "count",
+          "gte": 2
+        },
+        {
+          "id": "tr",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_triggers",
+          "path": "count",
+          "gte": 3
+        },
+        {
+          "id": "se",
+          "type": "state_pred",
+          "weight": 1,
+          "query": "proj_secrets",
+          "path": "secrets.0.decryptable",
+          "eq": true
+        },
+        {
+          "id": "jo_events",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_jobs",
+          "path": "events",
+          "gte": 3
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "state_pred",
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "proj_jobs",
+          "path": "events_dropped",
+          "gt": 0
+        },
+        {
+          "type": "state_pred",
+          "query": "proj_secrets",
+          "path": "secrets.0.has_plaintext",
+          "eq": true
+        }
+      ]
+    },
+    {
+      "case_id": "mig_dev_mixed_medium",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "v1_intact",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": true
+        },
+        {
+          "id": "all_accounted",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": true
+        },
+        {
+          "id": "th",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_threads",
+          "path": "count",
+          "gte": 3
+        },
+        {
+          "id": "tr",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_triggers",
+          "path": "count",
+          "gte": 3
+        },
+        {
+          "id": "se",
+          "type": "state_pred",
+          "weight": 1,
+          "query": "proj_secrets",
+          "path": "secrets.0.decryptable",
+          "eq": true
+        },
+        {
+          "id": "jo_events",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_jobs",
+          "path": "events",
+          "gte": 3
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "state_pred",
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "proj_jobs",
+          "path": "events_dropped",
+          "gt": 0
+        },
+        {
+          "type": "state_pred",
+          "query": "proj_secrets",
+          "path": "secrets.0.has_plaintext",
+          "eq": true
+        }
+      ]
+    },
+    {
+      "case_id": "mig_dev_mixed_full",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "v1_intact",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": true
+        },
+        {
+          "id": "all_accounted",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": true
+        },
+        {
+          "id": "th",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_threads",
+          "path": "count",
+          "gte": 3
+        },
+        {
+          "id": "tr",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_triggers",
+          "path": "count",
+          "gte": 3
+        },
+        {
+          "id": "se",
+          "type": "state_pred",
+          "weight": 1,
+          "query": "proj_secrets",
+          "path": "secrets.0.decryptable",
+          "eq": true
+        },
+        {
+          "id": "jo_events",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_jobs",
+          "path": "events",
+          "gte": 3
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "state_pred",
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "proj_jobs",
+          "path": "events_dropped",
+          "gt": 0
+        },
+        {
+          "type": "state_pred",
+          "query": "proj_secrets",
+          "path": "secrets.0.has_plaintext",
+          "eq": true
+        }
+      ]
+    },
+    {
+      "case_id": "mig_dev_mixed_crossref_jobconv",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "v1_intact",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": true
+        },
+        {
+          "id": "all_accounted",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": true
+        },
+        {
+          "id": "th",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_threads",
+          "path": "count",
+          "gte": 3
+        },
+        {
+          "id": "tr",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_triggers",
+          "path": "count",
+          "gte": 3
+        },
+        {
+          "id": "se",
+          "type": "state_pred",
+          "weight": 1,
+          "query": "proj_secrets",
+          "path": "secrets.0.decryptable",
+          "eq": true
+        },
+        {
+          "id": "jo_events",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_jobs",
+          "path": "events",
+          "gte": 3
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "state_pred",
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "proj_jobs",
+          "path": "events_dropped",
+          "gt": 0
+        },
+        {
+          "type": "state_pred",
+          "query": "proj_secrets",
+          "path": "secrets.0.has_plaintext",
+          "eq": true
+        }
+      ]
+    },
+    {
+      "case_id": "mig_dev_mixed_crossref_triggerroutine",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "v1_intact",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": true
+        },
+        {
+          "id": "all_accounted",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": true
+        },
+        {
+          "id": "th",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_threads",
+          "path": "count",
+          "gte": 2
+        },
+        {
+          "id": "tr",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_triggers",
+          "path": "count",
+          "gte": 3
+        },
+        {
+          "id": "se",
+          "type": "state_pred",
+          "weight": 1,
+          "query": "proj_secrets",
+          "path": "secrets.0.decryptable",
+          "eq": true
+        },
+        {
+          "id": "jo_events",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_jobs",
+          "path": "events",
+          "gte": 3
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "state_pred",
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "proj_jobs",
+          "path": "events_dropped",
+          "gt": 0
+        },
+        {
+          "type": "state_pred",
+          "query": "proj_secrets",
+          "path": "secrets.0.has_plaintext",
+          "eq": true
+        }
+      ]
+    },
+    {
+      "case_id": "mig_dev_mixed_multiuser",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "v1_intact",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": true
+        },
+        {
+          "id": "all_accounted",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": true
+        },
+        {
+          "id": "th",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_threads",
+          "path": "count",
+          "gte": 3
+        },
+        {
+          "id": "tr",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_triggers",
+          "path": "count",
+          "gte": 3
+        },
+        {
+          "id": "se",
+          "type": "state_pred",
+          "weight": 1,
+          "query": "proj_secrets",
+          "path": "secrets.0.decryptable",
+          "eq": true
+        },
+        {
+          "id": "jo_events",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_jobs",
+          "path": "events",
+          "gte": 3
+        },
+        {
+          "id": "id_both",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_identities",
+          "path": "count",
+          "gte": 3
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "state_pred",
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "proj_jobs",
+          "path": "events_dropped",
+          "gt": 0
+        },
+        {
+          "type": "state_pred",
+          "query": "proj_secrets",
+          "path": "secrets.0.has_plaintext",
+          "eq": true
+        }
+      ]
+    },
+    {
+      "case_id": "mig_dev_edge_unicode",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "v1_intact",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": true
+        },
+        {
+          "id": "all_accounted",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": true
+        },
+        {
+          "id": "m",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_messages",
+          "path": "count",
+          "gte": 2
+        },
+        {
+          "id": "mem",
+          "type": "state_pred",
+          "weight": 1,
+          "query": "proj_memory",
+          "path": "count",
+          "gte": 1
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "state_pred",
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": false
+        }
+      ]
+    },
+    {
+      "case_id": "mig_dev_edge_oversized",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "v1_intact",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": true
+        },
+        {
+          "id": "all_accounted",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": true
+        },
+        {
+          "id": "m_floor",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_messages",
+          "path": "count",
+          "gte": 1
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "state_pred",
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "domains.message.fully_accounted",
+          "eq": false
+        }
+      ]
+    },
+    {
+      "case_id": "mig_dev_edge_dangling_fk",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "v1_intact",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": true
+        },
+        {
+          "id": "all_accounted",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": true
+        },
+        {
+          "id": "th_valid",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_threads",
+          "path": "count",
+          "gte": 1
+        },
+        {
+          "id": "skip_enum",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "lossy",
+          "path": "items",
+          "contains": {
+            "domain": "message",
+            "source_ref": "c_bad",
+            "field": "user_id",
+            "reason": "unparseable"
+          }
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "state_pred",
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "domains.message.fully_accounted",
+          "eq": false
+        }
+      ]
+    },
+    {
+      "case_id": "mig_dev_edge_legacy_enum",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "v1_intact",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": true
+        },
+        {
+          "id": "all_accounted",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": true
+        },
+        {
+          "id": "t",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "proj_triggers",
+          "path": "count",
+          "gte": 1
+        },
+        {
+          "id": "degrade_enum",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "recon",
+          "path": "domains.routine.degraded_count",
+          "gte": 1
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "state_pred",
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "domains.routine.fully_accounted",
+          "eq": false
+        }
+      ]
+    },
+    {
+      "case_id": "mig_dev_edge_empty_db",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "v1_intact",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": true
+        },
+        {
+          "id": "all_accounted",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": true
+        },
+        {
+          "id": "th0",
+          "type": "state_pred",
+          "weight": 1,
+          "query": "proj_threads",
+          "path": "count",
+          "eq": 0
+        },
+        {
+          "id": "tr0",
+          "type": "state_pred",
+          "weight": 1,
+          "query": "proj_triggers",
+          "path": "count",
+          "eq": 0
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "state_pred",
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": false
+        }
+      ]
+    },
+    {
+      "case_id": "mig_dev_dryrun_honesty",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "v1_intact",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": true
+        },
+        {
+          "id": "all_accounted",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": true
+        },
+        {
+          "id": "dry_settings",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "dry_recon",
+          "path": "domains.setting.migrated_count",
+          "eq": 2
+        },
+        {
+          "id": "wet_settings",
+          "type": "state_pred",
+          "weight": 2,
+          "query": "recon",
+          "path": "domains.setting.migrated_count",
+          "eq": 2
+        },
+        {
+          "id": "dry_flag",
+          "type": "state_pred",
+          "weight": 1,
+          "query": "dry_recon",
+          "path": "dry_run",
+          "eq": true
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "state_pred",
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": false
+        }
+      ]
+    },
+    {
+      "case_id": "mig_dev_dryrun_writes_nothing",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "v1_intact",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": true
+        },
+        {
+          "id": "all_accounted",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": true
+        },
+        {
+          "id": "nothing",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "proj_threads",
+          "path": "count",
+          "eq": 0
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "state_pred",
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "proj_threads",
+          "path": "count",
+          "gt": 0
+        }
+      ]
+    },
+    {
+      "case_id": "mig_dev_idempotent_double",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "v1_intact",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": true
+        },
+        {
+          "id": "all_accounted",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": true
+        },
+        {
+          "id": "id_stable",
+          "type": "state_eq",
+          "weight": 3,
+          "query": "proj_identities_run2",
+          "eq": {
+            "count": 2,
+            "oauth": 1,
+            "channels": 1
+          }
+        },
+        {
+          "id": "ext_stable",
+          "type": "state_eq",
+          "weight": 3,
+          "query": "proj_extensions_run2",
+          "eq": {
+            "count": 1,
+            "refs": [
+              "tool-idem"
+            ],
+            "wasm_binary_carried": true,
+            "manifest_fidelity_carried": true
+          }
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "state_pred",
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": false
+        }
+      ]
+    },
+    {
+      "case_id": "mig_dev_idempotent_secrets",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "v1_intact",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": true
+        },
+        {
+          "id": "all_accounted",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": true
+        },
+        {
+          "id": "sec_stable",
+          "type": "state_eq",
+          "weight": 3,
+          "query": "proj_secrets_run2",
+          "eq": {
+            "count": 1,
+            "secrets": [
+              {
+                "ref": "openai_api_key",
+                "provider": "openai",
+                "decryptable": true,
+                "has_plaintext": false,
+                "expires_at": null
+              }
+            ]
+          }
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "state_pred",
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": false
+        }
+      ]
+    },
+    {
+      "case_id": "mig_dev_idempotent_memory",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "v1_intact",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": true
+        },
+        {
+          "id": "all_accounted",
+          "type": "state_pred",
+          "weight": 3,
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": true
+        },
+        {
+          "id": "mem_stable",
+          "type": "state_eq",
+          "weight": 3,
+          "query": "proj_memory_run2",
+          "eq": {
+            "count": 1,
+            "paths": [
+              "context/vision.md"
+            ]
+          }
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "state_pred",
+          "query": "v1_intact",
+          "path": "unchanged",
+          "eq": false
+        },
+        {
+          "type": "state_pred",
+          "query": "recon",
+          "path": "all_accounted",
+          "eq": false
+        }
+      ]
+    }
+  ]
+}

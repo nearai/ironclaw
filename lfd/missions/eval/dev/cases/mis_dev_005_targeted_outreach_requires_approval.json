@@ -1,0 +1,208 @@
+{
+  "case_id": "mis_dev_005_targeted_outreach_requires_approval",
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "request": {
+          "allowed_action_classes": [
+            "read_memory",
+            "fake_tool",
+            "write_checkpoint",
+            "schedule_routine",
+            "schedule_task"
+          ],
+          "budget": {
+            "model_call_limit": 56,
+            "requires_explicit_approval_for_overrun": true,
+            "usd_limit": 7,
+            "wall_clock_minutes": 140
+          },
+          "definition_of_done": "Ten approved prospects have personalized drafts and no message is sent without approval",
+          "forbidden_action_classes": [
+            "live_external_send",
+            "unapproved_paid_api"
+          ],
+          "goal": "Prepare targeted outreach for Atlas design partners",
+          "mission_kind": "finite",
+          "mission_ref": "atlas-outreach-20260710",
+          "trigger_ref": "trg-atlas-outreach-20260710",
+          "trigger_source": "manual"
+        },
+        "submitted_at": "2026-07-07T09:00:00Z",
+        "type": "mission_request",
+        "user_id": "U469860"
+      }
+    }
+  ],
+  "live": false,
+  "llm_script": [
+    {
+      "steps": [
+        {
+          "params": {
+            "definition_of_done": "Ten approved prospects have personalized drafts and no message is sent without approval",
+            "goal": "Prepare targeted outreach for Atlas design partners",
+            "kind": "finite",
+            "mission_ref": "atlas-outreach-20260710"
+          },
+          "tool": "mission.plan"
+        },
+        {
+          "params": {
+            "count": 1,
+            "mission_ref": "atlas-outreach-20260710"
+          },
+          "tool": "mission.schedule_task"
+        },
+        {
+          "params": {
+            "checkpoint_kind": "durable_progress",
+            "mission_ref": "atlas-outreach-20260710"
+          },
+          "tool": "mission.checkpoint"
+        },
+        {
+          "text": "Mission atlas-outreach-20260710: draft approved prospect messages"
+        }
+      ],
+      "turn": 1
+    }
+  ],
+  "profile": "missions",
+  "schema_version": 1,
+  "setup": {
+    "extensions": [],
+    "http_stubs": [
+      {
+        "body": {
+          "ok": true
+        },
+        "key": "fake.mission_tool",
+        "status": 200
+      }
+    ],
+    "memory_docs": [
+      {
+        "content": "lfdmission targeted outreach: draft only until explicit approval, cap daily sends at five, and record opt-out blockers.",
+        "path": "/projects/atlas-outreach/policy/approval.md",
+        "title": "Atlas outreach approval policy"
+      }
+    ],
+    "profile_extra": {
+      "agent_id": "agent-missions",
+      "clock_start": "2026-07-07T09:00:00Z",
+      "expected_failure_direction": false,
+      "mission_ref": "atlas-outreach-20260710",
+      "mission_request": {
+        "allowed_action_classes": [
+          "read_memory",
+          "fake_tool",
+          "write_checkpoint",
+          "schedule_routine",
+          "schedule_task"
+        ],
+        "budget": {
+          "model_call_limit": 56,
+          "requires_explicit_approval_for_overrun": true,
+          "usd_limit": 7,
+          "wall_clock_minutes": 140
+        },
+        "definition_of_done": "Ten approved prospects have personalized drafts and no message is sent without approval",
+        "forbidden_action_classes": [
+          "live_external_send",
+          "unapproved_paid_api"
+        ],
+        "goal": "Prepare targeted outreach for Atlas design partners",
+        "mission_kind": "finite",
+        "mission_ref": "atlas-outreach-20260710",
+        "trigger_ref": "trg-atlas-outreach-20260710",
+        "trigger_source": "manual"
+      },
+      "project_id": "project-outreach",
+      "tenant_id": "tenant-lfdmission-blue",
+      "timeline": [
+        {
+          "at": "2026-07-07T09:00:00Z",
+          "mission_ref": "atlas-outreach-20260710",
+          "op": "mission_request"
+        },
+        {
+          "at": "2026-07-07T09:00:00Z",
+          "fire_slot": "2026-07-07T09:00:00Z",
+          "op": "fire_trigger",
+          "trigger_ref": "trg-atlas-outreach-20260710"
+        }
+      ]
+    },
+    "secrets": [],
+    "triggers": [
+      {
+        "completion_policy": "complete_after_done",
+        "mission_ref": "atlas-outreach-20260710",
+        "source": "manual",
+        "trigger_ref": "trg-atlas-outreach-20260710"
+      }
+    ]
+  },
+  "state_queries": [
+    {
+      "id": "mission",
+      "kind": "mission_record",
+      "params": {
+        "mission_ref": "atlas-outreach-20260710"
+      }
+    },
+    {
+      "id": "plan",
+      "kind": "mission_plan",
+      "params": {
+        "mission_ref": "atlas-outreach-20260710"
+      }
+    },
+    {
+      "id": "checkpoints",
+      "kind": "checkpoint_log",
+      "params": {
+        "mission_ref": "atlas-outreach-20260710"
+      }
+    },
+    {
+      "id": "budget",
+      "kind": "budget_ledger",
+      "params": {
+        "mission_ref": "atlas-outreach-20260710"
+      }
+    },
+    {
+      "id": "decisions",
+      "kind": "scheduler_decisions",
+      "params": {
+        "mission_ref": "atlas-outreach-20260710"
+      }
+    },
+    {
+      "id": "prompt",
+      "kind": "prompt_envelope",
+      "params": {
+        "fire_index": 1,
+        "mission_ref": "atlas-outreach-20260710"
+      }
+    },
+    {
+      "id": "progress",
+      "kind": "mission_progress",
+      "params": {
+        "mission_ref": "atlas-outreach-20260710"
+      }
+    },
+    {
+      "id": "status",
+      "kind": "status_report",
+      "params": {
+        "mission_ref": "atlas-outreach-20260710"
+      }
+    }
+  ],
+  "title": "targeted outreach mission drafts task but gates live send behind approval"
+}

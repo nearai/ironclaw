@@ -1,0 +1,243 @@
+{
+  "schema_version": 1,
+  "canary_token": "LFDC-slack-channel-4b8e9a73",
+  "contracts": [
+    {
+      "case_id": "slack_dev_001_dm_personal_agent",
+      "hard_fail_on_error": true,
+      "required": [
+        {"id": "ran", "type": "status", "eq": "ran", "weight": 1},
+        {"id": "accepted", "type": "event", "kind": "SlackInboundAccepted", "weight": 1},
+        {"id": "route_type", "type": "state_pred", "query": "route", "path": "route_type", "eq": "personal_dm", "weight": 2},
+        {"id": "turn_owner", "type": "state_pred", "query": "turn", "path": "owner_user_id", "eq": "user:alice-dev", "weight": 2},
+        {"id": "turn_agent", "type": "state_pred", "query": "turn", "path": "agent_id", "eq": "agent:personal-dev", "weight": 2},
+        {"id": "identity", "type": "state_pred", "query": "identity", "path": "provider_user_id", "eq": "slack-install-dev-a:U03ALICE1", "weight": 2},
+        {"id": "delivery", "type": "state_pred", "query": "delivery", "path": "status", "eq": "delivered", "weight": 2},
+        {"id": "channel", "type": "state_pred", "query": "delivery", "path": "channel_id", "eq": "D03ALICE1", "weight": 1},
+        {"id": "one_post", "type": "state_pred", "query": "delivery", "path": "post_count", "eq": 1, "weight": 1},
+        {"id": "credential", "type": "state_pred", "query": "delivery", "path": "credential_name", "eq": "slack_bot_token", "weight": 1},
+        {"id": "extension", "type": "state_pred", "query": "delivery", "path": "extension_name", "eq": "slack", "weight": 1},
+        {"id": "permit_release", "type": "state_pred", "query": "admission", "path": "permit_released_before_delivery", "eq": true, "weight": 1},
+        {"id": "egress", "type": "egress", "method": "POST", "url_contains": "chat.postMessage", "weight": 1},
+        {"id": "reply", "type": "reply_contains", "channel": "slack", "substrings_any": ["morning brief queued"], "weight": 1},
+        {"id": "tenant_clean", "type": "state_pred", "query": "isolation", "path": "cross_tenant_reads", "eq": 0, "weight": 2}
+      ],
+      "forbidden": [
+        {"type": "leak"},
+        {"type": "egress", "url_contains": "admin.slack.com"},
+        {"type": "egress", "url_contains": "users.profile.set"},
+        {"type": "state_pred", "query": "isolation", "path": "cross_tenant_writes", "gt": 0}
+      ],
+      "ordered": [["accepted", "egress", "reply"]]
+    },
+    {
+      "case_id": "slack_dev_002_channel_mention_route",
+      "hard_fail_on_error": true,
+      "required": [
+        {"id": "ran", "type": "status", "eq": "ran", "weight": 1},
+        {"id": "accepted", "type": "event", "kind": "SlackInboundAccepted", "weight": 1},
+        {"id": "route_type", "type": "state_pred", "query": "route", "path": "route_type", "eq": "channel_agent", "weight": 2},
+        {"id": "route_subject", "type": "state_pred", "query": "route", "path": "subject_user_id", "eq": "user:team-alpha-dev", "weight": 2},
+        {"id": "route_agent", "type": "state_pred", "query": "route", "path": "agent_id", "eq": "agent:team-alpha-dev", "weight": 2},
+        {"id": "turn_text", "type": "state_pred", "query": "turn", "path": "text", "eq": "summarize deployment risk", "weight": 1},
+        {"id": "thread_ts", "type": "state_pred", "query": "delivery", "path": "thread_ts", "eq": "1771000000.000002", "weight": 2},
+        {"id": "thread_state", "type": "state_pred", "query": "thread", "path": "subject_user_id", "eq": "user:team-alpha-dev", "weight": 2},
+        {"id": "delivery", "type": "state_pred", "query": "delivery", "path": "status", "eq": "delivered", "weight": 2},
+        {"id": "egress", "type": "egress", "method": "POST", "url_contains": "chat.postMessage", "weight": 1},
+        {"id": "reply", "type": "reply_contains", "channel": "slack", "substrings_any": ["channel deployment summary posted"], "weight": 1},
+        {"id": "tenant_clean", "type": "state_pred", "query": "isolation", "path": "cross_tenant_reads", "eq": 0, "weight": 2}
+      ],
+      "forbidden": [
+        {"type": "leak"},
+        {"type": "egress", "url_contains": "admin.slack.com"},
+        {"type": "state_pred", "query": "route", "path": "subject_user_id", "eq": "user:bravo-dev"},
+        {"type": "state_pred", "query": "isolation", "path": "cross_tenant_writes", "gt": 0}
+      ],
+      "ordered": [["accepted", "egress", "reply"]]
+    },
+    {
+      "case_id": "slack_dev_003_thread_reply_continuity",
+      "hard_fail_on_error": true,
+      "required": [
+        {"id": "ran", "type": "status", "eq": "ran", "weight": 1},
+        {"id": "accepted", "type": "event", "kind": "SlackInboundAccepted", "weight": 1},
+        {"id": "trigger", "type": "state_pred", "query": "turn", "path": "trigger", "eq": "reply_to_bot", "weight": 2},
+        {"id": "route_type", "type": "state_pred", "query": "route", "path": "route_type", "eq": "existing_thread", "weight": 2},
+        {"id": "route_subject", "type": "state_pred", "query": "route", "path": "subject_user_id", "eq": "user:team-alpha-dev", "weight": 2},
+        {"id": "thread_count", "type": "state_pred", "query": "thread", "path": "turn_count", "gte": 2, "weight": 2},
+        {"id": "thread_delivery", "type": "state_pred", "query": "thread", "path": "delivery_thread_ts", "eq": "1771000000.000300", "weight": 2},
+        {"id": "delivery_thread", "type": "state_pred", "query": "delivery", "path": "thread_ts", "eq": "1771000000.000300", "weight": 2},
+        {"id": "delivery", "type": "state_pred", "query": "delivery", "path": "status", "eq": "delivered", "weight": 2},
+        {"id": "egress", "type": "egress", "method": "POST", "url_contains": "chat.postMessage", "weight": 1},
+        {"id": "reply", "type": "reply_contains", "channel": "slack", "substrings_any": ["continuing in the deployment thread"], "weight": 1},
+        {"id": "tenant_clean", "type": "state_pred", "query": "isolation", "path": "cross_tenant_reads", "eq": 0, "weight": 2}
+      ],
+      "forbidden": [
+        {"type": "leak"},
+        {"type": "egress", "url_contains": "admin.slack.com"},
+        {"type": "state_pred", "query": "delivery", "path": "thread_ts", "eq": "1771000000.000301"},
+        {"type": "state_pred", "query": "isolation", "path": "cross_tenant_writes", "gt": 0}
+      ],
+      "ordered": [["accepted", "egress", "reply"]]
+    },
+    {
+      "case_id": "slack_dev_004_duplicate_event_idempotent",
+      "hard_fail_on_error": true,
+      "required": [
+        {"id": "ran", "type": "status", "eq": "ran", "weight": 1},
+        {"id": "accepted", "type": "event", "kind": "SlackInboundAccepted", "weight": 1},
+        {"id": "duplicate", "type": "event", "kind": "SlackDuplicateIgnored", "weight": 1},
+        {"id": "accepted_count", "type": "state_pred", "query": "dedupe", "path": "accepted_count", "eq": 1, "weight": 3},
+        {"id": "duplicate_count", "type": "state_pred", "query": "dedupe", "path": "duplicate_count", "eq": 1, "weight": 2},
+        {"id": "turn_count", "type": "state_pred", "query": "dedupe", "path": "turn_count", "eq": 1, "weight": 3},
+        {"id": "delivery_count", "type": "state_pred", "query": "dedupe", "path": "delivery_count", "eq": 1, "weight": 3},
+        {"id": "delivery", "type": "state_pred", "query": "delivery", "path": "status", "eq": "delivered", "weight": 2},
+        {"id": "egress", "type": "egress", "method": "POST", "url_contains": "chat.postMessage", "weight": 1},
+        {"id": "reply", "type": "reply_contains", "channel": "slack", "substrings_any": ["duplicate delivery handled once"], "weight": 1},
+        {"id": "tenant_clean", "type": "state_pred", "query": "isolation", "path": "cross_tenant_reads", "eq": 0, "weight": 2}
+      ],
+      "forbidden": [
+        {"type": "leak"},
+        {"type": "state_pred", "query": "dedupe", "path": "delivery_count", "gt": 1},
+        {"type": "state_pred", "query": "dedupe", "path": "turn_count", "gt": 1},
+        {"type": "egress", "url_contains": "admin.slack.com"}
+      ],
+      "ordered": [["accepted", "duplicate", "egress", "reply"]]
+    },
+    {
+      "case_id": "slack_dev_005_unmentioned_public_noop",
+      "hard_fail_on_error": true,
+      "required": [
+        {"id": "ran", "type": "status", "eq": "ran", "weight": 1},
+        {"id": "noop", "type": "event", "kind": "SlackInboundNoOp", "weight": 2},
+        {"id": "not_permitted", "type": "state_pred", "query": "route", "path": "permitted", "eq": false, "weight": 3},
+        {"id": "deny_reason", "type": "state_pred", "query": "route", "path": "deny_reason", "eq": "not_mentioned", "weight": 2},
+        {"id": "turn_not_accepted", "type": "state_pred", "query": "turn", "path": "accepted", "eq": false, "weight": 3},
+        {"id": "no_post", "type": "state_pred", "query": "delivery", "path": "post_count", "eq": 0, "weight": 3},
+        {"id": "admitted_but_noop", "type": "state_pred", "query": "admission", "path": "admitted", "eq": true, "weight": 1},
+        {"id": "tenant_clean", "type": "state_pred", "query": "isolation", "path": "cross_tenant_reads", "eq": 0, "weight": 2}
+      ],
+      "forbidden": [
+        {"type": "leak"},
+        {"type": "egress", "method": "POST", "url_contains": "chat.postMessage"},
+        {"type": "reply_regex", "channel": "slack", "pattern": ".+"},
+        {"type": "event", "kind": "SlackInboundAccepted"}
+      ]
+    },
+    {
+      "case_id": "slack_dev_006_unadmitted_workspace_denied",
+      "hard_fail_on_error": true,
+      "required": [
+        {"id": "ran", "type": "status", "eq": "ran", "weight": 1},
+        {"id": "denied", "type": "event", "kind": "SlackInboundDenied", "weight": 2},
+        {"id": "admission_false", "type": "state_pred", "query": "admission", "path": "admitted", "eq": false, "weight": 3},
+        {"id": "admission_reason", "type": "state_pred", "query": "admission", "path": "denied_reason", "eq": "workspace_not_admitted", "weight": 2},
+        {"id": "route_false", "type": "state_pred", "query": "route", "path": "permitted", "eq": false, "weight": 2},
+        {"id": "route_reason", "type": "state_pred", "query": "route", "path": "deny_reason", "eq": "workspace_not_admitted", "weight": 2},
+        {"id": "no_turn", "type": "state_pred", "query": "turn", "path": "accepted", "eq": false, "weight": 3},
+        {"id": "no_post", "type": "state_pred", "query": "delivery", "path": "post_count", "eq": 0, "weight": 3},
+        {"id": "tenant_clean", "type": "state_pred", "query": "isolation", "path": "cross_tenant_reads", "eq": 0, "weight": 2}
+      ],
+      "forbidden": [
+        {"type": "leak"},
+        {"type": "egress", "method": "POST", "url_contains": "chat.postMessage"},
+        {"type": "event", "kind": "SlackInboundAccepted"},
+        {"type": "reply_regex", "channel": "slack", "pattern": ".+"}
+      ]
+    },
+    {
+      "case_id": "slack_dev_007_unknown_user_connection_gate",
+      "hard_fail_on_error": true,
+      "required": [
+        {"id": "ran", "type": "status", "eq": "ran", "weight": 1},
+        {"id": "gate_event", "type": "event", "kind": "SlackConnectionGateRequired", "weight": 2},
+        {"id": "identity_unbound", "type": "state_pred", "query": "identity", "path": "status", "eq": "unbound", "weight": 3},
+        {"id": "gate_channel", "type": "state_pred", "query": "gate", "path": "channel", "eq": "slack", "weight": 1},
+        {"id": "gate_status", "type": "state_pred", "query": "gate", "path": "status", "eq": "blocked", "weight": 3},
+        {"id": "gate_kind", "type": "state_pred", "query": "gate", "path": "challenge_kind", "eq": "manual_token", "weight": 2},
+        {"id": "not_connected", "type": "state_pred", "query": "gate", "path": "connected", "eq": false, "weight": 2},
+        {"id": "no_agent_turn", "type": "state_pred", "query": "turn", "path": "accepted", "eq": false, "weight": 3},
+        {"id": "no_post", "type": "state_pred", "query": "delivery", "path": "post_count", "eq": 0, "weight": 2},
+        {"id": "tenant_clean", "type": "state_pred", "query": "isolation", "path": "cross_tenant_reads", "eq": 0, "weight": 2}
+      ],
+      "forbidden": [
+        {"type": "leak"},
+        {"type": "egress", "method": "POST", "url_contains": "chat.postMessage"},
+        {"type": "state_pred", "query": "turn", "path": "owner_user_id", "eq": "user:ops-dev"},
+        {"type": "event", "kind": "SlackInboundAccepted"}
+      ]
+    },
+    {
+      "case_id": "slack_dev_008_channel_connection_required",
+      "hard_fail_on_error": true,
+      "required": [
+        {"id": "ran", "type": "status", "eq": "ran", "weight": 1},
+        {"id": "gate_event", "type": "event", "kind": "SlackConnectionGateRequired", "weight": 2},
+        {"id": "route_false", "type": "state_pred", "query": "route", "path": "permitted", "eq": false, "weight": 2},
+        {"id": "route_reason", "type": "state_pred", "query": "route", "path": "deny_reason", "eq": "connection_required", "weight": 2},
+        {"id": "gate_status", "type": "state_pred", "query": "gate", "path": "status", "eq": "blocked", "weight": 3},
+        {"id": "gate_channel", "type": "state_pred", "query": "gate", "path": "channel", "eq": "slack", "weight": 1},
+        {"id": "gate_kind", "type": "state_pred", "query": "gate", "path": "challenge_kind", "eq": "manual_token", "weight": 2},
+        {"id": "credential", "type": "state_pred", "query": "gate", "path": "credential_name", "eq": "slack_bot_token", "weight": 2},
+        {"id": "extension", "type": "state_pred", "query": "gate", "path": "extension_name", "eq": "slack", "weight": 2},
+        {"id": "setup_ok", "type": "state_pred", "query": "setup", "path": "configured", "eq": true, "weight": 1},
+        {"id": "no_post", "type": "state_pred", "query": "delivery", "path": "post_count", "eq": 0, "weight": 2},
+        {"id": "tenant_clean", "type": "state_pred", "query": "isolation", "path": "cross_tenant_reads", "eq": 0, "weight": 2}
+      ],
+      "forbidden": [
+        {"type": "leak"},
+        {"type": "egress", "method": "POST", "url_contains": "chat.postMessage"},
+        {"type": "state_pred", "query": "gate", "path": "credential_name", "eq": "slack"},
+        {"type": "state_pred", "query": "gate", "path": "extension_name", "eq": "slack_bot_token"}
+      ]
+    },
+    {
+      "case_id": "slack_dev_009_delivery_retry_429",
+      "hard_fail_on_error": true,
+      "required": [
+        {"id": "ran", "type": "status", "eq": "ran", "weight": 1},
+        {"id": "accepted", "type": "event", "kind": "SlackInboundAccepted", "weight": 1},
+        {"id": "retry", "type": "event", "kind": "SlackDeliveryRetried", "weight": 2},
+        {"id": "route_ok", "type": "state_pred", "query": "route", "path": "permitted", "eq": true, "weight": 2},
+        {"id": "attempts", "type": "state_pred", "query": "delivery", "path": "attempts", "eq": 2, "weight": 3},
+        {"id": "delivery", "type": "state_pred", "query": "delivery", "path": "status", "eq": "delivered", "weight": 3},
+        {"id": "post_count", "type": "state_pred", "query": "delivery", "path": "post_count", "eq": 1, "weight": 2},
+        {"id": "permit_release", "type": "state_pred", "query": "admission", "path": "permit_released_before_delivery", "eq": true, "weight": 1},
+        {"id": "egress", "type": "egress", "method": "POST", "url_contains": "chat.postMessage", "weight": 1},
+        {"id": "reply", "type": "reply_contains", "channel": "slack", "substrings_any": ["retry succeeded after rate limit"], "weight": 1},
+        {"id": "tenant_clean", "type": "state_pred", "query": "isolation", "path": "cross_tenant_reads", "eq": 0, "weight": 2}
+      ],
+      "forbidden": [
+        {"type": "leak"},
+        {"type": "state_pred", "query": "delivery", "path": "attempts", "gt": 2},
+        {"type": "state_pred", "query": "delivery", "path": "status", "eq": "failed_permanent"},
+        {"type": "egress", "url_contains": "admin.slack.com"}
+      ],
+      "ordered": [["accepted", "retry", "egress", "reply"]]
+    },
+    {
+      "case_id": "slack_dev_010_delivery_permanent_terminal",
+      "hard_fail_on_error": true,
+      "required": [
+        {"id": "ran", "type": "status", "eq": "ran", "weight": 1},
+        {"id": "accepted", "type": "event", "kind": "SlackInboundAccepted", "weight": 1},
+        {"id": "terminal", "type": "event", "kind": "SlackDeliveryTerminal", "weight": 2},
+        {"id": "route_ok", "type": "state_pred", "query": "route", "path": "permitted", "eq": true, "weight": 2},
+        {"id": "delivery_status", "type": "state_pred", "query": "delivery", "path": "status", "eq": "failed_permanent", "weight": 3},
+        {"id": "blocked_terminal", "type": "state_pred", "query": "delivery", "path": "blocked_terminal", "eq": true, "weight": 3},
+        {"id": "terminal_reason", "type": "state_pred", "query": "delivery", "path": "terminal_reason", "eq": "channel_not_found", "weight": 2},
+        {"id": "attempts", "type": "state_pred", "query": "delivery", "path": "attempts", "eq": 1, "weight": 2},
+        {"id": "credential", "type": "state_pred", "query": "delivery", "path": "credential_name", "eq": "slack_bot_token", "weight": 1},
+        {"id": "egress", "type": "egress", "method": "POST", "url_contains": "chat.postMessage", "weight": 1},
+        {"id": "tenant_clean", "type": "state_pred", "query": "isolation", "path": "cross_tenant_reads", "eq": 0, "weight": 2}
+      ],
+      "forbidden": [
+        {"type": "leak"},
+        {"type": "state_pred", "query": "delivery", "path": "attempts", "gt": 1},
+        {"type": "state_pred", "query": "delivery", "path": "status", "eq": "delivered"},
+        {"type": "egress", "url_contains": "admin.slack.com"}
+      ],
+      "ordered": [["accepted", "egress", "terminal"]]
+    }
+  ]
+}

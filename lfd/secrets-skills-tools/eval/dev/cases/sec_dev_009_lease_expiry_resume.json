@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "case_id": "sec_dev_009_lease_expiry_resume",
+  "profile": "secrets_skills_tools",
+  "title": "Expired lease parks the tool call and resumes with a fresh lease",
+  "setup": {
+    "extensions": ["pagerduty"],
+    "secrets": [{"credential_name": "pagerduty_api_key", "value": "lfd-dev-secret-pagerduty-100009"}],
+    "http_stubs": [{"key": "pagerduty.incidents", "status": 200, "body": {"ok": true}}],
+    "profile_extra": {
+      "scenario": "lease_expiry_resume",
+      "origin": "tool",
+      "actor": {"tenant_id": "T100009", "user_id": "U100009", "agent_id": "A100009"},
+      "extension_name": "pagerduty",
+      "credential_name": "pagerduty_api_key",
+      "capability_id": "cap-sec-dev-009",
+      "declaration": {"tool_name": "builtin.http_request", "allowed_hosts": ["api.pagerduty.dev.lfd"], "allowed_paths": ["/incidents"], "credential_target": {"type": "header", "name": "Authorization", "prefix": "Token token="}, "required": true},
+      "authorization": {"decision": "allow", "resume": "approved"},
+      "lease": {"mode": "expires_before_egress", "ttl_ms": 1},
+      "egress": {"method": "GET", "url": "https://api.pagerduty.dev.lfd/incidents", "expect_network_attempts": 1, "expect_credential_seen": true},
+      "attack": {"manual_auth_header": false, "wrong_host": false, "tool_output_echoes_secret": false}
+    }
+  },
+  "llm_script": [{"turn": 1, "steps": [{"tool": "builtin.http_request", "params": {"method": "GET", "url": "https://api.pagerduty.dev.lfd/incidents"}}, {"text": "The incident fetch resumed after credential reauthorization."}]}],
+  "inbound": [{"channel": "chat", "payload": {"text": "Fetch incidents even if the credential lease expires mid-run."}}],
+  "state_queries": [
+    {"id": "secret_meta", "kind": "secret_meta", "params": {"credential_name": "pagerduty_api_key", "extension_name": "pagerduty"}},
+    {"id": "credential_audit", "kind": "credential_audit", "params": {"capability_id": "cap-sec-dev-009"}},
+    {"id": "egress_capture", "kind": "egress_capture", "params": {"capability_id": "cap-sec-dev-009"}},
+    {"id": "lease_state", "kind": "lease_state", "params": {"capability_id": "cap-sec-dev-009"}},
+    {"id": "run_state", "kind": "run_state", "params": {"capability_id": "cap-sec-dev-009"}},
+    {"id": "redaction_scan", "kind": "redaction_scan", "params": {"capability_id": "cap-sec-dev-009"}}
+  ],
+  "live": false
+}

@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "case_id": "mem_place_dev_029",
+  "profile": "memory_placement",
+  "title": "native provider is selected by default when product supplies no override",
+  "setup": {
+    "extensions": [],
+    "secrets": [],
+    "memory_docs": [
+      {
+        "path": "notes/mpseed-beryl.md",
+        "content": "mpseed beryl default native"
+      }
+    ],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {
+      "scenario": "native_default_no_override",
+      "case_kind": "positive",
+      "provider": {
+        "default": "native",
+        "active": "native",
+        "compare_with": "native",
+        "fake_provider_pinned_in_support": true
+      },
+      "policy": {
+        "decision": "allow",
+        "constraints": []
+      },
+      "operation": {
+        "family": "read",
+        "target": "notes/mpseed-beryl.md"
+      },
+      "seed": {
+        "tenant_id": "T729MP",
+        "user_id": "U729MP",
+        "project_id": "proj-default",
+        "docs": [
+          {
+            "path": "notes/mpseed-beryl.md",
+            "content": "mpseed beryl default native"
+          }
+        ],
+        "versions": [],
+        "retention_records": []
+      },
+      "contract_markers": [
+        "mpseed-beryl",
+        "native-default-no-override",
+        "memory.document_written",
+        "memory.search_performed",
+        "memory.prompt_context_built",
+        "memory.provider_denied",
+        "memory.provider_constrained",
+        "memory.safety_rejected",
+        "memory.profile_updated",
+        "host-network/memory-embeddings",
+        "memory_provider_repository"
+      ]
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.memory_read",
+          "params": {
+            "path": "notes/mpseed-beryl.md"
+          }
+        },
+        {
+          "text": "memory placement scenario mem_place_dev_029 completed"
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "lfd_memory",
+      "payload": {
+        "text": "Execute native_default_no_override for lane 16 memory placement"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "boundary",
+      "kind": "memory_provider_boundary",
+      "params": {
+        "operation_ref": "native_default_no_override",
+        "provider": "native"
+      }
+    },
+    {
+      "id": "dependency",
+      "kind": "memory_dependency_boundary",
+      "params": {
+        "surface": "product"
+      }
+    }
+  ],
+  "live": false
+}

@@ -1,0 +1,180 @@
+{
+  "schema_version": 1,
+  "case_id": "cbt_dev_016_transform_temp_celsius",
+  "profile": "custom_build_tools",
+  "title": "weather wrapper transforms Fahrenheit to Celsius",
+  "setup": {
+    "extensions": [
+      "custom_tool_builder"
+    ],
+    "secrets": [
+      {
+        "credential_name": "weathermint_key",
+        "value": "test-secret-cbt_dev_016_transform_temp_celsius"
+      }
+    ],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [
+      {
+        "key": "WeatherMint.GET./weather/94107",
+        "status": 200,
+        "body": {
+          "temp_f": 68,
+          "condition": "fog"
+        }
+      }
+    ],
+    "profile_extra": {
+      "task": {
+        "request_id": "cbt_dev_016_transform_temp_celsius",
+        "shape": "credentialed_http_api_wrapper",
+        "mode": "create",
+        "user_request": "Build a credentialed HTTP API wrapper named weathermint_temp_celsius for WeatherMint. Use credential weathermint_key; call GET https://weathermint.cbt-dev.test/weather/94107; transform the provider response with fahrenheit_to_celsius.",
+        "api_docs": {
+          "service": "WeatherMint",
+          "base_url": "https://weathermint.cbt-dev.test",
+          "auth": {
+            "method": "api_key",
+            "placement": "query",
+            "query": "api_key",
+            "credential_name": "weathermint_key"
+          },
+          "operation": {
+            "method": "GET",
+            "path": "/weather/94107",
+            "input_schema": {
+              "type": "object",
+              "example": {
+                "postal": "94107"
+              }
+            },
+            "response_example": {
+              "temp_f": 68,
+              "condition": "fog"
+            },
+            "transform": "fahrenheit_to_celsius"
+          },
+          "sandbox": {
+            "network_allowlist": [
+              "weathermint.cbt-dev.test"
+            ],
+            "host_network": false,
+            "shell": false
+          }
+        },
+        "expected_tool_name": "weathermint_temp_celsius",
+        "invocation": {
+          "input": {
+            "postal": "94107"
+          }
+        },
+        "fake_api": {
+          "host": "weathermint.cbt-dev.test",
+          "method": "GET",
+          "path": "/weather/94107",
+          "response": {
+            "temp_f": 68,
+            "condition": "fog"
+          }
+        }
+      }
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.custom_tool.build_http_wrapper",
+          "params": {
+            "request_id": "cbt_dev_016_transform_temp_celsius",
+            "profile": "custom_build_tools"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.validate_artifact",
+          "params": {
+            "tool_name": "weathermint_temp_celsius"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.install",
+          "params": {
+            "tool_name": "weathermint_temp_celsius"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.invoke_generated_tool",
+          "params": {
+            "tool_name": "weathermint_temp_celsius",
+            "input": {
+              "postal": "94107"
+            }
+          }
+        },
+        {
+          "text": "Built and verified weathermint_temp_celsius."
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "text": "Build a credentialed HTTP API wrapper named weathermint_temp_celsius for WeatherMint. Use credential weathermint_key; call GET https://weathermint.cbt-dev.test/weather/94107; transform the provider response with fahrenheit_to_celsius.",
+        "user_id": "UCBT1001"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "spec",
+      "kind": "custom_tool_spec",
+      "params": {
+        "request_id": "cbt_dev_016_transform_temp_celsius",
+        "tool_name": "weathermint_temp_celsius"
+      }
+    },
+    {
+      "id": "artifact",
+      "kind": "tool_artifact",
+      "params": {
+        "request_id": "cbt_dev_016_transform_temp_celsius",
+        "tool_name": "weathermint_temp_celsius"
+      }
+    },
+    {
+      "id": "install",
+      "kind": "extension_lifecycle",
+      "params": {
+        "request_id": "cbt_dev_016_transform_temp_celsius",
+        "tool_name": "weathermint_temp_celsius"
+      }
+    },
+    {
+      "id": "invoke",
+      "kind": "generated_tool_invocation",
+      "params": {
+        "request_id": "cbt_dev_016_transform_temp_celsius",
+        "tool_name": "weathermint_temp_celsius"
+      }
+    },
+    {
+      "id": "diagnostic",
+      "kind": "tool_builder_diagnostic",
+      "params": {
+        "request_id": "cbt_dev_016_transform_temp_celsius"
+      }
+    },
+    {
+      "id": "network",
+      "kind": "fake_api_egress",
+      "params": {
+        "request_id": "cbt_dev_016_transform_temp_celsius"
+      }
+    }
+  ],
+  "live": false
+}

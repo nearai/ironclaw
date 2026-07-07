@@ -1,0 +1,106 @@
+{
+  "schema_version": 1,
+  "case_id": "mem_place_dev_013",
+  "profile": "memory_placement",
+  "title": "prompt context uses memory provider without gaining write authority",
+  "setup": {
+    "extensions": [],
+    "secrets": [],
+    "memory_docs": [
+      {
+        "path": "notes/mpseed-lambda.md",
+        "content": "mpseed lambda planning context"
+      }
+    ],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {
+      "scenario": "prompt_context_no_write",
+      "case_kind": "positive",
+      "provider": {
+        "default": "native",
+        "active": "native",
+        "compare_with": "native",
+        "fake_provider_pinned_in_support": true
+      },
+      "policy": {
+        "decision": "allow",
+        "constraints": []
+      },
+      "operation": {
+        "family": "prompt_context",
+        "query": "mpseed lambda planning context",
+        "target": "prompt/context"
+      },
+      "seed": {
+        "tenant_id": "T713MP",
+        "user_id": "U713MP",
+        "project_id": "proj-prompt",
+        "docs": [
+          {
+            "path": "notes/mpseed-lambda.md",
+            "content": "mpseed lambda planning context"
+          }
+        ],
+        "versions": [],
+        "retention_records": []
+      },
+      "contract_markers": [
+        "mpseed-lambda",
+        "prompt-context",
+        "memory.document_written",
+        "memory.search_performed",
+        "memory.prompt_context_built",
+        "memory.provider_denied",
+        "memory.provider_constrained",
+        "memory.safety_rejected",
+        "memory.profile_updated",
+        "host-network/memory-embeddings",
+        "memory_provider_repository"
+      ]
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "text": "memory placement scenario mem_place_dev_013 completed"
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "lfd_memory",
+      "payload": {
+        "text": "Execute prompt_context_no_write for lane 16 memory placement"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "boundary",
+      "kind": "memory_provider_boundary",
+      "params": {
+        "operation_ref": "prompt_context_no_write",
+        "provider": "native"
+      }
+    },
+    {
+      "id": "prompt",
+      "kind": "memory_prompt_boundary",
+      "params": {
+        "operation_ref": "prompt_context_no_write"
+      }
+    },
+    {
+      "id": "host",
+      "kind": "memory_host_mediation",
+      "params": {
+        "operation_ref": "prompt_context_no_write"
+      }
+    }
+  ],
+  "live": false
+}

@@ -1,0 +1,208 @@
+{
+  "case_id": "mis_dev_011_progress_partial_checkpoint",
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "request": {
+          "allowed_action_classes": [
+            "read_memory",
+            "fake_tool",
+            "write_checkpoint",
+            "schedule_routine",
+            "schedule_task"
+          ],
+          "budget": {
+            "model_call_limit": 72,
+            "requires_explicit_approval_for_overrun": true,
+            "usd_limit": 9,
+            "wall_clock_minutes": 180
+          },
+          "definition_of_done": "Cohort drift explanation includes warehouse query result and attribution note",
+          "forbidden_action_classes": [
+            "live_external_send",
+            "unapproved_paid_api"
+          ],
+          "goal": "Analyze Aurora weekly cohort drift",
+          "mission_kind": "finite",
+          "mission_ref": "partial-progress-20260714",
+          "trigger_ref": "trg-partial-progress-20260714",
+          "trigger_source": "manual"
+        },
+        "submitted_at": "2026-07-07T09:00:00Z",
+        "type": "mission_request",
+        "user_id": "U321217"
+      }
+    }
+  ],
+  "live": false,
+  "llm_script": [
+    {
+      "steps": [
+        {
+          "params": {
+            "definition_of_done": "Cohort drift explanation includes warehouse query result and attribution note",
+            "goal": "Analyze Aurora weekly cohort drift",
+            "kind": "finite",
+            "mission_ref": "partial-progress-20260714"
+          },
+          "tool": "mission.plan"
+        },
+        {
+          "params": {
+            "count": 2,
+            "mission_ref": "partial-progress-20260714"
+          },
+          "tool": "mission.schedule_task"
+        },
+        {
+          "params": {
+            "checkpoint_kind": "durable_progress",
+            "mission_ref": "partial-progress-20260714"
+          },
+          "tool": "mission.checkpoint"
+        },
+        {
+          "text": "Mission partial-progress-20260714: run warehouse query"
+        }
+      ],
+      "turn": 1
+    }
+  ],
+  "profile": "missions",
+  "schema_version": 1,
+  "setup": {
+    "extensions": [],
+    "http_stubs": [
+      {
+        "body": {
+          "ok": true
+        },
+        "key": "fake.mission_tool",
+        "status": 200
+      }
+    ],
+    "memory_docs": [
+      {
+        "content": "lfdmission analytics: compare Monday cohort deltas, explain attribution drift, and checkpoint spend before warehouse queries.",
+        "path": "/projects/aurora-analytics/checks.md",
+        "title": "Aurora analytics checks"
+      }
+    ],
+    "profile_extra": {
+      "agent_id": "agent-missions",
+      "clock_start": "2026-07-07T09:00:00Z",
+      "expected_failure_direction": false,
+      "mission_ref": "partial-progress-20260714",
+      "mission_request": {
+        "allowed_action_classes": [
+          "read_memory",
+          "fake_tool",
+          "write_checkpoint",
+          "schedule_routine",
+          "schedule_task"
+        ],
+        "budget": {
+          "model_call_limit": 72,
+          "requires_explicit_approval_for_overrun": true,
+          "usd_limit": 9,
+          "wall_clock_minutes": 180
+        },
+        "definition_of_done": "Cohort drift explanation includes warehouse query result and attribution note",
+        "forbidden_action_classes": [
+          "live_external_send",
+          "unapproved_paid_api"
+        ],
+        "goal": "Analyze Aurora weekly cohort drift",
+        "mission_kind": "finite",
+        "mission_ref": "partial-progress-20260714",
+        "trigger_ref": "trg-partial-progress-20260714",
+        "trigger_source": "manual"
+      },
+      "project_id": "project-analytics",
+      "tenant_id": "tenant-lfdmission-blue",
+      "timeline": [
+        {
+          "at": "2026-07-07T09:00:00Z",
+          "mission_ref": "partial-progress-20260714",
+          "op": "mission_request"
+        },
+        {
+          "at": "2026-07-07T09:00:00Z",
+          "fire_slot": "2026-07-07T09:00:00Z",
+          "op": "fire_trigger",
+          "trigger_ref": "trg-partial-progress-20260714"
+        }
+      ]
+    },
+    "secrets": [],
+    "triggers": [
+      {
+        "completion_policy": "complete_after_done",
+        "mission_ref": "partial-progress-20260714",
+        "source": "manual",
+        "trigger_ref": "trg-partial-progress-20260714"
+      }
+    ]
+  },
+  "state_queries": [
+    {
+      "id": "mission",
+      "kind": "mission_record",
+      "params": {
+        "mission_ref": "partial-progress-20260714"
+      }
+    },
+    {
+      "id": "plan",
+      "kind": "mission_plan",
+      "params": {
+        "mission_ref": "partial-progress-20260714"
+      }
+    },
+    {
+      "id": "checkpoints",
+      "kind": "checkpoint_log",
+      "params": {
+        "mission_ref": "partial-progress-20260714"
+      }
+    },
+    {
+      "id": "budget",
+      "kind": "budget_ledger",
+      "params": {
+        "mission_ref": "partial-progress-20260714"
+      }
+    },
+    {
+      "id": "decisions",
+      "kind": "scheduler_decisions",
+      "params": {
+        "mission_ref": "partial-progress-20260714"
+      }
+    },
+    {
+      "id": "prompt",
+      "kind": "prompt_envelope",
+      "params": {
+        "fire_index": 1,
+        "mission_ref": "partial-progress-20260714"
+      }
+    },
+    {
+      "id": "progress",
+      "kind": "mission_progress",
+      "params": {
+        "mission_ref": "partial-progress-20260714"
+      }
+    },
+    {
+      "id": "status",
+      "kind": "status_report",
+      "params": {
+        "mission_ref": "partial-progress-20260714"
+      }
+    }
+  ],
+  "title": "partial progress writes durable checkpoint and visible status before continuing"
+}

@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "case_id": "mem_place_dev_027",
+  "profile": "memory_placement",
+  "title": "protected prompt-file write is safety rejected through host boundary",
+  "setup": {
+    "extensions": [],
+    "secrets": [],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {
+      "scenario": "protected_prompt_write_rejected",
+      "case_kind": "failure_denial",
+      "provider": {
+        "default": "native",
+        "active": "native",
+        "compare_with": "native",
+        "fake_provider_pinned_in_support": true
+      },
+      "policy": {
+        "decision": "deny",
+        "constraints": [
+          "prompt_safety"
+        ],
+        "denial_reason": "prompt_safety"
+      },
+      "operation": {
+        "family": "write",
+        "target": "SOUL.md",
+        "content": "mpseed zulu prompt mutation",
+        "append": false
+      },
+      "seed": {
+        "tenant_id": "T727MP",
+        "user_id": "U727MP",
+        "project_id": "proj-prompt-safety",
+        "docs": [],
+        "versions": [],
+        "retention_records": []
+      },
+      "contract_markers": [
+        "mpseed-zulu",
+        "prompt-safety",
+        "memory.document_written",
+        "memory.search_performed",
+        "memory.prompt_context_built",
+        "memory.provider_denied",
+        "memory.provider_constrained",
+        "memory.safety_rejected",
+        "memory.profile_updated",
+        "host-network/memory-embeddings",
+        "memory_provider_repository"
+      ]
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.memory_write",
+          "params": {
+            "target": "SOUL.md",
+            "content": "mpseed zulu prompt mutation",
+            "append": false
+          }
+        },
+        {
+          "text": "memory placement scenario mem_place_dev_027 completed"
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "lfd_memory",
+      "payload": {
+        "text": "Execute protected_prompt_write_rejected for lane 16 memory placement"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "policy",
+      "kind": "memory_policy_decision",
+      "params": {
+        "operation_ref": "protected_prompt_write_rejected"
+      }
+    },
+    {
+      "id": "prompt",
+      "kind": "memory_prompt_boundary",
+      "params": {
+        "operation_ref": "protected_prompt_write_rejected"
+      }
+    },
+    {
+      "id": "host",
+      "kind": "memory_host_mediation",
+      "params": {
+        "operation_ref": "protected_prompt_write_rejected"
+      }
+    }
+  ],
+  "live": false
+}

@@ -1,0 +1,232 @@
+{
+  "case_id": "mis_dev_030_meta_prompt_uses_updated_memory",
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "request": {
+          "allowed_action_classes": [
+            "read_memory",
+            "fake_tool",
+            "write_checkpoint",
+            "schedule_routine",
+            "schedule_task"
+          ],
+          "budget": {
+            "model_call_limit": 64,
+            "requires_explicit_approval_for_overrun": true,
+            "usd_limit": 8,
+            "wall_clock_minutes": 160
+          },
+          "definition_of_done": "Second fire prompt includes newly written learning and changes next focus",
+          "forbidden_action_classes": [
+            "live_external_send",
+            "unapproved_paid_api"
+          ],
+          "goal": "Adapt Solstice content experiments using latest memory",
+          "mission_kind": "standing",
+          "mission_ref": "updated-memory-20260723",
+          "trigger_ref": "trg-updated-memory-20260723",
+          "trigger_source": "cron"
+        },
+        "submitted_at": "2026-07-07T09:00:00Z",
+        "type": "mission_request",
+        "user_id": "U545830"
+      }
+    },
+    {
+      "channel": "scheduler",
+      "payload": {
+        "fire_slot": "2026-07-07T09:00:00Z",
+        "mission_ref": "updated-memory-20260723",
+        "trigger_ref": "trg-updated-memory-20260723",
+        "type": "trigger_fire"
+      }
+    }
+  ],
+  "live": false,
+  "llm_script": [
+    {
+      "steps": [
+        {
+          "params": {
+            "definition_of_done": "Second fire prompt includes newly written learning and changes next focus",
+            "goal": "Adapt Solstice content experiments using latest memory",
+            "kind": "standing",
+            "mission_ref": "updated-memory-20260723"
+          },
+          "tool": "mission.plan"
+        },
+        {
+          "params": {
+            "count": 1,
+            "mission_ref": "updated-memory-20260723",
+            "trigger_ref": "trg-updated-memory-20260723"
+          },
+          "tool": "mission.schedule_routine"
+        },
+        {
+          "params": {
+            "count": 1,
+            "mission_ref": "updated-memory-20260723"
+          },
+          "tool": "mission.schedule_task"
+        },
+        {
+          "params": {
+            "mission_ref": "updated-memory-20260723",
+            "next_focus": "adapt to latest memory"
+          },
+          "tool": "mission.update_next_focus"
+        },
+        {
+          "params": {
+            "checkpoint_kind": "durable_progress",
+            "mission_ref": "updated-memory-20260723"
+          },
+          "tool": "mission.checkpoint"
+        },
+        {
+          "text": "Mission updated-memory-20260723: adapt to latest memory"
+        }
+      ],
+      "turn": 1
+    }
+  ],
+  "profile": "missions",
+  "schema_version": 1,
+  "setup": {
+    "extensions": [],
+    "http_stubs": [
+      {
+        "body": {
+          "ok": true
+        },
+        "key": "fake.mission_tool",
+        "status": 200
+      }
+    ],
+    "memory_docs": [
+      {
+        "content": "lfdmission follower growth: compare creator interviews, avoid bought followers, and prefer weekly learning checkpoints over vanity metrics.",
+        "path": "/projects/solstice-growth/notes/audience.md",
+        "title": "Solstice audience constraints"
+      }
+    ],
+    "profile_extra": {
+      "agent_id": "agent-missions",
+      "clock_start": "2026-07-07T09:00:00Z",
+      "expected_failure_direction": false,
+      "mission_ref": "updated-memory-20260723",
+      "mission_request": {
+        "allowed_action_classes": [
+          "read_memory",
+          "fake_tool",
+          "write_checkpoint",
+          "schedule_routine",
+          "schedule_task"
+        ],
+        "budget": {
+          "model_call_limit": 64,
+          "requires_explicit_approval_for_overrun": true,
+          "usd_limit": 8,
+          "wall_clock_minutes": 160
+        },
+        "definition_of_done": "Second fire prompt includes newly written learning and changes next focus",
+        "forbidden_action_classes": [
+          "live_external_send",
+          "unapproved_paid_api"
+        ],
+        "goal": "Adapt Solstice content experiments using latest memory",
+        "mission_kind": "standing",
+        "mission_ref": "updated-memory-20260723",
+        "trigger_ref": "trg-updated-memory-20260723",
+        "trigger_source": "cron"
+      },
+      "project_id": "project-growth",
+      "tenant_id": "tenant-lfdmission-blue",
+      "timeline": [
+        {
+          "at": "2026-07-07T09:00:00Z",
+          "mission_ref": "updated-memory-20260723",
+          "op": "mission_request"
+        },
+        {
+          "at": "2026-07-07T09:00:00Z",
+          "fire_slot": "2026-07-07T09:00:00Z",
+          "op": "fire_trigger",
+          "trigger_ref": "trg-updated-memory-20260723"
+        }
+      ]
+    },
+    "secrets": [],
+    "triggers": [
+      {
+        "completion_policy": "recurring",
+        "mission_ref": "updated-memory-20260723",
+        "source": "cron",
+        "trigger_ref": "trg-updated-memory-20260723"
+      }
+    ]
+  },
+  "state_queries": [
+    {
+      "id": "mission",
+      "kind": "mission_record",
+      "params": {
+        "mission_ref": "updated-memory-20260723"
+      }
+    },
+    {
+      "id": "plan",
+      "kind": "mission_plan",
+      "params": {
+        "mission_ref": "updated-memory-20260723"
+      }
+    },
+    {
+      "id": "checkpoints",
+      "kind": "checkpoint_log",
+      "params": {
+        "mission_ref": "updated-memory-20260723"
+      }
+    },
+    {
+      "id": "budget",
+      "kind": "budget_ledger",
+      "params": {
+        "mission_ref": "updated-memory-20260723"
+      }
+    },
+    {
+      "id": "decisions",
+      "kind": "scheduler_decisions",
+      "params": {
+        "mission_ref": "updated-memory-20260723"
+      }
+    },
+    {
+      "id": "prompt",
+      "kind": "prompt_envelope",
+      "params": {
+        "fire_index": 1,
+        "mission_ref": "updated-memory-20260723"
+      }
+    },
+    {
+      "id": "progress",
+      "kind": "mission_progress",
+      "params": {
+        "mission_ref": "updated-memory-20260723"
+      }
+    },
+    {
+      "id": "status",
+      "kind": "status_report",
+      "params": {
+        "mission_ref": "updated-memory-20260723"
+      }
+    }
+  ],
+  "title": "second fire uses updated memory summary rather than static meta-prompt"
+}

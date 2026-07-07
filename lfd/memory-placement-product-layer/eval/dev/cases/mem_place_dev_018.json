@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "case_id": "mem_place_dev_018",
+  "profile": "memory_placement",
+  "title": "search result shape preserved without return-everything shortcut",
+  "setup": {
+    "extensions": [],
+    "secrets": [],
+    "memory_docs": [
+      {
+        "path": "notes/mpseed-quebec.md",
+        "content": "mpseed quebec precise result"
+      },
+      {
+        "path": "notes/mpseed-quebec-distractor.md",
+        "content": "unrelated distractor"
+      }
+    ],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {
+      "scenario": "native_search_result_shape",
+      "case_kind": "positive",
+      "provider": {
+        "default": "native",
+        "active": "native",
+        "compare_with": "native",
+        "fake_provider_pinned_in_support": true
+      },
+      "policy": {
+        "decision": "allow",
+        "constraints": []
+      },
+      "operation": {
+        "family": "search",
+        "query": "mpseed quebec precise result",
+        "target": "memory/search"
+      },
+      "seed": {
+        "tenant_id": "T718MP",
+        "user_id": "U718MP",
+        "project_id": "proj-search",
+        "docs": [
+          {
+            "path": "notes/mpseed-quebec.md",
+            "content": "mpseed quebec precise result"
+          },
+          {
+            "path": "notes/mpseed-quebec-distractor.md",
+            "content": "unrelated distractor"
+          }
+        ],
+        "versions": [],
+        "retention_records": []
+      },
+      "contract_markers": [
+        "mpseed-quebec",
+        "search-result-shape",
+        "memory.document_written",
+        "memory.search_performed",
+        "memory.prompt_context_built",
+        "memory.provider_denied",
+        "memory.provider_constrained",
+        "memory.safety_rejected",
+        "memory.profile_updated",
+        "host-network/memory-embeddings",
+        "memory_provider_repository"
+      ]
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.memory_search",
+          "params": {
+            "query": "mpseed quebec precise result",
+            "limit": 3
+          }
+        },
+        {
+          "text": "memory placement scenario mem_place_dev_018 completed"
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "lfd_memory",
+      "payload": {
+        "text": "Execute native_search_result_shape for lane 16 memory placement"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "boundary",
+      "kind": "memory_provider_boundary",
+      "params": {
+        "operation_ref": "native_search_result_shape",
+        "provider": "native"
+      }
+    },
+    {
+      "id": "host",
+      "kind": "memory_host_mediation",
+      "params": {
+        "operation_ref": "native_search_result_shape"
+      }
+    }
+  ],
+  "live": false
+}

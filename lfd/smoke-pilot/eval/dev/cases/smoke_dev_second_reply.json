@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "case_id": "smoke_dev_second_reply",
+  "profile": "smoke_builtin_tools",
+  "title": "second scripted text reply proves batch execution",
+  "setup": {},
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "text": "second smoke reply complete"
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "pilot",
+      "payload": {
+        "text": "please produce the second smoke reply"
+      }
+    }
+  ],
+  "state_queries": [],
+  "live": false
+}

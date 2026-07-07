@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "case_id": "mig_dev_edge_legacy_enum",
+  "profile": "migration",
+  "title": "legacy enum value degrades and is enumerated",
+  "setup": {
+    "secrets": [],
+    "profile_extra": {
+      "seed": {
+        "backend": "libsql",
+        "users": [
+          {
+            "ref": "u1",
+            "user_id": "ben",
+            "email": "ben@lfdseed.example",
+            "display_name": "Boran",
+            "identities": [],
+            "channels": []
+          }
+        ],
+        "conversations": [],
+        "routines": [
+          {
+            "ref": "r1",
+            "name": "legacy-r",
+            "user": "u1",
+            "trigger": {
+              "kind": "cron",
+              "expr": "0 9 * * *",
+              "tz": "UTC"
+            },
+            "action": "lightweight",
+            "enabled": true,
+            "status": "legacy_enum",
+            "runs": 0
+          }
+        ],
+        "missions": [],
+        "memory_docs": [],
+        "settings": [],
+        "secrets": [],
+        "jobs": [],
+        "extensions": []
+      },
+      "run": {
+        "mode": "wet"
+      }
+    }
+  },
+  "state_queries": [
+    {
+      "id": "v1_intact",
+      "kind": "v1_db_digest",
+      "params": {}
+    },
+    {
+      "id": "recon",
+      "kind": "migration_report",
+      "params": {
+        "run": "wet",
+        "view": "reconciliation"
+      }
+    },
+    {
+      "id": "lossy",
+      "kind": "migration_report",
+      "params": {
+        "run": "wet",
+        "view": "lossy"
+      }
+    },
+    {
+      "id": "proj_triggers",
+      "kind": "migration_projection",
+      "params": {
+        "domain": "triggers"
+      }
+    }
+  ],
+  "live": false
+}

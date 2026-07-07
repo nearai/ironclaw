@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "case_id": "mem_place_dev_028",
+  "profile": "memory_placement",
+  "title": "unsupported embeddings skip indexing without provider direct egress",
+  "setup": {
+    "extensions": [],
+    "secrets": [],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {
+      "scenario": "unsupported_embeddings_index_skipped",
+      "case_kind": "failure_denial",
+      "provider": {
+        "default": "native",
+        "active": "native",
+        "compare_with": "native",
+        "fake_provider_pinned_in_support": true
+      },
+      "policy": {
+        "decision": "constrain",
+        "constraints": [
+          "no_embeddings"
+        ],
+        "denial_reason": "no_embeddings"
+      },
+      "operation": {
+        "family": "write",
+        "target": "notes/mpseed-amber.md",
+        "content": "mpseed amber indexing disabled",
+        "append": false
+      },
+      "seed": {
+        "tenant_id": "T728MP",
+        "user_id": "U728MP",
+        "project_id": "proj-index-skip",
+        "docs": [],
+        "versions": [],
+        "retention_records": []
+      },
+      "contract_markers": [
+        "mpseed-amber",
+        "index-skipped",
+        "memory.document_written",
+        "memory.search_performed",
+        "memory.prompt_context_built",
+        "memory.provider_denied",
+        "memory.provider_constrained",
+        "memory.safety_rejected",
+        "memory.profile_updated",
+        "host-network/memory-embeddings",
+        "memory_provider_repository"
+      ]
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.memory_write",
+          "params": {
+            "target": "notes/mpseed-amber.md",
+            "content": "mpseed amber indexing disabled",
+            "append": false
+          }
+        },
+        {
+          "text": "memory placement scenario mem_place_dev_028 completed"
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "lfd_memory",
+      "payload": {
+        "text": "Execute unsupported_embeddings_index_skipped for lane 16 memory placement"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "policy",
+      "kind": "memory_policy_decision",
+      "params": {
+        "operation_ref": "unsupported_embeddings_index_skipped"
+      }
+    },
+    {
+      "id": "host",
+      "kind": "memory_host_mediation",
+      "params": {
+        "operation_ref": "unsupported_embeddings_index_skipped"
+      }
+    },
+    {
+      "id": "storage",
+      "kind": "memory_storage_placement",
+      "params": {
+        "operation_ref": "unsupported_embeddings_index_skipped"
+      }
+    }
+  ],
+  "live": false
+}

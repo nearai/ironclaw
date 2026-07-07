@@ -1,0 +1,182 @@
+{
+  "case_id": "mis_dev_018_missing_budget_denied",
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "request": {
+          "allowed_action_classes": [
+            "read_memory",
+            "fake_tool",
+            "write_checkpoint",
+            "schedule_routine",
+            "schedule_task"
+          ],
+          "budget": null,
+          "definition_of_done": "Request is rejected until a budget and resources are supplied",
+          "forbidden_action_classes": [
+            "live_external_send",
+            "unapproved_paid_api"
+          ],
+          "goal": "Track Acme support queue without a budget",
+          "mission_kind": "finite",
+          "mission_ref": "missing-budget-20260717",
+          "trigger_ref": "trg-missing-budget-20260717",
+          "trigger_source": "manual"
+        },
+        "submitted_at": "2026-07-07T09:00:00Z",
+        "type": "mission_request",
+        "user_id": "U609898"
+      }
+    }
+  ],
+  "live": false,
+  "llm_script": [
+    {
+      "steps": [
+        {
+          "params": {
+            "mission_ref": "missing-budget-20260717",
+            "reason": "missing_budget"
+          },
+          "tool": "mission.deny_request"
+        },
+        {
+          "text": "Mission missing-budget-20260717: ask for budget"
+        }
+      ],
+      "turn": 1
+    }
+  ],
+  "profile": "missions",
+  "schema_version": 1,
+  "setup": {
+    "extensions": [],
+    "http_stubs": [
+      {
+        "body": {
+          "ok": true
+        },
+        "key": "fake.mission_tool",
+        "status": 200
+      }
+    ],
+    "memory_docs": [
+      {
+        "content": "lfdmission support triage: prioritize P0 refunds, escalate API outage tickets within 15 minutes, and summarize stale VIP threads before outreach.",
+        "path": "/projects/acme-support/playbooks/triage-sla.md",
+        "title": "Acme support queue SLA playbook"
+      }
+    ],
+    "profile_extra": {
+      "agent_id": "agent-missions",
+      "clock_start": "2026-07-07T09:00:00Z",
+      "expected_failure_direction": true,
+      "mission_ref": "missing-budget-20260717",
+      "mission_request": {
+        "allowed_action_classes": [
+          "read_memory",
+          "fake_tool",
+          "write_checkpoint",
+          "schedule_routine",
+          "schedule_task"
+        ],
+        "budget": null,
+        "definition_of_done": "Request is rejected until a budget and resources are supplied",
+        "forbidden_action_classes": [
+          "live_external_send",
+          "unapproved_paid_api"
+        ],
+        "goal": "Track Acme support queue without a budget",
+        "mission_kind": "finite",
+        "mission_ref": "missing-budget-20260717",
+        "trigger_ref": "trg-missing-budget-20260717",
+        "trigger_source": "manual"
+      },
+      "project_id": "project-support",
+      "tenant_id": "tenant-lfdmission-blue",
+      "timeline": [
+        {
+          "at": "2026-07-07T09:00:00Z",
+          "mission_ref": "missing-budget-20260717",
+          "op": "mission_request"
+        },
+        {
+          "at": "2026-07-07T09:00:00Z",
+          "fire_slot": "2026-07-07T09:00:00Z",
+          "op": "fire_trigger",
+          "trigger_ref": "trg-missing-budget-20260717"
+        }
+      ]
+    },
+    "secrets": [],
+    "triggers": [
+      {
+        "completion_policy": "complete_after_done",
+        "mission_ref": "missing-budget-20260717",
+        "source": "manual",
+        "trigger_ref": "trg-missing-budget-20260717"
+      }
+    ]
+  },
+  "state_queries": [
+    {
+      "id": "mission",
+      "kind": "mission_record",
+      "params": {
+        "mission_ref": "missing-budget-20260717"
+      }
+    },
+    {
+      "id": "plan",
+      "kind": "mission_plan",
+      "params": {
+        "mission_ref": "missing-budget-20260717"
+      }
+    },
+    {
+      "id": "checkpoints",
+      "kind": "checkpoint_log",
+      "params": {
+        "mission_ref": "missing-budget-20260717"
+      }
+    },
+    {
+      "id": "budget",
+      "kind": "budget_ledger",
+      "params": {
+        "mission_ref": "missing-budget-20260717"
+      }
+    },
+    {
+      "id": "decisions",
+      "kind": "scheduler_decisions",
+      "params": {
+        "mission_ref": "missing-budget-20260717"
+      }
+    },
+    {
+      "id": "prompt",
+      "kind": "prompt_envelope",
+      "params": {
+        "fire_index": 1,
+        "mission_ref": "missing-budget-20260717"
+      }
+    },
+    {
+      "id": "progress",
+      "kind": "mission_progress",
+      "params": {
+        "mission_ref": "missing-budget-20260717"
+      }
+    },
+    {
+      "id": "status",
+      "kind": "status_report",
+      "params": {
+        "mission_ref": "missing-budget-20260717"
+      }
+    }
+  ],
+  "title": "mission creation without budget is denied before scheduling"
+}

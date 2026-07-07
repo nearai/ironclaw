@@ -1,0 +1,178 @@
+{
+  "schema_version": 1,
+  "case_id": "cbt_dev_020_csv_response_to_json",
+  "profile": "custom_build_tools",
+  "title": "CSV response wrapper parses rows into JSON totals",
+  "setup": {
+    "extensions": [
+      "custom_tool_builder"
+    ],
+    "secrets": [
+      {
+        "credential_name": "csvledger_token",
+        "value": "test-secret-cbt_dev_020_csv_response_to_json"
+      }
+    ],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [
+      {
+        "key": "CsvLedger.GET./export.csv",
+        "status": 200,
+        "body": {
+          "csv": "name,amount\na,4\nb,9\n"
+        }
+      }
+    ],
+    "profile_extra": {
+      "task": {
+        "request_id": "cbt_dev_020_csv_response_to_json",
+        "shape": "credentialed_http_api_wrapper",
+        "mode": "create",
+        "user_request": "Build a credentialed HTTP API wrapper named csvledger_totals for CsvLedger. Use credential csvledger_token; call GET https://csvledger.cbt-dev.test/export.csv; transform the provider response with csv_sum.",
+        "api_docs": {
+          "service": "CsvLedger",
+          "base_url": "https://csvledger.cbt-dev.test",
+          "auth": {
+            "method": "bearer",
+            "placement": "header",
+            "header": "Authorization",
+            "prefix": "Bearer ",
+            "credential_name": "csvledger_token"
+          },
+          "operation": {
+            "method": "GET",
+            "path": "/export.csv",
+            "input_schema": {
+              "type": "object",
+              "example": {
+                "account": "ops"
+              }
+            },
+            "response_example": {
+              "csv": "name,amount\na,4\nb,9\n"
+            },
+            "transform": "csv_sum"
+          },
+          "sandbox": {
+            "network_allowlist": [
+              "csvledger.cbt-dev.test"
+            ],
+            "host_network": false,
+            "shell": false
+          }
+        },
+        "expected_tool_name": "csvledger_totals",
+        "invocation": {
+          "input": {
+            "account": "ops"
+          }
+        },
+        "fake_api": {
+          "host": "csvledger.cbt-dev.test",
+          "method": "GET",
+          "path": "/export.csv",
+          "response": {
+            "csv": "name,amount\na,4\nb,9\n"
+          }
+        }
+      }
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.custom_tool.build_http_wrapper",
+          "params": {
+            "request_id": "cbt_dev_020_csv_response_to_json",
+            "profile": "custom_build_tools"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.validate_artifact",
+          "params": {
+            "tool_name": "csvledger_totals"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.install",
+          "params": {
+            "tool_name": "csvledger_totals"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.invoke_generated_tool",
+          "params": {
+            "tool_name": "csvledger_totals",
+            "input": {
+              "account": "ops"
+            }
+          }
+        },
+        {
+          "text": "Built and verified csvledger_totals."
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "text": "Build a credentialed HTTP API wrapper named csvledger_totals for CsvLedger. Use credential csvledger_token; call GET https://csvledger.cbt-dev.test/export.csv; transform the provider response with csv_sum.",
+        "user_id": "UCBT1001"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "spec",
+      "kind": "custom_tool_spec",
+      "params": {
+        "request_id": "cbt_dev_020_csv_response_to_json",
+        "tool_name": "csvledger_totals"
+      }
+    },
+    {
+      "id": "artifact",
+      "kind": "tool_artifact",
+      "params": {
+        "request_id": "cbt_dev_020_csv_response_to_json",
+        "tool_name": "csvledger_totals"
+      }
+    },
+    {
+      "id": "install",
+      "kind": "extension_lifecycle",
+      "params": {
+        "request_id": "cbt_dev_020_csv_response_to_json",
+        "tool_name": "csvledger_totals"
+      }
+    },
+    {
+      "id": "invoke",
+      "kind": "generated_tool_invocation",
+      "params": {
+        "request_id": "cbt_dev_020_csv_response_to_json",
+        "tool_name": "csvledger_totals"
+      }
+    },
+    {
+      "id": "diagnostic",
+      "kind": "tool_builder_diagnostic",
+      "params": {
+        "request_id": "cbt_dev_020_csv_response_to_json"
+      }
+    },
+    {
+      "id": "network",
+      "kind": "fake_api_egress",
+      "params": {
+        "request_id": "cbt_dev_020_csv_response_to_json"
+      }
+    }
+  ],
+  "live": false
+}

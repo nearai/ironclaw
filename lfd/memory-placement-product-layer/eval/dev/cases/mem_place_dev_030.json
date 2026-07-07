@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "case_id": "mem_place_dev_030",
+  "profile": "memory_placement",
+  "title": "op-family parity covers write read search tree through one product path",
+  "setup": {
+    "extensions": [],
+    "secrets": [],
+    "memory_docs": [
+      {
+        "path": "notes/mpseed-cobalt.md",
+        "content": "mpseed cobalt family"
+      }
+    ],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {
+      "scenario": "op_family_boundary_parity",
+      "case_kind": "positive",
+      "provider": {
+        "default": "native",
+        "active": "fake_echo",
+        "compare_with": "native",
+        "fake_provider_pinned_in_support": true
+      },
+      "policy": {
+        "decision": "allow",
+        "constraints": []
+      },
+      "operation": {
+        "family": "multi_op",
+        "target": "notes/mpseed-cobalt.md",
+        "query": "mpseed cobalt family"
+      },
+      "seed": {
+        "tenant_id": "T730MP",
+        "user_id": "U730MP",
+        "project_id": "proj-family",
+        "docs": [
+          {
+            "path": "notes/mpseed-cobalt.md",
+            "content": "mpseed cobalt family"
+          }
+        ],
+        "versions": [],
+        "retention_records": []
+      },
+      "contract_markers": [
+        "mpseed-cobalt",
+        "op-family-parity",
+        "memory.document_written",
+        "memory.search_performed",
+        "memory.prompt_context_built",
+        "memory.provider_denied",
+        "memory.provider_constrained",
+        "memory.safety_rejected",
+        "memory.profile_updated",
+        "host-network/memory-embeddings",
+        "memory_provider_repository"
+      ]
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.memory_write",
+          "params": {
+            "target": "notes/mpseed-cobalt.md",
+            "content": "mpseed cobalt family",
+            "append": false
+          }
+        },
+        {
+          "text": "memory placement scenario mem_place_dev_030 completed"
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "lfd_memory",
+      "payload": {
+        "text": "Execute op_family_boundary_parity for lane 16 memory placement"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "boundary",
+      "kind": "memory_provider_boundary",
+      "params": {
+        "operation_ref": "op_family_boundary_parity",
+        "provider": "fake_echo"
+      }
+    },
+    {
+      "id": "parity",
+      "kind": "memory_provider_parity",
+      "params": {
+        "operation_ref": "op_family_boundary_parity",
+        "baseline_provider": "native",
+        "candidate_provider": "fake_echo"
+      }
+    },
+    {
+      "id": "host",
+      "kind": "memory_host_mediation",
+      "params": {
+        "operation_ref": "op_family_boundary_parity"
+      }
+    }
+  ],
+  "live": false
+}

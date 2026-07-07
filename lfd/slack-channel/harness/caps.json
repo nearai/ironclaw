@@ -1,0 +1,79 @@
+{
+  "_doc": {
+    "about": "Lane-03 Slack-channel lint/status config. Consumed by lfd/_shared/scorer/lint_core.py and status_core.py.",
+    "scope_note": "Capacity caps use scope=diff against base_ref so the optimizer is budgeted only on newly added product/test code. Eval-sensitive lint emits VOID only; detailed reports are written under LFD_STATE_ROOT outside the optimizer surface.",
+    "cap_rationale": {
+      "no_eval_case_id_branching": "Blocks branching on visible dev or holdout case ids.",
+      "no_slack_id_literals": "Blocks hardcoded Slack team/user/channel ids in product code; probe.sh renames these ids.",
+      "no_test_weakening_ignore": "Stage-0 tests may not be disabled.",
+      "no_test_weakening_cfg_never": "Stage-0 tests may not be cfg-disabled.",
+      "no_trusted_ingress_minting": "Product adapters and workflow code must not mint trusted inbound requests.",
+      "no_credential_extension_confusion": "Slack setup must keep credential_name=slack_bot_token distinct from extension_name=slack."
+    }
+  },
+  "schema_version": 1,
+  "base_ref": "4e9d81efc",
+  "caps": [
+    {
+      "name": "no_eval_case_id_branching",
+      "scope": "diff",
+      "paths": ["src/**/*.rs", "crates/**/*.rs", "tests/**/*.rs"],
+      "pattern": "slack_dev_|slack_hold_",
+      "max_count": 0
+    },
+    {
+      "name": "no_slack_id_literals",
+      "scope": "diff",
+      "paths": ["src/**/*.rs", "crates/**/*.rs"],
+      "pattern": "\\b[UTC][0-9A-Z]{7,}\\b",
+      "max_count": 0
+    },
+    {
+      "name": "no_test_weakening_ignore",
+      "scope": "diff",
+      "paths": [
+        "crates/ironclaw_slack_v2_adapter/**/*.rs",
+        "crates/ironclaw_reborn_composition/src/slack_*.rs",
+        "tests/**/*.rs"
+      ],
+      "pattern": "#\\[ignore",
+      "max_count": 0
+    },
+    {
+      "name": "no_test_weakening_cfg_never",
+      "scope": "diff",
+      "paths": [
+        "crates/ironclaw_slack_v2_adapter/**/*.rs",
+        "crates/ironclaw_reborn_composition/src/slack_*.rs",
+        "tests/**/*.rs"
+      ],
+      "pattern": "#\\[cfg\\(never\\)\\]",
+      "max_count": 0
+    },
+    {
+      "name": "no_trusted_ingress_minting",
+      "scope": "diff",
+      "paths": [
+        "crates/ironclaw_slack_v2_adapter/**/*.rs",
+        "crates/ironclaw_reborn_composition/src/slack_*.rs",
+        "crates/ironclaw_product_workflow/**/*.rs",
+        "crates/ironclaw_product_adapters/**/*.rs"
+      ],
+      "pattern": "TrustedInboundTurnRequest|trusted_trigger_submitter|mint_trusted",
+      "max_count": 0
+    },
+    {
+      "name": "no_credential_extension_confusion",
+      "scope": "diff",
+      "paths": [
+        "crates/ironclaw_reborn_composition/src/slack_*.rs",
+        "crates/ironclaw_slack_v2_adapter/**/*.rs",
+        "tests/**/*.rs"
+      ],
+      "pattern": "extension_name[^\\n]{0,80}slack_bot_token|credential_name[^\\n]{0,80}\\bslack\\b",
+      "max_count": 0
+    }
+  ],
+  "holdout_canaries": ["LFDH-slack-channel-8f14a6d39c2b507e"],
+  "spend_ceiling_usd": 15.0
+}

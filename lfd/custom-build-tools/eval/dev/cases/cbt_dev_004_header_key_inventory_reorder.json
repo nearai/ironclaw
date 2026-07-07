@@ -1,0 +1,186 @@
+{
+  "schema_version": 1,
+  "case_id": "cbt_dev_004_header_key_inventory_reorder",
+  "profile": "custom_build_tools",
+  "title": "header api-key wrapper computes reorder recommendation",
+  "setup": {
+    "extensions": [
+      "custom_tool_builder"
+    ],
+    "secrets": [
+      {
+        "credential_name": "stockpilot_api_key",
+        "value": "test-secret-cbt_dev_004_header_key_inventory_reorder"
+      }
+    ],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [
+      {
+        "key": "StockPilot.GET./inventory/sku-44",
+        "status": 200,
+        "body": {
+          "sku": "sku-44",
+          "on_hand": 17,
+          "incoming": 8
+        }
+      }
+    ],
+    "profile_extra": {
+      "task": {
+        "request_id": "cbt_dev_004_header_key_inventory_reorder",
+        "shape": "credentialed_http_api_wrapper",
+        "mode": "create",
+        "user_request": "Build a credentialed HTTP API wrapper named stockpilot_reorder for StockPilot. Use credential stockpilot_api_key; call GET https://stockpilot.cbt-dev.test/inventory/sku-44; transform the provider response with reorder_delta.",
+        "api_docs": {
+          "service": "StockPilot",
+          "base_url": "https://stockpilot.cbt-dev.test",
+          "auth": {
+            "method": "api_key",
+            "placement": "header",
+            "header": "X-API-Key",
+            "credential_name": "stockpilot_api_key"
+          },
+          "operation": {
+            "method": "GET",
+            "path": "/inventory/sku-44",
+            "input_schema": {
+              "type": "object",
+              "example": {
+                "sku": "sku-44",
+                "target": 50
+              }
+            },
+            "response_example": {
+              "sku": "sku-44",
+              "on_hand": 17,
+              "incoming": 8
+            },
+            "transform": "reorder_delta"
+          },
+          "sandbox": {
+            "network_allowlist": [
+              "stockpilot.cbt-dev.test"
+            ],
+            "host_network": false,
+            "shell": false
+          }
+        },
+        "expected_tool_name": "stockpilot_reorder",
+        "invocation": {
+          "input": {
+            "sku": "sku-44",
+            "target": 50
+          }
+        },
+        "fake_api": {
+          "host": "stockpilot.cbt-dev.test",
+          "method": "GET",
+          "path": "/inventory/sku-44",
+          "response": {
+            "sku": "sku-44",
+            "on_hand": 17,
+            "incoming": 8
+          }
+        }
+      }
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.custom_tool.build_http_wrapper",
+          "params": {
+            "request_id": "cbt_dev_004_header_key_inventory_reorder",
+            "profile": "custom_build_tools"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.validate_artifact",
+          "params": {
+            "tool_name": "stockpilot_reorder"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.install",
+          "params": {
+            "tool_name": "stockpilot_reorder"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.invoke_generated_tool",
+          "params": {
+            "tool_name": "stockpilot_reorder",
+            "input": {
+              "sku": "sku-44",
+              "target": 50
+            }
+          }
+        },
+        {
+          "text": "Built and verified stockpilot_reorder."
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "text": "Build a credentialed HTTP API wrapper named stockpilot_reorder for StockPilot. Use credential stockpilot_api_key; call GET https://stockpilot.cbt-dev.test/inventory/sku-44; transform the provider response with reorder_delta.",
+        "user_id": "UCBT1001"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "spec",
+      "kind": "custom_tool_spec",
+      "params": {
+        "request_id": "cbt_dev_004_header_key_inventory_reorder",
+        "tool_name": "stockpilot_reorder"
+      }
+    },
+    {
+      "id": "artifact",
+      "kind": "tool_artifact",
+      "params": {
+        "request_id": "cbt_dev_004_header_key_inventory_reorder",
+        "tool_name": "stockpilot_reorder"
+      }
+    },
+    {
+      "id": "install",
+      "kind": "extension_lifecycle",
+      "params": {
+        "request_id": "cbt_dev_004_header_key_inventory_reorder",
+        "tool_name": "stockpilot_reorder"
+      }
+    },
+    {
+      "id": "invoke",
+      "kind": "generated_tool_invocation",
+      "params": {
+        "request_id": "cbt_dev_004_header_key_inventory_reorder",
+        "tool_name": "stockpilot_reorder"
+      }
+    },
+    {
+      "id": "diagnostic",
+      "kind": "tool_builder_diagnostic",
+      "params": {
+        "request_id": "cbt_dev_004_header_key_inventory_reorder"
+      }
+    },
+    {
+      "id": "network",
+      "kind": "fake_api_egress",
+      "params": {
+        "request_id": "cbt_dev_004_header_key_inventory_reorder"
+      }
+    }
+  ],
+  "live": false
+}

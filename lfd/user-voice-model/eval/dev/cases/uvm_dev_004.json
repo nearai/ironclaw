@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "case_id": "uvm_dev_004",
+  "profile": "user_voice_model",
+  "title": "Configured secondary mock provider is selected by config, not hardcoded",
+  "setup": {
+    "extensions": [],
+    "secrets": [],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {
+      "mode": "provider_selection",
+      "transcription": {
+        "provider": "mock_secondary",
+        "mock_table": "pinned_content_hash",
+        "allowed_language": "en-US",
+        "tts_enabled": false,
+        "retain_original_audio": true
+      },
+      "audio": {
+        "fixture": {
+          "path": "lfd/user-voice-model/eval/fixtures/dev/8efd8648fc3a56c3.wav",
+          "sha256": "8efd8648fc3a56c34b21aec0c6bea930f9a583a146f066a98a8d9611f7ccfdd3",
+          "bytes": 119768,
+          "format": "wav",
+          "voice": "Samantha"
+        },
+        "source_kind": "provider_selection",
+        "attachment_id": "att_uvm_dev_004",
+        "mime_type": "audio/wav",
+        "duration_ms_hint": 4200
+      },
+      "expected_route_family": "draft.reply"
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.draft.create",
+          "params": {
+            "topic": "billing migration is green",
+            "style": "concise"
+          }
+        },
+        {
+          "text": "Done."
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "webui",
+      "payload": {
+        "message_id": "msg_uvm_dev_004",
+        "user_id": "voice-user-10",
+        "team_id": "tenant-voice-10",
+        "thread_id": "thread_uvm_dev_004",
+        "text": "[Voice note]",
+        "attachments": [
+          {
+            "id": "att_uvm_dev_004",
+            "kind": "audio",
+            "mime_type": "audio/wav",
+            "path": "lfd/user-voice-model/eval/fixtures/dev/8efd8648fc3a56c3.wav",
+            "sha256": "8efd8648fc3a56c34b21aec0c6bea930f9a583a146f066a98a8d9611f7ccfdd3",
+            "size_bytes": 119768
+          }
+        ]
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "transcript",
+      "kind": "transcript",
+      "params": {
+        "case_id": "uvm_dev_004"
+      }
+    },
+    {
+      "id": "turn_envelope",
+      "kind": "turn_envelope",
+      "params": {
+        "case_id": "uvm_dev_004"
+      }
+    },
+    {
+      "id": "route_comparison",
+      "kind": "route_comparison",
+      "params": {
+        "case_id": "uvm_dev_004"
+      }
+    },
+    {
+      "id": "provider_trace",
+      "kind": "provider_trace",
+      "params": {
+        "case_id": "uvm_dev_004"
+      }
+    },
+    {
+      "id": "privacy_audit",
+      "kind": "privacy_audit",
+      "params": {
+        "case_id": "uvm_dev_004"
+      }
+    }
+  ],
+  "live": false
+}

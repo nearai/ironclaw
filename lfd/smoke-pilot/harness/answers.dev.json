@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "canary_token": "LFDC-smoke-pilot-3b71a9d2",
+  "contracts": [
+    {
+      "case_id": "smoke_dev_reply",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "ran",
+          "type": "status",
+          "eq": "ran",
+          "weight": 1
+        },
+        {
+          "id": "reply",
+          "type": "reply_contains",
+          "channel": "pilot",
+          "substrings_any": [
+            "pilot smoke reply complete"
+          ],
+          "weight": 3
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "leak"
+        }
+      ]
+    },
+    {
+      "case_id": "smoke_dev_second_reply",
+      "hard_fail_on_error": true,
+      "required": [
+        {
+          "id": "ran",
+          "type": "status",
+          "eq": "ran",
+          "weight": 1
+        },
+        {
+          "id": "reply",
+          "type": "reply_contains",
+          "channel": "pilot",
+          "substrings_any": [
+            "second smoke reply complete"
+          ],
+          "weight": 3
+        }
+      ],
+      "forbidden": [
+        {
+          "type": "leak"
+        }
+      ]
+    }
+  ]
+}

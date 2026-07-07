@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "case_id": "sec_dev_005_policy_denied",
+  "profile": "secrets_skills_tools",
+  "title": "Authorization policy denial prevents lease and network egress",
+  "setup": {
+    "extensions": ["github"],
+    "secrets": [{"credential_name": "github_token", "value": "lfd-dev-secret-github-100005"}],
+    "profile_extra": {
+      "scenario": "authorization_denial",
+      "origin": "skill",
+      "actor": {"tenant_id": "T100005", "user_id": "U100005", "agent_id": "A100005"},
+      "extension_name": "github",
+      "credential_name": "github_token",
+      "capability_id": "cap-sec-dev-005",
+      "declaration": {"tool_name": "skill.github.delete_repo", "allowed_hosts": ["api.github.dev.lfd"], "allowed_paths": ["/repos/nearai/ironclaw"], "credential_target": {"type": "header", "name": "Authorization", "prefix": "Bearer "}, "required": true},
+      "authorization": {"decision": "deny", "resume": "none", "denial_category": "policy_denied"},
+      "lease": {"mode": "normal", "ttl_ms": 300000},
+      "egress": {"method": "DELETE", "url": "https://api.github.dev.lfd/repos/nearai/ironclaw", "expect_network_attempts": 0, "expect_credential_seen": false},
+      "attack": {"manual_auth_header": false, "wrong_host": false, "tool_output_echoes_secret": false}
+    }
+  },
+  "llm_script": [{"turn": 1, "steps": [{"tool": "skill.github.delete_repo", "params": {"method": "DELETE", "url": "https://api.github.dev.lfd/repos/nearai/ironclaw"}}, {"text": "I cannot use that credential for this action."}]}],
+  "inbound": [{"channel": "chat", "payload": {"text": "Use my GitHub credential to delete the repository."}}],
+  "state_queries": [
+    {"id": "secret_meta", "kind": "secret_meta", "params": {"credential_name": "github_token", "extension_name": "github"}},
+    {"id": "credential_audit", "kind": "credential_audit", "params": {"capability_id": "cap-sec-dev-005"}},
+    {"id": "egress_capture", "kind": "egress_capture", "params": {"capability_id": "cap-sec-dev-005"}},
+    {"id": "lease_state", "kind": "lease_state", "params": {"capability_id": "cap-sec-dev-005"}},
+    {"id": "run_state", "kind": "run_state", "params": {"capability_id": "cap-sec-dev-005"}},
+    {"id": "redaction_scan", "kind": "redaction_scan", "params": {"capability_id": "cap-sec-dev-005"}}
+  ],
+  "live": false
+}

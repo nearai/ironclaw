@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "case_id": "mig_dev_mission_cron",
+  "profile": "migration",
+  "title": "engine-v2 cron mission -> trigger + thread",
+  "setup": {
+    "secrets": [],
+    "profile_extra": {
+      "seed": {
+        "backend": "libsql",
+        "users": [
+          {
+            "ref": "u1",
+            "user_id": "ned",
+            "email": "ned@lfdseed.example",
+            "display_name": "Boran",
+            "identities": [],
+            "channels": []
+          }
+        ],
+        "conversations": [],
+        "routines": [],
+        "missions": [
+          {
+            "ref": "m1",
+            "name": "daily-digest",
+            "user": "u1",
+            "cadence": {
+              "kind": "cron",
+              "expr": "0 7 * * *",
+              "tz": "UTC"
+            },
+            "status": "ok",
+            "thread_messages": [
+              {
+                "role": "user",
+                "content": "run digest"
+              },
+              {
+                "role": "assistant",
+                "content": "digest ready"
+              }
+            ]
+          }
+        ],
+        "memory_docs": [],
+        "settings": [],
+        "secrets": [],
+        "jobs": [],
+        "extensions": []
+      },
+      "run": {
+        "mode": "wet"
+      }
+    }
+  },
+  "state_queries": [
+    {
+      "id": "v1_intact",
+      "kind": "v1_db_digest",
+      "params": {}
+    },
+    {
+      "id": "recon",
+      "kind": "migration_report",
+      "params": {
+        "run": "wet",
+        "view": "reconciliation"
+      }
+    },
+    {
+      "id": "proj_triggers",
+      "kind": "migration_projection",
+      "params": {
+        "domain": "triggers"
+      }
+    },
+    {
+      "id": "proj_threads",
+      "kind": "migration_projection",
+      "params": {
+        "domain": "threads"
+      }
+    }
+  ],
+  "live": false
+}

@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "case_id": "mem_place_dev_010",
+  "profile": "memory_placement",
+  "title": "version and retention records survive provider boundary write update",
+  "setup": {
+    "extensions": [],
+    "secrets": [],
+    "memory_docs": [
+      {
+        "path": "notes/mpseed-juliet.md",
+        "content": "mpseed juliet current content"
+      }
+    ],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {
+      "scenario": "retention_version_boundary",
+      "case_kind": "failure_denial",
+      "provider": {
+        "default": "native",
+        "active": "native",
+        "compare_with": "native",
+        "fake_provider_pinned_in_support": true
+      },
+      "policy": {
+        "decision": "allow",
+        "constraints": []
+      },
+      "operation": {
+        "family": "write",
+        "target": "notes/mpseed-juliet.md",
+        "content": "mpseed juliet version two content",
+        "append": false
+      },
+      "seed": {
+        "tenant_id": "T710MP",
+        "user_id": "U710MP",
+        "project_id": "proj-juliet",
+        "docs": [
+          {
+            "path": "notes/mpseed-juliet.md",
+            "content": "mpseed juliet current content"
+          }
+        ],
+        "versions": [
+          {
+            "path": "notes/mpseed-juliet.md",
+            "content": "mpseed juliet version one content"
+          }
+        ],
+        "retention_records": [
+          {
+            "path": "notes/mpseed-juliet.md",
+            "version": 1
+          }
+        ]
+      },
+      "contract_markers": [
+        "mpseed-juliet",
+        "retention-version"
+      ]
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.memory_write",
+          "params": {
+            "target": "notes/mpseed-juliet.md",
+            "content": "mpseed juliet version two content",
+            "append": false
+          }
+        },
+        {
+          "text": "memory placement scenario mem_place_dev_010 completed"
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "lfd_memory",
+      "payload": {
+        "text": "Run memory placement scenario mem_place_dev_010 for write"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "boundary",
+      "kind": "memory_provider_boundary",
+      "params": {
+        "operation_ref": "retention_version_boundary",
+        "provider": "native"
+      }
+    },
+    {
+      "id": "versions",
+      "kind": "memory_retention_versions",
+      "params": {
+        "path": "notes/mpseed-juliet.md"
+      }
+    },
+    {
+      "id": "storage",
+      "kind": "memory_storage_placement",
+      "params": {
+        "operation_ref": "retention_version_boundary"
+      }
+    }
+  ],
+  "live": false
+}

@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "case_id": "slack_dev_006_unadmitted_workspace_denied",
+  "profile": "slack_channel",
+  "title": "App mention from an unadmitted workspace is denied without egress",
+  "setup": {
+    "extensions": ["slack"],
+    "secrets": [{"credential_name": "slack_bot_token", "value": "xoxb-dev-slice-006"}],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [{"key": "slack.postMessage", "status": 200, "body": {"ok": true}}],
+    "profile_extra": {
+      "slack_fixture": {
+        "tenant_id": "tenant:slack-dev-a",
+        "installation_id": "slack-install-dev-a",
+        "team_id": "T03DENIED",
+        "api_app_id": "A03DENIED",
+        "bot_user_id": "UBOTDEV03",
+        "operator_user_id": "user:ops-dev",
+        "default_personal_agent_id": "agent:personal-dev",
+        "channel_routes": [{"channel_id": "C03BLOCK1", "subject_user_id": "user:team-blocked-dev", "agent_id": "agent:team-blocked-dev"}],
+        "identity_bindings": [{"slack_user_id": "U03FINN01", "user_id": "user:finn-dev", "dm_channel_id": "D03FINN01"}],
+        "connection": {"configured": true, "caller_connected": true},
+        "admission": {"workspace_allowed": false, "channels_allowed": []},
+        "delivery_script": [],
+        "existing_threads": []
+      }
+    }
+  },
+  "llm_script": [],
+  "inbound": [{
+    "channel": "slack",
+    "payload": {
+      "type": "event_callback",
+      "team_id": "T03DENIED",
+      "event_id": "Ev03D006",
+      "event": {"type": "app_mention", "user": "U03FINN01", "channel": "C03BLOCK1", "text": "<@UBOTDEV03> run the incident report", "ts": "1771000000.000006"}
+    }
+  }],
+  "state_queries": [
+    {"id": "turn", "kind": "slack_turn", "params": {"event_id": "Ev03D006"}},
+    {"id": "route", "kind": "slack_route_resolution", "params": {"event_id": "Ev03D006"}},
+    {"id": "delivery", "kind": "slack_delivery", "params": {"event_id": "Ev03D006"}},
+    {"id": "admission", "kind": "slack_admission", "params": {"event_id": "Ev03D006"}},
+    {"id": "isolation", "kind": "slack_isolation_audit", "params": {"event_id": "Ev03D006"}}
+  ],
+  "live": false
+}

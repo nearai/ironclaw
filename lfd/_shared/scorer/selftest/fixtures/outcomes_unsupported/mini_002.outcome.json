@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "case_id": "mini_002",
+  "status": "unsupported",
+  "error": null,
+  "replies": [],
+  "tool_invocations": [],
+  "egress": [],
+  "events": [],
+  "gates": [],
+  "state": {},
+  "leaks": {"secret_scan_hits": 0},
+  "meta": {"profile": "selftest_profile", "runner_hash": "SELFTEST", "duration_ms": 1}
+}

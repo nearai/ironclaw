@@ -1,0 +1,122 @@
+{
+  "_doc": {
+    "about": "Lane-11 missions lint/status config consumed by lfd/_shared/scorer/lint_core.py and status_core.py. Common caps plus missions state-machine caps. Deleting required keys is a lint violation.",
+    "cap_rationale": {
+      "no_budget_gate_bypass": "Budget enforcement is core state-machine behavior; added bypass/TODO markers void.",
+      "no_checkpoint_disable": "Durable checkpoints are mandatory; added skip/disable checkpoint paths void.",
+      "no_dev_seed_literals": "All distinctive eval seed text carries lfdmission; product/runtime code must not learn fixtures by literal.",
+      "no_eval_case_id_branching": "Blocks product/test code special-casing visible dev or holdout mission case ids.",
+      "no_failure_category_literal_table": "Blocks hardcoded adaptation keyed on dev failure categories such as webhook_timeout or api_quota_spike.",
+      "no_static_meta_prompt_shortcut": "Meta-prompt must flow from memory and mission state, not a static fixture.",
+      "no_test_weakening": "Stage-0 tests cannot be ignored or cfg-nevered to improve score.",
+      "no_unbounded_spawn_loop": "Recursive or unbounded mission spawning is explicitly a failure case."
+    },
+    "reconciliation": "State-machine framing from the lane addendum supersedes the older meta-prompt-only brief; surviving mission-specific cheat fences cover memory-prompt data flow, restart durability, duplicate identity, routine-vs-task decisions, and budget gates."
+  },
+  "base_ref": "d9eaae2bb",
+  "caps": [
+    {
+      "max_count": 0,
+      "name": "no_eval_case_id_branching",
+      "paths": [
+        "src/**/*.rs",
+        "crates/**/*.rs",
+        "tests/**/*.rs"
+      ],
+      "pattern": "mis_dev_|mis_hold_",
+      "scope": "diff"
+    },
+    {
+      "max_count": 0,
+      "name": "no_dev_seed_literals",
+      "paths": [
+        "src/**/*.rs",
+        "crates/**/*.rs"
+      ],
+      "pattern": "(?i)lfdmission",
+      "scope": "diff"
+    },
+    {
+      "max_count": 0,
+      "name": "no_failure_category_literal_table",
+      "paths": [
+        "src/**/*.rs",
+        "crates/**/*.rs"
+      ],
+      "pattern": "(?i)(webhook_timeout|api_quota_spike|calendar_conflict|paid_enrichment|live_outreach|external_purchase)",
+      "scope": "diff"
+    },
+    {
+      "max_count": 0,
+      "name": "no_budget_gate_bypass",
+      "paths": [
+        "src/**/*.rs",
+        "crates/**/*.rs",
+        "tests/**/*.rs"
+      ],
+      "pattern": "(?i)(ignore_budget|skip_budget|bypass_budget|allow_over_budget|budget.*TODO|TODO.*budget)",
+      "scope": "diff"
+    },
+    {
+      "max_count": 0,
+      "name": "no_checkpoint_disable",
+      "paths": [
+        "src/**/*.rs",
+        "crates/**/*.rs",
+        "tests/**/*.rs"
+      ],
+      "pattern": "(?i)(disable_checkpoint|skip_checkpoint|checkpoint.*TODO|TODO.*checkpoint)",
+      "scope": "diff"
+    },
+    {
+      "max_count": 0,
+      "name": "no_static_meta_prompt_shortcut",
+      "paths": [
+        "src/**/*.rs",
+        "crates/**/*.rs",
+        "tests/**/*.rs"
+      ],
+      "pattern": "(?i)(static_meta_prompt|hardcoded_meta_prompt|mission_prompt_fixture|canned_next_focus)",
+      "scope": "diff"
+    },
+    {
+      "max_count": 0,
+      "name": "no_unbounded_spawn_loop",
+      "paths": [
+        "src/**/*.rs",
+        "crates/**/*.rs"
+      ],
+      "pattern": "(?i)(unbounded_mission|recursive_mission_spawn|spawn_mission.*while|while\\s+true.*spawn_mission)",
+      "scope": "diff"
+    },
+    {
+      "max_count": 0,
+      "name": "no_test_weakening_ignore",
+      "paths": [
+        "crates/ironclaw_triggers/**/*.rs",
+        "crates/ironclaw_turns/**/*.rs",
+        "crates/ironclaw_reborn_composition/**/*.rs",
+        "tests/**/*.rs"
+      ],
+      "pattern": "#\\[ignore",
+      "scope": "diff"
+    },
+    {
+      "max_count": 0,
+      "name": "no_test_weakening_cfg_never",
+      "paths": [
+        "crates/ironclaw_triggers/**/*.rs",
+        "crates/ironclaw_turns/**/*.rs",
+        "crates/ironclaw_reborn_composition/**/*.rs",
+        "tests/**/*.rs"
+      ],
+      "pattern": "#\\[cfg\\(never\\)\\]",
+      "scope": "diff"
+    }
+  ],
+  "holdout_canaries": [
+    "LFDH-missions-4b13d8a7e2c0f9aa"
+  ],
+  "schema_version": 1,
+  "spend_ceiling_usd": 25.0
+}

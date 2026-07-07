@@ -1,0 +1,218 @@
+{
+  "case_id": "mis_dev_003_competitor_watch_standing",
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "request": {
+          "allowed_action_classes": [
+            "read_memory",
+            "fake_tool",
+            "write_checkpoint",
+            "schedule_routine",
+            "schedule_task"
+          ],
+          "budget": {
+            "model_call_limit": 48,
+            "requires_explicit_approval_for_overrun": true,
+            "usd_limit": 6,
+            "wall_clock_minutes": 120
+          },
+          "definition_of_done": "Weekly digest lists material pricing changes with source links",
+          "forbidden_action_classes": [
+            "live_external_send",
+            "unapproved_paid_api"
+          ],
+          "goal": "Watch Orbit competitors for pricing and launch changes every weekday",
+          "mission_kind": "standing",
+          "mission_ref": "orbit-watch-20260709",
+          "trigger_ref": "trg-orbit-watch-20260709",
+          "trigger_source": "cron"
+        },
+        "submitted_at": "2026-07-07T09:00:00Z",
+        "type": "mission_request",
+        "user_id": "U066435"
+      }
+    },
+    {
+      "channel": "scheduler",
+      "payload": {
+        "fire_slot": "2026-07-07T09:00:00Z",
+        "mission_ref": "orbit-watch-20260709",
+        "trigger_ref": "trg-orbit-watch-20260709",
+        "type": "trigger_fire"
+      }
+    }
+  ],
+  "live": false,
+  "llm_script": [
+    {
+      "steps": [
+        {
+          "params": {
+            "definition_of_done": "Weekly digest lists material pricing changes with source links",
+            "goal": "Watch Orbit competitors for pricing and launch changes every weekday",
+            "kind": "standing",
+            "mission_ref": "orbit-watch-20260709"
+          },
+          "tool": "mission.plan"
+        },
+        {
+          "params": {
+            "count": 1,
+            "mission_ref": "orbit-watch-20260709",
+            "trigger_ref": "trg-orbit-watch-20260709"
+          },
+          "tool": "mission.schedule_routine"
+        },
+        {
+          "params": {
+            "checkpoint_kind": "durable_progress",
+            "mission_ref": "orbit-watch-20260709"
+          },
+          "tool": "mission.checkpoint"
+        },
+        {
+          "text": "Mission orbit-watch-20260709: check public sources"
+        }
+      ],
+      "turn": 1
+    }
+  ],
+  "profile": "missions",
+  "schema_version": 1,
+  "setup": {
+    "extensions": [],
+    "http_stubs": [
+      {
+        "body": {
+          "ok": true
+        },
+        "key": "fake.mission_tool",
+        "status": 200
+      }
+    ],
+    "memory_docs": [
+      {
+        "content": "lfdmission competitor watch: use public changelogs, release RSS, and pricing pages; never scrape gated forums.",
+        "path": "/projects/orbit-watch/research/sources.md",
+        "title": "Orbit competitor watch source policy"
+      }
+    ],
+    "profile_extra": {
+      "agent_id": "agent-missions",
+      "clock_start": "2026-07-07T09:00:00Z",
+      "expected_failure_direction": false,
+      "mission_ref": "orbit-watch-20260709",
+      "mission_request": {
+        "allowed_action_classes": [
+          "read_memory",
+          "fake_tool",
+          "write_checkpoint",
+          "schedule_routine",
+          "schedule_task"
+        ],
+        "budget": {
+          "model_call_limit": 48,
+          "requires_explicit_approval_for_overrun": true,
+          "usd_limit": 6,
+          "wall_clock_minutes": 120
+        },
+        "definition_of_done": "Weekly digest lists material pricing changes with source links",
+        "forbidden_action_classes": [
+          "live_external_send",
+          "unapproved_paid_api"
+        ],
+        "goal": "Watch Orbit competitors for pricing and launch changes every weekday",
+        "mission_kind": "standing",
+        "mission_ref": "orbit-watch-20260709",
+        "trigger_ref": "trg-orbit-watch-20260709",
+        "trigger_source": "cron"
+      },
+      "project_id": "project-research",
+      "tenant_id": "tenant-lfdmission-blue",
+      "timeline": [
+        {
+          "at": "2026-07-07T09:00:00Z",
+          "mission_ref": "orbit-watch-20260709",
+          "op": "mission_request"
+        },
+        {
+          "at": "2026-07-07T09:00:00Z",
+          "fire_slot": "2026-07-07T09:00:00Z",
+          "op": "fire_trigger",
+          "trigger_ref": "trg-orbit-watch-20260709"
+        }
+      ]
+    },
+    "secrets": [],
+    "triggers": [
+      {
+        "completion_policy": "recurring",
+        "mission_ref": "orbit-watch-20260709",
+        "source": "cron",
+        "trigger_ref": "trg-orbit-watch-20260709"
+      }
+    ]
+  },
+  "state_queries": [
+    {
+      "id": "mission",
+      "kind": "mission_record",
+      "params": {
+        "mission_ref": "orbit-watch-20260709"
+      }
+    },
+    {
+      "id": "plan",
+      "kind": "mission_plan",
+      "params": {
+        "mission_ref": "orbit-watch-20260709"
+      }
+    },
+    {
+      "id": "checkpoints",
+      "kind": "checkpoint_log",
+      "params": {
+        "mission_ref": "orbit-watch-20260709"
+      }
+    },
+    {
+      "id": "budget",
+      "kind": "budget_ledger",
+      "params": {
+        "mission_ref": "orbit-watch-20260709"
+      }
+    },
+    {
+      "id": "decisions",
+      "kind": "scheduler_decisions",
+      "params": {
+        "mission_ref": "orbit-watch-20260709"
+      }
+    },
+    {
+      "id": "prompt",
+      "kind": "prompt_envelope",
+      "params": {
+        "fire_index": 1,
+        "mission_ref": "orbit-watch-20260709"
+      }
+    },
+    {
+      "id": "progress",
+      "kind": "mission_progress",
+      "params": {
+        "mission_ref": "orbit-watch-20260709"
+      }
+    },
+    {
+      "id": "status",
+      "kind": "status_report",
+      "params": {
+        "mission_ref": "orbit-watch-20260709"
+      }
+    }
+  ],
+  "title": "standing competitor watch schedules routine and remains active within policy"
+}

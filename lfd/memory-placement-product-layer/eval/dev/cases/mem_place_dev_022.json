@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "case_id": "mem_place_dev_022",
+  "profile": "memory_placement",
+  "title": "sandbox blocks raw host path memory target before provider call",
+  "setup": {
+    "extensions": [],
+    "secrets": [],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {
+      "scenario": "sandbox_denies_raw_host_path",
+      "case_kind": "failure_denial",
+      "provider": {
+        "default": "native",
+        "active": "native",
+        "compare_with": "native",
+        "fake_provider_pinned_in_support": true
+      },
+      "policy": {
+        "decision": "deny",
+        "constraints": [
+          "sandbox_path"
+        ],
+        "denial_reason": "sandbox_path"
+      },
+      "operation": {
+        "family": "write",
+        "target": "/Users/mpseed-uniform/secret.md",
+        "content": "mpseed uniform raw path",
+        "append": false
+      },
+      "seed": {
+        "tenant_id": "T722MP",
+        "user_id": "U722MP",
+        "project_id": "proj-sandbox",
+        "docs": [],
+        "versions": [],
+        "retention_records": []
+      },
+      "contract_markers": [
+        "mpseed-uniform",
+        "sandbox-deny",
+        "memory.document_written",
+        "memory.search_performed",
+        "memory.prompt_context_built",
+        "memory.provider_denied",
+        "memory.provider_constrained",
+        "memory.safety_rejected",
+        "memory.profile_updated",
+        "host-network/memory-embeddings",
+        "memory_provider_repository"
+      ]
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.memory_write",
+          "params": {
+            "target": "/Users/mpseed-uniform/secret.md",
+            "content": "mpseed uniform raw path",
+            "append": false
+          }
+        },
+        {
+          "text": "memory placement scenario mem_place_dev_022 completed"
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "lfd_memory",
+      "payload": {
+        "text": "Execute sandbox_denies_raw_host_path for lane 16 memory placement"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "policy",
+      "kind": "memory_policy_decision",
+      "params": {
+        "operation_ref": "sandbox_denies_raw_host_path"
+      }
+    },
+    {
+      "id": "boundary",
+      "kind": "memory_provider_boundary",
+      "params": {
+        "operation_ref": "sandbox_denies_raw_host_path",
+        "provider": "native"
+      }
+    },
+    {
+      "id": "host",
+      "kind": "memory_host_mediation",
+      "params": {
+        "operation_ref": "sandbox_denies_raw_host_path"
+      }
+    }
+  ],
+  "live": false
+}

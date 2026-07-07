@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "case_id": "mig_dev_memory_versions",
+  "profile": "migration",
+  "title": "memory_document_versions migrate (gap closed)",
+  "setup": {
+    "secrets": [],
+    "profile_extra": {
+      "seed": {
+        "backend": "libsql",
+        "users": [
+          {
+            "ref": "u1",
+            "user_id": "hal",
+            "email": "hal@lfdseed.example",
+            "display_name": "Hakan",
+            "identities": [],
+            "channels": []
+          }
+        ],
+        "conversations": [],
+        "routines": [],
+        "missions": [],
+        "memory_docs": [
+          {
+            "ref": "d1",
+            "path": "context/vision.md",
+            "content": "# Vision v3",
+            "versions": 3
+          }
+        ],
+        "settings": [],
+        "secrets": [],
+        "jobs": [],
+        "extensions": []
+      },
+      "run": {
+        "mode": "wet"
+      }
+    }
+  },
+  "state_queries": [
+    {
+      "id": "v1_intact",
+      "kind": "v1_db_digest",
+      "params": {}
+    },
+    {
+      "id": "recon",
+      "kind": "migration_report",
+      "params": {
+        "run": "wet",
+        "view": "reconciliation"
+      }
+    },
+    {
+      "id": "proj_memory_versions",
+      "kind": "migration_projection",
+      "params": {
+        "domain": "memory_versions"
+      }
+    }
+  ],
+  "live": false
+}

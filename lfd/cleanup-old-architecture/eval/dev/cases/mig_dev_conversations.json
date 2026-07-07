@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "case_id": "mig_dev_conversations",
+  "profile": "migration",
+  "title": "conversations + messages migrate to threads",
+  "setup": {
+    "secrets": [],
+    "profile_extra": {
+      "seed": {
+        "backend": "libsql",
+        "users": [
+          {
+            "ref": "u1",
+            "user_id": "alice",
+            "email": "alice@lfdseed.example",
+            "display_name": "Vale",
+            "identities": [],
+            "channels": []
+          }
+        ],
+        "conversations": [
+          {
+            "ref": "c_gw",
+            "channel": "gateway",
+            "user": "u1",
+            "messages": [
+              {
+                "role": "user",
+                "content": "hello there"
+              },
+              {
+                "role": "assistant",
+                "content": "hi, how can I help?"
+              }
+            ]
+          },
+          {
+            "ref": "c_tg",
+            "channel": "telegram",
+            "user": "u1",
+            "messages": [
+              {
+                "role": "user",
+                "content": "what's on my calendar?"
+              },
+              {
+                "role": "assistant",
+                "content": "you have 2 meetings"
+              }
+            ]
+          }
+        ],
+        "routines": [],
+        "missions": [],
+        "memory_docs": [],
+        "settings": [],
+        "secrets": [],
+        "jobs": [],
+        "extensions": []
+      },
+      "run": {
+        "mode": "wet"
+      }
+    }
+  },
+  "state_queries": [
+    {
+      "id": "v1_intact",
+      "kind": "v1_db_digest",
+      "params": {}
+    },
+    {
+      "id": "recon",
+      "kind": "migration_report",
+      "params": {
+        "run": "wet",
+        "view": "reconciliation"
+      }
+    },
+    {
+      "id": "proj_threads",
+      "kind": "migration_projection",
+      "params": {
+        "domain": "threads"
+      }
+    },
+    {
+      "id": "proj_messages",
+      "kind": "migration_projection",
+      "params": {
+        "domain": "messages"
+      }
+    }
+  ],
+  "live": false
+}

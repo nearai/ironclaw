@@ -1,0 +1,183 @@
+{
+  "schema_version": 1,
+  "case_id": "cbt_dev_008_patch_priority_transform",
+  "profile": "custom_build_tools",
+  "title": "PATCH wrapper maps friendly priority into provider enum",
+  "setup": {
+    "extensions": [
+      "custom_tool_builder"
+    ],
+    "secrets": [
+      {
+        "credential_name": "taskwell_key",
+        "value": "test-secret-cbt_dev_008_patch_priority_transform"
+      }
+    ],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [
+      {
+        "key": "TaskWell.PATCH./tasks/T-18",
+        "status": 200,
+        "body": {
+          "id": "T-18",
+          "priority_code": 80
+        }
+      }
+    ],
+    "profile_extra": {
+      "task": {
+        "request_id": "cbt_dev_008_patch_priority_transform",
+        "shape": "credentialed_http_api_wrapper",
+        "mode": "create",
+        "user_request": "Build a credentialed HTTP API wrapper named taskwell_set_priority for TaskWell. Use credential taskwell_key; call PATCH https://taskwell.cbt-dev.test/tasks/T-18; transform the provider response with priority_enum.",
+        "api_docs": {
+          "service": "TaskWell",
+          "base_url": "https://taskwell.cbt-dev.test",
+          "auth": {
+            "method": "api_key",
+            "placement": "header",
+            "header": "X-API-Key",
+            "credential_name": "taskwell_key"
+          },
+          "operation": {
+            "method": "PATCH",
+            "path": "/tasks/T-18",
+            "input_schema": {
+              "type": "object",
+              "example": {
+                "task_id": "T-18",
+                "priority": "high"
+              }
+            },
+            "response_example": {
+              "id": "T-18",
+              "priority_code": 80
+            },
+            "transform": "priority_enum"
+          },
+          "sandbox": {
+            "network_allowlist": [
+              "taskwell.cbt-dev.test"
+            ],
+            "host_network": false,
+            "shell": false
+          }
+        },
+        "expected_tool_name": "taskwell_set_priority",
+        "invocation": {
+          "input": {
+            "task_id": "T-18",
+            "priority": "high"
+          }
+        },
+        "fake_api": {
+          "host": "taskwell.cbt-dev.test",
+          "method": "PATCH",
+          "path": "/tasks/T-18",
+          "response": {
+            "id": "T-18",
+            "priority_code": 80
+          }
+        }
+      }
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.custom_tool.build_http_wrapper",
+          "params": {
+            "request_id": "cbt_dev_008_patch_priority_transform",
+            "profile": "custom_build_tools"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.validate_artifact",
+          "params": {
+            "tool_name": "taskwell_set_priority"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.install",
+          "params": {
+            "tool_name": "taskwell_set_priority"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.invoke_generated_tool",
+          "params": {
+            "tool_name": "taskwell_set_priority",
+            "input": {
+              "task_id": "T-18",
+              "priority": "high"
+            }
+          }
+        },
+        {
+          "text": "Built and verified taskwell_set_priority."
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "text": "Build a credentialed HTTP API wrapper named taskwell_set_priority for TaskWell. Use credential taskwell_key; call PATCH https://taskwell.cbt-dev.test/tasks/T-18; transform the provider response with priority_enum.",
+        "user_id": "UCBT1001"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "spec",
+      "kind": "custom_tool_spec",
+      "params": {
+        "request_id": "cbt_dev_008_patch_priority_transform",
+        "tool_name": "taskwell_set_priority"
+      }
+    },
+    {
+      "id": "artifact",
+      "kind": "tool_artifact",
+      "params": {
+        "request_id": "cbt_dev_008_patch_priority_transform",
+        "tool_name": "taskwell_set_priority"
+      }
+    },
+    {
+      "id": "install",
+      "kind": "extension_lifecycle",
+      "params": {
+        "request_id": "cbt_dev_008_patch_priority_transform",
+        "tool_name": "taskwell_set_priority"
+      }
+    },
+    {
+      "id": "invoke",
+      "kind": "generated_tool_invocation",
+      "params": {
+        "request_id": "cbt_dev_008_patch_priority_transform",
+        "tool_name": "taskwell_set_priority"
+      }
+    },
+    {
+      "id": "diagnostic",
+      "kind": "tool_builder_diagnostic",
+      "params": {
+        "request_id": "cbt_dev_008_patch_priority_transform"
+      }
+    },
+    {
+      "id": "network",
+      "kind": "fake_api_egress",
+      "params": {
+        "request_id": "cbt_dev_008_patch_priority_transform"
+      }
+    }
+  ],
+  "live": false
+}

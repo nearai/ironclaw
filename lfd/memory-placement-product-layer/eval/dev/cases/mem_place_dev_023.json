@@ -1,0 +1,113 @@
+{
+  "schema_version": 1,
+  "case_id": "mem_place_dev_023",
+  "profile": "memory_placement",
+  "title": "read/search placement does not mutate control-plane storage",
+  "setup": {
+    "extensions": [],
+    "secrets": [],
+    "memory_docs": [
+      {
+        "path": "notes/mpseed-victor.md",
+        "content": "mpseed victor no control plane"
+      }
+    ],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {
+      "scenario": "read_search_no_control_plane_write",
+      "case_kind": "failure_denial",
+      "provider": {
+        "default": "native",
+        "active": "native",
+        "compare_with": "native",
+        "fake_provider_pinned_in_support": true
+      },
+      "policy": {
+        "decision": "allow",
+        "constraints": []
+      },
+      "operation": {
+        "family": "search",
+        "query": "mpseed victor no control plane",
+        "target": "memory/search"
+      },
+      "seed": {
+        "tenant_id": "T723MP",
+        "user_id": "U723MP",
+        "project_id": "proj-control",
+        "docs": [
+          {
+            "path": "notes/mpseed-victor.md",
+            "content": "mpseed victor no control plane"
+          }
+        ],
+        "versions": [],
+        "retention_records": []
+      },
+      "contract_markers": [
+        "mpseed-victor",
+        "no-control-plane",
+        "memory.document_written",
+        "memory.search_performed",
+        "memory.prompt_context_built",
+        "memory.provider_denied",
+        "memory.provider_constrained",
+        "memory.safety_rejected",
+        "memory.profile_updated",
+        "host-network/memory-embeddings",
+        "memory_provider_repository"
+      ]
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.memory_search",
+          "params": {
+            "query": "mpseed victor no control plane",
+            "limit": 5
+          }
+        },
+        {
+          "text": "memory placement scenario mem_place_dev_023 completed"
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "lfd_memory",
+      "payload": {
+        "text": "Execute read_search_no_control_plane_write for lane 16 memory placement"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "boundary",
+      "kind": "memory_provider_boundary",
+      "params": {
+        "operation_ref": "read_search_no_control_plane_write",
+        "provider": "native"
+      }
+    },
+    {
+      "id": "storage",
+      "kind": "memory_storage_placement",
+      "params": {
+        "operation_ref": "read_search_no_control_plane_write"
+      }
+    },
+    {
+      "id": "host",
+      "kind": "memory_host_mediation",
+      "params": {
+        "operation_ref": "read_search_no_control_plane_write"
+      }
+    }
+  ],
+  "live": false
+}

@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "case_id": "mem_place_dev_012",
+  "profile": "memory_placement",
+  "title": "profile_set routes closed profile fields through memory service",
+  "setup": {
+    "extensions": [],
+    "secrets": [],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {
+      "scenario": "profile_set_boundary",
+      "case_kind": "positive",
+      "provider": {
+        "default": "native",
+        "active": "native",
+        "compare_with": "native",
+        "fake_provider_pinned_in_support": true
+      },
+      "policy": {
+        "decision": "allow",
+        "constraints": []
+      },
+      "operation": {
+        "family": "profile_set",
+        "target": "context/profile.json",
+        "fields": {
+          "timezone": "Europe/Istanbul"
+        }
+      },
+      "seed": {
+        "tenant_id": "T712MP",
+        "user_id": "U712MP",
+        "project_id": "proj-profile",
+        "docs": [],
+        "versions": [],
+        "retention_records": []
+      },
+      "contract_markers": [
+        "mpseed-profile",
+        "profile-set-boundary",
+        "memory.document_written",
+        "memory.search_performed",
+        "memory.prompt_context_built",
+        "memory.provider_denied",
+        "memory.provider_constrained",
+        "memory.safety_rejected",
+        "memory.profile_updated",
+        "host-network/memory-embeddings",
+        "memory_provider_repository"
+      ]
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.profile_set",
+          "params": {
+            "timezone": "Europe/Istanbul"
+          }
+        },
+        {
+          "text": "memory placement scenario mem_place_dev_012 completed"
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "lfd_memory",
+      "payload": {
+        "text": "Execute profile_set_boundary for lane 16 memory placement"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "boundary",
+      "kind": "memory_provider_boundary",
+      "params": {
+        "operation_ref": "profile_set_boundary",
+        "provider": "native"
+      }
+    },
+    {
+      "id": "host",
+      "kind": "memory_host_mediation",
+      "params": {
+        "operation_ref": "profile_set_boundary"
+      }
+    }
+  ],
+  "live": false
+}

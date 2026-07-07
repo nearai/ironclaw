@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "_doc": "selftest fixture -- see lfd/_shared/templates/caps.example.json for field docs",
+  "base_ref": "HEAD",
+  "caps": [
+    {
+      "name": "no_per_case_branching",
+      "paths": ["src/**/*.rs"],
+      "pattern": "(?i)case_id|mini_00",
+      "max_count": 0
+    }
+  ],
+  "holdout_canaries": ["LFDH-mini-selftest-holdout-cafe"],
+  "spend_ceiling_usd": 25.0
+}

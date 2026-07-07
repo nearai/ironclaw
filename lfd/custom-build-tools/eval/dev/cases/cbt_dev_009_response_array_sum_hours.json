@@ -1,0 +1,217 @@
+{
+  "schema_version": 1,
+  "case_id": "cbt_dev_009_response_array_sum_hours",
+  "profile": "custom_build_tools",
+  "title": "array response wrapper sums billable hours",
+  "setup": {
+    "extensions": [
+      "custom_tool_builder"
+    ],
+    "secrets": [
+      {
+        "credential_name": "timehive_token",
+        "value": "test-secret-cbt_dev_009_response_array_sum_hours"
+      }
+    ],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [
+      {
+        "key": "TimeHive.GET./entries",
+        "status": 200,
+        "body": {
+          "entries": [
+            {
+              "hours": 1.25,
+              "billable": true
+            },
+            {
+              "hours": 2.5,
+              "billable": false
+            },
+            {
+              "hours": 3.75,
+              "billable": true
+            }
+          ]
+        }
+      }
+    ],
+    "profile_extra": {
+      "task": {
+        "request_id": "cbt_dev_009_response_array_sum_hours",
+        "shape": "credentialed_http_api_wrapper",
+        "mode": "create",
+        "user_request": "Build a credentialed HTTP API wrapper named timehive_billable_hours for TimeHive. Use credential timehive_token; call GET https://timehive.cbt-dev.test/entries; transform the provider response with sum_hours.",
+        "api_docs": {
+          "service": "TimeHive",
+          "base_url": "https://timehive.cbt-dev.test",
+          "auth": {
+            "method": "bearer",
+            "placement": "header",
+            "header": "Authorization",
+            "prefix": "Bearer ",
+            "credential_name": "timehive_token"
+          },
+          "operation": {
+            "method": "GET",
+            "path": "/entries",
+            "input_schema": {
+              "type": "object",
+              "example": {
+                "project": "PX"
+              }
+            },
+            "response_example": {
+              "entries": [
+                {
+                  "hours": 1.25,
+                  "billable": true
+                },
+                {
+                  "hours": 2.5,
+                  "billable": false
+                },
+                {
+                  "hours": 3.75,
+                  "billable": true
+                }
+              ]
+            },
+            "transform": "sum_hours"
+          },
+          "sandbox": {
+            "network_allowlist": [
+              "timehive.cbt-dev.test"
+            ],
+            "host_network": false,
+            "shell": false
+          }
+        },
+        "expected_tool_name": "timehive_billable_hours",
+        "invocation": {
+          "input": {
+            "project": "PX"
+          }
+        },
+        "fake_api": {
+          "host": "timehive.cbt-dev.test",
+          "method": "GET",
+          "path": "/entries",
+          "response": {
+            "entries": [
+              {
+                "hours": 1.25,
+                "billable": true
+              },
+              {
+                "hours": 2.5,
+                "billable": false
+              },
+              {
+                "hours": 3.75,
+                "billable": true
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.custom_tool.build_http_wrapper",
+          "params": {
+            "request_id": "cbt_dev_009_response_array_sum_hours",
+            "profile": "custom_build_tools"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.validate_artifact",
+          "params": {
+            "tool_name": "timehive_billable_hours"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.install",
+          "params": {
+            "tool_name": "timehive_billable_hours"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.invoke_generated_tool",
+          "params": {
+            "tool_name": "timehive_billable_hours",
+            "input": {
+              "project": "PX"
+            }
+          }
+        },
+        {
+          "text": "Built and verified timehive_billable_hours."
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "text": "Build a credentialed HTTP API wrapper named timehive_billable_hours for TimeHive. Use credential timehive_token; call GET https://timehive.cbt-dev.test/entries; transform the provider response with sum_hours.",
+        "user_id": "UCBT1001"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "spec",
+      "kind": "custom_tool_spec",
+      "params": {
+        "request_id": "cbt_dev_009_response_array_sum_hours",
+        "tool_name": "timehive_billable_hours"
+      }
+    },
+    {
+      "id": "artifact",
+      "kind": "tool_artifact",
+      "params": {
+        "request_id": "cbt_dev_009_response_array_sum_hours",
+        "tool_name": "timehive_billable_hours"
+      }
+    },
+    {
+      "id": "install",
+      "kind": "extension_lifecycle",
+      "params": {
+        "request_id": "cbt_dev_009_response_array_sum_hours",
+        "tool_name": "timehive_billable_hours"
+      }
+    },
+    {
+      "id": "invoke",
+      "kind": "generated_tool_invocation",
+      "params": {
+        "request_id": "cbt_dev_009_response_array_sum_hours",
+        "tool_name": "timehive_billable_hours"
+      }
+    },
+    {
+      "id": "diagnostic",
+      "kind": "tool_builder_diagnostic",
+      "params": {
+        "request_id": "cbt_dev_009_response_array_sum_hours"
+      }
+    },
+    {
+      "id": "network",
+      "kind": "fake_api_egress",
+      "params": {
+        "request_id": "cbt_dev_009_response_array_sum_hours"
+      }
+    }
+  ],
+  "live": false
+}

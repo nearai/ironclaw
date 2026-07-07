@@ -1,0 +1,193 @@
+{
+  "schema_version": 1,
+  "case_id": "cbt_dev_003_basic_auth_lookup_ticket",
+  "profile": "custom_build_tools",
+  "title": "basic auth wrapper extracts ticket owner and severity",
+  "setup": {
+    "extensions": [
+      "custom_tool_builder"
+    ],
+    "secrets": [
+      {
+        "credential_name": "desknest_basic",
+        "value": "test-secret-cbt_dev_003_basic_auth_lookup_ticket"
+      }
+    ],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [
+      {
+        "key": "DeskNest.GET./tickets/TK-771",
+        "status": 200,
+        "body": {
+          "ticket": {
+            "id": "TK-771",
+            "owner": "nora",
+            "priority": "p1",
+            "notes": "restart queued"
+          }
+        }
+      }
+    ],
+    "profile_extra": {
+      "task": {
+        "request_id": "cbt_dev_003_basic_auth_lookup_ticket",
+        "shape": "credentialed_http_api_wrapper",
+        "mode": "create",
+        "user_request": "Build a credentialed HTTP API wrapper named desknest_ticket_lookup for DeskNest. Use credential desknest_basic; call GET https://desknest.cbt-dev.test/tickets/TK-771; transform the provider response with ticket_summary.",
+        "api_docs": {
+          "service": "DeskNest",
+          "base_url": "https://desknest.cbt-dev.test",
+          "auth": {
+            "method": "basic",
+            "placement": "header",
+            "header": "Authorization",
+            "prefix": "Basic ",
+            "credential_name": "desknest_basic"
+          },
+          "operation": {
+            "method": "GET",
+            "path": "/tickets/TK-771",
+            "input_schema": {
+              "type": "object",
+              "example": {
+                "ticket_id": "TK-771"
+              }
+            },
+            "response_example": {
+              "ticket": {
+                "id": "TK-771",
+                "owner": "nora",
+                "priority": "p1",
+                "notes": "restart queued"
+              }
+            },
+            "transform": "ticket_summary"
+          },
+          "sandbox": {
+            "network_allowlist": [
+              "desknest.cbt-dev.test"
+            ],
+            "host_network": false,
+            "shell": false
+          }
+        },
+        "expected_tool_name": "desknest_ticket_lookup",
+        "invocation": {
+          "input": {
+            "ticket_id": "TK-771"
+          }
+        },
+        "fake_api": {
+          "host": "desknest.cbt-dev.test",
+          "method": "GET",
+          "path": "/tickets/TK-771",
+          "response": {
+            "ticket": {
+              "id": "TK-771",
+              "owner": "nora",
+              "priority": "p1",
+              "notes": "restart queued"
+            }
+          }
+        }
+      }
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.custom_tool.build_http_wrapper",
+          "params": {
+            "request_id": "cbt_dev_003_basic_auth_lookup_ticket",
+            "profile": "custom_build_tools"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.validate_artifact",
+          "params": {
+            "tool_name": "desknest_ticket_lookup"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.install",
+          "params": {
+            "tool_name": "desknest_ticket_lookup"
+          }
+        },
+        {
+          "tool": "builtin.custom_tool.invoke_generated_tool",
+          "params": {
+            "tool_name": "desknest_ticket_lookup",
+            "input": {
+              "ticket_id": "TK-771"
+            }
+          }
+        },
+        {
+          "text": "Built and verified desknest_ticket_lookup."
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "text": "Build a credentialed HTTP API wrapper named desknest_ticket_lookup for DeskNest. Use credential desknest_basic; call GET https://desknest.cbt-dev.test/tickets/TK-771; transform the provider response with ticket_summary.",
+        "user_id": "UCBT1001"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "spec",
+      "kind": "custom_tool_spec",
+      "params": {
+        "request_id": "cbt_dev_003_basic_auth_lookup_ticket",
+        "tool_name": "desknest_ticket_lookup"
+      }
+    },
+    {
+      "id": "artifact",
+      "kind": "tool_artifact",
+      "params": {
+        "request_id": "cbt_dev_003_basic_auth_lookup_ticket",
+        "tool_name": "desknest_ticket_lookup"
+      }
+    },
+    {
+      "id": "install",
+      "kind": "extension_lifecycle",
+      "params": {
+        "request_id": "cbt_dev_003_basic_auth_lookup_ticket",
+        "tool_name": "desknest_ticket_lookup"
+      }
+    },
+    {
+      "id": "invoke",
+      "kind": "generated_tool_invocation",
+      "params": {
+        "request_id": "cbt_dev_003_basic_auth_lookup_ticket",
+        "tool_name": "desknest_ticket_lookup"
+      }
+    },
+    {
+      "id": "diagnostic",
+      "kind": "tool_builder_diagnostic",
+      "params": {
+        "request_id": "cbt_dev_003_basic_auth_lookup_ticket"
+      }
+    },
+    {
+      "id": "network",
+      "kind": "fake_api_egress",
+      "params": {
+        "request_id": "cbt_dev_003_basic_auth_lookup_ticket"
+      }
+    }
+  ],
+  "live": false
+}

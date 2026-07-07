@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "case_id": "mig_dev_extension_install",
+  "profile": "migration",
+  "title": "wasm tool install migrates as ExtensionInstallation",
+  "setup": {
+    "secrets": [
+      {
+        "credential_name": "openai_api_key",
+        "value": "sk-live-lfdseedplaintextvalue002"
+      }
+    ],
+    "profile_extra": {
+      "seed": {
+        "backend": "libsql",
+        "users": [
+          {
+            "ref": "u1",
+            "user_id": "leo",
+            "email": "leo@lfdseed.example",
+            "display_name": "Lale",
+            "identities": [],
+            "channels": []
+          }
+        ],
+        "conversations": [],
+        "routines": [],
+        "missions": [],
+        "memory_docs": [],
+        "settings": [],
+        "secrets": [
+          {
+            "ref": "s1",
+            "name": "openai_api_key",
+            "provider": "openai",
+            "value": "sk-live-lfdseedplaintextvalue002",
+            "expires_at": null,
+            "decryptable": true
+          }
+        ],
+        "jobs": [],
+        "extensions": [
+          {
+            "ref": "x1",
+            "name": "weather",
+            "version": "1.0.0",
+            "status": "active",
+            "wasm_len": 16,
+            "allowed_secrets": [
+              "openai_api_key"
+            ]
+          }
+        ]
+      },
+      "run": {
+        "mode": "wet"
+      }
+    }
+  },
+  "state_queries": [
+    {
+      "id": "v1_intact",
+      "kind": "v1_db_digest",
+      "params": {}
+    },
+    {
+      "id": "recon",
+      "kind": "migration_report",
+      "params": {
+        "run": "wet",
+        "view": "reconciliation"
+      }
+    },
+    {
+      "id": "proj_extensions",
+      "kind": "migration_projection",
+      "params": {
+        "domain": "extensions"
+      }
+    }
+  ],
+  "live": false
+}

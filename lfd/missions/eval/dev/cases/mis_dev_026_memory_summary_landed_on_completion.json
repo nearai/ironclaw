@@ -1,0 +1,220 @@
+{
+  "case_id": "mis_dev_026_memory_summary_landed_on_completion",
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "request": {
+          "allowed_action_classes": [
+            "read_memory",
+            "fake_tool",
+            "write_checkpoint",
+            "schedule_routine",
+            "schedule_task"
+          ],
+          "budget": {
+            "model_call_limit": 40,
+            "requires_explicit_approval_for_overrun": true,
+            "usd_limit": 5,
+            "wall_clock_minutes": 100
+          },
+          "definition_of_done": "VIP cleanup summary is written to project memory with remaining risks",
+          "forbidden_action_classes": [
+            "live_external_send",
+            "unapproved_paid_api"
+          ],
+          "goal": "Finish Acme VIP support cleanup",
+          "mission_kind": "finite",
+          "mission_ref": "summary-memory-20260721",
+          "trigger_ref": "trg-summary-memory-20260721",
+          "trigger_source": "manual"
+        },
+        "submitted_at": "2026-07-07T09:00:00Z",
+        "type": "mission_request",
+        "user_id": "U853201"
+      }
+    }
+  ],
+  "live": false,
+  "llm_script": [
+    {
+      "steps": [
+        {
+          "params": {
+            "definition_of_done": "VIP cleanup summary is written to project memory with remaining risks",
+            "goal": "Finish Acme VIP support cleanup",
+            "kind": "finite",
+            "mission_ref": "summary-memory-20260721"
+          },
+          "tool": "mission.plan"
+        },
+        {
+          "params": {
+            "count": 1,
+            "mission_ref": "summary-memory-20260721"
+          },
+          "tool": "mission.schedule_task"
+        },
+        {
+          "params": {
+            "memory": true,
+            "mission_ref": "summary-memory-20260721"
+          },
+          "tool": "mission.write_summary"
+        },
+        {
+          "params": {
+            "checkpoint_kind": "durable_progress",
+            "mission_ref": "summary-memory-20260721"
+          },
+          "tool": "mission.checkpoint"
+        },
+        {
+          "text": "Mission summary-memory-20260721: write memory summary"
+        }
+      ],
+      "turn": 1
+    }
+  ],
+  "profile": "missions",
+  "schema_version": 1,
+  "setup": {
+    "extensions": [],
+    "http_stubs": [
+      {
+        "body": {
+          "ok": true
+        },
+        "key": "fake.mission_tool",
+        "status": 200
+      }
+    ],
+    "memory_docs": [
+      {
+        "content": "lfdmission support triage: prioritize P0 refunds, escalate API outage tickets within 15 minutes, and summarize stale VIP threads before outreach.",
+        "path": "/projects/acme-support/playbooks/triage-sla.md",
+        "title": "Acme support queue SLA playbook"
+      }
+    ],
+    "profile_extra": {
+      "agent_id": "agent-missions",
+      "clock_start": "2026-07-07T09:00:00Z",
+      "expected_failure_direction": false,
+      "mission_ref": "summary-memory-20260721",
+      "mission_request": {
+        "allowed_action_classes": [
+          "read_memory",
+          "fake_tool",
+          "write_checkpoint",
+          "schedule_routine",
+          "schedule_task"
+        ],
+        "budget": {
+          "model_call_limit": 40,
+          "requires_explicit_approval_for_overrun": true,
+          "usd_limit": 5,
+          "wall_clock_minutes": 100
+        },
+        "definition_of_done": "VIP cleanup summary is written to project memory with remaining risks",
+        "forbidden_action_classes": [
+          "live_external_send",
+          "unapproved_paid_api"
+        ],
+        "goal": "Finish Acme VIP support cleanup",
+        "mission_kind": "finite",
+        "mission_ref": "summary-memory-20260721",
+        "trigger_ref": "trg-summary-memory-20260721",
+        "trigger_source": "manual"
+      },
+      "project_id": "project-support",
+      "tenant_id": "tenant-lfdmission-blue",
+      "timeline": [
+        {
+          "at": "2026-07-07T09:00:00Z",
+          "mission_ref": "summary-memory-20260721",
+          "op": "mission_request"
+        },
+        {
+          "at": "2026-07-07T09:00:00Z",
+          "fire_slot": "2026-07-07T09:00:00Z",
+          "op": "fire_trigger",
+          "trigger_ref": "trg-summary-memory-20260721"
+        },
+        {
+          "at": "2026-07-07T09:20:00Z",
+          "met": true,
+          "op": "completion_evaluation"
+        }
+      ]
+    },
+    "secrets": [],
+    "triggers": [
+      {
+        "completion_policy": "complete_after_done",
+        "mission_ref": "summary-memory-20260721",
+        "source": "manual",
+        "trigger_ref": "trg-summary-memory-20260721"
+      }
+    ]
+  },
+  "state_queries": [
+    {
+      "id": "mission",
+      "kind": "mission_record",
+      "params": {
+        "mission_ref": "summary-memory-20260721"
+      }
+    },
+    {
+      "id": "plan",
+      "kind": "mission_plan",
+      "params": {
+        "mission_ref": "summary-memory-20260721"
+      }
+    },
+    {
+      "id": "checkpoints",
+      "kind": "checkpoint_log",
+      "params": {
+        "mission_ref": "summary-memory-20260721"
+      }
+    },
+    {
+      "id": "budget",
+      "kind": "budget_ledger",
+      "params": {
+        "mission_ref": "summary-memory-20260721"
+      }
+    },
+    {
+      "id": "decisions",
+      "kind": "scheduler_decisions",
+      "params": {
+        "mission_ref": "summary-memory-20260721"
+      }
+    },
+    {
+      "id": "prompt",
+      "kind": "prompt_envelope",
+      "params": {
+        "fire_index": 1,
+        "mission_ref": "summary-memory-20260721"
+      }
+    },
+    {
+      "id": "progress",
+      "kind": "mission_progress",
+      "params": {
+        "mission_ref": "summary-memory-20260721"
+      }
+    },
+    {
+      "id": "status",
+      "kind": "status_report",
+      "params": {
+        "mission_ref": "summary-memory-20260721"
+      }
+    }
+  ],
+  "title": "completion summary lands in project memory with goal and outcome"
+}

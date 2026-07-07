@@ -1,0 +1,106 @@
+{
+  "schema_version": 1,
+  "case_id": "mem_place_dev_024",
+  "profile": "memory_placement",
+  "title": "fake provider denied by policy is not invoked",
+  "setup": {
+    "extensions": [],
+    "secrets": [],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {
+      "scenario": "fake_provider_policy_denied",
+      "case_kind": "failure_denial",
+      "provider": {
+        "default": "native",
+        "active": "fake_echo",
+        "compare_with": "native",
+        "fake_provider_pinned_in_support": true
+      },
+      "policy": {
+        "decision": "deny",
+        "constraints": [],
+        "denial_reason": "provider_denied"
+      },
+      "operation": {
+        "family": "write",
+        "target": "notes/mpseed-whiskey.md",
+        "content": "mpseed whiskey fake denied",
+        "append": false
+      },
+      "seed": {
+        "tenant_id": "T724MP",
+        "user_id": "U724MP",
+        "project_id": "proj-fake-deny",
+        "docs": [],
+        "versions": [],
+        "retention_records": []
+      },
+      "contract_markers": [
+        "mpseed-whiskey",
+        "fake-deny",
+        "memory.document_written",
+        "memory.search_performed",
+        "memory.prompt_context_built",
+        "memory.provider_denied",
+        "memory.provider_constrained",
+        "memory.safety_rejected",
+        "memory.profile_updated",
+        "host-network/memory-embeddings",
+        "memory_provider_repository"
+      ]
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "tool": "builtin.memory_write",
+          "params": {
+            "target": "notes/mpseed-whiskey.md",
+            "content": "mpseed whiskey fake denied",
+            "append": false
+          }
+        },
+        {
+          "text": "memory placement scenario mem_place_dev_024 completed"
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "lfd_memory",
+      "payload": {
+        "text": "Execute fake_provider_policy_denied for lane 16 memory placement"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "policy",
+      "kind": "memory_policy_decision",
+      "params": {
+        "operation_ref": "fake_provider_policy_denied"
+      }
+    },
+    {
+      "id": "boundary",
+      "kind": "memory_provider_boundary",
+      "params": {
+        "operation_ref": "fake_provider_policy_denied",
+        "provider": "fake_echo"
+      }
+    },
+    {
+      "id": "dependency",
+      "kind": "memory_dependency_boundary",
+      "params": {
+        "surface": "product"
+      }
+    }
+  ],
+  "live": false
+}

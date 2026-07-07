@@ -1,0 +1,235 @@
+{
+  "case_id": "mis_dev_014_duplicate_fire_same_slot_denied",
+  "inbound": [
+    {
+      "channel": "web",
+      "payload": {
+        "request": {
+          "allowed_action_classes": [
+            "read_memory",
+            "fake_tool",
+            "write_checkpoint",
+            "schedule_routine",
+            "schedule_task"
+          ],
+          "budget": {
+            "model_call_limit": 40,
+            "requires_explicit_approval_for_overrun": true,
+            "usd_limit": 5,
+            "wall_clock_minutes": 100
+          },
+          "definition_of_done": "One mission run per canonical trigger slot with duplicate fires deduped",
+          "forbidden_action_classes": [
+            "live_external_send",
+            "unapproved_paid_api"
+          ],
+          "goal": "Run Orbit daily competitor watch exactly once per slot",
+          "mission_kind": "standing",
+          "mission_ref": "duplicate-slot-20260715",
+          "trigger_ref": "trg-duplicate-slot-20260715",
+          "trigger_source": "cron"
+        },
+        "submitted_at": "2026-07-07T09:00:00Z",
+        "type": "mission_request",
+        "user_id": "U183580"
+      }
+    },
+    {
+      "channel": "scheduler",
+      "payload": {
+        "fire_slot": "2026-07-07T09:00:00Z",
+        "mission_ref": "duplicate-slot-20260715",
+        "trigger_ref": "trg-duplicate-slot-20260715",
+        "type": "trigger_fire"
+      }
+    },
+    {
+      "channel": "scheduler",
+      "payload": {
+        "duplicate": true,
+        "fire_slot": "2026-07-07T09:00:00Z",
+        "mission_ref": "duplicate-slot-20260715",
+        "trigger_ref": "trg-duplicate-slot-20260715",
+        "type": "trigger_fire"
+      }
+    }
+  ],
+  "live": false,
+  "llm_script": [
+    {
+      "steps": [
+        {
+          "params": {
+            "definition_of_done": "One mission run per canonical trigger slot with duplicate fires deduped",
+            "goal": "Run Orbit daily competitor watch exactly once per slot",
+            "kind": "standing",
+            "mission_ref": "duplicate-slot-20260715"
+          },
+          "tool": "mission.plan"
+        },
+        {
+          "params": {
+            "count": 1,
+            "mission_ref": "duplicate-slot-20260715",
+            "trigger_ref": "trg-duplicate-slot-20260715"
+          },
+          "tool": "mission.schedule_routine"
+        },
+        {
+          "params": {
+            "checkpoint_kind": "durable_progress",
+            "mission_ref": "duplicate-slot-20260715"
+          },
+          "tool": "mission.checkpoint"
+        },
+        {
+          "text": "Mission duplicate-slot-20260715: record deduped slot"
+        }
+      ],
+      "turn": 1
+    }
+  ],
+  "profile": "missions",
+  "schema_version": 1,
+  "setup": {
+    "extensions": [],
+    "http_stubs": [
+      {
+        "body": {
+          "ok": true
+        },
+        "key": "fake.mission_tool",
+        "status": 200
+      }
+    ],
+    "memory_docs": [
+      {
+        "content": "lfdmission competitor watch: use public changelogs, release RSS, and pricing pages; never scrape gated forums.",
+        "path": "/projects/orbit-watch/research/sources.md",
+        "title": "Orbit competitor watch source policy"
+      }
+    ],
+    "profile_extra": {
+      "agent_id": "agent-missions",
+      "clock_start": "2026-07-07T09:00:00Z",
+      "expected_failure_direction": true,
+      "mission_ref": "duplicate-slot-20260715",
+      "mission_request": {
+        "allowed_action_classes": [
+          "read_memory",
+          "fake_tool",
+          "write_checkpoint",
+          "schedule_routine",
+          "schedule_task"
+        ],
+        "budget": {
+          "model_call_limit": 40,
+          "requires_explicit_approval_for_overrun": true,
+          "usd_limit": 5,
+          "wall_clock_minutes": 100
+        },
+        "definition_of_done": "One mission run per canonical trigger slot with duplicate fires deduped",
+        "forbidden_action_classes": [
+          "live_external_send",
+          "unapproved_paid_api"
+        ],
+        "goal": "Run Orbit daily competitor watch exactly once per slot",
+        "mission_kind": "standing",
+        "mission_ref": "duplicate-slot-20260715",
+        "trigger_ref": "trg-duplicate-slot-20260715",
+        "trigger_source": "cron"
+      },
+      "project_id": "project-research",
+      "tenant_id": "tenant-lfdmission-blue",
+      "timeline": [
+        {
+          "at": "2026-07-07T09:00:00Z",
+          "mission_ref": "duplicate-slot-20260715",
+          "op": "mission_request"
+        },
+        {
+          "at": "2026-07-07T09:00:00Z",
+          "fire_slot": "2026-07-07T09:00:00Z",
+          "op": "fire_trigger",
+          "trigger_ref": "trg-duplicate-slot-20260715"
+        },
+        {
+          "at": "2026-07-07T09:00:00Z",
+          "duplicate": true,
+          "fire_slot": "2026-07-07T09:00:00Z",
+          "op": "fire_trigger",
+          "trigger_ref": "trg-duplicate-slot-20260715"
+        }
+      ]
+    },
+    "secrets": [],
+    "triggers": [
+      {
+        "completion_policy": "recurring",
+        "mission_ref": "duplicate-slot-20260715",
+        "source": "cron",
+        "trigger_ref": "trg-duplicate-slot-20260715"
+      }
+    ]
+  },
+  "state_queries": [
+    {
+      "id": "mission",
+      "kind": "mission_record",
+      "params": {
+        "mission_ref": "duplicate-slot-20260715"
+      }
+    },
+    {
+      "id": "plan",
+      "kind": "mission_plan",
+      "params": {
+        "mission_ref": "duplicate-slot-20260715"
+      }
+    },
+    {
+      "id": "checkpoints",
+      "kind": "checkpoint_log",
+      "params": {
+        "mission_ref": "duplicate-slot-20260715"
+      }
+    },
+    {
+      "id": "budget",
+      "kind": "budget_ledger",
+      "params": {
+        "mission_ref": "duplicate-slot-20260715"
+      }
+    },
+    {
+      "id": "decisions",
+      "kind": "scheduler_decisions",
+      "params": {
+        "mission_ref": "duplicate-slot-20260715"
+      }
+    },
+    {
+      "id": "prompt",
+      "kind": "prompt_envelope",
+      "params": {
+        "fire_index": 1,
+        "mission_ref": "duplicate-slot-20260715"
+      }
+    },
+    {
+      "id": "progress",
+      "kind": "mission_progress",
+      "params": {
+        "mission_ref": "duplicate-slot-20260715"
+      }
+    },
+    {
+      "id": "status",
+      "kind": "status_report",
+      "params": {
+        "mission_ref": "duplicate-slot-20260715"
+      }
+    }
+  ],
+  "title": "duplicate trigger fire for same slot reuses mission identity and suppresses second spawn"
+}

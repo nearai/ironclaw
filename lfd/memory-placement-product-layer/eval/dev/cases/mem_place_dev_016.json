@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "case_id": "mem_place_dev_016",
+  "profile": "memory_placement",
+  "title": "fake provider prompt-context parity hides provider identity",
+  "setup": {
+    "extensions": [],
+    "secrets": [],
+    "memory_docs": [
+      {
+        "path": "notes/mpseed-oscar.md",
+        "content": "mpseed oscar fake prompt context"
+      }
+    ],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {
+      "scenario": "fake_prompt_context_parity",
+      "case_kind": "positive",
+      "provider": {
+        "default": "native",
+        "active": "fake_shadow",
+        "compare_with": "native",
+        "fake_provider_pinned_in_support": true
+      },
+      "policy": {
+        "decision": "allow",
+        "constraints": []
+      },
+      "operation": {
+        "family": "prompt_context",
+        "query": "mpseed oscar fake prompt context",
+        "target": "prompt/context"
+      },
+      "seed": {
+        "tenant_id": "T716MP",
+        "user_id": "U716MP",
+        "project_id": "proj-fake-prompt",
+        "docs": [
+          {
+            "path": "notes/mpseed-oscar.md",
+            "content": "mpseed oscar fake prompt context"
+          }
+        ],
+        "versions": [],
+        "retention_records": []
+      },
+      "contract_markers": [
+        "mpseed-oscar",
+        "fake-prompt-parity",
+        "memory.document_written",
+        "memory.search_performed",
+        "memory.prompt_context_built",
+        "memory.provider_denied",
+        "memory.provider_constrained",
+        "memory.safety_rejected",
+        "memory.profile_updated",
+        "host-network/memory-embeddings",
+        "memory_provider_repository"
+      ]
+    }
+  },
+  "llm_script": [
+    {
+      "turn": 1,
+      "steps": [
+        {
+          "text": "memory placement scenario mem_place_dev_016 completed"
+        }
+      ]
+    }
+  ],
+  "inbound": [
+    {
+      "channel": "lfd_memory",
+      "payload": {
+        "text": "Execute fake_prompt_context_parity for lane 16 memory placement"
+      }
+    }
+  ],
+  "state_queries": [
+    {
+      "id": "boundary",
+      "kind": "memory_provider_boundary",
+      "params": {
+        "operation_ref": "fake_prompt_context_parity",
+        "provider": "fake_shadow"
+      }
+    },
+    {
+      "id": "parity",
+      "kind": "memory_provider_parity",
+      "params": {
+        "operation_ref": "fake_prompt_context_parity",
+        "baseline_provider": "native",
+        "candidate_provider": "fake_shadow"
+      }
+    },
+    {
+      "id": "prompt",
+      "kind": "memory_prompt_boundary",
+      "params": {
+        "operation_ref": "fake_prompt_context_parity"
+      }
+    }
+  ],
+  "live": false
+}
