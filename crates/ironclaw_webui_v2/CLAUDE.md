@@ -64,6 +64,10 @@ browser-reachable.
 | `webui.v2.retry_run` | POST | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/retry` | None | `TurnCoordinator` |
 | `webui.v2.resolve_gate` | POST | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/gates/{gate_ref}/resolve` | None | `TurnCoordinator` |
 | `webui.v2.list_automations` | GET | `/api/webchat/v2/automations` (optional `?limit=N&run_limit=N`) | None | `ProductWorkflow` |
+| `webui.v2.pause_automation` | POST | `/api/webchat/v2/automations/{automation_id}/pause` | None | `ProductWorkflow` |
+| `webui.v2.resume_automation` | POST | `/api/webchat/v2/automations/{automation_id}/resume` | None | `ProductWorkflow` |
+| `webui.v2.rename_automation` | POST | `/api/webchat/v2/automations/{automation_id}` | None | `ProductWorkflow` |
+| `webui.v2.delete_automation` | DELETE | `/api/webchat/v2/automations/{automation_id}` | None | `ProductWorkflow` |
 | `webui.v2.list_connectable_channels` | GET | `/api/webchat/v2/channels/connectable` | None | `ProjectionOnly` |
 | `webui.v2.list_extensions` | GET | `/api/webchat/v2/extensions` | None | `ProjectionOnly` |
 | `webui.v2.list_extension_registry` | GET | `/api/webchat/v2/extensions/registry` | None | `ProjectionOnly` |

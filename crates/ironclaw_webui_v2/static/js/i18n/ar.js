@@ -721,6 +721,10 @@ registerPack("ar", {
   "automations.filter.completed": "مكتمل",
   "automations.refresh": "تحديث عمليات الأتمتة",
   "automations.error.loadFailed": "غير قادر على تحميل عمليات الأتمتة",
+  "automations.rename.action": "إعادة تسمية الأتمتة",
+  "automations.rename.nameLabel": "اسم الأتمتة",
+  "automations.rename.nameRequired": "اسم الأتمتة مطلوب.",
+  "automations.rename.nameTooLong": "اسم الأتمتة طويل جدًا.",
   "automations.schedulerOff.title": "تم إيقاف الجدولة",
   "automations.schedulerOff.description":
     "هذه الأتمتة محفوظة لكنها لن تعمل حتى يتم تفعيل المجدول.",

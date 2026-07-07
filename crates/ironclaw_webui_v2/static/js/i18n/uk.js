@@ -721,6 +721,10 @@ registerPack("uk", {
   "automations.filter.completed": "Завершені",
   "automations.refresh": "Оновити автоматизації",
   "automations.error.loadFailed": "Неможливо завантажити автоматизації",
+  "automations.rename.action": "Перейменувати автоматизацію",
+  "automations.rename.nameLabel": "Назва автоматизації",
+  "automations.rename.nameRequired": "Назва автоматизації обов'язкова.",
+  "automations.rename.nameTooLong": "Назва автоматизації задовга.",
   "automations.schedulerOff.title": "Планування вимкнено",
   "automations.schedulerOff.description":
     "Ці автоматизації збережено, але вони не запускатимуться, доки не ввімкнено планувальник.",

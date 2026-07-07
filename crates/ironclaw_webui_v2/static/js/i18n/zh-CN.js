@@ -721,6 +721,10 @@ registerPack("zh-CN", {
   "automations.filter.completed": "已完成",
   "automations.refresh": "更新最新自动化",
   "automations.error.loadFailed": "提取系统自动化计划列表不成功！",
+  "automations.rename.action": "重命名自动化",
+  "automations.rename.nameLabel": "自动化名称",
+  "automations.rename.nameRequired": "自动化名称不能为空。",
+  "automations.rename.nameTooLong": "自动化名称太长。",
   "automations.schedulerOff.title": "调度已关闭",
   "automations.schedulerOff.description":
     "这些自动化已保存，但在启用调度器之前不会运行。",

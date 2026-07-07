@@ -721,6 +721,10 @@ registerPack("pt-BR", {
   "automations.filter.completed": "Concluídas",
   "automations.refresh": "Atualizar automações",
   "automations.error.loadFailed": "Não é possível carregar automações",
+  "automations.rename.action": "Renomear automação",
+  "automations.rename.nameLabel": "Nome da automação",
+  "automations.rename.nameRequired": "O nome da automação é obrigatório.",
+  "automations.rename.nameTooLong": "O nome da automação é muito longo.",
   "automations.schedulerOff.title": "O agendamento está desativado",
   "automations.schedulerOff.description":
     "Estas automações estão salvas, mas não serão executadas até que o agendamento seja ativado.",

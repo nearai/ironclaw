@@ -52,8 +52,8 @@ use crate::{
     UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand, WebUiInboundValidationCode,
     WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest,
+    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
     approval_interaction::RejectingApprovalInteractionService,
     auth_interaction::RejectingAuthInteractionService,
     binding_ref::{
@@ -61,6 +61,7 @@ use crate::{
         bounded_source_binding_ref,
     },
     is_approval_gate_ref, is_auth_gate_ref, thread_metadata_is_automation_trigger,
+    webui_inbound::AUTOMATION_NAME_MAX_BYTES,
 };
 
 mod error;
@@ -674,6 +675,15 @@ pub trait AutomationProductFacade: Send + Sync {
         Err(automation_unavailable())
     }
 
+    async fn rename_automation(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _automation_id: String,
+        _name: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        Err(automation_unavailable())
+    }
+
     async fn delete_automation(
         &self,
         _caller: ProductAgentBoundCaller,
@@ -748,6 +758,15 @@ impl AutomationProductFacade for UnsupportedAutomationProductFacade {
         &self,
         _caller: ProductAgentBoundCaller,
         _automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        Err(automation_unavailable())
+    }
+
+    async fn rename_automation(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _automation_id: String,
+        _name: String,
     ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
         Err(automation_unavailable())
     }
@@ -1988,6 +2007,16 @@ pub trait RebornServicesApi: Send + Sync {
         automation_id: String,
     ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
         let _ = (caller, automation_id);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn rename_automation(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+        request: WebUiRenameAutomationRequest,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        let _ = (caller, automation_id, request);
         Err(RebornServicesError::service_unavailable(false))
     }
 
@@ -3926,6 +3955,25 @@ impl RebornServicesApi for RebornServices {
         };
         self.automation_facade
             .resume_automation(caller, automation_id)
+            .await
+    }
+
+    async fn rename_automation(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+        request: WebUiRenameAutomationRequest,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        let Some(caller) = product_agent_bound_caller_from_webui(caller) else {
+            return Err(RebornServicesError::from_status(
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+                false,
+            ));
+        };
+        let name = parse_automation_name(request)?;
+        self.automation_facade
+            .rename_automation(caller, automation_id, name)
             .await
     }
 
@@ -5932,6 +5980,28 @@ fn clamp_automation_run_limit(requested: Option<u32>) -> usize {
     // 0 is intentional: callers suppress embedded run history by passing run_limit=0.
     let clamped = raw.min(AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE);
     clamped as usize
+}
+
+fn parse_automation_name(
+    request: WebUiRenameAutomationRequest,
+) -> Result<String, RebornServicesError> {
+    let Some(raw_name) = request.name else {
+        return Err(RebornServicesError::validation(
+            WebUiInboundValidationError::new("name", WebUiInboundValidationCode::MissingField),
+        ));
+    };
+    let name = raw_name.trim().to_string();
+    if name.is_empty() {
+        return Err(RebornServicesError::validation(
+            WebUiInboundValidationError::new("name", WebUiInboundValidationCode::Blank),
+        ));
+    }
+    if name.len() > AUTOMATION_NAME_MAX_BYTES {
+        return Err(RebornServicesError::validation(
+            WebUiInboundValidationError::new("name", WebUiInboundValidationCode::TooLong),
+        ));
+    }
+    Ok(name)
 }
 
 fn notification_approval_timeout_error() -> RebornServicesError {

@@ -721,6 +721,10 @@ registerPack("ja", {
   "automations.filter.completed": "完了",
   "automations.refresh": "自動化の更新",
   "automations.error.loadFailed": "自動化をロードできません",
+  "automations.rename.action": "自動化名を変更",
+  "automations.rename.nameLabel": "自動化名",
+  "automations.rename.nameRequired": "自動化名は必須です。",
+  "automations.rename.nameTooLong": "自動化名が長すぎます。",
   "automations.schedulerOff.title": "スケジュールは無効です",
   "automations.schedulerOff.description":
     "これらのオートメーションは保存されていますが、スケジューラーを有効にするまで実行されません。",

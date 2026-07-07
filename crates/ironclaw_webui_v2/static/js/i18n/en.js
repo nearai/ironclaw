@@ -768,6 +768,10 @@ registerPack("en", {
   "automations.filter.completed": "Completed",
   "automations.refresh": "Refresh automations",
   "automations.error.loadFailed": "Unable to load automations",
+  "automations.rename.action": "Rename automation",
+  "automations.rename.nameLabel": "Automation name",
+  "automations.rename.nameRequired": "Automation name is required.",
+  "automations.rename.nameTooLong": "Automation name is too long.",
   "automations.schedulerOff.title": "Scheduling is turned off",
   "automations.schedulerOff.description":
     "These automations are saved but won't run until the scheduler is enabled.",

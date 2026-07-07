@@ -266,6 +266,19 @@ export function resumeAutomation({ automationId } = {}) {
   });
 }
 
+export function renameAutomation({ automationId, name } = {}) {
+  if (!automationId) {
+    return Promise.reject(new Error("automationId is required"));
+  }
+  if (!name) {
+    return Promise.reject(new Error("name is required"));
+  }
+  return apiFetch(`${V2_BASE}/automations/${encodeURIComponent(automationId)}`, {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+}
+
 export function deleteAutomation({ automationId } = {}) {
   if (!automationId) {
     return Promise.reject(new Error("automationId is required"));

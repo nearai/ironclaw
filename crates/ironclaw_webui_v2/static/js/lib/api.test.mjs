@@ -11,6 +11,7 @@ import {
   listAutomations,
   listThreads,
   pauseAutomation,
+  renameAutomation,
   resumeAutomation,
 } from "./api.js";
 
@@ -143,9 +144,13 @@ test("automation mutations use encoded v2 automation routes", async () => {
 
   await pauseAutomation({ automationId: "automation/needs encoding" });
   await resumeAutomation({ automationId: "automation/needs encoding" });
+  await renameAutomation({
+    automationId: "automation/needs encoding",
+    name: "Renamed status",
+  });
   await deleteAutomation({ automationId: "automation/needs encoding" });
 
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 4);
   assert.equal(
     calls[0].path,
     "/api/webchat/v2/automations/automation%2Fneeds%20encoding/pause",
@@ -160,7 +165,13 @@ test("automation mutations use encoded v2 automation routes", async () => {
     calls[2].path,
     "/api/webchat/v2/automations/automation%2Fneeds%20encoding",
   );
-  assert.equal(calls[2].options.method, "DELETE");
+  assert.equal(calls[2].options.method, "POST");
+  assert.equal(calls[2].options.body, JSON.stringify({ name: "Renamed status" }));
+  assert.equal(
+    calls[3].path,
+    "/api/webchat/v2/automations/automation%2Fneeds%20encoding",
+  );
+  assert.equal(calls[3].options.method, "DELETE");
   assert.equal(calls[0].options.headers.get("Authorization"), "Bearer token-1");
 });
 
@@ -178,6 +189,11 @@ test("automation state mutations reject before fetch when automation id is missi
 
   await assert.rejects(pauseAutomation(), /automationId is required/);
   await assert.rejects(resumeAutomation({}), /automationId is required/);
+  await assert.rejects(renameAutomation({ name: "Renamed" }), /automationId is required/);
+  await assert.rejects(
+    renameAutomation({ automationId: "automation-alpha" }),
+    /name is required/,
+  );
   await assert.rejects(deleteAutomation({ automationId: "" }), /automationId is required/);
   assert.equal(fetchCalled, false);
 });

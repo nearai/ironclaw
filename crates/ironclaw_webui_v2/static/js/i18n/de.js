@@ -721,6 +721,10 @@ registerPack("de", {
   "automations.filter.completed": "Abgeschlossen",
   "automations.refresh": "Automatisierungen aktualisieren",
   "automations.error.loadFailed": "Automatisierungen können nicht geladen werden",
+  "automations.rename.action": "Automatisierung umbenennen",
+  "automations.rename.nameLabel": "Automatisierungsname",
+  "automations.rename.nameRequired": "Automatisierungsname ist erforderlich.",
+  "automations.rename.nameTooLong": "Automatisierungsname ist zu lang.",
   "automations.schedulerOff.title": "Planung ist deaktiviert",
   "automations.schedulerOff.description":
     "Diese Automatisierungen sind gespeichert, werden aber erst ausgeführt, wenn die Planung aktiviert ist.",

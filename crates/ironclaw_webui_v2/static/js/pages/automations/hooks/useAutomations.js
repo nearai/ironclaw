@@ -4,6 +4,7 @@ import {
   deleteAutomation,
   listAutomations,
   pauseAutomation,
+  renameAutomation,
   resumeAutomation,
 } from "../../../lib/api.js";
 import { useI18n } from "../../../lib/i18n.js";
@@ -75,6 +76,10 @@ export function useAutomations(includeCompleted = false) {
     mutationFn: (automationId) => resumeAutomation({ automationId }),
     onSuccess: invalidateAutomations,
   });
+  const renameMutation = useMutation({
+    mutationFn: ({ automationId, name }) => renameAutomation({ automationId, name }),
+    onSuccess: invalidateAutomations,
+  });
   const deleteMutation = useMutation({
     mutationFn: (automationId) => deleteAutomation({ automationId }),
     onSuccess: invalidateAutomations,
@@ -86,11 +91,21 @@ export function useAutomations(includeCompleted = false) {
     schedulerEnabled,
     isLoading: query.isLoading,
     isRefreshing: query.isFetching,
-    isMutating: pauseMutation.isPending || resumeMutation.isPending || deleteMutation.isPending,
+    isMutating:
+      pauseMutation.isPending ||
+      resumeMutation.isPending ||
+      renameMutation.isPending ||
+      deleteMutation.isPending,
     error: query.error || null,
-    actionError: pauseMutation.error || resumeMutation.error || deleteMutation.error || null,
+    actionError:
+      pauseMutation.error ||
+      resumeMutation.error ||
+      renameMutation.error ||
+      deleteMutation.error ||
+      null,
     pauseAutomation: pauseMutation.mutate,
     resumeAutomation: resumeMutation.mutate,
+    renameAutomation: renameMutation.mutate,
     deleteAutomation: deleteMutation.mutate,
     refetch: query.refetch,
   };

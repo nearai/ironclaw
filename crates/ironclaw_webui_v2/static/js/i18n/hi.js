@@ -721,6 +721,10 @@ registerPack("hi", {
   "automations.filter.completed": "पूर्ण",
   "automations.refresh": "ऑटोमेशन ताज़ा करें",
   "automations.error.loadFailed": "ऑटोमेशन लोड करने में असमर्थ",
+  "automations.rename.action": "ऑटोमेशन का नाम बदलें",
+  "automations.rename.nameLabel": "ऑटोमेशन नाम",
+  "automations.rename.nameRequired": "ऑटोमेशन नाम आवश्यक है.",
+  "automations.rename.nameTooLong": "ऑटोमेशन नाम बहुत लंबा है.",
   "automations.schedulerOff.title": "शेड्यूलिंग बंद है",
   "automations.schedulerOff.description":
     "ये ऑटोमेशन सहेजे गए हैं लेकिन शेड्यूलर सक्षम होने तक नहीं चलेंगे।",

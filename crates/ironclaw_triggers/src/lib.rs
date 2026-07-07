@@ -330,18 +330,7 @@ pub struct TriggerRecord {
 
 impl TriggerRecord {
     pub fn validate(&self) -> Result<(), TriggerError> {
-        if self.name.trim().is_empty() {
-            return Err(TriggerError::InvalidRecord {
-                kind: TriggerRecordValidationKind::NameEmpty,
-                reason: "trigger name must not be empty".to_string(),
-            });
-        }
-        if self.name.len() > MAX_TRIGGER_NAME_BYTES {
-            return Err(TriggerError::InvalidRecord {
-                kind: TriggerRecordValidationKind::NameTooLong,
-                reason: format!("trigger name must be at most {MAX_TRIGGER_NAME_BYTES} bytes"),
-            });
-        }
+        validate_trigger_name(&self.name)?;
         if self.prompt.trim().is_empty() {
             return Err(TriggerError::InvalidRecord {
                 kind: TriggerRecordValidationKind::PromptEmpty,
@@ -371,6 +360,22 @@ impl TriggerRecord {
     pub fn has_active_fire(&self) -> bool {
         self.active_fire_slot.is_some() || self.active_run_ref.is_some()
     }
+}
+
+pub(crate) fn validate_trigger_name(name: &str) -> Result<(), TriggerError> {
+    if name.trim().is_empty() {
+        return Err(TriggerError::InvalidRecord {
+            kind: TriggerRecordValidationKind::NameEmpty,
+            reason: "trigger name must not be empty".to_string(),
+        });
+    }
+    if name.len() > MAX_TRIGGER_NAME_BYTES {
+        return Err(TriggerError::InvalidRecord {
+            kind: TriggerRecordValidationKind::NameTooLong,
+            reason: format!("trigger name must be at most {MAX_TRIGGER_NAME_BYTES} bytes"),
+        });
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1006,6 +1011,25 @@ pub trait TriggerRepository: Send + Sync {
         state: TriggerState,
     ) -> Result<Option<TriggerRecord>, TriggerError>;
 
+    /// Renames a trigger only when the full caller scope matches the stored record.
+    ///
+    /// This user-facing mutation updates only the human-readable label. It
+    /// must not alter schedule state, active-fire metadata, run history, or
+    /// prompt content.
+    async fn rename_scoped_trigger(
+        &self,
+        _tenant_id: TenantId,
+        _creator_user_id: UserId,
+        _agent_id: Option<AgentId>,
+        _project_id: Option<ProjectId>,
+        _trigger_id: TriggerId,
+        _name: String,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        Err(TriggerError::Backend {
+            reason: "rename_scoped_trigger not implemented by this repository".to_string(),
+        })
+    }
+
     /// Lists due triggers across all tenants for the trusted poller path.
     ///
     /// # Safety / Authorization
@@ -1344,6 +1368,31 @@ impl TriggerRepository for InMemoryTriggerRepository {
             return Ok(None);
         }
         record.state = new_state;
+        Ok(Some(record.clone()))
+    }
+
+    async fn rename_scoped_trigger(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        trigger_id: TriggerId,
+        name: String,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        validate_trigger_name(&name)?;
+        let mut state = self.lock_state()?;
+        let key = TriggerRepositoryKey::new(&tenant_id, trigger_id);
+        let Some(record) = state.records.get_mut(&key) else {
+            return Ok(None);
+        };
+        if record.creator_user_id != creator_user_id
+            || record.agent_id != agent_id
+            || record.project_id != project_id
+        {
+            return Ok(None);
+        }
+        record.name = name;
         Ok(Some(record.clone()))
     }
 

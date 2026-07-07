@@ -618,6 +618,49 @@ impl TriggerRepository for LibSqlTriggerRepository {
         }
     }
 
+    async fn rename_scoped_trigger(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        trigger_id: TriggerId,
+        name: String,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        crate::validate_trigger_name(&name)?;
+        let conn = self.connect().await?;
+        let agent_id = agent_id.as_ref().map(AgentId::as_str);
+        let project_id = project_id.as_ref().map(ProjectId::as_str);
+        let mut rows = conn
+            .query(
+                &format!(
+                    "UPDATE {TRIGGER_TABLE}
+                     SET name = ?6
+                     WHERE tenant_id = ?1
+                       AND creator_user_id = ?2
+                       AND agent_id IS ?3
+                       AND project_id IS ?4
+                       AND trigger_id = ?5
+                     RETURNING {TRIGGER_COLUMNS}"
+                ),
+                params![
+                    tenant_id.as_str(),
+                    creator_user_id.as_str(),
+                    agent_id,
+                    project_id,
+                    trigger_id.to_string(),
+                    name,
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("rename scoped trigger", error))?;
+        match rows.next().await {
+            Ok(Some(row)) => Ok(Some(row_to_record(&row)?)),
+            Ok(None) => Ok(None),
+            Err(error) => Err(backend_error("read renamed scoped trigger row", error)),
+        }
+    }
+
     async fn list_due_triggers(
         &self,
         now: Timestamp,
