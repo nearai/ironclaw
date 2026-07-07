@@ -59,7 +59,7 @@ use serde_json::json;
 use url::Url;
 use uuid::Uuid;
 
-use crate::auth::{RebornDcrOAuthStartFlowRequest, RebornOAuthStartFlowRequest};
+use crate::product_auth::api::auth::{RebornDcrOAuthStartFlowRequest, RebornOAuthStartFlowRequest};
 use crate::{
     RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse,
     RebornOAuthCallbackError, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
@@ -1343,9 +1343,12 @@ where
 mod tests {
     use super::*;
     use crate::AuthChallengeProvider;
-    use crate::oauth_dcr::{OAuthDcrProvider, OAuthDcrProviderConfig, OAuthDcrProviderRegistry};
-    use crate::oauth_dcr_protocol::flow_secret_handle;
-    use crate::{RebornAuthContinuationDispatcher, notion_oauth::notion_provider_spec};
+    use crate::RebornAuthContinuationDispatcher;
+    use crate::product_auth::oauth::notion_oauth::notion_provider_spec;
+    use crate::product_auth::oauth::oauth_dcr::{
+        OAuthDcrProvider, OAuthDcrProviderConfig, OAuthDcrProviderRegistry,
+    };
+    use crate::product_auth::oauth::oauth_dcr_protocol::flow_secret_handle;
     use async_trait::async_trait;
     use axum::body::{Body, to_bytes};
     use axum::http::{Method, Request, header};

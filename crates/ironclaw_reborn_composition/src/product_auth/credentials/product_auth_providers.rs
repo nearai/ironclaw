@@ -15,9 +15,11 @@ use ironclaw_secrets::SecretStore;
 
 use crate::RebornBuildError;
 use crate::input::{OAuthDcrProviderBackendConfig, OAuthProviderBackendConfig};
-use crate::oauth_dcr::{OAuthDcrProvider, OAuthDcrProviderRegistry};
-use crate::oauth_gate::{GoogleOAuthGateProvider, GoogleOAuthGateProviderRegistry};
-use crate::oauth_provider_client::HostOAuthProviderClient;
+use crate::product_auth::oauth::oauth_dcr::{OAuthDcrProvider, OAuthDcrProviderRegistry};
+use crate::product_auth::oauth::oauth_gate::{
+    GoogleOAuthGateProvider, GoogleOAuthGateProviderRegistry,
+};
+use crate::product_auth::oauth::oauth_provider_client::HostOAuthProviderClient;
 
 #[derive(Clone)]
 pub(crate) struct OAuthProviderComposition {
@@ -238,9 +240,9 @@ impl AuthProviderClient for MultiplexAuthProviderClient {
 mod tests {
     use super::*;
     use crate::OAuthClientConfig;
-    use crate::google_oauth::google_provider_spec;
-    use crate::notion_oauth::{NOTION_PROVIDER_ID, notion_provider_spec};
-    use crate::oauth_gate::OAuthGateChallengeRequest;
+    use crate::product_auth::oauth::google_oauth::google_provider_spec;
+    use crate::product_auth::oauth::notion_oauth::{NOTION_PROVIDER_ID, notion_provider_spec};
+    use crate::product_auth::oauth::oauth_gate::OAuthGateChallengeRequest;
     use ironclaw_auth::{
         AuthFlowManager, AuthFlowRecordSource, AuthGateRef, AuthProductScope, AuthProviderId,
         AuthSurface, AuthorizationCodeHash, CredentialAccountLabel, CredentialAccountLookupRequest,
