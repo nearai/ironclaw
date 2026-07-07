@@ -81,6 +81,7 @@ impl AgentLoopDriver for TextOnlyModelReplyDriver {
 
         let model_response = host
             .stream_model(LoopModelRequest {
+                inline_messages: Vec::new(),
                 messages: prompt_bundle.messages,
                 surface_version: prompt_bundle.surface_version,
                 model_preference: None,
@@ -95,6 +96,7 @@ impl AgentLoopDriver for TextOnlyModelReplyDriver {
                 return Err(AgentLoopDriverError::Failed {
                     reason_kind: loop_failure_kind_name(LoopFailureKind::InvalidModelOutput)
                         .to_string(),
+                    detail: None,
                 });
             }
         };
@@ -153,6 +155,7 @@ fn completed_final_reply(
     let exit_id = LoopExitId::new(format!("exit:{run_id}-final-reply")).map_err(|_| {
         AgentLoopDriverError::Failed {
             reason_kind: loop_failure_kind_name(LoopFailureKind::DriverBug).to_string(),
+            detail: None,
         }
     })?;
     Ok(LoopCompleted {
@@ -182,8 +185,15 @@ fn map_host_error(stage: &'static str, error: AgentLoopHostError) -> AgentLoopDr
     if let Some(category) =
         model_stage_failure_category(stage == STAGE_MODEL, error.kind, error.reason_kind)
     {
+        // Carry the secret-scrubbed model-visible detail (falling back to the
+        // bounded safe summary) so the failure explainer gets the real cause.
+        let detail = error
+            .detail
+            .clone()
+            .or_else(|| Some(error.safe_summary.clone()));
         return AgentLoopDriverError::Failed {
             reason_kind: category.to_string(),
+            detail,
         };
     }
 
@@ -198,27 +208,36 @@ fn map_host_error(stage: &'static str, error: AgentLoopHostError) -> AgentLoopDr
                 reason: format!("{stage}: {}", error.kind.as_str()),
             }
         }
+        AgentLoopHostErrorKind::InvalidOutput => AgentLoopDriverError::Failed {
+            reason_kind: loop_failure_kind_name(LoopFailureKind::InvalidModelOutput).to_string(),
+            detail: error.detail.clone(),
+        },
         AgentLoopHostErrorKind::Internal => AgentLoopDriverError::Unavailable {
             reason: format!("{stage}: unavailable"),
         },
         AgentLoopHostErrorKind::TranscriptWriteFailed => AgentLoopDriverError::Failed {
             reason_kind: loop_failure_kind_name(LoopFailureKind::TranscriptWriteFailed).to_string(),
+            detail: error.detail.clone(),
         },
         AgentLoopHostErrorKind::BudgetExceeded
         | AgentLoopHostErrorKind::BudgetApprovalRequired
         | AgentLoopHostErrorKind::BudgetAccountingFailed
         | AgentLoopHostErrorKind::PolicyDenied => AgentLoopDriverError::Failed {
             reason_kind: loop_failure_kind_name(LoopFailureKind::ModelError).to_string(),
+            detail: error.detail.clone(),
         },
         AgentLoopHostErrorKind::CredentialUnavailable => AgentLoopDriverError::Failed {
             reason_kind: loop_failure_kind_name(LoopFailureKind::ModelError).to_string(),
+            detail: error.detail.clone(),
         },
         AgentLoopHostErrorKind::CheckpointRejected => AgentLoopDriverError::Failed {
             reason_kind: loop_failure_kind_name(LoopFailureKind::CheckpointRejected).to_string(),
+            detail: error.detail.clone(),
         },
         AgentLoopHostErrorKind::Unauthorized | AgentLoopHostErrorKind::StaleSurface => {
             AgentLoopDriverError::Failed {
                 reason_kind: loop_failure_kind_name(LoopFailureKind::DriverBug).to_string(),
+                detail: error.detail.clone(),
             }
         }
     }
@@ -285,7 +304,8 @@ mod tests {
         assert_eq!(
             mapped,
             AgentLoopDriverError::Failed {
-                reason_kind: MODEL_CREDITS_EXHAUSTED_CATEGORY.to_string()
+                reason_kind: MODEL_CREDITS_EXHAUSTED_CATEGORY.to_string(),
+                detail: Some("safe summary wording is display-only".to_string()),
             }
         );
     }
@@ -303,7 +323,8 @@ mod tests {
         assert_eq!(
             mapped,
             AgentLoopDriverError::Failed {
-                reason_kind: MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY.to_string()
+                reason_kind: MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY.to_string(),
+                detail: Some("model credentials are unavailable".to_string()),
             }
         );
     }
@@ -323,7 +344,8 @@ mod tests {
         assert_eq!(
             mapped,
             AgentLoopDriverError::Failed {
-                reason_kind: loop_failure_kind_name(LoopFailureKind::ModelError).to_string()
+                reason_kind: loop_failure_kind_name(LoopFailureKind::ModelError).to_string(),
+                detail: None,
             }
         );
     }
@@ -341,7 +363,8 @@ mod tests {
         assert_eq!(
             mapped,
             AgentLoopDriverError::Failed {
-                reason_kind: loop_failure_kind_name(LoopFailureKind::ModelError).to_string()
+                reason_kind: loop_failure_kind_name(LoopFailureKind::ModelError).to_string(),
+                detail: None,
             }
         );
     }

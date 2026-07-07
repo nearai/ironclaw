@@ -77,8 +77,8 @@ use ironclaw_product_workflow::{
     StaticOperatorStatusService, TriggerRunThreadScope, UpsertLlmProviderRequest,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-    approval_gate_ref, automation_trigger_thread_metadata_json,
+    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest, approval_gate_ref, automation_trigger_thread_metadata_json,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -96,9 +96,10 @@ use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
     CancelRunResponse, DefaultTurnCoordinator, EventCursor, GateRef, GetRunStateRequest,
     InMemoryTurnStateStore, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
-    ResumeTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnCapacityResource, TurnCoordinator, TurnError, TurnId,
-    TurnOriginKind, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, RunProfileId, RunProfileVersion,
+    SanitizedFailure, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
+    TurnCapacityResource, TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId,
+    TurnRunState, TurnScope, TurnStatus,
 };
 use secrecy::SecretString;
 use serde_json::json;
@@ -245,14 +246,18 @@ struct FakeTurnCoordinator {
     submissions: Mutex<Vec<SubmitTurnRequest>>,
     cancellations: Mutex<Vec<CancelRunRequest>>,
     resumptions: Mutex<Vec<ResumeTurnRequest>>,
+    retries: Mutex<Vec<RetryTurnRequest>>,
+    retry_attempts: Mutex<usize>,
     run_state_requests: Mutex<Vec<GetRunStateRequest>>,
     submit_error: Mutex<Option<TurnError>>,
+    retry_error: Mutex<Option<TurnError>>,
     run_state_error: Mutex<Option<TurnError>>,
     run_state_actor: Mutex<Option<TurnActor>>,
     explicit_run_status: Mutex<Option<TurnStatus>>,
     parked_gate_ref: Mutex<Option<GateRef>>,
     parked_auth_gate: Mutex<bool>,
     parked_approval_gate: Mutex<bool>,
+    run_state_failure: Mutex<Option<SanitizedFailure>>,
 }
 
 impl Default for FakeTurnCoordinator {
@@ -261,14 +266,18 @@ impl Default for FakeTurnCoordinator {
             submissions: Mutex::default(),
             cancellations: Mutex::default(),
             resumptions: Mutex::default(),
+            retries: Mutex::default(),
+            retry_attempts: Mutex::default(),
             run_state_requests: Mutex::default(),
             submit_error: Mutex::default(),
+            retry_error: Mutex::default(),
             run_state_error: Mutex::default(),
             run_state_actor: Mutex::new(Some(turn_actor_for_user("user-alpha"))),
             explicit_run_status: Mutex::default(),
             parked_gate_ref: Mutex::default(),
             parked_auth_gate: Mutex::default(),
             parked_approval_gate: Mutex::default(),
+            run_state_failure: Mutex::default(),
         }
     }
 }
@@ -284,6 +293,13 @@ impl FakeTurnCoordinator {
     fn with_run_state_error(error: TurnError) -> Self {
         Self {
             run_state_error: Mutex::new(Some(error)),
+            ..Self::default()
+        }
+    }
+
+    fn with_retry_error(error: TurnError) -> Self {
+        Self {
+            retry_error: Mutex::new(Some(error)),
             ..Self::default()
         }
     }
@@ -318,6 +334,10 @@ impl FakeTurnCoordinator {
         *self.explicit_run_status.lock().expect("lock") = Some(status);
     }
 
+    fn set_run_state_failure(&self, failure: SanitizedFailure) {
+        *self.run_state_failure.lock().expect("lock") = Some(failure);
+    }
+
     fn submission_count(&self) -> usize {
         self.submissions.lock().expect("lock").len()
     }
@@ -328,6 +348,14 @@ impl FakeTurnCoordinator {
 
     fn resumption_count(&self) -> usize {
         self.resumptions.lock().expect("lock").len()
+    }
+
+    fn retry_count(&self) -> usize {
+        self.retries.lock().expect("lock").len()
+    }
+
+    fn retry_attempt_count(&self) -> usize {
+        *self.retry_attempts.lock().expect("lock")
     }
 
     fn run_state_request_count(&self) -> usize {
@@ -348,6 +376,10 @@ impl FakeTurnCoordinator {
             .expect("lock")
             .last()
             .map(|request| request.precondition)
+    }
+
+    fn last_retry(&self) -> Option<RetryTurnRequest> {
+        self.retries.lock().expect("lock").last().cloned()
     }
 
     fn last_submission_scope(&self) -> Option<ironclaw_turns::TurnScope> {
@@ -436,6 +468,19 @@ impl TurnCoordinator for FakeTurnCoordinator {
         })
     }
 
+    async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
+        *self.retry_attempts.lock().expect("lock") += 1;
+        if let Some(error) = self.retry_error.lock().expect("lock").take() {
+            return Err(error);
+        }
+        self.retries.lock().expect("lock").push(request);
+        Ok(RetryTurnResponse {
+            run_id: TurnRunId::new(),
+            status: TurnStatus::Queued,
+            event_cursor: EventCursor(19),
+        })
+    }
+
     async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
         let run_id = request.run_id;
         self.cancellations.lock().expect("lock").push(request);
@@ -488,7 +533,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
             gate_ref,
             blocked_activity_id: None,
             credential_requirements: Vec::new(),
-            failure: None,
+            failure: self.run_state_failure.lock().expect("lock").clone(),
             event_cursor: EventCursor(17),
             product_context: None,
             resume_disposition: None,
@@ -559,6 +604,13 @@ impl TurnCoordinator for BlockingSubmitCoordinator {
         _request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError> {
         panic!("resume_turn is not used by delete submit serialization tests")
+    }
+
+    async fn retry_turn(
+        &self,
+        _request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        panic!("retry_turn is not used by delete submit serialization tests")
     }
 
     async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
@@ -3850,6 +3902,165 @@ async fn cancel_run_uses_turn_facade_and_stable_response() {
     assert_eq!(response.event_cursor, EventCursor(13));
     assert!(!response.already_terminal);
     assert_eq!(coordinator.cancellation_count(), 1);
+}
+
+#[tokio::test]
+async fn retry_run_uses_turn_facade_and_stable_response() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let response = services
+        .retry_run(
+            caller(),
+            serde_json::from_value::<WebUiRetryRunRequest>(json!({
+                "client_action_id": "retry-1",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string()
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("retry succeeds");
+
+    assert_eq!(response.status, TurnStatus::Queued);
+    assert_eq!(response.event_cursor, EventCursor(19));
+    assert_eq!(coordinator.retry_count(), 1);
+    let retry = coordinator.last_retry().expect("retry request");
+    assert_eq!(
+        retry.run_id,
+        TurnRunId::parse(&run_id_string()).expect("run id")
+    );
+    assert_eq!(retry.actor, caller().actor());
+    assert_eq!(
+        retry.scope,
+        caller().turn_scope(ThreadId::new("thread-alpha").expect("thread"))
+    );
+    assert!(
+        retry
+            .source_binding_ref
+            .as_str()
+            .contains("webui-retry-src")
+    );
+    assert!(
+        retry
+            .reply_target_binding_ref
+            .as_str()
+            .contains("webui-retry-reply")
+    );
+    assert_eq!(retry.idempotency_key.as_str(), "retry-1");
+}
+
+#[tokio::test]
+async fn retry_run_rejects_invalid_run_id_without_turn_facade() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+
+    let err = services
+        .retry_run(
+            caller(),
+            serde_json::from_value::<WebUiRetryRunRequest>(json!({
+                "client_action_id": "retry-invalid-run",
+                "thread_id": "thread-alpha",
+                "run_id": "not-a-run-uuid"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("invalid run id should fail validation");
+
+    assert_eq!(err.code, RebornServicesErrorCode::InvalidRequest);
+    assert_eq!(err.kind, RebornServicesErrorKind::Validation);
+    assert_eq!(err.status_code, 400);
+    assert_eq!(err.field.as_deref(), Some("run_id"));
+    assert_eq!(
+        err.validation_code,
+        Some(WebUiInboundValidationCode::InvalidId)
+    );
+    assert_eq!(
+        coordinator.retry_attempt_count(),
+        0,
+        "validation must fail before TurnCoordinator::retry_turn"
+    );
+    assert_eq!(coordinator.retry_count(), 0);
+}
+
+#[tokio::test]
+async fn retry_run_maps_not_retryable_to_non_retryable_conflict() {
+    let run_id = TurnRunId::parse(&run_id_string()).expect("run id");
+    let coordinator = Arc::new(FakeTurnCoordinator::with_retry_error(
+        TurnError::RunNotRetryable { run_id },
+    ));
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let err = services
+        .retry_run(
+            caller(),
+            serde_json::from_value::<WebUiRetryRunRequest>(json!({
+                "client_action_id": "retry-not-retryable",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string()
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("not retryable maps to conflict");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Conflict);
+    assert_eq!(err.kind, RebornServicesErrorKind::Conflict);
+    assert_eq!(err.status_code, 409);
+    assert!(!err.retryable);
+    assert_eq!(coordinator.retry_attempt_count(), 1);
+    assert_eq!(coordinator.retry_count(), 0);
+}
+
+#[tokio::test]
+async fn retry_run_rejects_cross_user_access() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+    let alice = caller();
+    create_thread_for(&services, alice.clone(), "thread-alice").await;
+
+    let bob = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-alpha").expect("tenant"),
+        UserId::new("user-bob").expect("user"),
+        alice.agent_id.clone(),
+        alice.project_id.clone(),
+    );
+
+    let err = services
+        .retry_run(
+            bob,
+            serde_json::from_value::<WebUiRetryRunRequest>(json!({
+                "client_action_id": "retry-cross",
+                "thread_id": "thread-alice",
+                "run_id": run_id_string()
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("cross-user retry must be rejected");
+
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
+    assert_eq!(
+        coordinator.retry_count(),
+        0,
+        "turn coordinator must NOT be called for cross-user retry"
+    );
 }
 
 #[tokio::test]
@@ -9598,6 +9809,16 @@ fn assert_setup_validation(
 #[tokio::test]
 async fn get_run_state_returns_stable_dto_without_m3_internal_fields() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
+    // A failed run carries a model-visible `detail` (free-form backend cause
+    // text, scrubbed only for secret VALUES). The public run-state DTO must
+    // keep the user-facing `category` but strip `detail` so internal
+    // diagnostics never reach the browser (see
+    // `SanitizedFailure::public_projection`).
+    coordinator.set_run_state_failure(
+        SanitizedFailure::new("model_unavailable")
+            .expect("valid category")
+            .with_detail("HTTP 500 from provider at /internal/models/route-xyz"),
+    );
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
@@ -9625,12 +9846,19 @@ async fn get_run_state_returns_stable_dto_without_m3_internal_fields() {
         RunProfileId::default_profile().as_str()
     );
     assert!(response.gate_ref.is_none());
-    assert!(response.failure.is_none());
+    // The user-facing category survives; the model-visible detail is stripped.
+    let failure = response.failure.as_ref().expect("failure present");
+    assert_eq!(failure.category(), "model_unavailable");
+    assert_eq!(
+        failure.detail(),
+        None,
+        "public run-state DTO must not expose the model-visible failure detail"
+    );
     assert!(response.checkpoint_id.is_none());
     assert_eq!(coordinator.run_state_request_count(), 1);
 
-    // Stable DTO must not surface M3-internal binding refs, model route, or
-    // raw turn scope to WebUI consumers.
+    // Stable DTO must not surface M3-internal binding refs, model route, raw
+    // turn scope, or the internal failure detail to WebUI consumers.
     let rendered = serde_json::to_string(&response).expect("json");
     assert!(!rendered.contains("source_binding_ref"));
     assert!(!rendered.contains("reply_target_binding_ref"));
@@ -9638,6 +9866,8 @@ async fn get_run_state_returns_stable_dto_without_m3_internal_fields() {
     assert!(!rendered.contains("webui-src:replayed"));
     assert!(!rendered.contains("webui-reply:replayed"));
     assert!(!rendered.contains("\"scope\""));
+    assert!(!rendered.contains("\"detail\""));
+    assert!(!rendered.contains("/internal/models/route-xyz"));
 }
 
 #[tokio::test]
@@ -11056,14 +11286,14 @@ async fn legacy_deferred_busy_mark_failure_surfaces_error_not_false_terminal() {
 /// both that decode→land ran and that the returned refs reach the transcript.
 #[derive(Default)]
 struct RecordingLander {
-    landed: Mutex<Vec<(String, Vec<InboundAttachment>)>>,
+    landed: Mutex<Vec<(ThreadScope, String, Vec<InboundAttachment>)>>,
 }
 
 #[async_trait]
 impl InboundAttachmentLander for RecordingLander {
     async fn land(
         &self,
-        _thread_scope: &ThreadScope,
+        thread_scope: &ThreadScope,
         message_id: &str,
         attachments: Vec<InboundAttachment>,
     ) -> Result<Vec<AttachmentRef>, RebornServicesError> {
@@ -11083,10 +11313,11 @@ impl InboundAttachmentLander for RecordingLander {
                 extracted_text: None,
             })
             .collect();
-        self.landed
-            .lock()
-            .expect("lander mutex")
-            .push((message_id.to_string(), attachments));
+        self.landed.lock().expect("lander mutex").push((
+            thread_scope.clone(),
+            message_id.to_string(),
+            attachments,
+        ));
         Ok(refs)
     }
 }
@@ -11121,14 +11352,16 @@ async fn submit_turn_lands_attachments_and_persists_refs_on_the_user_message() {
         .await
         .expect("submit succeeds");
 
-    // The lander was invoked with the decoded attachment bytes + metadata.
+    // The lander was invoked with the caller-derived thread scope plus the
+    // decoded attachment bytes + metadata.
     {
         let landed = lander.landed.lock().expect("lander mutex");
         assert_eq!(landed.len(), 1);
-        assert_eq!(landed[0].1.len(), 1);
-        assert_eq!(landed[0].1[0].mime_type, "application/pdf");
-        assert_eq!(landed[0].1[0].filename.as_deref(), Some("report.pdf"));
-        assert_eq!(landed[0].1[0].bytes, b"%PDF-1.7 body");
+        assert_eq!(landed[0].0, thread_scope_for(&caller()));
+        assert_eq!(landed[0].2.len(), 1);
+        assert_eq!(landed[0].2[0].mime_type, "application/pdf");
+        assert_eq!(landed[0].2[0].filename.as_deref(), Some("report.pdf"));
+        assert_eq!(landed[0].2[0].bytes, b"%PDF-1.7 body");
     }
 
     // The returned refs are persisted on the accepted user message.

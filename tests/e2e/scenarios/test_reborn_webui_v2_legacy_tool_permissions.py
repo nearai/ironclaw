@@ -46,7 +46,9 @@ def _tool_entry(
     }
 
 
-async def _open_mocked_tools_page(reborn_v2_server, reborn_v2_browser):
+async def _open_mocked_tools_page(
+    reborn_v2_server, reborn_v2_browser, *, fail_permission_saves: bool = False
+):
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
     auto_approve = {"enabled": False}
@@ -130,6 +132,14 @@ async def _open_mocked_tools_page(reborn_v2_server, reborn_v2_browser):
             name = unquote(path.removeprefix("/api/webchat/v2/settings/tools/"))
             body = json.loads(request.post_data or "{}")
             permission_requests.append({"name": name, "body": body})
+            if fail_permission_saves:
+                await fulfill_json(
+                    route,
+                    {"kind": "permission_denied", "error": "permission_denied"},
+                    status=403,
+                )
+                return
+
             tool = tool_states[name]
             if not tool["mutable"]:
                 await fulfill_json(
@@ -295,6 +305,34 @@ async def test_reborn_legacy_tool_permission_select_persists_after_reload(
         assert harness["permission_requests"][-1] == {
             "name": "echo",
             "body": {"state": "default"},
+        }
+    finally:
+        await harness["context"].close()
+
+
+async def test_reborn_legacy_tool_permission_save_failure_shows_error(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_tools_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        fail_permission_saves=True,
+    )
+    try:
+        page = harness["page"]
+        select = page.get_by_label("Permission for echo")
+        await expect(select).to_have_value("always_allow", timeout=5000)
+
+        await select.select_option("ask_each_time")
+
+        await expect(page.get_by_role("alert")).to_contain_text(
+            "Save failed: Permission denied",
+            timeout=5000,
+        )
+        await expect(select).to_have_value("always_allow", timeout=5000)
+        assert harness["permission_requests"][-1] == {
+            "name": "echo",
+            "body": {"state": "ask_each_time"},
         }
     finally:
         await harness["context"].close()

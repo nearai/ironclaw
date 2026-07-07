@@ -37,7 +37,6 @@ use std::time::Duration;
 
 use deadpool::managed::{Manager, Metrics, Pool, RecycleError, RecycleResult};
 
-use crate::db::infrastructure_libsql_error;
 use crate::{FilesystemError, FilesystemOperation};
 
 /// Maximum simultaneously checked-out connections. Starting point, not a
@@ -154,10 +153,26 @@ pub(crate) fn build_libsql_pool(db: Arc<libsql::Database>) -> LibSqlPool {
 /// transient file-open races get a short retry budget before surfacing
 /// as infrastructure errors.
 pub(crate) async fn connect_with_retry<F>(
-    mut open: F,
+    open: F,
 ) -> Result<libsql::Connection, FilesystemError>
 where
     F: FnMut() -> Result<libsql::Connection, libsql::Error>,
+{
+    connect_with_retry_and_pragmas(open, |_| LIBSQL_CONNECTION_PRAGMAS).await
+}
+
+/// Like [`connect_with_retry`], but lets the caller vary the PRAGMA batch
+/// applied on each attempt. Retries cover both a failed connection *open*
+/// and a failed PRAGMA *application* — a connection that opens but whose
+/// setup batch fails (e.g. a transient lock on the file) is discarded and
+/// re-opened rather than surfaced as a permanent error.
+async fn connect_with_retry_and_pragmas<F, P>(
+    mut open: F,
+    mut pragmas_for_attempt: P,
+) -> Result<libsql::Connection, FilesystemError>
+where
+    F: FnMut() -> Result<libsql::Connection, libsql::Error>,
+    P: FnMut(u32) -> &'static str,
 {
     let mut last_error = None;
     for attempt in 0..LIBSQL_CONNECT_ATTEMPTS {
@@ -167,12 +182,15 @@ where
                 // `execute_batch` runs each statement and discards the rows
                 // PRAGMAs like `busy_timeout` return, which is exactly what
                 // we want — we only care about the side effect.
-                conn.execute_batch(LIBSQL_CONNECTION_PRAGMAS)
-                    .await
-                    .map_err(|error| {
-                        infrastructure_libsql_error(FilesystemOperation::Connect, error)
-                    })?;
-                return Ok(conn);
+                match conn.execute_batch(pragmas_for_attempt(attempt)).await {
+                    Ok(_) => return Ok(conn),
+                    Err(error) => {
+                        last_error = Some(error);
+                        if attempt + 1 < LIBSQL_CONNECT_ATTEMPTS {
+                            tokio::time::sleep(connect_backoff(attempt)).await;
+                        }
+                    }
+                }
             }
             Err(error) => {
                 last_error = Some(error);
@@ -186,11 +204,13 @@ where
     let reason = match last_error {
         Some(error) => {
             format!(
-                "failed to create libSQL connection after {LIBSQL_CONNECT_ATTEMPTS} attempts: {error}"
+                "failed to create or initialize libSQL connection after {LIBSQL_CONNECT_ATTEMPTS} attempts: {error}"
             )
         }
         None => {
-            format!("failed to create libSQL connection after {LIBSQL_CONNECT_ATTEMPTS} attempts")
+            format!(
+                "failed to create or initialize libSQL connection after {LIBSQL_CONNECT_ATTEMPTS} attempts"
+            )
         }
     };
     Err(crate::db::infrastructure_error(
@@ -279,5 +299,43 @@ mod tests {
             }
             other => panic!("expected FilesystemError::BackendInfrastructure, got {other:?}"),
         }
+    }
+
+    /// A connection that opens successfully but whose PRAGMA batch fails
+    /// (e.g. a transient lock on the file mid-setup) must be retried with
+    /// a fresh `open()` call rather than surfaced immediately — `create`
+    /// only has one chance to hand deadpool a usable connection per
+    /// checkout.
+    #[tokio::test]
+    async fn connect_retries_transient_pragma_failures_before_succeeding() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("connect-retry-pragma-test.db");
+        let db = libsql::Builder::new_local(db_path).build().await.unwrap();
+        let mut opens = 0;
+        let mut initializers = 0;
+
+        let conn = connect_with_retry_and_pragmas(
+            || {
+                opens += 1;
+                db.connect()
+            },
+            |_| {
+                initializers += 1;
+                if initializers == 1 {
+                    "THIS IS NOT SQL"
+                } else {
+                    LIBSQL_CONNECTION_PRAGMAS
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(opens, 2);
+        assert_eq!(initializers, 2);
+        let mut rows = conn.query("PRAGMA busy_timeout", ()).await.unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let timeout: i64 = row.get(0).unwrap();
+        assert_eq!(timeout, 5000);
     }
 }
