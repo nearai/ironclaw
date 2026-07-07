@@ -100,7 +100,7 @@ QA_SHEET_CASES: dict[str, dict[str, object]] = {
     "qa_3a_slack_connect": {
         "rows": ["3A"],
         "feature": "Slack connection flow",
-        "gate": "requires live Slack OAuth or host-beta Slack bot/signing-secret env",
+        "gate": "requires live Slack bot setup and personal OAuth client credentials",
     },
     "qa_3b_endpoint_status_live_chat": {
         "rows": ["3B"],
@@ -143,7 +143,7 @@ QA_SHEET_CASES: dict[str, dict[str, object]] = {
     "qa_5a_slack_connect": {
         "rows": ["5A"],
         "feature": "Slack connection flow for AMA",
-        "gate": "requires live Slack OAuth or host-beta Slack bot/signing-secret env",
+        "gate": "requires live Slack bot setup and personal OAuth client credentials",
     },
     "qa_5b_drive_connect": {
         "rows": ["5B"],
@@ -222,7 +222,7 @@ QA_SHEET_CASES: dict[str, dict[str, object]] = {
     "qa_8a_slack_connect": {
         "rows": ["8A"],
         "feature": "Slack connection flow for HN monitor",
-        "gate": "requires live Slack OAuth or host-beta Slack bot/signing-secret env",
+        "gate": "requires live Slack bot setup and personal OAuth client credentials",
     },
     "qa_8b_hn_keyword_live_chat": {
         "rows": ["8B"],

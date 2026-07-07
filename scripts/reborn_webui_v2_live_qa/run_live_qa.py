@@ -2008,6 +2008,11 @@ def _slack_connect_instructions_look_valid(instructions: str) -> bool:
     return "connect slack with oauth" in text or ("slack" in text and "oauth" in text)
 
 
+def _slack_oauth_start_expires_at() -> str:
+    expires = datetime.fromtimestamp(time.time() + 600, timezone.utc)
+    return expires.isoformat().replace("+00:00", "Z")
+
+
 async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeResult:
     from playwright.async_api import expect
 
@@ -2059,19 +2064,47 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
         instructions = str(action_body.get("instructions") or "")
         if not _slack_connect_instructions_look_valid(instructions):
             raise AssertionError(f"unexpected Slack connect instructions: {instructions!r}")
+        oauth_start = await _webui_json(
+            page,
+            "POST",
+            "/api/webchat/v2/extensions/slack/setup/oauth/start",
+            {
+                "provider": "slack_personal",
+                "account_label": "Slack personal OAuth",
+                "scopes": [],
+                "expires_at": _slack_oauth_start_expires_at(),
+                "invocation_id": str(uuid.uuid4()),
+            },
+        )
+        if oauth_start.get("provider") != "slack_personal":
+            raise AssertionError(f"Slack OAuth start returned unexpected provider: {oauth_start!r}")
+        authorization_url = str(oauth_start.get("authorization_url") or "")
+        if not authorization_url.startswith("https://slack.com/oauth/"):
+            raise AssertionError(f"Slack OAuth start returned unexpected URL: {oauth_start!r}")
         await expect(page.locator("body")).to_contain_text(title, timeout=15000)  # type: ignore[attr-defined]
         await expect(page.locator("body")).to_contain_text("Connect Slack with OAuth", timeout=15000)  # type: ignore[attr-defined]
         observed["slack_display_name"] = personal.get("display_name")
         observed["slack_connect_title"] = title
         observed["slack_connect_instructions"] = instructions
+        observed["slack_oauth_start_provider"] = oauth_start.get("provider")
+        observed["slack_oauth_start_status"] = oauth_start.get("status")
+        observed["slack_oauth_start_url"] = authorization_url
 
     try:
         slack = _slack_preflight(ctx)
         auth_test = slack.get("auth_test")
+        setup = slack.get("setup")
         if not slack.get("enabled_in_config") or not slack.get("env_present"):
             raise AssertionError(f"Slack was not enabled with env in preflight: {slack!r}")
+        if not isinstance(setup, dict) or not setup.get("personal_oauth_ready"):
+            raise AssertionError(f"Slack personal OAuth is not ready in preflight: {setup!r}")
         if not isinstance(auth_test, dict) or not auth_test.get("ok"):
             raise AssertionError(f"Slack auth.test did not pass in preflight: {auth_test!r}")
+        observed["slack_personal_oauth_ready"] = setup.get("personal_oauth_ready")
+        observed["slack_oauth_client_id_configured"] = setup.get("oauth_client_id_configured")
+        observed["slack_oauth_client_secret_configured"] = setup.get(
+            "oauth_client_secret_configured"
+        )
         observed["slack_auth_team_id"] = auth_test.get("team_id")
         observed["slack_auth_user_id"] = auth_test.get("user_id")
         await _with_page(ctx.output_dir, case_name, action)

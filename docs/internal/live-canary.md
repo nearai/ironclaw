@@ -110,7 +110,9 @@ Required secrets:
 - `IRONCLAW_REBORN_SLACK_SIGNING_SECRET`
 - `IRONCLAW_REBORN_SLACK_BOT_TOKEN`
 
-Optional personal-OAuth readiness inputs:
+Required for `qa_3a_slack_connect`, `qa_5a_slack_connect`, and
+`qa_8a_slack_connect`, which assert personal OAuth readiness and start the
+Slack OAuth flow headlessly:
 
 - variable `REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_ID`
 - secret `REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_SECRET`

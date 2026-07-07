@@ -528,7 +528,7 @@ def _slack_setup_payload(
         "bot_token": bot_token,
         "signing_secret": signing_secret,
     }
-    oauth_client_id = _env_value(SLACK_OAUTH_CLIENT_ID_ENV, extra_env)
+    oauth_client_id = str(preflight.get("oauth_client_id") or "").strip()
     oauth_client_secret = _env_value(SLACK_OAUTH_CLIENT_SECRET_ENV, extra_env)
     if oauth_client_id:
         payload["oauth_client_id"] = oauth_client_id
