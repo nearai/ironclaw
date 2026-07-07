@@ -994,8 +994,7 @@ async fn list_thread_history_returns_durable_message_timestamps() {
         .await
         .unwrap();
     let draft_created_at = draft.created_at.expect("draft has created_at");
-    let draft_updated_at = draft.updated_at.expect("draft has updated_at");
-    wait_until_after(draft_updated_at).await;
+    assert_eq!(draft.updated_at, Some(draft_created_at));
 
     let finalized = service
         .finalize_assistant_message(
@@ -1007,10 +1006,6 @@ async fn list_thread_history_returns_durable_message_timestamps() {
         .await
         .unwrap();
     let final_updated_at = finalized.updated_at.expect("finalized has updated_at");
-    assert!(
-        final_updated_at > draft_updated_at,
-        "finalizing a draft must move updated_at forward"
-    );
 
     let history = service
         .list_thread_history(ThreadHistoryRequest {

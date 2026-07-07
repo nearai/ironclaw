@@ -161,7 +161,7 @@ impl SessionThreadService for InMemorySessionThreadService {
         // stamp so activity-ordered listings surface this thread first.
         let now = Utc::now();
         thread.record.updated_at = Some(now);
-        thread.messages.push(ThreadMessageRecord {
+        let message = ThreadMessageRecord {
             message_id,
             thread_id: request.thread_id.clone(),
             sequence,
@@ -179,7 +179,9 @@ impl SessionThreadService for InMemorySessionThreadService {
             content: Some(content_text),
             attachments,
             redaction_ref: None,
-        });
+        };
+        crate::contract::validate_new_message_timestamps(&message, "inbound user")?;
+        thread.messages.push(message);
 
         if let Some(key) = key {
             state.inbound_idempotency.insert(
@@ -246,9 +248,15 @@ impl SessionThreadService for InMemorySessionThreadService {
         let mut state = self.state.lock().await;
         let message = get_message_mut(&mut state, scope, thread_id, message_id)?;
         ensure_user_accepted(message, "mark_message_submitted")?;
+        let before = message.clone();
         message.status = MessageStatus::Submitted;
         message.turn_id = Some(turn_id);
         message.turn_run_id = Some(turn_run_id);
+        crate::contract::validate_message_timestamps_not_cleared(
+            &before,
+            message,
+            "mark_message_submitted",
+        )?;
         Ok(message.clone())
     }
 
@@ -261,9 +269,15 @@ impl SessionThreadService for InMemorySessionThreadService {
         let mut state = self.state.lock().await;
         let message = get_message_mut(&mut state, scope, thread_id, message_id)?;
         ensure_user_accepted(message, "mark_message_rejected_busy")?;
+        let before = message.clone();
         message.status = MessageStatus::RejectedBusy;
         message.turn_id = None;
         message.turn_run_id = None;
+        crate::contract::validate_message_timestamps_not_cleared(
+            &before,
+            message,
+            "mark_message_rejected_busy",
+        )?;
         Ok(message.clone())
     }
 
@@ -304,6 +318,7 @@ impl SessionThreadService for InMemorySessionThreadService {
         // Appending a message is thread activity; bump the last-activity
         // stamp so activity-ordered listings surface this thread first.
         thread.record.updated_at = Some(now);
+        crate::contract::validate_new_message_timestamps(&message, "assistant draft")?;
         thread.messages.push(message.clone());
         Ok(message)
     }
@@ -320,10 +335,16 @@ impl SessionThreadService for InMemorySessionThreadService {
         }) {
             if existing.status == MessageStatus::Draft {
                 let now = Utc::now();
+                let before = existing.clone();
                 existing.status = MessageStatus::Finalized;
                 existing.content = Some(request.content.into_text());
                 existing.attachments = Vec::new();
                 existing.updated_at = Some(now);
+                crate::contract::validate_message_timestamps_not_cleared(
+                    &before,
+                    existing,
+                    "append_finalized_assistant_message",
+                )?;
                 thread.record.updated_at = Some(now);
             }
             return Ok(existing.clone());
@@ -352,6 +373,7 @@ impl SessionThreadService for InMemorySessionThreadService {
         // Appending a message is thread activity; bump the last-activity
         // stamp so activity-ordered listings surface this thread first.
         thread.record.updated_at = Some(now);
+        crate::contract::validate_new_message_timestamps(&message, "finalized assistant")?;
         thread.messages.push(message.clone());
         Ok(message)
     }
@@ -375,12 +397,18 @@ impl SessionThreadService for InMemorySessionThreadService {
                 && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
                 && message.tool_result_ref.as_deref() == Some(envelope.result_ref.as_str())
         }) {
+            let now = Utc::now();
+            let before = existing.clone();
+            let mut changed = false;
             if let Some(provider_call) = provider_call.as_ref() {
                 provider_call
                     .validate()
                     .map_err(SessionThreadError::Serialization)?;
                 match existing.tool_result_provider_call.as_ref() {
-                    None => existing.tool_result_provider_call = Some(provider_call.clone()),
+                    None => {
+                        existing.tool_result_provider_call = Some(provider_call.clone());
+                        changed = true;
+                    }
                     Some(existing_provider_call) if existing_provider_call == provider_call => {}
                     Some(_) => {
                         return Err(SessionThreadError::Serialization(
@@ -404,10 +432,22 @@ impl SessionThreadService for InMemorySessionThreadService {
                     .map_err(SessionThreadError::Serialization)?
                 {
                     existing.content = Some(content);
-                    existing.updated_at = Some(Utc::now());
+                    changed = true;
                 }
             }
-            return Ok(existing.clone());
+            if changed {
+                existing.updated_at = Some(now);
+            }
+            crate::contract::validate_message_timestamps_not_cleared(
+                &before,
+                existing,
+                "append_tool_result_reference",
+            )?;
+            let updated = existing.clone();
+            if changed {
+                thread.record.updated_at = Some(now);
+            }
+            return Ok(updated);
         }
         if let Some(provider_call) = &provider_call {
             provider_call
@@ -440,6 +480,7 @@ impl SessionThreadService for InMemorySessionThreadService {
         // Appending a message is thread activity; bump the last-activity
         // stamp so activity-ordered listings surface this thread first.
         thread.record.updated_at = Some(now);
+        crate::contract::validate_new_message_timestamps(&message, "tool result reference")?;
         thread.messages.push(message.clone());
         Ok(message)
     }
@@ -494,6 +535,7 @@ impl SessionThreadService for InMemorySessionThreadService {
         // Appending a message is thread activity; bump the last-activity
         // stamp so activity-ordered listings surface this thread first.
         thread.record.updated_at = Some(now);
+        crate::contract::validate_new_message_timestamps(&message, "capability display preview")?;
         thread.messages.push(message.clone());
         Ok(message)
     }
@@ -502,58 +544,82 @@ impl SessionThreadService for InMemorySessionThreadService {
         &self,
         request: UpdateToolResultReferenceRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let now = Utc::now();
         let mut state = self.state.lock().await;
         let thread = get_thread_mut(&mut state, &request.scope, &request.thread_id)?;
-        let message = thread
-            .messages
-            .iter_mut()
-            .find(|message| {
-                message.kind == MessageKind::ToolResultReference
-                    && message.status == MessageStatus::Finalized
-                    && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
-                    && message.tool_result_ref.as_deref() == Some(request.result_ref.as_str())
-            })
-            .ok_or_else(|| {
-                SessionThreadError::Backend(format!(
-                    "tool result reference {} was not found in thread {}",
-                    request.result_ref, request.thread_id
-                ))
+        let updated = {
+            let message = thread
+                .messages
+                .iter_mut()
+                .find(|message| {
+                    message.kind == MessageKind::ToolResultReference
+                        && message.status == MessageStatus::Finalized
+                        && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
+                        && message.tool_result_ref.as_deref() == Some(request.result_ref.as_str())
+                })
+                .ok_or_else(|| {
+                    SessionThreadError::Backend(format!(
+                        "tool result reference {} was not found in thread {}",
+                        request.result_ref, request.thread_id
+                    ))
+                })?;
+            let before = message.clone();
+            let content = message.content.as_deref().ok_or_else(|| {
+                SessionThreadError::Serialization(
+                    "tool result reference content is missing".to_string(),
+                )
             })?;
-        let content = message.content.as_deref().ok_or_else(|| {
-            SessionThreadError::Serialization(
-                "tool result reference content is missing".to_string(),
-            )
-        })?;
-        let envelope = ToolResultReferenceEnvelope::from_json_str(content)
-            .map_err(SessionThreadError::Serialization)?
-            .with_safe_summary(request.safe_summary);
-        message.content = Some(
-            serde_json::to_string(&envelope)
-                .map_err(|error| SessionThreadError::Serialization(error.to_string()))?,
-        );
-        message.updated_at = Some(Utc::now());
-        Ok(message.clone())
+            let envelope = ToolResultReferenceEnvelope::from_json_str(content)
+                .map_err(SessionThreadError::Serialization)?
+                .with_safe_summary(request.safe_summary);
+            message.content = Some(
+                serde_json::to_string(&envelope)
+                    .map_err(|error| SessionThreadError::Serialization(error.to_string()))?,
+            );
+            message.updated_at = Some(now);
+            crate::contract::validate_message_timestamps_not_cleared(
+                &before,
+                message,
+                "update_tool_result_reference",
+            )?;
+            message.clone()
+        };
+        thread.record.updated_at = Some(now);
+        Ok(updated)
     }
 
     async fn update_assistant_draft(
         &self,
         request: UpdateAssistantDraftRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let now = Utc::now();
         let mut state = self.state.lock().await;
-        let message = get_message_mut(
-            &mut state,
-            &request.scope,
-            &request.thread_id,
-            request.message_id,
-        )?;
-        ensure_draft(message)?;
-        message.content = Some(request.content.into_text());
-        // Keep content and attachments in lockstep (as redaction does): an
-        // assistant draft carries no attachments, so a content update must not
-        // leave stale refs behind if a future draft path ever sets them.
-        message.attachments = Vec::new();
-        message.updated_at = Some(Utc::now());
-        Ok(message.clone())
+        let thread = get_thread_mut(&mut state, &request.scope, &request.thread_id)?;
+        let updated = {
+            let message = thread
+                .messages
+                .iter_mut()
+                .find(|message| message.message_id == request.message_id)
+                .ok_or(SessionThreadError::UnknownMessage {
+                    message_id: request.message_id,
+                })?;
+            ensure_draft(message)?;
+            let before = message.clone();
+            message.content = Some(request.content.into_text());
+            // Keep content and attachments in lockstep (as redaction does): an
+            // assistant draft carries no attachments, so a content update must not
+            // leave stale refs behind if a future draft path ever sets them.
+            message.attachments = Vec::new();
+            message.updated_at = Some(now);
+            crate::contract::validate_message_timestamps_not_cleared(
+                &before,
+                message,
+                "update_assistant_draft",
+            )?;
+            message.clone()
+        };
+        thread.record.updated_at = Some(now);
+        Ok(updated)
     }
 
     async fn finalize_assistant_message(
@@ -572,10 +638,16 @@ impl SessionThreadService for InMemorySessionThreadService {
             .ok_or(SessionThreadError::UnknownMessage { message_id })?;
         ensure_draft(message)?;
         let now = Utc::now();
+        let before = message.clone();
         message.status = MessageStatus::Finalized;
         message.content = Some(content.into_text());
         message.attachments = Vec::new();
         message.updated_at = Some(now);
+        crate::contract::validate_message_timestamps_not_cleared(
+            &before,
+            message,
+            "finalize_assistant_message",
+        )?;
         thread.record.updated_at = Some(now);
         Ok(message.clone())
     }
@@ -584,20 +656,33 @@ impl SessionThreadService for InMemorySessionThreadService {
         &self,
         request: RedactMessageRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let now = Utc::now();
         let mut state = self.state.lock().await;
-        let message = get_message_mut(
-            &mut state,
-            &request.scope,
-            &request.thread_id,
-            request.message_id,
-        )?;
-        message.status = MessageStatus::Redacted;
-        message.content = None;
-        message.attachments = Vec::new();
-        message.tool_result_provider_call = None;
-        message.redaction_ref = Some(request.redaction_ref);
-        message.updated_at = Some(Utc::now());
-        Ok(message.clone())
+        let thread = get_thread_mut(&mut state, &request.scope, &request.thread_id)?;
+        let updated = {
+            let message = thread
+                .messages
+                .iter_mut()
+                .find(|message| message.message_id == request.message_id)
+                .ok_or(SessionThreadError::UnknownMessage {
+                    message_id: request.message_id,
+                })?;
+            let before = message.clone();
+            message.status = MessageStatus::Redacted;
+            message.content = None;
+            message.attachments = Vec::new();
+            message.tool_result_provider_call = None;
+            message.redaction_ref = Some(request.redaction_ref);
+            message.updated_at = Some(now);
+            crate::contract::validate_message_timestamps_not_cleared(
+                &before,
+                message,
+                "redact_message",
+            )?;
+            message.clone()
+        };
+        thread.record.updated_at = Some(now);
+        Ok(updated)
     }
 
     async fn load_context_window(

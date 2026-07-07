@@ -38,7 +38,7 @@ mod message_sequence_index;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use futures::{StreamExt, future::join_all};
 use ironclaw_filesystem::{
     CasApply, CasExpectation, CasUpdateError, ContentType, Entry, FileType, FilesystemError,
@@ -322,6 +322,7 @@ where
         message: &ThreadMessageRecord,
         description: &'static str,
     ) -> Result<(), SessionThreadError> {
+        crate::contract::validate_new_message_timestamps(message, description)?;
         let path = message_record_path(scope, thread_id, message.message_id)?;
         let entry = Self::message_entry(message)?;
         match put_with_cas(
@@ -359,6 +360,7 @@ where
         thread_id: &ThreadId,
         message: &ThreadMessageRecord,
     ) -> Result<bool, SessionThreadError> {
+        crate::contract::validate_new_message_timestamps(message, "message append event")?;
         let path = message_append_log_path(scope, thread_id)?;
         let payload = serialize_pretty(&StoredThreadMessageRecord::from(message))?;
         match self
@@ -455,6 +457,7 @@ where
         message: &mut ThreadMessageRecord,
         idempotency_record: Option<(&ScopedPath, &Entry)>,
     ) -> Result<TransactionalMessageWrite, SessionThreadError> {
+        crate::contract::validate_new_message_timestamps(message, "transactional message")?;
         let resource_scope = scope.to_resource_scope();
         let txn_prefix = scoped_path(THREADS_PREFIX)?;
         let thread_path = thread_record_path(scope, thread_id)?;
@@ -1142,6 +1145,7 @@ where
         &self,
         scope: &ThreadScope,
         thread_id: &ThreadId,
+        updated_at: DateTime<Utc>,
     ) -> Result<(), SessionThreadError> {
         let path = thread_record_path(scope, thread_id)?;
         for _ in 0..FILESYSTEM_CAS_RETRIES {
@@ -1152,7 +1156,7 @@ where
             else {
                 return Ok(());
             };
-            stored.record.updated_at = Some(Utc::now());
+            stored.record.updated_at = Some(updated_at);
             let entry = Self::thread_entry(&stored)?;
             match put_with_cas(
                 self.filesystem.as_ref(),
@@ -1186,8 +1190,16 @@ where
     /// un-idempotent caller retry and duplicate the message. Logs and
     /// continues; the advisory `updated_at` stamp simply stays at its prior
     /// value until the next activity.
-    async fn touch_thread_updated_at_best_effort(&self, scope: &ThreadScope, thread_id: &ThreadId) {
-        if let Err(error) = self.touch_thread_updated_at(scope, thread_id).await {
+    async fn touch_thread_updated_at_best_effort_at(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        updated_at: DateTime<Utc>,
+    ) {
+        if let Err(error) = self
+            .touch_thread_updated_at(scope, thread_id, updated_at)
+            .await
+        {
             // silent-ok: recency stamp is advisory after the message is durable.
             tracing::debug!(
                 ?error,
@@ -1248,7 +1260,13 @@ where
                     (record, CasExpectation::Absent)
                 }
             };
+            let before = message.clone();
             mutate(&mut message)?;
+            crate::contract::validate_message_timestamps_not_cleared(
+                &before,
+                &message,
+                "filesystem message update",
+            )?;
             let entry = Self::message_entry(&message)?;
             match put_with_cas(
                 self.filesystem.as_ref(),
@@ -1527,7 +1545,7 @@ where
         // sidebar surfaces this thread first. Best-effort: the message is
         // already durable, so a touch failure must not fail (and retry) the
         // accept.
-        self.touch_thread_updated_at_best_effort(&scope, &thread_id)
+        self.touch_thread_updated_at_best_effort_at(&scope, &thread_id, now)
             .await;
 
         Ok(AcceptedInboundMessage {
@@ -1707,6 +1725,7 @@ where
                 return Ok(existing);
             }
             let content = request.content.clone();
+            let now = Utc::now();
             let finalized = self
                 .apply_message_update(
                     &request.scope,
@@ -1714,7 +1733,6 @@ where
                     existing.message_id,
                     |message| {
                         ensure_draft(message)?;
-                        let now = Utc::now();
                         message.status = MessageStatus::Finalized;
                         message.content = Some(content.clone().into_text());
                         message.attachments = Vec::new();
@@ -1725,7 +1743,7 @@ where
                 .await?;
             // Finalizing the in-flight draft is thread activity — stamp recency
             // (best-effort; the draft update above is already durable).
-            self.touch_thread_updated_at_best_effort(&request.scope, &request.thread_id)
+            self.touch_thread_updated_at_best_effort_at(&request.scope, &request.thread_id, now)
                 .await;
             return Ok(finalized);
         }
@@ -1781,7 +1799,7 @@ where
         }
         // Finalized assistant reply is thread activity — stamp recency
         // (best-effort; the append above is already durable).
-        self.touch_thread_updated_at_best_effort(&request.scope, &request.thread_id)
+        self.touch_thread_updated_at_best_effort_at(&request.scope, &request.thread_id, now)
             .await;
         Ok(message)
     }
@@ -1828,14 +1846,17 @@ where
             };
             let model_observation = envelope.model_observation.clone();
             if provider_call_update.is_some() || model_observation.is_some() {
-                return self
+                let now = Utc::now();
+                let updated = self
                     .apply_message_update(
                         &request.scope,
                         &request.thread_id,
                         existing.message_id,
                         |message| {
+                            let mut changed = false;
                             if let Some(provider_call) = provider_call_update.as_ref() {
                                 message.tool_result_provider_call = Some(provider_call.clone());
+                                changed = true;
                             }
                             if let Some(model_observation) = model_observation.as_ref() {
                                 let content = message.content.as_deref().ok_or_else(|| {
@@ -1850,13 +1871,25 @@ where
                                 .map_err(SessionThreadError::Serialization)?
                                 {
                                     message.content = Some(content);
-                                    message.updated_at = Some(Utc::now());
+                                    changed = true;
                                 }
+                            }
+                            if changed {
+                                message.updated_at = Some(now);
                             }
                             Ok(())
                         },
                     )
+                    .await?;
+                if updated != existing {
+                    self.touch_thread_updated_at_best_effort_at(
+                        &request.scope,
+                        &request.thread_id,
+                        now,
+                    )
                     .await;
+                }
+                return Ok(updated);
             }
             return Ok(existing);
         }
@@ -1951,6 +1984,7 @@ where
             redaction_ref: None,
         };
         let path = message_record_path(&request.scope, &request.thread_id, message.message_id)?;
+        crate::contract::validate_new_message_timestamps(&message, "capability display preview")?;
         let entry = Self::message_entry(&message)?;
         match put_with_cas(
             self.filesystem.as_ref(),
@@ -2008,7 +2042,9 @@ where
         let result_ref = request.result_ref.clone();
         let thread_id_for_error = request.thread_id.clone();
         let safe_summary = request.safe_summary;
-        self.apply_message_update(
+        let now = Utc::now();
+        let updated = self
+            .apply_message_update(
             &request.scope,
             &request.thread_id,
             message.message_id,
@@ -2029,11 +2065,14 @@ where
                 let content = serde_json::to_string(&envelope)
                     .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
                 message.content = Some(content.clone());
-                message.updated_at = Some(Utc::now());
+                message.updated_at = Some(now);
                 Ok(())
             },
         )
-        .await
+        .await?;
+        self.touch_thread_updated_at_best_effort_at(&request.scope, &request.thread_id, now)
+            .await;
+        Ok(updated)
     }
 
     async fn update_assistant_draft(
@@ -2045,21 +2084,26 @@ where
             .ok_or_else(|| SessionThreadError::UnknownThread {
                 thread_id: request.thread_id.clone(),
             })?;
-        self.apply_message_update(
-            &request.scope,
-            &request.thread_id,
-            request.message_id,
-            |message| {
-                ensure_draft(message)?;
-                message.content = Some(request.content.clone().into_text());
-                // Keep content and attachments in lockstep (as redaction does):
-                // a content update must not leave stale attachment refs behind.
-                message.attachments = Vec::new();
-                message.updated_at = Some(Utc::now());
-                Ok(())
-            },
-        )
-        .await
+        let now = Utc::now();
+        let updated = self
+            .apply_message_update(
+                &request.scope,
+                &request.thread_id,
+                request.message_id,
+                |message| {
+                    ensure_draft(message)?;
+                    message.content = Some(request.content.clone().into_text());
+                    // Keep content and attachments in lockstep (as redaction does):
+                    // a content update must not leave stale attachment refs behind.
+                    message.attachments = Vec::new();
+                    message.updated_at = Some(now);
+                    Ok(())
+                },
+            )
+            .await?;
+        self.touch_thread_updated_at_best_effort_at(&request.scope, &request.thread_id, now)
+            .await;
+        Ok(updated)
     }
 
     async fn finalize_assistant_message(
@@ -2074,13 +2118,14 @@ where
             .ok_or_else(|| SessionThreadError::UnknownThread {
                 thread_id: thread_id.clone(),
             })?;
+        let now = Utc::now();
         let finalized = self
             .apply_message_update(scope, thread_id, message_id, |message| {
                 ensure_draft(message)?;
                 message.status = MessageStatus::Finalized;
                 message.content = Some(content.clone().into_text());
                 message.attachments = Vec::new();
-                message.updated_at = Some(Utc::now());
+                message.updated_at = Some(now);
                 Ok(())
             })
             .await?;
@@ -2088,7 +2133,7 @@ where
         // (best-effort; the finalize above is already durable). Without this,
         // the draft/update/finalize path would leave active threads stale in
         // the `updated_at`-sorted sidebar.
-        self.touch_thread_updated_at_best_effort(scope, thread_id)
+        self.touch_thread_updated_at_best_effort_at(scope, thread_id, now)
             .await;
         Ok(finalized)
     }
@@ -2102,21 +2147,26 @@ where
             .ok_or_else(|| SessionThreadError::UnknownThread {
                 thread_id: request.thread_id.clone(),
             })?;
-        self.apply_message_update(
-            &request.scope,
-            &request.thread_id,
-            request.message_id,
-            |message| {
-                message.status = MessageStatus::Redacted;
-                message.content = None;
-                message.attachments = Vec::new();
-                message.tool_result_provider_call = None;
-                message.redaction_ref = Some(request.redaction_ref.clone());
-                message.updated_at = Some(Utc::now());
-                Ok(())
-            },
-        )
-        .await
+        let now = Utc::now();
+        let updated = self
+            .apply_message_update(
+                &request.scope,
+                &request.thread_id,
+                request.message_id,
+                |message| {
+                    message.status = MessageStatus::Redacted;
+                    message.content = None;
+                    message.attachments = Vec::new();
+                    message.tool_result_provider_call = None;
+                    message.redaction_ref = Some(request.redaction_ref.clone());
+                    message.updated_at = Some(now);
+                    Ok(())
+                },
+            )
+            .await?;
+        self.touch_thread_updated_at_best_effort_at(&request.scope, &request.thread_id, now)
+            .await;
+        Ok(updated)
     }
 
     async fn load_context_window(

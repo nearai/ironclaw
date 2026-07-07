@@ -158,16 +158,12 @@ function roleForRecord(record) {
 }
 
 function timestampForRecord(record) {
-  // Prefer durable server-side timestamps from the timeline. Finalized
-  // assistant rows can be born as drafts and finalized later, so their
-  // completion/update stamp is the user-visible receive time.
+  // Prefer durable server-side timestamps from the timeline. Finalized rows
+  // can be updated after creation, so their latest durable update is the
+  // user-visible receive/completion time.
   if (record.received_at) return record.received_at;
-  const kind = record.kind || "";
   const status = record.status || "";
-  if (
-    (kind === "assistant" || kind === "assistant_message") &&
-    status === "finalized"
-  ) {
+  if (status === "finalized") {
     return record.updated_at || record.created_at || null;
   }
   return record.created_at || record.updated_at || null;

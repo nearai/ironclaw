@@ -231,6 +231,43 @@ pub struct ThreadMessageRecord {
     pub redaction_ref: Option<String>,
 }
 
+/// New transcript rows must carry durable timestamps. Legacy rows persisted
+/// before this field existed still deserialize with `None` and remain readable,
+/// but all current writers should fail loudly if they try to append a fresh
+/// row without both stamps.
+pub(crate) fn validate_new_message_timestamps(
+    message: &ThreadMessageRecord,
+    context: &'static str,
+) -> Result<(), crate::error::SessionThreadError> {
+    if message.created_at.is_none() || message.updated_at.is_none() {
+        return Err(crate::error::SessionThreadError::Backend(format!(
+            "new {context} message {} is missing durable timestamps",
+            message.message_id
+        )));
+    }
+    Ok(())
+}
+
+/// Existing timestamp values are append-only metadata: once a row has either
+/// stamp, mutation paths may update it but must not erase it. This keeps
+/// legacy `None` values compatible while catching accidental nullification of
+/// newly-written rows.
+pub(crate) fn validate_message_timestamps_not_cleared(
+    before: &ThreadMessageRecord,
+    after: &ThreadMessageRecord,
+    context: &'static str,
+) -> Result<(), crate::error::SessionThreadError> {
+    let created_at_cleared = before.created_at.is_some() && after.created_at.is_none();
+    let updated_at_cleared = before.updated_at.is_some() && after.updated_at.is_none();
+    if created_at_cleared || updated_at_cleared {
+        return Err(crate::error::SessionThreadError::Backend(format!(
+            "{context} cleared durable timestamps on message {}",
+            after.message_id
+        )));
+    }
+    Ok(())
+}
+
 /// Summary artifact over a stable transcript sequence range.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SummaryArtifact {
@@ -592,6 +629,29 @@ mod tests {
         }
     }
 
+    fn sample_message() -> ThreadMessageRecord {
+        let now = Utc::now();
+        ThreadMessageRecord {
+            message_id: ThreadMessageId::new(),
+            thread_id: ThreadId::new("thread-contract").unwrap(),
+            sequence: 1,
+            kind: MessageKind::User,
+            status: MessageStatus::Accepted,
+            created_at: Some(now),
+            updated_at: Some(now),
+            actor_id: Some("actor-a".to_string()),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            turn_id: None,
+            turn_run_id: None,
+            tool_result_ref: None,
+            tool_result_provider_call: None,
+            content: Some("hello".to_string()),
+            attachments: Vec::new(),
+            redaction_ref: None,
+        }
+    }
+
     #[test]
     fn text_constructor_carries_no_attachments() {
         let content = MessageContent::text("hello");
@@ -642,6 +702,29 @@ mod tests {
         let mut at_cap = sample_ref();
         at_cap.extracted_text = Some("x".repeat(MAX_EXTRACTED_TEXT_CHARS));
         assert!(validate_attachment_refs(&[at_cap]).is_ok());
+    }
+
+    #[test]
+    fn validate_new_message_timestamps_rejects_missing_stamps() {
+        let mut message = sample_message();
+        message.created_at = None;
+
+        let err = validate_new_message_timestamps(&message, "test message")
+            .expect_err("new messages without created_at must be rejected");
+
+        assert!(matches!(err, crate::error::SessionThreadError::Backend(_)));
+    }
+
+    #[test]
+    fn validate_message_timestamps_not_cleared_rejects_nullification() {
+        let before = sample_message();
+        let mut after = before.clone();
+        after.updated_at = None;
+
+        let err = validate_message_timestamps_not_cleared(&before, &after, "test update")
+            .expect_err("message updates must not clear existing timestamps");
+
+        assert!(matches!(err, crate::error::SessionThreadError::Backend(_)));
     }
 
     #[test]

@@ -206,6 +206,30 @@ test("messagesFromTimeline: finalized assistant records prefer durable updated_a
   assert.equal(messages[0].timestamp, "2026-05-12T17:08:00Z");
 });
 
+test("messagesFromTimeline: finalized non-assistant records prefer durable updated_at timestamps", () => {
+  const messages = messagesFromTimeline([
+    {
+      message_id: "tool-preview-1",
+      kind: "capability_display_preview",
+      status: "finalized",
+      turn_run_id: "run-tools",
+      content: JSON.stringify({
+        version: 1,
+        invocation_id: "invocation-extension-a",
+        capability_id: "builtin.extension_search",
+        status: "completed",
+        title: "extension_search",
+      }),
+      created_at: "2026-05-12T17:06:00Z",
+      updated_at: "2026-05-12T17:10:00Z",
+    },
+  ]);
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].role, "tool_activity");
+  assert.equal(messages[0].timestamp, "2026-05-12T17:10:00Z");
+});
+
 test("messagesFromTimeline: tool previews use timeline sequence as activity order", () => {
   const messages = messagesFromTimeline([
     {
