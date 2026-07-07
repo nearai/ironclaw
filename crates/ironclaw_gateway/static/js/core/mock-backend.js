@@ -172,6 +172,9 @@ window.NUX_DATA = {
     { id: 'gmail', icon: '/icons/integrations/gmail.png', label: 'Gmail', glyph: '\u2709', blurb: 'Read, triage, label, and draft email on your behalf.' },
     { id: 'google_calendar', icon: '/icons/integrations/google_calendar.png', label: 'Google Calendar', glyph: '\u29D7', blurb: 'See your schedule, prep you for meetings, and block time.' },
     { id: 'google_sheets', icon: '/icons/integrations/google_sheets.png', label: 'Google Sheets', glyph: '\u2261', blurb: 'Append rows, build reports, and keep trackers up to date.' },
+    { id: 'google_drive', icon: '/icons/integrations/google_drive.png', label: 'Google Drive', glyph: '\u25B3', blurb: 'Files found, organized, and summarized on demand.' },
+    { id: 'google_docs', icon: '/icons/integrations/google_docs.png', label: 'Google Docs', glyph: '\u2630', blurb: 'Drafts, edits, and summaries straight into Docs.' },
+    { id: 'notion', icon: '/icons/integrations/notion.png', label: 'Notion', glyph: '\u25A4', blurb: 'Docs and databases your agent can read and update.' },
     { id: 'slack', icon: '/icons/integrations/slack.png', label: 'Slack', glyph: '\u2318', blurb: 'Chat with your agent and post updates where your team works.' },
     { id: 'telegram', icon: '/icons/integrations/telegram.png', label: 'Telegram', glyph: '\u2708', blurb: 'Message your agent from your phone, anywhere.' },
     { id: 'discord', icon: '/icons/integrations/discord.png', label: 'Discord', glyph: '\u2756', blurb: 'Run your agent inside your community server.' },
@@ -348,6 +351,9 @@ window.NUX_BILLING = {
     { name: 'gmail', display_name: 'Gmail', kind: 'wasm_tool', description: 'Read, triage, label, and draft email.' },
     { name: 'google_calendar', display_name: 'Google Calendar', kind: 'wasm_tool', description: 'Schedule awareness and meeting prep.' },
     { name: 'google_sheets', display_name: 'Google Sheets', kind: 'wasm_tool', description: 'Append rows and build reports.' },
+    { name: 'google_drive', display_name: 'Google Drive', kind: 'wasm_tool', description: 'Find, organize, and summarize files.' },
+    { name: 'google_docs', display_name: 'Google Docs', kind: 'wasm_tool', description: 'Draft and edit documents.' },
+    { name: 'notion', display_name: 'Notion', kind: 'mcp_server', description: 'Read and update docs and databases.' },
     { name: 'github', display_name: 'GitHub', kind: 'wasm_tool', description: 'Watch repos, releases, and issues.' },
     { name: 'linear', display_name: 'Linear', kind: 'wasm_tool', description: 'Create and update tickets from chat.' },
     { name: 'http', display_name: 'HTTP', kind: 'native', lucideIcon: 'globe', description: 'Fetch URLs and call APIs.' },
@@ -646,18 +652,23 @@ window.NUX_BILLING = {
   // land on POST /api/flows/action { action, provider|proposal }.
   // --------------------------------------------------------------------
 
+  // `runsWhen` + `uses` feed the proposal-detail modal (trigger line + the
+  // automation spec preview) — mirrors the /start prototype's automation view.
   var FLOW_PROPOSALS = {
-    'digest': { icon: 'bell', title: 'A morning digest of what you actually care about', body: 'I read your recent threads and grouped everything into one brief \u2014 the launch, hiring, and anything time-sensitive.', details: ['3 new replies that need you today', '2 threads waiting on a decision', '1 invoice to approve before Friday'], suggestLine: "I'll send it every morning at 8:00am once you approve.", mission: { name: 'Morning digest', cadence: 'Every weekday, 8:00', cadenceType: 'cron' } },
-    'triage': { icon: 'inbox', title: 'Inbox triage + drafted replies', body: 'I sorted your unread mail into Action / FYI / Ignore and drafted replies for the ones that matter.', details: ['9 labeled Action, 24 FYI, 41 Ignore', '5 replies drafted in your voice', '2 newsletters auto-archived'], suggestLine: "Approve and I'll keep your inbox triaged automatically.", mission: { name: 'Inbox triage', cadence: 'On new email', cadenceType: 'event' } },
-    'meeting-prep': { icon: 'calendar-check', title: 'Briefs before every meeting', body: 'From your calendar, I prepared a one-pager for each upcoming meeting \u2014 company, attendees, and recent context.', details: ['Prepped your next 4 meetings', 'Flagged 1 conflict to resolve', 'Found a 30-min slot for the Dana sync'], suggestLine: "Approve and I'll deliver each brief 10 minutes ahead.", mission: { name: 'Meeting briefs', cadence: '10 min before meetings', cadenceType: 'event' } },
-    'people': { icon: 'users', title: "Who to talk to \u2014 and I've already held the time", body: "I read your docs and call transcripts. Here's who to sync with this week \u2014 I drafted the invites and blocked the slots \u2014 plus the calls only you can make.", details: ['Priya \u2014 Series A term sheet (today)', 'Marcus \u2014 close out the eng hiring loop', 'Dana \u2014 finalize the launch date & GTM', 'Decision needed: approve the 3 pricing tiers'], suggestLine: '3 invites drafted on your calendar \u2014 approve to send.', mission: { name: 'Weekly sync scheduler', cadence: 'Every Monday, 8:00', cadenceType: 'cron' } },
-    'twitter': { icon: 'trending-up', title: "You're growing on X \u2014 I got a head start", body: "I studied your voice and what's been landing, then put together a week of content and engagement.", details: ['Drafted 3 tweets in your voice', 'Replied to 2 mentions about you', 'Lined up 5 relevant accounts to follow'], suggestLine: 'All drafted \u2014 approve any to go live. Nothing posts without you.', mission: { name: 'X growth drafts', cadence: 'Daily', cadenceType: 'cron' } },
-    'monitor': { icon: 'radar', title: 'Keep an eye on what matters', body: 'I can watch Hacker News, your repos, or your endpoints and ping you the moment something happens.', details: ['Watching mentions of your product', 'Alerting on failed deploys', 'Daily summary of new releases'], suggestLine: "Approve any and I'll start watching.", mission: { name: 'Keyword monitor', cadence: 'Every 10 minutes', cadenceType: 'cron' } },
-    'slack-triage': { icon: 'messages-square', title: 'Mentions + threads, triaged', body: 'I sort your mentions into what needs you now vs. later, and draft replies.', details: ['17 mentions \u2014 5 need you today', '3 threads awaiting a decision', 'Drafted 4 replies in your voice'], suggestLine: "Approve and I'll keep your mentions triaged.", mission: { name: 'Slack mention triage', cadence: 'Continuous', cadenceType: 'event' } },
-    'slack-digest': { icon: 'newspaper', title: 'A daily team digest', body: 'One post each morning summarizing what moved across your channels.', details: ['#launch: GTM doc finalized', '#eng: 2 incidents resolved', '#sales: 3 new deals in'], suggestLine: "Approve and I'll post a daily digest at 9am.", mission: { name: 'Team digest', cadence: 'Every day, 9:00', cadenceType: 'cron' } },
-    'slack-tasks': { icon: 'check-square', title: 'Turn messages into tasks', body: 'When someone says "create task: \u2026" I open a ticket and confirm back with the link.', details: ['6 tasks captured this week', 'Routed to the right project', 'Nudged 2 that went overdue'], suggestLine: "Approve and I'll turn requests into tracked tasks.", mission: { name: 'Task capture', cadence: 'On matching message', cadenceType: 'event' } },
-    'tg-health': { icon: 'activity', title: 'Deployment health watch', body: 'I ping your endpoints and alert you on Telegram the moment anything returns non-200.', details: ['Watching 3 endpoints', 'Checking every 5 minutes', 'Alerts routed to Telegram'], suggestLine: "Approve and I'll watch your endpoints 24/7.", mission: { name: 'Deployment health watch', cadence: 'Every 5 minutes', cadenceType: 'cron' } },
-    'tg-incident': { icon: 'alert-triangle', title: 'Incident first-responder', body: 'When something breaks, I gather the logs and the suspect change and ping you with a one-line summary.', details: ['Hooks into your deploys', 'Pulls logs + recent commits', 'One-line summary to Telegram'], suggestLine: "Approve and I'll be your incident first-responder.", mission: { name: 'Incident first-responder', cadence: 'On deploy failure', cadenceType: 'event' } },
+    'digest': { icon: 'bell', title: 'A morning digest of what you actually care about', body: 'I read your recent threads and grouped everything into one brief \u2014 the launch, hiring, and anything time-sensitive.', details: ['3 new replies that need you today', '2 threads waiting on a decision', '1 invoice to approve before Friday'], suggestLine: "I'll send it every morning at 8:00am once you approve.", runsWhen: 'schedule \u00b7 every weekday at 08:00', uses: ['gmail', 'google_calendar'], mission: { name: 'Morning digest', cadence: 'Every weekday, 8:00', cadenceType: 'cron' } },
+    'triage': { icon: 'inbox', title: 'Inbox triage + drafted replies', body: 'I sorted your unread mail into Action / FYI / Ignore and drafted replies for the ones that matter.', details: ['9 labeled Action, 24 FYI, 41 Ignore', '5 replies drafted in your voice', '2 newsletters auto-archived'], suggestLine: "Approve and I'll keep your inbox triaged automatically.", runsWhen: 'event \u00b7 on new email', uses: ['gmail'], mission: { name: 'Inbox triage', cadence: 'On new email', cadenceType: 'event' } },
+    'meeting-prep': { icon: 'calendar-check', title: 'Briefs before every meeting', body: 'From your calendar, I prepared a one-pager for each upcoming meeting \u2014 company, attendees, and recent context.', details: ['Prepped your next 4 meetings', 'Flagged 1 conflict to resolve', 'Found a 30-min slot for the Dana sync'], suggestLine: "Approve and I'll deliver each brief 10 minutes ahead.", runsWhen: 'schedule \u00b7 10 min before each meeting', uses: ['google_calendar', 'gmail'], mission: { name: 'Meeting briefs', cadence: '10 min before meetings', cadenceType: 'event' } },
+    'people': { icon: 'users', title: "Who to talk to \u2014 and I've already held the time", body: "I read your docs and call transcripts. Here's who to sync with this week \u2014 I drafted the invites and blocked the slots \u2014 plus the calls only you can make.", details: ['Priya \u2014 Series A term sheet (today)', 'Marcus \u2014 close out the eng hiring loop', 'Dana \u2014 finalize the launch date & GTM', 'Decision needed: approve the 3 pricing tiers'], suggestLine: '3 invites drafted on your calendar \u2014 approve to send.', runsWhen: 'schedule \u00b7 weekly on Monday at 09:00', uses: ['google_calendar', 'gmail', 'notion'], mission: { name: 'Weekly sync scheduler', cadence: 'Every Monday, 8:00', cadenceType: 'cron' } },
+    'twitter': { icon: 'trending-up', title: "You're growing on X \u2014 I got a head start", body: "I studied your voice and what's been landing, then put together a week of content and engagement.", details: ['Drafted 3 tweets in your voice', 'Replied to 2 mentions about you', 'Lined up 5 relevant accounts to follow'], suggestLine: 'All drafted \u2014 approve any to go live. Nothing posts without you.', runsWhen: 'manual \u00b7 on your approval', uses: [], mission: { name: 'X growth drafts', cadence: 'Daily', cadenceType: 'cron' } },
+    'monitor': { icon: 'radar', title: 'Keep an eye on what matters', body: 'I can watch Hacker News, your repos, or your endpoints and ping you the moment something happens.', details: ['Watching mentions of your product', 'Alerting on failed deploys', 'Daily summary of new releases'], suggestLine: "Approve any and I'll start watching.", runsWhen: 'schedule \u00b7 every 5 minutes', uses: ['slack', 'telegram', 'github'], mission: { name: 'Keyword monitor', cadence: 'Every 10 minutes', cadenceType: 'cron' } },
+    'gh-releases': { icon: 'git-branch', title: 'Release notes, summarized', body: 'I watch your repos and turn each new release into a clean summary for your channel.', details: ['nearai/ironclaw v0.31 \u2014 3 days ago', '12 PRs merged since the last release', '1 breaking change flagged'], suggestLine: "Approve and I'll summarize each release as it ships.", runsWhen: 'event \u00b7 on new release', uses: ['github'], mission: { name: 'Release tracker', cadence: 'On new release', cadenceType: 'event' } },
+    'gh-reviews': { icon: 'git-pull-request', title: 'Your review queue, triaged', body: "PRs waiting on you, ranked by what's blocking the team.", details: ['4 PRs awaiting your review', '1 is blocking the launch branch', '2 have been stale for >3 days'], suggestLine: "Approve and I'll keep your review queue triaged.", runsWhen: 'schedule \u00b7 daily at 09:00', uses: ['github'], mission: { name: 'Review queue triage', cadence: 'Every day, 9:00', cadenceType: 'cron' } },
+    'gh-ci': { icon: 'bug', title: 'CI watch + failure digests', body: 'When CI breaks on main, I find the failing job and the suspect commit before you ask.', details: ['main: green right now', 'Flaky test flagged: gateway_spec', 'Last failure traced to a config change'], suggestLine: "Approve and I'll watch CI and digest failures.", runsWhen: 'event \u00b7 on CI failure (branch: main)', uses: ['github'], mission: { name: 'CI watch', cadence: 'On CI failure', cadenceType: 'event' } },
+    'slack-triage': { icon: 'messages-square', title: 'Mentions + threads, triaged', body: 'I sort your mentions into what needs you now vs. later, and draft replies.', details: ['17 mentions \u2014 5 need you today', '3 threads awaiting a decision', 'Drafted 4 replies in your voice'], suggestLine: "Approve and I'll keep your mentions triaged.", runsWhen: 'event \u00b7 on mention', uses: ['slack'], mission: { name: 'Slack mention triage', cadence: 'Continuous', cadenceType: 'event' } },
+    'slack-digest': { icon: 'newspaper', title: 'A daily team digest', body: 'One post each morning summarizing what moved across your channels.', details: ['#launch: GTM doc finalized', '#eng: 2 incidents resolved', '#sales: 3 new deals in'], suggestLine: "Approve and I'll post a daily digest at 9am.", runsWhen: 'schedule \u00b7 daily at 09:00', uses: ['slack'], mission: { name: 'Team digest', cadence: 'Every day, 9:00', cadenceType: 'cron' } },
+    'slack-tasks': { icon: 'check-square', title: 'Turn messages into tasks', body: 'When someone says "create task: \u2026" I open a ticket and confirm back with the link.', details: ['6 tasks captured this week', 'Routed to the right project', 'Nudged 2 that went overdue'], suggestLine: "Approve and I'll turn requests into tracked tasks.", runsWhen: 'event \u00b7 on message matching "create task:"', uses: ['slack', 'linear'], mission: { name: 'Task capture', cadence: 'On matching message', cadenceType: 'event' } },
+    'tg-health': { icon: 'activity', title: 'Deployment health watch', body: 'I ping your endpoints and alert you on Telegram the moment anything returns non-200.', details: ['Watching 3 endpoints', 'Checking every 5 minutes', 'Alerts routed to Telegram'], suggestLine: "Approve and I'll watch your endpoints 24/7.", runsWhen: 'schedule \u00b7 every 5 minutes', uses: ['telegram'], mission: { name: 'Deployment health watch', cadence: 'Every 5 minutes', cadenceType: 'cron' } },
+    'tg-incident': { icon: 'alert-triangle', title: 'Incident first-responder', body: 'When something breaks, I gather the logs and the suspect change and ping you with a one-line summary.', details: ['Hooks into your deploys', 'Pulls logs + recent commits', 'One-line summary to Telegram'], suggestLine: "Approve and I'll be your incident first-responder.", runsWhen: 'event \u00b7 on deploy failure', uses: ['telegram', 'github'], mission: { name: 'Incident first-responder', cadence: 'On deploy failure', cadenceType: 'event' } },
   };
 
   var NUX_FLOWS = {
@@ -747,12 +758,47 @@ window.NUX_BILLING = {
     },
   };
 
+  // Hover blurbs for cascade chips (one line on what the agent can do with
+  // each tool — mirrors the prototype's tooltip copy).
+  var CASCADE_BLURBS = {
+    gmail: 'Read, send, and manage email \u2014 without the model ever seeing your credentials.',
+    google_calendar: 'Schedules, conflicts, and prep \u2014 handled before you ask.',
+    google_drive: 'Files found, organized, and summarized on demand.',
+    google_docs: 'Drafts, edits, and summaries straight into Docs.',
+    notion: 'Docs and databases your agent can read and update.',
+    slack: 'Talk to your agent where your team already works.',
+    telegram: 'Your agent in your pocket \u2014 on your phone, on the go.',
+    github: 'Repos, issues, PRs, and releases \u2014 watched and summarized.',
+    linear: 'Issues filed, triaged, and tracked from chat.',
+  };
+
   // Map a lead integration id onto a flow bucket (mirrors the prototype).
   function flowForLead(lead) {
     if (lead === 'github') return NUX_FLOWS.github;
     if (lead === 'slack' || lead === 'linear' || lead === 'discord') return NUX_FLOWS.slack;
     if (lead === 'telegram') return NUX_FLOWS.telegram;
     return NUX_FLOWS.gmail;
+  }
+
+  // Naive keyword inference: free-typed prompt -> lead integration id
+  // (ported from the /start prototype's inferIntegrationsFromPrompt; first
+  // hit wins, gmail is the default lead).
+  function inferLeadFromPrompt(text) {
+    var p = String(text || '').toLowerCase();
+    if (/(email|inbox|gmail|invoice)/.test(p)) return 'gmail';
+    if (/(calendar|meeting|schedule|invite)/.test(p)) return 'gmail';
+    if (/(github|repo\b|pull request|\bpr\b|release|commit|\bci\b)/.test(p)) return 'github';
+    if (/slack/.test(p)) return 'slack';
+    if (/(linear|ticket)/.test(p)) return 'slack';
+    if (/(telegram|phone|alert|ping|monitor|watch|endpoint|deploy)/.test(p)) return 'telegram';
+    return 'gmail';
+  }
+
+  // True once any flow-lead integration is connected — the moment the story
+  // shifts from "get connected" to "the agent is on the job".
+  function anyLeadConnected() {
+    return isConnected('gmail') || isConnected('github')
+      || isConnected('slack') || isConnected('telegram');
   }
 
   // --------------------------------------------------------------------
@@ -805,7 +851,7 @@ window.NUX_BILLING = {
     if (/hacker news|keyword|appears on/.test(text) && /send|watch|summar/.test(text)) {
       return keywordMonitorScenario(usedCase('keyword-monitor'));
     }
-    if (/ping http|health|non-200|watch.*endpoint/.test(text)) {
+    if (/ping http|\bhealth\b|non-200|watch.*endpoint/.test(text)) {
       return deployWatcherScenario(usedCase('deploy-watcher'));
     }
     if (/watch the .*github|new releases/.test(text)) {
@@ -814,7 +860,13 @@ window.NUX_BILLING = {
     if (/summarize the top stories/.test(text)) {
       return hnSummaryScenario();
     }
-    return genericScenario(content);
+    // Free-typed asks (prototype parity): before anything is connected, any
+    // request routes into the matching connect→cascade→draft flow; once the
+    // stack is connected, acknowledge and "get to work" instead.
+    if (!anyLeadConnected()) {
+      return flowScenario(flowForLead(inferLeadFromPrompt(text)));
+    }
+    return ackScenario(content);
   }
 
   // The signature prototype flow, expressed as engine steps. `say` posts a
@@ -845,7 +897,11 @@ window.NUX_BILLING = {
       kind: 'cascade',
       label: flow.cascadeLabel,
       chips: flow.cascade.map(function(c) {
-        return { id: c.id, label: c.label, via: c.via || null, icon: '/icons/integrations/' + c.id + '.png' };
+        return {
+          id: c.id, label: c.label, via: c.via || null,
+          icon: '/icons/integrations/' + c.id + '.png',
+          blurb: CASCADE_BLURBS[c.id] || null,
+        };
       }),
     } });
     steps.push({ t: 1600, connectMany: flow.cascade.map(function(c) { return c.id; }) });
@@ -862,11 +918,27 @@ window.NUX_BILLING = {
         body: p.body,
         details: p.details,
         suggestLine: p.suggestLine,
+        runsWhen: p.runsWhen,
+        uses: p.uses,
       } });
     });
     steps.push({ t: 900, say: "That's your first hour \u2014 done. You're on free credits, which cover today. Approve any draft above and it becomes a live task under **Tasks**." });
+    // Land the moment (sparkle flourish rides on the upgrade card), then
+    // surface the plan-upgrade path — the last beat of the scripted journey.
+    steps.push({ t: 600, say: 'To keep all of this running, pick a plan whenever you\u2019re ready.' });
+    steps.push({ t: 300, card: { kind: 'upgrade' } });
     steps.push({ t: 300, suggest: ['Show my tasks', 'What else can you take off my plate?'] });
     return steps;
+  }
+
+  // Post-connect acknowledgement for free-typed asks (prototype parity).
+  function ackScenario(content) {
+    var quoted = String(content || '').slice(0, 120);
+    return [
+      { t: 400, thinking: 'Thinking' },
+      { t: 900, say: 'On it \u2014 I\u2019ll run "' + quoted + '" and post the results right here, then keep it running automatically.' },
+      { t: 300, suggest: ['Show my tasks', 'What else can you take off my plate?'] },
+    ];
   }
 
   function capabilityScenario() {
@@ -1041,24 +1113,6 @@ window.NUX_BILLING = {
     ];
   }
 
-  function genericScenario(content) {
-    var quoted = String(content || '').slice(0, 120);
-    return [
-      { t: 400, thinking: 'Thinking' },
-      { t: 1200, respond:
-        'Got it — here\'s how I\'d approach *"' + quoted + '"*:\n\n'
-        + 'In this demo I run on scripted data, so I can\'t execute that one for real. In a live workspace I would plan the steps, '
-        + 'pick the right tools or integrations, and either do it once or set it up as a repeating task under **Tasks**.\n\n'
-        + 'Some things the demo *does* fully walk through:' },
-      { t: 400, suggest: [
-        'Set up a daily 9am briefing with my calendar and inbox',
-        'If "IronClaw" appears on Hacker News, send a summary to me here',
-        'Triage my inbox: label new emails as "Action", "FYI", or "Ignore", and summarize the Action ones for me.',
-        'What can you do for me?',
-      ] },
-    ];
-  }
-
   // Scenario player: a sequential step walker emitting SSE events the way
   // the real agent loop does. Supports pausing (connect gates) and resuming
   // via POST /api/flows/action.
@@ -1139,9 +1193,24 @@ window.NUX_BILLING = {
         return;
       }
       if (step.say) {
-        turn.response = (turn.response ? turn.response + '\n\n' : '') + step.say;
-        emit('response', { thread_id: threadId, content: step.say });
-        next();
+        // Smooth character streaming for scripted agent bubbles (prototype
+        // parity): chunks ride the real `stream_chunk` event, and the final
+        // `response` event closes the bubble exactly like the live engine.
+        var sayText = step.say;
+        var sayAt = 0;
+        for (var s = 0; s < sayText.length; s += 3) {
+          sayAt += 18;
+          (function(chunk, delay) {
+            setTimeout(function() {
+              emit('stream_chunk', { thread_id: threadId, content: chunk });
+            }, delay);
+          })(sayText.slice(s, s + 3), sayAt);
+        }
+        setTimeout(function() {
+          turn.response = (turn.response ? turn.response + '\n\n' : '') + sayText;
+          emit('response', { thread_id: threadId, content: sayText });
+          next();
+        }, sayAt + 120);
         return;
       }
       if (step.respond) {
@@ -1204,6 +1273,25 @@ window.NUX_BILLING = {
       return { success: true, mission_id: mission.id };
     }
     if (action === 'dismiss') return { success: true };
+    // Plan picked from the in-flow upgrade card: confirm it in the thread
+    // the way the agent would (streamed bubble appended to the last turn).
+    if (action === 'upgrade' && body.plan) {
+      var plan = null;
+      for (var bp = 0; bp < window.NUX_BILLING.plans.length; bp++) {
+        if (window.NUX_BILLING.plans[bp].id === body.plan) { plan = window.NUX_BILLING.plans[bp]; break; }
+      }
+      var confirmThreadId = body.thread_id || (state.threads[0] && state.threads[0].id);
+      var turns = getTurns(confirmThreadId);
+      var confirmTurn = turns[turns.length - 1];
+      if (!confirmTurn) {
+        confirmTurn = { user_input: null, response: null, tool_calls: [] };
+        turns.push(confirmTurn);
+      }
+      playSteps(confirmThreadId, confirmTurn, [
+        { t: 400, say: 'You\u2019re on the ' + ((plan && plan.name) || body.plan) + ' plan now \u2014 everything I set up stays running, with room to grow. Welcome aboard.' },
+      ]);
+      return { success: true };
+    }
     return { success: false, message: 'unknown flow action' };
   }
 
@@ -1324,6 +1412,23 @@ window.NUX_BILLING = {
     }
     if (path === '/api/extensions/install') {
       installExtension(body && body.name, body && body.kind);
+      return { success: true };
+    }
+    // Disconnect from the Integrations surface (implied: POST
+    // /api/extensions/uninstall { name } or DELETE /api/extensions/{name}).
+    if (path === '/api/extensions/uninstall') {
+      var uninstallName = body && body.name;
+      state.extensions = state.extensions.filter(function(e) { return e.name !== uninstallName; });
+      // Drop it from the onboarding-handoff seed too so a reload doesn't
+      // resurrect the connection.
+      try {
+        var seededRaw = sessionStorage.getItem('ironclaw_nux_connected_integrations');
+        var seededIds = seededRaw ? JSON.parse(seededRaw) : [];
+        if (Array.isArray(seededIds)) {
+          sessionStorage.setItem('ironclaw_nux_connected_integrations',
+            JSON.stringify(seededIds.filter(function(id) { return id !== uninstallName; })));
+        }
+      } catch (e) { /* no handoff state */ }
       return { success: true };
     }
     if (path === '/api/extensions') {

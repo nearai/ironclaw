@@ -175,6 +175,8 @@ I18n.register('en', {
   'billing.reminderTitle': 'You\u2019re on free credits',
   'billing.reminderText': 'You have {remaining} of {total} free credits left. Pick a plan to keep your agent running without interruption.',
   'billing.notNow': 'Not now',
+  'billing.pickerTitle': 'Choose your plan',
+  'billing.pickerText': 'You\u2019re on free credits. Pick a plan to keep your automations running \u2014 change anytime.',
 
   // Integrations surface
   'integrations.title': 'Integrations',
@@ -189,6 +191,8 @@ I18n.register('en', {
   'integrations.mockConnectedHint': 'Connected during onboarding (prototype)',
   'integrations.connect': 'Connect',
   'integrations.askAgent': 'Ask agent to connect',
+  'integrations.disconnect': 'Disconnect',
+  'integrations.disconnected': '{name} disconnected',
 
   // Skills surface
   'skills.subtitle': 'Teach your agent new tricks \u2014 install skills from ClawHub or by URL.',
@@ -304,6 +308,17 @@ I18n.register('en', {
   'flow.dismiss': 'Dismiss',
   'flow.approvedNote': 'Running \u2014 see Tasks',
   'flow.automationCreated': 'Automation created \u2014 it\u2019s live under Tasks',
+  'flow.viewDetails': 'View details',
+  'flow.notNow': 'Not now',
+  'flow.allow': 'Allow',
+  'flow.consentSubtitle': 'Sign in with {provider} to continue',
+  'flow.consentScopesLabel': 'IronClaw will be able to:',
+  'flow.consentVault': 'Your credentials are stored in an encrypted vault and never shared with the model. You can disconnect anytime.',
+  'flow.detailRunsWhen': 'Runs when',
+  'flow.detailWhatItDoes': 'What it does',
+  'flow.detailAutomation': 'Automation',
+  'flow.pickPlan': 'Pick a plan',
+  'flow.onPlan': 'On the {plan} plan \u2014 all set.',
   'chat.modelInfoTooltip': 'Model: {detail} \u2014 click to switch with /model',
   
   // Memory Tab

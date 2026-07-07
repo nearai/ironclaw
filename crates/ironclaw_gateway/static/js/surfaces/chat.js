@@ -81,6 +81,169 @@ function flowIconSvg(name, size) {
   return '<svg width="' + (size || 15) + '" height="' + (size || 15) + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + path + '</svg>';
 }
 
+// MOCK: per-provider consent scopes shown in the OAuth-style connect modal
+// (illustrative demo copy — a real OAuth screen lives with the provider).
+const FLOW_CONSENT_SCOPES = {
+  gmail: ['Read, compose, and send email', 'Manage labels and drafts'],
+  google_calendar: ['View and edit events on your calendars', 'See your availability'],
+  google_sheets: ['See and manage your spreadsheets'],
+  google_drive: ['View and manage files you open with this app'],
+  slack: ['Send messages as you', 'Read channels you choose'],
+  telegram: ['Message you on Telegram'],
+  github: ['Read repos, issues, and pull requests'],
+};
+
+function flowProviderLabel(provider, title) {
+  if (provider === 'gmail' || String(provider).indexOf('google_') === 0) return 'Google';
+  return title || provider;
+}
+
+// OAuth-style consent modal — the deferred-auth moment of the chat-first
+// journey. "Allow" mocks the OAuth round-trip (short beat), then resolves
+// the paused flow via /api/flows/action.
+function showFlowConsentModal(card, onAllowed) {
+  closeFlowModal();
+  const provider = card.provider;
+  const name = card.title.replace(/^Connect\s+/i, '');
+  const scopes = FLOW_CONSENT_SCOPES[provider] || ['Access your ' + name + ' data'];
+
+  const overlay = document.createElement('div');
+  overlay.className = 'flow-modal-overlay';
+  overlay.id = 'flow-modal';
+  let scopeRows = '';
+  scopes.forEach((scope) => {
+    scopeRows += '<li class="flow-consent-scope">'
+      + '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>'
+      + escapeHtml(scope) + '</li>';
+  });
+  overlay.innerHTML =
+    '<div class="flow-modal flow-consent" role="dialog" aria-modal="true" aria-label="' + escapeHtml(card.title) + '">'
+    + '<div class="flow-consent-head">'
+    + '<img class="flow-consent-icon" src="' + escapeHtml(card.icon || '') + '" alt="" aria-hidden="true">'
+    + '<div class="flow-consent-titles">'
+    + '<div class="flow-consent-title">' + escapeHtml(card.title) + '</div>'
+    + '<div class="flow-consent-subtitle">' + escapeHtml(I18n.t('flow.consentSubtitle', { provider: flowProviderLabel(provider, name) })) + '</div>'
+    + '</div>'
+    + '</div>'
+    + '<div class="flow-consent-scopes">'
+    + '<div class="flow-consent-scopes-label">' + escapeHtml(I18n.t('flow.consentScopesLabel')) + '</div>'
+    + '<ul>' + scopeRows + '</ul>'
+    + '</div>'
+    + '<div class="flow-consent-vault">'
+    + '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></svg>'
+    + '<span>' + escapeHtml(I18n.t('flow.consentVault')) + '</span>'
+    + '</div>'
+    + '<div class="flow-modal-actions">'
+    + '<button type="button" class="flow-modal-secondary flow-consent-cancel">' + escapeHtml(I18n.t('flow.notNow')) + '</button>'
+    + '<button type="button" class="btn-primary flow-consent-allow">' + escapeHtml(I18n.t('flow.allow')) + '</button>'
+    + '</div>'
+    + '</div>';
+
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) closeFlowModal();
+  });
+  overlay.querySelector('.flow-consent-cancel').addEventListener('click', () => closeFlowModal());
+  const allowBtn = overlay.querySelector('.flow-consent-allow');
+  allowBtn.addEventListener('click', () => {
+    allowBtn.disabled = true;
+    overlay.querySelector('.flow-consent-cancel').disabled = true;
+    allowBtn.innerHTML = '<span class="spinner"></span> ' + escapeHtml(I18n.t('flow.connecting'));
+    // Mock the OAuth round-trip, then resolve the paused flow.
+    setTimeout(() => {
+      closeFlowModal();
+      onAllowed();
+    }, 900);
+  });
+  document.body.appendChild(overlay);
+}
+
+// Proposal detail modal — what would actually run: trigger, steps, and a
+// readable automation spec (Suggest-only, nothing runs without approval).
+function showFlowProposalModal(card) {
+  closeFlowModal();
+  const uses = (card.uses && card.uses.length > 0) ? card.uses : ['chat'];
+  const specLines = [
+    'name: ' + card.proposal,
+    'on: ' + (card.runsWhen || 'schedule \u00b7 daily'),
+    'uses: [' + uses.join(', ') + ']',
+    'mode: suggest        # drafts for your approval \u2014 nothing runs without you',
+    'steps:',
+  ];
+  (card.details || []).forEach((d) => {
+    specLines.push('  - ' + d.toLowerCase().replace(/\.$/, ''));
+  });
+  specLines.push('deliver: chat + connected channels');
+  specLines.push('vault: credentials injected at the boundary \u2014 the model never sees them');
+
+  let detailRows = '';
+  (card.details || []).forEach((d) => {
+    detailRows += '<li>' + escapeHtml(d) + '</li>';
+  });
+
+  const overlay = document.createElement('div');
+  overlay.className = 'flow-modal-overlay';
+  overlay.id = 'flow-modal';
+  overlay.innerHTML =
+    '<div class="flow-modal flow-proposal-detail" role="dialog" aria-modal="true" aria-label="' + escapeHtml(card.title) + '">'
+    + '<div class="flow-consent-head">'
+    + '<span class="flow-proposal-icon flow-detail-icon" aria-hidden="true">' + flowIconSvg(card.icon, 18) + '</span>'
+    + '<div class="flow-consent-titles">'
+    + '<div class="flow-consent-title">' + escapeHtml(card.title) + '</div>'
+    + '<div class="flow-detail-body">' + escapeHtml(card.body || '') + '</div>'
+    + '</div>'
+    + '</div>'
+    + '<div class="flow-detail-section">'
+    + '<div class="flow-detail-label">' + escapeHtml(I18n.t('flow.detailRunsWhen')) + '</div>'
+    + '<div class="flow-detail-trigger">' + escapeHtml(card.runsWhen || '') + '</div>'
+    + '</div>'
+    + '<div class="flow-detail-section">'
+    + '<div class="flow-detail-label">' + escapeHtml(I18n.t('flow.detailWhatItDoes')) + '</div>'
+    + '<ul class="flow-detail-list">' + detailRows + '</ul>'
+    + '</div>'
+    + '<div class="flow-detail-section">'
+    + '<div class="flow-detail-label">' + escapeHtml(I18n.t('flow.detailAutomation')) + '</div>'
+    + '<pre class="flow-detail-spec">' + escapeHtml(specLines.join('\n')) + '</pre>'
+    + '</div>'
+    + '<div class="flow-modal-actions">'
+    + '<button type="button" class="flow-modal-secondary flow-detail-close">' + escapeHtml(I18n.t('common.close')) + '</button>'
+    + '</div>'
+    + '</div>';
+
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) closeFlowModal();
+  });
+  overlay.querySelector('.flow-detail-close').addEventListener('click', () => closeFlowModal());
+  document.body.appendChild(overlay);
+}
+
+function closeFlowModal() {
+  document.getElementById('flow-modal')?.remove();
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeFlowModal();
+});
+
+// One-shot sparkle burst — the "magic moment" when the scripted first hour
+// completes (prototype parity, tuned down for the workspace).
+function flowFlourish() {
+  if (document.getElementById('flow-flourish')) return;
+  const host = document.createElement('div');
+  host.id = 'flow-flourish';
+  host.className = 'flow-flourish';
+  host.setAttribute('aria-hidden', 'true');
+  let sparks = '';
+  for (let i = 0; i < 14; i++) {
+    const left = 8 + ((i * 6.3) % 84);
+    const delay = (i % 7) * 90;
+    const size = 9 + (i % 4) * 4;
+    sparks += '<svg class="flow-flourish-spark" style="left:' + left + '%;width:' + size + 'px;height:' + size + 'px;animation-delay:' + delay + 'ms" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/></svg>';
+  }
+  host.innerHTML = sparks;
+  document.body.appendChild(host);
+  setTimeout(() => host.remove(), 2400);
+}
+
 function renderFlowCard(card) {
   if (!card || !card.kind) return;
   const container = document.getElementById('chat-messages');
@@ -99,20 +262,24 @@ function renderFlowCard(card) {
       + '</span>'
       + '<button type="button" class="btn-primary flow-connect-btn">' + escapeHtml(I18n.t('flow.connect')) + '</button>';
     const btn = el.querySelector('.flow-connect-btn');
+    // The OAuth-style consent modal is the deferred-auth beat: Connect opens
+    // it, Allow resolves the mock OAuth and resumes the paused flow.
     btn.addEventListener('click', () => {
-      btn.disabled = true;
-      btn.textContent = I18n.t('flow.connecting');
-      apiFetch('/api/flows/action', {
-        method: 'POST',
-        body: { action: 'connect', provider: card.provider },
-      }).then(() => {
-        el.classList.add('connected');
-        btn.outerHTML = '<span class="flow-connect-done">'
-          + '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> '
-          + escapeHtml(I18n.t('flow.connected')) + '</span>';
-      }).catch(() => {
-        btn.disabled = false;
-        btn.textContent = I18n.t('flow.connect');
+      showFlowConsentModal(card, () => {
+        btn.disabled = true;
+        btn.textContent = I18n.t('flow.connecting');
+        apiFetch('/api/flows/action', {
+          method: 'POST',
+          body: { action: 'connect', provider: card.provider },
+        }).then(() => {
+          el.classList.add('connected');
+          btn.outerHTML = '<span class="flow-connect-done">'
+            + '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> '
+            + escapeHtml(I18n.t('flow.connected')) + '</span>';
+        }).catch(() => {
+          btn.disabled = false;
+          btn.textContent = I18n.t('flow.connect');
+        });
       });
     });
   }
@@ -120,7 +287,8 @@ function renderFlowCard(card) {
   if (card.kind === 'cascade') {
     let chips = '';
     (card.chips || []).forEach((chip, i) => {
-      chips += '<span class="flow-cascade-chip" style="animation-delay:' + (i * 380) + 'ms">'
+      chips += '<span class="flow-cascade-chip" style="animation-delay:' + (i * 380) + 'ms"'
+        + (chip.blurb ? ' title="' + escapeHtml(chip.blurb) + '"' : '') + '>'
         + (chip.icon ? '<img src="' + escapeHtml(chip.icon) + '" alt="" aria-hidden="true">' : '')
         + escapeHtml(chip.label)
         + '<svg class="flow-cascade-check" style="animation-delay:' + (i * 380 + 240) + 'ms" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>'
@@ -164,8 +332,11 @@ function renderFlowCard(card) {
       + '</div>'
       + '<div class="flow-proposal-body">' + escapeHtml(card.body || '') + '</div>'
       + '<div class="flow-proposal-rows">' + rows + '</div>'
+      + '<div class="flow-proposal-hint">' + escapeHtml(card.suggestLine || '') + '</div>'
       + '<div class="flow-proposal-footer">'
-      + '<span class="flow-proposal-hint">' + escapeHtml(card.suggestLine || '') + '</span>'
+      + '<button type="button" class="flow-proposal-details">' + escapeHtml(I18n.t('flow.viewDetails'))
+      + '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>'
+      + '</button>'
       + '<span class="flow-proposal-actions">'
       + '<button type="button" class="flow-proposal-dismiss">' + escapeHtml(I18n.t('flow.dismiss')) + '</button>'
       + '<button type="button" class="btn-primary flow-proposal-approve">' + escapeHtml(I18n.t('flow.approve')) + '</button>'
@@ -174,6 +345,7 @@ function renderFlowCard(card) {
     const badge = el.querySelector('.flow-proposal-badge');
     const approve = el.querySelector('.flow-proposal-approve');
     const dismiss = el.querySelector('.flow-proposal-dismiss');
+    el.querySelector('.flow-proposal-details').addEventListener('click', () => showFlowProposalModal(card));
     approve.addEventListener('click', () => {
       approve.disabled = true;
       dismiss.disabled = true;
@@ -199,6 +371,30 @@ function renderFlowCard(card) {
       el.classList.add('dismissed');
       badge.textContent = I18n.t('flow.dismissed');
       el.querySelector('.flow-proposal-actions').innerHTML = '';
+    });
+  }
+
+  // Plan-upgrade CTA — the last beat of the scripted first hour. Rides with
+  // the one-shot sparkle flourish (the setup-complete "magic moment").
+  if (card.kind === 'upgrade') {
+    flowFlourish();
+    el.innerHTML =
+      '<button type="button" class="btn-primary flow-upgrade-btn">'
+      + '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="20" height="14" x="2" y="5" rx="2"/><line x1="2" x2="22" y1="10" y2="10"/></svg>'
+      + escapeHtml(I18n.t('flow.pickPlan'))
+      + '</button>';
+    el.querySelector('.flow-upgrade-btn').addEventListener('click', () => {
+      showPlanPickerModal((plan) => {
+        el.innerHTML = '<span class="flow-upgrade-done">'
+          + '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>'
+          + escapeHtml(I18n.t('flow.onPlan', { plan: plan.name }))
+          + '</span>';
+        // The agent confirms the upgrade in-thread (streamed bubble).
+        apiFetch('/api/flows/action', {
+          method: 'POST',
+          body: { action: 'upgrade', plan: plan.id, thread_id: currentThreadId },
+        }).catch(() => {});
+      });
     });
   }
 

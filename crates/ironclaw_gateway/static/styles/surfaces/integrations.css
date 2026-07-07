@@ -68,6 +68,16 @@
   align-items: center;
 }
 
+/* Disconnect (demo) swaps in for the Connected badge on hover so the card
+   name never gets crushed by two actions competing for the same slot. */
+.integration-card .integration-disconnect { display: none; }
+
+.integration-card:hover .integration-disconnect { display: inline-flex; }
+
+.integration-card:hover .integration-card-action:has(.integration-disconnect) .integration-badge {
+  display: none;
+}
+
 .integrations-empty {
   grid-column: 1 / -1;
   display: flex;

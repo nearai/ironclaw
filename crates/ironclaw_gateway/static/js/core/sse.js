@@ -331,12 +331,14 @@ function connectSSE(lastEventIdOverride) {
     }
     finalizeActivityGroup();
 
-    // Mark the active assistant message as streaming
+    // Route chunks into the actively-streaming assistant bubble only. A
+    // finished bubble (its `response` event already landed and cleared the
+    // attribute) must never absorb the next response's chunks — each
+    // streamed response gets its own bubble.
     const container = document.getElementById('chat-messages');
-    let lastAssistant = container.querySelector('.message.assistant:last-of-type');
+    let lastAssistant = container.querySelector('.message.assistant[data-streaming="true"]');
     if (!lastAssistant) {
-      addMessage('assistant', '');
-      lastAssistant = container.querySelector('.message.assistant:last-of-type');
+      lastAssistant = addMessage('assistant', '');
     }
     if (lastAssistant) lastAssistant.setAttribute('data-streaming', 'true');
 

@@ -226,6 +226,27 @@ function renderIntegrationCard(item) {
       badge.title = I18n.t('integrations.mockConnectedHint');
     }
     action.appendChild(badge);
+    // Demo-only: let the walkthrough disconnect a mock-connected tool so the
+    // "manage your connections" beat is interactive end-to-end.
+    if (window.__IRONCLAW_DEMO__) {
+      const disconnectBtn = document.createElement('button');
+      disconnectBtn.type = 'button';
+      disconnectBtn.className = 'discover-btn secondary integration-disconnect';
+      disconnectBtn.textContent = I18n.t('integrations.disconnect');
+      disconnectBtn.addEventListener('click', () => {
+        disconnectBtn.disabled = true;
+        apiFetch('/api/extensions/uninstall', {
+          method: 'POST',
+          body: { name: item.id },
+        }).then(() => {
+          showToast(I18n.t('integrations.disconnected', { name: item.label }), 'success');
+          loadIntegrations(true);
+        }).catch(() => {
+          disconnectBtn.disabled = false;
+        });
+      });
+      action.appendChild(disconnectBtn);
+    }
   } else if (item.state === 'pairing' || item.state === 'setup') {
     const btn = document.createElement('button');
     btn.type = 'button';
