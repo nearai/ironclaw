@@ -1869,9 +1869,8 @@ fn thread_failure(stage: impl Into<String>, error: SessionThreadError) -> Operat
         SessionThreadError::Serialization(_) | SessionThreadError::Deserialization(_) => {
             "thread_serialization"
         }
-        SessionThreadError::InvalidMessageTimestamp { .. } | SessionThreadError::Backend(_) => {
-            "thread_backend"
-        }
+        SessionThreadError::InvalidMessageTimestamp { .. } => "thread_timestamp_invalid",
+        SessionThreadError::Backend(_) => "thread_backend",
     };
     OperationFailure::new(bucket, stage, error)
 }
