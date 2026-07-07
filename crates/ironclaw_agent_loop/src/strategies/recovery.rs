@@ -130,6 +130,8 @@ pub(crate) enum ModelErrorClass {
     ContextOverflow,
     /// Provider rejected or filtered the content.
     ContentFiltered,
+    /// Provider/model output was structurally invalid for the loop contract.
+    InvalidOutput,
     /// Model route, credentials, or provider is unavailable.
     Unavailable,
     /// Model gateway failed internally without safe caller detail.
@@ -187,8 +189,8 @@ pub(crate) enum RetryScope {
 /// - Retries capability transient, unavailable, and internal errors up to
 ///   [`Self::max_attempts_per_class`] times with `Backoff`, then returns a
 ///   model-visible tool error result.
-/// - Retries model transient, unavailable, and internal errors up to the same
-///   budget, then aborts the run.
+/// - Retries model transient, unavailable, invalid-output, and internal errors
+///   up to the same budget, then aborts the run.
 /// - Retries `ContextOverflow` at iteration scope with `ShrinkContext`.
 #[derive(Debug, Clone, Copy)]
 pub struct DefaultRecoveryStrategy {
@@ -275,6 +277,22 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
                     kind,
                     RetryScope::Iteration,
                     |_| Some(RetryAlteration::ShrinkContext),
+                )
+            }
+            ModelErrorClass::InvalidOutput => {
+                let Some(attempt_class) = model_retry_attempt_class(err.class) else {
+                    return RecoveryOutcome::Abort {
+                        recovery: state.recovery_state.cleared_attempts(),
+                        failure_kind: LoopFailureKind::DriverBug,
+                    };
+                };
+                retry_or_abort(
+                    state,
+                    attempt_class,
+                    self.max_attempts_per_class,
+                    kind,
+                    RetryScope::Call,
+                    |_| Some(RetryAlteration::RepairInvalidModelOutput),
                 )
             }
             ModelErrorClass::Transient
@@ -378,6 +396,7 @@ fn model_retry_attempt_class(class: ModelErrorClass) -> Option<RecoveryAttemptCl
     match class {
         ModelErrorClass::Transient => Some(RecoveryAttemptClass::ModelTransient),
         ModelErrorClass::ContextOverflow => Some(RecoveryAttemptClass::ModelContextOverflow),
+        ModelErrorClass::InvalidOutput => Some(RecoveryAttemptClass::ModelInvalidOutput),
         ModelErrorClass::Unavailable => Some(RecoveryAttemptClass::ModelUnavailable),
         ModelErrorClass::Internal => Some(RecoveryAttemptClass::ModelInternal),
         ModelErrorClass::ContentFiltered => None,
@@ -399,13 +418,14 @@ fn capability_error_to_failure_kind(class: CapabilityErrorClass) -> LoopFailureK
 }
 
 /// Maps a sanitized model error class to the loop-level failure kind.
-fn model_error_to_failure_kind(class: ModelErrorClass) -> LoopFailureKind {
+pub(crate) fn model_error_to_failure_kind(class: ModelErrorClass) -> LoopFailureKind {
     match class {
         ModelErrorClass::Transient
         | ModelErrorClass::ContextOverflow
         | ModelErrorClass::ContentFiltered
         | ModelErrorClass::Unavailable
         | ModelErrorClass::Internal => LoopFailureKind::ModelError,
+        ModelErrorClass::InvalidOutput => LoopFailureKind::InvalidModelOutput,
     }
 }
 
@@ -429,6 +449,10 @@ pub(crate) enum RetryAlteration {
     ShrinkContext,
     /// Backoff before retry (executor honors as a sleep).
     Backoff { delay_ms: BackoffDelayMs },
+    /// Rebuild the next model prompt with a model-visible invalid-output repair
+    /// hint. Used when the provider/model returned an empty or structurally
+    /// invalid response for the active loop contract.
+    RepairInvalidModelOutput,
     /// Reserved for future `ModelRouteChain` landing. Skeleton executor MUST
     /// reject this alteration with `LoopFailureKind::DriverBug` until the
     /// chain mechanism lands.
@@ -651,6 +675,18 @@ mod tests {
     fn retry_alteration_advance_fallback_round_trips() {
         let alteration = RetryAlteration::AdvanceFallback;
         let value = serde_json::to_value(&alteration).expect("serialize");
+        let restored: RetryAlteration = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(restored, alteration);
+    }
+
+    #[test]
+    fn retry_alteration_repair_invalid_model_output_round_trips() {
+        let alteration = RetryAlteration::RepairInvalidModelOutput;
+        let value = serde_json::to_value(&alteration).expect("serialize");
+        assert_eq!(
+            value,
+            serde_json::json!({"alteration": "repair_invalid_model_output"})
+        );
         let restored: RetryAlteration = serde_json::from_value(value).expect("deserialize");
         assert_eq!(restored, alteration);
     }
@@ -1037,6 +1073,43 @@ mod tests {
                 .on_model_error(&state, &model_err(ModelErrorClass::Transient))
                 .await;
             assert!(matches!(outcome, RecoveryOutcome::Abort { .. }));
+        }
+
+        #[tokio::test]
+        async fn model_invalid_output_retries_with_repair_then_aborts_at_budget() {
+            let strategy = DefaultRecoveryStrategy::default();
+
+            let state = state_with_no_attempts();
+            let outcome = strategy
+                .on_model_error(&state, &model_err(ModelErrorClass::InvalidOutput))
+                .await;
+            match outcome {
+                RecoveryOutcome::Retry {
+                    recovery,
+                    scope,
+                    alter,
+                } => {
+                    assert_eq!(
+                        recovery.attempts_for(RecoveryAttemptClass::ModelInvalidOutput),
+                        1
+                    );
+                    assert_eq!(scope, RetryScope::Call);
+                    assert_eq!(alter, Some(RetryAlteration::RepairInvalidModelOutput));
+                }
+                other => panic!("expected invalid-output repair retry, got {other:?}"),
+            }
+
+            let state = state_with_attempts_for(2, RecoveryAttemptClass::ModelInvalidOutput);
+            let outcome = strategy
+                .on_model_error(&state, &model_err(ModelErrorClass::InvalidOutput))
+                .await;
+            assert!(matches!(
+                outcome,
+                RecoveryOutcome::Abort {
+                    failure_kind: LoopFailureKind::InvalidModelOutput,
+                    ..
+                }
+            ));
         }
 
         #[tokio::test]

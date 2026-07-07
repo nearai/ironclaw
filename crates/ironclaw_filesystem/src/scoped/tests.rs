@@ -15,9 +15,8 @@ use super::*;
 use crate::in_memory::InMemoryBackend;
 use crate::{
     BackendId, BackendKind, CasExpectation, CompositeRootFilesystem, ContentKind, Entry,
-    FilesystemCatalog, FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind,
-    IndexName, IndexPolicy, IndexSpec, MountDescriptor, Page, RecordKind, SeqNo, StorageClass,
-    TxnCapability,
+    FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind, IndexName, IndexPolicy,
+    IndexSpec, MountDescriptor, Page, RecordKind, SeqNo, StorageClass, TxnCapability,
 };
 
 fn test_scope() -> ResourceScope {

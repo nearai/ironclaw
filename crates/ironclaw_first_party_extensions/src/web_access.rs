@@ -1,3 +1,4 @@
+// arch-exempt: large_file, web-access Exa SSE regression coverage stays with this tool harness, plan #5573
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     net::IpAddr,
@@ -552,10 +553,48 @@ fn mcp_initialize_params() -> Value {
 }
 
 fn is_valid_mcp_initialize_response(body: &[u8]) -> bool {
-    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+    let Some(value) = mcp_json_value_from_body(body) else {
         return false;
     };
     value.get("error").is_none() && value.get("result").is_some_and(Value::is_object)
+}
+
+fn mcp_json_value_from_body(body: &[u8]) -> Option<Value> {
+    if let Ok(value) = serde_json::from_slice::<Value>(body) {
+        return Some(value);
+    }
+
+    let body = std::str::from_utf8(body).ok()?;
+    let mut event_data = String::new();
+    for line in body.lines() {
+        if line.is_empty() {
+            if let Some(value) = mcp_json_value_from_sse_event(&event_data) {
+                return Some(value);
+            }
+            event_data.clear();
+            continue;
+        }
+
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim_start();
+        if data.is_empty() {
+            continue;
+        }
+        if !event_data.is_empty() {
+            event_data.push('\n');
+        }
+        event_data.push_str(data);
+    }
+    mcp_json_value_from_sse_event(&event_data)
+}
+
+fn mcp_json_value_from_sse_event(data: &str) -> Option<Value> {
+    if data.trim().is_empty() {
+        return None;
+    }
+    serde_json::from_str::<Value>(data).ok()
 }
 
 async fn call_exa_mcp_search(
@@ -1307,15 +1346,39 @@ mod tests {
 
         fn ok_json(body: Value) -> RuntimeHttpEgressResponse {
             let bytes = serde_json::to_vec(&body).unwrap();
+            Self::ok_body(bytes, 20)
+        }
+
+        fn ok_body(body: Vec<u8>, response_bytes: u64) -> RuntimeHttpEgressResponse {
             RuntimeHttpEgressResponse {
                 status: 200,
                 headers: Vec::new(),
-                body: bytes,
+                body,
                 saved_body: None,
                 request_bytes: 10,
-                response_bytes: 20,
+                response_bytes,
                 redaction_applied: false,
             }
+        }
+
+        fn ok_sse_json(body: Value) -> RuntimeHttpEgressResponse {
+            let body = format!("event: message\ndata: {body}\n");
+            let bytes = body.into_bytes();
+            let response_bytes = bytes.len() as u64;
+            Self::ok_body(bytes, response_bytes)
+        }
+
+        fn ok_sse_data_lines(lines: &[&str]) -> RuntimeHttpEgressResponse {
+            let mut body = String::from("event: message\n");
+            for line in lines {
+                body.push_str("data: ");
+                body.push_str(line);
+                body.push('\n');
+            }
+            body.push('\n');
+            let bytes = body.into_bytes();
+            let response_bytes = bytes.len() as u64;
+            Self::ok_body(bytes, response_bytes)
         }
 
         fn accepted() -> RuntimeHttpEgressResponse {
@@ -1386,6 +1449,30 @@ data: {"result":{"content":[{"type":"text","text":"Title: Example\nURL: https://
             extract_mcp_text(body).as_deref(),
             Some("Title: Example\nURL: https://example.com\nText: Body")
         );
+    }
+
+    #[test]
+    fn validates_sse_mcp_initialize_response() {
+        let body = br#"event: message
+data: {"result":{"protocolVersion":"2024-11-05","capabilities":{}},"jsonrpc":"2.0","id":1}
+"#;
+        assert!(is_valid_mcp_initialize_response(body));
+    }
+
+    #[test]
+    fn validates_split_data_sse_mcp_initialize_response() {
+        let body = br#"event: message
+data: {
+data:   "result": {
+data:     "protocolVersion": "2024-11-05",
+data:     "capabilities": {}
+data:   },
+data:   "jsonrpc": "2.0",
+data:   "id": 1
+data: }
+
+"#;
+        assert!(is_valid_mcp_initialize_response(body));
     }
 
     #[test]
@@ -1819,6 +1906,61 @@ data: {"result":{"content":[{"type":"text","text":"Title: Example\nURL: https://
             request_bodies[2]["params"]["arguments"]["maxCharacters"],
             1000
         );
+    }
+
+    async fn assert_get_content_accepts_initialize_response(
+        initialize_response: RuntimeHttpEgressResponse,
+    ) {
+        let executor = WebAccessExecutor::default();
+        let capability = capability_id(WEB_GET_CONTENT_CAPABILITY_ID);
+        let scope = scope();
+        let input = json!({"url":"https://example.com", "max_characters": 1000});
+        let egress = Arc::new(RecordingEgress::with_responses(vec![
+            Ok(initialize_response),
+            Ok(RecordingEgress::accepted()),
+            Ok(RecordingEgress::ok_json(json!({
+                "result": {"content": [{"type": "text", "text": "# Example Domain\nURL: https://example.com\n\nExample body"}]}
+            }))),
+        ]));
+
+        let result = executor
+            .dispatch(request(
+                &capability,
+                &scope,
+                &input,
+                Some(egress.clone() as Arc<dyn RuntimeHttpEgress>),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(result.output["provider_used"], "exa_mcp");
+        assert_eq!(result.output["url"], "https://example.com");
+        assert_eq!(result.output["content"], "Example body");
+        assert_eq!(egress.request_bodies().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn get_content_accepts_sse_mcp_initialize_response() {
+        let initialize_response = RecordingEgress::ok_sse_json(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"protocolVersion": "2024-11-05", "capabilities": {}}
+        }));
+
+        assert_get_content_accepts_initialize_response(initialize_response).await;
+    }
+
+    #[tokio::test]
+    async fn get_content_accepts_split_data_sse_mcp_initialize_response() {
+        let initialize_response = RecordingEgress::ok_sse_data_lines(&[
+            "{",
+            r#""jsonrpc": "2.0","#,
+            r#""id": 1,"#,
+            r#""result": {"protocolVersion": "2024-11-05", "capabilities": {}}"#,
+            "}",
+        ]);
+
+        assert_get_content_accepts_initialize_response(initialize_response).await;
     }
 
     #[tokio::test]

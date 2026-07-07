@@ -11,16 +11,10 @@ export function primaryExtensionAction(ext) {
     return "configure";
   }
 
-  if (ext?.kind === "wasm_channel") {
-    return null;
-  }
-
-  // Channel-surface kinds in a pairing state hand off to the pairing section;
-  // no primary Activate button should appear alongside the dedicated pairing UI.
-  if (
-    isChannelExtensionKind(ext?.kind) &&
-    (state === "pairing_required" || state === "pairing")
-  ) {
+  // Channel-surface extensions are configured or paired through their channel
+  // panels. A generic Activate button bypasses that guidance and can hit the
+  // wrong lifecycle endpoint for Slack-style inbound proof-code flows.
+  if (isChannelExtensionKind(ext?.kind)) {
     return null;
   }
 

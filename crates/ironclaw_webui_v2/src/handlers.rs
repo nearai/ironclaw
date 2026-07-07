@@ -44,17 +44,18 @@ use ironclaw_product_workflow::{
     RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
     RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsReadRequest,
     RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectMemberInfo,
-    RebornProjectResponse, RebornRemoveMemberRequest, RebornResolveGateResponse, RebornServicesApi,
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse,
-    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, SetActiveLlmRequest,
-    UpsertLlmProviderRequest, WebUiAttachmentCapabilities, WebUiAuthenticatedCaller,
-    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
-    WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    RebornProjectResponse, RebornRemoveMemberRequest, RebornResolveGateResponse,
+    RebornRetryRunResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
+    RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
+    SetActiveLlmRequest, SettingsToolPermissionState, UpsertLlmProviderRequest,
+    WebUiAttachmentCapabilities, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
     webui_attachment_capabilities,
 };
 use serde::{Deserialize, Serialize};
@@ -931,6 +932,28 @@ pub struct ResolveGatePath {
     pub gate_ref: String,
 }
 
+/// `POST /api/webchat/v2/threads/{thread_id}/runs/{run_id}/retry`
+///
+/// Body shape: [`WebUiRetryRunRequest`] (path overrides body for
+/// `thread_id` and `run_id`).
+pub async fn retry_run(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(RetryRunPath { thread_id, run_id }): Path<RetryRunPath>,
+    Json(mut body): Json<WebUiRetryRunRequest>,
+) -> Result<Json<RebornRetryRunResponse>, WebUiV2HttpError> {
+    body.thread_id = Some(thread_id);
+    body.run_id = Some(run_id);
+    let response = state.services().retry_run(caller, body).await?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RetryRunPath {
+    pub thread_id: String,
+    pub run_id: String,
+}
+
 /// `GET /api/webchat/v2/threads`
 ///
 /// Lists threads scoped to the authenticated caller. Pagination is
@@ -1414,15 +1437,6 @@ pub async fn set_settings_tools_auto_approve(
 #[derive(Debug, Deserialize)]
 pub struct SettingsToolPermissionPath {
     pub capability_id: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SettingsToolPermissionState {
-    Default,
-    AlwaysAllow,
-    AskEachTime,
-    Disabled,
 }
 
 #[derive(Debug, Deserialize)]

@@ -52,6 +52,12 @@ Slack Events API must reach the Reborn listener over a public HTTPS URL:
 https://<public-host>/webhooks/slack/events
 ```
 
+The `/pair` slash command uses a second signed endpoint on the same listener:
+
+```text
+https://<public-host>/webhooks/slack/commands
+```
+
 For local development, expose the local listener through a tunnel and use the
 tunnel URL in Slack. The listener defaults to `127.0.0.1:3000`; use
 `serve --host 0.0.0.0 --port 3000` only when intentionally exposing it behind a
@@ -111,8 +117,9 @@ enabled = true
 overrides only the route enablement gate: `true`/`1` mounts Slack, while
 `false`/`0` acts as a deployment kill switch.
 
-Slack enablement mounts `POST /webhooks/slack/events` and exposes Slack channel
-setup in WebUI.
+Slack enablement mounts `POST /webhooks/slack/events` and the `/pair`
+slash-command endpoint `POST /webhooks/slack/commands`, and exposes Slack
+channel setup in WebUI.
 Slack installation ids, team/app ids, the bot token, the signing secret,
 and channel mappings are configured after startup from WebUI channel setup.
 
@@ -148,6 +155,8 @@ OAuth & Permissions:
 - Add bot token scopes:
   - `chat:write` for final replies and temporary working messages.
   - `im:write` for opening DMs used by the pairing-code flow.
+  - `commands` for the `/pair` slash command (added automatically when you
+    register the command; listed here for completeness).
   - `app_mentions:read` for channel mentions.
   - `im:history` for direct-message events.
   - `channels:history` if the bot should receive public-channel message events
@@ -174,6 +183,26 @@ https://<public-host>/webhooks/slack/events
   - Optional: `message.groups`
   - Optional: `message.mpim`
 
+Slash Commands:
+
+- Create a slash command named `/pair`.
+- Set the Request URL to:
+
+```text
+https://<public-host>/webhooks/slack/commands
+```
+
+- Short description: `Get a fresh Ironclaw pairing code`.
+- Usage hint: leave blank; `/pair` takes no arguments.
+- Registering a slash command adds the `commands` bot scope; reinstall the app
+  after adding it.
+
+`/pair` replies privately (ephemeral — only the invoking user sees it) with a
+fresh pairing code that expires in 10 minutes and invalidates any previous
+code. If the user is already linked, it replies that they are already
+connected. Paste the code into the caller-facing Slack connect flow to finish
+linking.
+
 App Home:
 
 - Enable messages so users can DM the app.
@@ -192,11 +221,17 @@ features:
   bot_user:
     display_name: IronClaw Reborn
     always_online: false
+  slash_commands:
+    - command: /pair
+      url: https://<public-host>/webhooks/slack/commands
+      description: Get a fresh Ironclaw pairing code
+      should_escape: false
 oauth_config:
   scopes:
     bot:
       - chat:write
       - im:write
+      - commands
       - app_mentions:read
       - im:history
       - channels:history
@@ -249,6 +284,7 @@ Verification checklist:
   during setup.
 - A DM to the app either produces a pairing code or routes through the paired
   Reborn user.
+- `/pair` returns a private (ephemeral) reply containing a fresh pairing code.
 - A channel `@app` mention replies in the same channel thread.
 - Bot-originated and subtyped Slack messages are ignored.
 
@@ -273,6 +309,10 @@ Add or confirm chat:write, reinstall the Slack app, and update the bot token in 
 ### Pairing code DM fails
 
 Confirm im:write and chat:write, reinstall the app, and verify the bot token in WebUI Slack setup starts with xoxb-.
+
+### /pair returns a dispatch or signing error
+
+Confirm the slash command Request URL is exactly https://<public-host>/webhooks/slack/commands, the commands scope is granted, the app was reinstalled after adding the command, and the WebUI Slack setup signing secret matches the app signing secret. The /pair endpoint uses the same signed-request verification as the Events API.
 
 ### Channel mention does not reach Reborn
 

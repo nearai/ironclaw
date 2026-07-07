@@ -36,6 +36,8 @@ async fn webui_event_stream_enriches_auth_prompt_through_projection_stream() {
                     credential_requirements: Vec::new(),
                 }),
                 sanitized_reason: Some("GitHub authentication required".to_string()),
+                detail: None,
+                retryable: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator {
@@ -130,6 +132,8 @@ async fn webui_event_stream_uses_credential_requirement_for_manual_token_auth_pr
                     credential_requirements: credential_requirements.clone(),
                 }),
                 sanitized_reason: Some("GitHub authentication required".to_string()),
+                detail: None,
+                retryable: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator {
@@ -181,6 +185,111 @@ async fn webui_event_stream_uses_credential_requirement_for_manual_token_auth_pr
 }
 
 #[tokio::test]
+async fn webui_event_stream_renders_channel_pairing_requirement_as_manual_token_with_connection() {
+    // A channel-pairing credential requirement (Slack) blocks on the same
+    // auth-gate rail as GitHub, but the projection renders it as a `manual_token`
+    // challenge carrying channel-connection context (the render copy + resolve
+    // route), so one paste card serves both a stored secret and a pairing code.
+    let tenant_id = TenantId::new("webui-events-tenant").unwrap();
+    let user_id = UserId::new("webui-events-user").unwrap();
+    let agent_id = AgentId::new("webui-events-agent").unwrap();
+    let thread_id = ThreadId::new("webui-events-channel-pairing-thread").unwrap();
+    let turn_run = TurnRunId::new();
+    let gate_ref = "gate:auth-required";
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let credential_requirements = vec![RuntimeCredentialAuthRequirement {
+        provider: RuntimeCredentialAccountProviderId::new("slack").unwrap(),
+        setup: RuntimeCredentialAccountSetup::ChannelPairing {
+            channel: "slack".to_string(),
+        },
+        requester_extension: ExtensionId::new("slack").unwrap(),
+        provider_scopes: Vec::new(),
+    }];
+    let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let services = build_reborn_projection_services(
+        event_log_dyn,
+        ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
+    )
+    .with_turn_events(
+        Arc::new(FakeTurnEventSource {
+            events: vec![TurnLifecycleEvent {
+                cursor: TurnEventCursor(1),
+                scope: scope.clone(),
+                occurred_at: Some(chrono::Utc::now()),
+                owner_user_id: Some(user_id.clone()),
+                run_id: turn_run,
+                status: TurnStatus::BlockedAuth,
+                kind: TurnEventKind::Blocked,
+                blocked_gate: Some(TurnBlockedGateMetadata {
+                    gate_ref: GateRef::new(gate_ref).unwrap(),
+                    gate_kind: TurnBlockedGateKind::Auth,
+                    activity_id: None,
+                    credential_requirements: credential_requirements.clone(),
+                }),
+                sanitized_reason: Some("Slack connection required".to_string()),
+                retryable: None,
+                detail: None,
+            }],
+        }),
+        Arc::new(FakeTurnCoordinator {
+            state: TurnRunState {
+                credential_requirements,
+                ..turn_run_state(&scope, &user_id, turn_run, TurnEventCursor(1))
+            },
+        }),
+    );
+
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(events.iter().any(|event| matches!(
+        event.payload(),
+        ProductOutboundPayload::AuthPrompt(prompt)
+            if prompt.turn_run_id == turn_run
+                && prompt.challenge_kind == Some(AuthPromptChallengeKind::ManualToken)
+                && prompt.connection.as_ref().is_some_and(|connection| {
+                    connection.channel == "slack"
+                        && connection.strategy.as_deref() == Some("inbound_proof_code")
+                        && connection.input_placeholder.as_deref()
+                            == Some("Enter Slack pairing code...")
+                        && connection
+                            .error_message
+                            .as_deref()
+                            .is_some_and(|message| message.contains("/pair"))
+                })
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event.payload(),
+        ProductOutboundPayload::ProjectionUpdate { state }
+            if state.items.iter().any(|item| matches!(
+                item,
+                ProductProjectionItem::Gate {
+                    gate_kind,
+                    auth_context: Some(context),
+                    ..
+                } if *gate_kind == ProductGateKind::Auth
+                    && context.challenge_kind == AuthPromptChallengeKind::ManualToken
+                    && context
+                        .connection
+                        .as_ref()
+                        .is_some_and(|connection| connection.channel == "slack")
+            ))
+    )));
+}
+
+#[tokio::test]
 async fn webui_event_stream_keeps_oauth_requirement_as_oauth_prompt_without_url() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
@@ -224,6 +333,8 @@ async fn webui_event_stream_keeps_oauth_requirement_as_oauth_prompt_without_url(
                     credential_requirements: credential_requirements.clone(),
                 }),
                 sanitized_reason: Some("Google authentication required".to_string()),
+                detail: None,
+                retryable: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator {
@@ -295,6 +406,8 @@ async fn webui_event_stream_surfaces_auth_challenge_lookup_failure() {
                     credential_requirements: Vec::new(),
                 }),
                 sanitized_reason: Some("GitHub authentication required".to_string()),
+                detail: None,
+                retryable: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator {
@@ -322,8 +435,12 @@ async fn webui_event_stream_surfaces_auth_challenge_lookup_failure() {
 #[tokio::test]
 async fn webui_event_stream_creates_google_oauth_prompt_for_runtime_credential_gate() {
     use crate::OAuthClientConfig;
-    use crate::auth::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
-    use crate::oauth_gate::{GoogleOAuthGateProvider, GoogleOAuthGateProviderRegistry};
+    use crate::product_auth::api::auth::{
+        RebornAuthContinuationDispatcher, RebornProductAuthServices,
+    };
+    use crate::product_auth::oauth::oauth_gate::{
+        GoogleOAuthGateProvider, GoogleOAuthGateProviderRegistry,
+    };
     use async_trait::async_trait;
     use ironclaw_auth::{AuthContinuationEvent, InMemoryAuthProductServices};
     use ironclaw_secrets::InMemorySecretStore;
@@ -402,6 +519,8 @@ async fn webui_event_stream_creates_google_oauth_prompt_for_runtime_credential_g
                     credential_requirements: credential_requirements.clone(),
                 }),
                 sanitized_reason: Some("Google authentication required".to_string()),
+                detail: None,
+                retryable: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator {
@@ -440,8 +559,12 @@ async fn webui_event_stream_creates_google_oauth_prompt_for_runtime_credential_g
 
 #[tokio::test]
 async fn webui_event_stream_creates_notion_dcr_oauth_prompt_for_runtime_credential_gate() {
-    use crate::auth::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
-    use crate::oauth_dcr::{OAuthDcrProvider, OAuthDcrProviderConfig, OAuthDcrProviderRegistry};
+    use crate::product_auth::api::auth::{
+        RebornAuthContinuationDispatcher, RebornProductAuthServices,
+    };
+    use crate::product_auth::oauth::oauth_dcr::{
+        OAuthDcrProvider, OAuthDcrProviderConfig, OAuthDcrProviderRegistry,
+    };
     use async_trait::async_trait;
     use ironclaw_auth::{
         AuthContinuationEvent, CredentialAccountLabel, InMemoryAuthProductServices,
@@ -534,7 +657,7 @@ async fn webui_event_stream_creates_notion_dcr_oauth_prompt_for_runtime_credenti
     let dcr_provider = Arc::new(
         OAuthDcrProvider::new(
             OAuthDcrProviderConfig {
-                spec: crate::notion_oauth::notion_provider_spec(),
+                spec: crate::product_auth::oauth::notion_oauth::notion_provider_spec(),
                 callback_origin: "http://127.0.0.1:3000".to_string(),
                 client_name: "Ironclaw".to_string(),
                 account_label: CredentialAccountLabel::new("notion").unwrap(),
@@ -574,6 +697,8 @@ async fn webui_event_stream_creates_notion_dcr_oauth_prompt_for_runtime_credenti
                     credential_requirements: credential_requirements.clone(),
                 }),
                 sanitized_reason: Some("Notion authentication required".to_string()),
+                detail: None,
+                retryable: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator {

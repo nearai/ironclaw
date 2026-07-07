@@ -4,7 +4,11 @@
 //! and run exactly once, rather than being duplicated across every `e2e_*.rs`
 //! test binary that declares `mod support;`.
 
-#[path = "support/reborn/mod.rs"]
+#[allow(dead_code)]
+#[path = "support/reborn_parity_qa/mod.rs"]
+mod parity_qa_support;
+#[allow(dead_code)]
+#[path = "integration/support/mod.rs"]
 mod reborn_support;
 mod support;
 
@@ -362,12 +366,13 @@ mod reborn_support_tests {
     };
 
     use async_trait::async_trait;
-    use ironclaw_filesystem::ScopedFilesystem;
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{
         AgentId, CapabilityId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
         NetworkMethod, NetworkPolicy, NetworkTargetPattern, ProjectId, ResourceScope, TenantId,
         ThreadId, UserId, VirtualPath,
     };
+    use ironclaw_llm::{LlmProvider, ToolCompletionRequest};
     use ironclaw_loop_support::{
         HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessage,
         HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
@@ -398,9 +403,10 @@ mod reborn_support_tests {
     };
     use ironclaw_turns::{
         CancelRunRequest, CancelRunResponse, GetRunStateRequest, LoopMessageRef,
-        ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
-        RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnCoordinator,
-        TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+        ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest,
+        RetryTurnResponse, RunProfileId, RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse,
+        ThreadBusy, TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope,
+        TurnStatus,
         events::EventCursor,
         run_profile::{
             CapabilityBatchInvocation, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
@@ -409,18 +415,20 @@ mod reborn_support_tests {
     };
     use tokio::sync::Barrier;
 
-    use crate::reborn_support::delivery::RecordingOutboundDeliverySink;
-    use crate::reborn_support::filesystem::local_filesystem;
-    use crate::reborn_support::harness::RecordingTestCapabilityPort;
-    use crate::reborn_support::model_replay::{
+    use crate::parity_qa_support::delivery::RecordingOutboundDeliverySink;
+    use crate::parity_qa_support::model_replay::{
         RebornModelReplayStep, RebornScriptedProviderToolCall, RebornTraceReplayError,
         RebornTraceReplayModelGateway, capability_call_from_trace_with_surface,
     };
-    use crate::reborn_support::network::RecordingNetworkHttpTransport;
+    use crate::parity_qa_support::network::RecordingNetworkHttpTransport;
+    use crate::reborn_support::filesystem::local_filesystem;
+    use crate::reborn_support::harness::RecordingTestCapabilityPort;
     use crate::reborn_support::product_workflow::{
         FilesystemIdempotencyLedger, RebornProductWorkflowHarness,
         RebornProductWorkflowHarnessError, resource_scope,
     };
+    use crate::reborn_support::reply::RebornScriptedReply;
+    use crate::reborn_support::scripted_provider::scripted_trace_llm;
     use crate::reborn_support::session_thread::{RebornThreadHarness, RebornThreadHarnessError};
     use crate::reborn_support::test_adapter::{RebornTestIngress, RebornTestProductAdapter};
     use crate::support::trace_llm::{
@@ -776,6 +784,41 @@ mod reborn_support_tests {
         gateway.assert_exhausted();
     }
 
+    #[tokio::test]
+    async fn scripted_trace_llm_canonicalizes_tool_call_ids_per_trace() {
+        let first = scripted_trace_llm([RebornScriptedReply::tool_calls([
+            (
+                "builtin.http",
+                serde_json::json!({"url": "https://a.example"}),
+            ),
+            (
+                "builtin.http",
+                serde_json::json!({"url": "https://b.example"}),
+            ),
+        ])]);
+
+        let first_response = first
+            .complete_with_tools(ToolCompletionRequest::new(Vec::new(), Vec::new()))
+            .await
+            .expect("first scripted tool-calls response");
+        assert_eq!(first_response.tool_calls[0].id, "call-1");
+        assert_eq!(first_response.tool_calls[1].id, "call-2");
+
+        let second = scripted_trace_llm([RebornScriptedReply::tool_call(
+            "builtin.http",
+            serde_json::json!({"url": "https://c.example"}),
+        )]);
+
+        let second_response = second
+            .complete_with_tools(ToolCompletionRequest::new(Vec::new(), Vec::new()))
+            .await
+            .expect("second scripted tool-call response");
+        assert_eq!(
+            second_response.tool_calls[0].id, "call-1",
+            "each materialized trace starts its deterministic id sequence fresh"
+        );
+    }
+
     #[test]
     fn trace_replay_rejects_user_input_response() {
         let error = RebornTraceReplayModelGateway::from_trace(LlmTrace::single_turn(
@@ -1085,6 +1128,49 @@ mod reborn_support_tests {
             .assert_final_reply(ThreadId::new("thread-reopen").unwrap(), "assistant")
             .await
             .expect("reopened final reply");
+    }
+
+    #[tokio::test]
+    async fn filesystem_thread_harness_reopens_distinct_actor_scope() {
+        // Regression pin for E-MULTIUSER (#5479): before the fix, the
+        // `/threads` mount was resolved ONCE at construction
+        // (`ScopedFilesystem::with_fixed_view`), baking in whichever scope
+        // built the service first. Build a harness under a NON-default owner
+        // (distinct from every other test's shared "user-reborn-support"),
+        // write history, reopen a fresh service instance over the SAME
+        // backend under that SAME distinct owner, and confirm history is
+        // still readable — the reopened mount resolves the identical owner
+        // subtree. A sibling harness sharing the SAME backend but a
+        // DIFFERENT owner must not see it (proves subtree separation, not
+        // just "didn't crash" round-tripping).
+        let backend = Arc::new(InMemoryBackend::new());
+        let owner_a = RebornThreadHarness::filesystem_shared_backend(
+            thread_scope_with_owner("distinct-actor-reopen", "user-distinct-actor-a"),
+            Arc::clone(&backend),
+        )
+        .expect("owner-a thread harness");
+        let thread_id = write_thread_history(&owner_a).await;
+
+        let reopened_a = owner_a.reopened().expect("reopened owner-a harness");
+        let history = reopened_a
+            .history(thread_id.clone())
+            .await
+            .expect("reopened history under the same distinct owner");
+        assert_eq!(history.len(), 2);
+        reopened_a
+            .assert_final_reply(thread_id.clone(), "assistant")
+            .await
+            .expect("reopened final reply under the same distinct owner");
+
+        let owner_b = RebornThreadHarness::filesystem_shared_backend(
+            thread_scope_with_owner("distinct-actor-reopen", "user-distinct-actor-b"),
+            backend,
+        )
+        .expect("owner-b thread harness");
+        assert!(
+            owner_b.history(thread_id).await.is_err(),
+            "a distinct owner scope must not see owner-a's history after reopen"
+        );
     }
 
     #[tokio::test]
@@ -2168,11 +2254,17 @@ mod reborn_support_tests {
     }
 
     fn thread_scope(label: &str) -> ThreadScope {
+        thread_scope_with_owner(label, "user-reborn-support")
+    }
+
+    /// Like [`thread_scope`] but with a caller-chosen owner, so tests can pin
+    /// behavior for a non-default owner (E-MULTIUSER reopen coverage).
+    fn thread_scope_with_owner(label: &str, owner: &str) -> ThreadScope {
         ThreadScope {
             tenant_id: TenantId::new("tenant-reborn-support").unwrap(),
             agent_id: AgentId::new("agent-reborn-support").unwrap(),
             project_id: None,
-            owner_user_id: Some(UserId::new("user-reborn-support").unwrap()),
+            owner_user_id: Some(UserId::new(owner).unwrap()),
             mission_id: None,
         }
         .with_thread_label(label)
@@ -2485,6 +2577,13 @@ mod reborn_support_tests {
             panic!("resume_turn is not used by reborn support tests")
         }
 
+        async fn retry_turn(
+            &self,
+            _request: RetryTurnRequest,
+        ) -> Result<RetryTurnResponse, TurnError> {
+            panic!("retry_turn is not used by reborn support tests")
+        }
+
         async fn cancel_run(
             &self,
             _request: CancelRunRequest,
@@ -2498,6 +2597,64 @@ mod reborn_support_tests {
         ) -> Result<TurnRunState, TurnError> {
             panic!("get_run_state is not used by reborn support tests")
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// reborn support: session_thread
+// ---------------------------------------------------------------------------
+
+mod session_thread_tests {
+    use ironclaw_host_api::{AgentId, ResourceScope, SYSTEM_RESERVED_ID, TenantId};
+    use ironclaw_threads::ThreadScope;
+
+    use crate::reborn_support::session_thread::{path_segment, threads_mount_view};
+
+    /// Direct unit pin for `path_segment`'s sentinel mapping: the
+    /// `SYSTEM_RESERVED_ID` control-byte sentinel becomes the path-safe
+    /// `_system` segment; any ordinary id passes through unchanged.
+    #[test]
+    fn path_segment_maps_system_sentinel_to_system_segment() {
+        assert_eq!(path_segment(SYSTEM_RESERVED_ID), "_system");
+        assert_eq!(path_segment("tenant-real"), "tenant-real");
+    }
+
+    /// `ResourceScope::system()` (both tenant AND user are the sentinel, the
+    /// scope `find_idempotency_record` routes through) must mount under
+    /// `_system/_system`, not leak the raw control-byte sentinel into a
+    /// filesystem path.
+    #[test]
+    fn threads_mount_view_system_scope_mounts_under_system_segments() {
+        let view =
+            threads_mount_view("", &ResourceScope::system()).expect("system scope mount view");
+        assert_eq!(view.mounts.len(), 1);
+        assert_eq!(
+            view.mounts[0].target.as_str(),
+            "/tenants/_system/users/_system/threads"
+        );
+    }
+
+    /// An owner-less thread scope (`ThreadScope::to_resource_scope` with no
+    /// `owner_user_id` — system-scoped thread infrastructure with no owning
+    /// user) carries a REAL tenant but the sentinel only in the user segment.
+    /// Only the user axis should fall back to `_system`; the tenant axis must
+    /// resolve normally.
+    #[test]
+    fn threads_mount_view_owner_less_scope_mounts_only_user_segment_under_system() {
+        let owner_less = ThreadScope {
+            tenant_id: TenantId::new("tenant-owner-less").unwrap(),
+            agent_id: AgentId::new("agent-owner-less").unwrap(),
+            project_id: None,
+            owner_user_id: None,
+            mission_id: None,
+        }
+        .to_resource_scope();
+
+        let view = threads_mount_view("", &owner_less).expect("owner-less scope mount view");
+        assert_eq!(
+            view.mounts[0].target.as_str(),
+            "/tenants/tenant-owner-less/users/_system/threads"
+        );
     }
 }
 

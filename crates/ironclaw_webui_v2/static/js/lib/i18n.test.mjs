@@ -83,7 +83,7 @@ function loadLocalePack(locale) {
   vm.runInNewContext(source, {
     registerPack: (id, pack) => {
       registeredId = id;
-      registeredPack = pack;
+      registeredPack = { ...(registeredPack || {}), ...pack };
     },
   });
 
@@ -105,6 +105,15 @@ test("ensurePack: a known locale resolves and populates its pack", async () => {
   };
   assert.deepEqual(await ensurePack("es"), { greet: "hola" });
   assert.deepEqual(packs.es, { greet: "hola" });
+});
+
+test("registerPack merges repeated locale registrations", () => {
+  const { registerPack, packs } = loadI18n();
+
+  registerPack("es", { greet: "hola", shared: "first" });
+  registerPack("es", { bye: "adios", shared: "second" });
+
+  assert.deepEqual(packs.es, { greet: "hola", bye: "adios", shared: "second" });
 });
 
 test("ensurePack: an already-registered pack resolves without invoking the loader", async () => {

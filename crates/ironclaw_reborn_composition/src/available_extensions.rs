@@ -21,7 +21,7 @@ use crate::extension_credential_requirements::{
     can_merge_lifecycle_credential_setup, merge_lifecycle_credential_setup,
     product_auth_credential_source,
 };
-use crate::nearai_mcp::{
+use crate::llm_admin::nearai_mcp::{
     NearAiMcpBootstrapConfig, NearAiMcpEndpoint, durable_product_auth_storage_enabled,
     nearai_mcp_endpoint_from_base, nearai_mcp_endpoint_from_env,
 };
@@ -546,6 +546,14 @@ pub(crate) fn web_access_manifest_digest() -> String {
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) fn slack_manifest_digest() -> String {
     sha256_digest_token(SLACK_MANIFEST.as_bytes())
+}
+
+/// The bundled Slack extension manifest TOML. The serve layer projects the
+/// Slack host-ingress route descriptors from this manifest rather than from
+/// Rust literals (see `slack_serve::slack_events_route_descriptors`).
+#[cfg(feature = "slack-v2-host-beta")]
+pub(crate) fn slack_manifest_toml() -> &'static str {
+    SLACK_MANIFEST
 }
 
 pub(crate) fn nearai_mcp_manifest_toml_for_config(

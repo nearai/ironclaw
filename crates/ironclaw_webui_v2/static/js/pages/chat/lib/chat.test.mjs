@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
+import { channelConnectionDisplayName } from "../../../lib/channel-connection-events.js";
+
 function chatSourceForTest() {
   const source = readFileSync(new URL("../chat.js", import.meta.url), "utf8");
   const lines = [];
@@ -59,6 +61,8 @@ function componentProps(node, component) {
 function renderChat({
   hookState,
   activeThreadId = "thread-1",
+  runEffects = false,
+  threadStateUpdates = [],
   globalAutoApproveEnabled = false,
 }) {
   const components = {
@@ -72,6 +76,7 @@ function renderChat({
     KeyboardShortcuts() {},
     Link() {},
     MessageList() {},
+    OnboardingPairingCard() {},
     RecoveryNotice() {},
     SuggestionChips() {},
     TypingIndicator() {},
@@ -80,7 +85,9 @@ function renderChat({
     ...components,
     React: {
       useCallback: (fn) => fn,
-      useEffect: () => {},
+      useEffect: (effect) => {
+        if (runEffects) effect();
+      },
       useMemo: (fn) => fn(),
       useRef: (initial) => ({ current: initial }),
       useState: (initial) => [initial, () => {}],
@@ -89,10 +96,19 @@ function renderChat({
     THREAD_STATE: { NEEDS_ATTENTION: "needs_attention", RUNNING: "running" },
     buildRuntimeContext: () => ({}),
     buildScopedLogsPath: ({ threadId }) => `/logs?thread_id=${threadId}`,
-    clearThreadState: () => {},
+    clearThreadState: (threadId) =>
+      threadStateUpdates.push({ threadId, state: null }),
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
-    setThreadState: () => {},
+    channelConnectionDisplayName,
+    setThreadState: (threadId, state) =>
+      threadStateUpdates.push({ threadId, state }),
+    setTimeout: () => 1,
+    clearTimeout: () => {},
+    window: {
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    },
     useChat: () => hookState,
     useT: () => (key) => key,
   };
@@ -277,11 +293,11 @@ test("Chat keeps composer send blocked while a gate owns the run decision", asyn
   assert.equal(props.sendDisabled, true);
   assert.equal(
     props.statusText,
-    "Resolve the approval request before sending another message.",
+    "chat.resolveApprovalBeforeSend",
   );
   await assert.rejects(
     props.onSend("draft while approval is open"),
-    /Resolve the approval request before sending another message/,
+    /chat\.resolveApprovalBeforeSend/,
   );
   assert.equal(sendCount, 0);
 });
@@ -328,8 +344,93 @@ test("Chat keeps the new-conversation composer sendable while a prior run is set
   assert.equal(sentBody.options.attachments.length, 0);
 });
 
+test("Chat renders the pairing card from a channel-connection gate and blocks composer sends", async () => {
+  // A connectable channel that needs connection blocks the turn as a standard
+  // auth gate: a `manual_token` challenge that also carries a `connection`
+  // requirement. Chat renders the pairing card off that gate — no timeline
+  // heuristic — wired to a redeem submit and a run-cancel dismiss.
+  const pendingGate = {
+    kind: "auth_required",
+    challengeKind: "manual_token",
+    runId: "run-1",
+    gateRef: "gate-1",
+    connection: {
+      channel: "telegram",
+      instructions: "Message the Telegram bot and paste the code here.",
+      inputPlaceholder: "Enter code",
+      submitLabel: "Connect",
+      errorMessage: "Pairing failed.",
+    },
+  };
+  const submissions = [];
+  const cancelReasons = [];
+  const threadStateUpdates = [];
+  let sendCount = 0;
+  const { tree, components } = renderChat({
+    runEffects: true,
+    threadStateUpdates,
+    hookState: {
+      messages: [{ id: "message-1" }],
+      isProcessing: false,
+      pendingGate,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: { runId: "run-1", threadId: "thread-1", status: "awaiting_gate" },
+      send: async () => {
+        sendCount += 1;
+        return {};
+      },
+      cancelRun: async (reason) => cancelReasons.push(reason),
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+      submitChannelConnectionPairing: async (code) => submissions.push(code),
+    },
+  });
+
+  const pairingCard = findComponent(tree, components.OnboardingPairingCard);
+  assert.ok(pairingCard, "pairing card should render off the manual_token+connection gate");
+  const pairingProps = componentProps(pairingCard, components.OnboardingPairingCard);
+  // The gate's connection context is normalized onto an onboarding-shaped prop.
+  assert.equal(pairingProps.onboarding.extensionName, "telegram");
+  assert.equal(
+    pairingProps.onboarding.instructions,
+    "Message the Telegram bot and paste the code here.",
+  );
+  assert.deepEqual(threadStateUpdates, [
+    { threadId: "thread-1", state: "needs_attention" },
+  ]);
+  // Submit redeems through the pairing handler (no resolveGate here).
+  await pairingProps.onSubmit("A1B2C3");
+  assert.deepEqual(submissions, ["A1B2C3"]);
+  // Cancel abandons the parked turn via the run-cancel endpoint.
+  await pairingProps.onCancel();
+  assert.deepEqual(cancelReasons, ["user_requested"]);
+
+  const chatInput = findComponent(tree, components.ChatInput);
+  const inputProps = componentProps(chatInput, components.ChatInput);
+  assert.equal(inputProps.sendDisabled, true);
+  assert.equal(
+    inputProps.statusText,
+    "chat.finishPairingBeforeSend",
+  );
+  // The pairing gate blocks the composer exactly like any other pending gate.
+  await assert.rejects(
+    inputProps.onSend("do not send while pairing"),
+    /chat\.finishPairingBeforeSend/,
+  );
+  assert.equal(sendCount, 0);
+});
+
 test("Chat renders a timeline load failure as an alert instead of the empty landing", () => {
-  const historyLoadError = "Failed to load conversation history.";
+  const historyLoadError = "chat.history.loadFailed";
   const { tree, components } = renderChat({
     hookState: {
       messages: [],

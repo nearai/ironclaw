@@ -78,6 +78,21 @@ from `tests/e2e/` for the full, current set.
 | `test_v2_activity_shell.py` | v2 activity shell rendering |
 | `test_v2_*_flow.py` / `test_v2_engine_*.py` | v2 auth/OAuth matrix (GitHub PAT, GSuite, Notion MCP) and v2-engine approval/auth/tool-lifecycle/error-handling |
 
+### Reborn E2E coverage gate
+
+The Code Coverage workflow does **not** run the entire historical Python E2E
+tree. It reads `tests/e2e/reborn_coverage_tests.txt`, which is limited to
+scenarios that start the standalone `ironclaw-reborn serve` binary and exercise
+the Reborn WebChat v2 or OpenAI-compatible API surface. The manifest may use
+pytest node IDs to include only the Reborn binary/API checks from a broader
+scenario file.
+
+Do not add legacy `ironclaw` gateway tests to that manifest, even if they run
+with `ENGINE_V2=true`. Those are compatibility/runtime E2E tests. Direct
+Emulate provider-contract tests are also excluded from the Reborn coverage gate
+because they primarily validate the fixture provider, while current hosted
+full-path Emulate tests still start the legacy gateway binary.
+
 **Provider-contract / full-path (Emulate-backed):**
 
 | File | What it tests |

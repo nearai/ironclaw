@@ -49,7 +49,9 @@ pub(super) struct LiveSkillActivationObserver {
 pub(crate) struct LiveProjectionPublisher {
     update_source: Arc<InMemoryProjectionUpdateSource>,
     actor_user_id: UserId,
-    next_sequence: AtomicU64,
+    // Shared by publishers from the same projection services so live cursors
+    // stay monotonic across progress, skill, and other projection updates.
+    next_sequence: Arc<AtomicU64>,
 }
 
 impl std::fmt::Debug for LiveProjectionPublisher {
@@ -80,11 +82,12 @@ impl LiveProjectionPublisher {
     pub(super) fn new(
         update_source: Arc<InMemoryProjectionUpdateSource>,
         actor_user_id: UserId,
+        next_sequence: Arc<AtomicU64>,
     ) -> Self {
         Self {
             update_source,
             actor_user_id,
-            next_sequence: AtomicU64::new(0),
+            next_sequence,
         }
     }
 

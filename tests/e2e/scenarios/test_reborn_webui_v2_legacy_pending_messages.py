@@ -470,7 +470,7 @@ async def test_reborn_legacy_pending_attachment_message_survives_thread_reload(
         await harness["context"].close()
 
 
-async def test_reborn_legacy_sidebar_refresh_keeps_active_thread_outside_summary_window(
+async def test_reborn_legacy_sidebar_cache_keeps_active_thread_outside_summary_window(
     reborn_v2_server, reborn_v2_browser
 ):
     async def handle_successful_send(route, _payload, fulfill_json):
@@ -519,10 +519,6 @@ async def test_reborn_legacy_sidebar_refresh_keeps_active_thread_outside_summary
                 has_text="Summary refresh should keep this Reborn thread"
             )
         ).to_have_count(1, timeout=5000)
-        await _wait_for_request_count(
-            harness["thread_requests"],
-            before_refresh_requests,
-        )
 
         assert len(harness["send_requests"]) == 1
         assert (
@@ -533,9 +529,16 @@ async def test_reborn_legacy_sidebar_refresh_keeps_active_thread_outside_summary
         await expect(composer).to_be_visible(timeout=5000)
         await expect(
             page.locator(SEL_V2["sidebar"]).get_by_role("button").filter(
+                has_text="Summary refresh should keep this Reborn thread"
+            )
+        ).to_be_visible(timeout=5000)
+        await expect(
+            page.locator(SEL_V2["sidebar"]).get_by_role("button").filter(
                 has_text="Newest summary thread"
             )
         ).to_be_visible(timeout=5000)
+        await page.wait_for_timeout(250)
+        assert len(harness["thread_requests"]) == before_refresh_requests
     finally:
         await harness["context"].close()
 

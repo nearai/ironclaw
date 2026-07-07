@@ -1083,6 +1083,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn channel_connection_required_preview_keeps_slash_command_copy() {
+        // The connect-requirement payload is backend-authored first-party
+        // copy. The display sanitizer once classified the "/pair" slash
+        // command as an absolute path and persisted the card as
+        // "run [redacted] in Slack" — which the WebChat pairing panel then
+        // rendered to the user. Drive the real preview builder and pin the
+        // copy end-to-end.
+        let value = json!({
+            "channel": "slack",
+            "strategy": "inbound_proof_code",
+            "instructions": "Message the IronClaw Reborn app in Slack to get a pairing code, then paste it here. Codes expire in 10 minutes. If a code is invalid or expired, run /pair in Slack for a fresh one.",
+            "input_placeholder": "Enter Slack pairing code...",
+            "submit_label": "Connect",
+            "error_message": "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one."
+        });
+        let preview = output_preview(&value);
+        let text = preview
+            .preview
+            .expect("connect requirement renders a preview");
+        assert!(
+            text.contains("run /pair in Slack"),
+            "instructions must keep the /pair command, got: {text}"
+        );
+        assert!(
+            text.contains("Run /pair in Slack"),
+            "error copy must keep the /pair command, got: {text}"
+        );
+        assert!(
+            !text.contains("[redacted]"),
+            "first-party pairing copy must not be redacted, got: {text}"
+        );
+    }
+
+    #[test]
     fn record_input_recovers_from_poisoned_pending_input_lock() {
         let store = CapabilityDisplayPreviewStore::default();
         let poison_result = catch_unwind(AssertUnwindSafe(|| {

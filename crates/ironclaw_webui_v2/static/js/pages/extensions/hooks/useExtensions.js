@@ -100,21 +100,25 @@ export function useExtensions() {
 
   const installMutation = useMutation({
     mutationFn: ({ packageRef }) => installExtension(packageRef),
-    onSuccess: (res, { displayName, configureAfterInstall, onNeedsSetup, packageRef }) => {
+    onSuccess: (res, { displayName, kind, configureAfterInstall, onNeedsSetup, packageRef }) => {
       if (res.success) {
-        setActionResult({
-          type: "success",
-          message:
-            res.message ||
+        const message = isChannelExtensionKind(kind)
+          ? t("extensions.channelInstalledSetup", {
+              name: displayName || t("extensions.kind.channel"),
+            })
+          : res.message ||
             res.instructions ||
             t("extensions.installedSuccess", {
               name: displayName || t("extensions.defaultName"),
-            }),
+            });
+        setActionResult({
+          type: "success",
+          message,
         });
         if (res.auth_url && !openAuthUrl(res.auth_url).ok) {
           setActionResult({
             type: "error",
-            message: "Authentication URL must use HTTPS.",
+            message: t("extensions.authUrlHttpsRequired"),
           });
         } else if (
           !res.auth_url &&
@@ -124,6 +128,12 @@ export function useExtensions() {
           onNeedsSetup({
             packageRef,
             displayName,
+            // Carry `kind` so the modal can route a connectable channel to the
+            // Connect (pairing) panel — without it the modal can't tell this is
+            // a channel and falls through to "No configuration required".
+            kind,
+            // Freshly installed: the caller has not connected/paired yet.
+            authenticated: false,
             active: false,
             activationStatus: "setup_required",
             onboardingState: "setup_required",
@@ -156,7 +166,7 @@ export function useExtensions() {
         if (res.auth_url && !openAuthUrl(res.auth_url).ok) {
           setActionResult({
             type: "error",
-            message: "Authentication URL must use HTTPS.",
+            message: t("extensions.authUrlHttpsRequired"),
           });
         }
       } else if (res.auth_url) {
@@ -165,7 +175,7 @@ export function useExtensions() {
         } else {
           setActionResult({
             type: "error",
-            message: "Authentication URL must use HTTPS.",
+            message: t("extensions.authUrlHttpsRequired"),
           });
         }
       } else if (res.awaiting_token) {

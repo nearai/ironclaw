@@ -35,8 +35,8 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
-    ResumeTurnRequest, SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
+    ResumeTurnRequest, RetryTurnRequest, SanitizedCancelReason, SubmitTurnRequest,
+    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
 };
 use secrecy::{ExposeSecret as _, SecretString};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
@@ -52,7 +52,8 @@ use crate::{
     UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand, WebUiInboundValidationCode,
     WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest,
     approval_interaction::RejectingApprovalInteractionService,
     auth_interaction::RejectingAuthInteractionService,
     binding_ref::{
@@ -136,13 +137,13 @@ pub use types::{
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
     RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
     RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-    RebornResolveGateResponse, RebornResumeGateResponse, RebornServiceLifecycleAction,
-    RebornServiceLifecycleRequest, RebornServiceLifecycleResponse, RebornServiceLifecycleState,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse,
+    RebornResolveGateResponse, RebornResumeGateResponse, RebornRetryRunResponse,
+    RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
+    RebornServiceLifecycleState, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    RebornSkillTrustLevel, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
 };
 
 type SkillActivationRecorder =
@@ -224,6 +225,40 @@ impl ConnectableChannelsProductFacade for StaticConnectableChannelsProductFacade
         Ok(RebornConnectableChannelListResponse {
             channels: self.channels.iter().cloned().collect(),
         })
+    }
+}
+
+/// Per-user channel connection state. Returns, for the calling user, which
+/// channel extensions they have personally connected (e.g. Slack pairing).
+/// Keyed by channel package id (e.g. `"slack"`) -> `true` when connected.
+/// Only channels that have a per-user connection concept appear in the map;
+/// absence means "no per-user connection concept for this channel".
+#[async_trait]
+pub trait ChannelConnectionFacade: Send + Sync {
+    async fn caller_channel_connections(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<std::collections::HashMap<String, bool>, RebornServicesError>;
+
+    async fn disconnect_channel_for_caller(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _channel: &str,
+    ) -> Result<(), RebornServicesError> {
+        Err(RebornServicesError::service_unavailable(false))
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StaticChannelConnectionFacade;
+
+#[async_trait]
+impl ChannelConnectionFacade for StaticChannelConnectionFacade {
+    async fn caller_channel_connections(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<std::collections::HashMap<String, bool>, RebornServicesError> {
+        Ok(std::collections::HashMap::new())
     }
 }
 
@@ -1225,6 +1260,24 @@ fn tool_permission_state_wire(state: ToolPermissionState) -> &'static str {
     }
 }
 
+/// Wire enum for the WebUI settings/tools permission request body.
+///
+/// Request-side vocabulary on the RebornServicesApi contract surface: the
+/// three resolved [`ToolPermissionState`] values plus `default`, which clears
+/// the stored per-capability override. The serialized strings must stay
+/// byte-identical to what [`parse_tool_permission_state`] accepts and
+/// [`tool_permission_state_wire`] emits — the
+/// `settings_tool_permission_state_wire_strings_stay_linked` test pins that
+/// link so the request enum cannot drift from the storage vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsToolPermissionState {
+    Default,
+    AlwaysAllow,
+    AskEachTime,
+    Disabled,
+}
+
 enum ToolPermissionUpdate {
     Default,
     State(ToolPermissionState),
@@ -1713,6 +1766,12 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
         request: WebUiResolveGateRequest,
     ) -> Result<RebornResolveGateResponse, RebornServicesError>;
+
+    async fn retry_run(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiRetryRunRequest,
+    ) -> Result<RebornRetryRunResponse, RebornServicesError>;
 
     async fn get_run_state(
         &self,
@@ -2407,6 +2466,7 @@ pub struct RebornServices {
     automation_facade: Arc<dyn AutomationProductFacade>,
     skills_facade: Arc<dyn SkillsProductFacade>,
     connectable_channels_facade: Arc<dyn ConnectableChannelsProductFacade>,
+    channel_connection_facade: Arc<dyn ChannelConnectionFacade>,
     outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade>,
     operator_status: Arc<dyn OperatorStatusService>,
     operator_logs: Arc<dyn OperatorLogsService>,
@@ -2441,6 +2501,7 @@ impl RebornServices {
             automation_facade: Arc::new(UnsupportedAutomationProductFacade::new_static()),
             skills_facade: Arc::new(UnsupportedSkillsProductFacade::new_static()),
             connectable_channels_facade: Arc::new(StaticConnectableChannelsProductFacade::default()),
+            channel_connection_facade: Arc::new(StaticChannelConnectionFacade),
             outbound_preferences_facade: Arc::new(
                 UnsupportedOutboundPreferencesProductFacade::new_static(),
             ),
@@ -2566,6 +2627,14 @@ impl RebornServices {
         connectable_channels_facade: Arc<dyn ConnectableChannelsProductFacade>,
     ) -> Self {
         self.connectable_channels_facade = connectable_channels_facade;
+        self
+    }
+
+    pub fn with_channel_connection_facade(
+        mut self,
+        channel_connection_facade: Arc<dyn ChannelConnectionFacade>,
+    ) -> Self {
+        self.channel_connection_facade = channel_connection_facade;
         self
     }
 
@@ -3124,6 +3193,11 @@ impl RebornServicesApi for RebornServices {
                 event_cursor,
                 ..
             }) => {
+                tracing::debug!(
+                    thread_id = ?scope.thread_id,
+                    run_id = %run_id,
+                    "webui submit_turn accepted: turn run enqueued"
+                );
                 mark_message_submitted_or_replay(
                     &*self.thread_service,
                     &thread_scope,
@@ -3146,6 +3220,11 @@ impl RebornServicesApi for RebornServices {
                 })
             }
             Err(TurnError::ThreadBusy(busy)) => {
+                tracing::debug!(
+                    thread_id = ?scope.thread_id,
+                    active_run_id = ?busy.active_run_id,
+                    "webui submit_turn deferred: thread busy with an active run"
+                );
                 self.clear_skill_activation_message(&scope, &accepted_message_ref)?;
                 mark_message_rejected_busy_or_replay(
                     &*self.thread_service,
@@ -3165,6 +3244,11 @@ impl RebornServicesApi for RebornServices {
                 })
             }
             Err(error) => {
+                tracing::debug!(
+                    thread_id = ?scope.thread_id,
+                    error = ?error,
+                    "webui submit_turn rejected by coordinator; no run enqueued"
+                );
                 self.clear_skill_activation_message(&scope, &accepted_message_ref)?;
                 Err(map_turn_error(error))
             }
@@ -3677,6 +3761,54 @@ impl RebornServicesApi for RebornServices {
         }
     }
 
+    async fn retry_run(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiRetryRunRequest,
+    ) -> Result<RebornRetryRunResponse, RebornServicesError> {
+        let caller_for_fallback = caller.clone();
+        let command = request.into_command(caller)?;
+        let WebUiInboundCommand::RetryRun {
+            scope,
+            actor,
+            run_id,
+            client_action_id,
+        } = command
+        else {
+            return Err(RebornServicesError::internal_invariant());
+        };
+
+        let access = self
+            .resolve_thread_access_for_caller(caller_for_fallback, scope, &actor)
+            .await?;
+        // Serialize retry admission with thread deletion. `delete_thread` holds
+        // this same per-thread lock across its active-run probe + delete; taking
+        // it here closes the window where a concurrent delete passes its probe
+        // (the failed run is terminal) and then deletes the thread while
+        // `retry_turn` enqueues a replacement run against it.
+        let _thread_operation_guard = self.lock_thread_operation(&access.scope).await;
+        let binding_id = webui_retry_binding_id(&access.scope, run_id, &client_action_id);
+        let response = self
+            .turn_coordinator
+            .retry_turn(RetryTurnRequest {
+                scope: access.scope,
+                actor: access.run_actor,
+                run_id,
+                source_binding_ref: webui_source_binding_ref_from_raw(
+                    "webui-retry-src",
+                    &binding_id,
+                )?,
+                reply_target_binding_ref: webui_reply_target_binding_ref_from_raw(
+                    "webui-retry-reply",
+                    &binding_id,
+                )?,
+                idempotency_key: client_action_id,
+            })
+            .await
+            .map_err(map_turn_error)?;
+        Ok(response.into())
+    }
+
     async fn get_run_state(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -3858,6 +3990,7 @@ impl RebornServicesApi for RebornServices {
         extensions::list_extensions(
             Arc::clone(&self.lifecycle_facade),
             self.extension_credentials.clone(),
+            Arc::clone(&self.channel_connection_facade),
             caller,
         )
         .await
@@ -3963,7 +4096,13 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
         package_ref: LifecyclePackageRef,
     ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        extensions::remove_extension(self.lifecycle_facade.as_ref(), caller, package_ref).await
+        extensions::remove_extension(
+            self.lifecycle_facade.as_ref(),
+            self.channel_connection_facade.clone(),
+            caller,
+            package_ref,
+        )
+        .await
     }
 
     async fn setup_extension(
@@ -5890,6 +6029,21 @@ fn webui_gate_binding_id(scope: &TurnScope, gate_ref: &str) -> String {
     )
 }
 
+fn webui_retry_binding_id(
+    scope: &TurnScope,
+    run_id: TurnRunId,
+    client_action_id: &IdempotencyKey,
+) -> String {
+    format!(
+        "{}{}{}{}{}",
+        segment("surface", "webui"),
+        segment("tenant", scope.tenant_id.as_str()),
+        segment("thread", scope.thread_id.as_str()),
+        segment("failed_run", run_id.as_uuid().to_string().as_str()),
+        segment("action", client_action_id.as_str())
+    )
+}
+
 fn gate_ref_string(gate_ref: &ironclaw_turns::GateRef) -> String {
     gate_ref.as_str().to_string()
 }
@@ -5978,6 +6132,14 @@ fn delete_thread_busy() -> RebornServicesError {
 }
 
 fn map_turn_error(error: TurnError) -> RebornServicesError {
+    if matches!(error, TurnError::RunNotRetryable { .. }) {
+        return RebornServicesError::from_status_kind(
+            RebornServicesErrorCode::Conflict,
+            RebornServicesErrorKind::Conflict,
+            409,
+            false,
+        );
+    }
     let (code, kind, status_code, retryable) = match error.category() {
         ironclaw_turns::TurnErrorCategory::ThreadBusy => (
             RebornServicesErrorCode::Conflict,
@@ -6296,6 +6458,53 @@ fn generated_thread_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The WebUI settings/tools request enum must use the exact wire strings
+    /// the operator-config storage parser accepts and the entry writer emits.
+    /// This pins the type link so the request vocabulary cannot drift from
+    /// the approvals-owned resolved-state vocabulary (audit 2026-07, 6a).
+    #[test]
+    fn settings_tool_permission_state_wire_strings_stay_linked() {
+        let cases = [
+            (SettingsToolPermissionState::Default, "default", None),
+            (
+                SettingsToolPermissionState::AlwaysAllow,
+                "always_allow",
+                Some(ToolPermissionState::AlwaysAllow),
+            ),
+            (
+                SettingsToolPermissionState::AskEachTime,
+                "ask_each_time",
+                Some(ToolPermissionState::AskEachTime),
+            ),
+            (
+                SettingsToolPermissionState::Disabled,
+                "disabled",
+                Some(ToolPermissionState::Disabled),
+            ),
+        ];
+        for (state, wire, resolved) in cases {
+            let serialized = serde_json::to_value(state).unwrap();
+            assert_eq!(serialized, serde_json::Value::String(wire.to_string()));
+            assert_eq!(
+                serde_json::from_value::<SettingsToolPermissionState>(serialized).unwrap(),
+                state
+            );
+            // Round-trips through the storage parser the facade applies on set.
+            let update =
+                parse_tool_permission_state(&serde_json::json!({ "state": wire })).unwrap();
+            match (update, resolved) {
+                (ToolPermissionUpdate::Default, None) => {}
+                (ToolPermissionUpdate::State(parsed), Some(expected)) => {
+                    assert_eq!(parsed, expected);
+                    // The resolved states serialize to the same strings the
+                    // config entry writer emits.
+                    assert_eq!(tool_permission_state_wire(expected), wire);
+                }
+                _ => panic!("wire string {wire} no longer parses to the expected update"),
+            }
+        }
+    }
 
     /// Every `ProjectServiceError` variant projects to a sanitized facade error
     /// with the expected coarse code/status, and `InvalidInput`'s field name is

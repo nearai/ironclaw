@@ -13,9 +13,9 @@
 
 - The Reborn MCP runtime lane (fail-closed process policy, host-mediated egress), currently:
 - Runtime + executor: `McpRuntime`, the `McpExecutor` trait, and `McpRuntimeConfig`.
-- Execution request/result types: `McpInvocation`, `McpExecutionRequest`, `McpExecutionResult`, `McpCapabilityResult`; `McpError`.
+- Execution request/result types: `McpInvocation`, `McpExecutionRequest`, `McpExecutionResult` (result field is the shared `ironclaw_host_api::CapabilityHostResult`); `McpError`.
 - Client abstraction: the `McpClient` trait with `McpClientRequest` / `McpClientOutput` (JSON-RPC exchange).
-- Host-mediated HTTP: the `McpHostHttp` trait, `McpRuntimeHttpAdapter`, `McpHostHttpClient`, the egress planner (`McpHostHttpEgressPlanner` / `StaticMcpHostHttpEgressPlanner`, `McpHostHttpEgressPlan`/`McpHostHttpEgressPlanRequest`), and `McpHostHttpRequest`/`McpHostHttpResponse`/`McpHostHttpError`.
+- Host-mediated HTTP: the `McpHostHttp` trait, `McpRuntimeHttpAdapter`, `McpHostHttpClient`, the egress planner (`McpHostHttpEgressPlanner` / `StaticMcpHostHttpEgressPlanner`, `McpHostHttpEgressPlan`/`McpHostHttpEgressPlanRequest`), and the shared `ironclaw_host_api::CapabilityHostHttpRequest` / `McpHostHttpResponse` / `McpHostHttpError`.
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
 ## Do Not Move In Here

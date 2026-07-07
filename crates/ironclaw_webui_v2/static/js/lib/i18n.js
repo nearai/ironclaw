@@ -1,4 +1,5 @@
 import { React, html } from "./html.js";
+import { interpolateParams } from "./i18n-format.js";
 
 const STORAGE_KEY = "ironclaw_language";
 
@@ -24,7 +25,11 @@ function detectLanguage() {
 const packs = {};
 
 export function registerPack(lang, translations) {
-  packs[lang] = translations;
+  if (packs[lang]) {
+    Object.assign(packs[lang], translations);
+  } else {
+    packs[lang] = translations;
+  }
 }
 
 // Lazy loaders for every non-default locale. `en` is bundled eagerly in
@@ -76,8 +81,7 @@ function ensurePack(lang) {
 // bundled English pack and finally the raw key.
 function translate(pack, key, params = {}) {
   const text = pack?.[key] || packs["en"]?.[key] || key;
-  if (!params || typeof text !== "string") return text;
-  return text.replace(/\{(\w+)\}/g, (match, k) => (params[k] !== undefined ? params[k] : match));
+  return interpolateParams(text, params);
 }
 
 const I18nContext = React.createContext({

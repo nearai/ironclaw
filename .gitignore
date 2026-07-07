@@ -55,6 +55,9 @@ trace_*.json
 .claude/settings.local.json
 .worktrees/
 .ironclaw/
+
+# De-slop loop ledger + local loop scratch (.claude/commands/deslop-reborn.md)
+.work/
 .review/
 
 # Local-dev workspace artifacts: the WebChat v2 attachment lander writes

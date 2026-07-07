@@ -19,6 +19,7 @@ patterns=(
   'access[_-]?token[[:space:]]*[:=][[:space:]]*[^[:space:]]+'
   'refresh[_-]?token[[:space:]]*[:=][[:space:]]*[^[:space:]]+'
   'secret[[:space:]]*[:=][[:space:]]*[^[:space:]]+'
+  'password[[:space:]]*[:=][[:space:]]*[^[:space:]]+'
   # JSON-quoted token shapes — the seeded/browser auth lanes emit results.json
   # files containing full OAuth responses, which use `"access_token": "…"` /
   # `"refresh_token": "…"` form. The `token:` / `token=` patterns above do
@@ -29,7 +30,9 @@ patterns=(
   'github_pat_[A-Za-z0-9_]{20,}'
   'ya29\.[A-Za-z0-9._-]{20,}'
   'xox[baprs]-[A-Za-z0-9-]{10,}'
+  'sk-[A-Za-z0-9_-]{20,}'
   'sk-ant-[A-Za-z0-9_-]{10,}'
+  'A[KS]IA[0-9A-Z]{16}'
 )
 
 matches_file="${ARTIFACT_DIR}/scrub-matches.txt"
@@ -45,12 +48,40 @@ redact_matches() {
     -e 's/ya29\.[A-Za-z0-9._-]{20,}/<REDACTED_GOOGLE_TOKEN>/g' \
     -e 's/xox[baprs]-[A-Za-z0-9-]{10,}/<REDACTED_SLACK_TOKEN>/g' \
     -e 's/sk-ant-[A-Za-z0-9_-]{10,}/<REDACTED_ANTHROPIC_KEY>/g' \
+    -e 's/sk-[A-Za-z0-9_-]{20,}/<REDACTED_OPENAI_KEY>/g' \
+    -e 's/A[KS]IA[0-9A-Z]{16}/<REDACTED_AWS_ACCESS_KEY>/g' \
     -e 's/(api[_-]?key[[:space:]]*[:=][[:space:]]*)[^[:space:]]+/\1<REDACTED>/Ig' \
     -e 's/(access[_-]?token[[:space:]]*[:=][[:space:]]*)[^[:space:]]+/\1<REDACTED>/Ig' \
     -e 's/(refresh[_-]?token[[:space:]]*[:=][[:space:]]*)[^[:space:]]+/\1<REDACTED>/Ig' \
     -e 's/(secret[[:space:]]*[:=][[:space:]]*)[^[:space:]]+/\1<REDACTED>/Ig' \
+    -e 's/(password[[:space:]]*[:=][[:space:]]*)[^[:space:]]+/\1<REDACTED>/Ig' \
     -e 's/("(access|refresh|id|bearer)_token"[[:space:]]*:[[:space:]]*)"[^"]+"/\1"<REDACTED>"/Ig' \
     -e 's/("(api[_-]?key|client[_-]?secret|password)"[[:space:]]*:[[:space:]]*)"[^"]+"/\1"<REDACTED>"/Ig'
+}
+
+is_redactable_artifact() {
+  local file="$1"
+  local base
+  base="$(basename "${file}")"
+  case "${base}" in
+    *.log|*.jsonl|summary.md|env-summary.txt|trace-fixture-status.txt|auth-canary-junit.xml|results.json|case-manifest.json|preflight.json|preflight.*.json|browser-summary.json|browser-events.jsonl)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+contains_unredacted_secret_patterns() {
+  local file="$1"
+  local pattern
+  local matches
+  for pattern in "${patterns[@]}"; do
+    matches="$(grep -nHIEi "${pattern}" "${file}" 2>/dev/null || true)"
+    if [[ -n "${matches}" ]] && grep -qv '<REDACTED' <<< "${matches}"; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 : > "${tmp_matches}"
@@ -76,12 +107,37 @@ if [[ -s "${tmp_matches}" ]]; then
   echo "Potential secret material found in live canary artifacts:"
   head -200 "${matches_file}"
   if [[ "${STRICT_ARTIFACT_SCRUB}" == "true" || "${STRICT_ARTIFACT_SCRUB}" == "1" ]]; then
-    sort -u "${tmp_files}" | while IFS= read -r matched_file; do
+    unsafe_found=0
+    redacted_found=0
+    while IFS= read -r matched_file; do
       if [[ -n "${matched_file}" && "${matched_file}" != "${matches_file}" ]]; then
-        rm -f -- "${matched_file}"
+        if is_redactable_artifact "${matched_file}"; then
+          redacted_tmp="$(mktemp "${RUNNER_TEMP:-/tmp}/live-canary-redacted.XXXXXX")" || redacted_tmp=""
+          if [[ -n "${redacted_tmp}" ]] \
+            && redact_matches < "${matched_file}" > "${redacted_tmp}" \
+            && ! contains_unredacted_secret_patterns "${redacted_tmp}"; then
+            mv "${redacted_tmp}" "${matched_file}"
+            redacted_found=1
+          else
+            if [[ -n "${redacted_tmp}" ]]; then
+              rm -f -- "${redacted_tmp}"
+            fi
+            rm -f -- "${matched_file}"
+            unsafe_found=1
+          fi
+        else
+          rm -f -- "${matched_file}"
+          unsafe_found=1
+        fi
       fi
-    done
-    exit 1
+    done < <(sort -u "${tmp_files}")
+    if [[ "${unsafe_found}" == "1" ]]; then
+      exit 1
+    fi
+    if [[ "${redacted_found}" == "1" ]]; then
+      echo "Strict scrub redacted diagnostic artifacts in place."
+    fi
+    exit 0
   fi
   echo "Continuing because STRICT_ARTIFACT_SCRUB is not true."
 else

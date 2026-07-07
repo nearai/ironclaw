@@ -695,10 +695,8 @@ credentials:
 //   #8 Unregistered hosts ALLOW LLM-supplied auth headers
 //
 // `requires_approval` is exercised elsewhere (test #5); these tests drive
-// `HttpTool::execute()` directly so they hit the
-// `block LLM-provided authorization headers` branch in `http.rs:503-520`,
-// not just the upstream gating layer. Each test relies on the rejection
-// happening BEFORE any network call so we never need a real HTTP server.
+// `HttpTool::execute()` directly so they hit the caller-level header policy
+// in the HTTP tool, not just the upstream gating layer.
 
 fn make_registry_with_github() -> Arc<SharedCredentialRegistry> {
     let registry = Arc::new(SharedCredentialRegistry::new());
@@ -756,15 +754,16 @@ async fn test_credentialed_host_allows_non_auth_headers() {
     // Behavior #7: non-auth headers (Content-Type, Accept, custom headers
     // that aren't on the forbidden list) must pass the auth check on a
     // credentialed host. We assert that the rejection branch does NOT fire
-    // — the request will still fail at the network layer when it tries to
-    // reach api.github.com under test, but it must fail with something
-    // OTHER than NotAuthorized.
+    // by using an unsupported method: method validation happens after the
+    // credentialed-host header policy, but before the tool sends the request.
+    // That keeps this test independent of live GitHub responses and the
+    // response leak guard.
     let tool =
         http_tool_with_credentials(make_registry_with_github(), Arc::new(test_secrets_store()));
     let ctx = JobContext::new("Test", "credentialed non-auth headers");
 
     let params = serde_json::json!({
-        "method": "GET",
+        "method": "OPTIONS",
         "url": "https://api.github.com/repos/nearai/ironclaw/issues",
         "headers": [
             { "name": "Accept", "value": "application/vnd.github+json" },
@@ -779,7 +778,8 @@ async fn test_credentialed_host_allows_non_auth_headers() {
             "non-auth headers must NOT be rejected on credentialed host; got NotAuthorized: {msg}"
         );
     }
-    // Any other outcome (Ok, ExternalService, Timeout, Sandbox) is fine —
+    // Any other outcome (InvalidParameters, ExternalService, Timeout, Sandbox)
+    // is fine —
     // the test only asserts that the auth-rejection branch did not fire.
 }
 

@@ -6,6 +6,7 @@ import { toast } from "../../../lib/toast.js";
 import { ProjectFileChips } from "./project-file-chips.js";
 import { AttachmentChip } from "./attachment-chip.js";
 import { AttachmentPreviewModal } from "./attachment-preview.js";
+import { useT } from "../../../lib/i18n.js";
 
 /* User keeps a tinted bubble; assistant is borderless (document-like);
    system / error stay as centered tinted notices. Reasoning ("thinking")
@@ -28,6 +29,7 @@ function formatTimestamp(value) {
    thread stays clean; expands to the full reasoning markdown. Data comes
    from the `thinking` projection item (PR #4230). */
 function ThinkingDisclosure({ content }) {
+  const t = useT();
   const [open, setOpen] = React.useState(false);
   if (!content) return null;
   return html`
@@ -39,7 +41,7 @@ function ThinkingDisclosure({ content }) {
         className="v2-button inline-flex items-center gap-1.5 border-0 bg-transparent px-1 py-1 text-xs font-medium text-iron-400 hover:text-iron-200"
       >
         <${Icon} name="spark" className="h-3.5 w-3.5" />
-        <span>${open ? "Hide reasoning" : "Reasoning"}</span>
+        <span>${open ? t("chat.hideReasoning") : t("chat.reasoning")}</span>
         <${Icon}
           name="chevron"
           className=${["h-3 w-3", open ? "rotate-180" : ""].join(" ")}
@@ -56,6 +58,7 @@ function ThinkingDisclosure({ content }) {
 }
 
 function MessageBubbleImpl({ message, onRetry, threadId }) {
+  const t = useT();
   const { role, content, images, attachments, generatedImages, isOptimistic, status, error, toolCalls, timestamp } = message;
   const isUser = role === "user";
   const [copied, setCopied] = React.useState(false);
@@ -71,12 +74,12 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
     try {
       await navigator.clipboard.writeText(typeof content === "string" ? content : "");
       setCopied(true);
-      toast("Copied to clipboard", { tone: "success" });
+      toast(t("common.copiedToClipboard"), { tone: "success" });
       setTimeout(() => setCopied(false), 1400);
     } catch {
       // clipboard unavailable — no-op
     }
-  }, [content]);
+  }, [content, t]);
 
   if (role === "tool_activity" || (toolCalls && toolCalls.length > 0)) {
     const activity = (toolCalls && toolCalls.length > 0)
@@ -99,10 +102,10 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
         <div className="flex flex-wrap gap-2">
           ${imgs.map((img, i) =>
             img.data_url
-              ? html`<img key=${i} src=${img.data_url} className="max-h-64 rounded-lg border border-iron-700 object-cover" alt="Generated result" />`
+              ? html`<img key=${i} src=${img.data_url} className="max-h-64 rounded-lg border border-iron-700 object-cover" alt=${t("chat.generatedImageAlt")} />`
               : html`
                   <div key=${i} className="rounded-lg border border-iron-700 bg-iron-900/70 px-4 py-3 text-sm text-iron-200">
-                    <div>Generated image unavailable in history payload</div>
+                    <div>${t("chat.generatedImageUnavailable")}</div>
                     ${img.path && html`<div className="mt-1 font-mono text-xs text-iron-300">${img.path}</div>`}
                   </div>
                 `
@@ -115,8 +118,12 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
   const timeLabel = formatTimestamp(timestamp);
   const showActions = role === "user" || (role === "assistant" && !isOptimistic);
   const isNotice = role === "system" || role === "error";
-  const bubbleWidthClass = isUser ? "max-w-[85%]" : isNotice ? "mx-auto max-w-[85%]" : "w-full max-w-[85%]";
-  const contentWidthClass = isUser ? "" : "w-full min-w-0 max-w-full";
+  const bubbleWidthClass = isUser
+    ? "v2-chat-readable-width"
+    : isNotice
+    ? "mx-auto v2-chat-readable-width"
+    : "w-full v2-chat-readable-width";
+  const contentWidthClass = isUser ? "min-w-0 max-w-full" : "w-full min-w-0 max-w-full";
   const showRetryAction = status === "error" && onRetry;
   const showMetaRow = showActions || showRetryAction || timeLabel;
 
@@ -136,7 +143,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
         >
           ${role === "assistant" || role === "system" || role === "error"
             ? html`<${MarkdownRenderer} content=${content} />`
-            : html`<div className="whitespace-pre-wrap">${content}</div>`}
+            : html`<div className="v2-wrap-anywhere whitespace-pre-wrap break-words">${content}</div>`}
 
           ${status === "error" && html`
             <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-red-300">
@@ -146,7 +153,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
 
           ${images && images.length > 0 && html`
             <div className="mt-2 flex flex-wrap gap-2">
-              ${images.map((src, i) => html`<img key=${i} src=${src} className="max-h-48 rounded-lg border border-iron-700 object-cover" alt="Message attachment" />`)}
+              ${images.map((src, i) => html`<img key=${i} src=${src} className="max-h-48 rounded-lg border border-iron-700 object-cover" alt=${t("chat.messageAttachmentAlt")} />`)}
             </div>
           `}
 
@@ -175,7 +182,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
       ${showMetaRow && html`
         <div
           className=${[
-            "mt-1 flex min-h-7 w-max max-w-[85%] flex-nowrap items-center gap-3 px-1 text-iron-400 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100",
+            "mt-1 flex min-h-7 w-max v2-chat-readable-width flex-nowrap items-center gap-3 px-1 text-iron-400 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100",
             isUser ? "self-end justify-end" : isNotice ? "self-center justify-center" : "self-start justify-start",
           ].join(" ")}
         >
@@ -186,8 +193,8 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
               <button
                 type="button"
                 onClick=${copy}
-                title=${copied ? "Copied" : "Copy message"}
-                aria-label=${copied ? "Copied" : "Copy message"}
+                title=${copied ? t("common.copied") : t("chat.copyMessage")}
+                aria-label=${copied ? t("common.copied") : t("chat.copyMessage")}
                 className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 hover:text-iron-100"
               >
                 <${Icon} name=${copied ? "check" : "copy"} className="h-3.5 w-3.5" />
@@ -197,8 +204,8 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
               <button
                 type="button"
                 onClick=${() => onRetry(message)}
-                title="Retry message"
-                aria-label="Retry message"
+                title=${t("chat.retryMessage")}
+                aria-label=${t("chat.retryMessage")}
                 className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 text-red-300 hover:text-red-200"
               >
                 <${Icon} name="retry" className="h-3.5 w-3.5" />

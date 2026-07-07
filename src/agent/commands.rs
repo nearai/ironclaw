@@ -550,26 +550,8 @@ impl Agent {
             "recent_turns": recent_context,
         });
 
-        // Fire into v2 mission manager (learning missions)
+        // Fire through the v1 routine engine (if routines listen for this)
         let mut fired: usize = 0;
-        if let Some(mgr) = self.mission_manager().await {
-            match mgr
-                .fire_on_system_event(
-                    "user_feedback",
-                    "expected_behavior",
-                    user_id,
-                    Some(payload.clone()),
-                )
-                .await
-            {
-                Ok(ids) => fired += ids.len(),
-                Err(e) => {
-                    tracing::debug!("failed to fire expected-behavior mission: {e}");
-                }
-            }
-        }
-
-        // Also fire through v1 routine engine (if routines listen for this)
         if let Some(engine) = self.routine_engine().await {
             fired += engine
                 .emit_system_event(
@@ -1276,7 +1258,6 @@ mod tests {
                 multi_tenant: false,
                 max_llm_concurrent_per_user: None,
                 max_jobs_concurrent_per_user: None,
-                engine_v2: false,
             },
             deps,
             Arc::new(crate::channels::ChannelManager::new()),

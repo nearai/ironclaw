@@ -100,6 +100,14 @@ async fn save_handler(
         scan_route_admin_field(&config, "shared_subject_user_id", shared_subject_user_id)?;
     }
     let setup_service = config.setup_service()?;
-    setup_service.save(request.into_update()).await?;
+    let (previous_setup, saved_setup) = setup_service
+        .save_with_previous(request.into_update())
+        .await?;
+    if let Err(error) = config.activate_slack_channel_after_setup_save().await {
+        setup_service
+            .rollback_failed_activation_save(&saved_setup, previous_setup.as_ref())
+            .await?;
+        return Err(error);
+    }
     Ok(Json(setup_service.status().await?))
 }

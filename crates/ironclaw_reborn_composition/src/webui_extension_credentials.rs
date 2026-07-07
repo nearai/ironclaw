@@ -14,7 +14,7 @@ use ironclaw_product_workflow::{
 
 use crate::{
     RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest, RebornProductAuthServices,
-    product_auth_runtime_credentials::RuntimeCredentialAccountSelectionRequest,
+    product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest,
 };
 
 const EXTENSION_CREDENTIAL_SETUP_TTL_SECONDS: i64 = 300;
@@ -146,6 +146,9 @@ fn runtime_credential_setup(
         }
         LifecycleExtensionCredentialSetup::OAuth { scopes } => {
             ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth { scopes }
+        }
+        LifecycleExtensionCredentialSetup::ChannelPairing { channel } => {
+            ironclaw_host_api::RuntimeCredentialAccountSetup::ChannelPairing { channel }
         }
     }
 }
