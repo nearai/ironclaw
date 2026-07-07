@@ -185,17 +185,12 @@ impl TurnRunExecutor for RebornTurnRunExecutor {
                 // guard that is never reached in practice.
                 let failure =
                     sanitized.unwrap_or_else(|| unknown_failure_error().failure().clone());
-                // NOTE: `TurnRunExecutorError` (in `ironclaw_host_runtime`) only
-                // exposes a category-string constructor, so the scrubbed
-                // `failure.detail()` computed above is dropped here at the
-                // host-runtime boundary. The scheduler records
-                // `executor_error.failure()`, so until `TurnRunExecutorError`
-                // gains a `from_failure(SanitizedFailure)` constructor that
-                // preserves detail, the detail surfaced through this Err path
-                // does not reach `TurnLifecycleEvent.detail`. (The
-                // `record_runner_failure` / `fail_run` store paths DO carry it.)
-                let error = TurnRunExecutorError::new(failure.category())
-                    .unwrap_or_else(|_| unknown_failure_error().clone());
+                // Preserve the full `SanitizedFailure` (category + scrubbed
+                // model-visible `detail`) across the host-runtime boundary. The
+                // scheduler records `executor_error.failure()`, so this is what
+                // carries the real driver-failure cause into
+                // `TurnLifecycleEvent.detail` and the failure explainer.
+                let error = TurnRunExecutorError::from_failure(failure);
                 trace_executor_latency_error("execute_claimed_run", &claimed, started_at, &error);
                 Err(error)
             }
@@ -1180,6 +1175,41 @@ mod tests {
             err.failure_category(),
             "host_stage_unavailable_model",
             "Unavailable must map to the host-stage unavailable category"
+        );
+        assert_eq!(
+            transitions.fail_run_call_count(),
+            0,
+            "executor must NOT call fail_run; scheduler owns terminal failure recording"
+        );
+    }
+
+    /// A driver `Failed` carrying secret-scrubbed `detail` must have that detail
+    /// preserved on the returned `TurnRunExecutorError`. The scheduler records
+    /// `error.failure()`, so this Err path is what lets the real scrubbed cause
+    /// reach `TurnLifecycleEvent.detail` and the failure explainer. Regression
+    /// for the former `TurnRunExecutorError::new(category)` conversion that
+    /// dropped `detail` at the host-runtime boundary.
+    #[tokio::test]
+    async fn driver_failed_preserves_scrubbed_detail_on_executor_error() {
+        let executor = make_executor_with_failing_driver(AgentLoopDriverError::Failed {
+            reason_kind: "model_error".to_string(),
+            detail: Some("provider returned HTTP 500 for /internal/models/route".to_string()),
+        });
+        let transitions = Arc::new(RecordingTransitionPort::default());
+        let result = executor
+            .execute_claimed_run(
+                test_claimed_run(),
+                transitions.clone() as Arc<dyn TurnRunTransitionPort>,
+            )
+            .await;
+
+        let err = result.expect_err("expected Err for driver Failed");
+        assert_eq!(err.failure_category(), "driver_failed");
+        assert_eq!(
+            err.failure().detail(),
+            Some("provider returned HTTP 500 for /internal/models/route"),
+            "the scrubbed driver-failure detail must survive onto the executor error, \
+             not be dropped at the host-runtime boundary"
         );
         assert_eq!(
             transitions.fail_run_call_count(),
