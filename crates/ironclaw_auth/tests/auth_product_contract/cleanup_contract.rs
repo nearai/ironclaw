@@ -445,7 +445,8 @@ async fn cleanup_matches_owner_granularity_and_provider_selected_oauth_accounts(
         .expect("provider-selected cleanup");
     assert_eq!(report.revoked_accounts, vec![oauth_account.id]);
 
-    // A different provider must NOT be swept by the selector.
+    // A different provider may share the owner/grant selectors, but it must
+    // not be revoked unless the cleanup explicitly selects that provider.
     let other_provider_account = services
         .create_account(NewCredentialAccount {
             scope: scope("alice"),
@@ -453,8 +454,8 @@ async fn cleanup_matches_owner_granularity_and_provider_selected_oauth_accounts(
             label: label("other provider"),
             status: CredentialAccountStatus::Configured,
             ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
+            owner_extension: Some(extension.clone()),
+            granted_extensions: vec![extension.clone()],
             access_secret: Some(SecretHandle::new("other-access").unwrap()),
             refresh_secret: None,
             scopes: Vec::new(),
@@ -489,6 +490,8 @@ async fn cleanup_matches_owner_granularity_and_provider_selected_oauth_accounts(
         .await
         .expect("extension-keyed cleanup");
     assert_eq!(report.revoked_accounts, vec![owned.id]);
+    assert_eq!(report.retained_accounts, vec![other_provider_account.id]);
+    assert_eq!(report.removed_grants, vec![other_provider_account.id]);
     assert!(
         !report.revoked_accounts.contains(&other_provider_account.id),
         "an unrelated provider's account must survive extension-keyed cleanup"

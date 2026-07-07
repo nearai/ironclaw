@@ -220,10 +220,6 @@ pub use observability::operator_logs::{
     OperatorLogLayer, capture_tracing_log, operator_log_buffer,
 };
 pub use observability::trajectory_observer::RebornTrajectoryObserver;
-#[cfg(feature = "openai-compat-beta")]
-pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
-#[cfg(feature = "slack-v2-host-beta")]
-pub use product_auth::serve::SlackPersonalOAuthBindingConfig;
 pub use product_auth::api::auth::{
     RebornAuthContinuationDispatcher, RebornAuthProductError, RebornCredentialLifecycleError,
     RebornManualTokenChallenge, RebornManualTokenError, RebornManualTokenSetupRequest,
@@ -231,6 +227,8 @@ pub use product_auth::api::auth::{
     RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
     RebornProductAuthServicePorts, RebornProductAuthServices,
 };
+#[cfg(feature = "slack-v2-host-beta")]
+pub use product_auth::serve::SlackPersonalOAuthBindingConfig;
 pub use product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
     ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,

@@ -86,7 +86,8 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
 
     let result = match action {
         SlackUserAction::SearchMessages { query, count, sort } => {
-            let result = api::search_messages(&query, count, sort.as_deref())?;
+            let result =
+                api::search_messages(&query, count, sort.as_ref().map(|sort| sort.as_str()))?;
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }
 
