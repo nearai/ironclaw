@@ -44,7 +44,7 @@ mod runtime_setup;
 
 use crate::RebornRuntime;
 use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
-use crate::product_auth_serve::SlackPersonalOAuthBindingConfig;
+use crate::product_auth::serve::SlackPersonalOAuthBindingConfig;
 use crate::slack_actor_identity::{RebornUserIdentityLookup, SlackUserIdentityActorResolver};
 use crate::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteStore, SlackChannelRouteSubjectResolver,

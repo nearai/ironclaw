@@ -436,6 +436,7 @@ function httpsUrl(value) {
 }
 
 function ModalShell({ onClose, title, children }) {
+  const t = useT();
   const titleId = React.useId();
   React.useEffect(() => {
     const handleKey = (e) => {
@@ -463,6 +464,7 @@ function ModalShell({ onClose, title, children }) {
           <h3 id=${titleId} className="text-lg font-semibold text-white">${title}</h3>
           <button
             onClick=${onClose}
+            aria-label=${t("common.close")}
             className="grid h-8 w-8 place-items-center rounded-md text-iron-300 hover:bg-white/[0.06] hover:text-white"
           >
             <${Icon} name="close" className="h-4 w-4" />

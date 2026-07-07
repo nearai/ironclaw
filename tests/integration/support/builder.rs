@@ -30,7 +30,7 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::{
     InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
-    RuntimeHttpEgressRequest, VirtualPath,
+    RuntimeHttpEgressRequest, UserId, VirtualPath,
 };
 use ironclaw_llm::Role;
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
@@ -52,6 +52,7 @@ use ironclaw_turns::{
 use super::capability_backend::{
     CapabilityScriptingInputs, MOCK_MCP_PROVIDER_ID, RebornCapabilityBackend, ShellMode,
 };
+use super::doubles::ParkingCapabilityGate;
 use super::group::{GroupCapability, GroupSharedStorage, RebornIntegrationGroup};
 use super::harness::{HarnessCapabilityRecorder, HarnessTurnBackend, RecordedCapabilityResult};
 use super::http_matcher::ScriptedHttpResponse;
@@ -139,6 +140,19 @@ pub struct RebornIntegrationHarnessBuilder {
     /// threaded into the degenerate one-thread group (see
     /// `RebornIntegrationGroupBuilder::hook_dispatcher_builder_factory`).
     hook_dispatcher_builder_factory: Option<HookDispatcherBuilderFactory>,
+    /// E-GATEWAY tool-path analog of `park_gate`: when set, this harness's
+    /// `BuiltinHttpTools` capability dispatch parks until released (issue
+    /// #5476 lease-wedge coverage). Threaded into `RebornCapabilityBackend::install`.
+    park_tool_gate: Option<ParkingCapabilityGate>,
+    /// Shortens the underlying group's turn-state store lease TTL (default
+    /// 90s) for lease-expiry-under-a-wedged-tool coverage. Threaded into
+    /// `RebornIntegrationGroupBuilder::with_runner_lease_ttl_for_test`.
+    runner_lease_ttl: Option<chrono::Duration>,
+    /// Shortens the underlying group's scheduler lease-recovery sweep
+    /// interval (default 10s) for lease-expiry-under-a-wedged-tool coverage.
+    /// Threaded into
+    /// `RebornIntegrationGroupBuilder::with_lease_recovery_interval_for_test`.
+    lease_recovery_interval: Option<Duration>,
 }
 
 impl RebornIntegrationHarnessBuilder {
@@ -213,6 +227,33 @@ impl RebornIntegrationHarnessBuilder {
     /// [`RebornThreadBuilder::fail_model`](super::group::RebornThreadBuilder::fail_model).
     pub fn fail_model(mut self) -> Self {
         self.fail_model = true;
+        self
+    }
+
+    /// Park this harness's tool/capability dispatch until released
+    /// (tool-path analog of `park_model`, issue #5476 lease-wedge coverage).
+    /// Only the `BuiltinHttpTools` backend wires this today. See
+    /// `ParkingCapabilityGate`.
+    pub fn park_tool_dispatch(mut self, gate: ParkingCapabilityGate) -> Self {
+        self.park_tool_gate = Some(gate);
+        self
+    }
+
+    /// Shorten the underlying group's turn-state store lease TTL (default 90s)
+    /// for lease-expiry-under-a-wedged-tool coverage. `None` (default) leaves
+    /// today's behavior byte-identical.
+    pub fn with_runner_lease_ttl_for_test(mut self, ttl: chrono::Duration) -> Self {
+        self.runner_lease_ttl = Some(ttl);
+        self
+    }
+
+    /// Shorten the underlying group's scheduler lease-recovery sweep interval
+    /// (default 10s) so a wedged run is reaped without waiting on the
+    /// production tick. `None` (default) leaves today's behavior
+    /// byte-identical. See
+    /// `RebornIntegrationGroupBuilder::with_lease_recovery_interval_for_test`.
+    pub fn with_lease_recovery_interval_for_test(mut self, interval: Duration) -> Self {
+        self.lease_recovery_interval = Some(interval);
         self
     }
 
@@ -427,6 +468,7 @@ impl RebornIntegrationHarnessBuilder {
                     github_network_statuses: self.github_network_statuses,
                     real_egress_response_bodies: self.real_egress_response_bodies,
                 },
+                self.park_tool_gate,
             )
             .await?;
 
@@ -458,6 +500,12 @@ impl RebornIntegrationHarnessBuilder {
         }
         if let Some(factory) = self.hook_dispatcher_builder_factory {
             group_builder = group_builder.hook_dispatcher_builder_factory(factory);
+        }
+        if let Some(ttl) = self.runner_lease_ttl {
+            group_builder = group_builder.with_runner_lease_ttl_for_test(ttl);
+        }
+        if let Some(interval) = self.lease_recovery_interval {
+            group_builder = group_builder.with_lease_recovery_interval_for_test(interval);
         }
         let group: RebornIntegrationGroup = group_builder
             .build_with_capability(group_capability)
@@ -561,6 +609,9 @@ impl RebornIntegrationHarness {
             budget_accounting: false,
             communication_context_provider: None,
             hook_dispatcher_builder_factory: None,
+            park_tool_gate: None,
+            runner_lease_ttl: None,
+            lease_recovery_interval: None,
         }
     }
 
@@ -939,6 +990,27 @@ impl RebornIntegrationHarness {
             .map(|invocation| invocation.capability_id.as_str())
             .collect();
         Err(format!("capability {capability_id:?} was not invoked; saw {seen:?}").into())
+    }
+
+    /// Assert the named capability was NOT invoked through the real
+    /// capability path (proves a visibility/gating filter held). Same
+    /// delta-scoping as `assert_tool_invoked` (R2), but the diagnostic
+    /// `seen` list is captured on the failure branch that matters here —
+    /// when the capability unexpectedly WAS dispatched.
+    pub async fn assert_tool_not_invoked(&self, capability_id: &str) -> HarnessResult<()> {
+        let all = self.capability_recorder.invocations();
+        let delta = &all[self.baseline_invocation_count..];
+        if !delta
+            .iter()
+            .any(|invocation| invocation.capability_id.as_str() == capability_id)
+        {
+            return Ok(());
+        }
+        let seen: Vec<&str> = delta
+            .iter()
+            .map(|invocation| invocation.capability_id.as_str())
+            .collect();
+        Err(format!("capability {capability_id:?} was invoked; saw {seen:?}").into())
     }
 
     /// S2 seam: assert the named capability produced EXACTLY `expected`
@@ -1358,15 +1430,7 @@ impl RebornIntegrationHarness {
         // resolver's `account_visible_from_runtime_scope` check matches all
         // four, so a differently-scoped seed would leave the run stuck at
         // `BlockedAuth` forever.
-        let scope = ResourceScope {
-            tenant_id: self.turn_scope.tenant_id.clone(),
-            user_id: self.binding.actor_user_id.clone(),
-            agent_id: self.turn_scope.agent_id.clone(),
-            project_id: self.turn_scope.project_id.clone(),
-            mission_id: None,
-            thread_id: None,
-            invocation_id: InvocationId::new(),
-        };
+        let scope = self.run_resource_scope_for_user(self.binding.actor_user_id.clone());
         harness.seed_github_credential_account(&scope).await?;
         self.resume_run(
             run_id,
@@ -1375,6 +1439,49 @@ impl RebornIntegrationHarness {
             ResumeTurnPrecondition::BlockedAuthGate,
         )
         .await
+    }
+
+    /// Seed a Configured credential account WITH real secret material for
+    /// `provider` through the production manual-token flow, scoped so this
+    /// group's CAPABILITY dispatch finds it: account selection matches all of
+    /// `(tenant, user, agent, project)`, and the user must be the capability
+    /// harness's dispatch user — which, on groups that do not align it to the
+    /// binding subject, differs from this thread's binding actor.
+    pub async fn seed_capability_credential_account(
+        &self,
+        provider: &str,
+        label: &str,
+        provider_scopes: &[&str],
+    ) -> HarnessResult<()> {
+        let harness = match &self._shared.capability {
+            GroupCapability::HostRuntime(arc) => arc,
+            GroupCapability::Recording => {
+                return Err(
+                    "no host-runtime capability backend to seed a credential account".into(),
+                );
+            }
+        };
+        let scope = self.run_resource_scope_for_user(harness.capability_user_id().clone());
+        harness
+            .seed_credential_account_with_material(&scope, provider, label, provider_scopes)
+            .await
+    }
+
+    /// This thread's run `(tenant, agent, project)` scope with `user_id` as
+    /// the owner — the exact four fields dispatch-time credential-account
+    /// selection matches. Which user is correct depends on the caller: the
+    /// binding actor for user-aligned groups, the capability dispatch user
+    /// otherwise.
+    fn run_resource_scope_for_user(&self, user_id: UserId) -> ResourceScope {
+        ResourceScope {
+            tenant_id: self.turn_scope.tenant_id.clone(),
+            user_id,
+            agent_id: self.turn_scope.agent_id.clone(),
+            project_id: self.turn_scope.project_id.clone(),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }
     }
 
     /// Flip the per-`(tenant, user)` auto-approve toggle back ON for the run's

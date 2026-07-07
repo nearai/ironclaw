@@ -27,11 +27,11 @@ use ironclaw_turns::{
 use secrecy::SecretString;
 use std::sync::Mutex;
 
-use crate::auth::AUTH_CONTINUATION_DISPATCH_FAILED_CODE;
+use crate::product_auth::api::auth::AUTH_CONTINUATION_DISPATCH_FAILED_CODE;
 
 use super::*;
-use crate::notion_oauth::{NOTION_PROVIDER_ID, notion_provider_spec};
-use crate::oauth_provider_client::HostOAuthProviderClient;
+use crate::product_auth::oauth::notion_oauth::{NOTION_PROVIDER_ID, notion_provider_spec};
+use crate::product_auth::oauth::oauth_provider_client::HostOAuthProviderClient;
 
 #[derive(Clone)]
 struct ErrorTurnCoordinator {
@@ -56,6 +56,13 @@ impl TurnCoordinator for ErrorTurnCoordinator {
         _request: ironclaw_turns::ResumeTurnRequest,
     ) -> Result<ironclaw_turns::ResumeTurnResponse, TurnError> {
         Err(self.resume_error.clone())
+    }
+
+    async fn retry_turn(
+        &self,
+        _request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        panic!("retry_turn is not used by auth continuation error mapping tests");
     }
 
     async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {

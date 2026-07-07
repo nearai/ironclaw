@@ -162,6 +162,9 @@ fn validate_loop_safe_summary(value: String) -> Result<String, String> {
     }
 
     let lower = value.to_ascii_lowercase();
+    // Only credential markers are banned; descriptive error vocabulary
+    // ("provider error", "stack trace", "tool input", …) is allowed because
+    // the raw cause now rides the dedicated model-visible detail channel.
     for forbidden in [
         "access token",
         "api key",
@@ -169,18 +172,9 @@ fn validate_loop_safe_summary(value: String) -> Result<String, String> {
         "apikey",
         "authorization:",
         "bearer ",
-        "host path",
-        "invalid api key",
-        "invalid_api_key",
         "password",
         "passwd",
-        "provider error",
-        "raw runtime",
         "secret",
-        "stack trace",
-        "tool input",
-        "tool_input",
-        "traceback",
     ] {
         if lower.contains(forbidden) {
             return Err(format!(
@@ -724,6 +718,8 @@ pub enum AgentLoopHostErrorKind {
     /// The request payload itself is well-formed but its content is invalid in
     /// the current host state (e.g. schema id/version mismatch on checkpoint load).
     Invalid,
+    /// The model/provider output was structurally invalid for the active loop contract.
+    InvalidOutput,
     PolicyDenied,
     BudgetExceeded,
     /// The model call would push utilization past the configured pause
@@ -751,6 +747,7 @@ impl AgentLoopHostErrorKind {
             Self::StaleSurface => "stale_surface",
             Self::InvalidInvocation => "invalid_invocation",
             Self::Invalid => "invalid",
+            Self::InvalidOutput => "invalid_output",
             Self::PolicyDenied => "policy_denied",
             Self::BudgetExceeded => "budget_exceeded",
             Self::BudgetApprovalRequired => "budget_approval_required",
@@ -789,6 +786,12 @@ pub struct AgentLoopHostError {
     pub gate_ref: Option<LoopGateRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic_ref: Option<LoopDiagnosticRef>,
+    /// Model-visible, secret-scrubbed raw cause. Unlike `safe_summary`, this
+    /// carries the original error text (paths, codes, schema refs) so the model
+    /// can retry or explain. Secret VALUES are redacted by the producer via
+    /// [`sanitize_model_visible_text`]; the word/delimiter ban is NOT applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 impl AgentLoopHostError {
@@ -799,7 +802,13 @@ impl AgentLoopHostError {
             reason_kind: None,
             gate_ref: None,
             diagnostic_ref: None,
+            detail: None,
         }
+    }
+
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
     }
 
     pub fn with_reason_kind(mut self, reason_kind: AgentLoopHostErrorReasonKind) -> Self {
@@ -1045,6 +1054,8 @@ pub struct LoopModelCapabilityView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopModelRequest {
     pub messages: Vec<LoopModelMessage>,
+    #[serde(default)]
+    pub inline_messages: Vec<LoopInlineMessage>,
     pub surface_version: Option<CapabilitySurfaceVersion>,
     pub model_preference: Option<ModelProfileId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1098,7 +1109,8 @@ pub struct LoopInlineMessage {
 ///
 /// The optional cursor and checkpoint refs are run-scoped and are validated by
 /// host ports before context is loaded. `max_messages` is a host budget hint;
-/// zero is rejected and oversized values may be clamped by the implementation.
+/// zero is accepted only for inline-only context-free prompts, and oversized
+/// values may be clamped by the implementation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopPromptBundleRequest {
     pub mode: PromptMode,
@@ -2602,15 +2614,59 @@ mod tests {
     }
 
     #[test]
+    fn safe_summary_accepts_ordinary_error_vocabulary() {
+        // Words that used to be banned outright are ordinary error vocabulary,
+        // not secrets, and must now be accepted.
+        for accepted in [
+            "provider error occurred during the call",
+            "stack trace was captured for diagnosis",
+            "the tool input was malformed",
+            "a traceback is available for review",
+            "host path resolution did not complete",
+            "raw runtime returned an unexpected status",
+        ] {
+            validate_loop_safe_summary(accepted.to_string())
+                .unwrap_or_else(|error| panic!("`{accepted}` should be accepted: {error}"));
+        }
+    }
+
+    #[test]
     fn loop_safe_summary_accepts_fixed_input_encode_summary() {
         let summary = LoopSafeSummary::new(INPUT_ENCODE_HUMAN_SUMMARY)
             .expect("fixed host-authored input encode summary is safe");
         assert_eq!(summary.as_str(), INPUT_ENCODE_HUMAN_SUMMARY);
+    }
 
-        let raw_input_summary = LoopSafeSummary::new("tool input contained raw payload");
-        assert!(
-            raw_input_summary.is_err(),
-            "only the fixed fallback summary should bypass the raw-input denylist"
-        );
+    #[test]
+    fn safe_summary_still_rejects_secret_markers_and_delimiters() {
+        // Credential markers must still be rejected.
+        for rejected in [
+            "leaked sk-LIVEsecretvalue token",
+            "authorization header bearer abc123",
+            "the api key was exposed",
+            "user password was logged",
+            "a secret slipped into the message",
+        ] {
+            validate_loop_safe_summary(rejected.to_string())
+                .expect_err(&format!("`{rejected}` must still be rejected"));
+        }
+
+        // Path / payload delimiters must still be rejected.
+        validate_loop_safe_summary("missing schema at /system/extensions".to_string())
+            .expect_err("path delimiter `/` must still be rejected");
+    }
+
+    #[test]
+    fn agent_loop_host_error_carries_optional_detail() {
+        let path = "missing input_schema_ref at /system/extensions/google-calendar/list_calendars.input.v1.json";
+        let error = AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "host runtime rejected capability request",
+        )
+        .with_detail(path);
+        assert_eq!(error.detail.as_deref(), Some(path));
+
+        let plain = AgentLoopHostError::new(AgentLoopHostErrorKind::Internal, "boom");
+        assert_eq!(plain.detail, None);
     }
 }

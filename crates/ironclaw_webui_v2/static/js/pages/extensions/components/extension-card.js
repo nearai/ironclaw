@@ -32,6 +32,10 @@ function packageId(item) {
   return item.package_ref?.id || "";
 }
 
+function translatedKnownLabel(t, prefix, value, knownLabels) {
+  return knownLabels[value] ? t(`${prefix}.${value}`) : value;
+}
+
 /* Lightweight overflow menu. Real <button>s; closes on outside click. */
 function OverflowMenu({ actions, isBusy }) {
   const t = useT();
@@ -108,8 +112,8 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   const t = useT();
   const state = ext.onboarding_state || ext.activation_status || (ext.active ? "active" : "installed");
   const tone = STATE_TONES[state] || "muted";
-  const label = t(`extensions.state.${state}`) || STATE_LABELS[state] || state;
-  const kindLabel = t(`extensions.kind.${ext.kind}`) || KIND_LABELS[ext.kind] || ext.kind;
+  const label = translatedKnownLabel(t, "extensions.state", state, STATE_LABELS);
+  const kindLabel = translatedKnownLabel(t, "extensions.kind", ext.kind, KIND_LABELS);
   const displayName = ext.display_name || packageId(ext);
   const canManage = Boolean(ext.package_ref);
   const tools = ext.tools || [];
@@ -277,7 +281,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
 
 export function RegistryCard({ entry, onInstall, isBusy, statusLabel }) {
   const t = useT();
-  const kindLabel = t(`extensions.kind.${entry.kind}`) || KIND_LABELS[entry.kind] || entry.kind;
+  const kindLabel = translatedKnownLabel(t, "extensions.kind", entry.kind, KIND_LABELS);
   const displayName = entry.display_name || packageId(entry);
   const canInstall = Boolean(entry.package_ref && onInstall);
   const configureAfterInstall = Boolean(

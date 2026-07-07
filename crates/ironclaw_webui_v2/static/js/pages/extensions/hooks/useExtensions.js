@@ -133,7 +133,9 @@ export function useExtensions() {
     onSuccess: (res, { displayName, kind, configureAfterInstall, onNeedsSetup, packageRef }) => {
       if (res.success) {
         const message = isChannelExtensionKind(kind)
-          ? `${displayName || "Channel"} installed. Use Configure to connect the account.`
+          ? t("extensions.channelInstalledSetup", {
+              name: displayName || t("extensions.kind.channel"),
+            })
           : res.message ||
             res.instructions ||
             t("extensions.installedSuccess", {

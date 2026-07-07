@@ -5468,6 +5468,7 @@ dependencies = [
  "blake3",
  "chrono",
  "chrono-tz",
+ "futures-util",
  "hex",
  "ironclaw_filesystem",
  "ironclaw_host_api",

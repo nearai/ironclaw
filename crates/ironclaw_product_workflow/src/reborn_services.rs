@@ -35,8 +35,8 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
-    ResumeTurnRequest, SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
+    ResumeTurnRequest, RetryTurnRequest, SanitizedCancelReason, SubmitTurnRequest,
+    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
 };
 use secrecy::{ExposeSecret as _, SecretString};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
@@ -52,7 +52,8 @@ use crate::{
     UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand, WebUiInboundValidationCode,
     WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest,
     approval_interaction::RejectingApprovalInteractionService,
     auth_interaction::RejectingAuthInteractionService,
     binding_ref::{
@@ -136,13 +137,13 @@ pub use types::{
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
     RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
     RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-    RebornResolveGateResponse, RebornResumeGateResponse, RebornServiceLifecycleAction,
-    RebornServiceLifecycleRequest, RebornServiceLifecycleResponse, RebornServiceLifecycleState,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse,
+    RebornResolveGateResponse, RebornResumeGateResponse, RebornRetryRunResponse,
+    RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
+    RebornServiceLifecycleState, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    RebornSkillTrustLevel, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
 };
 
 type SkillActivationRecorder =
@@ -1766,6 +1767,12 @@ pub trait RebornServicesApi: Send + Sync {
         request: WebUiResolveGateRequest,
     ) -> Result<RebornResolveGateResponse, RebornServicesError>;
 
+    async fn retry_run(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiRetryRunRequest,
+    ) -> Result<RebornRetryRunResponse, RebornServicesError>;
+
     async fn get_run_state(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -3186,6 +3193,11 @@ impl RebornServicesApi for RebornServices {
                 event_cursor,
                 ..
             }) => {
+                tracing::debug!(
+                    thread_id = ?scope.thread_id,
+                    run_id = %run_id,
+                    "webui submit_turn accepted: turn run enqueued"
+                );
                 mark_message_submitted_or_replay(
                     &*self.thread_service,
                     &thread_scope,
@@ -3208,6 +3220,11 @@ impl RebornServicesApi for RebornServices {
                 })
             }
             Err(TurnError::ThreadBusy(busy)) => {
+                tracing::debug!(
+                    thread_id = ?scope.thread_id,
+                    active_run_id = ?busy.active_run_id,
+                    "webui submit_turn deferred: thread busy with an active run"
+                );
                 self.clear_skill_activation_message(&scope, &accepted_message_ref)?;
                 mark_message_rejected_busy_or_replay(
                     &*self.thread_service,
@@ -3227,6 +3244,11 @@ impl RebornServicesApi for RebornServices {
                 })
             }
             Err(error) => {
+                tracing::debug!(
+                    thread_id = ?scope.thread_id,
+                    error = ?error,
+                    "webui submit_turn rejected by coordinator; no run enqueued"
+                );
                 self.clear_skill_activation_message(&scope, &accepted_message_ref)?;
                 Err(map_turn_error(error))
             }
@@ -3737,6 +3759,54 @@ impl RebornServicesApi for RebornServices {
                 .await
             }
         }
+    }
+
+    async fn retry_run(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiRetryRunRequest,
+    ) -> Result<RebornRetryRunResponse, RebornServicesError> {
+        let caller_for_fallback = caller.clone();
+        let command = request.into_command(caller)?;
+        let WebUiInboundCommand::RetryRun {
+            scope,
+            actor,
+            run_id,
+            client_action_id,
+        } = command
+        else {
+            return Err(RebornServicesError::internal_invariant());
+        };
+
+        let access = self
+            .resolve_thread_access_for_caller(caller_for_fallback, scope, &actor)
+            .await?;
+        // Serialize retry admission with thread deletion. `delete_thread` holds
+        // this same per-thread lock across its active-run probe + delete; taking
+        // it here closes the window where a concurrent delete passes its probe
+        // (the failed run is terminal) and then deletes the thread while
+        // `retry_turn` enqueues a replacement run against it.
+        let _thread_operation_guard = self.lock_thread_operation(&access.scope).await;
+        let binding_id = webui_retry_binding_id(&access.scope, run_id, &client_action_id);
+        let response = self
+            .turn_coordinator
+            .retry_turn(RetryTurnRequest {
+                scope: access.scope,
+                actor: access.run_actor,
+                run_id,
+                source_binding_ref: webui_source_binding_ref_from_raw(
+                    "webui-retry-src",
+                    &binding_id,
+                )?,
+                reply_target_binding_ref: webui_reply_target_binding_ref_from_raw(
+                    "webui-retry-reply",
+                    &binding_id,
+                )?,
+                idempotency_key: client_action_id,
+            })
+            .await
+            .map_err(map_turn_error)?;
+        Ok(response.into())
     }
 
     async fn get_run_state(
@@ -5959,6 +6029,21 @@ fn webui_gate_binding_id(scope: &TurnScope, gate_ref: &str) -> String {
     )
 }
 
+fn webui_retry_binding_id(
+    scope: &TurnScope,
+    run_id: TurnRunId,
+    client_action_id: &IdempotencyKey,
+) -> String {
+    format!(
+        "{}{}{}{}{}",
+        segment("surface", "webui"),
+        segment("tenant", scope.tenant_id.as_str()),
+        segment("thread", scope.thread_id.as_str()),
+        segment("failed_run", run_id.as_uuid().to_string().as_str()),
+        segment("action", client_action_id.as_str())
+    )
+}
+
 fn gate_ref_string(gate_ref: &ironclaw_turns::GateRef) -> String {
     gate_ref.as_str().to_string()
 }
@@ -6047,6 +6132,14 @@ fn delete_thread_busy() -> RebornServicesError {
 }
 
 fn map_turn_error(error: TurnError) -> RebornServicesError {
+    if matches!(error, TurnError::RunNotRetryable { .. }) {
+        return RebornServicesError::from_status_kind(
+            RebornServicesErrorCode::Conflict,
+            RebornServicesErrorKind::Conflict,
+            409,
+            false,
+        );
+    }
     let (code, kind, status_code, retryable) = match error.category() {
         ironclaw_turns::TurnErrorCategory::ThreadBusy => (
             RebornServicesErrorCode::Conflict,

@@ -9,7 +9,7 @@ use std::{
 };
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use crate::product_auth_durable::{FilesystemAuthProductServices, UnavailableAuthProviderClient};
+use crate::product_auth::durable::{FilesystemAuthProductServices, UnavailableAuthProviderClient};
 use crate::support::fs::RebornProjectService;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_approvals::{
@@ -157,8 +157,10 @@ use crate::local_dev_mounts::{
     skill_management_mount_view, system_extensions_lifecycle_mount_view, workspace_mount_view,
 };
 use crate::mcp::hosted_http_mcp_runtime;
-use crate::product_auth_providers::{OAuthProviderComposition, compose_provider_client};
-use crate::product_auth_runtime_credentials::ProductAuthRuntimeCredentialResolver;
+use crate::product_auth::credentials::product_auth_providers::{
+    OAuthProviderComposition, compose_provider_client,
+};
+use crate::product_auth::credentials::runtime_credentials::ProductAuthRuntimeCredentialResolver;
 use crate::runtime_input::RebornRuntimeIdentity;
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
@@ -499,8 +501,8 @@ pub(crate) enum CredentialRefreshWorkerReady {
     /// the worker; the `enabled` policy flag still gates the actual spawn.
     Ready {
         candidate_source:
-            Arc<dyn crate::credential_refresh_worker::CredentialRefreshCandidateSource>,
-        leader_lock: crate::product_auth_refresh_lock::CredentialRefreshLeaderLock,
+            Arc<dyn crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshCandidateSource>,
+        leader_lock: crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock,
         refresh_port: Arc<RebornProductAuthServices>,
     },
     /// Deps intentionally absent: local-dev (single-user, no cross-owner
@@ -1648,7 +1650,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         active_extensions,
         Some(Arc::clone(&product_auth) as Arc<dyn ExtensionCredentialCleanup>),
     ));
-    let nearai_mcp_bootstrap_outcome = crate::nearai_mcp::bootstrap_nearai_mcp(
+    let nearai_mcp_bootstrap_outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
         nearai_mcp_bootstrap_config,
         &product_auth,
         &extension_management,
@@ -3768,7 +3770,7 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
         "/system/extensions/slack/manifest.toml".to_string(),
         Some(slack_manifest_digest()),
         HostTrustAssignment::first_party(),
-        gsuite_allowed_effects(),
+        slack_user_allowed_effects(),
         None,
     ));
     HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries(entries))]).map_err(|error| {
@@ -3779,6 +3781,16 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
 }
 
 fn gsuite_allowed_effects() -> Vec<EffectKind> {
+    vec![
+        EffectKind::DispatchCapability,
+        EffectKind::Network,
+        EffectKind::UseSecret,
+        EffectKind::ExternalWrite,
+    ]
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+fn slack_user_allowed_effects() -> Vec<EffectKind> {
     vec![
         EffectKind::DispatchCapability,
         EffectKind::Network,
@@ -4358,7 +4370,7 @@ async fn build_backend_production<F>(
     // Leader lock for the background credential keepalive worker. The worker
     // uses this to elect one process per tick as the sweep leader. `None`
     // pool → always-leader (libsql / single-process). Stays private.
-    leader_lock: crate::product_auth_refresh_lock::CredentialRefreshLeaderLock,
+    leader_lock: crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock,
 ) -> Result<RebornServices, RebornBuildError>
 where
     F: RootFilesystem + 'static,
@@ -4508,7 +4520,7 @@ where
     // instance here, so the candidate source is None (worker finds no
     // candidates, which is safe for override/test callers).
     let credential_refresh_candidate_source: Option<
-        Arc<dyn crate::credential_refresh_worker::CredentialRefreshCandidateSource>,
+        Arc<dyn crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshCandidateSource>,
     >;
     let product_auth_ports = match product_auth_ports {
         Some(ports) => {
@@ -4522,7 +4534,7 @@ where
                 Arc::clone(&secret_store),
             ));
             credential_refresh_candidate_source = Some(Arc::clone(&durable)
-                as Arc<dyn crate::credential_refresh_worker::CredentialRefreshCandidateSource>);
+                as Arc<dyn crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshCandidateSource>);
             RebornProductAuthServicePorts::from_shared_with_provider(
                 durable,
                 provider_composition
@@ -4649,11 +4661,11 @@ async fn build_libsql_production(
         {
             #[cfg(feature = "postgres")]
             {
-                crate::product_auth_refresh_lock::CredentialRefreshLeaderLock::new(None)
+                crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock::new(None)
             }
             #[cfg(not(feature = "postgres"))]
             {
-                crate::product_auth_refresh_lock::CredentialRefreshLeaderLock::always_leader()
+                crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock::always_leader()
             }
         },
     )
@@ -4697,7 +4709,7 @@ async fn build_postgres_production(
         stores,
         trigger_repository,
         RebornProductionRuntimeServices::Postgres,
-        crate::product_auth_refresh_lock::CredentialRefreshLeaderLock::new(Some(
+        crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock::new(Some(
             pool_for_refresh_lock,
         )),
     )
@@ -5926,7 +5938,12 @@ mod tests {
             panic!("expected fail-closed handler outcome, got {outcome:?}");
         };
         assert_eq!(failure.capability_id.as_str(), "web-access.search");
-        assert_eq!(failure.kind, RuntimeFailureKind::Backend);
+        // A capability the model named with no registered first-party handler
+        // is a model-fixable, model-visible failure (#5389 reclassified the
+        // missing-handler dispatch failure from Backend to InvalidInput so it
+        // does not burn the retry budget on a call that can never resolve). The
+        // capability still fails closed — only the disposition changed.
+        assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
     }
 
     fn nearai_bootstrap_input_with_base(
@@ -5936,7 +5953,7 @@ mod tests {
         api_key: &str,
     ) -> RebornBuildInput {
         RebornBuildInput::local_dev(owner, root).with_nearai_mcp_bootstrap_config(
-            crate::nearai_mcp::NearAiMcpBootstrapConfig::new(
+            crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
                 base_url,
                 secrecy::SecretString::from(api_key.to_string()),
             )
@@ -6480,9 +6497,9 @@ mod tests {
             .extension_management
             .as_ref()
             .expect("extension management");
-        let outcome = crate::nearai_mcp::bootstrap_nearai_mcp(
+        let outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
             Some(
-                crate::nearai_mcp::NearAiMcpBootstrapConfig::new(
+                crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
                     "https://private.near.ai",
                     secrecy::SecretString::from("nearai-second-key"),
                 )
@@ -6496,7 +6513,7 @@ mod tests {
         .expect("second NEAR AI MCP bootstrap");
         assert_eq!(
             outcome,
-            crate::nearai_mcp::NearAiMcpBootstrapOutcome::ReusedCredential
+            crate::llm_admin::nearai_mcp::NearAiMcpBootstrapOutcome::ReusedCredential
         );
         let accounts = first
             .product_auth
@@ -6557,9 +6574,9 @@ mod tests {
             )
             .await
             .expect("disable NEAR AI MCP extension");
-        let outcome = crate::nearai_mcp::bootstrap_nearai_mcp(
+        let outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
             Some(
-                crate::nearai_mcp::NearAiMcpBootstrapConfig::new(
+                crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
                     "https://private.near.ai",
                     secrecy::SecretString::from("nearai-test-key"),
                 )
@@ -6574,7 +6591,7 @@ mod tests {
         .expect("bootstrap should reinstall discovered extension");
         assert_eq!(
             outcome,
-            crate::nearai_mcp::NearAiMcpBootstrapOutcome::Activated
+            crate::llm_admin::nearai_mcp::NearAiMcpBootstrapOutcome::Activated
         );
         let projection = extension_management
             .project(nearai_ref)
@@ -6597,7 +6614,7 @@ mod tests {
     #[tokio::test]
     async fn local_dev_nearai_mcp_invalid_base_url_fails_build() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let config = crate::nearai_mcp::NearAiMcpBootstrapConfig::new(
+        let config = crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
             "http://private.near.ai",
             secrecy::SecretString::from("nearai-test-key"),
         )

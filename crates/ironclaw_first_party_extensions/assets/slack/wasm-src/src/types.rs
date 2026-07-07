@@ -28,9 +28,9 @@ pub enum SlackUserAction {
         /// Maximum number of matches to return (default: 20, max: 100).
         #[serde(default = "default_search_count")]
         count: u32,
-        /// Sort by `score` (relevance, default) or `timestamp` (recency).
+        /// Sort by relevance (default) or recency.
         #[serde(default)]
-        sort: Option<String>,
+        sort: Option<SearchSort>,
     },
 
     /// List conversations you belong to: channels, private channels,
@@ -79,6 +79,22 @@ pub enum SlackUserAction {
         #[serde(default)]
         thread_ts: Option<String>,
     },
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchSort {
+    Score,
+    Timestamp,
+}
+
+impl SearchSort {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Score => "score",
+            Self::Timestamp => "timestamp",
+        }
+    }
 }
 
 fn default_search_count() -> u32 {

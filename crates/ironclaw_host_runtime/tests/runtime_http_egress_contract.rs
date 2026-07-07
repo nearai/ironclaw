@@ -2610,7 +2610,11 @@ async fn mcp_http_client_cannot_use_direct_secret_store_lease_with_production_eg
         .await
         .expect_err("production MCP egress must require staged credentials");
 
-    assert_eq!(error.stable_reason(), "request_denied");
+    // Per-cause MCP denial tokens: the SecretStoreLease guard now names its
+    // cause instead of the flat "request_denied" (see
+    // `McpRequestDeniedCause::DeniedCredentialSource`). The boundary is
+    // unchanged — denied before any transport, asserted below.
+    assert_eq!(error.stable_reason(), "mcp_denied_credential_source");
     let requests = network_recorder.lock().unwrap();
     assert_eq!(
         requests.len(),

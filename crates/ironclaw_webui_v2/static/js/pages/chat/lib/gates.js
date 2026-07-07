@@ -146,13 +146,13 @@ function gateWithApprovalContext(gate, approvalContext, fallbackDescription) {
 function approvalDetailsFromContext(context) {
   const details = [];
   if (context.action?.label) {
-    details.push({ label: "Action", value: context.action.label });
+    details.push({ label: "Action", labelKey: "approval.detail.action", value: context.action.label });
   }
   if (context.destination?.label) {
-    details.push({ label: "Destination", value: context.destination.label });
+    details.push({ label: "Destination", labelKey: "approval.detail.destination", value: context.destination.label });
   }
   if (context.scope?.label) {
-    details.push({ label: "Scope", value: context.scope.label });
+    details.push({ label: "Scope", labelKey: "approval.detail.scope", value: context.scope.label });
   }
   for (const detail of context.details || []) {
     if (!detail?.label || detail.value == null) continue;

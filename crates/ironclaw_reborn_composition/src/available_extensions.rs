@@ -23,7 +23,7 @@ use crate::extension_credential_requirements::{
     can_merge_lifecycle_credential_setup, merge_lifecycle_credential_setup,
     product_auth_credential_source,
 };
-use crate::nearai_mcp::{
+use crate::llm_admin::nearai_mcp::{
     NearAiMcpBootstrapConfig, NearAiMcpEndpoint, durable_product_auth_storage_enabled,
     nearai_mcp_endpoint_from_base, nearai_mcp_endpoint_from_env,
 };
@@ -79,13 +79,13 @@ pub(crate) const SLACK_EXTENSION_ID: &str = "slack";
 #[cfg(feature = "slack-v2-host-beta")]
 const SLACK_PERSONAL_OAUTH_REQUIREMENT_NAME: &str = "slack_personal_oauth";
 // The slack_personal OAuth setup scopes are the union of the Slack tools'
-// per-capability scopes: the read-only tools request only read scopes, and only
-// send_message requests chat:write. Because the account is shared and
-// send_message is a default tool, a read-only user still grants chat:write;
+// per-capability scopes: the read-only tools request only read scopes, and
+// write tools request chat:write. Because the account is shared and send_message
+// is currently a default tool, a read-only user still grants chat:write;
 // reducing the grant (a write-opt-in / scope-upgrade re-consent flow) is tracked
 // in nearai/ironclaw#5669. `slack_read_only_tools_do_not_request_chat_write`
 // enforces that this list equals the union of the manifest capabilities' scopes
-// and that only send_message declares chat:write.
+// and that only write-effect capabilities declare chat:write.
 #[cfg(feature = "slack-v2-host-beta")]
 const SLACK_PERSONAL_OAUTH_SETUP_SCOPES: &[&str] = &[
     "search:read",
@@ -2330,7 +2330,7 @@ mod tests {
 
         let mut union_scopes = BTreeSet::new();
         for capability in &package.package.manifest.capabilities {
-            let is_write_tool = capability.id.as_str() == "slack.send_message";
+            let is_write_tool = capability.effects.iter().any(|effect| effect.is_write());
             for credential in &capability.runtime_credentials {
                 let RuntimeCredentialRequirementSource::ProductAuthAccount { provider, setup } =
                     &credential.source
@@ -2351,7 +2351,7 @@ mod tests {
                 let requests_write = scopes.iter().any(|scope| scope.as_str() == "chat:write");
                 assert_eq!(
                     requests_write, is_write_tool,
-                    "only send_message may request chat:write; capability {} requests_write={requests_write}",
+                    "only write-effect capabilities may request chat:write; capability {} requests_write={requests_write}",
                     capability.id
                 );
                 union_scopes.extend(scopes.iter().cloned());

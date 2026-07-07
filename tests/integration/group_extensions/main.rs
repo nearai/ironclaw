@@ -23,6 +23,7 @@ mod scenario_activate_then_active_cross_thread;
 mod scenario_install_then_visible_cross_thread;
 mod scenario_install_unknown_extension_id_fails_safely;
 mod scenario_remove_then_absent_cross_thread;
+mod scenario_uninstalled_tool_call_denied_until_activated;
 
 use reborn_support::group::{RebornIntegrationGroup, ScenarioReport};
 
@@ -61,6 +62,14 @@ async fn extensions_group_e2e() {
     report.record(
         "install_unknown_extension_id_fails_safely",
         scenario_install_unknown_extension_id_fails_safely::run(&g).await,
+    );
+
+    // Scenario 5: a model call to a not-installed extension capability is
+    // rejected fail-closed at the model gateway until real install+activate
+    // publishes it. Uses "gmail" (untouched by Scenarios 1-4).
+    report.record(
+        "uninstalled_tool_call_denied_until_activated",
+        scenario_uninstalled_tool_call_denied_until_activated::run(&g).await,
     );
 
     report.assert_all_passed();

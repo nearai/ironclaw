@@ -130,11 +130,13 @@ export function Chat({
   // is empty.
   const showLanding = !historyLoading && !hasMessages && !historyLoadError;
   const approvalSubmitWarning = activeThreadHasChannelConnectionGate
-    ? "Finish connecting the channel before sending another message."
+    ? t("chat.finishPairingBeforeSend")
     : activeThreadHasGate
-      ? "Resolve the approval request before sending another message."
+      ? t("chat.resolveApprovalBeforeSend")
       : activeThreadHasOnboarding
-        ? `Finish connecting ${pendingOnboardingLabel(pendingOnboarding)} before sending another message.`
+        ? t("chat.finishPairingBeforeSend", {
+            name: pendingOnboardingLabel(pendingOnboarding),
+          })
         : "";
   const composerSendDisabled =
     activeThreadHasGate ||
@@ -147,7 +149,7 @@ export function Chat({
   composerSendBlockedRef.current = composerSendDisabled;
   const composerStatusText =
     approvalSubmitWarning ||
-    (cooldownSeconds > 0 ? `Retry in ${cooldownSeconds}s` : undefined);
+    (cooldownSeconds > 0 ? t("chat.retryIn", { seconds: cooldownSeconds }) : undefined);
   // Scope the persisted composer draft to the open thread (or the
   // shared new-conversation slot when there's no active thread yet).
   const composerDraftKey = activeThreadId || NEW_DRAFT_KEY;
@@ -278,7 +280,7 @@ export function Chat({
             className="mx-4 mt-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300"
             role="alert"
           >
-            ${historyLoadError}
+            ${t(historyLoadError)}
           </div>
         `}
 

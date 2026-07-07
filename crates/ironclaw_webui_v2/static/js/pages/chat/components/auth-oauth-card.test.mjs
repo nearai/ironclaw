@@ -174,8 +174,8 @@ test("AuthOauthCard surfaces a blocked popup instead of silently doing nothing",
 
   assert.equal(openAuthPopupCalls.length, 0, "no navigation on a blocked popup");
   assert.ok(
-    stateSets.includes("Authorization popup was blocked."),
-    "blocked-popup error is surfaced"
+    stateSets.includes("authGate.popupBlocked"),
+    "blocked-popup error is surfaced through i18n"
   );
   assert.ok(!stateSets.includes(true), "opened state must not be set");
 });

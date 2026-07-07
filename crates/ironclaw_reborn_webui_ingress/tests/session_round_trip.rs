@@ -39,14 +39,14 @@ use ironclaw_product_workflow::{
     RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornGetRunStateRequest,
     RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
-    RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
+    RebornResolveGateResponse, RebornRetryRunResponse, RebornServicesApi, RebornServicesError,
     RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
     RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
     RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
     RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-    rejecting_reborn_services_error,
+    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest, rejecting_reborn_services_error,
 };
 use ironclaw_reborn_composition::{
     RebornReadiness, RebornWebuiBundle, WebuiServeConfig, webui_v2_app,
@@ -146,6 +146,14 @@ impl RebornServicesApi for StubServices {
         _request: WebUiCancelRunRequest,
     ) -> Result<RebornCancelRunResponse, RebornServicesError> {
         unreachable!("test does not drive cancel_run")
+    }
+
+    async fn retry_run(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: WebUiRetryRunRequest,
+    ) -> Result<RebornRetryRunResponse, RebornServicesError> {
+        unreachable!("test does not drive retry_run")
     }
 
     async fn resolve_gate(

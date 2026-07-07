@@ -1,8 +1,10 @@
 import { Icon } from "../../../design-system/icons.js";
 import { html } from "../../../lib/html.js";
+import { useT } from "../../../lib/i18n.js";
 import { EXTENSIONS_TABS } from "../lib/extensions-schema.js";
 
 export function ExtensionsTabs({ activeTab, onTabChange, counts }) {
+  const t = useT();
   return html`
     <div className="flex flex-col gap-1">
       ${EXTENSIONS_TABS.map(
@@ -27,7 +29,7 @@ export function ExtensionsTabs({ activeTab, onTabChange, counts }) {
             >
               <${Icon} name=${tab.icon} className="h-3.5 w-3.5" />
             </span>
-            <span className="min-w-0 truncate">${tab.label}</span>
+            <span className="min-w-0 truncate">${t(tab.labelKey)}</span>
             ${counts[tab.id] != null &&
             html`
               <span className="ml-auto font-mono text-[11px] text-iron-700"
@@ -42,6 +44,7 @@ export function ExtensionsTabs({ activeTab, onTabChange, counts }) {
 }
 
 export function ExtensionsTabsMobile({ activeTab, onTabChange, counts }) {
+  const t = useT();
   return html`
     <div className="flex gap-1.5 overflow-x-auto pb-1">
       ${EXTENSIONS_TABS.map(
@@ -57,7 +60,7 @@ export function ExtensionsTabsMobile({ activeTab, onTabChange, counts }) {
             ].join(" ")}
           >
             <${Icon} name=${tab.icon} className="h-3.5 w-3.5" />
-            ${tab.label}
+            ${t(tab.labelKey)}
             ${counts[tab.id] != null &&
             html`
               <span className="font-mono text-[11px] text-iron-700"

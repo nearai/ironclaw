@@ -124,7 +124,7 @@ export function AuthOauthCard({ gate, onCancel }) {
     setClosedNotice(false);
     const popup = window.open("about:blank", "_blank", "width=600,height=600");
     if (!popup) {
-      setError("Authorization popup was blocked.");
+      setError(t("authGate.popupBlocked"));
       return;
     }
     popup.opener = null;
@@ -132,7 +132,7 @@ export function AuthOauthCard({ gate, onCancel }) {
     openAuthPopup(gate.authorizationUrl, popup);
     setOpened(true);
     setWatchNonce((nonce) => nonce + 1);
-  }, [gate.authorizationUrl, hasHttpsAuthorizationUrl]);
+  }, [gate.authorizationUrl, hasHttpsAuthorizationUrl, t]);
 
   const openLabel = opened
     ? t("authGate.reopenAuthorization", { provider: providerLabel })
