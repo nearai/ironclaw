@@ -49,9 +49,10 @@ use crate::{
     ExternalIdentityKey, RebornIdentityError, RebornIdentityResolver, ResolveExternalIdentity,
     SurfaceKind,
 };
-use paths::{identity_path, user_path, verified_email_path};
+use paths::{identity_path, user_path, user_tombstone_path, verified_email_path};
 use record::{
-    StoredExternalIdentity, StoredUser, StoredUserRole, StoredUserStatus, StoredVerifiedEmailIndex,
+    StoredExternalIdentity, StoredUser, StoredUserRole, StoredUserStatus, StoredUserTombstone,
+    StoredVerifiedEmailIndex,
 };
 
 /// Canonical identity store backed by a host scoped filesystem.
@@ -195,6 +196,16 @@ where
         Ok(user_id)
     }
 
+    /// Whether a user is mid-delete (has a live tombstone). Used by
+    /// `resolve_or_create` to refuse re-linking an external identity onto a
+    /// user whose delete cascade is in flight.
+    async fn is_tombstoned(&self, user_id: &UserId) -> Result<bool, RebornIdentityError> {
+        Ok(self
+            .read_record::<StoredUserTombstone>(&user_tombstone_path(user_id.as_str())?)
+            .await?
+            .is_some())
+    }
+
     /// Read the user already bound to an external identity, or `None`.
     async fn identity_user(
         &self,
@@ -312,6 +323,16 @@ where
                 .await?
             {
                 let user_id = to_user_id(index.user_id)?;
+                // If the indexed user is mid-delete, re-linking a fresh identity
+                // record to it would resurrect a live login for an id about to
+                // vanish (a ghost). Fail closed with a retryable error: the
+                // delete cascade removes this index shortly, after which a retry
+                // mints a fresh user instead.
+                if self.is_tombstoned(&user_id).await? {
+                    return Err(RebornIdentityError::Backend(
+                        "verified-email index points at a user being deleted; retry".to_string(),
+                    ));
+                }
                 self.put_identity_reconciling(&id_path, &user_id, &identity, &now)
                     .await?;
                 // The identity link is legitimate even for a suspended account;
@@ -398,7 +419,16 @@ where
                                 "verified-email index vanished after CAS conflict".to_string(),
                             ));
                         };
-                        to_user_id(winner.user_id)?
+                        let winner_id = to_user_id(winner.user_id)?;
+                        // Same guard as the direct link path: never adopt (and
+                        // then bind an identity to) a user being deleted.
+                        if self.is_tombstoned(&winner_id).await? {
+                            return Err(RebornIdentityError::Backend(
+                                "verified-email index winner is a user being deleted; retry"
+                                    .to_string(),
+                            ));
+                        }
+                        winner_id
                     }
                     Err(error) => return Err(backend(error)),
                 }

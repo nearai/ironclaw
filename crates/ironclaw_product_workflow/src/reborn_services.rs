@@ -5219,6 +5219,19 @@ impl RebornServices {
     /// admins (a TOCTOU race). Holding this across the check+mutation makes the
     /// count read authoritative. Reuses the same weak-ref keyed registry as
     /// `thread_operation_lock`, namespaced so the keyspaces cannot collide.
+    ///
+    /// Scope of the guarantee: this lock lives in the current `RebornServices`
+    /// instance, so it serializes every admin mutation within one process. The
+    /// standalone `ironclaw-reborn serve` binary is single-process, so last-
+    /// admin protection is airtight there. It does NOT span multiple runtime
+    /// instances sharing one identity filesystem (a not-yet-supported multi-
+    /// replica deployment): two processes each hold their own lock and could
+    /// both read `active_admins > 1` before demoting different admins. Closing
+    /// that requires a durable per-tenant lease (a CAS-guarded lock record in
+    /// the identity store) shared by all instances — deferred until a multi-
+    /// replica deployment mode exists, since a hand-rolled filesystem lease adds
+    /// crash-recovery/stale-takeover risk that outweighs the bounded race it
+    /// would replace in the single-process product shipping today.
     async fn lock_admin_mutation(&self, tenant: &TenantId) -> OwnedMutexGuard<()> {
         let key = format!("admin-mutation:{}", tenant.as_str());
         let lock = {

@@ -56,6 +56,18 @@ pub(super) fn user_path(user_id: &str) -> Result<ScopedPath, RebornIdentityError
     scoped_path(&format!("{IDENTITY_ROOT}/users/{}.json", segment(user_id)))
 }
 
+/// Path of a user's delete tombstone. Present only while a delete cascade is in
+/// flight: it is written before the cascade and removed after it, so a
+/// concurrent `resolve_or_create` can refuse to re-link an external identity to
+/// a user that is being torn down (which would otherwise recreate a live
+/// identity record for a soon-to-be-deleted id).
+pub(super) fn user_tombstone_path(user_id: &str) -> Result<ScopedPath, RebornIdentityError> {
+    scoped_path(&format!(
+        "{IDENTITY_ROOT}/tombstones/{}.json",
+        segment(user_id)
+    ))
+}
+
 /// Directory holding every canonical user record. User records are NOT
 /// tenant-partitioned in the path (unlike identity/verified-email records), so
 /// enumeration lists this one directory and filters by the record's own

@@ -18,11 +18,12 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 use super::paths::{
-    child_path, external_tenant_dir_path, user_id_from_file_name, user_path, users_dir_path,
-    verified_email_path,
+    child_path, external_tenant_dir_path, user_id_from_file_name, user_path, user_tombstone_path,
+    users_dir_path, verified_email_path,
 };
 use super::record::{
-    StoredExternalIdentity, StoredUser, StoredUserRole, StoredUserStatus, StoredVerifiedEmailIndex,
+    StoredExternalIdentity, StoredUser, StoredUserRole, StoredUserStatus, StoredUserTombstone,
+    StoredVerifiedEmailIndex,
 };
 use super::{FilesystemRebornIdentityStore, backend, to_user_id};
 use crate::RebornIdentityError;
@@ -418,6 +419,25 @@ where
         tenant_id: &TenantId,
         user_id: &UserId,
     ) -> Result<(), RebornIdentityError> {
+        // 0. Tombstone the user for the duration of the cascade. Deleting the
+        //    external identities (step 1) before the verified-email index
+        //    (step 2) opens a window where a concurrent `resolve_or_create`
+        //    still sees the email index pointing at this user and would re-link
+        //    a fresh identity record to an id about to be deleted (future
+        //    logins would then fast-path to a ghost). The tombstone lets the
+        //    resolver refuse that re-link; it is removed once the cascade
+        //    completes (step 4).
+        let tombstone = user_tombstone_path(user_id.as_str())?;
+        self.write_record(
+            &tombstone,
+            &StoredUserTombstone {
+                deleted_at: now_rfc3339(),
+            },
+            CasExpectation::Any,
+        )
+        .await
+        .map_err(backend)?;
+
         // 1. External identities first: while the user record still exists we
         //    don't strictly need it, but doing identities first means a
         //    partial failure never leaves a deleted user whose logins still
@@ -433,6 +453,15 @@ where
         // 3. The user record itself.
         self.filesystem
             .delete(&self.scope, &user_path(user_id.as_str())?)
+            .await
+            .map_err(backend)?;
+
+        // 4. Cascade complete: drop the tombstone. A crash before this point
+        //    leaves the tombstone in place, which fails safe — the resolver
+        //    keeps refusing to re-link the half-deleted id until a re-run of
+        //    the delete (or manual cleanup) clears it.
+        self.filesystem
+            .delete(&self.scope, &tombstone)
             .await
             .map_err(backend)?;
         Ok(())

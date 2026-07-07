@@ -73,3 +73,12 @@ pub(super) struct StoredExternalIdentity {
 pub(super) struct StoredVerifiedEmailIndex {
     pub(super) user_id: String,
 }
+
+/// In-flight delete marker, keyed by `UserId` at `…/tombstones/{id}.json`.
+/// Written before a delete cascade and removed after it, so a concurrent
+/// `resolve_or_create` can see that a user is being torn down and refuse to
+/// re-link an external identity to it.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(super) struct StoredUserTombstone {
+    pub(super) deleted_at: String,
+}

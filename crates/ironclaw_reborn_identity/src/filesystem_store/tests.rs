@@ -1189,3 +1189,52 @@ async fn delete_user_cascades_external_identity_and_verified_email_index() {
         "the external identity must be cascaded so a re-login does not revive the deleted user"
     );
 }
+
+#[tokio::test]
+async fn resolve_or_create_refuses_to_relink_a_user_mid_delete() {
+    // Regression for the delete-vs-relink race: a delete cascade removes the
+    // external identity before the verified-email index, so during that window
+    // a concurrent login (here via a DIFFERENT provider for the SAME verified
+    // email) reaches the email-link branch and would otherwise re-link a fresh
+    // identity onto the id being deleted — reviving a ghost. The in-flight
+    // tombstone makes the resolver fail closed with a retryable error instead.
+    let store = store();
+    let t = tenant("acme");
+    let user = store
+        .resolve_or_create(oauth(&t, "google", "g-1", Some("shared@x.com"), true))
+        .await
+        .expect("first login mints the user + verified-email index");
+
+    // Simulate the mid-cascade state: the delete has written the tombstone but
+    // not yet removed the verified-email index.
+    store
+        .write_record(
+            &user_tombstone_path(user.as_str()).unwrap(),
+            &StoredUserTombstone {
+                deleted_at: "2026-07-07T00:00:00Z".to_string(),
+            },
+            CasExpectation::Any,
+        )
+        .await
+        .expect("write tombstone");
+
+    let err = store
+        .resolve_or_create(oauth(&t, "github", "gh-9", Some("shared@x.com"), true))
+        .await
+        .expect_err("a login racing a delete must not re-link the tombstoned user");
+    assert!(
+        matches!(err, RebornIdentityError::Backend(_)),
+        "the relink must fail closed with a retryable error, got {err:?}"
+    );
+
+    // Once the tombstone clears (cascade finished), logins mint fresh again.
+    store
+        .filesystem
+        .delete(&store.scope, &user_tombstone_path(user.as_str()).unwrap())
+        .await
+        .expect("clear tombstone");
+    store
+        .resolve_or_create(oauth(&t, "github", "gh-9", Some("shared@x.com"), true))
+        .await
+        .expect("after the tombstone clears, the email-link path resolves again");
+}
