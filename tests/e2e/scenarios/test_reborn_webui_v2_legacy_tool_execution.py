@@ -569,5 +569,5 @@ async def test_reborn_legacy_looping_tool_calls_stop_at_low_iteration_boundary(
                     await _wait_for_failed_run_projection(response)
                 )
 
-    assert run_status.get("failure_category") == "driver_protocol_violation", run_status
+    assert run_status.get("failure_category") == "iteration_limit", run_status
     assert completed_loop_echoes == 1
