@@ -68,6 +68,7 @@ I18n.register('ko', {
   'users.roleMember': '회원',
   'users.roleAdmin': '관리자',
   'users.create': '생성',
+  'users.creating': '생성 중...',
   'users.cancel': '취소',
   'users.emptyState': '사용자가 없습니다. 첫 번째 사용자를 생성하여 시작하세요.',
   'users.adminRequired': '사용자를 관리하려면 관리자 권한이 필요합니다.',

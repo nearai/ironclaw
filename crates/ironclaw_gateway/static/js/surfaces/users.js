@@ -1,3 +1,22 @@
+var usersCreateInFlight = false;
+
+function setUsersCreatePending(isPending) {
+  var submit = document.getElementById('users-create-submit');
+  var cancel = document.getElementById('users-create-cancel');
+  var displayName = document.getElementById('user-display-name');
+  var email = document.getElementById('user-email');
+  var role = document.getElementById('user-role');
+  [displayName, email, role, cancel].forEach(function(el) {
+    if (el) el.disabled = isPending;
+  });
+  if (submit) {
+    submit.disabled = isPending;
+    submit.setAttribute('aria-busy', isPending ? 'true' : 'false');
+    submit.classList.toggle('is-loading', isPending);
+    submit.textContent = isPending ? I18n.t('users.creating') : I18n.t('users.create');
+  }
+}
+
 function loadUsers() {
   apiFetch('/api/admin/users').then(function(data) {
     renderUsersList(data.users || []);
@@ -123,18 +142,24 @@ document.getElementById('users-table')?.addEventListener('click', function(e) {
 document.getElementById('users-create-btn')?.addEventListener('click', function() {
   document.getElementById('users-create-form').style.display = 'flex';
   document.getElementById('users-token-result').style.display = 'none';
+  setUsersCreatePending(usersCreateInFlight);
   document.getElementById('user-display-name').focus();
 });
 
 document.getElementById('users-create-cancel')?.addEventListener('click', function() {
+  if (usersCreateInFlight) return;
   document.getElementById('users-create-form').style.display = 'none';
 });
 
 document.getElementById('users-create-submit')?.addEventListener('click', function() {
+  if (usersCreateInFlight) return;
   var displayName = document.getElementById('user-display-name').value.trim();
   var email = document.getElementById('user-email').value.trim();
   var role = document.getElementById('user-role').value;
   if (!displayName) { alert(I18n.t('users.displayNameRequired')); return; }
+
+  usersCreateInFlight = true;
+  setUsersCreatePending(true);
 
   apiFetch('/api/admin/users', {
     method: 'POST',
@@ -152,8 +177,12 @@ document.getElementById('users-create-submit')?.addEventListener('click', functi
       showTokenBanner(data.token, I18n.t('users.userCreated'));
     }
     loadUsers();
-  }).catch(function(e) { alert(I18n.t('users.failedCreate') + ': ' + e.message); });
+  }).catch(function(e) {
+    alert(I18n.t('users.failedCreate') + ': ' + e.message);
+  }).finally(function() {
+    usersCreateInFlight = false;
+    setUsersCreatePending(false);
+  });
 });
 
 // --- Gateway status widget ---
-

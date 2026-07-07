@@ -323,6 +323,7 @@
   var usersCache = null;
   var usersFilter = 'all';
   var usersSearch = '';
+  var createUserInFlight = false;
 
   function renderUsers(el) {
     el.innerHTML = '<div class="loading">Loading users...</div>';
@@ -688,9 +689,11 @@
       case 'show-create-form':
         var form = document.getElementById('create-user-form');
         if (form) form.style.display = 'block';
+        setAdminCreateUserPending(createUserInFlight);
         break;
 
       case 'hide-create-form':
+        if (createUserInFlight) return;
         var formH = document.getElementById('create-user-form');
         if (formH) formH.style.display = 'none';
         break;
@@ -783,6 +786,7 @@
   }
 
   function createUser(el) {
+    if (createUserInFlight) return;
     var nameEl = document.getElementById('new-user-name');
     var emailEl = document.getElementById('new-user-email');
     var roleEl = document.getElementById('new-user-role');
@@ -793,6 +797,9 @@
     var body = { display_name: nameEl.value.trim(), role: roleEl ? roleEl.value : 'member' };
     if (emailEl && emailEl.value.trim()) body.email = emailEl.value.trim();
 
+    createUserInFlight = true;
+    setAdminCreateUserPending(true);
+
     apiFetch('/api/admin/users', { method: 'POST', body: body }).then(function (res) {
       var formEl = document.getElementById('create-user-form');
       if (formEl) formEl.style.display = 'none';
@@ -801,7 +808,7 @@
       var createdToken = res && (res.token || res.plaintext_token);
 
       // Reload users list
-      apiFetch('/api/admin/users').then(function (raw) {
+      return apiFetch('/api/admin/users').then(function (raw) {
         usersCache = Array.isArray(raw) ? raw : (raw && raw.users ? raw.users : []);
         renderUsersPage(el);
         if (createdToken) {
@@ -810,7 +817,27 @@
       });
     }).catch(function (err) {
       alert('Failed to create user: ' + err.message);
+    }).finally(function () {
+      createUserInFlight = false;
+      setAdminCreateUserPending(false);
     });
+  }
+
+  function setAdminCreateUserPending(isPending) {
+    var submit = document.querySelector('[data-action="create-user"]');
+    var cancel = document.querySelector('[data-action="hide-create-form"]');
+    var nameEl = document.getElementById('new-user-name');
+    var emailEl = document.getElementById('new-user-email');
+    var roleEl = document.getElementById('new-user-role');
+    [nameEl, emailEl, roleEl, cancel].forEach(function (el) {
+      if (el) el.disabled = isPending;
+    });
+    if (submit) {
+      submit.disabled = isPending;
+      submit.setAttribute('aria-busy', isPending ? 'true' : 'false');
+      submit.classList.toggle('is-loading', isPending);
+      submit.textContent = isPending ? 'Creating...' : 'Create';
+    }
   }
 
   function showTokenBanner(tokenValue) {

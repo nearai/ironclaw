@@ -15,5 +15,17 @@
 .btn-danger:hover { background: #ef4444; color: #fff; }
 .btn-primary { background: var(--accent); color: #fff; border: none; padding: 0.4rem 0.8rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem; }
 .btn-primary:hover { opacity: 0.9; }
+.btn-primary:disabled, .btn-secondary:disabled { opacity: 0.55; cursor: not-allowed; }
+.btn-primary.is-loading { display: inline-flex; align-items: center; gap: 0.4rem; }
+.btn-primary.is-loading::before {
+  content: '';
+  width: 0.75rem;
+  height: 0.75rem;
+  border: 2px solid rgba(255, 255, 255, 0.45);
+  border-top-color: #fff;
+  border-radius: 999px;
+  animation: users-create-spin 0.7s linear infinite;
+}
+@keyframes users-create-spin { to { transform: rotate(360deg); } }
+.users-form input:disabled, .users-form select:disabled { opacity: 0.65; cursor: not-allowed; }
 .btn-secondary { background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border); padding: 0.4rem 0.8rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem; }
-

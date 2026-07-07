@@ -68,6 +68,7 @@ I18n.register('zh-CN', {
   'users.roleMember': '成员',
   'users.roleAdmin': '管理员',
   'users.create': '创建',
+  'users.creating': '创建中...',
   'users.cancel': '取消',
   'users.emptyState': '暂无用户。创建第一个用户以开始使用。',
   'users.adminRequired': '需要管理员权限来管理用户。',

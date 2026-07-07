@@ -68,6 +68,7 @@ I18n.register('en', {
   'users.roleMember': 'Member',
   'users.roleAdmin': 'Admin',
   'users.create': 'Create',
+  'users.creating': 'Creating...',
   'users.cancel': 'Cancel',
   'users.emptyState': 'No users found. Create the first user to get started.',
   'users.adminRequired': 'Admin access required to manage users.',

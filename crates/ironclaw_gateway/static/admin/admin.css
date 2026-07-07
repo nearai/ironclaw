@@ -105,6 +105,17 @@ body {
 
 .btn-primary:hover { opacity: 0.9; }
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-primary.is-loading { display: inline-flex; align-items: center; gap: 8px; }
+.btn-primary.is-loading::before {
+  content: '';
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(255, 255, 255, 0.45);
+  border-top-color: var(--text-on-accent);
+  border-radius: 999px;
+  animation: admin-create-spin 0.7s linear infinite;
+}
+@keyframes admin-create-spin { to { transform: rotate(360deg); } }
 
 .btn-secondary {
   background: var(--bg-tertiary);
