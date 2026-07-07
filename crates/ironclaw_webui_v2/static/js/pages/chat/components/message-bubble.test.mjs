@@ -137,3 +137,33 @@ test("message timestamp and actions share a hover-only meta row", () => {
     "hover controls should use fixed-size icons instead of text that competes with the timestamp",
   );
 });
+
+test("optimistic message opacity does not fade attached image previews", () => {
+  assert.match(
+    messageBubbleSource,
+    /const contentOpacityClass = isOptimistic \? "opacity-70" : "";/,
+    "optimistic pending state should dim only textual message content",
+  );
+
+  const contentBubbleClassArrayStart = messageBubbleSource.indexOf('"text-base leading-7"');
+  const contentBubbleClassArray = messageBubbleSource.slice(
+    contentBubbleClassArrayStart,
+    messageBubbleSource.indexOf('].join(" ")}', contentBubbleClassArrayStart),
+  );
+  assert.doesNotMatch(
+    contentBubbleClassArray,
+    /isOptimistic|contentOpacityClass|opacity-70/,
+    "the whole bubble must not be opacity-wrapped because attachments inherit that fade",
+  );
+
+  assert.match(
+    messageBubbleSource,
+    /images && images\.length > 0 && html`[\s\S]*<img key=\$\{i\} src=\$\{src\} className="max-h-48 rounded-lg border border-iron-700 object-cover"/,
+    "inline image previews should render outside the optimistic text opacity wrapper",
+  );
+  assert.match(
+    messageBubbleSource,
+    /attachments && attachments\.length > 0 && html`[\s\S]*<\$\{AttachmentChip\}/,
+    "attachment chips and thumbnails should render outside the optimistic text opacity wrapper",
+  );
+});

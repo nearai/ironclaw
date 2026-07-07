@@ -126,6 +126,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
   const contentWidthClass = isUser ? "min-w-0 max-w-full" : "w-full min-w-0 max-w-full";
   const showRetryAction = status === "error" && onRetry;
   const showMetaRow = showActions || showRetryAction || timeLabel;
+  const contentOpacityClass = isOptimistic ? "opacity-70" : "";
 
   return html`
     <div
@@ -138,15 +139,14 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
             "text-base leading-7",
             contentWidthClass,
             ROLE_STYLES[role] || ROLE_STYLES.assistant,
-            isOptimistic ? "opacity-70" : "",
           ].join(" ")}
         >
           ${role === "assistant" || role === "system" || role === "error"
-            ? html`<${MarkdownRenderer} content=${content} />`
-            : html`<div className="v2-wrap-anywhere whitespace-pre-wrap break-words">${content}</div>`}
+            ? html`<div className=${contentOpacityClass}><${MarkdownRenderer} content=${content} /></div>`
+            : html`<div className="v2-wrap-anywhere whitespace-pre-wrap break-words"><span className=${contentOpacityClass}>${content}</span></div>`}
 
           ${status === "error" && html`
-            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-red-300">
+            <div className=${["mt-2 flex flex-wrap items-center gap-2 text-xs text-red-300", contentOpacityClass].join(" ")}>
               <span>${error}</span>
             </div>
           `}
