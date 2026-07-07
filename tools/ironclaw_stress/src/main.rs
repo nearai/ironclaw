@@ -1,4 +1,5 @@
 mod analysis;
+mod api_capacity;
 mod capture;
 mod child_io;
 mod compare;
@@ -24,6 +25,7 @@ use std::{
     any::Any,
     collections::BTreeMap,
     io::ErrorKind,
+    net::SocketAddr,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{Arc, mpsc},
@@ -35,6 +37,7 @@ use std::{
 #[cfg(feature = "postgres")]
 use crate::redaction::redact_postgres_url;
 use crate::{
+    api_capacity::ApiCapacitySummary,
     capture::CapturedRun,
     child_io::{join_child_stderr_reader, spawn_child_stderr_reader},
     db_probe::DbProbeSummary,
@@ -166,6 +169,82 @@ pub(crate) struct Args {
     /// Postgres pool size per process.
     #[arg(long, default_value_t = 4)]
     pub(crate) postgres_pool_size: usize,
+
+    /// Base URL for API-level scenarios, for example https://host or http://127.0.0.1:8080.
+    #[arg(long)]
+    pub(crate) api_base_url: Option<String>,
+
+    /// JSONL file of API test users. Each line may contain user_id and bearer_token.
+    #[arg(long)]
+    pub(crate) api_users_jsonl: Option<PathBuf>,
+
+    /// Bearer token used for every generated API test user when --api-users-jsonl is omitted.
+    #[arg(long)]
+    pub(crate) api_bearer_token: Option<String>,
+
+    /// Aggregate read pressure per virtual user for api-user-capacity.
+    #[arg(long, default_value_t = 0.0)]
+    pub(crate) api_read_qps_per_user: f64,
+
+    /// Read worker count for api-user-capacity. 0 auto-scales from --users.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) api_read_workers: usize,
+
+    /// Read endpoint mix for api-user-capacity, e.g. list_threads=50,timeline=45,session=5.
+    #[arg(long, default_value_t = api_capacity::default_read_mix())]
+    pub(crate) api_read_mix: String,
+
+    /// Page size for API list/timeline reads.
+    #[arg(long, default_value_t = 50)]
+    pub(crate) api_page_size: u32,
+
+    /// Per-user delay after each completed full flow.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) api_message_interval_ms: u64,
+
+    /// Wait until the assistant message is visible in the timeline before completing a full flow.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub(crate) api_wait_for_assistant: bool,
+
+    /// Full-flow timeout while waiting for assistant visibility.
+    #[arg(long, default_value_t = 30_000)]
+    pub(crate) api_terminal_timeout_ms: u64,
+
+    /// Timeline polling interval while waiting for assistant visibility.
+    #[arg(long, default_value_t = 250)]
+    pub(crate) api_poll_interval_ms: u64,
+
+    /// Per-request timeout for API calls.
+    #[arg(long, default_value_t = 10_000)]
+    pub(crate) api_request_timeout_ms: u64,
+
+    /// Concurrent setup creates for API scenario user threads.
+    #[arg(long, default_value_t = 16)]
+    pub(crate) api_setup_concurrency: usize,
+
+    /// Optional bind address for the built-in OpenAI-compatible mock LLM sidecar.
+    #[arg(long)]
+    pub(crate) mock_llm_bind: Option<SocketAddr>,
+
+    /// Model name returned by the built-in mock LLM.
+    #[arg(long, default_value = "stress-mock")]
+    pub(crate) mock_llm_model: String,
+
+    /// Base latency added by the built-in mock LLM.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) mock_llm_latency_ms: u64,
+
+    /// Deterministic jitter ceiling added by the built-in mock LLM.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) mock_llm_jitter_ms: u64,
+
+    /// Assistant content bytes returned by the built-in mock LLM.
+    #[arg(long, default_value_t = 128)]
+    pub(crate) mock_llm_output_bytes: usize,
+
+    /// Deterministic failure rate for the built-in mock LLM, from 0.0 to 1.0.
+    #[arg(long, default_value_t = 0.0)]
+    pub(crate) mock_llm_failure_rate: f64,
 
     /// Emit live progress to stderr every N seconds. Set to 0 to disable.
     #[arg(long, default_value_t = 1)]
@@ -584,6 +663,7 @@ pub(crate) enum Scenario {
     MixedUserSession,
     ContextGrowth,
     ToolSession,
+    ApiUserCapacity,
     CpuBurn,
     MemoryChurn,
 }
@@ -597,6 +677,7 @@ impl Scenario {
             Self::MixedUserSession => "mixed-user-session",
             Self::ContextGrowth => "context-growth",
             Self::ToolSession => "tool-session",
+            Self::ApiUserCapacity => "api-user-capacity",
             Self::CpuBurn => "cpu-burn",
             Self::MemoryChurn => "memory-churn",
         }
@@ -611,6 +692,10 @@ impl Scenario {
             self,
             Self::ChatTurn | Self::MixedUserSession | Self::ContextGrowth | Self::ToolSession
         )
+    }
+
+    pub(crate) fn is_api_capacity(self) -> bool {
+        matches!(self, Self::ApiUserCapacity)
     }
 
     pub(crate) fn is_process_local(self) -> bool {
@@ -686,6 +771,8 @@ struct RunSummary {
     operation_attribution: Option<UserTurnOperationAttributionSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stage_latency: Option<UserTurnStageLatencySummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    api_capacity: Option<ApiCapacitySummary>,
     errors: BTreeMap<String, u64>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     failure_causes: BTreeMap<String, FailureCauseSummary>,
@@ -698,6 +785,7 @@ struct SummaryInput {
     process: ProcessMetrics,
     db_probe: Option<DbProbeSummary>,
     prefill: Option<user_turn::PrefillSummary>,
+    api_capacity: Option<ApiCapacitySummary>,
 }
 
 #[tokio::main]
@@ -719,6 +807,7 @@ async fn run() -> Result<(), String> {
     args.run_id = Some(run_id.clone());
     let generated_libsql_path = if args.child_index.is_none()
         && matches!(args.backend, Backend::Libsql)
+        && !args.scenario.is_api_capacity()
         && args.libsql_path.is_none()
     {
         let path = default_libsql_path();
@@ -909,6 +998,36 @@ fn validate_args(args: &Args) -> Result<(), String> {
     }
     if args.postgres_pool_size == 0 {
         return Err("--postgres-pool-size must be greater than 0".to_string());
+    }
+    if args.scenario.is_api_capacity() {
+        if args.api_base_url.is_none() {
+            return Err("--api-base-url is required for --scenario api-user-capacity".to_string());
+        }
+        if args.processes > 1 {
+            return Err("--scenario api-user-capacity requires --processes 1".to_string());
+        }
+    }
+    if args.api_read_qps_per_user < 0.0 {
+        return Err("--api-read-qps-per-user must be greater than or equal to 0".to_string());
+    }
+    if args.api_page_size == 0 {
+        return Err("--api-page-size must be greater than 0".to_string());
+    }
+    if args.api_terminal_timeout_ms == 0 {
+        return Err("--api-terminal-timeout-ms must be greater than 0".to_string());
+    }
+    if args.api_poll_interval_ms == 0 {
+        return Err("--api-poll-interval-ms must be greater than 0".to_string());
+    }
+    if args.api_request_timeout_ms == 0 {
+        return Err("--api-request-timeout-ms must be greater than 0".to_string());
+    }
+    if args.api_setup_concurrency == 0 {
+        return Err("--api-setup-concurrency must be greater than 0".to_string());
+    }
+    api_capacity::validate_read_mix(&args.api_read_mix)?;
+    if !(0.0..=1.0).contains(&args.mock_llm_failure_rate) {
+        return Err("--mock-llm-failure-rate must be between 0.0 and 1.0".to_string());
     }
     if matches!(args.model_latency_source, ModelLatencySource::Provider) {
         if !matches!(args.scenario, Scenario::MixedUserSession) {
@@ -1365,6 +1484,9 @@ async fn run_in_process(args: &Args, run_id: &str) -> Result<RunSummary, String>
     if args.scenario.is_process_local() {
         return run_process_pressure_in_process(args, run_id, operation_target).await;
     }
+    if args.scenario.is_api_capacity() {
+        return run_api_capacity_in_process(args, run_id, operation_target).await;
+    }
     let identities = Arc::new(SyntheticIds::new(args)?);
 
     if args.scenario.is_resource_governor() {
@@ -1432,6 +1554,72 @@ async fn run_process_pressure_in_process(
             process,
             db_probe: None,
             prefill: None,
+            api_capacity: None,
+        },
+    );
+    eprintln!(
+        "{} finished attempted={} succeeded={} failed={} duration_ms={} throughput_ops_sec={:.1}",
+        log_prefix(args),
+        summary.attempted,
+        summary.succeeded,
+        summary.failed,
+        summary.duration_ms,
+        summary.throughput_ops_sec
+    );
+    Ok(summary)
+}
+
+async fn run_api_capacity_in_process(
+    args: &Args,
+    run_id: &str,
+    operation_target: OperationTarget,
+) -> Result<RunSummary, String> {
+    let target = args
+        .api_base_url
+        .clone()
+        .unwrap_or_else(|| "api://unconfigured".to_string());
+    let progress_total = match operation_target {
+        OperationTarget::Fixed { .. } => Some(args.users.saturating_mul(args.operations)),
+        OperationTarget::Duration { .. } => None,
+    };
+    eprintln!(
+        "{} running target={} virtual_users={} operations_per_user={} {} warmup_seconds={} read_qps_per_user={:.2} progress_interval_seconds={}",
+        log_prefix(args),
+        target,
+        args.users,
+        args.operations,
+        operation_target.label(),
+        args.warmup_seconds,
+        args.api_read_qps_per_user,
+        args.progress_interval_seconds
+    );
+    let progress = Arc::new(ProgressCounters::new(args.trace_jsonl.is_some()));
+    let progress_reporter = spawn_progress_reporter(
+        log_prefix(args),
+        args.backend.as_str(),
+        args.scenario.as_str(),
+        args.progress_interval_seconds,
+        progress_total,
+        Arc::clone(&progress),
+    );
+    let trace_reporter = trace::spawn_trace_reporter(args, &target, Arc::clone(&progress));
+    let metrics = ProcessMetricsSampler::start(Duration::from_millis(100));
+    let api_run = api_capacity::run(args, run_id, progress).await;
+    trace::stop_trace_reporter(trace_reporter);
+    stop_progress_reporter(progress_reporter);
+    let api_run = api_run?;
+    let process = metrics.finish();
+    let summary = summarize(
+        args,
+        run_id,
+        SummaryInput {
+            target: api_run.target,
+            elapsed: api_run.elapsed,
+            samples: api_run.samples,
+            process,
+            db_probe: None,
+            prefill: None,
+            api_capacity: Some(api_run.summary),
         },
     );
     eprintln!(
@@ -1521,6 +1709,7 @@ async fn run_resource_governor_in_process(
             process,
             db_probe: Some(db_probe),
             prefill: None,
+            api_capacity: None,
         },
     );
     eprintln!(
@@ -1585,6 +1774,7 @@ async fn run_user_turn_in_process(
             process,
             db_probe: Some(db_probe),
             prefill,
+            api_capacity: None,
         },
     );
     eprintln!(
@@ -1724,6 +1914,9 @@ fn run_one_operation(
         Scenario::MixedUserSession => {
             unreachable!("mixed-user-session uses the async user-turn workload")
         }
+        Scenario::ApiUserCapacity => {
+            unreachable!("api-user-capacity uses the async API workload")
+        }
         Scenario::CpuBurn | Scenario::MemoryChurn => {
             unreachable!("process-only scenarios use the local pressure workload")
         }
@@ -1811,6 +2004,7 @@ fn summarize(args: &Args, run_id: &str, input: SummaryInput) -> RunSummary {
         prefill: input.prefill,
         operation_attribution: summarize_user_turn_operation_attribution(&input.samples),
         stage_latency: summarize_user_turn_stages(&input.samples),
+        api_capacity: input.api_capacity,
         errors,
         failure_causes: summarize_failure_causes(&input.samples),
     }

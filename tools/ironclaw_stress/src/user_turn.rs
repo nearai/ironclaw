@@ -890,6 +890,12 @@ where
             };
 
             if matches!(args.scenario, Scenario::MixedUserSession) {
+                stage_trace(
+                    worker_index,
+                    operation_index,
+                    &operation_ref,
+                    "load_context:start",
+                );
                 time_stage(
                     &mut stages.load_context,
                     self.thread_service
@@ -901,7 +907,19 @@ where
                 )
                 .await
                 .map_err(|error| thread_failure("load_context", error))?;
+                stage_trace(
+                    worker_index,
+                    operation_index,
+                    &operation_ref,
+                    "load_context:done",
+                );
 
+                stage_trace(
+                    worker_index,
+                    operation_index,
+                    &operation_ref,
+                    "resource_reserve:start",
+                );
                 let reservation = time_stage(
                     &mut stages.resource_reserve,
                     reserve_resources(
@@ -910,14 +928,38 @@ where
                     ),
                 )
                 .await?;
+                stage_trace(
+                    worker_index,
+                    operation_index,
+                    &operation_ref,
+                    "resource_reserve:done",
+                );
 
                 let execution = async {
+                    stage_trace(
+                        worker_index,
+                        operation_index,
+                        &operation_ref,
+                        "model_wait:start",
+                    );
                     time_stage(
                         &mut stages.model_wait,
                         self.model_latency.run(args, worker_index, operation_index),
                     )
                     .await?;
+                    stage_trace(
+                        worker_index,
+                        operation_index,
+                        &operation_ref,
+                        "model_wait:done",
+                    );
 
+                    stage_trace(
+                        worker_index,
+                        operation_index,
+                        &operation_ref,
+                        "write_assistant:start",
+                    );
                     self.write_assistant_turn(
                         &context,
                         &thread.thread_id,
@@ -927,6 +969,12 @@ where
                         stages,
                     )
                     .await?;
+                    stage_trace(
+                        worker_index,
+                        operation_index,
+                        &operation_ref,
+                        "write_assistant:done",
+                    );
 
                     Ok::<(), OperationFailure>(())
                 }
@@ -941,11 +989,23 @@ where
                     return Err(error);
                 }
 
+                stage_trace(
+                    worker_index,
+                    operation_index,
+                    &operation_ref,
+                    "resource_reconcile:start",
+                );
                 time_stage(
                     &mut stages.resource_reconcile,
                     reconcile_resources(Arc::clone(&self.governor), reservation.id),
                 )
                 .await?;
+                stage_trace(
+                    worker_index,
+                    operation_index,
+                    &operation_ref,
+                    "resource_reconcile:done",
+                );
             } else if matches!(args.scenario, Scenario::ToolSession) {
                 time_stage(
                     &mut stages.load_context,
@@ -1393,12 +1453,27 @@ async fn time_stage<T>(slot: &mut Option<Duration>, future: impl Future<Output =
     output
 }
 
+fn stage_trace(worker_index: usize, operation_index: usize, operation_ref: &str, stage: &str) {
+    if std::env::var_os("IRONCLAW_STRESS_STAGE_TRACE").is_some() {
+        eprintln!(
+            "[ironclaw-stress-stage] worker={worker_index} op={operation_index} ref={operation_ref} {stage}"
+        );
+    }
+}
+
 async fn reserve_resources(
     governor: Arc<dyn ResourceGovernor>,
     scope: ResourceScope,
 ) -> Result<ResourceReservation, OperationFailure> {
-    governor
-        .reserve(scope, resource_ops::estimate())
+    tokio::task::spawn_blocking(move || governor.reserve(scope, resource_ops::estimate()))
+        .await
+        .map_err(|error| {
+            OperationFailure::new(
+                "resource_worker_join",
+                "resource_reserve",
+                format!("resource reserve worker failed: {error}"),
+            )
+        })?
         .map_err(|error| resource_failure("resource_reserve", error))
 }
 
@@ -1406,8 +1481,15 @@ async fn reconcile_resources(
     governor: Arc<dyn ResourceGovernor>,
     reservation_id: ResourceReservationId,
 ) -> Result<(), OperationFailure> {
-    governor
-        .reconcile(reservation_id, resource_ops::usage())
+    tokio::task::spawn_blocking(move || governor.reconcile(reservation_id, resource_ops::usage()))
+        .await
+        .map_err(|error| {
+            OperationFailure::new(
+                "resource_worker_join",
+                "resource_reconcile",
+                format!("resource reconcile worker failed: {error}"),
+            )
+        })?
         .map(|_| ())
         .map_err(|error| resource_failure("resource_reconcile", error))
 }
@@ -1416,8 +1498,15 @@ async fn release_resources(
     governor: Arc<dyn ResourceGovernor>,
     reservation_id: ResourceReservationId,
 ) -> Result<(), OperationFailure> {
-    governor
-        .release(reservation_id)
+    tokio::task::spawn_blocking(move || governor.release(reservation_id))
+        .await
+        .map_err(|error| {
+            OperationFailure::new(
+                "resource_worker_join",
+                "resource_release",
+                format!("resource release worker failed: {error}"),
+            )
+        })?
         .map(|_| ())
         .map_err(|error| resource_failure("resource_release", error))
 }
