@@ -7,7 +7,7 @@ use ironclaw_host_runtime::{
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_trust::TrustDecision;
 
-use crate::extension_host::local_dev_capability_policy::{
+use crate::local_dev_capability_policy::{
     LocalDevApprovalPolicyAction, LocalDevCapabilityPolicyError, local_dev_one_shot_lease_approval,
 };
 use crate::{RebornServices, factory::RebornLocalRuntimeServices};

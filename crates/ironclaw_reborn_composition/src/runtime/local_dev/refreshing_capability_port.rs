@@ -18,7 +18,7 @@ use ironclaw_turns::run_profile::{
 };
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::extension_host::local_dev_capability_policy::LocalDevCapabilityPolicy;
+use crate::local_dev_capability_policy::LocalDevCapabilityPolicy;
 use crate::profile_approval_authorization::ApprovalSettingsProvider;
 use crate::runtime::LocalDevSelectableSkillContextSource;
 use crate::runtime::local_dev::extension_surface::LocalDevExtensionSurfaceSource;

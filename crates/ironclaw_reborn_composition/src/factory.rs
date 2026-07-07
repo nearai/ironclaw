@@ -149,9 +149,6 @@ use crate::extension_host::available_extensions::slack_manifest_digest;
 use crate::extension_host::lifecycle::{
     RebornLocalSkillManagementPort, build_local_skill_management_port,
 };
-use crate::extension_host::local_dev_capability_policy::{
-    LocalDevCapabilityPolicy, local_dev_capability_policy,
-};
 use crate::extension_host::mcp::hosted_http_mcp_runtime;
 use crate::extension_host::{
     available_extensions::{
@@ -173,6 +170,7 @@ use crate::extension_host::{
 };
 use crate::input::{RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::local_dev_authorization::{StoreApprovalSettingsProvider, local_dev_authorizer};
+use crate::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
 use crate::local_dev_mounts::{
     ambient_workspace_mount_view, memory_mount_view, scoped_skill_context_mount_view,
     skill_management_mount_view, system_extensions_lifecycle_mount_view, workspace_mount_view,
@@ -4694,7 +4692,7 @@ mod tests {
     use secrecy::ExposeSecret;
 
     use crate::extension_host::extension_lifecycle::ExtensionActivationMode;
-    use crate::extension_host::local_dev_capability_policy::{
+    use crate::local_dev_capability_policy::{
         LocalDevApprovalPolicyAction, LocalDevCapabilityPolicyError,
     };
     use crate::{

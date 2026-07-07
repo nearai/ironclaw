@@ -26,6 +26,7 @@ integrations/abound/tests/source_env_vars.sh
 # Sidecar tool data
 .sidecar/
 .todos/
+.tmp/
 
 target/
 

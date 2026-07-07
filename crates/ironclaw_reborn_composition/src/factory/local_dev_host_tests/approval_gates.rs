@@ -25,7 +25,7 @@ use ironclaw_run_state::{ApprovalRequestStore, ApprovalStatus};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
 use super::*;
-use crate::extension_host::local_dev_capability_policy::local_dev_one_shot_lease_approval;
+use crate::local_dev_capability_policy::local_dev_one_shot_lease_approval;
 
 use crate::approval_test_support::disable_global_auto_approve;
 

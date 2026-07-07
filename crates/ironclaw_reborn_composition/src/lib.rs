@@ -35,6 +35,7 @@ mod failure_summary;
 mod input;
 mod llm_admin;
 mod local_dev_authorization;
+mod local_dev_capability_policy;
 mod local_dev_mounts;
 mod local_runtime_profile;
 mod observability;

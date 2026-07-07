@@ -7,11 +7,9 @@
 //! installation store and lifecycle command/capability stack
 //! (`extension_installation_store`, `extension_lifecycle`,
 //! `extension_lifecycle_capabilities`, `extension_lifecycle_command`,
-//! `lifecycle`, `skill_learning`, `skill_listing`), MCP discovery
-//! (`mcp`, `mcp_discovery`), and local-dev capability policy
-//! (`local_dev_capability_policy`) — behind one internal module. The crate root
-//! re-exports the same public items from here so the crate's public API is
-//! unchanged.
+//! `lifecycle`, `skill_learning`, `skill_listing`), and MCP discovery
+//! (`mcp`, `mcp_discovery`) behind one internal module. The crate root re-exports
+//! the same public items from here so the crate's public API is unchanged.
 
 pub(crate) mod available_extensions;
 pub(crate) mod bundled_skills;
@@ -25,7 +23,6 @@ pub(crate) mod extension_lifecycle_capabilities_auth_tests;
 pub(crate) mod extension_lifecycle_command;
 pub(crate) mod gsuite;
 pub(crate) mod lifecycle;
-pub(crate) mod local_dev_capability_policy;
 pub(crate) mod mcp;
 pub(crate) mod mcp_discovery;
 pub(crate) mod skill_learning;

@@ -104,10 +104,8 @@ use ironclaw_turns::run_profile::UserProfileContext;
 use self::latency::{trace_runtime_latency_error, trace_runtime_latency_ok};
 use self::runtime_turn_scheduler::RuntimeTurnScheduler;
 use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
-use crate::extension_host::local_dev_capability_policy::{
-    LocalDevCapabilityPolicy, local_dev_capability_policy,
-};
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore, builtin_extension_registry};
+use crate::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
 #[cfg(any(test, feature = "test-support"))]
 use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
 use crate::outbound::{
