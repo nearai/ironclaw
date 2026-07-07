@@ -610,12 +610,14 @@ impl OAuthProviderIdentitySubject {
         &self.0
     }
 
-    pub fn as_ref(&self) -> &str {
-        &self.0
-    }
-
     pub fn into_inner(self) -> String {
         self.0
+    }
+}
+
+impl AsRef<str> for OAuthProviderIdentitySubject {
+    fn as_ref(&self) -> &str {
+        self.as_str()
     }
 }
 
