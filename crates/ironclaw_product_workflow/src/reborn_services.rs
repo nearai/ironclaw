@@ -2886,9 +2886,17 @@ impl RebornServices {
             .await
             .map_err(map_admin_user_error)?;
         match record {
-            Some(user) if user.role.is_admin() => Ok(()),
-            // Both "no record" and "record but not admin" are a 403: the caller
-            // is authenticated but not authorized. Never leak which.
+            // Admin/owner role AND an active account. A suspended admin keeps
+            // the role field but must not act: status gates authorization, so
+            // suspending an admin immediately revokes their admin API access
+            // (same "read on every call, never cache" contract as role).
+            Some(user)
+                if user.role.is_admin() && user.status == AdminUserStatus::Active =>
+            {
+                Ok(())
+            }
+            // "No record", "not admin", and "suspended admin" are all a 403: the
+            // caller is authenticated but not authorized. Never leak which.
             _ => Err(RebornServicesError::from_status(
                 RebornServicesErrorCode::Forbidden,
                 403,
@@ -3051,6 +3059,9 @@ impl RebornServicesApi for RebornServices {
         request: RebornAdminSetStatusRequest,
     ) -> Result<RebornAdminUserResponse, RebornServicesError> {
         self.authorize_admin(&caller).await?;
+        // Serialize with concurrent role/status/delete on this tenant so the
+        // last-admin count read below reflects any in-flight demotion.
+        let _admin_guard = self.lock_admin_mutation(&caller.tenant_id).await;
         let target = self
             .require_admin_target(&caller.tenant_id, &user_id)
             .await?;
@@ -3073,6 +3084,9 @@ impl RebornServicesApi for RebornServices {
         request: RebornAdminSetRoleRequest,
     ) -> Result<RebornAdminUserResponse, RebornServicesError> {
         self.authorize_admin(&caller).await?;
+        // Serialize with concurrent role/status/delete on this tenant so the
+        // last-admin count read below reflects any in-flight demotion.
+        let _admin_guard = self.lock_admin_mutation(&caller.tenant_id).await;
         let target = self
             .require_admin_target(&caller.tenant_id, &user_id)
             .await?;
@@ -3093,6 +3107,9 @@ impl RebornServicesApi for RebornServices {
         user_id: UserId,
     ) -> Result<RebornAdminUserDeletedResponse, RebornServicesError> {
         self.authorize_admin(&caller).await?;
+        // Serialize with concurrent role/status/delete on this tenant so the
+        // last-admin count read below reflects any in-flight demotion.
+        let _admin_guard = self.lock_admin_mutation(&caller.tenant_id).await;
         let target = self
             .require_admin_target(&caller.tenant_id, &user_id)
             .await?;
@@ -5162,6 +5179,32 @@ impl RebornServices {
 
     async fn lock_thread_operation(&self, scope: &TurnScope) -> OwnedMutexGuard<()> {
         self.thread_operation_lock(scope).lock_owned().await
+    }
+
+    /// Per-tenant lock serializing admin mutations that affect the active-admin
+    /// count (role/status/delete). `ensure_not_last_admin` re-reads the count
+    /// then mutates; without serialization two concurrent demotions each see
+    /// "2 admins", both pass, and both land — stranding the tenant with zero
+    /// admins (a TOCTOU race). Holding this across the check+mutation makes the
+    /// count read authoritative. Reuses the same weak-ref keyed registry as
+    /// `thread_operation_lock`, namespaced so the keyspaces cannot collide.
+    async fn lock_admin_mutation(&self, tenant: &TenantId) -> OwnedMutexGuard<()> {
+        let key = format!("admin-mutation:{}", tenant.as_str());
+        let lock = {
+            let mut locks = match self.thread_operation_locks.lock() {
+                Ok(locks) => locks,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+                lock
+            } else {
+                let lock = Arc::new(AsyncMutex::new(()));
+                locks.insert(key, Arc::downgrade(&lock));
+                lock
+            }
+        };
+        lock.lock_owned().await
     }
 
     async fn reject_delete_with_active_run(

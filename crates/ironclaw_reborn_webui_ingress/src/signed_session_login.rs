@@ -529,6 +529,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn revoked_token_survives_a_simulated_process_restart() {
+        // CHARACTERIZATION of an INTENTIONAL bound (see the module docs:
+        // "The denylist is process-local and clears on restart, after which a
+        // not-yet-expired revoked token would validate again"). Revocation is
+        // an in-memory, process-local denylist — it does NOT persist. A fresh
+        // store built from the SAME operator secret + tenant (a process
+        // restart) re-accepts a revoked-but-unexpired token, because the token
+        // is a stateless valid HMAC and the new process starts with an empty
+        // denylist. A deployment needing durable revocation supplies a
+        // DB-backed SessionStore; this test pins that logout does not survive a
+        // restart with the stateless store.
+        let store_a = signed_store("operator-secret");
+        let token = store_a
+            .create_session(
+                tenant(),
+                UserId::new("operator").expect("user"),
+                ChronoDuration::hours(1),
+            )
+            .await
+            .expect("create");
+        let raw = token.expose_secret().to_string();
+
+        store_a.revoke(&raw).await.expect("revoke");
+        assert!(
+            store_a.lookup(&raw).await.expect("lookup").is_none(),
+            "the minting store rejects the revoked token in-process",
+        );
+
+        // Simulate a restart: a brand-new store, same operator secret + tenant,
+        // empty denylist.
+        let store_b = signed_store("operator-secret");
+        assert!(
+            store_b.lookup(&raw).await.expect("lookup").is_some(),
+            "a fresh store does not honor another process's revocation, so the \
+             revoked-but-unexpired token authenticates again after restart",
+        );
+    }
+
+    #[tokio::test]
+    async fn denylist_eviction_can_resurrect_a_revoked_token() {
+        // CHARACTERIZATION of an INTENTIONAL bound: the revocation denylist is
+        // hard-capped at MAX_REVOKED_ENTRIES and, when full of live entries,
+        // evicts the one closest to expiry (see the const's doc comment). Under
+        // enough revocation pressure a still-unexpired revoked token can be
+        // evicted from the denylist and then re-accepted by `lookup` BEFORE its
+        // own `exp` — because the token itself remains a cryptographically
+        // valid, unexpired HMAC. This pins the security-relevant limit: durable
+        // revocation is not a property of the stateless store.
+        let store = signed_store("operator-secret");
+        let base = Utc::now().timestamp();
+
+        // Deterministic raw tokens with explicit sids/expiries so we control
+        // which entry the "closest to expiry" eviction rule targets.
+        let raw = |sid: &str, exp: i64| {
+            signed_raw(
+                &store,
+                &TokenPayload {
+                    sid: sid.to_string(),
+                    tenant: "tenant-a".to_string(),
+                    user: "operator".to_string(),
+                    iat: base,
+                    exp,
+                },
+            )
+        };
+
+        // The victim has the SOONEST expiry, so the eviction rule ("drop the
+        // entry closest to expiry") is guaranteed to target it once the cap is
+        // reached — while it stays on the denylist, it is rejected.
+        let victim = raw("victim", base + 60);
+        store.revoke(&victim).await.expect("revoke victim");
+        assert!(
+            store.lookup(&victim).await.expect("lookup").is_none(),
+            "a revoked token on the denylist must be rejected",
+        );
+
+        // Fill the denylist past the cap with DISTINCT, longer-lived tokens.
+        // Nothing has expired, so the sweep frees nothing and the store must
+        // evict the soonest-expiry entry (the victim) to stay bounded.
+        for i in 0..MAX_REVOKED_ENTRIES {
+            let filler = raw(&format!("filler-{i}"), base + 3600);
+            store.revoke(&filler).await.expect("revoke filler");
+        }
+
+        // The denylist stayed bounded at/under the hard cap.
+        assert!(
+            store.revoked.read().len() <= MAX_REVOKED_ENTRIES,
+            "the denylist must never exceed its hard cap",
+        );
+        assert_eq!(store.revoked.read().len(), MAX_REVOKED_ENTRIES);
+
+        // The evicted-but-unexpired victim is once again accepted: revocation
+        // was silently undone by denylist pressure.
+        assert!(
+            store.lookup(&victim).await.expect("lookup").is_some(),
+            "an evicted, still-unexpired revoked token is accepted again",
+        );
+        // A filler that stayed on the denylist is still rejected — only the
+        // evicted entry was resurrected; the denylist itself still works.
+        let still_revoked = raw("filler-0", base + 3600);
+        assert!(
+            store.lookup(&still_revoked).await.expect("lookup").is_none(),
+            "a token still on the denylist stays revoked",
+        );
+    }
+
+    #[tokio::test]
     async fn create_session_rejects_non_positive_lifetime() {
         let store = signed_store("operator-secret");
         for lifetime in [ChronoDuration::zero(), ChronoDuration::seconds(-1)] {

@@ -83,7 +83,8 @@ use ironclaw_product_workflow::{
 use ironclaw_product_workflow::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
     AdminUserSecretMeta, AdminUserService, AdminUserStatus, RebornAdminCreateUserRequest,
-    RebornAdminSetRoleRequest, RebornAdminSetStatusRequest, RebornAdminUserListQuery,
+    RebornAdminPutSecretRequest, RebornAdminSetRoleRequest, RebornAdminSetStatusRequest,
+    RebornAdminUpdateUserRequest, RebornAdminUserListQuery,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -11682,21 +11683,170 @@ fn admin_services(fake: FakeAdminUsers) -> RebornServices {
     .with_admin_user_service(Arc::new(fake))
 }
 
+fn assert_forbidden(err: RebornServicesError) {
+    assert_eq!(err.status_code, 403, "expected a 403 authorization failure");
+    assert_eq!(err.code, RebornServicesErrorCode::Forbidden);
+}
+
+/// Drive EVERY admin verb through the facade and assert each is a 403.
+/// `authorize_admin` is a predicate that gates side effects, so it must be
+/// tested at every call site — not just `list` (.claude/rules/testing.md,
+/// "test through the caller"): a verb that forgot to call it would be an
+/// unauthorized read/mutation hole invisible to a single-endpoint test.
+async fn assert_every_admin_verb_forbidden(services: &RebornServices) {
+    let target = UserId::new("some-target").expect("user");
+    assert_forbidden(
+        services
+            .list_admin_users(caller(), RebornAdminUserListQuery::default())
+            .await
+            .expect_err("list"),
+    );
+    assert_forbidden(
+        services
+            .get_admin_user(caller(), target.clone())
+            .await
+            .expect_err("get"),
+    );
+    assert_forbidden(
+        services
+            .create_admin_user(
+                caller(),
+                RebornAdminCreateUserRequest {
+                    email: None,
+                    display_name: None,
+                    role: AdminUserRole::Member,
+                },
+            )
+            .await
+            .expect_err("create"),
+    );
+    assert_forbidden(
+        services
+            .update_admin_user(
+                caller(),
+                target.clone(),
+                RebornAdminUpdateUserRequest::default(),
+            )
+            .await
+            .expect_err("update"),
+    );
+    assert_forbidden(
+        services
+            .set_admin_user_status(
+                caller(),
+                target.clone(),
+                RebornAdminSetStatusRequest {
+                    status: AdminUserStatus::Suspended,
+                },
+            )
+            .await
+            .expect_err("status"),
+    );
+    assert_forbidden(
+        services
+            .set_admin_user_role(
+                caller(),
+                target.clone(),
+                RebornAdminSetRoleRequest {
+                    role: AdminUserRole::Admin,
+                },
+            )
+            .await
+            .expect_err("role"),
+    );
+    assert_forbidden(
+        services
+            .delete_admin_user(caller(), target.clone())
+            .await
+            .expect_err("delete"),
+    );
+    assert_forbidden(
+        services
+            .list_admin_user_secrets(caller(), target.clone())
+            .await
+            .expect_err("list_secrets"),
+    );
+    assert_forbidden(
+        services
+            .put_admin_user_secret(
+                caller(),
+                target.clone(),
+                "handle".to_string(),
+                RebornAdminPutSecretRequest {
+                    value: "v".to_string(),
+                },
+            )
+            .await
+            .expect_err("put_secret"),
+    );
+    assert_forbidden(
+        services
+            .delete_admin_user_secret(caller(), target, "handle".to_string())
+            .await
+            .expect_err("delete_secret"),
+    );
+}
+
 #[tokio::test]
-async fn admin_member_caller_is_forbidden() {
-    // caller() resolves to user-alpha; seeded as a plain member → 403 on every
-    // admin operation.
+async fn admin_member_caller_is_forbidden_on_every_verb() {
+    // caller() resolves to user-alpha; seeded as a plain member → 403 on EVERY
+    // admin verb, not just list.
     let services = admin_services(FakeAdminUsers::with([admin_record(
         "user-alpha",
         AdminUserRole::Member,
         AdminUserStatus::Active,
     )]));
-    let err = services
-        .list_admin_users(caller(), RebornAdminUserListQuery::default())
-        .await
-        .expect_err("a member must not reach the admin surface");
-    assert_eq!(err.code, RebornServicesErrorCode::Forbidden);
-    assert_eq!(err.status_code, 403);
+    assert_every_admin_verb_forbidden(&services).await;
+    // Self-privilege-escalation: a member cannot promote their own record.
+    assert_forbidden(
+        services
+            .set_admin_user_role(
+                caller(),
+                UserId::new("user-alpha").expect("user"),
+                RebornAdminSetRoleRequest {
+                    role: AdminUserRole::Admin,
+                },
+            )
+            .await
+            .expect_err("a member must not promote themselves"),
+    );
+}
+
+#[tokio::test]
+async fn admin_unknown_caller_is_forbidden_on_every_verb() {
+    // The caller has no user record at all. Same 403 as a member — the facade
+    // must never leak (via a different status/code) whether the caller record
+    // exists but is under-privileged vs. does not exist.
+    let services = admin_services(FakeAdminUsers::default());
+    assert_every_admin_verb_forbidden(&services).await;
+}
+
+#[tokio::test]
+async fn admin_suspended_admin_is_forbidden_on_every_verb() {
+    // Regression: `authorize_admin` used to check `role` only, so a SUSPENDED
+    // admin kept full control (the role field still reads Admin). Status now
+    // gates authorization, so suspending an admin revokes their admin API
+    // access immediately — on every verb.
+    let services = admin_services(FakeAdminUsers::with([admin_record(
+        "user-alpha",
+        AdminUserRole::Admin,
+        AdminUserStatus::Suspended,
+    )]));
+    assert_every_admin_verb_forbidden(&services).await;
+
+    // A suspended OWNER is likewise locked out (owner also clears the role
+    // boundary, so status must gate it too).
+    let services_owner = admin_services(FakeAdminUsers::with([admin_record(
+        "user-alpha",
+        AdminUserRole::Owner,
+        AdminUserStatus::Suspended,
+    )]));
+    assert_forbidden(
+        services_owner
+            .list_admin_users(caller(), RebornAdminUserListQuery::default())
+            .await
+            .expect_err("a suspended owner must not reach the admin surface"),
+    );
 }
 
 #[tokio::test]
@@ -11788,4 +11938,65 @@ async fn admin_last_admin_protection_allows_demote_with_a_second_admin() {
         )
         .await
         .expect("demoting one of two admins is allowed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn admin_last_admin_protection_survives_concurrent_demotion() {
+    // Two active admins. Fire both demotions concurrently: without serialization
+    // each `ensure_not_last_admin` reads "2 admins", both pass, and both land →
+    // 0 admins (a TOCTOU race). The per-tenant admin-mutation lock serializes
+    // the check+mutation, so exactly one demotion succeeds and the other is a
+    // 409 — the tenant always keeps an admin. Runs on a multi-thread runtime so
+    // the two calls are genuinely parallel.
+    let services = std::sync::Arc::new(admin_services(FakeAdminUsers::with([
+        admin_record("user-alpha", AdminUserRole::Admin, AdminUserStatus::Active),
+        admin_record("user-beta", AdminUserRole::Admin, AdminUserStatus::Active),
+    ])));
+
+    // Both demotions run as an OPERATOR caller (bypasses the role check and is
+    // never itself demoted), so the second failure is deterministically the
+    // 409 last-admin block — not a 403 from the caller losing its own role.
+    let demote = |uid: &'static str| {
+        let services = std::sync::Arc::clone(&services);
+        async move {
+            services
+                .set_admin_user_role(
+                    caller().with_operator_webui_config(true),
+                    UserId::new(uid).expect("user"),
+                    RebornAdminSetRoleRequest {
+                        role: AdminUserRole::Member,
+                    },
+                )
+                .await
+        }
+    };
+
+    let (alpha, beta) = tokio::join!(demote("user-alpha"), demote("user-beta"));
+
+    let successes = [alpha.is_ok(), beta.is_ok()]
+        .into_iter()
+        .filter(|ok| *ok)
+        .count();
+    let blocked = [&alpha, &beta]
+        .into_iter()
+        .filter(|result| matches!(result, Err(err) if err.status_code == 409))
+        .count();
+    assert_eq!(successes, 1, "exactly one concurrent demotion may land");
+    assert_eq!(
+        blocked, 1,
+        "the other must be blocked by last-admin protection (never stranded at 0 admins)"
+    );
+
+    let remaining = services
+        .list_admin_users(
+            caller().with_operator_webui_config(true),
+            RebornAdminUserListQuery::default(),
+        )
+        .await
+        .expect("list")
+        .users
+        .into_iter()
+        .filter(|u| u.role.is_admin() && u.status == AdminUserStatus::Active)
+        .count();
+    assert_eq!(remaining, 1, "the tenant must never be stranded without an admin");
 }
