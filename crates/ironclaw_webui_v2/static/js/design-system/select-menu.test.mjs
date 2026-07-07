@@ -329,6 +329,29 @@ test("SelectMenu exposes the active descendant and restores trigger focus on clo
   assert.deepEqual(focusCalls, ["focus"]);
 });
 
+test("SelectMenu does not restore trigger focus after outside click close", () => {
+  const harness = createHarness();
+  const focusCalls = [];
+  const props = { onChange: () => {} };
+
+  let rendered = harness.render(props);
+  harness.state.refs[1].current = {
+    focus() {
+      focusCalls.push("focus");
+    },
+  };
+
+  firstValueAfter(rendered, "onClick=")();
+  rendered = harness.render(props);
+  assert.equal(firstValueAfter(rendered, "aria-expanded="), "true");
+
+  harness.state.listeners.mousedown({ target: {} });
+  rendered = harness.render(props);
+
+  assert.equal(firstValueAfter(rendered, "aria-expanded="), "false");
+  assert.deepEqual(focusCalls, []);
+});
+
 test("SelectMenu only passes safe root attributes through rest props", () => {
   const harness = createHarness();
   const rendered = harness.render({

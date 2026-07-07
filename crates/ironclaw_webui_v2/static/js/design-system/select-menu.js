@@ -167,10 +167,10 @@ export function SelectMenu({
   if (!outsideClickEntryRef.current) {
     outsideClickEntryRef.current = {
       rootRef,
-      close: () => closeMenu(),
+      close: () => closeMenu({ restoreFocus: false }),
     };
   }
-  outsideClickEntryRef.current.close = () => closeMenu();
+  outsideClickEntryRef.current.close = () => closeMenu({ restoreFocus: false });
 
   React.useEffect(() => {
     setActiveIndex(selectedOptionIndex(options, value));
