@@ -62,6 +62,12 @@ CLAUDE.md: *"LLM data is never deleted... 'Cleanup' means evicting from in-memor
 
 **Consequences:** the per-parent live-index approach from earlier drafts is **deleted outright** (deletion gets there for free). No closed-root/archive language anywhere. Settled-but-undrained edges are the pending-delivery queue and are never deleted — only terminal transitions delete. `NotFound` on any edge read is benign — treat it like a completed settle-then-drain.
 
+**Abandon is mode-scoped, not a blanket "parent terminal → abandoned" rule.** §1's inherited open→abandoned transition applies only to:
+- **(a) Blocking edges whose resume became impossible** — the parent run went `Cancelled`/`Failed` while parked on the gate/dependent-run wait, and was never resumed. This is the failure case `abandoned` exists to capture.
+- **(b) Explicit tree teardown** — an operator/human tears the tree down (`subagent_cancel`, §7 PR6) while the edge is still open.
+
+**For background edges, parent-run completion with the edge open is the *normal* delivery case, not an abandonment trigger** — see §8. Threads park, never die (§1); a live parent thread finishing its run is not "parent gone," it's exactly the state §8's `System`-provenance activate exists to wake. The edge stays `open` (then `settled`) and drains the ordinary way, whether the parent run that opened it is still live or has already gone terminal.
+
 ## 3. What this replaces
 
 New code lives in `crates/ironclaw_reborn/src/subagent/await_edge/` (`mod.rs`, `store.rs`, `resolver.rs`, `roster.rs`). The new `AwaitEdgeResolver` owns settle/resume/drain/recovery end-to-end.
@@ -146,6 +152,16 @@ The following are carried forward unchanged from the prior durability-design lin
 
 **5.1 Capacity: reservation is the cap, listing advisory.** Unchanged. `SpawnTreeReservation` (depth ≤ 1, ≤ 4 spawns/turn, ≤ 16 descendants/tree) is the sole admission mechanism.
 
+**Made explicit: the 16-descendant cap counts non-terminal children — deliberately, including gate-parked ones.** A child sitting on `BlockedApproval`/`BlockedAuth` still holds its reservation slot. The cap bounds **outstanding side-effect obligations** — 16 approval-parked children is 16 pending sensitive actions paging one human — not compute. Compute concurrency is excluded on a separate, already-existing axis: the scheduler deschedules a blocked run (no worker slot held), so a tree full of gate-parked children costs zero live workers, only zero remaining reservation headroom. These are deliberately different budgets; this design does not collapse them.
+
+**Never release-on-park; release only at terminal (§5.5); never re-claim on ordinary resume.** A child resuming past its own gate (approval granted, auth completed) is not a re-admission event — it already holds its slot from spawn, uninterrupted. **Ruling: resumption must never require re-admission.** An approved child that can't resume because the tree filled up while it waited would be a deadlock-by-design (the human who just unblocked it discovers the unblock didn't work) — never chosen.
+
+**Relief valves, when a tree does fill:** `subagent_inspect` (§7 PR3) shows which children are blocked and why; `subagent_cancel` (§7 PR6) reclaims slots by driving a child to terminal early (terminal → release, §5.5); a human resolving the gate queue directly (§9.2) drains blocked children the ordinary way, which also releases their slots. `ironclaw-reborn subagent edges` (§5.4) reports per-scope open-reservation counts alongside edge counts, so an operator sees a tree approaching the cap before it deadlocks.
+
+**`subagent_extend` is the one re-claim path — by design, not by exception.** Unlike ordinary resume, `subagent_extend` (§6, §7 PR4) re-activates an *already-terminal* child (§0 requirement 3, "no cold start"). A terminal child already released its slot (§5.5: `Claimed → Released` on terminal). Re-activating it is therefore a **fresh outstanding obligation**, not a continuation — `subagent_extend`'s `activate()` call re-claims a descendant-reservation slot as a normal admission check, and fails with the existing capacity error (the same one spawn uses) if the tree is already full. This is the only place in the design where activating a child re-runs admission.
+
+Required tests (**P4.4**): extend on a full tree → capacity rejection (integration-tier — drives extend through the real `activate()`/reservation admission path); extend releases its slot at the new run's terminal (crate-tier is sufficient for the reservation-accounting half).
+
 **5.2 Two-layer exactly-once, `InvalidTransition` discriminator.** Layer 1: CAS single-winner per transition. Layer 2: `resume_turn`'s durable idempotency replay (`crates/ironclaw_turns/src/memory/mod.rs:187,1031-1046,2248-2269`, CAS'd in the same snapshot as every run-state transition). No `resume_dispatched_at` field needed.
 
 **Boot/drain contract, matched on `from` — no wildcard.** `resume_turn_once` (`memory/mod.rs:2363-2384`) sets `from: record.status.get()` when `BlockedDependentRunGate`'s required status (`BlockedDependentRun`, `request.rs:48`) mismatches, raising `InvalidTransition{from, to: Queued}`.
@@ -203,16 +219,30 @@ Cap: **8 consecutive `ParentAgent`-provenance activations per thread.** `Human` 
 
 Unchanged: per-child SUBAGENT budget (`iteration_limit` 16, made per-flavor-overridable in §10); `SpawnTreeReservation` cap (16), depth cap (1, depth-agnostic per §9/§10).
 
+## 6a. Human input priority — no content queue
+
+Two mechanisms give a human priority over `ParentAgent`/`System` activation traffic on a thread. **The no-queue non-goal stands**: neither mechanism stores any payload, so none of a content queue's ordering, injection, or budget questions apply — a reservation is a marker, not a mailbox.
+
+**(i) Next-slot reservation.** A human whose `activate()` hits `ThreadBusy` may set a `human_waiting` reservation marker on the thread. While set, `activate()` admission refuses `ParentAgent` and `System` provenance with a new `ThreadReserved` outcome — callers treat it exactly like `ThreadBusy` (retry/backoff, no special-casing needed at call sites). The marker clears when the human activates (their `activate()` succeeds) or when they explicitly abandon the reservation.
+
+Deferred `System` settle-wakes are not lost while a reservation holds `ParentAgent`/`System` off the thread — the existing run-start sweep and boot pass (§8.2, triggers 2 and 3) already heal any settle-wake that loses to `ThreadBusy`/`ThreadReserved`; the settled edge just waits its turn, same as any other `ThreadBusy` deferral.
+
+**Marker storage:** a small marker file, scoped and CAS'd the same way as every other piece of state in this design (§4.0/§4.5's pattern) — not a mutation onto `SessionThreadRecord.metadata_json`, which §6 already establishes has **no mutation path**. Reusing the filesystem-marker pattern this design already relies on for edges and the scope roster is simpler than opening a first mutation path onto `metadata_json` for a feature that doesn't need anything else `metadata_json` carries.
+
+Ships with the extend PR (**P4.3**) — `activate()` admission is where `ThreadBusy` already lives, so `ThreadReserved` is a sibling admission outcome in the same place. **Required test — integration-tier**: reservation set → parent `subagent_extend` refused with `ThreadReserved` → human `activate()` succeeds and clears the marker → a subsequent parent extend is admitted normally.
+
+**(ii) Interrupt & take over.** Console-only compose of two existing primitives — the underlying run-cancel mechanism (the same one `subagent_cancel`, §7 PR6, later wraps as a model-facing tool) and `activate(Human)` (§1) — no new state, no new admission outcome, and no dependency on PR6's tool-level capability landing first. A human on a child (or parent) console cancels the live run and activates in its place. Ships with the console UI PR (**P5.4**).
+
 ## 7. Functionality staging
 
 | PR | Ships | Gate |
 |----|-------|------|
 | 1 | edge store + resolver + scope roster + boot/lazy recovery + **CAS-guarded delete (P1.0b, §4.0)** + depth floor + `wrap_untrusted_subagent_text` promotion + **P1.0: #5466 fix** + exactly-once + scope-isolation + **descendant-reservation tri-state (§5.5)** tests — **replaces** gate-store delivery outright (blocking only) | P1.0 + P1.0b done; all tests green both backends |
-| 2 | background mode + activate-on-settle for parked/completed parents (§8) + `ResolveReport` counters + operator `edges` command + **gate-propagation escalation walk, moved up from PR6 (§9, P2.5/P2.6)** | PR1 soaked; integration matrix green; gate-walk tests green |
+| 2 | background mode + activate-on-settle for parked/completed parents (§8) + `ResolveReport` counters + operator `edges` command + **gate-propagation escalation walk, moved up from PR6 (§9, P2.5/P2.6), including resolution-from-any-owner-surface (§9.2)** | PR1 soaked; integration matrix green; gate-walk tests green |
 | 3 | `subagent_inspect` (metadata-only) + per-flavor budget plumbing (P3.2, §10c) | — |
-| 4 | `subagent_extend` (`activate` + `ParentAgent` + consent-to-wake + budget, §6) | — |
+| 4 | `subagent_extend` (`activate` + `ParentAgent` + consent-to-wake + budget, §6) + reservation re-claim at admission (P4.4, §5.1) + next-slot reservation / `ThreadReserved` (P4.3, §6a) | — |
 | 5a | `GET /api/webchat/v2/threads/{thread_id}/children` (lineage projection, no new store) | ~0.5 day |
-| 5b | `ThreadTree` sidebar + raw-vs-framed display rule (§11) | ~1.5-2 days |
+| 5b | `ThreadTree` sidebar + raw-vs-framed display rule (§11) + interrupt & take over (P5.4, §6a) | ~1.5-2 days |
 | 6 | `subagent_cancel` | security review |
 
 **Gate-coverage window.** §9's escalation walk is now a **prod-enable gate**, not a PR6 afterthought — it ships with PR2, before `spawn_subagent` is ever cleared from `disabled_capability_ids`. During PR1 alone (blocking-only), a descendant's `BlockedApproval`/`BlockedAuth` has **no escalation** yet — the harness-only-phase inherited behavior: per §1, "child = normal Turn thread... ordinary thread operations," so the gate surfaces exactly the way **any** blocked thread's gate does today — via the existing origin-agnostic gate projection (`ironclaw_event_projections::PendingGateProjection`, `crates/ironclaw_event_projections/src/pending_gate_projection.rs`) and per-thread approval service (`crates/ironclaw_product_workflow/src/approval_interaction/service.rs`), neither new for subagents. The gap during this window is **discoverability, not resolvability**: a human must directly inspect/attach to the child thread (available from PR1 via §1, ahead of PR3 formalizing `subagent_inspect`) rather than being paged at the root automatically. Since `spawn_subagent` stays deny-filtered through PR1 regardless (the standing no-flag ruling), this window is unreachable in production — it only constrains what PR1's own tests may assume.
@@ -234,11 +264,11 @@ Prod enable: clear `builtin.spawn_subagent` from `disabled_capability_ids` after
 2. **Every run-start sweep** — `PostCapabilityStage::process` runs on every `Continue`, including a fresh run's first iteration, so the *next* time this thread runs for **any** reason, `drain_settled` (P2.4) picks up every still-settled edge as a side effect of that run happening at all.
 3. **Boot pass** (§4.3/§5.3) — roster-driven, independent of any thread activating.
 
-**Invariant:** a `ThreadBusy` at settle-time (trigger 1) is always healed by trigger 2 or 3 — a settled edge can never go permanently undrained while its parent thread ever runs again or a boot pass ever occurs. **Required test — integration-tier** (`tests/integration/`, same P2.4 acceptance as §8.1, driven through the live parent thread + boot-pass harness, not the resolver in isolation): settle a child mid-parent-run (forcing `ThreadBusy` on trigger 1); assert no further `System` attempt (dedup by `settled` state); then either (a) let the live run's next iteration drain it (trigger 2), or (b) run a boot pass and assert the roster sweep does (trigger 3).
+**Invariant:** a `ThreadBusy` at settle-time (trigger 1) is always healed by trigger 2 or 3 — a settled edge can never go permanently undrained while its parent thread ever runs again or a boot pass ever occurs. **Required test — integration-tier** (`tests/integration/`, same P2.4 acceptance as §8.1, driven through the live parent thread + boot-pass harness, not the resolver in isolation): settle a child mid-parent-run (forcing `ThreadBusy` on trigger 1); assert no further `System` attempt (dedup by `settled` state); then either (a) let the live run's next iteration drain it (trigger 2), or (b) run a boot pass and assert the roster sweep does (trigger 3). **Make the parent-completed precondition explicit** (§2's mode-scoping): the parent run reaching its own terminal state (`Completed`) while the background child is still running and its edge is `open` is not a special case of the above — the test asserts the edge stays `open` (never `abandoned`, per §2) across the parent's own terminal transition, and that the child's later settle still wakes the parked parent thread via trigger 1 (or trigger 3, if the thread never runs again first) and drains normally.
 
 ## 9. Gate propagation — approval and auth, always to the tree root
 
-Any gate from any descendant, any depth, bubbles to the **tree root's** originating human surface. Covers **auth/credential gates** (`BlockedAuth`) too, not just approvals. **Surfacing is always the tree root's originating surface**; an intermediate console may reference a pending gate but never resolves it.
+Any gate from any descendant, any depth, bubbles to the **tree root's** originating human surface. Covers **auth/credential gates** (`BlockedAuth`) too, not just approvals. **Surfacing is always the tree root's originating surface** — one deterministic paging point, unchanged. **Resolution is not the same thing as surfacing**: it is accepted from any surface authenticated as the tree owner, including a child thread's console a human has open directly — §9.2 lifts the old blanket restriction for owner-authenticated humans specifically; it still holds, without exception, for any LLM in the chain.
 
 **Both kinds, one shape — no new gate representation.** `TurnBlockedGateMetadata` (`crates/ironclaw_turns/src/events.rs:59-66`) already carries `gate_kind: TurnBlockedGateKind` (`Approval`, `Auth`, `Resource`, `AwaitDependentRun`, `ExternalTool`) plus `credential_requirements`. The walk is generic over `gate_kind`.
 
@@ -256,7 +286,7 @@ Any gate from any descendant, any depth, bubbles to the **tree root's** originat
 
 **Auth identity — no new resolver.** `RuntimeCredentialAuthRequirement.requester_extension: ExtensionId` (`crates/ironclaw_host_api/src/decision.rs:106-113`) is already typed on the gate metadata the walk forwards verbatim.
 
-**Required tests (P2.5/P2.6) — integration-tier** (`tests/integration/`; the walk, root-routing, and the Slack poller extension above all cross the descendant→root→delivery-surface seam, not a single-function unit): the depth-agnostic walk resolving a descendant gate to the tree root's delivery surface for each `RunNotificationOrigin` branch (§9.1), and the extended triggered-run delivery poller (`deliver_triggered_run`, above) picking up the walk's resolved gating-run id/kind/gate_ref instead of only the root run's own status.
+**Required tests (P2.5/P2.6) — integration-tier** (`tests/integration/`; the walk, root-routing, and the Slack poller extension above all cross the descendant→root→delivery-surface seam, not a single-function unit): the depth-agnostic walk resolving a descendant gate to the tree root's delivery surface for each `RunNotificationOrigin` branch (§9.1), and the extended triggered-run delivery poller (`deliver_triggered_run`, above) picking up the walk's resolved gating-run id/kind/gate_ref instead of only the root run's own status. **Add (§9.2):** resolution submitted from a child-console surface resolves the gating run exactly once — the second resolution attempt observes the already-resolved CAS state and no-ops.
 
 **Mechanics — depth-agnostic:**
 1. The gating run parks. No ancestor run touched.
@@ -264,6 +294,15 @@ Any gate from any descendant, any depth, bubbles to the **tree root's** originat
 3. §9.1's resolution engine picks the delivery target from the root's scope + origin.
 4. Resolution flows back down: the surface's decision resolves the **gating run itself** — not the root run.
 5. An `abandoned` (deleted, §2) edge along the chain doesn't break the walk — lineage lives on the immutable run record.
+
+**9.2 Resolution accepted from any owner-authenticated surface.** Surfacing and resolution are decoupled. Surfacing (§9's opening ruling) stays exactly as designed — the tree root's originating surface is the sole paging point, unconditionally. What changes: the gate **resolution** itself — the actual approval/auth decision — is accepted from *any* surface authenticated as the tree owner, not only the root's originating surface. This includes a child thread's console a human has directly opened (§1, `activate(Human)`; PR5a/5b once shipped, but the underlying approval-interaction service has no console dependency — it is exercisable as soon as any owner-authenticated surface can reach a `gate_ref`, ahead of full ThreadTree UI).
+
+Why this is safe, not a hole in the never-auto-approve floor:
+- **The approver must be a human, from any surface.** No LLM anywhere in the chain resolves a gate — a subagent (at any depth) referencing its own or a sibling's pending gate still never resolves it. Only lifting this for owner-authenticated humans, never for automation, is what makes it safe.
+- **The approval service was never root-scoped, only root-paged.** `crates/ironclaw_product_workflow/src/approval_interaction/service.rs` resolves against `gate_ref`/`run_id` with no thread affinity baked into the decision path — root-surfacing was a paging convention layered on top, not a constraint the service itself enforced.
+- **Two doors, one CAS'd lock.** Gate resolution is CAS-idempotent, single-winner, the same pattern as every other transition in this design (§5.2, §5.5). Whichever surface's resolution attempt wins the CAS resolves the gate; the other observes the already-resolved state and no-ops. Two resolution paths onto one lock is exactly the shape CAS'd resolution already handles safely.
+
+**Audit:** the resolution record captures *which* surface actually resolved the gate — root or a specific non-root owner surface — not just that it was resolved, so a human reviewing the tree afterward can see where the call was made.
 
 ## 10. Per-flavor configurability — flavors are data, the loop is shared
 
@@ -306,6 +345,7 @@ Extensibility (unchanged): fork-on-extend, structured child→parent output sche
 - **No gate expiry timers.**
 - **No multi-node/HA correctness claims.**
 - **No signature change to `RootFilesystem::delete`** — the CAS primitive is additive (`delete_if_version`, §4.0), avoiding a ~20-call-site blast radius.
+- **No content queue for human-priority activation (§6a)** — the next-slot reservation stores a marker, never a payload; no ordering, injection, or budget semantics to design for.
 - **Tripwires (flip these rulings if hit):** (1) #5466 turns out structural to CAS-over-libsql, not fixable at the RootFilesystem layer; (2) a scope's roster directory becomes pathological to `list_dir` — shard by tenant; (3) any scope's *open* edge count grows large enough that admission-time `list_dir` is measurably slow — one CAS'd count file; (4) depth cap raised above 1 and §8/§6 need more than the limits knob.
 
 ## 13. Design→Plan cross-map
@@ -315,7 +355,7 @@ Extensibility (unchanged): fork-on-extend, structured child→parent output sche
 | Design item | Task ID(s) | Note |
 |---|---|---|
 | §0 requirements | — | Traceability only |
-| §2 closed-edge deletion | P1.2 (delete-on-drain/abandon via `delete_if_version`), P1.10 (NotFound-as-benign), **P1.0b's crash-ordering recovery sweep** | Supersedes the prior per-parent live-index approach entirely |
+| §2 closed-edge deletion | P1.2 (delete-on-drain/abandon via `delete_if_version`), P1.10 (NotFound-as-benign), **P1.0b's crash-ordering recovery sweep** | Supersedes the prior per-parent live-index approach entirely; abandon is now mode-scoped to (a) unresumable blocking edges, (b) explicit teardown — background parent-completion is not an abandon trigger (§8) |
 | §3 replacement inventory | P1.1, P1.9 | Tombstone-store deletion now includes its `production_readiness.rs` field + test |
 | §4.0 CAS-guarded delete | **P1.0b** (new, PR1 merge blocker alongside P1.0) | `delete_if_version` on `RootFilesystem` + 3 backends + `ScopedFilesystem`/`CompositeRootFilesystem` passthrough |
 | §4.1 crate placement, DIP | P1.1, P1.4 | Permanent per type-placement.md cat. 2 |
@@ -324,15 +364,16 @@ Extensibility (unchanged): fork-on-extend, structured child→parent output sche
 | §4.4 #5466 fix | **P1.0** | PR1 merge gate, alongside P1.0b |
 | §4.5 roster + scope-key | **P1.6a, P1.6b (dual-backend), P1.6c (scope-aware construction, §4.5a, #5721 cross-check)** | Write-before-first-edge ordering is part of P1.6a; §4.5a's two-users-distinct-paths test — integration-tier — is part of P1.6c |
 | §4.6 module placement | P1.1, P1.2, P1.4, P1.6a, P2.1-P2.3 | — |
-| §5.1 capacity | — | Already shipped |
+| §5.1 capacity | Already shipped; **P4.4** (extend re-claims a reservation slot at admission + capacity tests) | Non-terminal cap now explicit as counting gate-parked children deliberately (side-effect-obligation bound, not compute); never release-on-park; `subagent_extend` is the sole re-claim path |
 | §5.2 exactly-once, discriminator | P1.3 (3 tests), P1.9 (contract) | — |
 | §5.3 boot/lazy enumeration | P1.6a, P1.9 | — |
 | §5.4 observability | P2.1, P2.2 | `terminal_byte_len` moves onto the edge |
-| §5.5 reservation-release tri-state | **P1.9's extension** (new test), state lives on `AwaitEdge` | — |
+| §5.5 reservation-release tri-state | **P1.9's extension** (new test), state lives on `AwaitEdge` | Release-at-terminal-only is the mechanism §5.1's re-claim ruling depends on |
 | §6 run-budget, derived | **P4.2** | Adds provenance field |
-| §7 staging | Governs PR1-6 | Gate-escalation walk moved PR6→PR2 |
-| §8 background = activate | **P2.4** | Drain-append idempotency and the system-activate retry set are part of P2.4's acceptance |
-| §9 gate propagation | **P2.5 (walk + root routing via `ironclaw_outbound` resolution engine), P2.6 (auth rendering, `requester_extension` reuse)** | Moved from P6.1/P6.2; P2.5 also extends the Slack triggered-delivery poller to accept the walk's gating-run id (the named integration gap in §9.1) |
+| §6a human input priority, no queue | **P4.3** (next-slot reservation + `ThreadReserved` admission, ships with extend PR), **P5.4** (interrupt & take over, ships with console PR) | No content queue (§12); marker stored via scoped-filesystem CAS pattern, not `metadata_json` (§6 already has no mutation path there) |
+| §7 staging | Governs PR1-6 | Gate-escalation walk moved PR6→PR2; PR4 gains P4.3/P4.4; PR5b gains P5.4 |
+| §8 background = activate | **P2.4** | Drain-append idempotency and the system-activate retry set are part of P2.4's acceptance; parent-completed-while-open precondition now explicit (§2's mode-scoped abandon) |
+| §9 gate propagation | **P2.5 (walk + root routing via `ironclaw_outbound` resolution engine), P2.6 (auth rendering, `requester_extension` reuse)** | Moved from P6.1/P6.2; P2.5 also extends the Slack triggered-delivery poller to accept the walk's gating-run id (the named integration gap in §9.1); §9.2's resolution-from-any-owner-surface + child-console resolution test fold into the same P2.5/P2.6 |
 | §10 per-flavor | (a)/(b) no task, live; **(c) P3.2, (d) P3.3** | — |
 | §11 PR5 WebUI | **P5.2 (5a), P5.3 (5b)** | — |
 | §12 non-goals/tripwires | — | — |
