@@ -1755,6 +1755,59 @@ async fn filesystem_list_threads_merges_partial_thread_index_with_source_rows() 
 }
 
 #[tokio::test]
+async fn filesystem_list_threads_does_not_treat_partial_source_cache_as_complete() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped_a = scoped_threads_fs_at(Arc::clone(&backend), "tenant-index-cache", "alice");
+    let scoped_b = scoped_threads_fs_at(backend, "tenant-index-cache", "alice");
+    let service_a = FilesystemSessionThreadService::new(scoped_a);
+    let service_b = FilesystemSessionThreadService::new(scoped_b);
+    let scope = scope("index-cache");
+
+    service_a
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("cached-source-a").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("cached source a".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service_b
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("cached-source-b").unwrap()),
+            created_by_actor_id: "actor-b".into(),
+            title: Some("cached source b".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let listed = service_a
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids: Vec<&str> = listed
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+
+    assert!(ids.contains(&"cached-source-a"));
+    assert!(
+        ids.contains(&"cached-source-b"),
+        "a single-row source cache from this process must not hide durable rows written by another service instance"
+    );
+}
+
+#[tokio::test]
 async fn filesystem_list_threads_retries_bootstrap_after_source_read_error() {
     use ironclaw_threads::ListThreadsForScopeRequest;
 

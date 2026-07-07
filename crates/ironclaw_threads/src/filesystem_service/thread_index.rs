@@ -253,15 +253,18 @@ where
         if same_source_generation {
             source.next_sequence = source.next_sequence.max(existing.next_sequence);
         }
-        if same_source_generation && existing.flags.title_present {
+        if same_source_generation && !source.flags.title_present && existing.flags.title_present {
             source.record.title = existing.record.title;
             source.flags.title_present = true;
         }
-        if same_source_generation && existing.flags.metadata_present {
+        if same_source_generation
+            && !source.flags.metadata_present
+            && existing.flags.metadata_present
+        {
             source.record.metadata_json = existing.record.metadata_json;
             source.flags.metadata_present = true;
         }
-        if same_source_generation && existing.flags.goal_present {
+        if same_source_generation && !source.flags.goal_present && existing.flags.goal_present {
             source.record.goal = existing.record.goal;
             source.flags.goal_present = true;
         }
@@ -485,10 +488,13 @@ where
         self.thread_index_load_locks
             .lock()
             .map(|mut locks| {
-                locks
-                    .entry(key.to_string())
-                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                    .clone()
+                locks.retain(|_, lock| lock.strong_count() > 0);
+                if let Some(lock) = locks.get(key).and_then(|lock| lock.upgrade()) {
+                    return lock;
+                }
+                let lock = Arc::new(tokio::sync::Mutex::new(()));
+                locks.insert(key.to_string(), Arc::downgrade(&lock));
+                lock
             })
             .unwrap_or_else(|_| Arc::new(tokio::sync::Mutex::new(())))
     }
@@ -515,6 +521,15 @@ where
     }
 
     fn cached_thread_source_ids(&self, key: &str) -> Option<HashSet<ThreadId>> {
+        let source_complete = self
+            .complete_thread_source_scopes
+            .lock()
+            .ok()
+            .map(|complete| complete.contains(key))
+            .unwrap_or(false);
+        if !source_complete {
+            return None;
+        }
         self.known_thread_source_rows
             .lock()
             .ok()
@@ -525,6 +540,10 @@ where
         if let Ok(mut known) = self.known_thread_source_rows.lock() {
             known.insert(key.clone(), ids.clone());
             evict_hash_map_entry_over_limit(&mut known, THREAD_INDEX_CACHE_MAX_SCOPES, &key);
+        }
+        if let Ok(mut complete) = self.complete_thread_source_scopes.lock() {
+            complete.insert(key.clone());
+            evict_hash_set_entry_over_limit(&mut complete, THREAD_INDEX_CACHE_MAX_SCOPES, &key);
         }
         if let Ok(mut scopes) = self.thread_index_force_validate_scopes.lock() {
             scopes.remove(&key);
@@ -756,10 +775,66 @@ mod tests {
 
     use crate::{
         EnsureThreadRequest, FilesystemSessionThreadService, ListThreadsForScopeRequest,
-        SessionThreadService, ThreadScope,
+        SessionThreadRecord, SessionThreadService, ThreadScope,
     };
 
     use super::super::thread_record_path;
+    use super::{ThreadIndexFlags, ThreadIndexRecord};
+
+    #[test]
+    fn merge_thread_index_records_prefers_present_source_fields() {
+        let request_scope = scope("merge-source-fields");
+        let thread_id = ThreadId::new("thread-merge-source-fields").unwrap();
+        let created_at = chrono::Utc::now();
+        let source = ThreadIndexRecord {
+            record: SessionThreadRecord {
+                scope: request_scope.clone(),
+                thread_id: thread_id.clone(),
+                created_by_actor_id: "actor-a".into(),
+                title: Some("source title".into()),
+                metadata_json: Some("{\"source\":true}".into()),
+                goal: None,
+                created_at: Some(created_at),
+                updated_at: Some(created_at),
+            },
+            next_sequence: 3,
+            flags: ThreadIndexFlags {
+                title_present: true,
+                metadata_present: true,
+                goal_present: false,
+            },
+        };
+        let existing = ThreadIndexRecord {
+            record: SessionThreadRecord {
+                scope: request_scope,
+                thread_id,
+                created_by_actor_id: "actor-a".into(),
+                title: Some("stale title".into()),
+                metadata_json: Some("{\"stale\":true}".into()),
+                goal: None,
+                created_at: Some(created_at),
+                updated_at: Some(created_at),
+            },
+            next_sequence: 7,
+            flags: ThreadIndexFlags {
+                title_present: true,
+                metadata_present: true,
+                goal_present: false,
+            },
+        };
+
+        let merged = FilesystemSessionThreadService::<InMemoryBackend>::merge_thread_index_records(
+            source, existing,
+        )
+        .unwrap();
+
+        assert_eq!(merged.record.title.as_deref(), Some("source title"));
+        assert_eq!(
+            merged.record.metadata_json.as_deref(),
+            Some("{\"source\":true}")
+        );
+        assert_eq!(merged.next_sequence, 7);
+    }
 
     fn scope(label: &str) -> ThreadScope {
         ThreadScope {

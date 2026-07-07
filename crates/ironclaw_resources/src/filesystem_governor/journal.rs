@@ -228,7 +228,7 @@ where
         .map_err(storage_error)?;
     let (state, latest_seq) = runtime.block_on(replay_journal(filesystem, snapshot.state, from))?;
     snapshot_store.update(move |snapshot| {
-        if snapshot.journal_seq > latest_seq.get() {
+        if snapshot.journal_seq >= latest_seq.get() {
             return Ok(());
         }
         snapshot.schema_version = crate::RESOURCE_GOVERNOR_SNAPSHOT_SCHEMA_VERSION;

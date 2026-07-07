@@ -39,7 +39,7 @@ mod thread_index;
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
 };
 
 use async_trait::async_trait;
@@ -180,9 +180,10 @@ where
     thread_index_cursor_positions: Mutex<HashMap<String, Arc<HashMap<String, usize>>>>,
     thread_index_cache_epochs: Mutex<HashMap<String, u64>>,
     thread_index_manual_clear_epochs: Mutex<HashMap<String, u64>>,
-    thread_index_load_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
+    thread_index_load_locks: Mutex<HashMap<String, Weak<AsyncMutex<()>>>>,
     known_thread_index_rows: Mutex<HashSet<String>>,
     known_thread_source_rows: Mutex<HashMap<String, HashSet<ThreadId>>>,
+    complete_thread_source_scopes: Mutex<HashSet<String>>,
     thread_index_force_validate_scopes: Mutex<HashSet<String>>,
     complete_thread_index_scopes: Mutex<HashSet<String>>,
 }
@@ -201,6 +202,7 @@ where
             thread_index_load_locks: Mutex::new(HashMap::new()),
             known_thread_index_rows: Mutex::new(HashSet::new()),
             known_thread_source_rows: Mutex::new(HashMap::new()),
+            complete_thread_source_scopes: Mutex::new(HashSet::new()),
             thread_index_force_validate_scopes: Mutex::new(HashSet::new()),
             complete_thread_index_scopes: Mutex::new(HashSet::new()),
         }
