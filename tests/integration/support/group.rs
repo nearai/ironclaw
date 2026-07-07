@@ -348,6 +348,7 @@ impl RebornIntegrationGroup {
             turn_event_sink: None,
             trace_capture: false,
             tool_disclosure: None,
+            narrowed_bridged_allow_set: None,
             budget: false,
             communication_context_provider: None,
             hook_dispatcher_builder_factory: None,
@@ -526,6 +527,10 @@ pub struct RebornIntegrationGroupBuilder {
     /// `.with_tool_disclosure_bridged()` has been called; `None` resolves via
     /// `ToolDisclosureMode::from_env()` in `into_group` (today's behavior).
     tool_disclosure: Option<ToolDisclosureMode>,
+    /// #5647 RED-pin seam: opt-in override of the forced `CapabilityAllowSet::All`
+    /// for Bridged-mode groups. `None` preserves today's behavior; only
+    /// consumed when `tool_disclosure == Some(Bridged)` (`into_group` fails fast otherwise).
+    narrowed_bridged_allow_set: Option<CapabilityAllowSet>,
     /// C-BUDGET: when `true`, `into_group` wires the production
     /// `build_default_budget_accountant` (in-memory governor + gate store +
     /// zero-cost table + compiled-default seeding) into the group's ONE planned
@@ -630,6 +635,19 @@ impl RebornIntegrationGroupBuilder {
         base: GroupBaseData,
         capability: GroupCapability,
     ) -> HarnessResult<RebornIntegrationGroup> {
+        // Harness-seam misuse guard (§7): fail fast instead of a silent no-op
+        // if the override is set without Bridged mode also selected.
+        if self.narrowed_bridged_allow_set.is_some()
+            && self.tool_disclosure != Some(ToolDisclosureMode::Bridged)
+        {
+            return Err(
+                "with_narrowed_capability_allow_set_for_bridged_test() was set but \
+                 tool_disclosure is not Bridged — the override only applies to \
+                 bridged-disclosure groups; call .with_tool_disclosure_bridged() too"
+                    .into(),
+            );
+        }
+
         let scope_gateway = Arc::new(ScopeRegistryGateway::new());
 
         // Issue #5476 lease-wedge coverage: `.with_limits` is the store's own
@@ -670,18 +688,16 @@ impl RebornIntegrationGroupBuilder {
         ) = capability.mode().into_parts(milestone_sink.clone())?;
 
         // Enabler (b): production resolves `CapabilityAllowSet::All` for a
-        // top-level user turn, making `CapabilitySurfaceProfileFilter` a no-op
-        // — so the disclosure decorator's synthetic bridge ids
-        // (`ironclaw.tool_search` etc., never in any granted set) survive to
-        // the model. The harness default (allowlist of exactly the granted
-        // capability ids) is NARROWER than production there and would strip
-        // the deferred bridge surface down to zero tools. Mirror production
-        // for bridged groups only; every non-bridged group keeps the strict
-        // allowlist.
+        // top-level user turn; mirror that for bridged groups (narrowed
+        // override = the #5647 seam). Bridge ids now survive narrowing via
+        // the filter's host-exempt set, so this is production parity, not a
+        // bug dodge.
         let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
             if self.tool_disclosure == Some(ToolDisclosureMode::Bridged) {
                 Arc::new(StaticCapabilitySurfaceProfileResolver {
-                    allow_set: CapabilityAllowSet::All,
+                    allow_set: self
+                        .narrowed_bridged_allow_set
+                        .unwrap_or(CapabilityAllowSet::All),
                 })
             } else {
                 capability_surface_resolver

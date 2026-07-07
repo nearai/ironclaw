@@ -8,10 +8,11 @@ use ironclaw_host_api::{
     AgentId, CapabilityId, InvocationId, ProjectId, ProviderToolName, TenantId, ThreadId,
 };
 use ironclaw_loop_support::{
-    CapabilityResultWrite, LoopCapabilityPortDecorator, LoopCapabilityResultWriter,
+    CapabilityAllowSet, CapabilityResultWrite, LoopCapabilityPortDecorator,
+    LoopCapabilityResultWriter,
 };
 use ironclaw_turns::{
-    CapabilityActivityId, TurnId,
+    CapabilityActivityId, TurnId, TurnRunId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
         CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityFailure, CapabilityFailureKind,
@@ -54,6 +55,16 @@ pub(crate) struct ToolDisclosureCapabilityDecorator {
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     promoted_by_scope: Arc<Mutex<HashMap<PromotionScopeKey, PromotedSet>>>,
     caps: DisclosureCaps,
+    /// This decorator no longer resolves its own allow-set. The
+    /// host-build boundary (`RebornLoopDriverHostFactory::create_host`)
+    /// resolves once and calls `prime_allow_set` for this turn before the
+    /// capability-port decorator chain runs, so `decorate` and the outer
+    /// `CapabilitySurfaceProfileFilter` observe the identical resolved value
+    /// instead of two independent resolves that could diverge under a
+    /// transient resolver failure. Keyed by `(turn_id, run_id)` and consumed
+    /// exactly once in `decorate` so concurrent turns sharing this long-lived
+    /// decorator never observe another turn's primed value.
+    primed_allow_sets: Mutex<HashMap<(TurnId, TurnRunId), Arc<CapabilityAllowSet>>>,
 }
 
 impl ToolDisclosureCapabilityDecorator {
@@ -62,22 +73,69 @@ impl ToolDisclosureCapabilityDecorator {
             result_writer,
             promoted_by_scope: Arc::new(Mutex::new(HashMap::new())),
             caps: DisclosureCaps::default(),
+            primed_allow_sets: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Prime this turn's already-resolved allow-set before `decorate` runs.
+    /// Called by the host-build boundary immediately after its single
+    /// resolve, before it asks the capability factory to build (and
+    /// decorate) the port for `run_context`.
+    pub(crate) fn prime_allow_set(
+        &self,
+        run_context: &LoopRunContext,
+        allow_set: Arc<CapabilityAllowSet>,
+    ) -> Result<(), AgentLoopHostError> {
+        self.primed_allow_sets
+            .lock()
+            .map_err(|e| {
+                invalid_invocation(format!(
+                    "tool disclosure primed allow-set lock is poisoned: {e}"
+                ))
+            })?
+            .insert((run_context.turn_id, run_context.run_id), allow_set);
+        Ok(())
     }
 }
 
+#[async_trait]
 impl LoopCapabilityPortDecorator for ToolDisclosureCapabilityDecorator {
-    fn decorate(
+    async fn decorate(
         &self,
         run_context: &LoopRunContext,
         inner: Arc<dyn LoopCapabilityPort>,
     ) -> Arc<dyn LoopCapabilityPort> {
+        // Consume this turn's primed allow-set (see `prime_allow_set`). Never
+        // resolves here: `tool_definitions()` is a *sync* trait method with no
+        // `.await` point, so the tool_search bridge's own advertised
+        // `description` (the always-on discoverable-tool-name index, built
+        // inside `turn_state()`) could never be narrowed by an async-resolved
+        // allow-set otherwise — only tool_search/tool_describe *results*, which
+        // run on an already-async path, could. A missing prime (the host-build
+        // boundary skipped it, or a lock is poisoned) fails closed (denies
+        // every real capability's *name* from the index) rather than silently
+        // falling back to an unnarrowed index — this should never happen when
+        // wired through `create_host`, which primes before it asks the
+        // capability factory to build this decorator's port.
+        let key = (run_context.turn_id, run_context.run_id);
+        let primed = self
+            .primed_allow_sets
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.remove(&key));
+        let allow_set = primed.unwrap_or_else(|| {
+            tracing::error!(
+                "tool disclosure allow-set was not primed before decorate; failing closed to an empty allow-set for this turn's tool_search index"
+            );
+            Arc::new(CapabilityAllowSet::allowlist([]))
+        });
         Arc::new(ToolDisclosureCapabilityPort {
             inner,
             run_context: run_context.clone(),
             result_writer: Arc::clone(&self.result_writer),
             promoted_by_scope: Arc::clone(&self.promoted_by_scope),
             caps: self.caps,
+            allow_set,
             turn_state: Mutex::new(None),
             bridge_inputs: Mutex::new(BTreeMap::new()),
             tool_call_target_inputs: Mutex::new(BTreeMap::new()),
@@ -91,6 +149,11 @@ struct ToolDisclosureCapabilityPort {
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     promoted_by_scope: Arc<Mutex<HashMap<PromotionScopeKey, PromotedSet>>>,
     caps: DisclosureCaps,
+    /// #5712/#5659-w6: the caller's effective allow-set, resolved once in
+    /// `ToolDisclosureCapabilityDecorator::decorate` — narrows disclosed
+    /// tool_search/tool_describe metadata *and* the tool_search bridge's own
+    /// advertised description (the always-on catalog index).
+    allow_set: Arc<CapabilityAllowSet>,
     turn_state: Mutex<Option<ToolDisclosureTurnState>>,
     bridge_inputs: Mutex<BTreeMap<String, BridgeInvocation>>,
     tool_call_target_inputs: Mutex<BTreeMap<String, CapabilityId>>,
@@ -588,7 +651,7 @@ impl ToolDisclosureCapabilityPort {
         if rebuild {
             let catalog = CapabilityCatalog::new(&definitions, &[]);
             let promoted = self.promoted_for_scope()?;
-            let active = select_active_set(&catalog, &promoted, self.caps);
+            let active = select_active_set(&catalog, &promoted, self.caps, &self.allow_set);
             // Preserve disclosure progress across a same-turn refresh (a tool the
             // model already described stays disclosed); a genuine turn change
             // starts fresh.
@@ -928,7 +991,9 @@ impl ToolDisclosureCapabilityPort {
             let Some(state) = guard.as_mut() else {
                 return Ok(failed_invalid_input("tool catalog is unavailable"));
             };
-            let names = tool_search_rank(&state.catalog, query, limit);
+            let names = tool_search_rank(&state.catalog, query, limit, |id| {
+                self.allow_set.permits(id)
+            });
             let mut results = Vec::new();
             for name in names {
                 state.disclosed_names.insert(name.clone());
@@ -971,6 +1036,11 @@ impl ToolDisclosureCapabilityPort {
             let Some(result) = state.catalog.search_result(name) else {
                 return Ok(failed_invalid_input("tool_describe target is unknown"));
             };
+            // #5712: same message as a truly unknown name — a narrowed profile
+            // must not learn that a non-allowlisted tool exists.
+            if !self.allow_set.permits(&result.capability_id) {
+                return Ok(failed_invalid_input("tool_describe target is unknown"));
+            }
             state.disclosed_names.insert(name.to_string());
             json!({
                 "name": result.name,
@@ -3086,6 +3156,9 @@ mod tests {
                 max_tools: 5,
                 ctx_limit: None,
             },
+            // Unnarrowed — unit tests here exercise disclosure mechanics, not
+            // profile narrowing (that's the integration tier).
+            allow_set: Arc::new(CapabilityAllowSet::All),
             turn_state: Mutex::new(None),
             bridge_inputs: Mutex::new(BTreeMap::new()),
             tool_call_target_inputs: Mutex::new(BTreeMap::new()),

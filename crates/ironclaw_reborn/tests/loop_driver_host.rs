@@ -40,17 +40,16 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
-    CapabilitySurfaceProfileResolver, CapabilityWriteResult, EmptyLoopCapabilityPort,
-    EmptyUserProfileSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
-    HostIdentityContextSource, HostIdentityMessageContent, HostInputBatch, HostInputEnvelope,
-    HostInputQueue, HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind,
-    HostManagedModelGateway, HostManagedModelMessageRole, HostManagedModelRequest,
-    HostManagedModelResponse, HostRuntimeLoopCapabilityPort, HostSkillContextBuildError,
-    HostSkillContextCandidate, HostSkillContextSource, HostUserProfileSource,
-    IdentityApplicability, IdentityFileName, JsonSpawnSubagentInputCodec,
-    LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
-    ProductLiveCancellationProbe, RunCancellationFactory, RunCancellationHandle,
-    identity_message_ref, loop_driver_execution_extension_id,
+    CapabilitySurfaceProfileResolver, CapabilityWriteResult, EmptyUserProfileSource,
+    HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
+    HostIdentityMessageContent, HostInputBatch, HostInputEnvelope, HostInputQueue,
+    HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
+    HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
+    HostRuntimeLoopCapabilityPort, HostSkillContextBuildError, HostSkillContextCandidate,
+    HostSkillContextSource, HostUserProfileSource, IdentityApplicability, IdentityFileName,
+    JsonSpawnSubagentInputCodec, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
+    LoopCapabilityResultWriter, ProductLiveCancellationProbe, RunCancellationFactory,
+    RunCancellationHandle, identity_message_ref, loop_driver_execution_extension_id,
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_reborn::app_loop_family::build_loop_family_registry;
@@ -76,7 +75,7 @@ use ironclaw_reborn::planned_driver_factory::{
 };
 use ironclaw_reborn::runtime::{
     DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, SchedulerWakeWiring,
-    build_default_planned_runtime, build_product_live_planned_runtime,
+    ToolDisclosureMode, build_default_planned_runtime, build_product_live_planned_runtime,
 };
 use ironclaw_reborn::subagent::{
     flavors::StaticSubagentDefinitionResolver, gate_resolution::BoundedSubagentGateResolutionStore,
@@ -1133,9 +1132,10 @@ async fn delivery_tools_visible_from_surface_renders_tool_hint_warning() {
         io,
         fixture.milestone_sink.clone(),
     );
-    let surface_resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
-        CapabilityAllowSet::allowlist([setter_id.clone(), lister_id.clone()]),
-    ));
+    let allow_set = Arc::new(CapabilityAllowSet::allowlist([
+        setter_id.clone(),
+        lister_id.clone(),
+    ]));
     let recording_provider = RecordingCommunicationContextProvider::new();
 
     let host = fixture
@@ -1149,7 +1149,7 @@ async fn delivery_tools_visible_from_surface_renders_tool_hint_warning() {
                 loop_run_context: loop_run_context.clone(),
             },
             Arc::new(capability_port),
-            surface_resolver,
+            allow_set,
         )
         .await
         .unwrap();
@@ -1206,9 +1206,7 @@ async fn delivery_tools_visible_requires_both_caps_setter_only_suppresses_hint()
         io,
         fixture.milestone_sink.clone(),
     );
-    let surface_resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
-        CapabilityAllowSet::allowlist([setter_id.clone()]),
-    ));
+    let allow_set = Arc::new(CapabilityAllowSet::allowlist([setter_id.clone()]));
     let recording_provider = RecordingCommunicationContextProvider::new();
 
     let host = fixture
@@ -1222,7 +1220,7 @@ async fn delivery_tools_visible_requires_both_caps_setter_only_suppresses_hint()
                 loop_run_context: loop_run_context.clone(),
             },
             Arc::new(capability_port),
-            surface_resolver,
+            allow_set,
         )
         .await
         .unwrap();
@@ -3255,50 +3253,12 @@ async fn planned_host_factory_sanitizes_capability_profile_resolver_errors() {
     assert!(!error.reason.contains("/tmp/private"));
 }
 
-#[tokio::test]
-async fn profiled_capability_surface_resolver_errors_are_sanitized() {
-    let fixture = HostFixture::new("thread-planned-host-sanitized-surface", "hello").await;
-    let planned = default_planned_run_profile_resolver()
-        .expect("planned default profile resolver")
-        .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
-        .await
-        .unwrap();
-    let mut claimed = fixture.claimed.clone();
-    claimed.state.resolved_run_profile_id = planned.profile_id.clone();
-    claimed.state.resolved_run_profile_version = planned.loop_driver.version;
-    claimed.resolved_run_profile = planned;
-    let loop_run_context = LoopRunContext::new(
-        fixture.context.scope.clone(),
-        fixture.context.turn_id,
-        fixture.context.run_id,
-        claimed.resolved_run_profile.clone(),
-    );
-    let request = RebornLoopDriverHostRequest {
-        claimed_run: claimed,
-        loop_run_context,
-    };
-
-    let error = fixture
-        .factory()
-        .build_text_only_host_with_profiled_capabilities(
-            request,
-            Arc::new(EmptyLoopCapabilityPort),
-            Arc::new(FailingCapabilitySurfaceProfileResolver::internal(
-                "raw resolver failure sk-secret /host/path tool_input",
-            )),
-        )
-        .await
-        .expect_err("resolver failure should fail host construction");
-    let reason = error.to_string();
-
-    assert!(
-        reason.contains("capability surface profile could not be resolved"),
-        "reason: {reason}"
-    );
-    assert!(!reason.contains("sk-secret"), "reason: {reason}");
-    assert!(!reason.contains("/host/path"), "reason: {reason}");
-    assert!(!reason.contains("tool_input"), "reason: {reason}");
-}
+// `profiled_capability_surface_resolver_errors_are_sanitized` (resolver
+// failure surfacing sanitized through `build_text_only_host_with_profiled_capabilities`
+// directly) was removed: that function no longer resolves — resolution now
+// happens once at the host-build boundary (`create_host`), and
+// `planned_host_factory_sanitizes_capability_profile_resolver_errors` above
+// already covers the same sanitized-error assertion through that boundary.
 
 #[tokio::test]
 async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_host_factory() {
@@ -4086,6 +4046,140 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
             .iter()
             .any(|message| message.content == "test safety context")
     );
+}
+
+// `create_host` resolves the caller's allow-set exactly once and
+// primes the tool-disclosure decorator with that same resolved `Arc`, rather
+// than the decorator and the `CapabilitySurfaceProfileFilter` each resolving
+// independently (which, under a transient resolver failure, could let the
+// two observe different profiles). A resolver that counts its own calls
+// pins the "exactly once per host build" contract directly; the surface
+// assertion below pins that the single resolved value is what both the
+// filter (and, transitively, the primed decorator) actually enforce.
+#[tokio::test]
+async fn planned_host_factory_create_host_resolves_allow_set_exactly_once_with_tool_disclosure() {
+    let fixture = HostFixture::new_unsubmitted("thread-product-live-single-resolve", "hello").await;
+    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let allowed_id = CapabilityId::new("demo.allowed").unwrap();
+    let denied_id = CapabilityId::new("demo.denied").unwrap();
+    let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
+        capability_descriptor(allowed_id.as_str()),
+        capability_descriptor(denied_id.as_str()),
+    ])));
+    let io = Arc::new(InMemoryCapabilityIo::default());
+    let capability_factory = Arc::new(TestHostRuntimeCapabilityFactory {
+        runtime: runtime.clone(),
+        visible_request: host_runtime_visible_request(&fixture, ["demo"]),
+        io: io.clone(),
+        milestone_sink: fixture.milestone_sink.clone(),
+    });
+    let model_route_resolver: Arc<dyn ModelRouteResolver> = Arc::new(
+        StaticModelRouteResolver::new(ModelRoutePolicy::new(
+            ModelSelectionMode::DeveloperAnyConfigured,
+        ))
+        .with_route(
+            ModelSlot::Default,
+            ModelRoute::new("nearai", "qwen3-coder").unwrap(),
+        ),
+    );
+    let counting_resolver = Arc::new(CountingCapabilitySurfaceProfileResolver::new(
+        CapabilityAllowSet::allowlist([allowed_id.clone()]),
+    ));
+
+    let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
+    let config = DefaultPlannedRuntimeConfig {
+        tool_disclosure: ToolDisclosureMode::Bridged,
+        ..Default::default()
+    };
+    let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
+        attachment_read_port: None,
+        turn_state: turn_store.clone(),
+        thread_service: fixture.thread_service.clone() as Arc<dyn SessionThreadService>,
+        thread_scope: fixture.thread_scope.clone(),
+        model_gateway: fixture.gateway.clone(),
+        checkpoint_state_store: fixture.checkpoint_state_store.clone(),
+        loop_checkpoint_store: turn_store.clone(),
+        milestone_sink: fixture.milestone_sink.clone(),
+        capability_factory,
+        capability_surface_resolver: Arc::clone(&counting_resolver)
+            as Arc<dyn CapabilitySurfaceProfileResolver>,
+        capability_result_writer: io.clone(),
+        subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
+        subagent_gate_store: subagent_gate_store.clone(),
+        subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
+        subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
+        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
+        loop_exit_evidence: Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
+            fixture.thread_service.clone(),
+            turn_state_store_dyn(&turn_store),
+            turn_store,
+            subagent_gate_store,
+        )),
+        config,
+        model_route_resolver: Some(model_route_resolver),
+        cancellation_factory: Some(Arc::new(ReadyRunCancellationFactory::default())),
+        skill_context_source: None,
+        input_queue: Some(Arc::new(EmptyHostInputQueue)),
+        identity_context_source: Arc::new(EmptyIdentityContextSource),
+        user_profile_source: Arc::new(EmptyUserProfileSource),
+        model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
+        model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
+        safety_context: Some(test_safety_context()),
+        hook_dispatcher_builder_factory: None,
+        communication_context_provider: None,
+        hook_security_audit_sink: None,
+        turn_event_sink: None,
+        scheduler_wake_wiring: None,
+    })
+    .expect("all product-live adapters should satisfy readiness");
+
+    let planned = composition
+        .run_profile_resolver
+        .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+        .await
+        .unwrap();
+    let mut claimed = fixture.claimed.clone();
+    claimed.state.resolved_run_profile_id = planned.profile_id.clone();
+    claimed.state.resolved_run_profile_version = planned.loop_driver.version;
+    claimed.resolved_run_profile = planned;
+
+    let host = composition
+        .host_factory
+        .create_host(&claimed)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        counting_resolver.call_count(),
+        1,
+        "create_host must resolve the caller's allow-set exactly once, even with the \
+         tool-disclosure decorator and the CapabilitySurfaceProfileFilter both wired"
+    );
+
+    // The single resolved value is what the filter actually enforces: only the
+    // allowlisted capability is visible/invokable.
+    let surface = host
+        .visible_capabilities(VisibleCapabilityRequest)
+        .await
+        .unwrap();
+    let _descriptor = only_runtime_surface_descriptor(&surface, &allowed_id);
+    let outcome = host
+        .invoke_capability(CapabilityInvocation {
+            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            surface_version: surface.version,
+            capability_id: denied_id,
+            input_ref: CapabilityInputRef::new("input:denied-single-resolve").unwrap(),
+            approval_resume: None,
+            auth_resume: None,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        CapabilityOutcome::Denied(denied)
+            if denied.reason_kind.as_str() == "surface_profile_denied"
+    ));
+    assert!(runtime.invocations().is_empty());
 }
 
 /// Build a fully-populated `DefaultPlannedRuntimeParts` for product-live
@@ -5730,9 +5824,7 @@ async fn text_only_host_profiled_capabilities_filter_surface_and_invocation() {
         io,
         fixture.milestone_sink.clone(),
     );
-    let resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
-        CapabilityAllowSet::allowlist([allowed_id.clone()]),
-    ));
+    let allow_set = Arc::new(CapabilityAllowSet::allowlist([allowed_id.clone()]));
 
     let host = fixture
         .factory()
@@ -5742,7 +5834,7 @@ async fn text_only_host_profiled_capabilities_filter_surface_and_invocation() {
                 loop_run_context: fixture.context.clone(),
             },
             Arc::new(capability_port),
-            resolver,
+            allow_set,
         )
         .await
         .unwrap();
@@ -5804,9 +5896,7 @@ async fn default_strategy_filter_all_loses_to_host_profile_filter() {
     // The strategy effectively resolves to `CapabilityAllowSet::All` for any
     // capability not explicitly blocked, but the host filter wraps the port and
     // takes precedence.
-    let resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
-        CapabilityAllowSet::allowlist([tool_a_id.clone()]),
-    ));
+    let allow_set = Arc::new(CapabilityAllowSet::allowlist([tool_a_id.clone()]));
 
     let host = fixture
         .factory()
@@ -5816,7 +5906,7 @@ async fn default_strategy_filter_all_loses_to_host_profile_filter() {
                 loop_run_context: fixture.context.clone(),
             },
             Arc::new(capability_port),
-            resolver,
+            allow_set,
         )
         .await
         .unwrap();
@@ -7308,6 +7398,38 @@ struct StaticCapabilitySurfaceProfileResolver {
 impl StaticCapabilitySurfaceProfileResolver {
     fn new(allow_set: CapabilityAllowSet) -> Self {
         Self { allow_set }
+    }
+}
+
+/// Wraps a static allow-set with a call counter, so a test can assert a
+/// host-build boundary resolved exactly once even with both the
+/// tool-disclosure decorator and the `CapabilitySurfaceProfileFilter` wired.
+struct CountingCapabilitySurfaceProfileResolver {
+    allow_set: CapabilityAllowSet,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl CountingCapabilitySurfaceProfileResolver {
+    fn new(allow_set: CapabilityAllowSet) -> Self {
+        Self {
+            allow_set,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn call_count(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl CapabilitySurfaceProfileResolver for CountingCapabilitySurfaceProfileResolver {
+    async fn resolve(
+        &self,
+        _run_context: &LoopRunContext,
+    ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(self.allow_set.clone())
     }
 }
 
