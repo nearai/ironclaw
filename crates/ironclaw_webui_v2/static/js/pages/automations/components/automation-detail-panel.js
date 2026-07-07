@@ -173,7 +173,7 @@ export function AutomationDetailPanel({
                   </form>
                 `
               : html`
-                  <div className="flex min-w-0 items-start gap-2">
+                  <div className="flex min-w-0 items-center gap-2">
                     <h3
                       data-testid="automation-detail-title"
                       className="min-w-0 flex-1 truncate text-xl font-semibold tracking-tight text-iron-100"
@@ -186,6 +186,7 @@ export function AutomationDetailPanel({
                         type="button"
                         variant="ghost"
                         size="icon-sm"
+                        className="shrink-0"
                         data-testid="automation-rename-button"
                         aria-label=${renameTitle}
                         title=${renameTitle}
