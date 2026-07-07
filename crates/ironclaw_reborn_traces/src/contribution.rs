@@ -5114,15 +5114,31 @@ impl TraceUploadCredentialProvider for DefaultTraceUploadCredentialProvider {
         context: &TraceUploadClaimContext,
         force_refresh: bool,
     ) -> anyhow::Result<String> {
-        if policy
-            .upload_token_issuer_url
-            .as_deref()
-            .is_some_and(|url| !url.trim().is_empty())
-        {
-            return trace_upload_issuer_claim_bearer_token(policy, context, force_refresh).await;
-        }
-        trace_upload_static_env_bearer_token(&policy.bearer_token_env)
+        trace_upload_bearer_token_via(policy, context, force_refresh, None).await
     }
+}
+
+/// Sink-aware bearer mint. `sink == Some`: AGENT path — the upload-claim
+/// issuer request routes through host `RuntimeHttpEgress` like every other
+/// agent-driven network effect. `sink == None`: WORKER/CLI path — the direct
+/// hardened reqwest client (unchanged [`DefaultTraceUploadCredentialProvider`]
+/// behavior). Sink-based entry points (login-link, account-traces) MUST pass
+/// their sink here rather than minting through the default provider, or the
+/// claim request silently bypasses the deployment's egress policy.
+async fn trace_upload_bearer_token_via(
+    policy: &StandingTraceContributionPolicy,
+    context: &TraceUploadClaimContext,
+    force_refresh: bool,
+    sink: Option<&dyn ContributionHttpSink>,
+) -> anyhow::Result<String> {
+    if policy
+        .upload_token_issuer_url
+        .as_deref()
+        .is_some_and(|url| !url.trim().is_empty())
+    {
+        return trace_upload_issuer_claim_bearer_token(policy, context, force_refresh, sink).await;
+    }
+    trace_upload_static_env_bearer_token(&policy.bearer_token_env)
 }
 
 fn trace_upload_static_env_bearer_token(bearer_token_env: &str) -> anyhow::Result<String> {
@@ -5138,13 +5154,14 @@ async fn trace_upload_issuer_claim_bearer_token(
     policy: &StandingTraceContributionPolicy,
     context: &TraceUploadClaimContext,
     force_refresh: bool,
+    sink: Option<&dyn ContributionHttpSink>,
 ) -> anyhow::Result<String> {
     let cache_key = trace_upload_claim_cache_key(policy, context)?;
     if !force_refresh && let Some(cached) = trace_upload_cached_claim(&cache_key, Utc::now()) {
         return Ok(cached);
     }
 
-    let claim = fetch_trace_upload_claim_from_issuer(policy, context, None).await?;
+    let claim = fetch_trace_upload_claim_from_issuer(policy, context, sink).await?;
     if let Some(refresh_after) = trace_upload_claim_refresh_after(&claim, Utc::now()) {
         let mut cache = match TRACE_UPLOAD_CLAIM_CACHE.lock() {
             Ok(cache) => cache,
@@ -6657,9 +6674,10 @@ async fn mint_account_login_link_inner(
         .map_err(AccountLoginLinkError::EnrollmentIncomplete)?;
     let context =
         TraceUploadClaimContext::for_account(resolution.subject.clone()).with_scope_dir(scope_dir);
-    let provider = DefaultTraceUploadCredentialProvider;
-    let bearer = provider
-        .bearer_token(&resolution.policy, &context, false)
+    // Mint the bearer THROUGH the sink: on the agent path the upload-claim
+    // issuer request must route via host RuntimeHttpEgress like the login-link
+    // POST below, not the direct reqwest path.
+    let bearer = trace_upload_bearer_token_via(&resolution.policy, &context, false, Some(sink))
         .await
         .map_err(AccountLoginLinkError::Backend)?;
     let body = match &resolution.subject {
@@ -6875,10 +6893,11 @@ async fn fetch_account_traces_inner(
 
     let context =
         TraceUploadClaimContext::for_account(resolution.subject.clone()).with_scope_dir(scope_dir);
-    let provider = DefaultTraceUploadCredentialProvider;
-    let bearer = provider
-        .bearer_token(&resolution.policy, &context, false)
-        .await?;
+    // Mint the bearer THROUGH the sink: on the agent path the upload-claim
+    // issuer request must route via host RuntimeHttpEgress like the traces
+    // GET below, not the direct reqwest path.
+    let bearer =
+        trace_upload_bearer_token_via(&resolution.policy, &context, false, Some(sink)).await?;
     let url = account_traces_url(&resolution.policy, limit)?;
     // Honor the operator-tuned issuer timeout rather than a hardcoded value,
     // and cap the body at the account-traces ceiling (a legitimate trace list
@@ -16164,6 +16183,38 @@ mod tests {
         }
     }
 
+    /// Sink wrapper that records every request URL it executes. Used to pin
+    /// the egress invariant: on the agent (sink) path, EVERY network call —
+    /// including the upload-claim mint — must route through the sink, not a
+    /// direct reqwest client.
+    struct RecordingSink {
+        inner: ReqwestContributionSink,
+        urls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingSink {
+        fn new() -> Self {
+            Self {
+                inner: ReqwestContributionSink,
+                urls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ContributionHttpSink for RecordingSink {
+        async fn execute(
+            &self,
+            req: ContributionHttpRequest,
+        ) -> Result<ContributionHttpResponse, ContributionHttpError> {
+            self.urls
+                .lock()
+                .expect("recording sink lock")
+                .push(req.url.clone());
+            self.inner.execute(req).await
+        }
+    }
+
     #[tokio::test]
     async fn mint_account_login_link_posts_subject_and_returns_url() {
         use std::sync::{Arc, Mutex};
@@ -16244,7 +16295,7 @@ mod tests {
         pending.promote(&instance_dir, "tenant-dev").unwrap();
 
         // ── call under test ──────────────────────────────────────────────────
-        let sink = ReqwestContributionSink;
+        let sink = RecordingSink::new();
         let link = mint_account_login_link_inner(base.path(), "tenant-dev", "alice", &sink)
             .await
             .unwrap();
@@ -16252,6 +16303,26 @@ mod tests {
         // ── assertions ───────────────────────────────────────────────────────
         assert_eq!(link.url, "/account/login?code=abc");
         assert_eq!(link.account_id, "11111111-1111-1111-1111-111111111111");
+
+        // Egress invariant: on the agent path BOTH network calls — the
+        // upload-claim mint and the login-link POST — must route through the
+        // sink; a direct-reqwest claim mint would bypass RuntimeHttpEgress.
+        {
+            let sink_urls = sink.urls.lock().unwrap();
+            assert_eq!(
+                sink_urls.len(),
+                2,
+                "claim mint + login-link POST must both go through the sink; got {sink_urls:?}"
+            );
+            assert!(
+                sink_urls[0].ends_with("/v1/trace-upload-claim"),
+                "first sink request must be the upload-claim mint; got {sink_urls:?}"
+            );
+            assert!(
+                sink_urls[1].ends_with("/v1/account/login-links"),
+                "second sink request must be the login-link POST; got {sink_urls:?}"
+            );
+        }
 
         let bodies = captured.lock().unwrap();
         assert_eq!(bodies.len(), 1, "exactly one POST to login-links");
@@ -16588,12 +16659,30 @@ mod tests {
         pending.promote(&instance_dir, "tenant-dev").unwrap();
 
         // ── call under test ──────────────────────────────────────────────────
-        let sink = ReqwestContributionSink;
+        let sink = RecordingSink::new();
         let items = fetch_account_traces_inner(base.path(), "tenant-dev", "alice", Some(50), &sink)
             .await
             .unwrap();
 
         // ── assertions ───────────────────────────────────────────────────────
+        // Egress invariant: claim mint + traces GET must both route through
+        // the sink on the agent path (no direct-reqwest claim mint).
+        {
+            let sink_urls = sink.urls.lock().unwrap();
+            assert_eq!(
+                sink_urls.len(),
+                2,
+                "claim mint + traces GET must both go through the sink; got {sink_urls:?}"
+            );
+            assert!(
+                sink_urls[0].ends_with("/v1/trace-upload-claim"),
+                "first sink request must be the upload-claim mint; got {sink_urls:?}"
+            );
+            assert!(
+                sink_urls[1].contains("/v1/account/traces"),
+                "second sink request must be the traces GET; got {sink_urls:?}"
+            );
+        }
         assert_eq!(items.len(), 1, "expected exactly one trace item");
         assert_eq!(items[0].submission_id, "s1");
         assert_eq!(items[0].status, "accepted");
