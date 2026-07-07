@@ -114,7 +114,7 @@ use crate::outbound::{
     RebornOutboundPreferencesFacade, outbound_delivery_synthetic_provider,
 };
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
-pub(crate) use crate::turn_run_snapshot::TurnRunSnapshotSource;
+use crate::turn_run_snapshot::TurnRunSnapshotSource;
 
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone)]
