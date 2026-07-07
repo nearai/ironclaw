@@ -203,6 +203,15 @@ pub struct ThreadMessageRecord {
     pub sequence: u64,
     pub kind: MessageKind,
     pub status: MessageStatus,
+    /// When this message row was first persisted. `None` for legacy records
+    /// written before per-message timestamps existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+    /// Last time the message row was materially changed. Draft finalization
+    /// updates this so UI refreshes can show the reply completion time instead
+    /// of the browser refresh time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
     pub actor_id: Option<String>,
     pub source_binding_id: Option<String>,
     pub reply_target_binding_id: Option<String>,
@@ -717,6 +726,8 @@ mod tests {
         }"#;
         let record: ThreadMessageRecord = serde_json::from_str(json).unwrap();
         assert!(record.attachments.is_empty());
+        assert_eq!(record.created_at, None);
+        assert_eq!(record.updated_at, None);
         assert_eq!(record.content.as_deref(), Some("legacy row"));
     }
 }

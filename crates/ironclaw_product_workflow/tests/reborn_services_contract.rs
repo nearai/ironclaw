@@ -186,6 +186,8 @@ fn fake_thread_history(owner: &WebUiAuthenticatedCaller, thread_id: &str) -> Thr
             sequence: 1,
             kind: MessageKind::User,
             status: MessageStatus::Submitted,
+            created_at: None,
+            updated_at: None,
             actor_id: Some(owner.user_id.as_str().to_string()),
             source_binding_id: Some("webui-src:test".to_string()),
             reply_target_binding_id: Some("webui-reply:test".to_string()),

@@ -174,6 +174,38 @@ test("messagesFromTimeline: finalized assistant records are marked as final repl
   assert.equal(messages[1].isFinalReply, false);
 });
 
+test("messagesFromTimeline: user records keep durable created_at timestamps", () => {
+  const messages = messagesFromTimeline([
+    {
+      message_id: "message-1",
+      kind: "user",
+      status: "submitted",
+      content: "check my calendar",
+      created_at: "2026-05-12T17:08:00Z",
+      updated_at: "2026-05-12T17:09:00Z",
+    },
+  ]);
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].timestamp, "2026-05-12T17:08:00Z");
+});
+
+test("messagesFromTimeline: finalized assistant records prefer durable updated_at timestamps", () => {
+  const messages = messagesFromTimeline([
+    {
+      message_id: "reply-1",
+      kind: "assistant",
+      status: "finalized",
+      content: "Done.",
+      created_at: "2026-05-12T17:06:00Z",
+      updated_at: "2026-05-12T17:08:00Z",
+    },
+  ]);
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].timestamp, "2026-05-12T17:08:00Z");
+});
+
 test("messagesFromTimeline: tool previews use timeline sequence as activity order", () => {
   const messages = messagesFromTimeline([
     {

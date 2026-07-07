@@ -159,13 +159,16 @@ impl SessionThreadService for InMemorySessionThreadService {
         thread.next_sequence += 1;
         // Appending a message is thread activity; bump the last-activity
         // stamp so activity-ordered listings surface this thread first.
-        thread.record.updated_at = Some(Utc::now());
+        let now = Utc::now();
+        thread.record.updated_at = Some(now);
         thread.messages.push(ThreadMessageRecord {
             message_id,
             thread_id: request.thread_id.clone(),
             sequence,
             kind: MessageKind::User,
             status: MessageStatus::Accepted,
+            created_at: Some(now),
+            updated_at: Some(now),
             actor_id: Some(request.actor_id),
             source_binding_id: request.source_binding_id.clone(),
             reply_target_binding_id: request.reply_target_binding_id,
@@ -277,12 +280,15 @@ impl SessionThreadService for InMemorySessionThreadService {
             return Ok(existing.clone());
         }
         let message_id = ThreadMessageId::new();
+        let now = Utc::now();
         let message = ThreadMessageRecord {
             message_id,
             thread_id: request.thread_id.clone(),
             sequence: thread.next_sequence,
             kind: MessageKind::Assistant,
             status: MessageStatus::Draft,
+            created_at: Some(now),
+            updated_at: Some(now),
             actor_id: None,
             source_binding_id: None,
             reply_target_binding_id: None,
@@ -297,7 +303,7 @@ impl SessionThreadService for InMemorySessionThreadService {
         thread.next_sequence += 1;
         // Appending a message is thread activity; bump the last-activity
         // stamp so activity-ordered listings surface this thread first.
-        thread.record.updated_at = Some(Utc::now());
+        thread.record.updated_at = Some(now);
         thread.messages.push(message.clone());
         Ok(message)
     }
@@ -313,18 +319,24 @@ impl SessionThreadService for InMemorySessionThreadService {
                 && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
         }) {
             if existing.status == MessageStatus::Draft {
+                let now = Utc::now();
                 existing.status = MessageStatus::Finalized;
                 existing.content = Some(request.content.into_text());
                 existing.attachments = Vec::new();
+                existing.updated_at = Some(now);
+                thread.record.updated_at = Some(now);
             }
             return Ok(existing.clone());
         }
+        let now = Utc::now();
         let message = ThreadMessageRecord {
             message_id: ThreadMessageId::new(),
             thread_id: request.thread_id.clone(),
             sequence: thread.next_sequence,
             kind: MessageKind::Assistant,
             status: MessageStatus::Finalized,
+            created_at: Some(now),
+            updated_at: Some(now),
             actor_id: None,
             source_binding_id: None,
             reply_target_binding_id: None,
@@ -339,7 +351,7 @@ impl SessionThreadService for InMemorySessionThreadService {
         thread.next_sequence += 1;
         // Appending a message is thread activity; bump the last-activity
         // stamp so activity-ordered listings surface this thread first.
-        thread.record.updated_at = Some(Utc::now());
+        thread.record.updated_at = Some(now);
         thread.messages.push(message.clone());
         Ok(message)
     }
@@ -392,6 +404,7 @@ impl SessionThreadService for InMemorySessionThreadService {
                     .map_err(SessionThreadError::Serialization)?
                 {
                     existing.content = Some(content);
+                    existing.updated_at = Some(Utc::now());
                 }
             }
             return Ok(existing.clone());
@@ -403,12 +416,15 @@ impl SessionThreadService for InMemorySessionThreadService {
         }
         let content = serde_json::to_string(&envelope)
             .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
+        let now = Utc::now();
         let message = ThreadMessageRecord {
             message_id: ThreadMessageId::new(),
             thread_id: request.thread_id.clone(),
             sequence: thread.next_sequence,
             kind: MessageKind::ToolResultReference,
             status: MessageStatus::Finalized,
+            created_at: Some(now),
+            updated_at: Some(now),
             actor_id: None,
             source_binding_id: None,
             reply_target_binding_id: None,
@@ -423,7 +439,7 @@ impl SessionThreadService for InMemorySessionThreadService {
         thread.next_sequence += 1;
         // Appending a message is thread activity; bump the last-activity
         // stamp so activity-ordered listings surface this thread first.
-        thread.record.updated_at = Some(Utc::now());
+        thread.record.updated_at = Some(now);
         thread.messages.push(message.clone());
         Ok(message)
     }
@@ -454,12 +470,15 @@ impl SessionThreadService for InMemorySessionThreadService {
         }
         let content = serde_json::to_string(&request.preview)
             .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
+        let now = Utc::now();
         let message = ThreadMessageRecord {
             message_id: ThreadMessageId::new(),
             thread_id: request.thread_id.clone(),
             sequence: thread.next_sequence,
             kind: MessageKind::CapabilityDisplayPreview,
             status: MessageStatus::Finalized,
+            created_at: Some(now),
+            updated_at: Some(now),
             actor_id: None,
             source_binding_id: None,
             reply_target_binding_id: None,
@@ -474,7 +493,7 @@ impl SessionThreadService for InMemorySessionThreadService {
         thread.next_sequence += 1;
         // Appending a message is thread activity; bump the last-activity
         // stamp so activity-ordered listings surface this thread first.
-        thread.record.updated_at = Some(Utc::now());
+        thread.record.updated_at = Some(now);
         thread.messages.push(message.clone());
         Ok(message)
     }
@@ -512,6 +531,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             serde_json::to_string(&envelope)
                 .map_err(|error| SessionThreadError::Serialization(error.to_string()))?,
         );
+        message.updated_at = Some(Utc::now());
         Ok(message.clone())
     }
 
@@ -532,6 +552,7 @@ impl SessionThreadService for InMemorySessionThreadService {
         // assistant draft carries no attachments, so a content update must not
         // leave stale refs behind if a future draft path ever sets them.
         message.attachments = Vec::new();
+        message.updated_at = Some(Utc::now());
         Ok(message.clone())
     }
 
@@ -543,11 +564,19 @@ impl SessionThreadService for InMemorySessionThreadService {
         content: MessageContent,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         let mut state = self.state.lock().await;
-        let message = get_message_mut(&mut state, scope, thread_id, message_id)?;
+        let thread = get_thread_mut(&mut state, scope, thread_id)?;
+        let message = thread
+            .messages
+            .iter_mut()
+            .find(|message| message.message_id == message_id)
+            .ok_or(SessionThreadError::UnknownMessage { message_id })?;
         ensure_draft(message)?;
+        let now = Utc::now();
         message.status = MessageStatus::Finalized;
         message.content = Some(content.into_text());
         message.attachments = Vec::new();
+        message.updated_at = Some(now);
+        thread.record.updated_at = Some(now);
         Ok(message.clone())
     }
 
@@ -567,6 +596,7 @@ impl SessionThreadService for InMemorySessionThreadService {
         message.attachments = Vec::new();
         message.tool_result_provider_call = None;
         message.redaction_ref = Some(request.redaction_ref);
+        message.updated_at = Some(Utc::now());
         Ok(message.clone())
     }
 
@@ -1092,6 +1122,8 @@ fn history_message(message: &ThreadMessageRecord) -> ThreadMessageRecord {
         reply_target_binding_id: message.reply_target_binding_id.clone(),
         turn_id: message.turn_id.clone(),
         turn_run_id: message.turn_run_id.clone(),
+        created_at: message.created_at,
+        updated_at: message.updated_at,
         tool_result_ref: message.tool_result_ref.clone(),
         tool_result_provider_call: None,
         content: message.content.clone(),

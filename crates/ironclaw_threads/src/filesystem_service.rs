@@ -1435,12 +1435,15 @@ where
         // transactional backends the thread counter, message, sequence index,
         // and idempotency record commit together; fallback backends reserve
         // immediately before the legacy message write.
+        let now = Utc::now();
         let mut message = ThreadMessageRecord {
             message_id,
             thread_id: thread_id.clone(),
             sequence: 0,
             kind: MessageKind::User,
             status: MessageStatus::Accepted,
+            created_at: Some(now),
+            updated_at: Some(now),
             actor_id: Some(actor_id.clone()),
             source_binding_id: source_binding_id.clone(),
             reply_target_binding_id: reply_target_binding_id.clone(),
@@ -1645,12 +1648,15 @@ where
         let sequence = self
             .reserve_sequence(&request.scope, &request.thread_id)
             .await?;
+        let now = Utc::now();
         let message = ThreadMessageRecord {
             message_id: ThreadMessageId::new(),
             thread_id: request.thread_id.clone(),
             sequence,
             kind: MessageKind::Assistant,
             status: MessageStatus::Draft,
+            created_at: Some(now),
+            updated_at: Some(now),
             actor_id: None,
             source_binding_id: None,
             reply_target_binding_id: None,
@@ -1708,9 +1714,11 @@ where
                     existing.message_id,
                     |message| {
                         ensure_draft(message)?;
+                        let now = Utc::now();
                         message.status = MessageStatus::Finalized;
                         message.content = Some(content.clone().into_text());
                         message.attachments = Vec::new();
+                        message.updated_at = Some(now);
                         Ok(())
                     },
                 )
@@ -1724,12 +1732,15 @@ where
         let sequence = self
             .reserve_sequence(&request.scope, &request.thread_id)
             .await?;
+        let now = Utc::now();
         let message = ThreadMessageRecord {
             message_id: ThreadMessageId::new(),
             thread_id: request.thread_id.clone(),
             sequence,
             kind: MessageKind::Assistant,
             status: MessageStatus::Finalized,
+            created_at: Some(now),
+            updated_at: Some(now),
             actor_id: None,
             source_binding_id: None,
             reply_target_binding_id: None,
@@ -1839,6 +1850,7 @@ where
                                 .map_err(SessionThreadError::Serialization)?
                                 {
                                     message.content = Some(content);
+                                    message.updated_at = Some(Utc::now());
                                 }
                             }
                             Ok(())
@@ -1858,12 +1870,15 @@ where
         let sequence = self
             .reserve_sequence(&request.scope, &request.thread_id)
             .await?;
+        let now = Utc::now();
         let message = ThreadMessageRecord {
             message_id: ThreadMessageId::new(),
             thread_id: request.thread_id.clone(),
             sequence,
             kind: MessageKind::ToolResultReference,
             status: MessageStatus::Finalized,
+            created_at: Some(now),
+            updated_at: Some(now),
             actor_id: None,
             source_binding_id: None,
             reply_target_binding_id: None,
@@ -1915,12 +1930,15 @@ where
         let sequence = self
             .reserve_sequence(&request.scope, &request.thread_id)
             .await?;
+        let now = Utc::now();
         let message = ThreadMessageRecord {
             message_id,
             thread_id: request.thread_id.clone(),
             sequence,
             kind: MessageKind::CapabilityDisplayPreview,
             status: MessageStatus::Finalized,
+            created_at: Some(now),
+            updated_at: Some(now),
             actor_id: None,
             source_binding_id: None,
             reply_target_binding_id: None,
@@ -2011,6 +2029,7 @@ where
                 let content = serde_json::to_string(&envelope)
                     .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
                 message.content = Some(content.clone());
+                message.updated_at = Some(Utc::now());
                 Ok(())
             },
         )
@@ -2036,6 +2055,7 @@ where
                 // Keep content and attachments in lockstep (as redaction does):
                 // a content update must not leave stale attachment refs behind.
                 message.attachments = Vec::new();
+                message.updated_at = Some(Utc::now());
                 Ok(())
             },
         )
@@ -2060,6 +2080,7 @@ where
                 message.status = MessageStatus::Finalized;
                 message.content = Some(content.clone().into_text());
                 message.attachments = Vec::new();
+                message.updated_at = Some(Utc::now());
                 Ok(())
             })
             .await?;
@@ -2091,6 +2112,7 @@ where
                 message.attachments = Vec::new();
                 message.tool_result_provider_call = None;
                 message.redaction_ref = Some(request.redaction_ref.clone());
+                message.updated_at = Some(Utc::now());
                 Ok(())
             },
         )
@@ -2927,6 +2949,8 @@ fn history_message(message: &ThreadMessageRecord) -> ThreadMessageRecord {
         reply_target_binding_id: message.reply_target_binding_id.clone(),
         turn_id: message.turn_id.clone(),
         turn_run_id: message.turn_run_id.clone(),
+        created_at: message.created_at,
+        updated_at: message.updated_at,
         tool_result_ref: message.tool_result_ref.clone(),
         tool_result_provider_call: None,
         content: message.content.clone(),
