@@ -85,13 +85,13 @@ export function AuthOauthCard({ gate, onCancel }) {
     setError("");
     const popup = window.open("about:blank", "_blank", "width=600,height=600");
     if (!popup) {
-      setError("Authorization popup was blocked.");
+      setError(t("authGate.popupBlocked"));
       return;
     }
     popup.opener = null;
     openAuthPopup(gate.authorizationUrl, popup);
     setOpened(true);
-  }, [gate.authorizationUrl, hasHttpsAuthorizationUrl]);
+  }, [gate.authorizationUrl, hasHttpsAuthorizationUrl, t]);
 
   const openLabel = opened
     ? t("authGate.reopenAuthorization", { provider: providerLabel })

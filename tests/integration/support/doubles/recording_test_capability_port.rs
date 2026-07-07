@@ -46,11 +46,18 @@ enum CapabilityMode {
     Echo,
     ApprovalThenEcho,
     SpawnAuthThenApprovalThenEcho,
+    InvocationError,
 }
 
 impl RecordingTestCapabilityPort {
     pub fn echo() -> Self {
         Self::new(CapabilityMode::Echo, false, false)
+    }
+
+    /// Every capability invocation fails with a scripted host invocation error
+    /// (fault-matrix P4: non-model capability-stage failure).
+    pub fn invocation_error() -> Self {
+        Self::new(CapabilityMode::InvocationError, false, false)
     }
 
     pub fn echo_with_spawn_subagent() -> Self {
@@ -254,6 +261,12 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
         request: CapabilityInvocation,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
         self.invocations.lock().unwrap().push(request);
+        if matches!(self.mode, CapabilityMode::InvocationError) {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "scripted capability invocation failure",
+            ));
+        }
         if matches!(self.mode, CapabilityMode::ApprovalThenEcho)
             && self.approval_calls.fetch_add(1, Ordering::SeqCst) == 0
         {

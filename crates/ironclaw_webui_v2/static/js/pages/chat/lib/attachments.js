@@ -183,7 +183,7 @@ export async function stageFiles(files, { limits, existing = [], t }) {
     try {
       dataUrl = await readAsDataUrl(file);
     } catch {
-      errors.push(t("chat.attachmentReadFailed", { name: file.name || "file" }));
+      errors.push(t("chat.attachmentReadFailed", { name: file.name || t("common.file") }));
       continue;
     }
     const { mime, base64 } = splitDataUrl(dataUrl, file.type);
@@ -191,7 +191,7 @@ export async function stageFiles(files, { limits, existing = [], t }) {
     const kind = attachmentKindFromMime(mimeType);
     staged.push({
       id: `staged-${stagedSeq++}`,
-      filename: file.name || "attachment",
+      filename: file.name || t("common.attachment"),
       mimeType,
       kind,
       sizeBytes: file.size,

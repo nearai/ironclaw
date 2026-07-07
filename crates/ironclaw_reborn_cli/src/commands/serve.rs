@@ -22,7 +22,9 @@ use ironclaw_reborn_composition::{
     SlackOperatorRouteVisibility, build_slack_host_beta_runtime_mounts,
     build_webui_services_with_slack_host_beta_mounts,
 };
-use ironclaw_reborn_config::{IdentitySection, seed_default_config_file_if_missing};
+use ironclaw_reborn_config::{
+    IdentitySection, RebornConfigFile, seed_default_config_file_if_missing,
+};
 use ironclaw_reborn_webui_ingress::{
     DeferredWebuiRouterHandle, EnvBearerAuthenticator, RebornWebuiServeError,
     RebornWebuiServeOptions, deferred_webui_v2_startup_router, serve_webui_v2,
@@ -177,8 +179,8 @@ impl ServeCommand {
         if let Some(project_id) = default_project_id.clone() {
             runtime_input = runtime_input.with_default_project_id(project_id);
         }
-        let slack_host_beta_config = crate::commands::serve_slack::resolve_slack_config_for_serve(
-            config_file.as_ref().and_then(|file| file.slack.as_ref()),
+        let slack_host_beta_config = resolve_slack_host_beta_config_for_serve_command(
+            config_file.as_ref(),
             &tenant_id,
             &default_agent_id,
             default_project_id.as_ref(),
@@ -591,6 +593,44 @@ impl ServeCommand {
     }
 }
 
+#[cfg(feature = "slack-v2-host-beta")]
+fn resolve_slack_host_beta_config_for_serve_command(
+    config_file: Option<&RebornConfigFile>,
+    tenant_id: &TenantId,
+    default_agent_id: &AgentId,
+    default_project_id: Option<&ProjectId>,
+    default_user_id: &UserId,
+    config_path: &std::path::Path,
+) -> anyhow::Result<Option<ironclaw_reborn_composition::SlackHostBetaRuntimeConfig>> {
+    crate::commands::serve_slack::resolve_slack_config_for_serve(
+        config_file.and_then(|file| file.slack.as_ref()),
+        tenant_id,
+        default_agent_id,
+        default_project_id,
+        default_user_id,
+        config_path,
+    )
+}
+
+#[cfg(not(feature = "slack-v2-host-beta"))]
+fn resolve_slack_host_beta_config_for_serve_command(
+    config_file: Option<&RebornConfigFile>,
+    tenant_id: &TenantId,
+    default_agent_id: &AgentId,
+    default_project_id: Option<&ProjectId>,
+    default_user_id: &UserId,
+    config_path: &std::path::Path,
+) -> anyhow::Result<Option<()>> {
+    crate::commands::serve_slack::resolve_slack_config_for_serve(
+        config_file.and_then(|file| file.slack.as_ref()),
+        tenant_id,
+        default_agent_id,
+        default_project_id,
+        default_user_id,
+        config_path,
+    )
+}
+
 struct StartupServe {
     ready_handle: DeferredWebuiRouterHandle,
     serve_task: tokio::task::JoinHandle<Result<(), RebornWebuiServeError>>,
@@ -976,6 +1016,47 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("reborn-cli"), "message: {message}");
         assert!(message.contains("local-user"), "message: {message}");
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn serve_startup_rejects_loaded_config_with_legacy_slack_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+api_version = "ironclaw.runtime/v1"
+
+[slack]
+enabled = true
+slack_user_id = "U123"
+"#,
+        )
+        .expect("write config");
+        let config_file = RebornConfigFile::load(&config_path)
+            .expect("config file loads")
+            .expect("config exists");
+
+        let error = resolve_slack_host_beta_config_for_serve_command(
+            Some(&config_file),
+            &TenantId::new("serve-slack-tenant").expect("tenant id"),
+            &AgentId::new("serve-slack-agent").expect("agent id"),
+            None,
+            &UserId::new("serve-slack-user").expect("user id"),
+            &config_path,
+        )
+        .expect_err("serve startup must reject legacy Slack config fields");
+        let message = error.to_string();
+
+        assert!(
+            message.contains("[slack].slack_user_id"),
+            "message: {message}"
+        );
+        assert!(
+            message.contains(&config_path.display().to_string()),
+            "message: {message}"
+        );
     }
 
     #[cfg(feature = "slack-v2-host-beta")]

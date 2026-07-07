@@ -1,6 +1,8 @@
 import { html } from "../../../lib/html.js";
+import { useT } from "../../../lib/i18n.js";
 
 export function CodeBlock({ code, language = "" }) {
+  const t = useT();
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(code);
@@ -17,7 +19,7 @@ export function CodeBlock({ code, language = "" }) {
           onClick=${handleCopy}
           className="rounded px-2 py-0.5 text-[11px] text-iron-200 opacity-0 hover:bg-white/10 group-hover:opacity-100"
         >
-          Copy
+          ${t("common.copy")}
         </button>
       </div>
       <pre className="overflow-x-auto p-3 text-sm"><code className="font-mono text-iron-100">${code}</code></pre>

@@ -418,6 +418,7 @@ async fn oauth_callback_handler_returns_provider_identity_for_host_binding() {
     assert!(
         !serialized.contains("U123")
             && !serialized.contains("T123")
+            && !serialized.contains("E123")
             && !serialized.contains("A123"),
         "provider identity is for host-side binding only and must stay out of the generic callback JSON"
     );

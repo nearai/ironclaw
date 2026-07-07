@@ -41,7 +41,10 @@ pub(crate) use compaction::{
     ByteCapStrategy, CompactionDecision, CompactionForceStrategy, CompactionStrategy,
     DefaultCompactionStrategy,
 };
-pub(crate) use context::{ContextPlan, ContextStrategy, DefaultContextStrategy};
+pub(crate) use context::{
+    ContextPlan, ContextStrategy, DefaultContextStrategy,
+    invalid_model_output_repair_control_message,
+};
 pub(crate) use drain::{DefaultInputDrainStrategy, InputDrainStrategy};
 pub(crate) use gate::{
     DefaultGateHandlingStrategy, GateHandlingStrategy, GateKind, GateOutcome, GateSummary,
@@ -50,7 +53,7 @@ pub(crate) use model::{DefaultModelStrategy, ModelPreference, ModelStrategy};
 pub(crate) use recovery::{
     BackoffDelayMs, CapabilityErrorClass, CapabilityErrorSummary, DefaultRecoveryStrategy,
     ModelErrorClass, ModelErrorSummary, RecoveryOutcome, RecoveryStrategy, RetryAlteration,
-    RetryScope, SanitizedStrategySummary,
+    RetryScope, SanitizedStrategySummary, model_error_to_failure_kind,
 };
 pub(crate) use reply_admission::{
     DefaultReplyAdmissionStrategy, ReplyAdmissionOutcome, ReplyAdmissionStrategy,

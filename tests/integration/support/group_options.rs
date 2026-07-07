@@ -13,6 +13,7 @@
 #![allow(dead_code)]
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use ironclaw_reborn::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_reborn::runtime::ToolDisclosureMode;
@@ -125,6 +126,25 @@ impl RebornIntegrationGroupBuilder {
         factory: HookDispatcherBuilderFactory,
     ) -> Self {
         self.hook_dispatcher_builder_factory = Some(factory);
+        self
+    }
+
+    /// Shorten the group's turn-state store lease TTL (default 90s,
+    /// `InMemoryTurnStateStoreLimits::default()`) for lease-expiry-under-a-
+    /// wedged-tool coverage (see `tests/integration/lease_wedge.rs`).
+    /// `None` (default) leaves today's behavior byte-identical.
+    pub fn with_runner_lease_ttl_for_test(mut self, ttl: chrono::Duration) -> Self {
+        self.runner_lease_ttl_override = Some(ttl);
+        self
+    }
+
+    /// Shorten the group's scheduler lease-recovery sweep interval (default
+    /// 10s, `TurnRunSchedulerConfig::lease_recovery_interval`) so a wedged run
+    /// is reaped without waiting on the production tick (see
+    /// `tests/integration/lease_wedge.rs`). `None` (default) leaves today's
+    /// behavior byte-identical.
+    pub fn with_lease_recovery_interval_for_test(mut self, interval: Duration) -> Self {
+        self.lease_recovery_interval_override = Some(interval);
         self
     }
 
