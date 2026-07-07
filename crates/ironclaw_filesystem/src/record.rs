@@ -233,7 +233,8 @@ impl fmt::Display for SeqNo {
     }
 }
 
-/// Compare-and-swap precondition for [`put`](crate::RootFilesystem::put).
+/// Compare-and-swap precondition for [`put`](crate::RootFilesystem::put) and
+/// [`delete_if_version`](crate::RootFilesystem::delete_if_version).
 ///
 /// All multi-step store operations (lease claim, lease consume, status
 /// transitions) are implemented with `CasExpectation::Version` and retry on
@@ -242,16 +243,29 @@ impl fmt::Display for SeqNo {
 /// — backends that need atomic multi-key updates expose
 /// [`StorageTxn`](crate::StorageTxn) separately, and consumers must continue
 /// to work when only CAS is available.
+///
+/// `delete_if_version` narrows this to two meaningful branches:
+/// `Version` performs a guarded delete (fails with `VersionMismatch` if the
+/// row moved, `NotFound` if it's already gone), and `Any` deletes
+/// unconditionally. `Absent` asserts "no entry present", which is not a
+/// meaningful precondition for a delete — every backend fails closed with
+/// [`FilesystemError::Unsupported`](crate::FilesystemError::Unsupported)
+/// rather than falling through to an unconditional delete; see
+/// [`required_delete_version`](Self::required_delete_version).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type", content = "version")]
 pub enum CasExpectation {
-    /// Path must not currently hold an entry. Used for issue/create.
+    /// Path must not currently hold an entry. Used for issue/create with
+    /// [`put`](crate::RootFilesystem::put); meaningless for
+    /// [`delete_if_version`](crate::RootFilesystem::delete_if_version), which
+    /// rejects it with `Unsupported`.
     Absent,
     /// Path must currently hold the named version. Used for claim/consume/
-    /// status transitions.
+    /// status transitions with `put`, and for guarded deletes with
+    /// `delete_if_version` (mismatch surfaces `VersionMismatch`).
     Version(RecordVersion),
-    /// Overwrite regardless of current state. Used only by backfills / admin
-    /// flows; domain code should default to one of the other variants.
+    /// Overwrite/delete regardless of current state. Used only by backfills /
+    /// admin flows; domain code should default to one of the other variants.
     Any,
 }
 

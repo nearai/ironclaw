@@ -522,6 +522,37 @@ async fn libsql_delete_if_version_any_deletes_single_key_unconditionally() {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
+async fn libsql_delete_if_version_rejects_absent_expectation() {
+    // Review fix (PR #5749 round 2): `CasExpectation::Absent` is meaningless
+    // for a delete (there's nothing to assert "not present") and must fail
+    // closed with `Unsupported` rather than silently falling through to an
+    // unconditional delete. The entry must survive untouched.
+    let filesystem = libsql_root().await;
+    let path = VirtualPath::new("/secrets/leases/CAS-DEL-ABSENT").unwrap();
+    let version = filesystem
+        .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+        .await
+        .unwrap();
+
+    let err = filesystem
+        .delete_if_version(&path, CasExpectation::Absent)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        FilesystemError::Unsupported {
+            operation: FilesystemOperation::Delete,
+            ..
+        }
+    ));
+
+    let got = filesystem.get(&path).await.unwrap().unwrap();
+    assert_eq!(got.version, version);
+    assert_eq!(got.entry.body, vec![1]);
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
 async fn libsql_native_put_cas_any_increments_existing_version() {
     let filesystem = libsql_root().await;
     let path = VirtualPath::new("/secrets/leases/L4").unwrap();
@@ -1705,6 +1736,39 @@ mod postgres_tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn postgres_delete_if_version_rejects_absent_expectation() {
+        // Review fix (PR #5749 round 2): `CasExpectation::Absent` is
+        // meaningless for a delete (there's nothing to assert "not present")
+        // and must fail closed with `Unsupported` rather than silently
+        // falling through to an unconditional delete. The entry must survive
+        // untouched.
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let path = vpath(&prefix, "cas_delete_absent");
+        let version = fs
+            .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+            .await
+            .unwrap();
+
+        let err = fs
+            .delete_if_version(&path, CasExpectation::Absent)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FilesystemError::Unsupported {
+                operation: FilesystemOperation::Delete,
+                ..
+            }
+        ));
+
+        let got = fs.get(&path).await.unwrap().unwrap();
+        assert_eq!(got.version, version);
+        assert_eq!(got.entry.body, vec![1]);
     }
 
     #[tokio::test]
