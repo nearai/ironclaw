@@ -2427,11 +2427,11 @@ async fn static_chat_oauth_card_exposes_https_only_authorization_link() {
         "OAuth auth card must reject non-HTTPS authorization URLs before opening"
     );
     assert!(
-        body.contains("className=\"auth-oauth\""),
+        body.contains("className:`auth-oauth`"),
         "OAuth auth card must keep the UI-test selector on the authorization control"
     );
     assert!(
-        body.contains("href=${s?e.authorizationUrl:void 0}"),
+        body.contains("href:s?e.authorizationUrl:void 0"),
         "OAuth auth card must expose the HTTPS authorization URL as a link href"
     );
     assert!(
@@ -2449,7 +2449,7 @@ async fn static_chat_hook_listens_for_oauth_callback_completion() {
         "chat hook must listen for the OAuth callback completion signal"
     );
     assert!(
-        body.contains("new window.BroadcastChannel(rp)"),
+        body.contains("new window.BroadcastChannel(") && body.contains(".onmessage=e=>t(e.data)"),
         "chat hook must consume same-origin OAuth callback broadcasts"
     );
     assert!(
@@ -2457,7 +2457,7 @@ async fn static_chat_hook_listens_for_oauth_callback_completion() {
         "chat hook must keep a localStorage fallback for browsers without BroadcastChannel"
     );
     assert!(
-        body.contains("window.localStorage?.getItem?.(ip)"),
+        body.contains("window.localStorage?.getItem?.("),
         "chat hook must poll localStorage in case the callback write happened before the storage event listener observed it"
     );
     assert!(
@@ -2465,7 +2465,7 @@ async fn static_chat_hook_listens_for_oauth_callback_completion() {
         "chat hook must match callback completion to the visible OAuth gate when continuation metadata is present"
     );
     assert!(
-        body.contains("pp(e)?null:e"),
+        body.contains("Mg(e)?null:e"),
         "OAuth callback completion must clear only a pending OAuth auth gate"
     );
 }
@@ -2553,11 +2553,11 @@ async fn static_i18n_module_guards_locale_race_and_clears_failed_pack_cache() {
     let body = served_app_javascript().await;
 
     assert!(
-        body.contains("lo[e]||null"),
+        body.contains("a.current=e"),
         "i18n provider must track the latest requested language in a ref",
     );
     assert!(
-        body.contains("po[e]||(po[e]="),
+        body.contains("uo[e]||(uo[e]="),
         "setLang must stamp the requested language before awaiting the pack",
     );
     assert!(
@@ -2565,7 +2565,7 @@ async fn static_i18n_module_guards_locale_race_and_clears_failed_pack_cache() {
         "a resolved pack load must only commit when the pack is available and still the latest request",
     );
     assert_eq!(
-        body.matches("delete po[e]").count(),
+        body.matches("delete uo[e]").count(),
         2,
         "ensurePack must clear pending[lang] on BOTH the success and failure paths so a transient import failure can be retried",
     );
@@ -3020,11 +3020,11 @@ async fn static_automations_run_row_spaces_action_button_icons() {
     let body = served_app_javascript().await;
 
     assert!(
-        body.contains("name=\"chat\" className=\"mr-1.5 h-4 w-4\""),
+        body.contains("name:`chat`,className:`mr-1.5 h-4 w-4`"),
         "the Open run button icon must be spaced away from its label"
     );
     assert!(
-        body.contains("name=\"file\" className=\"mr-1.5 h-4 w-4\""),
+        body.contains("name:`file`,className:`mr-1.5 h-4 w-4`"),
         "the Logs button icon must be spaced away from its label"
     );
 }

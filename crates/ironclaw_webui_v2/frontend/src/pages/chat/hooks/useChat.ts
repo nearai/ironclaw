@@ -5,28 +5,28 @@ import {
   resolveGate as resolveGateRequest,
   sendMessage,
   submitManualToken,
-} from "../../../lib/api.js";
-import { redeemSlackPairingCode } from "../../../lib/slack-pairing-api.js";
-import { subscribeChannelConnected } from "../../../lib/channel-connection-events.js";
-import { queryClient } from "../../../lib/query-client.js";
-import { React } from "../../../lib/html.js";
-import { redeemPairingCode } from "../../extensions/lib/pairing-api.js";
-import { useChatEvents } from "../lib/useChatEvents.js";
-import { touchThreadInCache } from "../lib/thread-cache.js";
+} from "../../../lib/api";
+import { redeemSlackPairingCode } from "../../../lib/slack-pairing-api";
+import { subscribeChannelConnected } from "../../../lib/channel-connection-events";
+import { queryClient } from "../../../lib/query-client";
+import React from "react";
+import { redeemPairingCode } from "../../extensions/lib/pairing-api";
+import { useChatEvents } from "../lib/useChatEvents";
+import { touchThreadInCache } from "../lib/thread-cache";
 import {
   addPending,
   recordAcceptedMessageRef,
   removePending,
   timelineMessageIdFromAcceptedRef,
-} from "../lib/pending-messages.js";
+} from "../lib/pending-messages";
 import {
   createToolActivityState,
   failGateToolActivity,
   resetToolActivityState,
-} from "../lib/tool-activity-state.js";
-import { toRenderAttachment, toWireAttachment } from "../lib/attachments.js";
-import { useHistory } from "./useHistory.js";
-import { useSSE } from "./useSSE.js";
+} from "../lib/tool-activity-state";
+import { toRenderAttachment, toWireAttachment } from "../lib/attachments";
+import { useHistory } from "./useHistory";
+import { useSSE } from "./useSSE";
 
 const AUTH_TOKEN_FLOW_TIMEOUT_MS = 30000;
 const AUTH_GATE_CREDENTIAL_STORED_ERROR =

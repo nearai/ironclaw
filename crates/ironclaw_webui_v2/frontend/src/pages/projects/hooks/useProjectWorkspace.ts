@@ -1,11 +1,11 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { React } from "../../../lib/html.js";
+import React from "react";
 import {
   fetchProjectDetail,
   fetchProjectMissions,
   fetchProjectThreads,
   fetchProjectWidgets,
-} from "../lib/projects-api.js";
+} from "../lib/projects-api";
 
 export function useProjectWorkspace(projectId) {
   const queryClient = useQueryClient();

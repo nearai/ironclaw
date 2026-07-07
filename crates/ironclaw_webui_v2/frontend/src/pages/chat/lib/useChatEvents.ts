@@ -1,15 +1,15 @@
 // @ts-nocheck
-import { React } from "../../../lib/html.js";
-import { gateFromEvent, gateFromProjectionGate } from "./gates.js";
+import React from "react";
+import { gateFromEvent, gateFromProjectionGate } from "./gates";
 import {
   toolCardFromActivity,
   toolCardFromPreview,
-} from "./history-messages.js";
-import { failureMessageForRunStatus } from "./failureMessages.js";
+} from "./history-messages";
+import { failureMessageForRunStatus } from "./failureMessages";
 import {
   ensureGateToolActivity,
   upsertToolActivityMessage,
-} from "./tool-activity-state.js";
+} from "./tool-activity-state";
 
 // Handler factory for v2 `WebChatV2EventFrame` events.
 //

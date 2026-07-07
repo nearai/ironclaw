@@ -3,8 +3,8 @@
 // - The v2 backend owns the registry/list/install/activate/remove/setup
 //   projection and maps those operations to the extension registry.
 
-import { apiFetch, setupExtension } from "../../../lib/api.js";
-import { redeemPairingCode } from "./pairing-api.js";
+import { apiFetch, setupExtension } from "../../../lib/api";
+import { redeemPairingCode } from "./pairing-api";
 
 export function fetchExtensions() {
   return apiFetch("/api/webchat/v2/extensions");

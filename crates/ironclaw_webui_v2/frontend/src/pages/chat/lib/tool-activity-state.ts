@@ -2,7 +2,7 @@
 import {
   isTerminalToolStatus,
   toolDisplayName,
-} from "./history-messages.js";
+} from "./history-messages";
 
 export function createToolActivityState() {
   return {

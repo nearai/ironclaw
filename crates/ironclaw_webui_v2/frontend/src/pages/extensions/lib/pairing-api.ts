@@ -1,6 +1,6 @@
 // @ts-nocheck
-import { apiFetch } from "../../../lib/api.js";
-import { notifyChannelConnected } from "../../../lib/channel-connection-events.js";
+import { apiFetch } from "../../../lib/api";
+import { notifyChannelConnected } from "../../../lib/channel-connection-events";
 
 export const PAIRING_REDEEM_PATH = "/api/webchat/v2/extensions/pairing/redeem";
 

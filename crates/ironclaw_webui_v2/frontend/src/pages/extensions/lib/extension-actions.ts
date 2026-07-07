@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { isChannelExtensionKind } from "./extensions-schema.js";
+import { isChannelExtensionKind } from "./extensions-schema";
 
 export function primaryExtensionAction(ext) {
   const state = extensionLifecycleState(ext);

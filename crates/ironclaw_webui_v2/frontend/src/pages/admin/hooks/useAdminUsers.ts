@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { React } from "../../../lib/html.js";
+import React from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   fetchAdminUsers,
@@ -10,7 +10,7 @@ import {
   suspendAdminUser,
   activateAdminUser,
   createUserToken,
-} from "../lib/admin-api.js";
+} from "../lib/admin-api";
 
 export function useAdminUsers() {
   const queryClient = useQueryClient();

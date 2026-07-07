@@ -1,4 +1,4 @@
-import { React } from "../../../lib/html.js";
+import React from "react";
 import {
   isValidProviderId,
   nextModelAfterFetch,
@@ -6,7 +6,7 @@ import {
   providerIdFromName,
   providerDefaultModel,
   providerPayload,
-} from "../lib/llm-providers.js";
+} from "../lib/llm-providers";
 
 function initialForm(provider, overrides) {
   return {

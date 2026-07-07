@@ -1,21 +1,21 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { React } from "../../../lib/html.js";
+import React from "react";
 import {
   deleteAutomation,
   listAutomations,
   pauseAutomation,
   resumeAutomation,
-} from "../../../lib/api.js";
-import { useI18n } from "../../../lib/i18n.js";
+} from "../../../lib/api";
+import { useI18n } from "../../../lib/i18n";
 
 import {
   automationSummary,
   normalizeAutomations,
-} from "../lib/automations-presenters.js";
+} from "../lib/automations-presenters";
 import {
   AUTOMATIONS_BASE_REFETCH_MS,
   nextAutomationsRefetchDelay,
-} from "../lib/automations-refresh.js";
+} from "../lib/automations-refresh";
 
 const AUTOMATIONS_PAGE_LIMIT = 50;
 const AUTOMATION_RUNS_LIMIT = 25;

@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { fetchUsageSummary, fetchUsage } from "../lib/admin-api.js";
+import { fetchUsageSummary, fetchUsage } from "../lib/admin-api";
 
 export function useUsageSummary() {
   return useQuery({

@@ -201,10 +201,9 @@ fn render_index_with_nonce() -> Response {
     // header we set here instead of overwriting it.
     //
     // Every sub-resource the shell loads is same-origin: Vite emits the app
-    // bundle and CSS under `/v2/assets/`, and Tailwind / dompurify / marked /
-    // highlight.js / the web fonts are vendored under `/v2/vendor/` (see
-    // `frontend/public`). So `script-src` / `style-src` / `font-src` collapse
-    // to `'self'` — no CDN origins, no third-party fetches.
+    // bundle and CSS under `/v2/assets/`, and the web fonts are vendored under
+    // `/v2/vendor/` (see `frontend/public`). So `script-src` / `style-src` /
+    // `font-src` collapse to `'self'` — no CDN origins, no third-party fetches.
     // `'unsafe-inline'` stays on `style-src` only: the Tailwind browser
     // runtime injects a generated `<style>` and the shell carries an
     // inline `text/tailwindcss` theme block; scripts still rely on the
@@ -370,8 +369,8 @@ mod tests {
     #[tokio::test]
     async fn spa_document_csp_allowlist_is_locked() {
         // Every sub-resource the SPA loads is now same-origin (the Vite
-        // bundle under `/v2/assets/` plus vendored Tailwind / dompurify /
-        // marked / highlight.js / fonts under `/v2/vendor/`). Lock that in:
+        // bundle under `/v2/assets/` plus self-hosted fonts under
+        // `/v2/vendor/`). Lock that in:
         // a regression that re-introduced a third-party CDN origin, added
         // `unsafe-eval`, or allowed `'unsafe-inline'` scripts must fail
         // here, not ship silently. (security-parity 03 row 3b.)
@@ -719,7 +718,7 @@ mod tests {
             "wallet-connect.js",
             "wallet-connect.html",
             "assets/favicon.svg",
-            "vendor/purify.min.js",
+            "vendor/fonts/fonts.css",
         ] {
             assert!(
                 assets::lookup(required).is_some(),

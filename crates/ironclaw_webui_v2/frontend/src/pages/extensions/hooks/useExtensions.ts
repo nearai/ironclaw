@@ -1,10 +1,10 @@
 // @ts-nocheck
-import { React } from "../../../lib/html.js";
+import React from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { gatewayStatus } from "../../../lib/api.js";
-import { listConnectableChannels } from "../../../lib/channel-connect.js";
-import { useT } from "../../../lib/i18n.js";
-import { isChannelExtensionKind } from "../lib/extensions-schema.js";
+import { gatewayStatus } from "../../../lib/api";
+import { listConnectableChannels } from "../../../lib/channel-connect";
+import { useT } from "../../../lib/i18n";
+import { isChannelExtensionKind } from "../lib/extensions-schema";
 import {
   fetchExtensions,
   fetchExtensionRegistry,
@@ -16,7 +16,7 @@ import {
   startExtensionOauth,
   fetchPairingRequests,
   approvePairingCode,
-} from "../lib/extensions-api.js";
+} from "../lib/extensions-api";
 
 const OAUTH_SETUP_REFRESH_MS = 2000;
 const OAUTH_SETUP_TIMEOUT_MS = 10 * 60 * 1000;

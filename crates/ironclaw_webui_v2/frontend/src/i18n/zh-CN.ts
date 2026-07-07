@@ -1,4 +1,4 @@
-import { registerPack } from "../lib/i18n.js";
+import { registerPack } from "../lib/i18n";
 
 registerPack("zh-CN", {
   // Language metadata

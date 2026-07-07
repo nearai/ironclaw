@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { apiFetch } from "./api.js";
+import { apiFetch } from "./api";
 
 export const SLACK_SETUP_PATH = "/api/webchat/v2/channels/slack/setup";
 

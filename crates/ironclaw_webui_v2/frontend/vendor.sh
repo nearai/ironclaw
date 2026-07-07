@@ -1,21 +1,15 @@
 #!/usr/bin/env bash
-# Vendors the WebUI v2 third-party assets that stay outside the Vite app bundle
-# into public/vendor/, so the SPA loads zero remote origins.
+# Vendors the WebUI v2 third-party browser assets that stay outside the Vite
+# app bundle into public/vendor/, so the SPA loads zero remote origins.
 #
-#   - DOMPurify / marked / highlight.js  (consumed as window globals)
 #   - Google Fonts CSS + woff2 files  (url()s rewritten to local paths)
 #
-# Versions are pinned to match what index.html previously pulled from the
-# CDNs. Bump them here and re-run; the downloaded files are committed.
+# Bump the font query here and re-run; the downloaded files are committed.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENDOR_DIR="$SCRIPT_DIR/public/vendor"
 FONTS_DIR="$VENDOR_DIR/fonts"
-
-DOMPURIFY_VER="3.2.3"
-MARKED_VER="17.0.2"
-HLJS_VER="11.11.1"
 
 # A desktop browser UA so Google Fonts serves modern woff2 @font-face.
 UA="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -30,11 +24,6 @@ fetch() {
     --retry 4 --retry-delay 2 --retry-connrefused \
     -A "$UA" -o "$2" "$1"
 }
-
-echo "Vendoring JS libraries…"
-fetch "https://cdnjs.cloudflare.com/ajax/libs/dompurify/${DOMPURIFY_VER}/purify.min.js" "$VENDOR_DIR/purify.min.js"
-fetch "https://cdn.jsdelivr.net/npm/marked@${MARKED_VER}/lib/marked.umd.min.js" "$VENDOR_DIR/marked.umd.min.js"
-fetch "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/${HLJS_VER}/highlight.min.js" "$VENDOR_DIR/highlight.min.js"
 
 echo "Vendoring Google Fonts…"
 RAW_CSS="$(curl -fsSL --max-time 60 -A "$UA" "https://fonts.googleapis.com/css2?${FONTS_QUERY}")"

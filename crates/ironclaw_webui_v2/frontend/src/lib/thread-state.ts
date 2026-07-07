@@ -31,7 +31,7 @@
  * see PERSISTED_STATES below for the full rationale.
  */
 
-import { React } from "./html.js";
+import React from "react";
 
 /** Thread state vocabulary. Absence from the map is the implicit `idle`. */
 export const THREAD_STATE = Object.freeze({
