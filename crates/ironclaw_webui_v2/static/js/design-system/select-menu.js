@@ -3,6 +3,8 @@ import { cn } from "../utils/cn.js";
 import { Icon } from "./icons.js";
 
 let nextSelectMenuId = 0;
+const openSelectMenuEntries = new Set();
+let sharedDocumentMouseDownListener = null;
 
 const toneDotClasses = {
   neutral: "bg-[var(--v2-text-faint)]",
@@ -16,6 +18,35 @@ const toneDotClasses = {
 function createSelectMenuId() {
   nextSelectMenuId += 1;
   return `v2-select-menu-${nextSelectMenuId}`;
+}
+
+function handleSharedDocumentMouseDown(event) {
+  for (const entry of Array.from(openSelectMenuEntries)) {
+    if (entry.rootRef.current?.contains?.(event.target)) continue;
+    entry.close();
+  }
+}
+
+function syncSharedDocumentListener() {
+  if (typeof document === "undefined") return;
+  if (openSelectMenuEntries.size > 0 && !sharedDocumentMouseDownListener) {
+    sharedDocumentMouseDownListener = handleSharedDocumentMouseDown;
+    document.addEventListener("mousedown", sharedDocumentMouseDownListener);
+    return;
+  }
+  if (openSelectMenuEntries.size === 0 && sharedDocumentMouseDownListener) {
+    document.removeEventListener("mousedown", sharedDocumentMouseDownListener);
+    sharedDocumentMouseDownListener = null;
+  }
+}
+
+function registerOpenSelectMenu(entry) {
+  openSelectMenuEntries.add(entry);
+  syncSharedDocumentListener();
+  return () => {
+    openSelectMenuEntries.delete(entry);
+    syncSharedDocumentListener();
+  };
 }
 
 function firstEnabledIndex(options) {
@@ -52,6 +83,24 @@ function optionLabel(option, fallback = "") {
   return option?.label ?? option?.value ?? fallback;
 }
 
+function optionsIdentity(options) {
+  return options
+    .map((option) => `${String(option.value)}:${option.disabled ? "disabled" : "enabled"}`)
+    .join("\u001f");
+}
+
+function safeRootProps(props) {
+  return Object.fromEntries(
+    Object.entries(props).filter(
+      ([key]) =>
+        key === "id" ||
+        key === "title" ||
+        key.startsWith("data-") ||
+        key.startsWith("aria-")
+    )
+  );
+}
+
 function ToneDot({ tone }) {
   if (!tone) return null;
   return html`
@@ -65,6 +114,13 @@ function ToneDot({ tone }) {
   `;
 }
 
+/**
+ * Custom listbox-backed select menu.
+ *
+ * `onChange` receives both the selected option value and the full option:
+ * `onChange(value, option)`. Root passthrough props are limited to `id`,
+ * `title`, `data-*`, and `aria-*`; event handlers are intentionally not spread.
+ */
 export function SelectMenu({
   value,
   options = [],
@@ -90,6 +146,7 @@ export function SelectMenu({
   const idRef = React.useRef("");
   const restoreFocusOnCloseRef = React.useRef(false);
   const wasOpenRef = React.useRef(open);
+  const outsideClickEntryRef = React.useRef(null);
   if (!idRef.current) idRef.current = createSelectMenuId();
 
   const selectedIndex = selectedOptionIndex(options, value);
@@ -99,20 +156,29 @@ export function SelectMenu({
   const activeOptionId =
     open && activeIndex >= 0 ? `${idRef.current}-option-${activeIndex}` : undefined;
   const effectiveAriaLabel = ariaLabel || ariaLabelProp;
+  const optionsKey = optionsIdentity(options);
+  const rootPassthroughProps = safeRootProps(rest);
 
   const closeMenu = ({ restoreFocus = true } = {}) => {
     restoreFocusOnCloseRef.current = restoreFocus;
     setOpen(false);
   };
 
-  React.useEffect(() => {
-    if (!open || typeof document === "undefined") return undefined;
-    const handleDocumentMouseDown = (event) => {
-      if (rootRef.current?.contains?.(event.target)) return;
-      closeMenu();
+  if (!outsideClickEntryRef.current) {
+    outsideClickEntryRef.current = {
+      rootRef,
+      close: () => closeMenu(),
     };
-    document.addEventListener("mousedown", handleDocumentMouseDown);
-    return () => document.removeEventListener("mousedown", handleDocumentMouseDown);
+  }
+  outsideClickEntryRef.current.close = () => closeMenu();
+
+  React.useEffect(() => {
+    setActiveIndex(selectedOptionIndex(options, value));
+  }, [optionsKey, value]);
+
+  React.useEffect(() => {
+    if (!open) return undefined;
+    return registerOpenSelectMenu(outsideClickEntryRef.current);
   }, [open]);
 
   React.useEffect(() => {
@@ -178,7 +244,7 @@ export function SelectMenu({
     <div
       ref=${rootRef}
       className=${cn("relative inline-block min-w-[9.5rem] text-left", className)}
-      ...${rest}
+      ...${rootPassthroughProps}
     >
       <button
         ref=${buttonRef}
@@ -187,6 +253,7 @@ export function SelectMenu({
         aria-expanded=${open ? "true" : "false"}
         aria-controls=${open ? listboxId : undefined}
         aria-activedescendant=${activeOptionId}
+        aria-owns=${listboxId}
         aria-label=${effectiveAriaLabel}
         aria-labelledby=${ariaLabelledBy}
         disabled=${disabled}
@@ -227,8 +294,6 @@ export function SelectMenu({
         <div
           id=${listboxId}
           role="listbox"
-          aria-label=${effectiveAriaLabel}
-          aria-labelledby=${ariaLabelledBy}
           className=${cn(
             "absolute top-[calc(100%+0.35rem)] z-30 min-w-full overflow-hidden rounded-[10px]",
             "border border-[color-mix(in_srgb,var(--v2-text-strong)_16%,var(--v2-panel-border))]",

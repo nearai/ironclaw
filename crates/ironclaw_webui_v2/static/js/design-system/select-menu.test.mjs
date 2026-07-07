@@ -38,6 +38,24 @@ function collectScalars(root) {
   return scalars;
 }
 
+function collectObjects(root) {
+  const objects = [];
+  visit(root, (node) => {
+    if (!Array.isArray(node.values)) return;
+    for (const value of node.values) {
+      if (
+        value &&
+        typeof value === "object" &&
+        !Array.isArray(value) &&
+        !Array.isArray(value.strings)
+      ) {
+        objects.push(value);
+      }
+    }
+  });
+  return objects;
+}
+
 function collectTemplateText(root) {
   const text = [];
   visit(root, (node) => {
@@ -78,6 +96,13 @@ function optionClasses(root) {
     (value) => typeof value === "string" && value.includes("flex w-full items-center")
   );
 }
+
+const defaultOptions = [
+  { value: "default", label: "Follow global", tone: "neutral" },
+  { value: "always_allow", label: "Always allow", tone: "positive" },
+  { value: "ask_each_time", label: "Ask each time", tone: "warning" },
+  { value: "disabled", label: "Disabled", tone: "danger" },
+];
 
 function createHarness() {
   const state = {
@@ -140,12 +165,7 @@ function createHarness() {
       state.refCursor = 0;
       return exports.SelectMenu({
         value: "default",
-        options: [
-          { value: "default", label: "Follow global", tone: "neutral" },
-          { value: "always_allow", label: "Always allow", tone: "positive" },
-          { value: "ask_each_time", label: "Ask each time", tone: "warning" },
-          { value: "disabled", label: "Disabled", tone: "danger" },
-        ],
+        options: defaultOptions,
         "aria-label": "Tool permission",
         ...props,
       });
@@ -172,6 +192,8 @@ test("SelectMenu opens, selects an option, and closes after selection", () => {
   let rendered = harness.render({ onChange: (value) => changes.push(value) });
   assert.equal(firstValueAfter(rendered, "aria-expanded="), "true");
   assert.match(collectTemplateText(rendered), /role="listbox"/);
+  assert.match(firstValueAfter(rendered, "aria-owns="), /^v2-select-menu-\d+-listbox$/);
+  assert.equal(valuesAfter(rendered, "aria-label=").length, 1);
   assert.ok(
     collectScalars(rendered).some(
       (value) => typeof value === "string" && value.includes("v2-canvas-strong")
@@ -223,6 +245,52 @@ test("SelectMenu starts closed arrow navigation from the selected option", () =>
   assert.deepEqual(changes, ["always_allow"]);
 });
 
+test("SelectMenu syncs active index when option order changes", () => {
+  const changes = [];
+  const harness = createHarness();
+  const reorderedOptions = [
+    defaultOptions[2],
+    defaultOptions[0],
+    defaultOptions[1],
+    defaultOptions[3],
+  ];
+  let rendered = harness.render({
+    value: "ask_each_time",
+    options: defaultOptions,
+    onChange: (value) => changes.push(value),
+  });
+
+  firstValueAfter(rendered, "onClick=")();
+  rendered = harness.render({
+    value: "ask_each_time",
+    options: defaultOptions,
+    onChange: (value) => changes.push(value),
+  });
+  assert.match(valuesAfter(rendered, "aria-activedescendant=")[0], /-option-2$/);
+
+  harness.render({
+    value: "ask_each_time",
+    options: reorderedOptions,
+    onChange: (value) => changes.push(value),
+  });
+  rendered = harness.render({
+    value: "ask_each_time",
+    options: reorderedOptions,
+    onChange: (value) => changes.push(value),
+  });
+  assert.match(valuesAfter(rendered, "aria-activedescendant=")[0], /-option-0$/);
+
+  firstValueAfter(rendered, "onKeyDown=")(keyEvent("ArrowDown"));
+  rendered = harness.render({
+    value: "ask_each_time",
+    options: reorderedOptions,
+    onChange: (value) => changes.push(value),
+  });
+  firstValueAfter(rendered, "onKeyDown=")(keyEvent("Enter"));
+
+  assert.deepEqual(changes, ["default"]);
+});
+
 test("SelectMenu only intercepts Escape while open", () => {
   const harness = createHarness();
   const closedEscape = keyEvent("Escape");
@@ -259,6 +327,24 @@ test("SelectMenu exposes the active descendant and restores trigger focus on clo
   harness.render({ value: "always_allow", ...props });
 
   assert.deepEqual(focusCalls, ["focus"]);
+});
+
+test("SelectMenu only passes safe root attributes through rest props", () => {
+  const harness = createHarness();
+  const rendered = harness.render({
+    id: "permission-root",
+    "data-testid": "permission-select",
+    title: "Permission select",
+    onPointerDown() {},
+  });
+  const passthroughProps = collectObjects(rendered).find(
+    (value) => value["data-testid"] === "permission-select"
+  );
+
+  assert.equal(passthroughProps.id, "permission-root");
+  assert.equal(passthroughProps["data-testid"], "permission-select");
+  assert.equal(passthroughProps.title, "Permission select");
+  assert.equal("onPointerDown" in passthroughProps, false);
 });
 
 test("SelectMenu ignores disabled trigger clicks", () => {
