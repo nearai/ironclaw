@@ -67,6 +67,17 @@ fn parse_oauth_access_token(json: &str) -> Option<String> {
     }
     Some(token.to_string())
 }
+/// Map an HTTP error status + response body to a context-length error when it
+/// indicates the prompt exceeded the model's context window.
+///
+/// Returns `Some(LlmError::ContextLengthExceeded { .. })` for HTTP 413 or for
+/// an HTTP 400 whose body matches a context-overflow pattern, and `None`
+/// otherwise. Delegates to the shared `crate::error::context_length_error`
+/// helper so detection stays consistent across direct-HTTP providers.
+fn context_length_error_for_status(status_code: u16, response_text: &str) -> Option<LlmError> {
+    crate::error::context_length_error(status_code, response_text)
+}
+
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 /// OAuth beta requires 2023-06-01; the 2024-10-22 version is not valid with the beta flag.
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
@@ -254,6 +265,14 @@ impl AnthropicOAuthProvider {
                     provider: "anthropic_oauth".to_string(),
                     retry_after,
                 });
+            }
+            // A too-large prompt (HTTP 413, or a 400 whose body says the context
+            // window was exceeded) must map to ContextLengthExceeded so the
+            // loop's context-shrink recovery can compact and retry instead of
+            // borking on a generic RequestFailed.
+            if let Some(error) = context_length_error_for_status(status.as_u16(), &response_text) {
+                tracing::warn!("Anthropic OAuth: context length exceeded");
+                return Err(error);
             }
             let truncated = ironclaw_common::truncate_for_preview(&response_text, 512);
             return Err(LlmError::RequestFailed {
@@ -766,6 +785,44 @@ fn extract_response_content(response: &AnthropicResponse) -> ExtractedAnthropicR
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_overflow_413_maps_to_context_length_exceeded() {
+        // A raw HTTP 413 (payload too large) must become ContextLengthExceeded
+        // so the loop's context-shrink recovery fires.
+        match context_length_error_for_status(413, "Request Entity Too Large") {
+            Some(LlmError::ContextLengthExceeded { .. }) => {}
+            other => panic!("expected ContextLengthExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn context_overflow_400_body_maps_to_context_length_exceeded() {
+        let body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 234872 tokens > 200000 maximum"}}"#;
+        match context_length_error_for_status(400, body) {
+            Some(LlmError::ContextLengthExceeded { used, limit }) => {
+                assert_eq!(used, 234872);
+                assert_eq!(limit, 200000);
+            }
+            other => panic!("expected ContextLengthExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unrelated_400_is_not_context_overflow() {
+        // A plain bad-request (e.g. invalid request shape) must NOT be
+        // classified as context overflow — the caller falls through to
+        // RequestFailed.
+        assert!(
+            context_length_error_for_status(400, r#"{"error":{"message":"invalid request body"}}"#)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn unrelated_5xx_is_not_context_overflow() {
+        assert!(context_length_error_for_status(503, "service unavailable").is_none());
+    }
 
     #[test]
     fn test_convert_messages_extracts_system() {

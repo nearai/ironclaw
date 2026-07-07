@@ -31,7 +31,6 @@ export function redeemSlackPairingCode(code, options = {}) {
       // continued); surfaced, not dropped, so the caller can react.
       resumeError: Boolean(response.resume_error),
       resumedRunCount: response.resumed_run_count ?? 0,
-      message: "Slack account connected.",
     };
   });
 }

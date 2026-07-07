@@ -300,6 +300,36 @@ impl LoopExecutionState {
             reason: error.to_string(),
         })
     }
+
+    /// Rebinds run-owned host state after loading a checkpoint into a new retry
+    /// run.
+    ///
+    /// Retryable failed runs intentionally reuse the source run's checkpoint
+    /// payload. The input cursor inside that payload is scoped to the source
+    /// `(scope, run_id)`, so it cannot be submitted to the retry host. Durable
+    /// transcript/result refs in the payload are also owned by the source run;
+    /// carrying them into the retry would make the retry's terminal exit claim
+    /// foreign-run evidence. Reset these run-owned fields and let the retry host
+    /// produce its own refs.
+    ///
+    /// Gate-bound resume state (`last_gate`, `pending_approval_resume`,
+    /// `pending_auth_resume`) is deliberately NOT cleared here: this same path
+    /// (`PlannedDriver::resume` -> `from_checkpoint_payload().rebase_for_run()`)
+    /// is what resumes a run after an approval/auth gate is resolved, and the
+    /// pending-resume record is exactly the evidence that tells the loop to
+    /// re-dispatch the gated capability. Clearing it drops the resumed
+    /// invocation (regression: only the pre-gate call runs). The resume host
+    /// re-validates the gate before honoring the record, so this is not a
+    /// trust-boundary leak.
+    pub fn rebase_for_run(mut self, context: &LoopRunContext) -> Self {
+        if self.input_cursor.is_for_run(context) {
+            return self;
+        }
+        self.input_cursor = LoopInputCursor::origin_for_run(context);
+        self.assistant_refs.clear();
+        self.result_refs.clear();
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -737,6 +767,99 @@ mod tests {
         let result = LoopExecutionState::from_checkpoint_payload(&payload, CheckpointKind::Final);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), state);
+    }
+
+    #[test]
+    fn rebase_for_run_resets_run_owned_refs_and_input_cursor() {
+        let source_context = test_run_context();
+        let target_context = test_run_context();
+        let mut state = LoopExecutionState::initial_for_run(&source_context);
+        state.input_cursor = LoopInputCursor::from_host_token(
+            &source_context,
+            ironclaw_turns::run_profile::LoopInputCursorToken::new("input-cursor:source-seen")
+                .unwrap(),
+        );
+        state
+            .assistant_refs
+            .push(LoopMessageRef::new("msg:source-run").unwrap());
+        state
+            .result_refs
+            .push(ironclaw_turns::LoopResultRef::new("result:source-run").unwrap());
+        state.iteration = 4;
+        // Gate-bound resume state must survive the rebase: this path also
+        // resumes a run after an approval/auth gate, where the pending-resume
+        // record drives re-dispatch of the gated capability.
+        state.last_gate = Some(LoopGateRef::new("gate:source-run").unwrap());
+        state.pending_approval_resume = Some(PendingApprovalResume {
+            gate_ref: LoopGateRef::new("gate:source-approval").unwrap(),
+            capability_id: CapabilityId::new("gsuite.calendar.list_events").unwrap(),
+            approval_request_id: ApprovalRequestId::new(),
+            resume_token: CapabilityResumeToken::new("00000000-0000-0000-0000-000000000002")
+                .unwrap(),
+            activity_id: CapabilityActivityId::new(),
+            correlation_id: CorrelationId::new(),
+            surface_version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+            input_ref: CapabilityInputRef::new("input:source-approval").unwrap(),
+            effective_capability_ids: vec![],
+            provider_replay: None,
+            input: json!({ "k": "v" }),
+            estimate: ResourceEstimate::default(),
+            disposition: None,
+        });
+        state.pending_auth_resume = Some(PendingAuthResume {
+            gate_ref: LoopGateRef::new("gate:source-auth").unwrap(),
+            capability_id: CapabilityId::new("gsuite.calendar.list_events").unwrap(),
+            surface_version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+            input_ref: CapabilityInputRef::new("input:source").unwrap(),
+            effective_capability_ids: vec![],
+            provider_replay: None,
+            resume_token: None,
+            activity_id: CapabilityActivityId::new(),
+            prior_approval: None,
+            replay: None,
+            disposition: None,
+        });
+
+        let rebased = state.clone().rebase_for_run(&target_context);
+
+        assert_eq!(rebased.iteration, state.iteration);
+        assert!(rebased.input_cursor.is_for_run(&target_context));
+        assert_eq!(
+            rebased.input_cursor,
+            LoopInputCursor::origin_for_run(&target_context)
+        );
+        assert!(rebased.assistant_refs.is_empty());
+        assert!(rebased.result_refs.is_empty());
+        // Gate-bound resume state is preserved so an approval/auth resume can
+        // re-dispatch the gated capability.
+        assert_eq!(rebased.last_gate, state.last_gate);
+        assert_eq!(
+            rebased.pending_approval_resume,
+            state.pending_approval_resume
+        );
+        assert_eq!(rebased.pending_auth_resume, state.pending_auth_resume);
+    }
+
+    #[test]
+    fn rebase_for_run_preserves_refs_for_same_run_gate_resume() {
+        let context = test_run_context();
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.input_cursor = LoopInputCursor::from_host_token(
+            &context,
+            ironclaw_turns::run_profile::LoopInputCursorToken::new("input-cursor:gate-seen")
+                .unwrap(),
+        );
+        state
+            .assistant_refs
+            .push(LoopMessageRef::new("msg:same-run").unwrap());
+        state
+            .result_refs
+            .push(ironclaw_turns::LoopResultRef::new("result:same-run").unwrap());
+        state.iteration = 3;
+
+        let rebased = state.clone().rebase_for_run(&context);
+
+        assert_eq!(rebased, state);
     }
 
     #[test]

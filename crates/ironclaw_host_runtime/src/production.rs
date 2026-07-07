@@ -614,7 +614,16 @@ impl HostRuntime for DefaultHostRuntime {
             idempotency_key,
             trust_decision: _caller_trust_decision,
         } = request;
-        let input = host_runtime_spawn_input_for_capability(&capability_id, input)?;
+        let input = match host_runtime_spawn_input_for_capability(&capability_id, input)? {
+            SpawnInputPreparation::Ready(input) => input,
+            SpawnInputPreparation::ModelInputRejected(failure) => {
+                tracing::debug!(
+                    capability_id = %capability_id,
+                    "process sandbox spawn rejected malformed model plan as recoverable tool error"
+                );
+                return Ok(RuntimeCapabilityOutcome::Failed(failure));
+            }
+        };
         let scope = context.resource_scope.clone();
         let invocation_id = context.invocation_id;
         let idempotency_key = idempotency_key.map(|key| key.as_str().to_string());
@@ -938,7 +947,16 @@ impl HostRuntime for DefaultHostRuntime {
             idempotency_key,
             trust_decision: _caller_trust_decision,
         } = request;
-        let input = host_runtime_spawn_input_for_capability(&capability_id, input)?;
+        let input = match host_runtime_spawn_input_for_capability(&capability_id, input)? {
+            SpawnInputPreparation::Ready(input) => input,
+            SpawnInputPreparation::ModelInputRejected(failure) => {
+                tracing::debug!(
+                    capability_id = %capability_id,
+                    "process sandbox spawn resume rejected malformed model plan as recoverable tool error"
+                );
+                return Ok(RuntimeCapabilityOutcome::Failed(failure));
+            }
+        };
         let idempotency_key = idempotency_key.map(|key| key.as_str().to_string());
         if let Some(key) = idempotency_key.as_deref() {
             tracing::debug!(
@@ -2110,26 +2128,64 @@ fn persistent_approval_lookup_scopes(scope: &ResourceScope) -> Vec<PersistentApp
     }
 }
 
+/// Outcome of preparing model-supplied spawn input for a capability.
+///
+/// A malformed or invalid process-sandbox plan is a *model-fixable* condition:
+/// the model chose bad arguments and can correct them on a retry. It must
+/// surface as a recoverable, model-visible tool error
+/// ([`RuntimeFailureKind::InvalidInput`] → `ModelVisibleToolError`), never as a
+/// terminal [`HostRuntimeError`] that ends the whole run. Genuine host-side
+/// faults (serializing the validated host struct back to JSON) remain errors.
+enum SpawnInputPreparation {
+    /// Input is ready to dispatch to the capability host.
+    Ready(serde_json::Value),
+    /// Model supplied an unparseable/invalid plan — recoverable, model-visible.
+    ModelInputRejected(RuntimeCapabilityFailure),
+}
+
 fn host_runtime_spawn_input_for_capability(
     capability_id: &CapabilityId,
     input: serde_json::Value,
-) -> Result<serde_json::Value, HostRuntimeError> {
+) -> Result<SpawnInputPreparation, HostRuntimeError> {
     if capability_id.as_str() != PROCESS_SANDBOX_CAPABILITY_ID {
-        return Ok(input);
+        return Ok(SpawnInputPreparation::Ready(input));
     }
-    let plan = serde_json::from_value::<SandboxProcessPlan>(input).map_err(|_| {
-        HostRuntimeError::invalid_request(
-            "process sandbox capability input must be a SandboxProcessPlan",
-        )
-    })?;
-    let plan = ValidatedSandboxProcessPlan::new(plan).map_err(|_| {
-        HostRuntimeError::invalid_request(
-            "process sandbox capability input failed SandboxProcessPlan validation",
-        )
-    })?;
-    serde_json::to_value(plan.into_plan()).map_err(|_| {
+    let plan = match serde_json::from_value::<SandboxProcessPlan>(input) {
+        Ok(plan) => plan,
+        Err(_) => {
+            return Ok(SpawnInputPreparation::ModelInputRejected(
+                RuntimeCapabilityFailure::new(
+                    capability_id.clone(),
+                    RuntimeFailureKind::InvalidInput,
+                    Some(
+                        "process sandbox capability input must be a SandboxProcessPlan".to_string(),
+                    ),
+                ),
+            ));
+        }
+    };
+    let plan = match ValidatedSandboxProcessPlan::new(plan) {
+        Ok(plan) => plan,
+        Err(_) => {
+            return Ok(SpawnInputPreparation::ModelInputRejected(
+                RuntimeCapabilityFailure::new(
+                    capability_id.clone(),
+                    RuntimeFailureKind::InvalidInput,
+                    Some(
+                        "process sandbox capability input failed SandboxProcessPlan validation"
+                            .to_string(),
+                    ),
+                ),
+            ));
+        }
+    };
+    // Serializing the *validated host struct* back to JSON is a host-side
+    // operation, not model input. A failure here is a genuine internal fault,
+    // so it stays a terminal error rather than a model-visible tool error.
+    let value = serde_json::to_value(plan.into_plan()).map_err(|_| {
         HostRuntimeError::invalid_request("validated process sandbox plan could not be serialized")
-    })
+    })?;
+    Ok(SpawnInputPreparation::Ready(value))
 }
 
 fn failure_from(
@@ -2292,13 +2348,20 @@ impl From<DispatchFailureKind> for RuntimeFailureKind {
             DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed) => {
                 RuntimeFailureKind::OperationFailed
             }
+            // A method or capability the model named that does not exist is a
+            // model-fixable request error, not an infra fault: classify it as
+            // InvalidInput so it surfaces as an immediate model-visible tool
+            // error instead of burning the retry budget on a call that can
+            // never resolve by retrying.
+            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::MethodMissing)
+            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UndeclaredCapability) => {
+                RuntimeFailureKind::InvalidInput
+            }
             DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Client)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Executor)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Manifest)
-            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::MethodMissing)
-            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UndeclaredCapability)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UnsupportedRunner) => {
                 RuntimeFailureKind::Backend
             }
@@ -2490,7 +2553,7 @@ output_schema_ref = "schemas/test.output.json"
             ),
             (
                 RuntimeDispatchErrorKind::MethodMissing,
-                RuntimeFailureKind::Backend,
+                RuntimeFailureKind::InvalidInput,
             ),
             (
                 RuntimeDispatchErrorKind::NetworkDenied,
@@ -2522,7 +2585,7 @@ output_schema_ref = "schemas/test.output.json"
             ),
             (
                 RuntimeDispatchErrorKind::UndeclaredCapability,
-                RuntimeFailureKind::Backend,
+                RuntimeFailureKind::InvalidInput,
             ),
             (
                 RuntimeDispatchErrorKind::UnsupportedRunner,
@@ -2603,7 +2666,81 @@ output_schema_ref = "schemas/test.output.json"
         let output = host_runtime_spawn_input_for_capability(&cap(), input.clone())
             .expect("non-sandbox capability input should pass through");
 
-        assert_eq!(output, input);
+        match output {
+            SpawnInputPreparation::Ready(value) => assert_eq!(value, input),
+            SpawnInputPreparation::ModelInputRejected(_) => {
+                panic!("non-sandbox input must pass through unchanged")
+            }
+        }
+    }
+
+    fn process_sandbox_cap() -> CapabilityId {
+        CapabilityId::new(PROCESS_SANDBOX_CAPABILITY_ID).expect("valid process sandbox capability")
+    }
+
+    #[test]
+    fn host_runtime_spawn_input_rejects_malformed_plan_as_recoverable_invalid_input() {
+        // The model supplied JSON that is not a `SandboxProcessPlan` at all.
+        // This is model-fixable: it must surface as a recoverable, model-visible
+        // tool error (`InvalidInput`), never a terminal `HostRuntimeError`.
+        let input = serde_json::json!({ "not_run": true });
+
+        let output = host_runtime_spawn_input_for_capability(&process_sandbox_cap(), input)
+            .expect("malformed model plan must not be a terminal host error");
+
+        match output {
+            SpawnInputPreparation::ModelInputRejected(failure) => {
+                assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+                assert_eq!(
+                    failure.disposition(),
+                    crate::CapabilityFailureDisposition::ModelVisibleToolError
+                );
+            }
+            SpawnInputPreparation::Ready(_) => {
+                panic!("malformed plan must be rejected as model-visible InvalidInput")
+            }
+        }
+    }
+
+    #[test]
+    fn host_runtime_spawn_input_rejects_invalid_plan_as_recoverable_invalid_input() {
+        // The model supplied a structurally-parseable plan that fails
+        // `ValidatedSandboxProcessPlan` validation (empty command). Still
+        // model-fixable → recoverable `InvalidInput`, not terminal.
+        let input = serde_json::json!({ "run": { "command": "" } });
+
+        let output = host_runtime_spawn_input_for_capability(&process_sandbox_cap(), input)
+            .expect("invalid model plan must not be a terminal host error");
+
+        match output {
+            SpawnInputPreparation::ModelInputRejected(failure) => {
+                assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+                assert_eq!(
+                    failure.disposition(),
+                    crate::CapabilityFailureDisposition::ModelVisibleToolError
+                );
+            }
+            SpawnInputPreparation::Ready(_) => {
+                panic!("invalid plan must be rejected as model-visible InvalidInput")
+            }
+        }
+    }
+
+    #[test]
+    fn host_runtime_spawn_input_accepts_valid_plan() {
+        let input = serde_json::json!({ "run": { "command": "echo", "args": ["ok"] } });
+
+        let output = host_runtime_spawn_input_for_capability(&process_sandbox_cap(), input)
+            .expect("valid plan preparation must not error");
+
+        match output {
+            SpawnInputPreparation::Ready(value) => {
+                assert!(value.is_object(), "validated plan serializes to an object");
+            }
+            SpawnInputPreparation::ModelInputRejected(_) => {
+                panic!("valid plan must be accepted")
+            }
+        }
     }
 
     #[test]
