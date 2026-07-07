@@ -585,6 +585,11 @@ input:focus, select:focus, textarea:focus {
     animation: none !important;
     transition: none !important;
   }
+  /* Redundant with the blanket rule above, but kept explicit: the typing
+     dot is the one intentional ambient loop, and webui_v2_serve.rs guards
+     this exact opt-out (static_typing_dot_animation_respects_reduced_motion). */
+  .v2-typing-dot { animation: none !important; }
+  .v2-spin { animation: none !important; }
 }
 
 /* ── Markdown body ───────────────────────────────────────────────── */
