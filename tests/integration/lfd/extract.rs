@@ -46,11 +46,19 @@ pub async fn extract(
     harness: &RebornIntegrationHarness,
     reply_channel: &str,
 ) -> Result<Extraction, String> {
-    let history = harness
+    let history = match harness
         .thread_harness
         .history(harness.binding.thread_id.clone())
         .await
-        .map_err(|error| format!("thread history read failed: {error}"))?;
+    {
+        Ok(history) => history,
+        // Protocol profiles can legitimately skip every inbound entry
+        // (Slack unmentioned public messages, duplicate-only replays, etc.).
+        // In that case no thread record is created and extraction should
+        // produce empty reply/tool/event lanes, not an error outcome.
+        Err(error) if error.to_string().contains("unknown thread") => Vec::new(),
+        Err(error) => return Err(format!("thread history read failed: {error}")),
+    };
 
     let mut scan_surfaces = Vec::new();
 

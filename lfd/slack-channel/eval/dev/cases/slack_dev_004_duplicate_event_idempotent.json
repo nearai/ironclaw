@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "case_id": "slack_dev_004_duplicate_event_idempotent",
+  "profile": "slack_channel",
+  "title": "Duplicate Slack delivery for one event id creates one turn and one post",
+  "setup": {
+    "extensions": ["slack_v2"],
+    "secrets": [{"credential_name": "slack_bot_token_alpha", "value": "xoxb-lfd-slack-dev-004"}],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {
+      "slack_fixture": {
+        "tenant_id": "tenant:lfd-slack-alpha",
+        "installation_id": "slack-install-lfd-alpha",
+        "users": {
+          "U_LFD_DREW": {
+            "owner_user_id": "user:drew-lfd",
+            "agent_id": "agent:personal-drew-lfd"
+          }
+        },
+        "channels": {},
+        "delivery": {
+          "credential_name": "slack_bot_token_alpha",
+          "extension_name": "slack_v2",
+          "attempts": 1
+        }
+      }
+    }
+  },
+  "llm_script": [{"turn": 1, "steps": [{"text": "duplicate delivery handled once"}]}],
+  "inbound": [
+    {
+      "channel": "slack",
+      "payload": {
+        "type": "event_callback",
+        "team_id": "T_LFD_ALPHA",
+        "event_id": "EvLfdSlack004",
+        "event": {
+          "type": "message",
+          "channel_type": "im",
+          "user": "U_LFD_DREW",
+          "channel": "D_LFD_DREW",
+          "text": "please confirm once",
+          "ts": "1771000000.000004"
+        }
+      }
+    },
+    {
+      "channel": "slack",
+      "payload": {
+        "type": "event_callback",
+        "team_id": "T_LFD_ALPHA",
+        "event_id": "EvLfdSlack004",
+        "event": {
+          "type": "message",
+          "channel_type": "im",
+          "user": "U_LFD_DREW",
+          "channel": "D_LFD_DREW",
+          "text": "please confirm once",
+          "ts": "1771000000.000004"
+        }
+      }
+    }
+  ],
+  "state_queries": [
+    {"id": "parse", "kind": "slack_parse", "params": {"event_id": "EvLfdSlack004"}},
+    {"id": "delivery", "kind": "slack_delivery", "params": {"event_id": "EvLfdSlack004"}},
+    {"id": "dedupe", "kind": "slack_dedupe", "params": {"event_id": "EvLfdSlack004"}},
+    {"id": "isolation", "kind": "slack_isolation_audit", "params": {"event_id": "EvLfdSlack004"}}
+  ],
+  "live": false
+}

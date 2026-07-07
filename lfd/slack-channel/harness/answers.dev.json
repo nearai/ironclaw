@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "canary_token": "LFDC-slack-channel-6f9a24d1",
+  "contracts": [
+    {
+      "case_id": "slack_dev_001_dm_personal_agent",
+      "hard_fail_on_error": true,
+      "required": [
+        {"id": "ran", "type": "status", "eq": "ran", "weight": 1},
+        {"id": "reply", "type": "reply_contains", "channel": "slack", "substrings_any": ["morning brief queued for Slack"], "weight": 2},
+        {"id": "parse_status", "type": "state_pred", "query": "parse", "path": "status", "eq": "user_message", "weight": 2},
+        {"id": "parse_text", "type": "state_pred", "query": "parse", "path": "text", "eq": "what changed overnight?", "weight": 2},
+        {"id": "trigger", "type": "state_pred", "query": "parse", "path": "trigger", "eq": "direct_chat", "weight": 2},
+        {"id": "route_permitted", "type": "state_pred", "query": "route", "path": "permitted", "eq": true, "weight": 2},
+        {"id": "route_type", "type": "state_pred", "query": "route", "path": "route_type", "eq": "personal_agent", "weight": 2},
+        {"id": "route_agent", "type": "state_pred", "query": "route", "path": "agent_id", "eq": "agent:personal-alice-lfd", "weight": 2},
+        {"id": "delivery", "type": "state_pred", "query": "delivery", "path": "post_count", "eq": 1, "weight": 2},
+        {"id": "dedupe", "type": "state_pred", "query": "dedupe", "path": "turn_count", "eq": 1, "weight": 1},
+        {"id": "isolation_r", "type": "state_pred", "query": "isolation", "path": "cross_tenant_reads", "eq": 0, "weight": 1},
+        {"id": "isolation_w", "type": "state_pred", "query": "isolation", "path": "cross_tenant_writes", "eq": 0, "weight": 1}
+      ],
+      "forbidden": [{"type": "leak"}]
+    },
+    {
+      "case_id": "slack_dev_002_channel_mention_route",
+      "hard_fail_on_error": true,
+      "required": [
+        {"id": "ran", "type": "status", "eq": "ran", "weight": 1},
+        {"id": "reply", "type": "reply_contains", "channel": "slack", "substrings_any": ["channel deployment summary posted"], "weight": 2},
+        {"id": "parse_status", "type": "state_pred", "query": "parse", "path": "status", "eq": "user_message", "weight": 2},
+        {"id": "parse_text", "type": "state_pred", "query": "parse", "path": "text", "eq": "summarize deployment risk", "weight": 2},
+        {"id": "trigger", "type": "state_pred", "query": "parse", "path": "trigger", "eq": "bot_mention", "weight": 2},
+        {"id": "thread", "type": "state_pred", "query": "parse", "path": "thread_ts", "eq": "1771000000.000002", "weight": 1},
+        {"id": "route_permitted", "type": "state_pred", "query": "route", "path": "permitted", "eq": true, "weight": 2},
+        {"id": "route_type", "type": "state_pred", "query": "route", "path": "route_type", "eq": "channel_agent", "weight": 2},
+        {"id": "route_agent", "type": "state_pred", "query": "route", "path": "agent_id", "eq": "agent:channel-alpha-lfd", "weight": 2},
+        {"id": "delivery_status", "type": "state_pred", "query": "delivery", "path": "status", "eq": "delivered", "weight": 1},
+        {"id": "delivery_thread", "type": "state_pred", "query": "delivery", "path": "thread_ts", "eq": "1771000000.000002", "weight": 1},
+        {"id": "isolation_r", "type": "state_pred", "query": "isolation", "path": "cross_tenant_reads", "eq": 0, "weight": 1}
+      ],
+      "forbidden": [{"type": "leak"}]
+    },
+    {
+      "case_id": "slack_dev_004_duplicate_event_idempotent",
+      "hard_fail_on_error": true,
+      "required": [
+        {"id": "ran", "type": "status", "eq": "ran", "weight": 1},
+        {"id": "reply", "type": "reply_contains", "channel": "slack", "substrings_any": ["duplicate delivery handled once"], "weight": 2},
+        {"id": "parse_status", "type": "state_pred", "query": "parse", "path": "status", "eq": "user_message", "weight": 2},
+        {"id": "accepted", "type": "state_pred", "query": "dedupe", "path": "accepted_count", "eq": 1, "weight": 3},
+        {"id": "duplicate", "type": "state_pred", "query": "dedupe", "path": "duplicate_count", "eq": 1, "weight": 3},
+        {"id": "turns", "type": "state_pred", "query": "dedupe", "path": "turn_count", "eq": 1, "weight": 3},
+        {"id": "deliveries", "type": "state_pred", "query": "dedupe", "path": "delivery_count", "eq": 1, "weight": 3},
+        {"id": "posts", "type": "state_pred", "query": "delivery", "path": "post_count", "eq": 1, "weight": 2},
+        {"id": "isolation_w", "type": "state_pred", "query": "isolation", "path": "cross_tenant_writes", "eq": 0, "weight": 1}
+      ],
+      "forbidden": [{"type": "leak"}]
+    },
+    {
+      "case_id": "slack_dev_005_unmentioned_public_noop",
+      "hard_fail_on_error": true,
+      "required": [
+        {"id": "ran", "type": "status", "eq": "ran", "weight": 1},
+        {"id": "parse_status", "type": "state_pred", "query": "parse", "path": "status", "eq": "noop", "weight": 3},
+        {"id": "route_denied", "type": "state_pred", "query": "route", "path": "permitted", "eq": false, "weight": 2},
+        {"id": "route_type", "type": "state_pred", "query": "route", "path": "route_type", "eq": "no_op", "weight": 2},
+        {"id": "turns", "type": "state_pred", "query": "dedupe", "path": "turn_count", "eq": 0, "weight": 3},
+        {"id": "posts", "type": "state_pred", "query": "delivery", "path": "post_count", "eq": 0, "weight": 3},
+        {"id": "delivery_status", "type": "state_pred", "query": "delivery", "path": "status", "eq": "skipped", "weight": 1},
+        {"id": "isolation_r", "type": "state_pred", "query": "isolation", "path": "cross_tenant_reads", "eq": 0, "weight": 1}
+      ],
+      "forbidden": [
+        {"type": "reply_regex", "pattern": ".+"},
+        {"type": "leak"}
+      ]
+    }
+  ]
+}

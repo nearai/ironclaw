@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "case_id": "slack_dev_005_unmentioned_public_noop",
+  "profile": "slack_channel",
+  "title": "Unmentioned public-channel message does not trigger the bot",
+  "setup": {
+    "extensions": ["slack_v2"],
+    "secrets": [{"credential_name": "slack_bot_token_alpha", "value": "xoxb-lfd-slack-dev-005"}],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {
+      "slack_fixture": {
+        "tenant_id": "tenant:lfd-slack-alpha",
+        "installation_id": "slack-install-lfd-alpha",
+        "users": {
+          "U_LFD_ELLI": {
+            "owner_user_id": "user:elli-lfd",
+            "agent_id": "agent:personal-elli-lfd"
+          }
+        },
+        "channels": {
+          "C_LFD_ALPHA": {
+            "owner_user_id": "user:team-alpha-lfd",
+            "agent_id": "agent:channel-alpha-lfd",
+            "connected": true
+          }
+        },
+        "delivery": {
+          "credential_name": "slack_bot_token_alpha",
+          "extension_name": "slack_v2",
+          "attempts": 1
+        }
+      }
+    }
+  },
+  "llm_script": [],
+  "inbound": [
+    {
+      "channel": "slack",
+      "payload": {
+        "type": "event_callback",
+        "team_id": "T_LFD_ALPHA",
+        "event_id": "EvLfdSlack005",
+        "event": {
+          "type": "message",
+          "user": "U_LFD_ELLI",
+          "channel": "C_LFD_ALPHA",
+          "text": "deploy notes are in the doc",
+          "ts": "1771000000.000005"
+        }
+      }
+    }
+  ],
+  "state_queries": [
+    {"id": "parse", "kind": "slack_parse", "params": {"event_id": "EvLfdSlack005"}},
+    {"id": "route", "kind": "slack_route", "params": {"event_id": "EvLfdSlack005"}},
+    {"id": "delivery", "kind": "slack_delivery", "params": {"event_id": "EvLfdSlack005"}},
+    {"id": "dedupe", "kind": "slack_dedupe", "params": {"event_id": "EvLfdSlack005"}},
+    {"id": "isolation", "kind": "slack_isolation_audit", "params": {"event_id": "EvLfdSlack005"}}
+  ],
+  "live": false
+}

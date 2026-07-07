@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use crate::case::{Case, InboundEntry};
 use crate::reborn_support::builder::RebornIntegrationHarness;
 
+pub mod slack_channel;
 pub mod smoke_builtin_tools;
 
 /// How a profile step failed, mapping 1:1 onto the two non-`ran` Outcome
@@ -56,6 +57,23 @@ pub trait LfdProfile: Send + Sync {
             })
     }
 
+    /// Submit one inbound entry through the profile's ingress. Most profiles
+    /// use plain text synthetic turns; product-channel profiles can override
+    /// this to parse raw channel payloads, skip no-ops, or apply protocol-level
+    /// idempotency before a turn is admitted.
+    async fn submit_inbound(
+        &self,
+        harness: &RebornIntegrationHarness,
+        inbound: &InboundEntry,
+    ) -> Result<(), ProfileError> {
+        let text = self.inbound_text(inbound)?;
+        harness
+            .submit_turn(&text)
+            .await
+            .map_err(|error| ProfileError::Harness(format!("turn failed: {error}")))?;
+        Ok(())
+    }
+
     /// Profile-specific state-query kinds, consulted only AFTER the pinned
     /// dispatcher's built-in kinds (`extract::run_state_queries`). Default:
     /// none supported.
@@ -74,6 +92,7 @@ pub trait LfdProfile: Send + Sync {
 /// Look up the profile named by a case. `None` → `status: "unsupported"`.
 pub fn resolve(profile: &str) -> Option<Box<dyn LfdProfile>> {
     match profile {
+        slack_channel::NAME => Some(Box::new(slack_channel::SlackChannel)),
         smoke_builtin_tools::NAME => Some(Box::new(smoke_builtin_tools::SmokeBuiltinTools)),
         _ => None,
     }

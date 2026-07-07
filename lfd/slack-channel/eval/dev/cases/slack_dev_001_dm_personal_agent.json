@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "case_id": "slack_dev_001_dm_personal_agent",
+  "profile": "slack_channel",
+  "title": "DM from a paired Slack user routes to the user's personal agent",
+  "setup": {
+    "extensions": ["slack_v2"],
+    "secrets": [{"credential_name": "slack_bot_token_alpha", "value": "xoxb-lfd-slack-dev-001"}],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {
+      "slack_fixture": {
+        "tenant_id": "tenant:lfd-slack-alpha",
+        "installation_id": "slack-install-lfd-alpha",
+        "users": {
+          "U_LFD_ALICE": {
+            "owner_user_id": "user:alice-lfd",
+            "agent_id": "agent:personal-alice-lfd"
+          }
+        },
+        "channels": {},
+        "delivery": {
+          "credential_name": "slack_bot_token_alpha",
+          "extension_name": "slack_v2",
+          "attempts": 1
+        }
+      }
+    }
+  },
+  "llm_script": [{"turn": 1, "steps": [{"text": "morning brief queued for Slack"}]}],
+  "inbound": [
+    {
+      "channel": "slack",
+      "payload": {
+        "type": "event_callback",
+        "team_id": "T_LFD_ALPHA",
+        "event_id": "EvLfdSlack001",
+        "event": {
+          "type": "message",
+          "channel_type": "im",
+          "user": "U_LFD_ALICE",
+          "channel": "D_LFD_ALICE",
+          "text": "what changed overnight?",
+          "ts": "1771000000.000001"
+        }
+      }
+    }
+  ],
+  "state_queries": [
+    {"id": "parse", "kind": "slack_parse", "params": {"event_id": "EvLfdSlack001"}},
+    {"id": "route", "kind": "slack_route", "params": {"event_id": "EvLfdSlack001"}},
+    {"id": "delivery", "kind": "slack_delivery", "params": {"event_id": "EvLfdSlack001"}},
+    {"id": "dedupe", "kind": "slack_dedupe", "params": {"event_id": "EvLfdSlack001"}},
+    {"id": "isolation", "kind": "slack_isolation_audit", "params": {"event_id": "EvLfdSlack001"}}
+  ],
+  "live": false
+}

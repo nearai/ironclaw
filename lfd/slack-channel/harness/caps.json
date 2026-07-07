@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "base_ref": "3276dedca3",
+  "caps": [
+    {
+      "name": "no_slack_eval_case_branching",
+      "scope": "diff",
+      "paths": [
+        "src/**/*.rs",
+        "crates/**/*.rs",
+        "tests/**/*.rs"
+      ],
+      "pattern": "(?i)slack_dev_|EvLfdSlack|LFDC-slack-channel",
+      "max_count": 0
+    }
+  ],
+  "holdout_canaries": [
+    "LFDH-slack-channel-a7c3e490"
+  ],
+  "spend_ceiling_usd": 0.0
+}

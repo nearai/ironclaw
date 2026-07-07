@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "case_id": "slack_dev_002_channel_mention_route",
+  "profile": "slack_channel",
+  "title": "App mention in a routed public channel targets the configured channel agent",
+  "setup": {
+    "extensions": ["slack_v2"],
+    "secrets": [{"credential_name": "slack_bot_token_alpha", "value": "xoxb-lfd-slack-dev-002"}],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [],
+    "profile_extra": {
+      "slack_fixture": {
+        "tenant_id": "tenant:lfd-slack-alpha",
+        "installation_id": "slack-install-lfd-alpha",
+        "users": {
+          "U_LFD_BRAVO": {
+            "owner_user_id": "user:bravo-lfd",
+            "agent_id": "agent:personal-bravo-lfd"
+          }
+        },
+        "channels": {
+          "C_LFD_ALPHA": {
+            "owner_user_id": "user:team-alpha-lfd",
+            "agent_id": "agent:channel-alpha-lfd",
+            "connected": true
+          }
+        },
+        "delivery": {
+          "credential_name": "slack_bot_token_alpha",
+          "extension_name": "slack_v2",
+          "attempts": 1
+        }
+      }
+    }
+  },
+  "llm_script": [{"turn": 1, "steps": [{"text": "channel deployment summary posted"}]}],
+  "inbound": [
+    {
+      "channel": "slack",
+      "payload": {
+        "type": "event_callback",
+        "team_id": "T_LFD_ALPHA",
+        "event_id": "EvLfdSlack002",
+        "event": {
+          "type": "app_mention",
+          "user": "U_LFD_BRAVO",
+          "channel": "C_LFD_ALPHA",
+          "text": "<@UBOT_LFD> summarize deployment risk",
+          "ts": "1771000000.000002"
+        }
+      }
+    }
+  ],
+  "state_queries": [
+    {"id": "parse", "kind": "slack_parse", "params": {"event_id": "EvLfdSlack002"}},
+    {"id": "route", "kind": "slack_route", "params": {"event_id": "EvLfdSlack002"}},
+    {"id": "delivery", "kind": "slack_delivery", "params": {"event_id": "EvLfdSlack002"}},
+    {"id": "dedupe", "kind": "slack_dedupe", "params": {"event_id": "EvLfdSlack002"}},
+    {"id": "isolation", "kind": "slack_isolation_audit", "params": {"event_id": "EvLfdSlack002"}}
+  ],
+  "live": false
+}

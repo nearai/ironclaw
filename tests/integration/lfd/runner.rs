@@ -155,15 +155,14 @@ async fn run_case(case: Case, runner_hash: &str) -> Outcome {
     };
 
     for entry in &case.inbound {
-        let text = match profile.inbound_text(entry) {
-            Ok(text) => text,
+        match profile.submit_inbound(&harness, entry).await {
+            Ok(()) => {}
             Err(ProfileError::Unsupported(reason)) => {
                 return fail(OutcomeStatus::Unsupported, reason);
             }
-            Err(ProfileError::Harness(reason)) => return fail(OutcomeStatus::Error, reason),
-        };
-        if let Err(error) = harness.submit_turn(&text).await {
-            return fail(OutcomeStatus::Error, format!("turn failed: {error}"));
+            Err(ProfileError::Harness(reason)) => {
+                return fail(OutcomeStatus::Error, reason);
+            }
         }
     }
 
