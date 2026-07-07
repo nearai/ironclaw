@@ -61,6 +61,7 @@ test("normalizeSidebarTitle treats raw thread ids as missing titles", () => {
   assert.equal(normalizeSidebarTitle("thread_abc123456", "thread_abc123456"), null);
   assert.equal(normalizeSidebarTitle("thread-abc123456", "thread-abc123456"), null);
   assert.equal(normalizeSidebarTitle("  Weekly status  ", "thread_abc123456"), "Weekly status");
+  assert.equal(normalizeSidebarTitle("thread-safety", "thread_abc123456"), "thread-safety");
   assert.equal(
     displaySidebarTitle({ thread_id: "thread_abc123456", title: "thread_abc123456" }),
     "Untitled thread",
