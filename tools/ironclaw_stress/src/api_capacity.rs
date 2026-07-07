@@ -202,8 +202,10 @@ pub(crate) async fn run(
             users.len()
         );
         let warmup_progress = Arc::new(ProgressCounters::new(false));
+        let warmup_namespace = format!("{run_id}:warmup");
         let _ = run_window(
             &warmup_args,
+            &warmup_namespace,
             &harness,
             Arc::new(users.clone()),
             &read_mix,
@@ -213,7 +215,16 @@ pub(crate) async fn run(
     }
 
     let started = Instant::now();
-    let window = run_window(args, &harness, Arc::new(users), &read_mix, progress).await?;
+    let measured_namespace = format!("{run_id}:measured");
+    let window = run_window(
+        args,
+        &measured_namespace,
+        &harness,
+        Arc::new(users),
+        &read_mix,
+        progress,
+    )
+    .await?;
     let elapsed = started.elapsed();
     let mock_summary = _mock_llm.as_ref().map(|handle| handle.summary.clone());
     let mut endpoints = summarize_api_samples(&window.api_samples, elapsed);
@@ -251,6 +262,7 @@ struct WindowResult {
 
 async fn run_window(
     args: &Args,
+    operation_namespace: &str,
     harness: &ApiHarness,
     users: Arc<Vec<ApiUser>>,
     read_mix: &ReadMix,
@@ -263,7 +275,10 @@ async fn run_window(
         let harness = harness.clone();
         let progress = Arc::clone(&progress);
         let args = args.clone();
-        tasks.spawn(async move { run_virtual_user(&args, harness, user, progress).await });
+        let operation_namespace = operation_namespace.to_string();
+        tasks.spawn(async move {
+            run_virtual_user(&args, &operation_namespace, harness, user, progress).await
+        });
     }
 
     if args.api_read_qps_per_user > 0.0 {
@@ -309,6 +324,7 @@ struct TaskResult {
 
 async fn run_virtual_user(
     args: &Args,
+    operation_namespace: &str,
     harness: ApiHarness,
     user: ApiUser,
     progress: Arc<ProgressCounters>,
@@ -320,7 +336,10 @@ async fn run_virtual_user(
     let mut api_samples = Vec::new();
 
     while crate::should_run_operation(target, started, operation_index) {
-        let operation_ref = format!("{}:{}:{}", user.label, user.index, operation_index);
+        let operation_ref = format!(
+            "{operation_namespace}:{}:{}:{}",
+            user.label, user.index, operation_index
+        );
         let (flow, mut operation_api_samples) =
             run_full_flow(args, &harness, &user, operation_index, &operation_ref).await;
         progress.record(flow.error.is_some(), flow.latency);
