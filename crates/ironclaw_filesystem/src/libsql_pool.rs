@@ -21,13 +21,16 @@
 //!
 //! A `RootFilesystem` method must **drop its checked-out connection
 //! before `.await`-ing any other `self` method that itself checks out a
-//! connection** (see `put()`'s explicit `drop(conn)` before its
-//! `current_version` readbacks, and `vector_nearest_query`'s before
-//! `materialize_ranked`). Nested checkouts on one call stack can exhaust
-//! the pool under load and stall every caller until the checkout wait
-//! timeout fires. The concurrent-CAS storm regression test converts a
-//! reintroduced nested checkout on the hot path into a deterministic
-//! failure rather than a silent slowdown.
+//! connection** (see `vector_nearest_query`'s explicit `drop(conn)`
+//! before `materialize_ranked`). Where the same connection can serve both
+//! statements — e.g. `put()`'s post-write version readback via
+//! `current_version_with_conn` — reuse the held checkout instead of
+//! dropping and re-checking-out; that removes the invariant for that call
+//! site entirely rather than relying on a manual `drop()`. Nested
+//! checkouts on one call stack can exhaust the pool under load and stall
+//! every caller until the checkout wait timeout fires. The concurrent-CAS
+//! storm regression test converts a reintroduced nested checkout on the
+//! hot path into a deterministic failure rather than a silent slowdown.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -198,4 +201,83 @@ where
 
 fn connect_backoff(attempt: u32) -> Duration {
     LIBSQL_CONNECT_INITIAL_BACKOFF * 2u32.pow(attempt)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Pool-internal regression tests. Cross-backend contract tests live
+    //! in `tests/`; these cover the deadpool `Manager` seam
+    //! (`recycle`/`create`) directly, which isn't reachable from that
+    //! integration surface.
+
+    use super::*;
+
+    /// A connection returned to the pool while a transaction is still open
+    /// (e.g. a caller that `BEGIN`s and then drops its checkout without
+    /// `COMMIT`/`ROLLBACK`) must never be handed to the next caller —
+    /// two unrelated operations interleaving statements on one open
+    /// transaction would silently corrupt state. `recycle` rejects it, so
+    /// deadpool discards the poisoned connection and opens a fresh one on
+    /// the next checkout (see `libsql_pool`'s one-checkout-per-call-stack
+    /// invariant note above).
+    #[tokio::test]
+    async fn recycle_rejects_connection_returned_inside_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("recycle-reject-test.db");
+        let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+        let pool = build_libsql_pool(db);
+
+        {
+            let conn = pool.get().await.unwrap();
+            conn.execute("BEGIN", ()).await.unwrap();
+            assert!(
+                !conn.is_autocommit(),
+                "connection must be mid-transaction before it's returned to the pool"
+            );
+            // `conn` drops here, returning to the pool with an open
+            // transaction and no COMMIT/ROLLBACK.
+        }
+
+        // The only idle connection in the pool is the one just returned
+        // with an open transaction. The next checkout must observe a
+        // fresh, autocommit-clean connection rather than the poisoned one.
+        let next = pool.get().await.unwrap();
+        assert!(
+            next.is_autocommit(),
+            "pool must discard a connection returned inside an open transaction, not reuse it"
+        );
+    }
+
+    /// When every open attempt fails, `connect_with_retry` must exhaust its
+    /// fixed retry budget (not retry forever) and surface a `Connect`
+    /// infrastructure error whose reason includes the final attempt's
+    /// cause, so a permanently broken database file/path fails fast and
+    /// diagnosably instead of hanging or masking the underlying error.
+    #[tokio::test]
+    async fn connect_with_retry_returns_connect_error_after_exhausting_open_failures() {
+        let mut attempts = 0;
+
+        let result = connect_with_retry(|| {
+            attempts += 1;
+            Err(libsql::Error::ConnectionFailed(format!(
+                "synthetic permanent failure {attempts}"
+            )))
+        })
+        .await;
+
+        assert_eq!(
+            attempts, LIBSQL_CONNECT_ATTEMPTS,
+            "must stop after exhausting the fixed retry budget, not retry forever"
+        );
+        match result {
+            Err(FilesystemError::BackendInfrastructure { operation, reason }) => {
+                assert_eq!(operation, FilesystemOperation::Connect);
+                assert!(
+                    reason.contains("synthetic permanent failure"),
+                    "reason must include the final open attempt's cause: {reason}"
+                );
+            }
+            other => panic!("expected FilesystemError::BackendInfrastructure, got {other:?}"),
+        }
+    }
 }

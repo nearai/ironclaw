@@ -134,15 +134,23 @@ async fn postgres_concurrent_cas_storm_has_no_errors_or_lost_updates() {
     if std::env::var("IRONCLAW_SKIP_POSTGRES_TESTS").is_ok() {
         return;
     }
+    // silent-ok: no Postgres URL configured means the environment has no
+    // Postgres to test against; skip vacuously rather than fail CI.
     let Ok(url) = std::env::var("IRONCLAW_FILESYSTEM_POSTGRES_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
     else {
         return;
     };
+    // silent-ok: an unparsable URL means the environment's Postgres config
+    // isn't usable here; skip rather than fail on a config format issue
+    // this test doesn't own.
     let Ok(config) = url.parse::<tokio_postgres::Config>() else {
         return;
     };
     let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
+    // silent-ok: pool construction failure means the environment can't
+    // stand up a Postgres pool right now; skip rather than fail this
+    // storm test on infrastructure it doesn't own.
     let Ok(pool) = deadpool_postgres::Pool::builder(manager)
         .max_size(4)
         .build()
@@ -150,6 +158,8 @@ async fn postgres_concurrent_cas_storm_has_no_errors_or_lost_updates() {
         return;
     };
     let root = Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(pool));
+    // silent-ok: an unreachable/misconfigured Postgres fails migrations;
+    // skip rather than fail this storm test on connectivity it doesn't own.
     if root.run_migrations().await.is_err() {
         return;
     }

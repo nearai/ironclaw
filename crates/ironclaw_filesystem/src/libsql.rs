@@ -97,11 +97,16 @@ impl LibSqlRootFilesystem {
     /// [`crate::libsql_pool`].
     async fn connect(&self) -> Result<PooledLibSqlConnection, FilesystemError> {
         self.pool.get().await.map_err(|error| match error {
-            deadpool::managed::PoolError::Backend(error) => error,
-            other => crate::db::infrastructure_error(
-                FilesystemOperation::Connect,
-                format!("libSQL connection pool checkout failed: {other}"),
-            ),
+            deadpool::managed::PoolError::Backend(error) => {
+                let reason = error.to_string();
+                tracing::debug!(%reason, "libSQL root filesystem pool checkout failed");
+                error
+            }
+            other => {
+                let reason = format!("libSQL connection pool checkout failed: {other}");
+                tracing::debug!(%reason, "libSQL root filesystem pool checkout failed");
+                crate::db::infrastructure_error(FilesystemOperation::Connect, reason)
+            }
         })
     }
 }
@@ -170,11 +175,11 @@ impl RootFilesystem for LibSqlRootFilesystem {
                     .map_err(|error| {
                         libsql_db_error(path.clone(), FilesystemOperation::WriteFile, error)
                     })?;
-                // Release the checkout before `current_version` claims its
-                // own — at most one pooled connection per call stack.
-                drop(conn);
                 if rows == 0 {
-                    let found = self.current_version(path).await?;
+                    // Reuse the connection already checked out above rather
+                    // than dropping and re-checking-out — one pooled
+                    // connection for the whole call stack, structurally.
+                    let found = current_version_with_conn(&conn, path).await?;
                     return Err(FilesystemError::VersionMismatch {
                         path: path.clone(),
                         expected: None,
@@ -211,11 +216,11 @@ impl RootFilesystem for LibSqlRootFilesystem {
                     .map_err(|error| {
                         libsql_db_error(path.clone(), FilesystemOperation::WriteFile, error)
                     })?;
-                // Release the checkout before `current_version` claims its
-                // own — at most one pooled connection per call stack.
-                drop(conn);
                 if rows == 0 {
-                    let found = self.current_version(path).await?;
+                    // Reuse the connection already checked out above rather
+                    // than dropping and re-checking-out — one pooled
+                    // connection for the whole call stack, structurally.
+                    let found = current_version_with_conn(&conn, path).await?;
                     return Err(FilesystemError::VersionMismatch {
                         path: path.clone(),
                         expected: Some(expected),
@@ -256,18 +261,17 @@ impl RootFilesystem for LibSqlRootFilesystem {
                 if rows == 0 {
                     return Err(directory_write_error(path.clone()));
                 }
-                // Release the checkout before the success-path version
-                // readback claims its own — at most one pooled connection
-                // per call stack.
-                drop(conn);
-                let version =
-                    self.current_version(path)
-                        .await?
-                        .ok_or_else(|| FilesystemError::Backend {
-                            path: path.clone(),
-                            operation: FilesystemOperation::WriteFile,
-                            reason: "put succeeded but version lookup found no row".to_string(),
-                        })?;
+                // Reuse the connection already checked out above for the
+                // success-path version readback rather than dropping and
+                // re-checking-out — one pooled connection for the whole
+                // call stack, structurally.
+                let version = current_version_with_conn(&conn, path)
+                    .await?
+                    .ok_or_else(|| FilesystemError::Backend {
+                        path: path.clone(),
+                        operation: FilesystemOperation::WriteFile,
+                        reason: "put succeeded but version lookup found no row".to_string(),
+                    })?;
                 Ok(version)
             }
         }
@@ -1509,30 +1513,50 @@ impl LibSqlRootFilesystem {
         Ok(out)
     }
 
-    async fn current_version(
+    /// Look up `path`'s current [`RecordVersion`], or `None` if no row
+    /// exists. Thin wrapper: checks out its own connection and delegates
+    /// to [`current_version_with_conn`]. Callers that already hold a
+    /// checked-out connection (e.g. `put()`'s version-mismatch and
+    /// success-path readbacks) call `current_version_with_conn` directly
+    /// instead, to keep at most one pooled connection per call stack.
+    pub async fn current_version(
         &self,
         path: &VirtualPath,
     ) -> Result<Option<RecordVersion>, FilesystemError> {
         let conn = self.connect().await?;
-        let mut rows = conn
-            .query(
-                "SELECT version FROM root_filesystem_entries WHERE path = ?1 AND is_dir = 0",
-                libsql::params![path.as_str()],
-            )
-            .await
-            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
-        let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?
-        else {
-            return Ok(None);
-        };
-        let version: i64 = row
-            .get(0)
-            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
-        Ok(Some(record_version_from_i64(path, version)?))
+        current_version_with_conn(&conn, path).await
     }
+}
+
+/// Look up `path`'s current [`RecordVersion`] using an already-checked-out
+/// connection. Split out of [`LibSqlRootFilesystem::current_version`] so
+/// callers that already hold a pooled connection (e.g. `put()`'s
+/// version-mismatch and success-path readbacks) can reuse it instead of
+/// dropping and re-checking-out — see the one-checkout-per-call-stack
+/// invariant in `libsql_pool`.
+#[cfg(feature = "libsql")]
+async fn current_version_with_conn(
+    conn: &PooledLibSqlConnection,
+    path: &VirtualPath,
+) -> Result<Option<RecordVersion>, FilesystemError> {
+    let mut rows = conn
+        .query(
+            "SELECT version FROM root_filesystem_entries WHERE path = ?1 AND is_dir = 0",
+            libsql::params![path.as_str()],
+        )
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?
+    else {
+        return Ok(None);
+    };
+    let version: i64 = row
+        .get(0)
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+    Ok(Some(record_version_from_i64(path, version)?))
 }
 
 #[cfg(feature = "libsql")]
