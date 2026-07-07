@@ -2956,6 +2956,11 @@ fn map_admin_user_error(error: AdminUserError) -> RebornServicesError {
         AdminUserError::NotFound => {
             RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false)
         }
+        // Client-supplied value is malformed (e.g. a bad secret handle) — a 400,
+        // never a 500: the input is at fault, not the backend.
+        AdminUserError::InvalidInput => {
+            RebornServicesError::from_status(RebornServicesErrorCode::InvalidRequest, 400, false)
+        }
         // Transient backend failure — the browser may retry.
         AdminUserError::Unavailable => RebornServicesError::service_unavailable(true),
         AdminUserError::Internal => RebornServicesError::internal(),

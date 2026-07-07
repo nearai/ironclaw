@@ -214,9 +214,11 @@ impl AdminUserService for RebornAdminUserDirectory {
         handle: String,
         material: SecretString,
     ) -> Result<AdminUserSecretMeta, AdminUserError> {
-        // The handle is validated at the HTTP edge (webui_v2 descriptor/handler);
-        // a construction failure here is an internal inconsistency.
-        let handle = SecretHandle::new(&handle).map_err(|_| AdminUserError::Internal)?;
+        // The handle comes straight from the request path and is NOT validated
+        // upstream, so a malformed handle is the client's fault → InvalidInput
+        // (400), not an internal 500. Validation is fail-closed: a rejected
+        // handle writes nothing.
+        let handle = SecretHandle::new(&handle).map_err(|_| AdminUserError::InvalidInput)?;
         let meta = self
             .secrets
             .put(tenant, user_id, handle, material)
@@ -231,7 +233,7 @@ impl AdminUserService for RebornAdminUserDirectory {
         user_id: &UserId,
         handle: String,
     ) -> Result<bool, AdminUserError> {
-        let handle = SecretHandle::new(&handle).map_err(|_| AdminUserError::Internal)?;
+        let handle = SecretHandle::new(&handle).map_err(|_| AdminUserError::InvalidInput)?;
         self.secrets
             .delete(tenant, user_id, &handle)
             .await

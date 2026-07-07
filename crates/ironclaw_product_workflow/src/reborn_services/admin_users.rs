@@ -102,6 +102,10 @@ pub struct AdminCreatedUser {
 pub enum AdminUserError {
     /// The targeted user id has no record.
     NotFound,
+    /// A caller-supplied value is malformed (e.g. an invalid secret handle).
+    /// Maps to a 400, not a 500 — it is the client's input at fault, not the
+    /// backend.
+    InvalidInput,
     /// A transient backend failure; the caller may retry.
     Unavailable,
     /// A backend inconsistency or unexpected failure; not retryable.

@@ -39,7 +39,7 @@ use ironclaw_reborn_composition::{
 use ironclaw_reborn_webui_ingress::{
     EnvBearerAuthenticator, SessionAuthenticator, SessionStore, signed_session_store,
 };
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -497,5 +497,355 @@ async fn admin_last_admin_protection_over_http() {
         status,
         StatusCode::OK,
         "demoting one of two admins is allowed"
+    );
+}
+
+// ─── adversarial / corner-case coverage ─────────────────────────────────────
+
+/// Build a signed-session store keyed by `(secret, TENANT)`. Because the store
+/// is deterministic in that pair, a store built here with `OPERATOR_TOKEN` mints
+/// bearers that validate under the harness's own authenticator (the exact
+/// property `signed_session_store`'s doc-comment guarantees); a store built with
+/// a *different* secret derives a different HMAC key, so its tokens fail closed.
+fn session_store_with_secret(secret: &str) -> Arc<dyn SessionStore> {
+    signed_session_store(
+        &SecretString::from(secret.to_string()),
+        &TenantId::new(TENANT).expect("tenant"),
+    )
+}
+
+/// Create an admin user via the API as the operator and return `(user_id,
+/// api_token)`. The `api_token` is the one-time minted session bearer.
+async fn create_admin(operator: &AdminApiDriver, display_name: &str) -> (String, String) {
+    let (status, created) = operator.create_user(None, display_name, "admin").await;
+    assert_eq!(status, StatusCode::OK, "operator creates an admin user");
+    let id = user_id_of(&created);
+    let token = created["api_token"]
+        .as_str()
+        .expect("create returns a one-time api_token")
+        .to_string();
+    (id, token)
+}
+
+/// 1. A deleted admin's minted token loses admin access: with no user record,
+///    `authorize_admin` fails closed → 403 on any admin verb.
+#[tokio::test]
+async fn deleted_admin_token_is_denied_on_admin_routes() {
+    let harness = build_admin_harness().await;
+    let operator = AdminApiDriver::new(harness.router.clone(), OPERATOR_TOKEN);
+
+    // A second admin so deleting the first is not blocked by last-admin
+    // protection (delete of the sole admin would 409, not 200).
+    let (admin_id, admin_token) = create_admin(&operator, "Del Admin").await;
+    let _ = create_admin(&operator, "Keep Admin").await;
+
+    // Sanity: the token clears the admin boundary while the record exists.
+    let admin_session = operator.as_bearer(&admin_token);
+    let (status, _) = admin_session.list_users().await;
+    assert_eq!(status, StatusCode::OK, "admin token works before delete");
+
+    let (status, deleted) = operator.delete_user(&admin_id).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(deleted["deleted"].as_bool(), Some(true));
+
+    // The deleted user's token no longer authorizes admin actions: the record
+    // is gone, so `authorize_admin`'s `get_user` returns None → 403.
+    let (status, _) = admin_session.list_users().await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a deleted admin's token must not reach the admin surface"
+    );
+
+    // KNOWN REVOCATION GAP (verified, deliberately NOT asserted as desired):
+    // signed session tokens are stateless and are NOT revoked on user delete,
+    // so the same deleted token still authenticates a non-admin route
+    // (`GET /api/webchat/v2/session` returns 200 as the tombstoned user id).
+    // We exercise that path to document the gap but do not lock it in with an
+    // assertion — when session revocation-on-delete lands this should change to
+    // a 401, and a test asserting 200 here would then wrongly fail-block the fix.
+    let _ = admin_session.session().await;
+}
+
+/// 2. A suspended admin's own token loses admin access. Relies on the
+///    status-gate in `authorize_admin` (role.is_admin() AND status==Active).
+#[tokio::test]
+async fn suspended_admin_token_is_denied_on_admin_routes() {
+    let harness = build_admin_harness().await;
+    let operator = AdminApiDriver::new(harness.router.clone(), OPERATOR_TOKEN);
+
+    // Two admins so suspending one is not blocked by last-admin protection.
+    let (admin_id, admin_token) = create_admin(&operator, "Suspendable Admin").await;
+    let _ = create_admin(&operator, "Other Admin").await;
+
+    let admin_session = operator.as_bearer(&admin_token);
+    let (status, _) = admin_session.list_users().await;
+    assert_eq!(status, StatusCode::OK, "admin token works while active");
+
+    let (status, suspended) = operator.set_status(&admin_id, "suspended").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(suspended["user"]["status"].as_str(), Some("suspended"));
+
+    // The suspended admin keeps the `admin` role but a non-Active status must
+    // immediately revoke admin API access.
+    let (status, _) = admin_session.list_users().await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a suspended admin's token must not reach the admin surface"
+    );
+}
+
+/// 3. A minted admin *session* bearer is admin for user-management but must NOT
+///    carry `operator_webui_config`: it is rejected on an operator-gated route
+///    (`GET /api/webchat/v2/operator/status`) that the operator env-bearer may
+///    reach. The harness mounts operator routes
+///    (`mounts_operator_webui_config_routes() == true`).
+#[tokio::test]
+async fn admin_session_bearer_cannot_reach_operator_routes() {
+    let harness = build_admin_harness().await;
+    let operator = AdminApiDriver::new(harness.router.clone(), OPERATOR_TOKEN);
+    let (_admin_id, admin_token) = create_admin(&operator, "Ops Curious Admin").await;
+
+    const OPERATOR_STATUS: &str = "/api/webchat/v2/operator/status";
+
+    // The operator env-bearer clears the operator capability gate.
+    let (status, _) = operator.send(Method::GET, OPERATOR_STATUS, None).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "operator env-bearer reaches the operator status route"
+    );
+
+    // The admin session bearer is admin for user CRUD but not an operator: the
+    // capability gate in composition rejects it before the handler runs.
+    let admin_session = operator.as_bearer(&admin_token);
+    let (status, _) = admin_session.list_users().await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the admin session bearer IS admin for user management"
+    );
+    let (status, _) = admin_session.send(Method::GET, OPERATOR_STATUS, None).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "an admin session bearer must NOT carry operator_webui_config"
+    );
+}
+
+/// 4. Forged / tampered / expired tokens are rejected at the auth boundary with
+///    a 401 — they never reach the admin facade.
+#[tokio::test]
+async fn forged_and_expired_tokens_are_rejected() {
+    let harness = build_admin_harness().await;
+    let operator = AdminApiDriver::new(harness.router.clone(), OPERATOR_TOKEN);
+    let admin_route = "/api/webchat/v2/admin/users";
+
+    let tenant = TenantId::new(TENANT).expect("tenant");
+    let user = UserId::new("forge-victim").expect("user");
+
+    // (a) random garbage bearer → 401.
+    let (status, _) = operator
+        .as_bearer("not-a-real-token")
+        .send(Method::GET, admin_route, None)
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "garbage bearer is rejected"
+    );
+
+    // Mint a genuine, in-secret bearer (validates under the harness).
+    let good_store = session_store_with_secret(OPERATOR_TOKEN);
+    let good_token = good_store
+        .create_session(tenant.clone(), user.clone(), chrono::Duration::days(1))
+        .await
+        .expect("mint valid token")
+        .expose_secret()
+        .to_string();
+
+    // (b) a bit-flipped valid token breaks the HMAC → 401.
+    let mut flipped: Vec<char> = good_token.chars().collect();
+    let last = flipped.len() - 1;
+    flipped[last] = if flipped[last] == 'A' { 'B' } else { 'A' };
+    let flipped: String = flipped.into_iter().collect();
+    assert_ne!(flipped, good_token, "bit-flip actually changed the token");
+    let (status, _) = operator
+        .as_bearer(&flipped)
+        .send(Method::GET, admin_route, None)
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "a tampered token is rejected"
+    );
+
+    // (c) a token minted under a DIFFERENT operator secret → 401 (foreign key).
+    let foreign_token = session_store_with_secret("a-totally-different-operator-secret")
+        .create_session(tenant.clone(), user.clone(), chrono::Duration::days(1))
+        .await
+        .expect("mint foreign token")
+        .expose_secret()
+        .to_string();
+    let (status, _) = operator
+        .as_bearer(&foreign_token)
+        .send(Method::GET, admin_route, None)
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "a token signed by a different secret is rejected"
+    );
+
+    // (d) an expired session → 401. The store fails LOUD on a non-positive
+    // lifetime (it refuses to mint an already-dead token), so we cannot mint
+    // one with `Duration::zero()` — assert that fail-loud contract, then mint a
+    // minimum 1s token and let it lapse (exp is second-granularity, so wait
+    // past the next whole second).
+    let zero = good_store
+        .create_session(tenant.clone(), user.clone(), chrono::Duration::zero())
+        .await;
+    assert!(
+        zero.is_err(),
+        "create_session refuses a zero/negative lifetime rather than minting a dead token"
+    );
+    let expiring = good_store
+        .create_session(tenant, user, chrono::Duration::seconds(1))
+        .await
+        .expect("mint short-lived token")
+        .expose_secret()
+        .to_string();
+    tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+    let (status, _) = operator
+        .as_bearer(&expiring)
+        .send(Method::GET, admin_route, None)
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "an expired session token is rejected"
+    );
+}
+
+/// 5. An oversized create-user body is rejected with 413 by the descriptor
+///    body-limit middleware BEFORE the facade runs. The `admin_create_user`
+///    route declares a 16 KiB per-route cap.
+#[tokio::test]
+async fn oversized_create_body_is_rejected_with_413() {
+    let harness = build_admin_harness().await;
+    let operator = AdminApiDriver::new(harness.router.clone(), OPERATOR_TOKEN);
+
+    // 20 KiB display_name → well past the 16 KiB `admin_create_user` cap.
+    let huge = "x".repeat(20 * 1024);
+    let body = json!({ "display_name": huge, "role": "member" });
+    let (status, _) = operator
+        .send(Method::POST, "/api/webchat/v2/admin/users", Some(body))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "an oversized create body is rejected by the per-route 16 KiB cap"
+    );
+}
+
+/// 6. A path-traversal-shaped secret handle cannot escape the target user's
+///    secret namespace. `SecretHandle` validation rejects `/` and dot-dot
+///    segments, so nothing is ever written; containment holds (fail-closed).
+///    The rejection now maps to a **400** (client input at fault), not a 500 —
+///    `admin_user_directory.rs` maps the `SecretHandle` construction failure to
+///    `AdminUserError::InvalidInput`. (Previously it returned 500 with a comment
+///    falsely claiming the handle was validated at the HTTP edge; this test pins
+///    the corrected 4xx.)
+#[tokio::test]
+async fn secret_handle_path_traversal_is_contained() {
+    let harness = build_admin_harness().await;
+    let operator = AdminApiDriver::new(harness.router.clone(), OPERATOR_TOKEN);
+
+    let (target_id, _) = create_admin(&operator, "Secret Target").await;
+    let (other_id, _) = create_admin(&operator, "Bystander").await;
+
+    for handle in ["..%2F..%2Fother", "a%2Fb"] {
+        let (status, _) = operator
+            .send(
+                Method::PUT,
+                &format!("/api/webchat/v2/admin/users/{target_id}/secrets/{handle}"),
+                Some(json!({ "value": "sk-should-never-persist" })),
+            )
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a traversal-shaped handle {handle:?} is a client error (400), not a 500"
+        );
+        // Containment is enforced by SecretHandle validation rejecting the path
+        // separators before any write; the failure is a 400, not an internal 500.
+    }
+
+    // Nothing leaked into the target's namespace...
+    let (status, secrets) = operator.list_secrets(&target_id).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        secrets["secrets"].as_array().map(Vec::len),
+        Some(0),
+        "no secret was written under the target user despite the traversal attempt"
+    );
+    // ...and nothing escaped into the bystander's namespace either.
+    let (status, secrets) = operator.list_secrets(&other_id).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        secrets["secrets"].as_array().map(Vec::len),
+        Some(0),
+        "the traversal did not escape into another user's secret namespace"
+    );
+}
+
+/// 7. Malformed inputs surface as 4xx (serde/path validation), never a 500.
+#[tokio::test]
+async fn malformed_inputs_are_4xx_not_500() {
+    let harness = build_admin_harness().await;
+    let operator = AdminApiDriver::new(harness.router.clone(), OPERATOR_TOKEN);
+
+    // A malformed `{user_id}` path segment (whitespace/control) → 400 from the
+    // handler's `parse_admin_user_id` before the facade is touched.
+    let (status, _) = operator
+        .send(
+            Method::GET,
+            "/api/webchat/v2/admin/users/not%20a%20valid%20id",
+            None,
+        )
+        .await;
+    assert!(
+        status.is_client_error() && status != StatusCode::INTERNAL_SERVER_ERROR,
+        "a malformed user_id is a 4xx (got {status}), never a 500"
+    );
+
+    // An unknown `role` enum in the body → serde rejection at the Json
+    // extractor (4xx), never a 500. Use a real user id so path extraction
+    // succeeds and the enum is what fails.
+    let (target_id, _) = create_admin(&operator, "Enum Target").await;
+    let (status, _) = operator
+        .send(
+            Method::POST,
+            &format!("/api/webchat/v2/admin/users/{target_id}/role"),
+            Some(json!({ "role": "superuser" })),
+        )
+        .await;
+    assert!(
+        status.is_client_error() && status != StatusCode::INTERNAL_SERVER_ERROR,
+        "an invalid role enum is a 4xx (got {status}), never a 500"
+    );
+
+    // An unknown `status` enum likewise.
+    let (status, _) = operator
+        .send(
+            Method::POST,
+            &format!("/api/webchat/v2/admin/users/{target_id}/status"),
+            Some(json!({ "status": "hibernating" })),
+        )
+        .await;
+    assert!(
+        status.is_client_error() && status != StatusCode::INTERNAL_SERVER_ERROR,
+        "an invalid status enum is a 4xx (got {status}), never a 500"
     );
 }
