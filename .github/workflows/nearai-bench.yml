@@ -57,6 +57,10 @@ jobs:
       framework: ${{ steps.parse.outputs.framework }}
       head_sha: ${{ steps.parse.outputs.head_sha }}
       authorized: ${{ steps.auth.outputs.authorized }}
+      # "true" only for same-repo PRs. Fork PRs run untrusted code at compile
+      # time (build scripts/proc macros), so we must NOT expose sccache creds to
+      # them — they'd be readable from ~/.config/sccache/config during cargo build.
+      trusted: ${{ steps.parse.outputs.trusted }}
     steps:
       - name: Check commenter has write permission
         id: auth
@@ -145,11 +149,20 @@ jobs:
             gh pr comment "$PR" --repo "$REPO" --body "Unknown suite \`${suite}\`. Available: ${available}"
             exit 0
           fi
-          sha=$(gh pr view "$PR" --repo "$REPO" --json headRefOid -q .headRefOid)
+          info=$(gh pr view "$PR" --repo "$REPO" --json headRefOid,isCrossRepository)
+          sha=$(printf '%s' "$info" | jq -r .headRefOid)
+          # Same-repo PR = trusted; fork PR (isCrossRepository) = untrusted, no
+          # sccache creds (see the `trusted` output rationale above).
+          if [ "$(printf '%s' "$info" | jq -r .isCrossRepository)" = "true" ]; then
+            trusted=false
+          else
+            trusted=true
+          fi
           echo "suite=$suite" >> "$GITHUB_OUTPUT"
           echo "model=$model" >> "$GITHUB_OUTPUT"
           echo "framework=$framework" >> "$GITHUB_OUTPUT"
           echo "head_sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "trusted=$trusted" >> "$GITHUB_OUTPUT"
 
       - name: Acknowledge with 🚀 reaction
         if: steps.auth.outputs.authorized == 'yes' && steps.parse.outputs.suite != ''
@@ -227,6 +240,17 @@ jobs:
       # Empty when unspecified → the reusable workflow defaults to ironclaw.
       framework: ${{ needs.parse.outputs.framework }}
       trigger-comment-id: ${{ github.event.comment.id }}
+      # Route the harness compile through our OVH sccache-dist build server so a
+      # new PR SHA only recompiles changed crates. Non-secret half (scheduler URL
+      # + SSH host/user/port) — same vars sccache-dist-smoke.yml uses. Empty →
+      # the reusable's setup step no-ops to local compilation.
+      # GATED ON `trusted`: fork PRs run untrusted code at compile time, which
+      # could read these from ~/.config/sccache/config — so forks get '' and
+      # build locally. Only same-repo PRs get the build server.
+      sccache-scheduler-url: ${{ needs.parse.outputs.trusted == 'true' && vars.SCCACHE_DIST_SCHEDULER_URL || '' }}
+      sccache-cache-ssh-host: ${{ needs.parse.outputs.trusted == 'true' && vars.SCCACHE_CACHE_SSH_HOST || '' }}
+      sccache-cache-ssh-user: ${{ needs.parse.outputs.trusted == 'true' && vars.SCCACHE_CACHE_SSH_USER || '' }}
+      sccache-cache-ssh-port: ${{ needs.parse.outputs.trusted == 'true' && vars.SCCACHE_CACHE_SSH_PORT || '' }}
     # Scope inherited secrets to only what the reusable workflow needs.
     # Replaces `secrets: inherit`, which gave the called workflow access
     # to every secret available here.
@@ -236,3 +260,9 @@ jobs:
       # workflow reads this for LLM_BACKEND=nearai. Optional there, so legacy
       # ironclaw runs (OpenRouter) are unaffected if it's unset.
       NEARAI_API_KEY: ${{ secrets.NEARAI_API_KEY }}
+      # sccache-dist secret half — forwarded ONLY for trusted same-repo PRs
+      # (see the with: block above). Fork PRs get '' → local compile, no leak.
+      SCCACHE_DIST_AUTH_TOKEN: ${{ needs.parse.outputs.trusted == 'true' && secrets.SCCACHE_DIST_AUTH_TOKEN || '' }}
+      SCCACHE_CACHE_SSH_PRIVATE_KEY: ${{ needs.parse.outputs.trusted == 'true' && secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY || '' }}
+      SCCACHE_CACHE_SSH_KNOWN_HOSTS: ${{ needs.parse.outputs.trusted == 'true' && secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS || '' }}
+      SCCACHE_REDIS_PASSWORD: ${{ needs.parse.outputs.trusted == 'true' && secrets.SCCACHE_REDIS_PASSWORD || '' }}

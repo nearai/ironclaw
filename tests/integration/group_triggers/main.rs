@@ -28,6 +28,7 @@ mod scenario_trigger_self_create_denied;
 mod scenario_triggered_chained_gate;
 mod scenario_triggered_gate;
 mod scenario_verbs_lifecycle;
+mod scenario_webui_automations_list;
 
 use reborn_support::group::{RebornIntegrationGroup, ScenarioReport};
 
@@ -47,6 +48,13 @@ async fn triggers_group_e2e() {
     report.record(
         "trigger_persists_after_reopen",
         scenario_trigger_persists_after_reopen::run(&g).await,
+    );
+    // W5-WEBUI-API-1: independent of `verbs_lifecycle` — mints its own
+    // trigger, then lists it back through the real WebUI automations facade
+    // over the group's shared trigger repository.
+    report.record(
+        "webui_automations_list",
+        scenario_webui_automations_list::run(&g).await,
     );
 
     // Triggered-turn coverage map (E-TRIGGERED-SUBMIT via `submit_triggered_turn`)
