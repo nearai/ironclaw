@@ -2,7 +2,10 @@ schema_version = "reborn.extension_manifest.v2"
 id = "hacker-news"
 name = "Hacker News"
 version = "0.1.0"
-description = "Toy tool (#5459 test fixture): returns canned Hacker News top stories. The network + no-key case: declares its egress host but injects no credential. Data is CANNED (no real Hacker News call), so it always completes once activated."
+# Test fixture — the network + no-key case: declares its egress host but
+# injects no credential. Data is CANNED (no real Hacker News call), so it
+# always completes once activated.
+description = "Return canned Hacker News top stories (title, url, score, author, comment count). Data is canned, not live — no real Hacker News request is made."
 # Uploaded bundles are validated as ManifestSource::InstalledLocal, which
 # forbids first_party/system trust claims and legacy top-level [[capabilities]];
 # installed manifests declare third_party trust and the capability_provider

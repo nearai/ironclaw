@@ -2,7 +2,9 @@ schema_version = "reborn.extension_manifest.v2"
 id = "market-data"
 name = "Market Data"
 version = "0.1.0"
-description = "Fake market-data tool (#5459 test fixture): returns a current S&P 500 (SPX) snapshot. The network + WITH key case: an admin installs it, provides the shared `market_data_api_key`, and every user can use it."
+# Test fixture — the network + WITH key case: an admin installs it, provides
+# the shared `market_data_api_key`, and every user can use it.
+description = "Get a canned S&P 500 (SPX) index snapshot. Data is canned, not live market data."
 # Uploaded bundles are validated as ManifestSource::InstalledLocal, which
 # forbids first_party/system trust claims and legacy top-level [[capabilities]];
 # installed manifests declare third_party trust and the capability_provider
@@ -19,7 +21,7 @@ section = "capability_provider.tools"
 
 [capability_provider.tools]
 
-# Networked tool WITH a key (#5459 third case): declares the `network` and
+# Networked tool WITH a key: declares the `network` and
 # `use_secret` effects plus a runtime credential. The credential's `audience`
 # populates the egress allowlist AND its handle triggers an `InjectSecretOnce`
 # obligation — so this capability gets BOTH `ApplyNetworkPolicy` (scoped to
