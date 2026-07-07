@@ -240,10 +240,11 @@ pub(crate) fn validate_new_message_timestamps(
     context: &'static str,
 ) -> Result<(), crate::error::SessionThreadError> {
     if message.created_at.is_none() || message.updated_at.is_none() {
-        return Err(crate::error::SessionThreadError::Backend(format!(
-            "new {context} message {} is missing durable timestamps",
-            message.message_id
-        )));
+        return Err(crate::error::SessionThreadError::InvalidMessageTimestamp {
+            message_id: message.message_id,
+            context,
+            violation: crate::error::TimestampViolation::MissingDurableTimestamps,
+        });
     }
     Ok(())
 }
@@ -260,10 +261,11 @@ pub(crate) fn validate_message_timestamps_not_cleared(
     let created_at_cleared = before.created_at.is_some() && after.created_at.is_none();
     let updated_at_cleared = before.updated_at.is_some() && after.updated_at.is_none();
     if created_at_cleared || updated_at_cleared {
-        return Err(crate::error::SessionThreadError::Backend(format!(
-            "{context} cleared durable timestamps on message {}",
-            after.message_id
-        )));
+        return Err(crate::error::SessionThreadError::InvalidMessageTimestamp {
+            message_id: after.message_id,
+            context,
+            violation: crate::error::TimestampViolation::ClearedDurableTimestamps,
+        });
     }
     Ok(())
 }
@@ -712,7 +714,14 @@ mod tests {
         let err = validate_new_message_timestamps(&message, "test message")
             .expect_err("new messages without created_at must be rejected");
 
-        assert!(matches!(err, crate::error::SessionThreadError::Backend(_)));
+        assert!(matches!(
+            err,
+            crate::error::SessionThreadError::InvalidMessageTimestamp {
+                context: "test message",
+                violation: crate::error::TimestampViolation::MissingDurableTimestamps,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -724,7 +733,14 @@ mod tests {
         let err = validate_message_timestamps_not_cleared(&before, &after, "test update")
             .expect_err("message updates must not clear existing timestamps");
 
-        assert!(matches!(err, crate::error::SessionThreadError::Backend(_)));
+        assert!(matches!(
+            err,
+            crate::error::SessionThreadError::InvalidMessageTimestamp {
+                context: "test update",
+                violation: crate::error::TimestampViolation::ClearedDurableTimestamps,
+                ..
+            }
+        ));
     }
 
     #[test]

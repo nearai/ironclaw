@@ -206,6 +206,23 @@ test("messagesFromTimeline: finalized assistant records prefer durable updated_a
   assert.equal(messages[0].timestamp, "2026-05-12T17:08:00Z");
 });
 
+test("messagesFromTimeline: received_at takes precedence over durable timestamps", () => {
+  const messages = messagesFromTimeline([
+    {
+      message_id: "reply-received",
+      kind: "assistant",
+      status: "finalized",
+      content: "Done.",
+      received_at: "2026-05-12T17:11:00Z",
+      created_at: "2026-05-12T17:06:00Z",
+      updated_at: "2026-05-12T17:08:00Z",
+    },
+  ]);
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].timestamp, "2026-05-12T17:11:00Z");
+});
+
 test("messagesFromTimeline: finalized non-assistant records prefer durable updated_at timestamps", () => {
   const messages = messagesFromTimeline([
     {
