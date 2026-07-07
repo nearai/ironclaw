@@ -1259,6 +1259,17 @@ fn shell_vite_asset_path(shell: &str, suffix: &str) -> String {
         .to_string()
 }
 
+fn bundle_segment<'a>(body: &'a str, start: &str, end: &str) -> &'a str {
+    let start_idx = body
+        .find(start)
+        .unwrap_or_else(|| panic!("bundle should contain start marker `{start}`"));
+    let after_start = &body[start_idx..];
+    let end_rel = after_start
+        .find(end)
+        .unwrap_or_else(|| panic!("bundle should contain end marker `{end}` after `{start}`"));
+    &after_start[..end_rel]
+}
+
 // ─── tests ────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -2465,15 +2476,17 @@ async fn static_chat_hook_listens_for_oauth_callback_completion() {
         "chat hook must listen for the OAuth callback completion signal"
     );
     assert!(
-        body.contains("new window.BroadcastChannel(rp)"),
+        body.contains("ironclaw-product-auth")
+            && body.contains("new window.BroadcastChannel(")
+            && body.contains("onmessage="),
         "chat hook must consume same-origin OAuth callback broadcasts"
     );
     assert!(
-        body.contains("window.addEventListener(`storage`,r)"),
+        body.contains("window.addEventListener(`storage`,"),
         "chat hook must keep a localStorage fallback for browsers without BroadcastChannel"
     );
     assert!(
-        body.contains("window.localStorage?.getItem?.(ip)"),
+        body.contains("window.localStorage?.getItem?.("),
         "chat hook must poll localStorage in case the callback write happened before the storage event listener observed it"
     );
     assert!(
@@ -2481,7 +2494,7 @@ async fn static_chat_hook_listens_for_oauth_callback_completion() {
         "chat hook must match callback completion to the visible OAuth gate when continuation metadata is present"
     );
     assert!(
-        body.contains("pp(e)?null:e"),
+        body.contains("auth_required") && body.contains("oauth_url") && body.contains("?null:e"),
         "OAuth callback completion must clear only a pending OAuth auth gate"
     );
 }
@@ -2567,21 +2580,29 @@ async fn static_i18n_module_guards_locale_race_and_clears_failed_pack_cache() {
     // test driving `setLang('es')` through an unloaded pack belongs in
     // the deferred JS/e2e scaffold.
     let body = served_app_javascript().await;
+    let loader_segment = bundle_segment(&body, "ironclaw_language", "createContext({lang:");
+    let provider_segment = bundle_segment(&body, "createContext({lang:", "function Yr");
 
     assert!(
-        body.contains("lo[e]||null"),
+        provider_segment.contains(".useState(()=>")
+            && provider_segment.contains("||null")
+            && provider_segment.contains(".useRef("),
         "i18n provider must track the latest requested language in a ref",
     );
     assert!(
-        body.contains("po[e]||(po[e]="),
+        provider_segment.contains(".current="),
         "setLang must stamp the requested language before awaiting the pack",
     );
     assert!(
-        body.contains("Promise.resolve(null)"),
+        loader_segment.contains("Promise.resolve(null)"),
         "a resolved pack load must only commit when the pack is available and still the latest request",
     );
+    assert!(
+        provider_segment.contains(".current!=="),
+        "a resolved pack load must be ignored after a newer language request",
+    );
     assert_eq!(
-        body.matches("delete po[e]").count(),
+        loader_segment.matches("delete ").count(),
         2,
         "ensurePack must clear pending[lang] on BOTH the success and failure paths so a transient import failure can be retried",
     );
