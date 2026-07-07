@@ -2338,4 +2338,53 @@ mod tests {
             other => panic!("expected FilesystemError::BackendInfrastructure, got {other:?}"),
         }
     }
+
+    /// Deterministic, single-task regression pin for the atomicity fix
+    /// (commit 1792aebb2 / PR #5749 round 4): `delete_if_version`'s
+    /// zero-rows diagnosis must reuse the SAME connection the conditional
+    /// DELETE ran on, not check out a second one. Round-B review finding:
+    /// the concurrency storm test in `tests/concurrent_cas_storm.rs`
+    /// doesn't actually discriminate this — every racer shares one
+    /// pre-fetched version and nothing recreates the path mid-round, so
+    /// it passes with or without the fix. This test does discriminate it,
+    /// with no concurrency required: build a deliberately size-1 pool (via
+    /// `build_libsql_pool_with_config`), let `delete_if_version` check out
+    /// its only connection, and hit the stale-version (0-rows) branch. If
+    /// the diagnosis internally called `self.connect()` again — the
+    /// pre-fix pattern — that second checkout would deadlock against the
+    /// first (nothing else can return the only connection) and time out;
+    /// reusing the passed-in `conn` completes immediately.
+    #[tokio::test]
+    async fn delete_if_version_diagnosis_reuses_the_delete_connection_under_a_size_one_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("delete-single-conn-test.db");
+        let db = std::sync::Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+        let fs = LibSqlRootFilesystem {
+            pool: crate::libsql_pool::build_libsql_pool_with_config(
+                db,
+                1,
+                std::time::Duration::from_millis(200),
+            ),
+        };
+        fs.run_migrations().await.unwrap();
+
+        let path = VirtualPath::new("/secrets/single-conn").unwrap();
+        let v1 = fs
+            .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+            .await
+            .unwrap();
+
+        // Stale version drives the 0-rows branch, which must diagnose
+        // NotFound/VersionMismatch via `current_version_libsql(conn, ...)`
+        // on the connection already checked out above, not a second
+        // checkout — a second checkout would time out against the
+        // size-1 pool's only (self-held) connection.
+        let stale = RecordVersion::from_backend(v1.get() + 1);
+        let err = fs.delete_if_version(&path, stale).await.unwrap_err();
+        assert!(
+            matches!(err, FilesystemError::VersionMismatch { .. }),
+            "expected VersionMismatch (proves the diagnosis ran to \
+             completion without deadlocking on the size-1 pool), got: {err:?}"
+        );
+    }
 }

@@ -671,8 +671,14 @@ impl RootFilesystem for PostgresRootFilesystem {
         path: &VirtualPath,
         expected_version: RecordVersion,
     ) -> Result<(), FilesystemError> {
+        // Round-B review: validate `expected_version` before taking the
+        // pool checkout, mirroring the libsql backend's Round-A fix — an
+        // out-of-range version can never match a real row, so failing
+        // closed here avoids holding a contended pool connection for a
+        // call destined to error.
+        let expected_raw = record_version_to_i64(path, expected_version)?;
         let client = self.client().await?;
-        postgres_delete_if_version_with_client(&client, path, expected_version).await
+        postgres_delete_if_version_with_client(&client, path, expected_version, expected_raw).await
     }
 
     async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
@@ -1668,8 +1674,8 @@ async fn postgres_delete_if_version_with_client(
     client: &deadpool_postgres::Object,
     path: &VirtualPath,
     expected_version: RecordVersion,
+    expected_raw: i64,
 ) -> Result<(), FilesystemError> {
-    let expected_raw = record_version_to_i64(path, expected_version)?;
     let row = cached_query_one(
         client,
         DELETE_IF_VERSION_ATOMIC_SQL,

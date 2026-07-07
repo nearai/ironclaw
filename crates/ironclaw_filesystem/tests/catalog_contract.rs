@@ -335,6 +335,34 @@ async fn composite_routes_delete_if_version_to_matching_backend() {
     assert!(specific.get(&path).await.unwrap().is_none());
 }
 
+/// Round-B review: mirrors `composite_append_batch_returns_mount_not_found`.
+/// A path outside every mount must fail closed with `MountNotFound` before
+/// any backend is touched, rather than e.g. falling through to the trait's
+/// `Unsupported` default or panicking on an absent mount lookup.
+#[tokio::test]
+async fn composite_delete_if_version_returns_mount_not_found() {
+    let backend = Arc::new(InMemoryBackend::new());
+
+    let mut root = CompositeRootFilesystem::new();
+    root.mount(
+        event_log_descriptor("/events", "events-backend"),
+        Arc::clone(&backend),
+    )
+    .unwrap();
+
+    let unmapped = VirtualPath::new("/memory/system.jsonl").unwrap();
+
+    let err = root
+        .delete_if_version(&unmapped, RecordVersion::from_backend(1))
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, FilesystemError::MountNotFound { .. }),
+        "expected MountNotFound, got {err:?}"
+    );
+}
+
 #[tokio::test]
 async fn composite_append_batch_returns_mount_not_found() {
     // A composite with one mount at /events.  An append_batch to /logs/…

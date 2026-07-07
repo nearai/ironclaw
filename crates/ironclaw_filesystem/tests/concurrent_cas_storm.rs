@@ -114,8 +114,7 @@ async fn run_storm<F: RootFilesystem + 'static>(fs: Arc<ScopedFilesystem<F>>) {
 /// `WRITERS`-way contention on `delete_if_version` itself, repeated over
 /// `DELETE_STORM_ROUNDS` recreate/delete cycles. Round-A review finding
 /// (PR #5749): the earlier CAS storm only ever exercised `put`/`cas_update`
-/// concurrency — `delete_if_version` (the operation this PR adds, and the
-/// one the `BEGIN IMMEDIATE`/`FOR UPDATE` atomicity fix targets) had no
+/// concurrency — `delete_if_version` (the operation this PR adds) had no
 /// concurrency coverage at all. Each round recreates the shared path at a
 /// known version, then `WRITERS` tasks race to `delete_if_version` it at
 /// that exact version: CAS-delete atomicity guarantees exactly one winner
@@ -124,27 +123,40 @@ async fn run_storm<F: RootFilesystem + 'static>(fs: Arc<ScopedFilesystem<F>>) {
 /// error, a panic, or more than one reported success, which would indicate
 /// the pool exhausted/deadlocked or the delete lost its atomicity under
 /// `WRITERS`-way contention.
+///
+/// Round-B review finding: this does NOT exercise (and cannot be used as
+/// a regression pin for) the separate delete-then-recreate diagnosis race
+/// the `BEGIN IMMEDIATE`/`FOR UPDATE` atomicity fix (commit 1792aebb2)
+/// targets — every racer here shares one pre-fetched version and nothing
+/// recreates the path mid-round, so ordinary single-row locking would
+/// make this pass even against the pre-fix two-statement implementation.
+/// That specific regression is pinned deterministically (no concurrency
+/// needed) by `postgres.rs`'s `delete_if_version_statements_are_single_round_trip_and_single_key`
+/// and `libsql.rs`'s `delete_if_version_diagnosis_reuses_the_delete_connection_under_a_size_one_pool`.
+/// This storm test instead proves a different, still-necessary property:
+/// `delete_if_version` behaves correctly and the pool doesn't
+/// exhaust/deadlock under real `WRITERS`-way parallel contention.
 async fn run_delete_storm<F: RootFilesystem + 'static>(fs: Arc<ScopedFilesystem<F>>) {
     let scope = ResourceScope::system();
     let path = ScopedPath::new("/counters/delete-storm.json").unwrap();
-    let total_wins = Arc::new(AtomicU64::new(0));
 
-    for _ in 0..DELETE_STORM_ROUNDS {
+    for round in 0..DELETE_STORM_ROUNDS {
         let version = fs
             .put(&scope, &path, Entry::bytes(vec![1]), CasExpectation::Any)
             .await
             .expect("round setup put must succeed");
+        let round_wins = Arc::new(AtomicU64::new(0));
 
         let mut handles = Vec::new();
         for _ in 0..WRITERS {
             let fs = Arc::clone(&fs);
             let scope = scope.clone();
             let path = path.clone();
-            let total_wins = Arc::clone(&total_wins);
+            let round_wins = Arc::clone(&round_wins);
             handles.push(tokio::spawn(async move {
                 match fs.delete_if_version(&scope, &path, version).await {
                     Ok(()) => {
-                        total_wins.fetch_add(1, Ordering::SeqCst);
+                        round_wins.fetch_add(1, Ordering::SeqCst);
                     }
                     Err(FilesystemError::NotFound { .. }) => {}
                     Err(other) => panic!(
@@ -157,13 +169,17 @@ async fn run_delete_storm<F: RootFilesystem + 'static>(fs: Arc<ScopedFilesystem<
         for handle in handles {
             handle.await.expect("delete-storm racer must not panic");
         }
-    }
 
-    assert_eq!(
-        total_wins.load(Ordering::SeqCst),
-        DELETE_STORM_ROUNDS,
-        "exactly one delete_if_version racer must win each round (no lost or duplicated deletes)"
-    );
+        // Asserted per round (not just summed across all rounds): a 0-win
+        // round and a 2-win round elsewhere could otherwise cancel out in
+        // a total-only check and mask a real lost/duplicated delete.
+        assert_eq!(
+            round_wins.load(Ordering::SeqCst),
+            1,
+            "round {round}: exactly one delete_if_version racer must win \
+             (no lost or duplicated deletes)"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]

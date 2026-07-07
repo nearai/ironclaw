@@ -533,6 +533,44 @@ async fn libsql_delete_if_version_rejects_out_of_range_expected_version() {
     assert_eq!(got.entry.body, vec![1]);
 }
 
+/// Round-B review: the ABA hazard `delete_if_version`'s trait doc warns
+/// about (version tokens are not generation-stable) was previously pinned
+/// only for the in-memory backend. libSQL shares the same "version
+/// restarts at 1 after a full delete" precondition — pin it here too so a
+/// future change to libSQL's version-assignment (e.g. a sequence that
+/// doesn't reset) can't silently invalidate the trait doc's warning for
+/// this backend without a test noticing.
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_delete_if_version_is_vulnerable_to_aba_across_delete_recreate_cycles() {
+    let filesystem = libsql_root().await;
+    let path = VirtualPath::new("/secrets/leases/CAS-DEL-ABA").unwrap();
+
+    let v1_first = filesystem
+        .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+        .await
+        .unwrap();
+    filesystem.delete_if_version(&path, v1_first).await.unwrap();
+    assert!(filesystem.get(&path).await.unwrap().is_none());
+
+    let v1_second = filesystem
+        .put(&path, Entry::bytes(vec![2]), CasExpectation::Absent)
+        .await
+        .unwrap();
+    assert_eq!(
+        v1_first, v1_second,
+        "version must restart after a full delete, or this ABA hazard doesn't apply"
+    );
+
+    // The stale `v1_first` token wrongly authorizes deleting the second
+    // incarnation's live data — documented hazard, not a regression.
+    filesystem.delete_if_version(&path, v1_first).await.unwrap();
+    assert!(
+        filesystem.get(&path).await.unwrap().is_none(),
+        "stale version token wrongly matched and deleted the second incarnation"
+    );
+}
+
 #[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_native_put_cas_any_increments_existing_version() {
@@ -1775,6 +1813,43 @@ mod postgres_tests {
         let got = fs.get(&path).await.unwrap().unwrap();
         assert_eq!(got.version, v1);
         assert_eq!(got.entry.body, vec![1]);
+    }
+
+    /// Round-B review: mirrors the libSQL/in-memory ABA-hazard pin. Postgres
+    /// shares the same "version restarts at 1 after a full delete"
+    /// precondition (see `put`'s Absent-insert path); pin it here too so a
+    /// future change to Postgres's version-assignment can't silently
+    /// invalidate the trait doc's ABA warning for this backend.
+    #[tokio::test]
+    async fn postgres_delete_if_version_is_vulnerable_to_aba_across_delete_recreate_cycles() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let path = vpath(&prefix, "cas_delete_aba");
+
+        let v1_first = fs
+            .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+            .await
+            .unwrap();
+        fs.delete_if_version(&path, v1_first).await.unwrap();
+        assert!(fs.get(&path).await.unwrap().is_none());
+
+        let v1_second = fs
+            .put(&path, Entry::bytes(vec![2]), CasExpectation::Absent)
+            .await
+            .unwrap();
+        assert_eq!(
+            v1_first, v1_second,
+            "version must restart after a full delete, or this ABA hazard doesn't apply"
+        );
+
+        // The stale `v1_first` token wrongly authorizes deleting the second
+        // incarnation's live data — documented hazard, not a regression.
+        fs.delete_if_version(&path, v1_first).await.unwrap();
+        assert!(
+            fs.get(&path).await.unwrap().is_none(),
+            "stale version token wrongly matched and deleted the second incarnation"
+        );
     }
 
     #[tokio::test]
