@@ -19,6 +19,7 @@ import sys
 import tempfile
 import types
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -177,12 +178,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     {
                         "channel": "slack",
                         "display_name": "Slack",
-                        "strategy": "inbound_proof_code",
+                        "strategy": "oauth",
                         "action": {
                             "title": "Slack account connection",
                             "instructions": (
-                                "Message the IronClaw Reborn app in Slack to get a "
-                                "pairing code, then paste it here."
+                                "Connect Slack with OAuth from the extension "
+                                "configuration, then message the Slack bot directly."
                             ),
                         },
                     },
@@ -198,6 +199,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                             "slack": {
                                 "enabled_in_config": True,
                                 "env_present": True,
+                                "setup": {
+                                    "configured": True,
+                                    "personal_oauth_ready": True,
+                                },
                                 "auth_test": {
                                     "ok": True,
                                     "team_id": "T123",
@@ -262,8 +267,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         observed_expectations = [text for _selector, text, _timeout in expected_texts]
         self.assertIn("Channels", observed_expectations)
         self.assertIn("Slack account connection", observed_expectations)
-        self.assertIn("pairing code", observed_expectations)
+        self.assertIn("Connect Slack with OAuth", observed_expectations)
         self.assertNotIn("Connect Slack", observed_expectations)
+        self.assertNotIn("pairing code", observed_expectations)
         self.assertFalse(any("/v2/chat" in url for url, _wait in fake_page.gotos))
         self.assertEqual(
             result.details["slack_connect_surface"],
@@ -274,21 +280,17 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "Slack account connection",
         )
 
-    def test_slack_connect_instruction_validation_accepts_pairing_copy(self):
+    def test_slack_connect_instruction_validation_accepts_oauth_copy(self):
         self.assertTrue(
             run_live_qa._slack_connect_instructions_look_valid(
-                "Message the Slack app, then enter the code here."
-            )
-        )
-        self.assertTrue(
-            run_live_qa._slack_connect_instructions_look_valid(
-                "Message the IronClaw Reborn app in Slack to get a pairing code, "
-                "then paste it here."
+                "Connect Slack with OAuth from the extension configuration, "
+                "then message the Slack bot directly."
             )
         )
         self.assertFalse(
             run_live_qa._slack_connect_instructions_look_valid(
-                "Connect the channel from settings."
+                "Message the IronClaw Reborn app in Slack to get a pairing code, "
+                "then paste it here."
             )
         )
 
@@ -895,8 +897,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             patch.dict(sys.modules, {"httpx": fake_httpx}),
         ):
             result = run_live_qa._discover_slack_dm_route_channel(
-                "[slack]\nbot_token_env = \"SLACK_BOT_TOKEN\"\n",
-                {"SLACK_BOT_TOKEN": "xoxb-test"},
+                "[slack]\nenabled = true\n",
+                {"IRONCLAW_REBORN_SLACK_BOT_TOKEN": "xoxb-test"},
             )
 
         self.assertTrue(result["ok"])
@@ -938,8 +940,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 patch.dict(sys.modules, {"httpx": fake_httpx}),
             ):
                 result = run_live_qa._discover_slack_dm_route_channel(
-                    "[slack]\nbot_token_env = \"SLACK_BOT_TOKEN\"\n",
-                    {"SLACK_BOT_TOKEN": "xoxb-test"},
+                    "[slack]\nenabled = true\n",
+                    {"IRONCLAW_REBORN_SLACK_BOT_TOKEN": "xoxb-test"},
                 )
 
         self.assertTrue(result["ok"])
@@ -959,8 +961,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             patch.dict(sys.modules, {"httpx": fake_httpx}),
         ):
             result = run_live_qa._discover_slack_dm_route_channel(
-                "[slack]\nbot_token_env = \"SLACK_BOT_TOKEN\"\n",
-                {"SLACK_BOT_TOKEN": "xoxb-test"},
+                "[slack]\nenabled = true\n",
+                {"IRONCLAW_REBORN_SLACK_BOT_TOKEN": "xoxb-test"},
             )
 
         self.assertFalse(result["ok"])
@@ -1217,8 +1219,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 run_live_qa,
                 "_slack_preflight",
                 return_value={
-                    "legacy_actor_configured": True,
-                    "legacy_actor_user_id": "U0REBORNQA",
+                    "inbound_user_id": "U0REBORNQA",
                     "delivery_target_present": True,
                 },
             ),
@@ -1751,7 +1752,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             patch.object(
                 run_live_qa,
                 "_slack_preflight",
-                return_value={"legacy_actor_user_id": "U0REBORNQA"},
+                return_value={"inbound_user_id": "U0REBORNQA"},
             ),
             patch.object(
                 run_live_qa,
@@ -1804,7 +1805,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             any(text.startswith("QA5D-NONCE-") for text in captured_slack_required_text)
         )
 
-    def test_signed_slack_event_cases_configure_legacy_actor(self):
+    def test_signed_slack_event_cases_resolve_inbound_user_without_legacy_config(self):
         for case_name in (
             "qa_5d_slack_strategy_doc_answer",
             "qa_7d_slack_bug_message_trigger",
@@ -1818,19 +1819,14 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     {"REBORN_WEBUI_V2_LIVE_QA_SLACK_INBOUND_USER_ID": "U0REBORNQA"},
                     clear=False,
                 ):
-                    changed, user_id = run_live_qa._configure_slack_legacy_actor_if_needed(
-                        config_path,
+                    user_id = run_live_qa._slack_inbound_user_id_for_cases(
                         [case_name],
                     )
 
-                self.assertTrue(changed)
                 self.assertEqual(user_id, "U0REBORNQA")
-                self.assertIn(
-                    'slack_user_id = "U0REBORNQA"',
-                    config_path.read_text(encoding="utf-8"),
-                )
+                self.assertNotIn("slack_user_id", config_path.read_text(encoding="utf-8"))
 
-    def test_signed_slack_event_cases_prefer_real_route_user_actor(self):
+    def test_signed_slack_event_cases_prefer_real_route_user_actor_without_legacy_config(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "config.toml"
             config_path.write_text("[slack]\n", encoding="utf-8")
@@ -1842,24 +1838,37 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 },
                 clear=True,
             ):
-                changed, user_id = run_live_qa._configure_slack_legacy_actor_if_needed(
-                    config_path,
+                user_id = run_live_qa._slack_inbound_user_id_for_cases(
                     ["qa_5d_slack_strategy_doc_answer"],
                 )
 
-            self.assertTrue(changed)
             self.assertEqual(user_id, "UQAUSER")
-            self.assertIn(
-                'slack_user_id = "UQAUSER"',
-                config_path.read_text(encoding="utf-8"),
-            )
+            self.assertNotIn("slack_user_id", config_path.read_text(encoding="utf-8"))
 
     def test_slack_personal_dm_seed_satisfies_delivery_target(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
+            (home / "local-dev").mkdir(parents=True)
+            run_live_qa._root_filesystem_create_table(
+                home / "local-dev" / "reborn-local-dev.db"
+            )
+            run_live_qa._put_root_filesystem_json(
+                home / "local-dev" / "reborn-local-dev.db",
+                "/tenants/reborn-cli/shared/slack-setup/installation.json",
+                {
+                    "installation_id": "install-alpha",
+                    "team_id": "T123",
+                    "api_app_id": "A123",
+                    "user_id": "user:web",
+                    "bot_token_handle": "slack_bot_token_handle",
+                    "signing_secret_handle": "slack_signing_secret_handle",
+                    "revision": 1,
+                    "updated_at": "2026-01-01T00:00:00Z",
+                },
+            )
             result = run_live_qa._seed_slack_personal_dm_target(
                 home,
-                '[slack]\ninstallation_id = "install-alpha"\nteam_id = "T123"\n',
+                "[slack]\nenabled = true\n",
                 auth_user_id="user:web",
                 slack_user_id="UQAUSER",
                 dm_channel_id="D0QA",
@@ -1874,7 +1883,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 "D0QA",
             )
             db_path = home / "local-dev" / "reborn-local-dev.db"
-            with sqlite3.connect(db_path) as db:
+            with closing(sqlite3.connect(db_path)) as db:
                 dm_row = db.execute(
                     """
                     SELECT path, contents FROM root_filesystem_entries
@@ -1915,9 +1924,27 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
     def test_slack_personal_dm_lookup_requires_exact_user_id(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
+            (home / "local-dev").mkdir(parents=True)
+            run_live_qa._root_filesystem_create_table(
+                home / "local-dev" / "reborn-local-dev.db"
+            )
+            run_live_qa._put_root_filesystem_json(
+                home / "local-dev" / "reborn-local-dev.db",
+                "/tenants/reborn-cli/shared/slack-setup/installation.json",
+                {
+                    "installation_id": "install-alpha",
+                    "team_id": "T123",
+                    "api_app_id": "A123",
+                    "user_id": "user:web",
+                    "bot_token_handle": "slack_bot_token_handle",
+                    "signing_secret_handle": "slack_signing_secret_handle",
+                    "revision": 1,
+                    "updated_at": "2026-01-01T00:00:00Z",
+                },
+            )
             result = run_live_qa._seed_slack_personal_dm_target(
                 home,
-                '[slack]\ninstallation_id = "install-alpha"\nteam_id = "T123"\n',
+                "[slack]\nenabled = true\n",
                 auth_user_id="user:web-extra",
                 slack_user_id="UQAUSER",
                 dm_channel_id="D0QA",
@@ -1998,6 +2025,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                         "",
                         "[slack]",
                         'enabled = true',
+                        'installation_id = "legacy-install"',
+                        'team_id = "TLEGACY"',
+                        'api_app_id = "ALEGACY"',
                         'signing_secret_env = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET"',
                         'bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"',
                         "",
@@ -2015,6 +2045,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 reborn_home=source_home,
             )
             env = {
+                "NEARAI_API_KEY": "fake-live-llm-key",
                 "LIVE_OPENAI_COMPATIBLE_API_KEY": "fake-live-llm-key",
                 "REBORN_WEBUI_V2_LIVE_QA_LLM_API_KEY_ENV": "LIVE_OPENAI_COMPATIBLE_API_KEY",
             }
@@ -2027,9 +2058,29 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             config = (prepared.path / "config.toml").read_text(encoding="utf-8")
 
             self.assertNotIn("D0STALE", config)
+            self.assertNotIn("C0SHARED", config)
+            for rejected in (
+                "installation_id",
+                "team_id",
+                "api_app_id",
+                "signing_secret_env",
+                "bot_token_env",
+                "[[slack.channel_routes]]",
+            ):
+                self.assertNotIn(rejected, config)
             self.assertEqual(
-                prepared.preflight["slack"]["stale_dm_route_cleanup"],
-                {"changed": True, "removed": 1},
+                prepared.preflight["slack"]["legacy_setup_cleanup"],
+                {
+                    "changed": True,
+                    "removed_channel_routes": 1,
+                    "removed_fields": [
+                        "api_app_id",
+                        "bot_token_env",
+                        "installation_id",
+                        "signing_secret_env",
+                        "team_id",
+                    ],
+                },
             )
 
     def test_with_page_writes_browser_diagnostics_on_failure(self):
@@ -2156,17 +2207,15 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 config_path.read_text(encoding="utf-8"),
             )
 
-    def test_non_signed_slack_cases_do_not_configure_legacy_actor(self):
+    def test_non_signed_slack_cases_do_not_resolve_inbound_user(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "config.toml"
             config_path.write_text("[slack]\n", encoding="utf-8")
 
-            changed, user_id = run_live_qa._configure_slack_legacy_actor_if_needed(
-                config_path,
+            user_id = run_live_qa._slack_inbound_user_id_for_cases(
                 ["qa_3a_slack_connect"],
             )
 
-            self.assertFalse(changed)
             self.assertIsNone(user_id)
             self.assertNotIn("slack_user_id", config_path.read_text(encoding="utf-8"))
 
@@ -2175,7 +2224,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             home = Path(tmpdir) / "reborn-home"
             db_path = home / "local-dev" / "reborn-local-dev.db"
             db_path.parent.mkdir(parents=True)
-            with sqlite3.connect(db_path) as db:
+            with closing(sqlite3.connect(db_path)) as db:
                 db.execute(
                     """
                     CREATE TABLE root_filesystem_entries (
@@ -2207,6 +2256,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                         ),
                     ),
                 )
+                db.commit()
 
             self.assertEqual(
                 run_live_qa._slack_event_run_id_for_event(home, "EvREBORNQA5D123"),
@@ -2315,7 +2365,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             master_key_path = home / "local-dev" / ".reborn-local-dev-secrets-master-key"
             self.assertEqual(master_key_path.stat().st_mode & 0o777, 0o600)
             master_key = master_key_path.read_text(encoding="utf-8")
-            with sqlite3.connect(db_path) as db:
+            with closing(sqlite3.connect(db_path)) as db:
                 rows = db.execute(
                     "SELECT contents FROM root_filesystem_entries "
                     "WHERE path LIKE '%/secrets/google-oauth-refresh-%'"
@@ -2406,7 +2456,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             master_key_path = home / "local-dev" / ".reborn-local-dev-secrets-master-key"
             self.assertEqual(master_key_path.stat().st_mode & 0o777, 0o600)
             master_key = master_key_path.read_text(encoding="utf-8")
-            with sqlite3.connect(db_path) as db:
+            with closing(sqlite3.connect(db_path)) as db:
                 account_row = db.execute(
                     "SELECT contents FROM root_filesystem_entries "
                     "WHERE path LIKE '%product-auth/callback/accounts/%.json'"
@@ -2420,7 +2470,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             )
             self.assertEqual(account["access_secret"], expected_handle)
 
-            with sqlite3.connect(db_path) as db:
+            with closing(sqlite3.connect(db_path)) as db:
                 secret_row = db.execute(
                     "SELECT contents FROM root_filesystem_entries "
                     "WHERE path LIKE ?",
@@ -2465,9 +2515,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             self.assertTrue(slack["requires_slack"])
             self.assertFalse(slack["env_present"])
             self.assertEqual(slack["auth_test"]["error"], "Slack env unavailable")
-            self.assertEqual(slack["config_installation_id"], "local-dev-installation")
-            self.assertEqual(slack["config_team_id"], "local-dev-team")
-            self.assertEqual(slack["config_api_app_id"], "local-dev-app-id")
+            self.assertIsNone(slack["setup"]["installation_id"])
+            self.assertIsNone(slack["setup"]["team_id"])
+            self.assertIsNone(slack["setup"]["api_app_id"])
 
     def test_prepare_reborn_home_synthesizes_config_for_copied_db_home(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2498,9 +2548,19 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             self.assertIn("[llm.default]", config)
             self.assertIn("[slack]", config)
             self.assertIn('api_key_env = "LIVE_OPENAI_COMPATIBLE_API_KEY"', config)
+            for rejected in (
+                "installation_id",
+                "team_id",
+                "api_app_id",
+                "signing_secret_env",
+                "bot_token_env",
+                "slack_user_id",
+                "[[slack.channel_routes]]",
+            ):
+                self.assertNotIn(rejected, config)
             self.assertFalse((source_home / "config.toml").exists())
 
-    def test_generated_slack_home_ignores_empty_ci_vars(self):
+    def test_generated_slack_home_uses_webui_setup_only(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir) / "reborn-home"
             env = {
@@ -2517,12 +2577,18 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 run_live_qa.create_generated_reborn_home(home, include_slack=True)
 
             config = (home / "config.toml").read_text(encoding="utf-8")
-            self.assertIn('installation_id = "local-dev-installation"', config)
-            self.assertIn('team_id = "local-dev-team"', config)
-            self.assertIn('api_app_id = "local-dev-app-id"', config)
-            self.assertNotIn('installation_id = ""', config)
-            self.assertNotIn('team_id = ""', config)
-            self.assertNotIn('api_app_id = ""', config)
+            self.assertIn("[slack]", config)
+            self.assertIn("enabled = true", config)
+            for rejected in (
+                "installation_id",
+                "team_id",
+                "api_app_id",
+                "signing_secret_env",
+                "bot_token_env",
+                "slack_user_id",
+                "[[slack.channel_routes]]",
+            ):
+                self.assertNotIn(rejected, config)
 
     def test_default_suite_includes_github_connect_after_generated_auth_seed(self):
         self.assertTrue(run_live_qa.CASES["qa_4b_github_connect"].default_enabled)
@@ -2857,7 +2923,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             db_dir = home / "local-dev"
             db_dir.mkdir(parents=True)
             db_path = db_dir / "reborn-local-dev.db"
-            with sqlite3.connect(db_path) as db:
+            with closing(sqlite3.connect(db_path)) as db:
                 db.execute(
                     """
                     CREATE TABLE root_filesystem_entries (
@@ -2882,6 +2948,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                         "2026-06-24T00:00:00Z",
                     ),
                 )
+                db.commit()
                 db.execute(
                     "INSERT INTO root_filesystem_entries(path, contents, updated_at) "
                     "VALUES (?, ?, ?)",
@@ -2918,7 +2985,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             db_dir = home / "local-dev"
             db_dir.mkdir(parents=True)
             db_path = db_dir / "reborn-local-dev.db"
-            with sqlite3.connect(db_path) as db:
+            with closing(sqlite3.connect(db_path)) as db:
                 db.execute(
                     """
                     CREATE TABLE root_filesystem_entries (
@@ -2941,6 +3008,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                         ),
                     ),
                 )
+                db.commit()
 
             preflight = run_live_qa._github_auth_preflight(
                 home,

@@ -86,6 +86,35 @@ Current provider material includes:
 - GitHub OAuth app credentials plus browser storage state and issue fixture
 - Notion browser storage state
 
+### Reborn WebUI v2 Slack lane
+
+The Reborn WebUI v2 live QA runner must not write legacy `[slack]` setup fields
+into `config.toml`. The generated Reborn config only enables Slack:
+
+```toml
+[slack]
+enabled = true
+```
+
+Bot installation setup is applied headlessly after `ironclaw-reborn serve`
+boots by calling `PUT /api/webchat/v2/channels/slack/setup` with the WebUI
+operator bearer token. Required repository variables:
+
+- `REBORN_WEBUI_V2_LIVE_QA_SLACK_INSTALLATION_ID`
+- `REBORN_WEBUI_V2_LIVE_QA_SLACK_TEAM_ID`
+- `REBORN_WEBUI_V2_LIVE_QA_SLACK_API_APP_ID`
+- `REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID`
+
+Required secrets:
+
+- `IRONCLAW_REBORN_SLACK_SIGNING_SECRET`
+- `IRONCLAW_REBORN_SLACK_BOT_TOKEN`
+
+Optional personal-OAuth readiness inputs:
+
+- variable `REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_ID`
+- secret `REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_SECRET`
+
 ## Commands
 
 Run public live smoke locally:
