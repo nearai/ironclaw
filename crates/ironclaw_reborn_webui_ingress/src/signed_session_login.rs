@@ -340,13 +340,27 @@ impl SessionStore for SignedTokenSessionStore {
 /// session token or the env operator token. Keeping the env-bearer path
 /// live means the existing scripted `Authorization: Bearer` workflow
 /// keeps working while a browser SSO login mints a signed session token.
-struct CompositeAuthenticator {
+///
+/// Public so the CLI can compose the same env-OR-session pair on the **no-SSO**
+/// serve path: `ironclaw-reborn serve` always mints admin-API session tokens
+/// (the user-create bearer), so their `SessionAuthenticator` must be wired even
+/// when no SSO provider is configured, or those tokens would never validate.
+/// Operator-capability gating still follows the env token only (see
+/// [`WebuiAuthenticator::mounts_operator_webui_config_routes`] below), so a
+/// minted session bearer stays non-operator regardless of this reuse.
+pub struct CompositeAuthenticator {
     session: Arc<dyn WebuiAuthenticator>,
     env_token: Arc<dyn WebuiAuthenticator>,
 }
 
 impl CompositeAuthenticator {
-    fn new(session: Arc<dyn WebuiAuthenticator>, env_token: Arc<dyn WebuiAuthenticator>) -> Self {
+    /// Compose an env-bearer authenticator with a session authenticator. The
+    /// env token is tried first (it carries operator capabilities); a token it
+    /// rejects falls through to the non-operator `session` authenticator.
+    pub fn new(
+        session: Arc<dyn WebuiAuthenticator>,
+        env_token: Arc<dyn WebuiAuthenticator>,
+    ) -> Self {
         Self { session, env_token }
     }
 }
