@@ -550,6 +550,16 @@ where
     }
 }
 
+fn fs_error(error: FilesystemError) -> ResourceError {
+    storage_error(error)
+}
+
+fn storage_error(error: impl std::fmt::Display) -> ResourceError {
+    ResourceError::Storage {
+        reason: error.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -717,15 +727,5 @@ mod tests {
                 },
             )
             .expect("rolled-over spend must not be resurrected by compaction replay");
-    }
-}
-
-fn fs_error(error: FilesystemError) -> ResourceError {
-    storage_error(error)
-}
-
-fn storage_error(error: impl std::fmt::Display) -> ResourceError {
-    ResourceError::Storage {
-        reason: error.to_string(),
     }
 }
