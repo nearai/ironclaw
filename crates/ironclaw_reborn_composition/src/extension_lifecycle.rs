@@ -124,7 +124,8 @@ fn unzip_extension_bundle(bundle: &[u8]) -> Result<Vec<(String, Vec<u8>)>, Produ
             reason: format!("uploaded tool bundle is not a valid zip: {error}"),
         }
     })?;
-    let mut files = Vec::new();
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut seen_names = std::collections::HashSet::new();
     let mut total_bytes = 0usize;
     for index in 0..archive.len() {
         let entry = archive.by_index(index).map_err(|error| {
@@ -150,6 +151,14 @@ fn unzip_extension_bundle(bundle: &[u8]) -> Result<Vec<(String, Vec<u8>)>, Produ
         {
             return Err(ProductWorkflowError::InvalidBindingRequest {
                 reason: format!("uploaded tool bundle contains an unsafe path: {name}"),
+            });
+        }
+        // Zip archives may legally repeat an entry name. Validation reads the
+        // first occurrence while materialization writes every entry in order,
+        // so a later duplicate could swap the validated bytes on disk.
+        if !seen_names.insert(name.clone()) {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("uploaded tool bundle contains a duplicate entry: {name}"),
             });
         }
         // `take(allowance + 1)` bounds what a hostile entry can buffer: the
@@ -464,9 +473,14 @@ impl RebornLocalExtensionManagementPort {
     /// Registry immediately. The existing install/activate flow then operates on
     /// it like any other available extension.
     ///
-    /// Takes the catalog WRITE lock and NO `operation_lock`; `install` takes a
-    /// catalog READ lock before `operation_lock`, so the lock order is
-    /// consistent and the two cannot deadlock.
+    /// Takes the catalog WRITE lock, then `operation_lock` — the same
+    /// catalog-before-operation order `install` uses, so the two cannot
+    /// deadlock. Both guards are held across the duplicate checks AND the
+    /// filesystem materialization: concurrent imports of the same id would
+    /// otherwise interleave file-by-file writes into the stable
+    /// `/system/extensions/<id>/` root, and an import over an already
+    /// installed id would swap the materialized files out from under the
+    /// live lifecycle state.
     pub(crate) async fn import_bundle(
         &self,
         bundle: &[u8],
@@ -475,11 +489,23 @@ impl RebornLocalExtensionManagementPort {
         let package = imported_extension_package(files)?;
         let package_ref = package.package_ref.clone();
         let summary = package.summary();
-        materialize_available_extension(self.filesystem.as_ref(), &package).await?;
-        {
-            let mut catalog = self.catalog.write().await;
-            catalog.extend(AvailableExtensionCatalog::from_packages(vec![package]));
+        let mut catalog = self.catalog.write().await;
+        let _operation_guard = self.operation_lock.lock().await;
+        if catalog.resolve(&package_ref).is_ok() {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "extension {} already exists in the catalog; remove it before importing a replacement",
+                    package_ref.id.as_str()
+                ),
+            });
         }
+        let installation_id = ExtensionInstallationId::new(package.package.id.as_str().to_string())
+            .map_err(map_extension_installation_error)?;
+        self.ensure_not_installed(&package.package.id, &installation_id)
+            .await?;
+        materialize_available_extension(self.filesystem.as_ref(), &package).await?;
+        catalog.extend(AvailableExtensionCatalog::from_packages(vec![package]));
+        drop(catalog);
         Ok(response_with_payload(
             Some(package_ref),
             LifecyclePhase::Discovered,
@@ -1183,9 +1209,13 @@ fn prepare_install(
                 reason: format!("host API contract registry rejected extension install: {error}"),
             }
         })?;
+    // Re-validate with the SAME source the package entered the catalog with:
+    // stamping everything `HostBundled` here would launder an imported
+    // (`InstalledLocal`) bundle into the stored-manifest tier that is allowed
+    // first-party trust and the bundled hash-migration path below.
     let manifest_record = ExtensionManifestRecord::from_toml_with_contracts(
         &available.manifest_toml,
-        ManifestSource::HostBundled,
+        available.source,
         &host_ports,
         Some(manifest_hash.clone()),
         &contracts,
@@ -1227,9 +1257,13 @@ fn prepare_manifest_migration(
                 reason: format!("host API contract registry rejected manifest migration: {error}"),
             }
         })?;
+    // Same source-preservation rule as `prepare_install`; the caller
+    // (`migrate_host_bundled_manifest_hash`) additionally requires the STORED
+    // manifest to be `HostBundled` before migrating, so an imported extension
+    // whose on-disk manifest changed fails closed instead of migrating.
     let manifest_record = ExtensionManifestRecord::from_toml_with_contracts(
         &available.manifest_toml,
-        ManifestSource::HostBundled,
+        available.source,
         &host_ports,
         Some(manifest_hash.clone()),
         &contracts,
@@ -1694,6 +1728,72 @@ mod tests {
         );
     }
 
+    /// Zip archives may legally contain two entries with the same name (the
+    /// spec does not forbid it and hostile archives are handcrafted, not
+    /// written by well-behaved writers). If both entries surfaced,
+    /// `imported_extension_package` would validate the FIRST
+    /// `manifest.toml`/asset while `materialize_available_extension` writes
+    /// every entry in order — the bytes on disk would differ from the bytes
+    /// that were validated.
+    ///
+    /// The invariant this test pins: `unzip_extension_bundle` NEVER returns two
+    /// entries with the same name. zip 8.x's reader indexes entries by
+    /// filename (`IndexMap`), so duplicates collapse at parse time and exactly
+    /// one entry survives; the explicit `seen_names` guard in
+    /// `unzip_extension_bundle` is the backstop that turns any future reader
+    /// behavior change (surfacing both entries) into a hard error instead of a
+    /// silent validated-vs-materialized divergence. Both outcomes satisfy the
+    /// invariant; returning two same-name entries fails the test.
+    ///
+    /// `zip::ZipWriter` itself refuses duplicate names, so the fixture is
+    /// authored with a same-length placeholder name and byte-patched into a
+    /// duplicate — entry names are stored verbatim in the local file header and
+    /// central directory and are not covered by the entry CRC, so the patched
+    /// archive stays structurally valid.
+    #[test]
+    fn unzip_extension_bundle_never_returns_duplicate_entry_names() {
+        let placeholder = zip_bundle(&[
+            ("manifest.toml", b"validated".as_slice()),
+            ("manifest.tomX", b"materialized".as_slice()),
+        ]);
+        let needle = b"manifest.tomX";
+        let replacement = b"manifest.toml";
+        let mut bundle = placeholder;
+        let mut patched = 0;
+        let mut index = 0;
+        while index + needle.len() <= bundle.len() {
+            if &bundle[index..index + needle.len()] == needle {
+                bundle[index..index + needle.len()].copy_from_slice(replacement);
+                patched += 1;
+            }
+            index += 1;
+        }
+        assert!(
+            patched >= 2,
+            "test premise: the placeholder name must appear in the local file \
+             header and the central directory; patched {patched} occurrence(s)"
+        );
+        match unzip_extension_bundle(&bundle) {
+            // Reader surfaced both entries → the seen_names guard must fire.
+            Err(error) => {
+                assert!(
+                    format!("{error}").contains("duplicate"),
+                    "unexpected error: {error}"
+                );
+            }
+            // Reader collapsed the duplicate → exactly one consistent entry;
+            // what gets validated IS what gets materialized.
+            Ok(files) => {
+                let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
+                assert_eq!(
+                    names,
+                    vec!["manifest.toml"],
+                    "duplicate names must never coexist in the unzipped file list"
+                );
+            }
+        }
+    }
+
     /// Entry-count flooding is the other zip-bomb axis: many tiny entries.
     #[test]
     fn unzip_extension_bundle_caps_entry_count() {
@@ -1819,6 +1919,143 @@ mod tests {
             !storage_root
                 .join("system/extensions/fixture/wasm/fixture.wasm")
                 .exists()
+        );
+    }
+
+    /// A complete uploaded WASM tool bundle zip in the `InstalledLocal`-legal
+    /// shape (trust `third_party`, capabilities via `capability_provider`
+    /// host_api), for driving `import_bundle` through the facade.
+    fn importable_tool_zip(id: &str) -> Vec<u8> {
+        let manifest = format!(
+            r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "{id}"
+name = "Imported Tool"
+version = "0.1.0"
+description = "Uploaded tool bundle fixture"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/tool.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "{id}.run"
+description = "Run the tool"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/run.input.json"
+output_schema_ref = "schemas/run.output.json"
+"#
+        );
+        zip_bundle(&[
+            ("manifest.toml", manifest.as_bytes()),
+            ("wasm/tool.wasm", b"\0asm\x01\0\0\0".as_slice()),
+            ("schemas/run.input.json", b"{}".as_slice()),
+            ("schemas/run.output.json", b"{}".as_slice()),
+        ])
+    }
+
+    /// Happy path for the WebUI "Install Tool" upload flow: an uploaded zip
+    /// imports into the catalog, then installs (assets materialized under
+    /// `/system/extensions/<id>/`) and activates (capability published) through
+    /// the SAME facade actions any catalog extension uses.
+    #[tokio::test]
+    async fn import_bundle_imports_installs_and_activates_uploaded_tool() {
+        let (_dir, storage_root, facade, active_registry, _installation_store) =
+            extension_lifecycle_fixture();
+
+        let import = facade
+            .import_extension_bundle(lifecycle_surface_context(), importable_tool_zip("uploaded"))
+            .await
+            .expect("import uploaded tool bundle");
+        assert_eq!(import.phase, LifecyclePhase::Discovered);
+        let Some(LifecycleProductPayload::ExtensionSearch { extensions, count }) =
+            import.payload.as_ref()
+        else {
+            panic!("expected extension search payload from import");
+        };
+        assert_eq!(*count, 1);
+        assert_eq!(extensions[0].summary.package_ref.id.as_str(), "uploaded");
+
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "uploaded")
+            .expect("valid ref");
+        let install = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("install imported extension");
+        assert_eq!(install.phase, LifecyclePhase::Installed);
+        assert!(
+            storage_root
+                .join("system/extensions/uploaded/manifest.toml")
+                .exists()
+        );
+        assert!(
+            storage_root
+                .join("system/extensions/uploaded/wasm/tool.wasm")
+                .exists()
+        );
+
+        let activate = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionActivate { package_ref },
+            )
+            .await
+            .expect("activate imported extension");
+        assert_eq!(activate.phase, LifecyclePhase::Active);
+        assert!(
+            active_registry
+                .snapshot()
+                .get_capability(&ironclaw_host_api::CapabilityId::new("uploaded.run").unwrap())
+                .is_some()
+        );
+    }
+
+    /// `import_bundle` must reject ids that already exist — both a repeat of a
+    /// previous import and an id already present in the catalog (a bundled or
+    /// discovered package). Without this check the second import's
+    /// materialization would overwrite `/system/extensions/<id>/` while
+    /// catalog/lifecycle state still points at the original package.
+    #[tokio::test]
+    async fn import_bundle_rejects_duplicate_and_catalog_resident_ids() {
+        let (_dir, _storage_root, facade, _active_registry, _installation_store) =
+            extension_lifecycle_fixture();
+
+        facade
+            .import_extension_bundle(lifecycle_surface_context(), importable_tool_zip("uploaded"))
+            .await
+            .expect("first import succeeds");
+        let reimport_error = facade
+            .import_extension_bundle(lifecycle_surface_context(), importable_tool_zip("uploaded"))
+            .await
+            .expect_err("re-importing the same id must be rejected");
+        assert!(
+            format!("{reimport_error}").contains("already exists in the catalog"),
+            "unexpected error: {reimport_error}"
+        );
+
+        // "fixture" is already in the catalog (the fixture package); an upload
+        // claiming that id must not be able to shadow or overwrite it.
+        let shadow_error = facade
+            .import_extension_bundle(lifecycle_surface_context(), importable_tool_zip("fixture"))
+            .await
+            .expect_err("importing an id already in the catalog must be rejected");
+        assert!(
+            format!("{shadow_error}").contains("already exists in the catalog"),
+            "unexpected error: {shadow_error}"
         );
     }
 
@@ -4897,6 +5134,7 @@ output_schema_ref = "schemas/search.output.json"
             package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, root_id)
                 .expect("fixture package ref"),
             manifest_toml: manifest_toml.to_string(),
+            source: ManifestSource::HostBundled,
             package,
             surface_kinds: Vec::new(),
             assets: vec![

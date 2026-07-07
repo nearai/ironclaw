@@ -842,6 +842,10 @@ registerPack("uk", {
   "ext.registry.emptyDesc": "Усі доступні розширення вже встановлені або реєстр не налаштований.",
   "ext.registry.availableTitle": "Доступні розширення",
   "ext.registry.noMatch": "Немає розширень, що відповідають фільтру.",
+  "ext.registry.import": "Імпортувати",
+  "ext.registry.importing": "Імпортування…",
+  "ext.registry.importSuccess": "Інструмент імпортовано — встановіть його з реєстру.",
+  "ext.registry.importFailed": "Не вдалося імпортувати",
 
   // Chat — history
   "chat.history.loading": "Завантаження...",

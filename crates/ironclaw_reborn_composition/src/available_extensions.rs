@@ -112,6 +112,14 @@ pub(crate) enum AvailableExtensionAssetContent {
 pub(crate) struct AvailableExtensionPackage {
     pub(crate) package_ref: LifecyclePackageRef,
     pub(crate) manifest_toml: String,
+    /// The loader-supplied [`ManifestSource`] this package was validated
+    /// under. Carried so install/migration re-parses (`prepare_install`,
+    /// `prepare_manifest_migration`) validate with the SAME source the
+    /// package entered the catalog with: an uploaded bundle validated as
+    /// `InstalledLocal` must never be re-validated (and persisted) as
+    /// `HostBundled`, which is the only source eligible for
+    /// first-party/system trust and runtime claims.
+    pub(crate) source: ManifestSource,
     pub(crate) package: ExtensionPackage,
     /// Surface kinds projected once from the manifest record at construction and
     /// cached here. Deliberately not re-derived in `summary()`: the projection
@@ -664,6 +672,7 @@ fn bundled_extension_package(
     Ok(AvailableExtensionPackage {
         package_ref,
         manifest_toml: record.raw_toml().to_string(),
+        source: ManifestSource::HostBundled,
         package,
         surface_kinds,
         assets,
@@ -1557,6 +1566,12 @@ where
                 package.id.as_str(),
             )?,
             manifest_toml: record.raw_toml().to_string(),
+            // Pre-existing behavior: operator-placed `/system/extensions`
+            // manifests are trusted like host-bundled ones (locked by the
+            // first_party-runtime filesystem-discovery tests). Uploaded
+            // bundles do NOT come through here — they are validated as
+            // `InstalledLocal` in `imported_extension_package`.
+            source: ManifestSource::HostBundled,
             package,
             surface_kinds,
             assets,
@@ -1595,14 +1610,28 @@ pub(crate) fn imported_extension_package(
                 reason: format!("host API contract registry rejected imported extension: {error}"),
             }
         })?;
+    // Uploaded bundles are validated as `InstalledLocal`, never `HostBundled`:
+    // an upload must not be able to claim first-party/system trust, a reserved
+    // `ironclaw.` id, or a first-party/system runtime — those assertions are
+    // reserved for manifests compiled into the host binary.
     let record = ExtensionManifestRecord::from_toml_with_contracts(
         manifest_toml,
-        ManifestSource::HostBundled,
+        ManifestSource::InstalledLocal,
         &host_ports,
         None,
         &contracts,
     )
     .map_err(map_binding_error)?;
+    // This import path installs WASM tool bundles specifically. `InstalledLocal`
+    // already forbids first-party/system runtimes; MCP/script runtimes have no
+    // zip assets to import, so reject them explicitly instead of materializing
+    // a bundle this runtime path cannot execute.
+    let runtime_kind = record.manifest().runtime.kind();
+    if runtime_kind != ironclaw_host_api::RuntimeKind::Wasm {
+        return Err(map_binding_error(format!(
+            "imported tool bundles must declare a wasm runtime; got `{runtime_kind:?}`"
+        )));
+    }
     // The manifest is projected exactly once; the typed id comes from the
     // validated record. First-party ids are the SYSTEM tier of the extension-id
     // namespace: an import claiming one would replace the first-party package in
@@ -1625,6 +1654,20 @@ pub(crate) fn imported_extension_package(
         .map_err(map_binding_error)?;
     let package = ExtensionPackage::from_manifest_toml(manifest, root, record.raw_toml())
         .map_err(map_binding_error)?;
+    // The bundle must ship every asset its manifest declares: a valid manifest
+    // with a missing runtime module, schema, or prompt doc would import (and
+    // later install/activate) cleanly and only fail when runtime or surface
+    // code tries to read the absent file. The unzip boundary already rejected
+    // duplicate entry names, so the path set is exact.
+    let bundled_paths: std::collections::HashSet<&str> =
+        files.iter().map(|(path, _)| path.as_str()).collect();
+    for declared in manifest_declared_asset_paths(record.manifest()) {
+        if !bundled_paths.contains(declared.as_str()) {
+            return Err(map_binding_error(format!(
+                "imported bundle is missing manifest-declared asset `{declared}`"
+            )));
+        }
+    }
     let assets = files
         .into_iter()
         .map(|(path, bytes)| bytes_asset(&path, &bytes))
@@ -1635,10 +1678,32 @@ pub(crate) fn imported_extension_package(
             package.id.as_str(),
         )?,
         manifest_toml: record.raw_toml().to_string(),
+        source: ManifestSource::InstalledLocal,
         package,
         surface_kinds,
         assets,
     })
+}
+
+/// Every bundle-relative asset path a validated v2 manifest declares: the WASM
+/// runtime module plus each capability's input/output schema and optional
+/// prompt doc. Used by the import path to require the uploaded zip to be
+/// complete before it is materialized.
+fn manifest_declared_asset_paths(
+    manifest: &ironclaw_extensions::ExtensionManifestV2,
+) -> Vec<String> {
+    let mut declared = Vec::new();
+    if let ironclaw_extensions::ExtensionRuntimeV2::Wasm { module } = &manifest.runtime {
+        declared.push(module.clone());
+    }
+    for capability in &manifest.capabilities {
+        declared.push(capability.input_schema_ref.as_str().to_string());
+        declared.push(capability.output_schema_ref.as_str().to_string());
+        if let Some(prompt_doc_ref) = &capability.prompt_doc_ref {
+            declared.push(prompt_doc_ref.as_str().to_string());
+        }
+    }
+    declared
 }
 
 fn reserved_host_bundled_extension_id(extension_id: &ExtensionId) -> bool {
@@ -2535,23 +2600,206 @@ handle = "web_token"
         assert_eq!(catalog.search("slack").count(), 0);
     }
 
-    /// The import (upload) path must enforce the same reserved-id boundary as
-    /// filesystem discovery: an uploaded bundle claiming a first-party id would
-    /// otherwise REPLACE that package in the catalog (`extend` upserts by
-    /// package_ref) and overwrite its assets under `/system/extensions/<id>/`.
-    /// The real github manifest is used so the rejection provably fires on a
-    /// bundle that passes full manifest validation.
+    /// A minimal, complete uploaded WASM tool bundle (manifest + module +
+    /// schemas + prompt doc) in the `InstalledLocal`-legal shape (trust
+    /// `third_party`, capabilities via `capability_provider` host_api). The
+    /// base for the import boundary tests below.
+    fn importable_tool_bundle_files(id: &str) -> Vec<(String, Vec<u8>)> {
+        let manifest = format!(
+            r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "{id}"
+name = "Imported Tool"
+version = "0.1.0"
+description = "Uploaded tool bundle fixture"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/tool.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "{id}.run"
+description = "Run the tool"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/run.input.json"
+output_schema_ref = "schemas/run.output.json"
+prompt_doc_ref = "prompts/run.md"
+"#
+        );
+        vec![
+            ("manifest.toml".to_string(), manifest.into_bytes()),
+            ("wasm/tool.wasm".to_string(), b"\0asm\x01\0\0\0".to_vec()),
+            ("schemas/run.input.json".to_string(), b"{}".to_vec()),
+            ("schemas/run.output.json".to_string(), b"{}".to_vec()),
+            ("prompts/run.md".to_string(), b"# run".to_vec()),
+        ]
+    }
+
+    /// The `test-tools/` fixture bundles are what the live QA scripts zip and
+    /// upload through `/api/webchat/v2/extensions/import`; their manifests must
+    /// stay in the `InstalledLocal`-legal shape the import path validates
+    /// (third_party trust, capability_provider host_api, wasm runtime) or the
+    /// upload flow breaks at runtime instead of in CI.
     #[test]
-    fn imported_extension_package_rejects_reserved_host_bundled_extension_ids() {
+    fn test_tool_fixture_manifests_stay_importable() {
+        for (label, manifest) in [
+            (
+                "market-data",
+                include_str!("../../../test-tools/market-data/manifest.toml"),
+            ),
+            (
+                "hacker-news",
+                include_str!("../../../test-tools/hacker-news/manifest.toml"),
+            ),
+            (
+                "ascii-renderer",
+                include_str!("../../../test-tools/ascii-renderer/manifest.toml"),
+            ),
+        ] {
+            let host_ports =
+                ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog");
+            let contracts = ironclaw_host_runtime::default_host_api_contract_registry()
+                .expect("host API contracts");
+            let record = ExtensionManifestRecord::from_toml_with_contracts(
+                manifest,
+                ManifestSource::InstalledLocal,
+                &host_ports,
+                None,
+                &contracts,
+            )
+            .unwrap_or_else(|error| {
+                panic!("test-tools/{label} manifest must validate as InstalledLocal: {error}")
+            });
+            assert_eq!(
+                record.manifest().runtime.kind(),
+                ironclaw_host_api::RuntimeKind::Wasm,
+                "test-tools/{label} must declare a wasm runtime for the import path"
+            );
+        }
+    }
+
+    /// Uploaded bundles are validated as `InstalledLocal`: the sanctioned
+    /// installed-manifest shape imports cleanly and the package carries the
+    /// `InstalledLocal` source so install/migration re-validation cannot
+    /// launder it into the host-bundled trust tier.
+    #[test]
+    fn imported_extension_package_validates_as_installed_local() {
+        let package = imported_extension_package(importable_tool_bundle_files("uploaded-tool"))
+            .expect("complete wasm tool bundle must import");
+        assert_eq!(package.source, ManifestSource::InstalledLocal);
+        assert_eq!(package.package_ref.id.as_str(), "uploaded-tool");
+    }
+
+    /// The real github manifest claims `first_party_requested` trust; as an
+    /// UPLOAD it must be rejected by the `InstalledLocal` trust contract —
+    /// uploads can never assert first-party/system claims.
+    #[test]
+    fn imported_extension_package_rejects_first_party_trust_claims() {
         let error = imported_extension_package(vec![(
             "manifest.toml".to_string(),
             GITHUB_MANIFEST.as_bytes().to_vec(),
         )])
-        .expect_err("uploading a bundle that claims a first-party id must be rejected");
+        .expect_err("uploading a bundle that claims first-party trust must be rejected");
+        assert!(
+            format!("{error}").contains("not allowed to assert trust"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// The import (upload) path must enforce the same reserved-id boundary as
+    /// filesystem discovery: an uploaded bundle claiming a first-party id would
+    /// otherwise REPLACE that package in the catalog (`extend` upserts by
+    /// package_ref) and overwrite its assets under `/system/extensions/<id>/`.
+    /// The bundle is otherwise fully valid so the rejection provably fires on
+    /// the id boundary, not an earlier validation error.
+    #[test]
+    fn imported_extension_package_rejects_reserved_host_bundled_extension_ids() {
+        let error = imported_extension_package(importable_tool_bundle_files("github"))
+            .expect_err("uploading a bundle that claims a first-party id must be rejected");
         assert!(
             format!("{error}").contains("reserved"),
             "unexpected error: {error}"
         );
+    }
+
+    /// This import path installs WASM tool bundles specifically; an MCP (or
+    /// script) runtime is `InstalledLocal`-legal but has no zip assets to
+    /// import and must be rejected explicitly.
+    #[test]
+    fn imported_extension_package_rejects_non_wasm_runtimes() {
+        let manifest = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "uploaded-mcp"
+name = "Uploaded MCP"
+version = "0.1.0"
+description = "MCP runtime uploaded as a tool bundle"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "https://mcp.example/api"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "uploaded-mcp.run"
+description = "Run the tool"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/run.input.json"
+output_schema_ref = "schemas/run.output.json"
+"#;
+        let error = imported_extension_package(vec![(
+            "manifest.toml".to_string(),
+            manifest.as_bytes().to_vec(),
+        )])
+        .expect_err("non-wasm runtimes must be rejected on the wasm tool import path");
+        assert!(
+            format!("{error}").contains("wasm runtime"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// A bundle whose manifest validates but which is missing a declared asset
+    /// (runtime module, schema, or prompt doc) must be rejected at import —
+    /// not imported, installed, activated, and only failing when the runtime
+    /// tries to read the absent file.
+    #[test]
+    fn imported_extension_package_rejects_missing_declared_assets() {
+        for missing in [
+            "wasm/tool.wasm",
+            "schemas/run.input.json",
+            "schemas/run.output.json",
+            "prompts/run.md",
+        ] {
+            let files = importable_tool_bundle_files("uploaded-tool")
+                .into_iter()
+                .filter(|(path, _)| path != missing)
+                .collect::<Vec<_>>();
+            let error = imported_extension_package(files).expect_err(
+                "a bundle missing a manifest-declared asset must be rejected at import",
+            );
+            let message = format!("{error}");
+            assert!(
+                message.contains("missing manifest-declared asset") && message.contains(missing),
+                "unexpected error for missing `{missing}`: {error}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2790,6 +3038,7 @@ output_schema_ref = "schemas/write.output.json"
             package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
                 .unwrap(),
             manifest_toml: MANIFEST.to_string(),
+            source: ManifestSource::HostBundled,
             package,
             surface_kinds: Vec::new(),
             assets: vec![

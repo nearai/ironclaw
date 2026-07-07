@@ -842,6 +842,10 @@ registerPack("pt-BR", {
   "ext.registry.emptyDesc": "Todas as extensões disponíveis já estão instaladas, ou nenhum registro está configurado.",
   "ext.registry.availableTitle": "Extensões disponíveis",
   "ext.registry.noMatch": "Nenhuma extensão corresponde ao filtro.",
+  "ext.registry.import": "Importar",
+  "ext.registry.importing": "Importando…",
+  "ext.registry.importSuccess": "Ferramenta importada — instale-a pelo registro.",
+  "ext.registry.importFailed": "Falha na importação",
 
   // Chat — history
   "chat.history.loading": "Carregando...",

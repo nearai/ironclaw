@@ -842,6 +842,10 @@ registerPack("ko", {
   "ext.registry.emptyDesc": "사용 가능한 확장이 이미 모두 설치되어 있거나, 레지스트리가 구성되어 있지 않습니다.",
   "ext.registry.availableTitle": "사용 가능한 확장",
   "ext.registry.noMatch": "필터와 일치하는 확장이 없습니다.",
+  "ext.registry.import": "가져오기",
+  "ext.registry.importing": "가져오는 중…",
+  "ext.registry.importSuccess": "도구를 가져왔습니다 — 레지스트리에서 설치하세요.",
+  "ext.registry.importFailed": "가져오기 실패",
 
   // Chat — history
   "chat.history.loading": "로딩 중...",
