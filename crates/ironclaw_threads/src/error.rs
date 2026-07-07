@@ -1,24 +1,15 @@
-use std::fmt;
-
 use ironclaw_host_api::ThreadId;
 use thiserror::Error;
 
 use crate::{MessageStatus, ThreadMessageId};
 
 /// Specific timestamp contract violation on a transcript message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum TimestampViolation {
+    #[error("missing durable timestamps")]
     MissingDurableTimestamps,
+    #[error("cleared durable timestamps")]
     ClearedDurableTimestamps,
-}
-
-impl fmt::Display for TimestampViolation {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingDurableTimestamps => write!(f, "missing durable timestamps"),
-            Self::ClearedDurableTimestamps => write!(f, "cleared durable timestamps"),
-        }
-    }
 }
 
 /// Canonical thread/transcript service errors.
