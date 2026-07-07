@@ -196,6 +196,7 @@ registerPack("ko", {
   "authGate.expiresAt": "만료",
   "authGate.oauthProviderFallback": "공급자",
   "authGate.serviceUnavailable": "서비스를 사용할 수 없습니다",
+  "authGate.popupBlocked": "승인 팝업이 차단되었습니다.",
   "authGate.pillAuthorize": "승인",
   "authGate.pillEnterToken": "토큰 입력",
   "authGate.unsupportedChallenge": "이 인증 단계를 완료하려면 설정을 엽니다.",

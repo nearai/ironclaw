@@ -323,10 +323,10 @@ mod tests {
         );
         assert_eq!(cleanup_requests[0].action, SecretCleanupAction::Uninstall);
         assert_eq!(
-            cleanup_requests[0].scope.resource.tenant_id,
-            expected_tenant_id
+            &cleanup_requests[0].scope.resource.tenant_id,
+            &expected_tenant_id
         );
-        assert_eq!(cleanup_requests[0].scope.resource.user_id, user_id);
+        assert_eq!(&cleanup_requests[0].scope.resource.user_id, &user_id);
 
         assert_eq!(
             facade
@@ -465,6 +465,7 @@ mod tests {
         // configured — and must clean the caller's own bindings without an
         // installation prefix while staying caller-bound.
         let tenant_id = TenantId::new("tenant:test").expect("tenant");
+        let expected_tenant_id = tenant_id.clone();
         let user_id = UserId::new("user:alice").expect("user");
         let installation_id = AdapterInstallationId::new("install-alpha").expect("installation id");
         let slack_provider_user_id = slack_user_identity_provider_user_id(&installation_id, "U123");
@@ -472,6 +473,7 @@ mod tests {
             slack_provider_user_id,
             user_id.clone(),
         )]));
+        let cleanup = Arc::new(RecordingCleanupService::default());
         let facade = SlackChannelConnectionFacade {
             tenant_id: tenant_id.clone(),
             personal_connection_scope: None,
@@ -479,7 +481,7 @@ mod tests {
             user_identity_lookup: identity_store.clone(),
             user_identity_delete_store: identity_store.clone(),
             personal_dm_target_store: Arc::new(InMemorySlackPersonalDmTargetStore::new()),
-            personal_credential_cleanup: None,
+            personal_credential_cleanup: Some(cleanup.clone()),
         };
         let caller =
             WebUiAuthenticatedCaller::new(tenant_id, user_id.clone(), None::<AgentId>, None);
@@ -495,6 +497,22 @@ mod tests {
             .disconnect_channel_for_caller(caller, "slack")
             .await
             .expect("disconnect succeeds without a setup scope");
+        let cleanup_requests = cleanup.requests();
+        assert_eq!(
+            cleanup_requests.len(),
+            1,
+            "no-scope disconnect must still revoke the caller's credential"
+        );
+        assert_eq!(
+            cleanup_requests[0].provider.as_ref().map(|p| p.as_str()),
+            Some(SLACK_PERSONAL_PROVIDER_ID)
+        );
+        assert_eq!(cleanup_requests[0].action, SecretCleanupAction::Uninstall);
+        assert_eq!(
+            &cleanup_requests[0].scope.resource.tenant_id,
+            &expected_tenant_id
+        );
+        assert_eq!(&cleanup_requests[0].scope.resource.user_id, &user_id);
         assert_eq!(
             identity_store.deletes(),
             vec![(SLACK_IDENTITY_PROVIDER.to_string(), user_id, None)],

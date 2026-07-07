@@ -196,6 +196,7 @@ registerPack("pt-BR", {
   "authGate.expiresAt": "Expira",
   "authGate.oauthProviderFallback": "o provedor",
   "authGate.serviceUnavailable": "Serviço indisponível",
+  "authGate.popupBlocked": "O pop-up de autorização foi bloqueado.",
   "authGate.pillAuthorize": "Autorizar",
   "authGate.pillEnterToken": "Insira o token",
   "authGate.unsupportedChallenge": "Abra as configurações para concluir esta etapa de autenticação.",

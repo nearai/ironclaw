@@ -196,6 +196,7 @@ registerPack("ja", {
   "authGate.expiresAt": "有効期限",
   "authGate.oauthProviderFallback": "プロバイダー",
   "authGate.serviceUnavailable": "サービスを利用できません",
+  "authGate.popupBlocked": "認証ポップアップがブロックされました。",
   "authGate.pillAuthorize": "承認",
   "authGate.pillEnterToken": "トークンを入力",
   "authGate.unsupportedChallenge": "設定を開いてこの認証手順を完了します。",

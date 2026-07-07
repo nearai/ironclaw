@@ -196,6 +196,7 @@ registerPack("hi", {
   "authGate.expiresAt": "समाप्त हो रहा है",
   "authGate.oauthProviderFallback": "प्रदाता",
   "authGate.serviceUnavailable": "सेवा उपलब्ध नहीं है",
+  "authGate.popupBlocked": "प्राधिकरण पॉपअप अवरुद्ध कर दिया गया।",
   "authGate.pillAuthorize": "अधिकृत करें",
   "authGate.pillEnterToken": "टोकन दर्ज करें",
   "authGate.unsupportedChallenge": "इस प्रमाणीकरण चरण को पूरा करने के लिए सेटिंग्स खोलें।",
