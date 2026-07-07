@@ -257,6 +257,7 @@ pub fn planned_default_profile_definition() -> Result<RunProfileDefinition, RunP
         descriptor,
         INTERACTIVE_CAPABILITY_SURFACE_PROFILE_ID,
     )
+    .map(|definition| definition.with_driver_specific_nudges(true))
 }
 
 pub fn subagent_planned_profile_definition() -> Result<RunProfileDefinition, RunProfileRegistryError>
@@ -274,8 +275,9 @@ pub fn subagent_planned_profile_definition() -> Result<RunProfileDefinition, Run
 
 /// Dedicated run profile for scheduled-trigger fires (issue #5505). Reuses
 /// the default planned driver/family unchanged — only the capability
-/// surface differs — so `runtime.rs`'s host deny-map can strip the trigger
-/// mutator capabilities keyed on `capability_surface_profile_id`.
+/// surface and the driver-specific-nudges opt-in differ — so `runtime.rs`'s
+/// host deny-map can strip the trigger mutator capabilities keyed on
+/// `capability_surface_profile_id`.
 pub fn scheduled_trigger_planned_profile_definition()
 -> Result<RunProfileDefinition, RunProfileRegistryError> {
     let descriptor = planned_driver_descriptor()
@@ -285,6 +287,7 @@ pub fn scheduled_trigger_planned_profile_definition()
         descriptor,
         SCHEDULED_TRIGGER_CAPABILITY_SURFACE_PROFILE_ID,
     )
+    .map(|definition| definition.with_driver_specific_nudges(true))
 }
 
 pub fn register_default_planned_profile(
@@ -447,6 +450,10 @@ mod tests {
                 .map(|id| id.as_str()),
             Some(PLANNED_DRIVER_CHECKPOINT_SCHEMA_ID)
         );
+        assert!(
+            snapshot.steering_policy.allow_driver_specific_nudges,
+            "planned_default must have driver-specific nudges enabled"
+        );
     }
 
     #[tokio::test]
@@ -468,6 +475,10 @@ mod tests {
         assert_eq!(
             snapshot.capability_surface_profile_id.as_str(),
             SUBAGENT_CAPABILITY_SURFACE_PROFILE_ID
+        );
+        assert!(
+            !snapshot.steering_policy.allow_driver_specific_nudges,
+            "subagent must not have driver-specific nudges enabled"
         );
     }
 
@@ -496,6 +507,10 @@ mod tests {
         assert_eq!(
             snapshot.capability_surface_profile_id.as_str(),
             SCHEDULED_TRIGGER_CAPABILITY_SURFACE_PROFILE_ID
+        );
+        assert!(
+            snapshot.steering_policy.allow_driver_specific_nudges,
+            "scheduled_trigger must have driver-specific nudges enabled"
         );
     }
 

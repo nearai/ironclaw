@@ -31,9 +31,11 @@ pub(super) const FINAL_ANSWER_NUDGE: &str = include_str!("../../prompts/final_an
 /// the finalized reply ref. This is the reborn equivalent of the legacy loop's
 /// `on_tool_intent_nudge` / force-text-recovery.
 ///
-/// Gated by `SteeringPolicy.allow_driver_specific_nudges` (off in production) and
-/// capped at one nudge per run. Returns `Ok(None)` when disabled, capped, or the
-/// model still declines to answer — callers then keep their existing behavior.
+/// Gated by `SteeringPolicy.allow_driver_specific_nudges` (enabled for select
+/// Reborn run profiles — see `ironclaw_reborn::planned_driver_factory`; off by
+/// default elsewhere) and capped at one nudge per run. Returns `Ok(None)` when
+/// disabled, capped, or the model still declines to answer — callers then keep
+/// their existing behavior.
 /// Does NOT push to `state.assistant_refs` (the caller owns that, to stay
 /// consistent with each exit path's checkpoint ordering).
 pub(super) async fn try_final_answer_nudge(
