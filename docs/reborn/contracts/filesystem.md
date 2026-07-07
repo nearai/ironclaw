@@ -422,11 +422,19 @@ pub trait RootFilesystem {
     async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError>;
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError>;
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError>;
+    // additive, default trait impl below — same pattern as other optional CAS operations (§14.1)
+    // no `CasExpectation`: `Any`/`Absent` are unrepresentable for delete (§14.1)
     async fn delete_if_version(
         &self,
         path: &VirtualPath,
-        expected: CasExpectation,
-    ) -> Result<(), FilesystemError>;
+        expected_version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        let _ = expected_version;
+        Err(FilesystemError::Unsupported {
+            path: path.clone(),
+            operation: FilesystemOperation::DeleteIfVersion,
+        })
+    }
 }
 
 pub struct CompositeRootFilesystem;
@@ -448,6 +456,12 @@ impl<F: RootFilesystem> ScopedFilesystem<F> {
     async fn write_file(&self, path: &ScopedPath, bytes: &[u8]) -> Result<(), FilesystemError>;
     async fn list_dir(&self, path: &ScopedPath) -> Result<Vec<DirEntry>, FilesystemError>;
     async fn stat(&self, path: &ScopedPath) -> Result<FileStat, FilesystemError>;
+    // requires `delete` permission, same as `delete`
+    async fn delete_if_version(
+        &self,
+        path: &ScopedPath,
+        expected_version: RecordVersion,
+    ) -> Result<(), FilesystemError>;
 }
 ```
 
@@ -455,16 +469,17 @@ The implementation may start synchronous if the V1 local backend is synchronous,
 
 ### 14.1 `delete_if_version` — CAS-guarded delete
 
-Additive method on `RootFilesystem` (default trait impl: `Unsupported`, same pattern as other optional CAS operations). `CasExpectation` (already used by the CAS'd write path): `Version(RecordVersion) | Any | Absent`.
+Additive method on `RootFilesystem` (default trait impl: `Unsupported`, same pattern as other optional CAS operations). Takes a concrete `expected_version: RecordVersion` directly — **not** the `CasExpectation` enum used by the CAS'd write path (`Version(RecordVersion) | Any | Absent`). `Any` and `Absent` are unrepresentable here, by design: `Any` would be behaviorally identical to the existing unconditional `delete(path)` — offering it on `delete_if_version` too would duplicate a sibling method; `Absent` has no meaning for a delete (nothing to compare against). Both are excluded at the type level rather than accepted and runtime-rejected.
 
 Rules:
 
 - version-guarded, single-key delete only — no subtree/cascade semantics
 - path absent -> `NotFound`
 - path present at a different version -> `VersionMismatch`
-- `CasExpectation::Absent` is not meaningful for delete -> `Unsupported`/fail-closed
 - requires `delete` permission at the `ScopedFilesystem` layer, same as `delete`
 - backends without CAS-delete support return `Unsupported` by default — fail-closed, never a silent unconditional delete
+
+**ABA caller invariant.** Version tokens are not generation-stable: a path's version restarts at 1 on a fresh `put` after a prior delete, so a token captured before a delete+recreate cycle can match a different incarnation of the same path (ABA). `delete_if_version` is a sound standalone precondition only for paths that are never recreated; callers that recreate paths must pair every successful delete with an unconditional postcondition recheck.
 
 ---
 
@@ -490,6 +505,8 @@ Add tests through the caller-facing filesystem APIs, not only helper functions:
 - `/tmp` mount can be created per invocation and cleaned up
 - `/artifacts` writes are captured under approved virtual path only
 - `delete_if_version` distinguishes `NotFound` (absent path) from `VersionMismatch` (wrong version) and leaves the entry untouched on either error
+- `delete_if_version` on a backend using the default trait implementation (no override) returns `Unsupported`
+- `delete_if_version` denied when the mount lacks `delete` permission
 
 ---
 
