@@ -795,7 +795,7 @@ fn github_request(method: &str, path: &str, body: Option<String>) -> Result<Stri
     // via the `http-wrapper` proxy based on the `github_token` secret.
     let headers = serde_json::json!({
         "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2026-03-10",
+        "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": "IronClaw-GitHub-Tool"
     });
 

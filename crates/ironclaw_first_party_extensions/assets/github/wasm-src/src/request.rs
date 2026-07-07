@@ -1,7 +1,6 @@
 #[cfg(not(test))]
 const GITHUB_API_ROOT: &str = "https://api.github.com";
-#[cfg(not(test))]
-const GITHUB_API_VERSION: &str = "2026-03-10";
+const GITHUB_API_VERSION: &str = "2022-11-28";
 #[cfg(not(test))]
 const HTTP_TIMEOUT_MS: u32 = 10_000;
 
@@ -146,6 +145,11 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::is_github_validation_error_body;
+
+    #[test]
+    fn github_api_version_matches_supported_rest_api_version() {
+        assert_eq!(super::GITHUB_API_VERSION, "2022-11-28");
+    }
 
     #[test]
     fn github_validation_422_body_requires_validation_error_details() {
