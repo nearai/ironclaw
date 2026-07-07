@@ -86,28 +86,46 @@ export function SelectMenu({
     selectedOptionIndex(options, value)
   );
   const rootRef = React.useRef(null);
+  const buttonRef = React.useRef(null);
   const idRef = React.useRef("");
+  const restoreFocusOnCloseRef = React.useRef(false);
+  const wasOpenRef = React.useRef(open);
   if (!idRef.current) idRef.current = createSelectMenuId();
 
   const selectedIndex = selectedOptionIndex(options, value);
   const selectedOption = selectedIndex >= 0 ? options[selectedIndex] : null;
   const selectedLabel = optionLabel(selectedOption, placeholder);
   const listboxId = `${idRef.current}-listbox`;
+  const activeOptionId =
+    open && activeIndex >= 0 ? `${idRef.current}-option-${activeIndex}` : undefined;
   const effectiveAriaLabel = ariaLabel || ariaLabelProp;
+
+  const closeMenu = ({ restoreFocus = true } = {}) => {
+    restoreFocusOnCloseRef.current = restoreFocus;
+    setOpen(false);
+  };
 
   React.useEffect(() => {
     if (!open || typeof document === "undefined") return undefined;
     const handleDocumentMouseDown = (event) => {
       if (rootRef.current?.contains?.(event.target)) return;
-      setOpen(false);
+      closeMenu();
     };
     document.addEventListener("mousedown", handleDocumentMouseDown);
     return () => document.removeEventListener("mousedown", handleDocumentMouseDown);
   }, [open]);
 
+  React.useEffect(() => {
+    if (wasOpenRef.current && !open && restoreFocusOnCloseRef.current) {
+      buttonRef.current?.focus?.();
+    }
+    if (open) restoreFocusOnCloseRef.current = false;
+    wasOpenRef.current = open;
+  }, [open]);
+
   const chooseOption = (option) => {
     if (!option || option.disabled) return;
-    setOpen(false);
+    closeMenu();
     if (option.value !== value) onChange(option.value, option);
   };
 
@@ -122,7 +140,8 @@ export function SelectMenu({
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       const direction = event.key === "ArrowDown" ? 1 : -1;
-      const nextIndex = nextEnabledIndex(options, activeIndex, direction);
+      const baseIndex = open ? activeIndex : selectedIndex;
+      const nextIndex = nextEnabledIndex(options, baseIndex, direction);
       openWithIndex(nextIndex);
       return;
     }
@@ -145,12 +164,14 @@ export function SelectMenu({
     }
 
     if (event.key === "Escape") {
-      event.preventDefault();
-      setOpen(false);
+      if (open) {
+        event.preventDefault();
+        closeMenu();
+      }
       return;
     }
 
-    if (event.key === "Tab") setOpen(false);
+    if (event.key === "Tab") closeMenu({ restoreFocus: false });
   };
 
   return html`
@@ -160,16 +181,19 @@ export function SelectMenu({
       ...${rest}
     >
       <button
+        ref=${buttonRef}
         type="button"
         aria-haspopup="listbox"
         aria-expanded=${open ? "true" : "false"}
         aria-controls=${open ? listboxId : undefined}
+        aria-activedescendant=${activeOptionId}
         aria-label=${effectiveAriaLabel}
         aria-labelledby=${ariaLabelledBy}
         disabled=${disabled}
         onClick=${() =>
           !disabled &&
           setOpen((current) => {
+            restoreFocusOnCloseRef.current = false;
             if (!current) setActiveIndex(selectedIndex);
             return !current;
           })}
@@ -232,13 +256,14 @@ export function SelectMenu({
                 className=${cn(
                   "flex w-full items-center justify-between gap-3 rounded-[7px] px-2.5 py-2",
                   "text-left font-mono text-xs text-[var(--v2-text)] transition-colors",
-                  "hover:bg-[var(--v2-surface-soft)] focus-visible:outline-none",
+                  "focus-visible:outline-none",
                   "focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--v2-accent)_30%,transparent)]",
                   "disabled:cursor-not-allowed disabled:opacity-50",
-                  isSelected &&
-                    "bg-[var(--v2-accent-soft)] text-[var(--v2-text-strong)]",
-                  isActive &&
-                    "bg-[var(--v2-surface-muted)] text-[var(--v2-text-strong)]",
+                  isActive
+                    ? "bg-[var(--v2-surface-muted)] text-[var(--v2-text-strong)]"
+                    : isSelected
+                      ? "bg-[var(--v2-accent-soft)] text-[var(--v2-text-strong)]"
+                      : "hover:bg-[var(--v2-surface-soft)]",
                   optionClassName
                 )}
               >

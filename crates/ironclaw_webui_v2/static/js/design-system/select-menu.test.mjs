@@ -63,6 +63,22 @@ function firstValueAfter(root, fragment) {
   return value;
 }
 
+function keyEvent(key) {
+  return {
+    key,
+    preventDefaultCalls: 0,
+    preventDefault() {
+      this.preventDefaultCalls += 1;
+    },
+  };
+}
+
+function optionClasses(root) {
+  return collectScalars(root).filter(
+    (value) => typeof value === "string" && value.includes("flex w-full items-center")
+  );
+}
+
 function createHarness() {
   const state = {
     hookCursor: 0,
@@ -161,6 +177,8 @@ test("SelectMenu opens, selects an option, and closes after selection", () => {
       (value) => typeof value === "string" && value.includes("v2-canvas-strong")
     )
   );
+  assert.match(optionClasses(rendered)[0], /v2-surface-muted/);
+  assert.doesNotMatch(optionClasses(rendered)[0], /v2-accent-soft/);
   assert.ok(collectScalars(rendered).includes("Always allow"));
 
   valuesAfter(rendered, "onClick=")[2]();
@@ -185,6 +203,62 @@ test("SelectMenu supports keyboard navigation and Enter selection", () => {
 
   firstValueAfter(opened, "onKeyDown=")(event("Enter"));
   assert.deepEqual(changes, ["always_allow"]);
+});
+
+test("SelectMenu starts closed arrow navigation from the selected option", () => {
+  const changes = [];
+  const harness = createHarness();
+  const props = { value: "default", onChange: (value) => changes.push(value) };
+
+  firstValueAfter(harness.render(props), "onClick=")();
+  let rendered = harness.render(props);
+  valuesAfter(rendered, "onMouseEnter=")[3]();
+  firstValueAfter(rendered, "onClick=")();
+
+  rendered = harness.render(props);
+  firstValueAfter(rendered, "onKeyDown=")(keyEvent("ArrowDown"));
+  rendered = harness.render(props);
+  firstValueAfter(rendered, "onKeyDown=")(keyEvent("Enter"));
+
+  assert.deepEqual(changes, ["always_allow"]);
+});
+
+test("SelectMenu only intercepts Escape while open", () => {
+  const harness = createHarness();
+  const closedEscape = keyEvent("Escape");
+
+  firstValueAfter(harness.render(), "onKeyDown=")(closedEscape);
+  assert.equal(closedEscape.preventDefaultCalls, 0);
+
+  firstValueAfter(harness.render(), "onClick=")();
+  const opened = harness.render();
+  const openEscape = keyEvent("Escape");
+  firstValueAfter(opened, "onKeyDown=")(openEscape);
+
+  assert.equal(openEscape.preventDefaultCalls, 1);
+  assert.equal(firstValueAfter(harness.render(), "aria-expanded="), "false");
+});
+
+test("SelectMenu exposes the active descendant and restores trigger focus on close", () => {
+  const harness = createHarness();
+  const focusCalls = [];
+  const props = { onChange: () => {} };
+
+  let rendered = harness.render(props);
+  harness.state.refs[1].current = {
+    focus() {
+      focusCalls.push("focus");
+    },
+  };
+
+  firstValueAfter(rendered, "onClick=")();
+  rendered = harness.render(props);
+  assert.match(valuesAfter(rendered, "aria-activedescendant=")[0], /-option-0$/);
+
+  valuesAfter(rendered, "onClick=")[2]();
+  harness.render({ value: "always_allow", ...props });
+
+  assert.deepEqual(focusCalls, ["focus"]);
 });
 
 test("SelectMenu ignores disabled trigger clicks", () => {
