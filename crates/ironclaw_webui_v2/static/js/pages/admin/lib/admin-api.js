@@ -30,11 +30,11 @@ export async function fetchAdminUser(id) {
 export async function createAdminUser(payload) {
   const response = await apiFetch(`${ADMIN_BASE}/users`, {
     method: "POST",
-    body: {
+    body: JSON.stringify({
       email: payload?.email,
       display_name: payload?.display_name,
       role: payload?.role || "member",
-    },
+    }),
   });
   // The one-time API bearer is exposed exactly once, here.
   return { ...normalizeUser(response?.user), token: response?.api_token };
@@ -47,16 +47,16 @@ export async function updateAdminUser(id, payload) {
   if (payload && Object.prototype.hasOwnProperty.call(payload, "role")) {
     const response = await apiFetch(`${ADMIN_BASE}/users/${encodeURIComponent(id)}/role`, {
       method: "POST",
-      body: { role: payload.role },
+      body: JSON.stringify({ role: payload.role }),
     });
     return normalizeUser(response?.user);
   }
   const response = await apiFetch(`${ADMIN_BASE}/users/${encodeURIComponent(id)}`, {
     method: "PATCH",
-    body: {
+    body: JSON.stringify({
       display_name: payload?.display_name,
       metadata: payload?.metadata,
-    },
+    }),
   });
   return normalizeUser(response?.user);
 }
@@ -68,7 +68,7 @@ export async function deleteAdminUser(id) {
 export async function suspendAdminUser(id) {
   const response = await apiFetch(`${ADMIN_BASE}/users/${encodeURIComponent(id)}/status`, {
     method: "POST",
-    body: { status: "suspended" },
+    body: JSON.stringify({ status: "suspended" }),
   });
   return normalizeUser(response?.user);
 }
@@ -76,7 +76,7 @@ export async function suspendAdminUser(id) {
 export async function activateAdminUser(id) {
   const response = await apiFetch(`${ADMIN_BASE}/users/${encodeURIComponent(id)}/status`, {
     method: "POST",
-    body: { status: "active" },
+    body: JSON.stringify({ status: "active" }),
   });
   return normalizeUser(response?.user);
 }
@@ -101,7 +101,7 @@ export async function fetchUserSecrets(userId) {
 export async function putUserSecret(userId, handle, value) {
   const response = await apiFetch(
     `${ADMIN_BASE}/users/${encodeURIComponent(userId)}/secrets/${encodeURIComponent(handle)}`,
-    { method: "PUT", body: { value } },
+    { method: "PUT", body: JSON.stringify({ value }) },
   );
   return response?.secret;
 }
