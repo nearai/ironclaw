@@ -79,6 +79,21 @@ test("failureMessageForRunStatus keeps non-connection driver failures unchanged"
   );
 });
 
+test("failureMessageForRunStatus does not infer driver_unavailable from summary copy", () => {
+  const summary =
+    "The run failed because the execution driver was temporarily unavailable.";
+
+  assert.equal(
+    failureMessageForRunStatus({
+      status: "failed",
+      failureCategory: null,
+      failureSummary: summary,
+      connectionStatus: CONNECTION_STATUS.DISCONNECTED,
+    }),
+    summary,
+  );
+});
+
 test("failureMessageForRunStatus does not hide unrelated failures while disconnected", () => {
   assert.equal(
     failureMessageForRunStatus({

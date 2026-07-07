@@ -431,14 +431,14 @@ export function useChat(threadId) {
   React.useEffect(() => {
     connectionStatusRef.current = sseStatus;
     if (sseStatus !== CONNECTION_STATUS.DISCONNECTED) return;
-    const runId = activeRunRef.current?.runId || null;
     const wasProcessing = isProcessingRef.current;
+    if (!wasProcessing) return;
+    const runId = activeRunRef.current?.runId || null;
     if (runId) {
       connectionInterruptedRunIdsRef.current.add(runId);
-    } else if (wasProcessing) {
+    } else {
       connectionInterruptedUnknownRef.current = true;
     }
-    if (!runId && !wasProcessing) return;
     setIsProcessing(false);
     setActiveRun(null);
     const localRunAdmission = localRunAdmissionRef.current;

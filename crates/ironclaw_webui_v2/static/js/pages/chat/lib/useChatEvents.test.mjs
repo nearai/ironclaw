@@ -274,6 +274,35 @@ test("useChatEvents: progress clears non-auth gates for the resumed run", () => 
   assert.equal(harness.pendingGate, null);
 });
 
+test("useChatEvents: final_reply clears the active run", () => {
+  const runId = "run-final-reply";
+  const harness = createUseChatEventsHarness();
+
+  harness.setCurrentActiveRun({
+    runId,
+    threadId: "thread-1",
+    status: "running",
+  });
+
+  harness.handleEvent({
+    type: "final_reply",
+    frame: {
+      reply: {
+        turn_run_id: runId,
+        text: "Done.",
+        generated_at: "2026-06-02T00:00:00Z",
+      },
+    },
+  });
+
+  assert.equal(harness.isProcessing, false);
+  assert.equal(harness.pendingGate, null);
+  assert.equal(harness.activeRun, null);
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, `reply-${runId}`);
+  assert.equal(harness.messages[0].content, "Done.");
+});
+
 test("useChatEvents: observed run ids are passed to the connection observer", () => {
   const notedRunIds = [];
   const harness = createUseChatEventsHarness({

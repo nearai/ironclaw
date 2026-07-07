@@ -132,7 +132,7 @@ async def test_reborn_v2_composer_accepts_draft_while_run_is_processing(reborn_v
 
 async def test_reborn_v2_disconnected_run_stops_typing_and_shows_connection_error(
     reborn_v2_server, reborn_v2_browser
-):
+) -> None:
     """A disconnected active run shows connection-loss copy instead of spinning forever."""
     thread_id = "thread-disconnected-run"
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
@@ -171,14 +171,14 @@ async def test_reborn_v2_disconnected_run_stops_typing_and_shows_connection_erro
         """
     )
 
-    async def fulfill_json(route, body, status=200):
+    async def fulfill_json(route, body, status=200) -> None:
         await route.fulfill(
             status=status,
             content_type="application/json",
             body=json.dumps(body),
         )
 
-    async def handle_session(route):
+    async def handle_session(route) -> None:
         await fulfill_json(
             route,
             {
@@ -195,7 +195,7 @@ async def test_reborn_v2_disconnected_run_stops_typing_and_shows_connection_erro
             },
         )
 
-    async def handle_threads(route):
+    async def handle_threads(route) -> None:
         await fulfill_json(
             route,
             {
@@ -211,10 +211,10 @@ async def test_reborn_v2_disconnected_run_stops_typing_and_shows_connection_erro
             },
         )
 
-    async def handle_timeline(route):
+    async def handle_timeline(route) -> None:
         await fulfill_json(route, {"messages": [], "next_cursor": None})
 
-    async def handle_send(route):
+    async def handle_send(route) -> None:
         await fulfill_json(
             route,
             {
@@ -292,14 +292,14 @@ async def test_reborn_v2_approval_gate_blocks_composer_send(
         """
     )
 
-    async def fulfill_json(route, body, status=200):
+    async def fulfill_json(route, body, status=200) -> None:
         await route.fulfill(
             status=status,
             content_type="application/json",
             body=json.dumps(body),
         )
 
-    async def handle_session(route):
+    async def handle_session(route) -> None:
         await fulfill_json(
             route,
             {
@@ -316,7 +316,7 @@ async def test_reborn_v2_approval_gate_blocks_composer_send(
             },
         )
 
-    async def handle_threads(route):
+    async def handle_threads(route) -> None:
         await fulfill_json(
             route,
             {
@@ -332,7 +332,7 @@ async def test_reborn_v2_approval_gate_blocks_composer_send(
             },
         )
 
-    async def handle_timeline(route):
+    async def handle_timeline(route) -> None:
         await fulfill_json(
             route,
             {
@@ -350,7 +350,7 @@ async def test_reborn_v2_approval_gate_blocks_composer_send(
             },
         )
 
-    async def handle_send(route):
+    async def handle_send(route) -> None:
         send_requests.append(json.loads(route.request.post_data or "{}"))
         await fulfill_json(route, {"thread_id": thread_id}, status=202)
 
@@ -470,7 +470,7 @@ async def test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context(
     requested_queries: list[dict[str, list[str]]] = []
     logs_requested = asyncio.Event()
 
-    async def handle_operator_logs(route):
+    async def handle_operator_logs(route) -> None:
         parsed = urlparse(route.request.url)
         requested_queries.append(parse_qs(parsed.query))
         logs_requested.set()

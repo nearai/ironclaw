@@ -307,6 +307,69 @@ test("useChat: disconnected SSE surfaces connection error before run id is known
   );
 });
 
+test("useChat: disconnected SSE ignores a stale active run after processing ended", () => {
+  const threadId = "thread-1";
+  const setCalls = [];
+  let renderedMessages = [];
+  const initialByIndex = new Map([
+    [STATE_SLOT.activeRun, { runId: "run-1", threadId, status: "running" }],
+    [STATE_SLOT.isProcessing, false],
+  ]);
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({ initialByIndex, setCalls, runEffects: true }),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearInterval,
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("thread should already exist");
+    },
+    globalThis: {},
+    queryClient: {
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => {
+      throw new Error("send should not run");
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadError: null,
+      loadHistory: () => {},
+      seedThreadMessages: () => {},
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: CONNECTION_STATUS.DISCONNECTED }),
+  };
+
+  runUseChatSource(context);
+  const chat = context.globalThis.__testExports.useChat(threadId);
+
+  assert.equal(chat.sseStatus, CONNECTION_STATUS.DISCONNECTED);
+  assert.deepEqual(renderedMessages, []);
+  assert.equal(stateUpdatesFor(setCalls, STATE_SLOT.isProcessing).length, 0);
+  assert.equal(stateUpdatesFor(setCalls, STATE_SLOT.activeRun).length, 0);
+});
+
 test("useChat.send: accepted ref reconciles pending message on timeline reload", async () => {
   const threadId = "thread-1";
   let renderedMessages = [];

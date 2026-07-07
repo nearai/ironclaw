@@ -159,6 +159,7 @@ export function useChatEvents({
           ]);
           setPendingGate(null);
           setIsProcessing(false);
+          setActiveRun?.(null);
           return;
         }
 

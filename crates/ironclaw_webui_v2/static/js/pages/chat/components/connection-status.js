@@ -8,7 +8,6 @@ const STYLES = {
   [CONNECTION_STATUS.DISCONNECTED]: "bg-red-500/20 text-red-200 border-red-400/30",
   [CONNECTION_STATUS.CONNECTING]: "bg-iron-700/50 text-iron-200 border-iron-700/50",
   [CONNECTION_STATUS.PAUSED]: "bg-iron-700/50 text-iron-200 border-iron-700/50",
-  [CONNECTION_STATUS.IDLE]: "hidden",
 };
 
 const HIDDEN_STATUSES = new Set([

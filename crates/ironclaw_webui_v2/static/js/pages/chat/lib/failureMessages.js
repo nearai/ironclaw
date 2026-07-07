@@ -15,16 +15,9 @@ function hasConnectionLostContext({ connectionStatus, connectionInterrupted }) {
   return connectionInterrupted === true || isConnectionLostStatus(connectionStatus);
 }
 
-function isDriverUnavailableFailure({ failureCategory, failureSummary }) {
+function isDriverUnavailableFailure({ failureCategory }) {
   const category = normalizeLowerText(failureCategory);
-  if (category === "driver_unavailable") return true;
-
-  const summary = normalizeLowerText(failureSummary);
-  return (
-    (summary.includes("execution driver") &&
-      summary.includes("temporarily unavailable")) ||
-    summary.includes("driver unavailable")
-  );
+  return category === "driver_unavailable";
 }
 
 function shouldPreferConnectionLostRunFailure(input) {
