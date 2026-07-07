@@ -115,9 +115,7 @@ pub(crate) async fn build_webui_auth_surface(
         user_directory: Arc::new(user_directory),
         operator_secret: session_signing_secret,
         session_epoch,
-        session_user_access_validator: Some(local_trigger_session_access_validator(
-            local_trigger_access,
-        )),
+        session_user_access_validator: local_trigger_session_access_validator(local_trigger_access),
         base_url: sso.base_url,
         providers: sso.providers,
         env_authenticator,
@@ -171,7 +169,7 @@ mod tests {
     use http_body_util::BodyExt;
     use ironclaw_reborn_composition::WebuiAuthentication;
     use ironclaw_reborn_webui_ingress::{
-        OAuthError, OAuthProvider, OAuthProviderName, OAuthUserProfile,
+        OAuthError, OAuthProvider, OAuthProviderName, OAuthUserProfile, SessionEpoch,
     };
     use serde::Deserialize;
     use std::net::SocketAddr;
@@ -527,6 +525,90 @@ mod tests {
         assert!(
             surface.authenticator.authenticate(&token).await.is_none(),
             "the same signed bearer must be rejected after local access is reconciled away",
+        );
+    }
+
+    #[tokio::test]
+    async fn sso_surface_rejects_signed_session_after_epoch_change() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let access_store_path = tmp.path().join("reborn-local-dev.db");
+        let access_store =
+            ironclaw_reborn_composition::open_local_trigger_access_store(&access_store_path)
+                .await
+                .expect("open local trigger access store");
+        let tenant_id = TenantId::new("sso-epoch-tenant").expect("tenant");
+        let agent_id = AgentId::new("sso-epoch-agent").expect("agent");
+        let project_id = ProjectId::new("sso-epoch-project").expect("project");
+        let signing_secret = SecretString::from("operator-session-secret".to_string());
+
+        let epoch_1_surface = build_webui_auth_surface(
+            Some(SsoStartupConfig {
+                providers: vec![Arc::new(StubProvider(
+                    OAuthProviderName::new("google").expect("provider name"),
+                ))],
+                base_url: "https://app.example".to_string(),
+                allowed_email_domains: vec!["example.com".to_string()],
+                session_epoch: Some(SessionEpoch::new("epoch-1").expect("valid epoch")),
+            }),
+            Some(ironclaw_reborn_composition::open_reborn_identity_resolver(
+                &tenant_id,
+            )),
+            tenant_id.clone(),
+            signing_secret.clone(),
+            Arc::new(RejectingAuth),
+            Some(LocalTriggerAccessBootstrapConfig {
+                store: access_store.clone(),
+                tenant_id: tenant_id.clone(),
+                agent_id: agent_id.clone(),
+                project_id: Some(project_id.clone()),
+            }),
+        )
+        .await
+        .expect("first epoch SSO surface must build");
+
+        let token =
+            mint_session_token(epoch_1_surface.public_mount.as_ref().expect("public mount")).await;
+        assert!(
+            epoch_1_surface
+                .authenticator
+                .authenticate(&token)
+                .await
+                .is_some(),
+            "the minting epoch must accept its own signed session",
+        );
+
+        let epoch_2_surface = build_webui_auth_surface(
+            Some(SsoStartupConfig {
+                providers: vec![Arc::new(StubProvider(
+                    OAuthProviderName::new("google").expect("provider name"),
+                ))],
+                base_url: "https://app.example".to_string(),
+                allowed_email_domains: vec!["example.com".to_string()],
+                session_epoch: Some(SessionEpoch::new("epoch-2").expect("valid epoch")),
+            }),
+            Some(ironclaw_reborn_composition::open_reborn_identity_resolver(
+                &tenant_id,
+            )),
+            tenant_id.clone(),
+            signing_secret,
+            Arc::new(RejectingAuth),
+            Some(LocalTriggerAccessBootstrapConfig {
+                store: access_store,
+                tenant_id,
+                agent_id,
+                project_id: Some(project_id),
+            }),
+        )
+        .await
+        .expect("second epoch SSO surface must build");
+
+        assert!(
+            epoch_2_surface
+                .authenticator
+                .authenticate(&token)
+                .await
+                .is_none(),
+            "changing the configured session epoch must reject the same signed bearer",
         );
     }
 }

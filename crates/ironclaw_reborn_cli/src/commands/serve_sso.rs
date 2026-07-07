@@ -633,6 +633,33 @@ mod tests {
     }
 
     #[test]
+    fn sso_startup_config_rejects_invalid_session_epoch() {
+        let _guard = WEBUI_BASE_URL_ENV_LOCK.lock().expect("env lock");
+        clear_sso_env();
+        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleaned up before the guard drops.
+        unsafe {
+            std::env::set_var("IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID", "client-id");
+            std::env::set_var(
+                "IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET",
+                "client-secret",
+            );
+            std::env::set_var("IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS", "example.com");
+            std::env::set_var(WEBUI_SESSION_EPOCH_ENV, "deploy\n2026");
+        }
+
+        let error = match sso_startup_config_from_env(addr("127.0.0.1:3000")) {
+            Ok(_) => panic!("invalid session epoch must fail startup"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains(WEBUI_SESSION_EPOCH_ENV),
+            "startup error must name the invalid session epoch env var, got: {error}",
+        );
+
+        clear_sso_env();
+    }
+
+    #[test]
     fn webui_oauth_base_url_falls_back_to_listener() {
         let _guard = WEBUI_BASE_URL_ENV_LOCK.lock().expect("env lock");
         clear_sso_env();

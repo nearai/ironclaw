@@ -144,10 +144,10 @@ pub struct SignedSessionLoginConfig {
     /// required during lookup when configured. Changing this value forces all
     /// browsers through SSO again without rotating the broader operator secret.
     pub session_epoch: Option<SessionEpoch>,
-    /// Optional host-supplied validator that re-checks whether a signed
-    /// token's user still has active access. SSO creation still goes through
-    /// `user_directory`; this guard only invalidates stale signed bearers.
-    pub session_user_access_validator: Option<Arc<dyn SessionUserAccessValidator>>,
+    /// Host-supplied validator that re-checks whether a signed token's user
+    /// still has active access. SSO creation still goes through
+    /// `user_directory`; this guard invalidates stale signed bearers.
+    pub session_user_access_validator: Arc<dyn SessionUserAccessValidator>,
     /// Public base URL used to build provider callback URLs.
     pub base_url: String,
     /// Configured OAuth providers. An empty list disables the login
@@ -242,7 +242,7 @@ struct SignedTokenSessionStore {
     /// Optional deployment epoch. When configured, lookup only accepts tokens
     /// minted with this exact epoch.
     session_epoch: Option<SessionEpoch>,
-    access_validator: Option<Arc<dyn SessionUserAccessValidator>>,
+    access_validator: Arc<dyn SessionUserAccessValidator>,
     /// Revoked session ids → their expiry (unix seconds). Bounded by
     /// [`MAX_REVOKED_ENTRIES`]; the common-case logout is an O(1) insert,
     /// with an expired-entry sweep only when the map reaches the cap (so
@@ -263,7 +263,7 @@ impl SignedTokenSessionStore {
         secret: &SecretString,
         tenant_id: &TenantId,
         session_epoch: Option<SessionEpoch>,
-        access_validator: Option<Arc<dyn SessionUserAccessValidator>>,
+        access_validator: Arc<dyn SessionUserAccessValidator>,
     ) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(b"ironclaw-reborn-webui-session-v1::");
@@ -393,19 +393,21 @@ impl SessionStore for SignedTokenSessionStore {
         ) {
             return Ok(None);
         }
-        if let Some(validator) = &self.access_validator {
-            let allowed = validator
-                .has_session_access(&tenant_id, &user_id)
-                .await
-                .map_err(|err| SessionStoreError::Backend(err.to_string()))?;
-            if !allowed {
-                tracing::debug!(
-                    tenant_id = %tenant_id.as_str(),
-                    user_id = %user_id.as_str(),
-                    "signed WebUI session rejected because user no longer has active access"
-                );
-                return Ok(None);
-            }
+        let allowed = self
+            .access_validator
+            .has_session_access(&tenant_id, &user_id)
+            .await
+            .map_err(|err| SessionStoreError::Backend(err.to_string()))?;
+        if !allowed {
+            tracing::debug!(
+                tenant_id = %tenant_id.as_str(),
+                user_id = %user_id.as_str(),
+                "signed WebUI session rejected because user no longer has active access"
+            );
+            return Ok(None);
+        }
+        if self.revoked.read().contains_key(&payload.sid) {
+            return Ok(None);
         }
         let created_at = DateTime::<Utc>::from_timestamp(payload.iat, 0)
             .ok_or_else(|| SessionStoreError::Backend("token iat out of range".into()))?;
@@ -488,9 +490,14 @@ mod tests {
     use crate::auth::{OAuthError, OAuthProviderName, OAuthUserProfile, UserDirectoryError};
     use secrecy::ExposeSecret;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::sync::Notify;
 
     fn tenant() -> TenantId {
         TenantId::new("tenant-a").expect("tenant")
+    }
+
+    fn allow_all_access_validator() -> Arc<dyn SessionUserAccessValidator> {
+        Arc::new(AllowAllAccessValidator)
     }
 
     fn signed_store(secret: &str) -> SignedTokenSessionStore {
@@ -498,7 +505,7 @@ mod tests {
             &SecretString::from(secret.to_string()),
             &tenant(),
             None,
-            None,
+            allow_all_access_validator(),
         )
     }
 
@@ -507,7 +514,7 @@ mod tests {
             &SecretString::from(secret.to_string()),
             tenant_id,
             None,
-            None,
+            allow_all_access_validator(),
         )
     }
 
@@ -544,6 +551,50 @@ mod tests {
 
     struct ToggleAccessValidator {
         allowed: AtomicBool,
+    }
+
+    struct AllowAllAccessValidator;
+
+    struct FailingAccessValidator;
+
+    struct BlockingAccessValidator {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl SessionUserAccessValidator for AllowAllAccessValidator {
+        async fn has_session_access(
+            &self,
+            _tenant_id: &TenantId,
+            _user_id: &UserId,
+        ) -> Result<bool, SessionUserAccessError> {
+            Ok(true)
+        }
+    }
+
+    #[async_trait]
+    impl SessionUserAccessValidator for FailingAccessValidator {
+        async fn has_session_access(
+            &self,
+            _tenant_id: &TenantId,
+            _user_id: &UserId,
+        ) -> Result<bool, SessionUserAccessError> {
+            Err(SessionUserAccessError::Backend("store unavailable".into()))
+        }
+    }
+
+    #[async_trait]
+    impl SessionUserAccessValidator for BlockingAccessValidator {
+        async fn has_session_access(
+            &self,
+            _tenant_id: &TenantId,
+            _user_id: &UserId,
+        ) -> Result<bool, SessionUserAccessError> {
+            self.started.notify_one();
+            self.release.notified().await;
+            Ok(true)
+        }
     }
 
     #[async_trait]
@@ -640,13 +691,13 @@ mod tests {
             &SecretString::from("operator-secret".to_string()),
             &tenant_id,
             Some(SessionEpoch::new("epoch-1").expect("valid epoch")),
-            None,
+            allow_all_access_validator(),
         );
         let store_epoch_2 = SignedTokenSessionStore::from_operator_secret(
             &SecretString::from("operator-secret".to_string()),
             &tenant_id,
             Some(SessionEpoch::new("epoch-2").expect("valid epoch")),
-            None,
+            allow_all_access_validator(),
         );
         let token = store_epoch_1
             .create_session(
@@ -669,6 +720,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn configured_session_epoch_rejects_legacy_tokens_without_epoch() {
+        let tenant_id = tenant();
+        let legacy_store = SignedTokenSessionStore::from_operator_secret(
+            &SecretString::from("operator-secret".to_string()),
+            &tenant_id,
+            None,
+            allow_all_access_validator(),
+        );
+        let epoch_store = SignedTokenSessionStore::from_operator_secret(
+            &SecretString::from("operator-secret".to_string()),
+            &tenant_id,
+            Some(SessionEpoch::new("epoch-1").expect("valid epoch")),
+            allow_all_access_validator(),
+        );
+        let token = legacy_store
+            .create_session(
+                tenant_id,
+                UserId::new("operator").expect("user"),
+                ChronoDuration::hours(1),
+            )
+            .await
+            .expect("create");
+        let raw = token.expose_secret().to_string();
+
+        assert!(
+            legacy_store.lookup(&raw).await.expect("lookup").is_some(),
+            "a pre-epoch store must still accept its own token",
+        );
+        assert!(
+            epoch_store.lookup(&raw).await.expect("lookup").is_none(),
+            "enabling a configured session epoch must reject legacy tokens with no epoch",
+        );
+    }
+
+    #[tokio::test]
     async fn access_validator_can_invalidate_existing_signed_token() {
         let tenant_id = tenant();
         let validator = Arc::new(ToggleAccessValidator {
@@ -679,7 +765,7 @@ mod tests {
             &SecretString::from("operator-secret".to_string()),
             &tenant_id,
             None,
-            Some(access_validator),
+            access_validator,
         );
         let token = store
             .create_session(
@@ -696,6 +782,34 @@ mod tests {
         assert!(
             store.lookup(&raw).await.expect("lookup").is_none(),
             "the same validly signed token must be rejected once the host access validator denies it",
+        );
+    }
+
+    #[tokio::test]
+    async fn access_validator_backend_error_is_returned_from_lookup() {
+        let tenant_id = tenant();
+        let store = SignedTokenSessionStore::from_operator_secret(
+            &SecretString::from("operator-secret".to_string()),
+            &tenant_id,
+            None,
+            Arc::new(FailingAccessValidator),
+        );
+        let token = store
+            .create_session(
+                tenant_id,
+                UserId::new("operator").expect("user"),
+                ChronoDuration::hours(1),
+            )
+            .await
+            .expect("create");
+        let error = store
+            .lookup(token.expose_secret())
+            .await
+            .expect_err("validator backend errors must surface");
+
+        assert!(
+            matches!(error, SessionStoreError::Backend(ref message) if message.contains("store unavailable")),
+            "lookup should preserve the validator backend failure, got: {error:?}",
         );
     }
 
@@ -737,6 +851,47 @@ mod tests {
         assert!(
             store.lookup(&raw).await.expect("lookup").is_none(),
             "a revoked token must no longer authenticate"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_during_access_validation_is_observed_before_authentication() {
+        let tenant_id = tenant();
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let store = Arc::new(SignedTokenSessionStore::from_operator_secret(
+            &SecretString::from("operator-secret".to_string()),
+            &tenant_id,
+            None,
+            Arc::new(BlockingAccessValidator {
+                started: started.clone(),
+                release: release.clone(),
+            }),
+        ));
+        let token = store
+            .create_session(
+                tenant_id,
+                UserId::new("operator").expect("user"),
+                ChronoDuration::hours(1),
+            )
+            .await
+            .expect("create");
+        let raw = token.expose_secret().to_string();
+        let lookup_store = store.clone();
+        let lookup_raw = raw.clone();
+        let lookup = tokio::spawn(async move { lookup_store.lookup(&lookup_raw).await });
+
+        started.notified().await;
+        store
+            .revoke(&raw)
+            .await
+            .expect("revoke while lookup awaits");
+        release.notify_one();
+
+        let result = lookup.await.expect("lookup task").expect("lookup");
+        assert!(
+            result.is_none(),
+            "lookup must re-check revocation after access validation awaits",
         );
     }
 
@@ -951,7 +1106,7 @@ mod tests {
             user_directory: Arc::new(StubUserDirectory),
             operator_secret: SecretString::from("operator-secret".to_string()),
             session_epoch: None,
-            session_user_access_validator: None,
+            session_user_access_validator: allow_all_access_validator(),
             base_url: "https://app.example".to_string(),
             providers,
             env_authenticator: Arc::new(OneToken {
