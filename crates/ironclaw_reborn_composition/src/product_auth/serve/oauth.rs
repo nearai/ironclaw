@@ -1,7 +1,7 @@
 //! OAuth start and callback handlers.
 
 use super::*;
-use crate::oauth_dcr::DcrOAuthCallbackState;
+use crate::product_auth::oauth::oauth_dcr::DcrOAuthCallbackState;
 
 pub(super) async fn oauth_start_handler(
     State(state): State<ProductAuthRouteState>,
@@ -754,7 +754,9 @@ mod tests {
     use crate::AuthChallengeProvider;
     use crate::RebornAuthContinuationDispatcher;
     use crate::input::OAuthClientConfig;
-    use crate::oauth_gate::{GoogleOAuthGateProvider, GoogleOAuthGateProviderRegistry};
+    use crate::product_auth::oauth::oauth_gate::{
+        GoogleOAuthGateProvider, GoogleOAuthGateProviderRegistry,
+    };
     use async_trait::async_trait;
     use axum::body::to_bytes;
     use ironclaw_auth::{GOOGLE_CALENDAR_READONLY_SCOPE, InMemoryAuthProductServices};

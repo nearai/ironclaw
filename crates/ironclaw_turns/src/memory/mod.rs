@@ -1,3 +1,4 @@
+// arch-exempt: large_file, in-memory turn state decomposition, plan #5662
 use async_trait::async_trait;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -441,6 +442,144 @@ impl InMemoryTurnStateStore {
         match self.inner.lock() {
             Ok(inner) => inner.events.clone(),
             Err(poisoned) => poisoned.into_inner().events.clone(),
+        }
+    }
+
+    pub(crate) fn events_after(&self, cursor: EventCursor) -> Vec<TurnLifecycleEvent> {
+        match self.inner.lock() {
+            Ok(inner) => inner
+                .events
+                .iter()
+                .filter(|event| event.cursor > cursor)
+                .cloned()
+                .collect(),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .events
+                .iter()
+                .filter(|event| event.cursor > cursor)
+                .cloned()
+                .collect(),
+        }
+    }
+
+    pub(crate) fn event_retention_floor(&self) -> EventCursor {
+        match self.inner.lock() {
+            Ok(inner) => inner.event_retention_floor,
+            Err(poisoned) => poisoned.into_inner().event_retention_floor,
+        }
+    }
+
+    pub(crate) fn turn_record(&self, turn_id: crate::TurnId) -> Option<TurnRecord> {
+        match self.inner.lock() {
+            Ok(inner) => inner.turns.get(&turn_id).cloned(),
+            Err(poisoned) => poisoned.into_inner().turns.get(&turn_id).cloned(),
+        }
+    }
+
+    pub(crate) fn run_record(&self, run_id: TurnRunId) -> Option<TurnRunRecord> {
+        match self.inner.lock() {
+            Ok(inner) => inner
+                .records
+                .get(&run_id)
+                .map(RunRecord::persistence_record),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .records
+                .get(&run_id)
+                .map(RunRecord::persistence_record),
+        }
+    }
+
+    pub(crate) fn overlay_runner_lease_record(
+        &self,
+        overlaid: TurnRunRecord,
+    ) -> Result<(), TurnError> {
+        let mut inner = self.lock_inner()?;
+        let Some(record) = inner.records.get_mut(&overlaid.run_id) else {
+            return Err(TurnError::ScopeNotFound);
+        };
+        if !matches!(
+            record.status.get(),
+            TurnStatus::Running | TurnStatus::CancelRequested
+        ) || record.runner_id != overlaid.runner_id
+            || record.lease_token != overlaid.lease_token
+            || record.runner_id.is_none()
+            || record.lease_token.is_none()
+        {
+            return Ok(());
+        }
+        if let (Some(current), Some(incoming)) =
+            (record.last_heartbeat_at, overlaid.last_heartbeat_at)
+            && incoming < current
+        {
+            return Ok(());
+        }
+        record.last_heartbeat_at = overlaid.last_heartbeat_at;
+        record.lease_expires_at = overlaid.lease_expires_at;
+        Ok(())
+    }
+
+    pub(crate) fn active_lock_record(&self, scope: &TurnScope) -> Option<TurnActiveLockRecord> {
+        let key = TurnActiveLockKey::from(scope);
+        match self.inner.lock() {
+            Ok(inner) => inner.active_locks.get(&key).cloned(),
+            Err(poisoned) => poisoned.into_inner().active_locks.get(&key).cloned(),
+        }
+    }
+
+    pub(crate) fn admission_reservation(
+        &self,
+        run_id: TurnRunId,
+    ) -> Option<TurnAdmissionReservationRecord> {
+        match self.inner.lock() {
+            Ok(inner) => inner.admission_reservations.get(&run_id).cloned(),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .admission_reservations
+                .get(&run_id)
+                .cloned(),
+        }
+    }
+
+    pub(crate) fn checkpoint_record(
+        &self,
+        checkpoint_id: TurnCheckpointId,
+    ) -> Option<TurnCheckpointRecord> {
+        match self.inner.lock() {
+            Ok(inner) => inner
+                .checkpoints
+                .iter()
+                .find(|record| record.checkpoint_id == checkpoint_id)
+                .cloned(),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .checkpoints
+                .iter()
+                .find(|record| record.checkpoint_id == checkpoint_id)
+                .cloned(),
+        }
+    }
+
+    pub(crate) fn idempotency_records_for_run_operation(
+        &self,
+        run_id: TurnRunId,
+        operation: TurnIdempotencyOperationKind,
+    ) -> Vec<TurnIdempotencyRecord> {
+        match self.inner.lock() {
+            Ok(inner) => inner
+                .idempotency_records
+                .values()
+                .filter(|record| record.run_id == Some(run_id) && record.operation == operation)
+                .cloned()
+                .collect(),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .idempotency_records
+                .values()
+                .filter(|record| record.run_id == Some(run_id) && record.operation == operation)
+                .cloned()
+                .collect(),
         }
     }
 
@@ -1893,6 +2032,10 @@ impl Inner {
         let mut records = HashMap::new();
         let mut queued_runs = VecDeque::new();
         let mut terminal_runs = VecDeque::new();
+        let mut active_locks = HashMap::new();
+        for lock in snapshot.active_locks {
+            active_locks.insert(lock.key.clone(), lock);
+        }
         for run in snapshot.runs {
             cursor = cursor.max(run.event_cursor.0);
             let actor = turns
@@ -1901,7 +2044,10 @@ impl Inner {
                 .ok_or_else(|| TurnError::Unavailable {
                     reason: "turn run references missing turn record".to_string(),
                 })?;
-            if run.status == TurnStatus::Queued {
+            let has_non_queued_active_lock = active_locks
+                .values()
+                .any(|lock| lock.run_id == run.run_id && lock.status != TurnStatus::Queued);
+            if run.status == TurnStatus::Queued && !has_non_queued_active_lock {
                 queued_runs.push_back(run.run_id);
             }
             if run.status.is_terminal() {
@@ -1939,11 +2085,6 @@ impl Inner {
                     resume_disposition: run.resume_disposition,
                 },
             );
-        }
-
-        let mut active_locks = HashMap::new();
-        for lock in snapshot.active_locks {
-            active_locks.insert(lock.key.clone(), lock);
         }
 
         let mut submit_idempotency = HashMap::new();
@@ -3401,7 +3542,16 @@ impl Inner {
                     .keys()
                     .any(|reservation| reservation.root_run_id == run_id)
             {
-                self.records.remove(&run_id);
+                if let Some(record) = self.records.remove(&run_id) {
+                    let turn_id = record.turn_id;
+                    if !self
+                        .records
+                        .values()
+                        .any(|record| record.turn_id == turn_id)
+                    {
+                        self.turns.remove(&turn_id);
+                    }
+                }
                 self.admission_reservations.remove(&run_id);
             }
         }
@@ -3733,4 +3883,187 @@ where
         order.pop_front();
     }
     removed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        AllowAllTurnAdmissionPolicy, ResolvedRunProfile, RunProfileId, RunProfileVersion,
+        TurnLeaseToken, TurnRunnerId,
+    };
+    use async_trait::async_trait;
+    use ironclaw_host_api::{AgentId, ProjectId, ThreadId};
+
+    struct TestRunProfileResolver;
+
+    #[async_trait]
+    impl RunProfileResolver for TestRunProfileResolver {
+        async fn resolve_run_profile(
+            &self,
+            _request: RunProfileResolutionRequest,
+        ) -> Result<ResolvedRunProfile, RunProfileResolutionError> {
+            Ok(ResolvedRunProfile::legacy_compatibility(
+                RunProfileId::default_profile(),
+                RunProfileVersion::new(1),
+                false,
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_pruning_removes_orphaned_turn_records() {
+        let limits = InMemoryTurnStateStoreLimits {
+            max_terminal_records: 1,
+            ..InMemoryTurnStateStoreLimits::default()
+        };
+        let store = InMemoryTurnStateStore::with_limits(limits);
+        let policy = AllowAllTurnAdmissionPolicy;
+        let resolver = TestRunProfileResolver;
+        let scope = TurnScope::new(
+            TenantId::new("tenant-turn-prune").unwrap(),
+            Some(AgentId::new("agent-turn-prune").unwrap()),
+            Some(ProjectId::new("project-turn-prune").unwrap()),
+            ThreadId::new("thread-turn-prune").unwrap(),
+        );
+
+        for index in 0..2 {
+            let response = store
+                .submit_turn(
+                    SubmitTurnRequest {
+                        scope: scope.clone(),
+                        actor: TurnActor::new(UserId::new(format!("user-{index}")).unwrap()),
+                        accepted_message_ref: AcceptedMessageRef::new(format!("accepted-{index}"))
+                            .unwrap(),
+                        source_binding_ref: SourceBindingRef::new(format!("source-{index}"))
+                            .unwrap(),
+                        reply_target_binding_ref: ReplyTargetBindingRef::new(format!(
+                            "reply-{index}"
+                        ))
+                        .unwrap(),
+                        idempotency_key: IdempotencyKey::new(format!("submit-{index}")).unwrap(),
+                        requested_run_profile: None,
+                        requested_run_id: None,
+                        received_at: Utc::now(),
+                        parent_run_id: None,
+                        subagent_depth: 0,
+                        spawn_tree_root_run_id: None,
+                        product_context: None,
+                    },
+                    &policy,
+                    &resolver,
+                )
+                .await
+                .unwrap();
+            let SubmitTurnResponse::Accepted { run_id, .. } = response;
+            let runner_id = TurnRunnerId::new();
+            let lease_token = TurnLeaseToken::new();
+            let claimed = store
+                .claim_next_run(ClaimRunRequest {
+                    runner_id,
+                    lease_token,
+                    scope_filter: Some(scope.clone()),
+                })
+                .await
+                .unwrap()
+                .expect("submitted run should be claimable");
+            assert_eq!(claimed.state.run_id, run_id);
+            store
+                .complete_run(CompleteRunRequest {
+                    run_id,
+                    runner_id,
+                    lease_token,
+                })
+                .await
+                .unwrap();
+        }
+
+        let snapshot = store.persistence_snapshot();
+        assert_eq!(
+            snapshot.runs.len(),
+            1,
+            "terminal run retention cap should prune old terminal runs"
+        );
+        assert_eq!(
+            snapshot.turns.len(),
+            1,
+            "pruning a terminal run must also prune its orphaned turn record"
+        );
+        assert_eq!(
+            snapshot.turns[0].turn_id, snapshot.runs[0].turn_id,
+            "remaining turn record should belong to the retained run"
+        );
+    }
+
+    #[tokio::test]
+    async fn overlay_runner_lease_record_ignores_stale_heartbeat() {
+        let store = InMemoryTurnStateStore::default();
+        let policy = AllowAllTurnAdmissionPolicy;
+        let resolver = TestRunProfileResolver;
+        let scope = TurnScope::new(
+            TenantId::new("tenant-lease-overlay").unwrap(),
+            Some(AgentId::new("agent-lease-overlay").unwrap()),
+            Some(ProjectId::new("project-lease-overlay").unwrap()),
+            ThreadId::new("thread-lease-overlay").unwrap(),
+        );
+        let response = store
+            .submit_turn(
+                SubmitTurnRequest {
+                    scope: scope.clone(),
+                    actor: TurnActor::new(UserId::new("user-lease-overlay").unwrap()),
+                    accepted_message_ref: AcceptedMessageRef::new("accepted-lease-overlay")
+                        .unwrap(),
+                    source_binding_ref: SourceBindingRef::new("source-lease-overlay").unwrap(),
+                    reply_target_binding_ref: ReplyTargetBindingRef::new("reply-lease-overlay")
+                        .unwrap(),
+                    idempotency_key: IdempotencyKey::new("submit-lease-overlay").unwrap(),
+                    requested_run_profile: None,
+                    requested_run_id: None,
+                    received_at: Utc::now(),
+                    parent_run_id: None,
+                    subagent_depth: 0,
+                    spawn_tree_root_run_id: None,
+                    product_context: None,
+                },
+                &policy,
+                &resolver,
+            )
+            .await
+            .unwrap();
+        let SubmitTurnResponse::Accepted { run_id, .. } = response;
+        store
+            .claim_next_run(ClaimRunRequest {
+                runner_id: TurnRunnerId::new(),
+                lease_token: TurnLeaseToken::new(),
+                scope_filter: Some(scope),
+            })
+            .await
+            .unwrap()
+            .expect("submitted run should be claimable");
+        let original = store.run_record(run_id).expect("claimed run record");
+        let original_heartbeat = original
+            .last_heartbeat_at
+            .expect("claimed run has heartbeat timestamp");
+        let original_expiry = original
+            .lease_expires_at
+            .expect("claimed run has lease expiry");
+
+        let mut stale = original.clone();
+        stale.last_heartbeat_at = Some(original_heartbeat - ChronoDuration::seconds(1));
+        stale.lease_expires_at = Some(original_expiry - ChronoDuration::seconds(1));
+        store.overlay_runner_lease_record(stale).unwrap();
+        let after_stale = store.run_record(run_id).expect("claimed run record");
+        assert_eq!(after_stale.last_heartbeat_at, Some(original_heartbeat));
+        assert_eq!(after_stale.lease_expires_at, Some(original_expiry));
+
+        let mut newer = original.clone();
+        let newer_heartbeat = original_heartbeat + ChronoDuration::seconds(1);
+        let newer_expiry = original_expiry + ChronoDuration::seconds(1);
+        newer.last_heartbeat_at = Some(newer_heartbeat);
+        newer.lease_expires_at = Some(newer_expiry);
+        store.overlay_runner_lease_record(newer).unwrap();
+        let after_newer = store.run_record(run_id).expect("claimed run record");
+        assert_eq!(after_newer.last_heartbeat_at, Some(newer_heartbeat));
+        assert_eq!(after_newer.lease_expires_at, Some(newer_expiry));
+    }
 }
