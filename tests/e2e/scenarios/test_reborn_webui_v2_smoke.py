@@ -130,6 +130,126 @@ async def test_reborn_v2_composer_accepts_draft_while_run_is_processing(reborn_v
     await expect(reborn_v2_page.locator(SEL_V2["msg_user"])).to_have_count(1, timeout=1000)
 
 
+async def test_reborn_v2_disconnected_run_stops_typing_and_shows_connection_error(
+    reborn_v2_server, reborn_v2_browser
+):
+    """A disconnected active run shows connection-loss copy instead of spinning forever."""
+    thread_id = "thread-disconnected-run"
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+
+    await page.add_init_script(
+        """
+        (() => {
+          const streams = [];
+          class FakeEventSource extends EventTarget {
+            constructor(url) {
+              super();
+              this.url = url;
+              this.readyState = 0;
+              streams.push(this);
+              setTimeout(() => {
+                this.readyState = 1;
+                if (typeof this.onopen === "function") this.onopen(new Event("open"));
+              }, 0);
+            }
+            close() {
+              this.readyState = 2;
+            }
+          }
+          window.EventSource = FakeEventSource;
+          window.__failLatestV2Sse = () => {
+            const stream = streams[streams.length - 1];
+            if (!stream) throw new Error("no EventSource stream is open");
+            stream.readyState = 2;
+            if (typeof stream.onerror !== "function") {
+              throw new Error("EventSource has no error handler");
+            }
+            stream.onerror(new Event("error"));
+          };
+        })();
+        """
+    )
+
+    async def fulfill_json(route, body, status=200):
+        await route.fulfill(
+            status=status,
+            content_type="application/json",
+            body=json.dumps(body),
+        )
+
+    async def handle_session(route):
+        await fulfill_json(
+            route,
+            {
+                "tenant_id": "reborn-v2-e2e",
+                "user_id": USER_ID,
+                "capabilities": {},
+                "features": {"reborn_projects": False},
+                "attachments": {
+                    "accept": ["text/plain"],
+                    "max_files_per_message": 4,
+                    "max_bytes_per_file": 1048576,
+                    "max_bytes_per_message": 4194304,
+                },
+            },
+        )
+
+    async def handle_threads(route):
+        await fulfill_json(
+            route,
+            {
+                "threads": [
+                    {
+                        "thread_id": thread_id,
+                        "title": "Disconnected run regression",
+                        "created_at": "2026-06-02T00:00:00Z",
+                        "updated_at": "2026-06-02T00:00:00Z",
+                    }
+                ],
+                "next_cursor": None,
+            },
+        )
+
+    async def handle_timeline(route):
+        await fulfill_json(route, {"messages": [], "next_cursor": None})
+
+    async def handle_send(route):
+        await fulfill_json(
+            route,
+            {
+                "thread_id": thread_id,
+                "run_id": "run-disconnected",
+                "status": "running",
+            },
+            status=202,
+        )
+
+    await page.route("**/api/webchat/v2/session", handle_session)
+    await page.route("**/api/webchat/v2/threads", handle_threads)
+    await page.route(f"**/api/webchat/v2/threads/{thread_id}/timeline**", handle_timeline)
+    await page.route(f"**/api/webchat/v2/threads/{thread_id}/messages", handle_send)
+
+    try:
+        await page.goto(f"{reborn_v2_server}/v2/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}")
+        composer = page.locator(SEL_V2["chat_composer"])
+        await expect(composer).to_be_visible(timeout=15000)
+
+        await composer.fill("summarize 3 X/Twitter posts")
+        await composer.press("Enter")
+        await expect(page.locator(SEL_V2["typing_indicator"])).to_be_visible(timeout=5000)
+
+        await page.evaluate("() => window.__failLatestV2Sse()")
+
+        await expect(page.locator(SEL_V2["typing_indicator"])).to_have_count(0, timeout=5000)
+        await expect(page.locator(SEL_V2["msg_error"]).last).to_contain_text(
+            "Connection to the server was lost. Please reconnect and try again.",
+            timeout=5000,
+        )
+    finally:
+        await context.close()
+
+
 async def test_reborn_v2_approval_gate_blocks_composer_send(
     reborn_v2_server, reborn_v2_browser
 ):
