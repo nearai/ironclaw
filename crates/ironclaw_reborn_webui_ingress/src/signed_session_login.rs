@@ -146,6 +146,23 @@ struct SignedTokenSessionStore {
     revoked: RwLock<HashMap<String, i64>>,
 }
 
+/// Build a signed-token [`SessionStore`] for minting/validating bearers from an
+/// operator secret + tenant. The store is stateless and deterministic in the
+/// signing key, so an instance built here mints tokens that validate under any
+/// other instance sharing the same operator secret + tenant (e.g. the SSO login
+/// surface's own store). Used by the admin user-management surface to mint the
+/// one-time API bearer on user create, which must be wired before the login
+/// surface (and its own store) is composed.
+pub fn signed_session_store(
+    operator_secret: &SecretString,
+    tenant_id: &TenantId,
+) -> std::sync::Arc<dyn SessionStore> {
+    std::sync::Arc::new(SignedTokenSessionStore::from_operator_secret(
+        operator_secret,
+        tenant_id,
+    ))
+}
+
 impl SignedTokenSessionStore {
     /// Derive the HMAC key from the operator secret AND the host tenant,
     /// domain-separated so the session-signing key never collides with

@@ -39,6 +39,30 @@ const DEFAULT_SERVE_HOST: &str = "127.0.0.1";
 const DEFAULT_SERVE_PORT: u16 = 3000;
 const DEFAULT_ENV_TOKEN_VAR: &str = "IRONCLAW_REBORN_WEBUI_TOKEN";
 const DEFAULT_ENV_USER_ID_VAR: &str = "IRONCLAW_REBORN_WEBUI_USER_ID";
+/// Lifetime of the one-time API bearer minted when an admin creates a user. A
+/// year: this is a long-lived programmatic credential, not a browser session.
+const ADMIN_API_TOKEN_LIFETIME_DAYS: i64 = 365;
+
+/// Mints the admin-created-user API bearer over a signed session store. The
+/// store is deterministic in its signing key (operator secret + tenant), so a
+/// token minted here validates under the SSO login surface's own store.
+struct SignedSessionTokenMinter {
+    session_store: Arc<dyn ironclaw_reborn_webui_ingress::SessionStore>,
+}
+
+#[async_trait::async_trait]
+impl ironclaw_reborn_composition::AdminApiTokenMinter for SignedSessionTokenMinter {
+    async fn mint(&self, tenant: &TenantId, user_id: &UserId) -> Result<SecretString, String> {
+        self.session_store
+            .create_session(
+                tenant.clone(),
+                user_id.clone(),
+                chrono::Duration::days(ADMIN_API_TOKEN_LIFETIME_DAYS),
+            )
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
 
 #[derive(Debug, Args)]
 pub(crate) struct ServeCommand {
@@ -174,6 +198,19 @@ impl ServeCommand {
         if let Some(project_id) = default_project_id.clone() {
             runtime_input = runtime_input.with_default_project_id(project_id);
         }
+        // Admin user-management: mint the one-time API bearer on user create via
+        // a signed session store built from the same operator secret + tenant as
+        // the SSO login surface. The store is stateless and deterministic in its
+        // signing key, so this sibling instance (built before the login surface)
+        // mints tokens that validate under the login surface's own store.
+        let admin_session_store = ironclaw_reborn_webui_ingress::signed_session_store(
+            &session_signing_secret,
+            &tenant_id,
+        );
+        runtime_input =
+            runtime_input.with_admin_api_token_minter(Arc::new(SignedSessionTokenMinter {
+                session_store: admin_session_store,
+            }));
         let slack_host_beta_config = crate::commands::serve_slack::resolve_slack_config_for_serve(
             config_file.as_ref().and_then(|file| file.slack.as_ref()),
             &tenant_id,

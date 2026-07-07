@@ -20,6 +20,11 @@
 
 use std::sync::Arc;
 
+#[cfg(feature = "webui-v2-beta")]
+mod admin_secrets;
+mod admin_token;
+#[cfg(feature = "webui-v2-beta")]
+mod admin_user_directory;
 #[cfg(test)]
 mod approval_test_support;
 mod auth;
@@ -166,6 +171,7 @@ mod webui_serve;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_ws_origin;
 
+pub use admin_token::AdminApiTokenMinter;
 pub use auth::{
     RebornAuthContinuationDispatcher, RebornAuthProductError, RebornCredentialLifecycleError,
     RebornManualTokenChallenge, RebornManualTokenError, RebornManualTokenSetupRequest,
@@ -791,7 +797,11 @@ fn invocation_mount_view_for_segments(
     grants.push(MountGrant::new(
         MountAlias::new("/tenant-shared")?,
         VirtualPath::new(format!("/tenants/{tenant_id}/shared"))?,
-        MountPermissions::read_write(),
+        // list + delete are needed by the Reborn identity store's admin
+        // user-directory: enumeration (`list_users`) and the delete cascade
+        // (removing a user's identity/verified-email records) live under
+        // `/tenant-shared/reborn-identity/…`.
+        MountPermissions::read_write_list_delete(),
     ));
     #[cfg(feature = "slack-v2-host-beta")]
     grants.push(MountGrant::new(

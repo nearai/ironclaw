@@ -80,6 +80,11 @@ use ironclaw_product_workflow::{
     WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
     WebUiSetupExtensionRequest, approval_gate_ref, automation_trigger_thread_metadata_json,
 };
+use ironclaw_product_workflow::{
+    AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
+    AdminUserSecretMeta, AdminUserService, AdminUserStatus, RebornAdminCreateUserRequest,
+    RebornAdminSetRoleRequest, RebornAdminSetStatusRequest, RebornAdminUserListQuery,
+};
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
@@ -11486,4 +11491,301 @@ async fn submit_turn_rejects_attachments_when_no_lander_is_wired() {
         .await
         .expect_err("attachments without a lander must be rejected");
     assert_eq!(err.kind, RebornServicesErrorKind::ServiceUnavailable);
+}
+
+// ---------------------------------------------------------------------------
+// Admin user management: facade authorization + last-admin protection.
+//
+// Drives the facade methods through a fake `AdminUserService` port so the
+// load-bearing NEW logic — role-based authorization (read every request),
+// operator bypass, and last-admin protection — is tested through the caller.
+// The composition adapter over the real identity store is thin mapping;
+// crate-tier is the reachable tier here because the integration harness does
+// not wire the admin service (no token minter in-harness).
+// ---------------------------------------------------------------------------
+
+fn admin_record(user_id: &str, role: AdminUserRole, status: AdminUserStatus) -> AdminUserRecord {
+    AdminUserRecord {
+        user_id: UserId::new(user_id).expect("user id"),
+        email: None,
+        display_name: None,
+        status,
+        role,
+        created_at: "2026-07-07T00:00:00Z".to_string(),
+        updated_at: "2026-07-07T00:00:00Z".to_string(),
+        created_by: None,
+        last_login_at: None,
+        metadata: std::collections::BTreeMap::new(),
+    }
+}
+
+#[derive(Default)]
+struct FakeAdminUsers {
+    users: Mutex<HashMap<String, AdminUserRecord>>,
+}
+
+impl FakeAdminUsers {
+    fn with(records: impl IntoIterator<Item = AdminUserRecord>) -> Self {
+        let map = records
+            .into_iter()
+            .map(|record| (record.user_id.as_str().to_string(), record))
+            .collect();
+        Self {
+            users: Mutex::new(map),
+        }
+    }
+}
+
+#[async_trait]
+impl AdminUserService for FakeAdminUsers {
+    async fn list_users(
+        &self,
+        _tenant: &TenantId,
+        status: Option<AdminUserStatus>,
+    ) -> Result<Vec<AdminUserRecord>, AdminUserError> {
+        Ok(self
+            .users
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|record| status.is_none_or(|want| record.status == want))
+            .cloned()
+            .collect())
+    }
+
+    async fn get_user(
+        &self,
+        _tenant: &TenantId,
+        user_id: &UserId,
+    ) -> Result<Option<AdminUserRecord>, AdminUserError> {
+        Ok(self.users.lock().unwrap().get(user_id.as_str()).cloned())
+    }
+
+    async fn create_user(
+        &self,
+        _tenant: &TenantId,
+        _actor: &UserId,
+        fields: AdminCreateUserFields,
+    ) -> Result<AdminCreatedUser, AdminUserError> {
+        let record = admin_record("created-user", fields.role, AdminUserStatus::Active);
+        self.users
+            .lock()
+            .unwrap()
+            .insert("created-user".to_string(), record.clone());
+        Ok(AdminCreatedUser {
+            record,
+            api_token: SecretString::from("minted-token"),
+        })
+    }
+
+    async fn update_profile(
+        &self,
+        _tenant: &TenantId,
+        user_id: &UserId,
+        display_name: Option<String>,
+        _metadata: Option<std::collections::BTreeMap<String, String>>,
+    ) -> Result<AdminUserRecord, AdminUserError> {
+        let mut users = self.users.lock().unwrap();
+        let record = users
+            .get_mut(user_id.as_str())
+            .ok_or(AdminUserError::NotFound)?;
+        if display_name.is_some() {
+            record.display_name = display_name;
+        }
+        Ok(record.clone())
+    }
+
+    async fn set_status(
+        &self,
+        _tenant: &TenantId,
+        user_id: &UserId,
+        status: AdminUserStatus,
+    ) -> Result<AdminUserRecord, AdminUserError> {
+        let mut users = self.users.lock().unwrap();
+        let record = users
+            .get_mut(user_id.as_str())
+            .ok_or(AdminUserError::NotFound)?;
+        record.status = status;
+        Ok(record.clone())
+    }
+
+    async fn set_role(
+        &self,
+        _tenant: &TenantId,
+        user_id: &UserId,
+        role: AdminUserRole,
+    ) -> Result<AdminUserRecord, AdminUserError> {
+        let mut users = self.users.lock().unwrap();
+        let record = users
+            .get_mut(user_id.as_str())
+            .ok_or(AdminUserError::NotFound)?;
+        record.role = role;
+        Ok(record.clone())
+    }
+
+    async fn delete_user(
+        &self,
+        _tenant: &TenantId,
+        user_id: &UserId,
+    ) -> Result<(), AdminUserError> {
+        self.users.lock().unwrap().remove(user_id.as_str());
+        Ok(())
+    }
+
+    async fn count_active_admins(&self, _tenant: &TenantId) -> Result<usize, AdminUserError> {
+        Ok(self
+            .users
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|record| record.status == AdminUserStatus::Active && record.role.is_admin())
+            .count())
+    }
+
+    async fn list_secrets(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+    ) -> Result<Vec<AdminUserSecretMeta>, AdminUserError> {
+        Ok(Vec::new())
+    }
+
+    async fn put_secret(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+        handle: String,
+        _material: SecretString,
+    ) -> Result<AdminUserSecretMeta, AdminUserError> {
+        Ok(AdminUserSecretMeta {
+            handle,
+            created_at: None,
+            updated_at: None,
+        })
+    }
+
+    async fn delete_secret(
+        &self,
+        _tenant: &TenantId,
+        _user_id: &UserId,
+        _handle: String,
+    ) -> Result<bool, AdminUserError> {
+        Ok(true)
+    }
+}
+
+fn admin_services(fake: FakeAdminUsers) -> RebornServices {
+    RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_admin_user_service(Arc::new(fake))
+}
+
+#[tokio::test]
+async fn admin_member_caller_is_forbidden() {
+    // caller() resolves to user-alpha; seeded as a plain member → 403 on every
+    // admin operation.
+    let services = admin_services(FakeAdminUsers::with([admin_record(
+        "user-alpha",
+        AdminUserRole::Member,
+        AdminUserStatus::Active,
+    )]));
+    let err = services
+        .list_admin_users(caller(), RebornAdminUserListQuery::default())
+        .await
+        .expect_err("a member must not reach the admin surface");
+    assert_eq!(err.code, RebornServicesErrorCode::Forbidden);
+    assert_eq!(err.status_code, 403);
+}
+
+#[tokio::test]
+async fn admin_caller_lists_and_creates_with_one_time_token() {
+    let services = admin_services(FakeAdminUsers::with([admin_record(
+        "user-alpha",
+        AdminUserRole::Admin,
+        AdminUserStatus::Active,
+    )]));
+    services
+        .list_admin_users(caller(), RebornAdminUserListQuery::default())
+        .await
+        .expect("an admin may list users");
+    let created = services
+        .create_admin_user(
+            caller(),
+            RebornAdminCreateUserRequest {
+                email: Some("new@acme.com".to_string()),
+                display_name: Some("New".to_string()),
+                role: AdminUserRole::Member,
+            },
+        )
+        .await
+        .expect("an admin may create a user");
+    assert_eq!(created.api_token, "minted-token");
+}
+
+#[tokio::test]
+async fn admin_operator_bypasses_role_check() {
+    // An env-bearer operator has no user record but is an implicit admin.
+    let services = admin_services(FakeAdminUsers::default());
+    let operator = caller().with_operator_webui_config(true);
+    services
+        .list_admin_users(operator, RebornAdminUserListQuery::default())
+        .await
+        .expect("an operator token clears the admin boundary without a user record");
+}
+
+#[tokio::test]
+async fn admin_last_admin_protection_blocks_demote_and_suspend() {
+    // caller() (user-alpha) is the SOLE active admin.
+    let services = admin_services(FakeAdminUsers::with([admin_record(
+        "user-alpha",
+        AdminUserRole::Admin,
+        AdminUserStatus::Active,
+    )]));
+    let target = UserId::new("user-alpha").expect("user");
+
+    let demote = services
+        .set_admin_user_role(
+            caller(),
+            target.clone(),
+            RebornAdminSetRoleRequest {
+                role: AdminUserRole::Member,
+            },
+        )
+        .await
+        .expect_err("demoting the sole admin must be blocked");
+    assert_eq!(demote.status_code, 409);
+    assert_eq!(demote.field.as_deref(), Some("last_admin"));
+
+    let suspend = services
+        .set_admin_user_status(
+            caller(),
+            target,
+            RebornAdminSetStatusRequest {
+                status: AdminUserStatus::Suspended,
+            },
+        )
+        .await
+        .expect_err("suspending the sole admin must be blocked");
+    assert_eq!(suspend.status_code, 409);
+}
+
+#[tokio::test]
+async fn admin_last_admin_protection_allows_demote_with_a_second_admin() {
+    // With two active admins, demoting one is allowed.
+    let services = admin_services(FakeAdminUsers::with([
+        admin_record("user-alpha", AdminUserRole::Admin, AdminUserStatus::Active),
+        admin_record("user-beta", AdminUserRole::Admin, AdminUserStatus::Active),
+    ]));
+    services
+        .set_admin_user_role(
+            caller(),
+            UserId::new("user-beta").expect("user"),
+            RebornAdminSetRoleRequest {
+                role: AdminUserRole::Member,
+            },
+        )
+        .await
+        .expect("demoting one of two admins is allowed");
 }

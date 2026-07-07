@@ -63,6 +63,7 @@ use crate::{
     is_approval_gate_ref, is_auth_gate_ref, thread_metadata_is_automation_trigger,
 };
 
+mod admin_users;
 mod error;
 mod extension_credentials;
 mod extension_onboarding;
@@ -76,6 +77,15 @@ mod projects;
 mod trace_credits;
 mod types;
 
+use admin_users::RejectingAdminUserService;
+pub use admin_users::{
+    AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
+    AdminUserSecretMeta, AdminUserService, AdminUserStatus, RebornAdminCreateUserRequest,
+    RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse, RebornAdminSecretResponse,
+    RebornAdminSetRoleRequest, RebornAdminSetStatusRequest, RebornAdminUpdateUserRequest,
+    RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse, RebornAdminUserListQuery,
+    RebornAdminUserListResponse, RebornAdminUserResponse, RebornAdminUserSecretsListResponse,
+};
 pub use error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
 pub use trace_credits::{RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse};
 
@@ -2417,6 +2427,109 @@ pub trait RebornServicesApi: Send + Sync {
         let _ = (caller, request);
         Err(RebornServicesError::service_unavailable(false))
     }
+
+    // --- Admin user management -----------------------------------------------
+    //
+    // Each method authorizes the caller (admin/owner role, or env-bearer
+    // operator) and enforces last-admin protection in the implementation.
+    // Default bodies report the service unavailable so implementors without a
+    // wired admin service (and existing fakes) compile untouched.
+
+    async fn list_admin_users(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: RebornAdminUserListQuery,
+    ) -> Result<RebornAdminUserListResponse, RebornServicesError> {
+        let _ = (caller, query);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn get_admin_user(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+    ) -> Result<RebornAdminUserResponse, RebornServicesError> {
+        let _ = (caller, user_id);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn create_admin_user(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornAdminCreateUserRequest,
+    ) -> Result<RebornAdminUserCreatedResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn update_admin_user(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+        request: RebornAdminUpdateUserRequest,
+    ) -> Result<RebornAdminUserResponse, RebornServicesError> {
+        let _ = (caller, user_id, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn set_admin_user_status(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+        request: RebornAdminSetStatusRequest,
+    ) -> Result<RebornAdminUserResponse, RebornServicesError> {
+        let _ = (caller, user_id, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn set_admin_user_role(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+        request: RebornAdminSetRoleRequest,
+    ) -> Result<RebornAdminUserResponse, RebornServicesError> {
+        let _ = (caller, user_id, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn delete_admin_user(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+    ) -> Result<RebornAdminUserDeletedResponse, RebornServicesError> {
+        let _ = (caller, user_id);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn list_admin_user_secrets(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+    ) -> Result<RebornAdminUserSecretsListResponse, RebornServicesError> {
+        let _ = (caller, user_id);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn put_admin_user_secret(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+        handle: String,
+        request: RebornAdminPutSecretRequest,
+    ) -> Result<RebornAdminSecretResponse, RebornServicesError> {
+        let _ = (caller, user_id, handle, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    async fn delete_admin_user_secret(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+        handle: String,
+    ) -> Result<RebornAdminSecretDeletedResponse, RebornServicesError> {
+        let _ = (caller, user_id, handle);
+        Err(RebornServicesError::service_unavailable(false))
+    }
 }
 
 /// Lands inbound attachment bytes into durable, agent-accessible storage and
@@ -2473,6 +2586,7 @@ pub struct RebornServices {
     operator_service_lifecycle: Arc<dyn OperatorServiceLifecycleService>,
     approval_interactions: Arc<dyn ApprovalInteractionService>,
     auth_interactions: Arc<dyn AuthInteractionService>,
+    admin_users: Arc<dyn AdminUserService>,
     extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
@@ -2510,6 +2624,7 @@ impl RebornServices {
             operator_service_lifecycle: Arc::new(UnsupportedOperatorServiceLifecycleService),
             approval_interactions: Arc::new(RejectingApprovalInteractionService),
             auth_interactions: Arc::new(RejectingAuthInteractionService),
+            admin_users: Arc::new(RejectingAdminUserService),
             extension_credentials: None,
             skill_activation_recorder: None,
             skill_activation_clearer: None,
@@ -2694,6 +2809,14 @@ impl RebornServices {
         self
     }
 
+    /// Wire the admin user-management port (user CRUD + per-user secret
+    /// provisioning). Without it, every admin facade method reports the service
+    /// unavailable via the fail-closed [`RejectingAdminUserService`] default.
+    pub fn with_admin_user_service(mut self, admin_users: Arc<dyn AdminUserService>) -> Self {
+        self.admin_users = admin_users;
+        self
+    }
+
     pub fn with_skill_activation_recorder<F>(mut self, recorder: F) -> Self
     where
         F: Fn(&TurnScope, &AcceptedMessageRef, &str) -> Result<(), RebornServicesError>
@@ -2743,10 +2866,305 @@ impl RebornServices {
         }
         Ok(())
     }
+
+    /// Authorize the caller for admin operations. An env-bearer operator is an
+    /// implicit owner; otherwise the caller's persisted role must be admin or
+    /// owner. The role is read from the directory on EVERY call (never cached),
+    /// so a demoted admin loses access immediately — see
+    /// `product_workflow/CLAUDE.md` ("No caching. Caching the authz result is
+    /// explicitly forbidden").
+    async fn authorize_admin(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+    ) -> Result<(), RebornServicesError> {
+        if caller.operator_webui_config {
+            return Ok(());
+        }
+        let record = self
+            .admin_users
+            .get_user(&caller.tenant_id, &caller.user_id)
+            .await
+            .map_err(map_admin_user_error)?;
+        match record {
+            Some(user) if user.role.is_admin() => Ok(()),
+            // Both "no record" and "record but not admin" are a 403: the caller
+            // is authenticated but not authorized. Never leak which.
+            _ => Err(RebornServicesError::from_status(
+                RebornServicesErrorCode::Forbidden,
+                403,
+                false,
+            )),
+        }
+    }
+
+    /// Fetch the target user, mapping absence to a sanitized 404.
+    async fn require_admin_target(
+        &self,
+        tenant: &TenantId,
+        user_id: &UserId,
+    ) -> Result<AdminUserRecord, RebornServicesError> {
+        self.admin_users
+            .get_user(tenant, user_id)
+            .await
+            .map_err(map_admin_user_error)?
+            .ok_or_else(|| {
+                RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false)
+            })
+    }
+
+    /// Reject a mutation that would strand the tenant without an admin.
+    /// `target` is the user's CURRENT record; `still_admin_after` is whether the
+    /// user remains an active admin once the mutation lands. Re-reads the
+    /// active-admin count immediately before the decision as a TOCTOU guard
+    /// (mirrors the `blocked_gate_state` re-read pattern).
+    async fn ensure_not_last_admin(
+        &self,
+        tenant: &TenantId,
+        target: &AdminUserRecord,
+        still_admin_after: bool,
+    ) -> Result<(), RebornServicesError> {
+        // Only a mutation that drops a currently-active admin below the line can
+        // strand the tenant. If the target is not now an active admin, or stays
+        // one, there is nothing to protect.
+        if still_admin_after || target.status != AdminUserStatus::Active || !target.role.is_admin()
+        {
+            return Ok(());
+        }
+        let active_admins = self
+            .admin_users
+            .count_active_admins(tenant)
+            .await
+            .map_err(map_admin_user_error)?;
+        if active_admins <= 1 {
+            return Err(last_admin_error());
+        }
+        Ok(())
+    }
+}
+
+/// Map the coarse admin-port error into the sanitized WebUI wire taxonomy.
+fn map_admin_user_error(error: AdminUserError) -> RebornServicesError {
+    match error {
+        AdminUserError::NotFound => {
+            RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false)
+        }
+        // Transient backend failure — the browser may retry.
+        AdminUserError::Unavailable => RebornServicesError::service_unavailable(true),
+        AdminUserError::Internal => RebornServicesError::internal(),
+    }
+}
+
+/// Stable last-admin-protection error: a 409 conflict carrying a `last_admin`
+/// marker so the UI can render a specific message and tests can pin it.
+fn last_admin_error() -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::Conflict,
+        kind: RebornServicesErrorKind::Conflict,
+        status_code: 409,
+        retryable: false,
+        field: Some("last_admin".to_string()),
+        validation_code: None,
+    }
 }
 
 #[async_trait]
 impl RebornServicesApi for RebornServices {
+    async fn list_admin_users(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: RebornAdminUserListQuery,
+    ) -> Result<RebornAdminUserListResponse, RebornServicesError> {
+        self.authorize_admin(&caller).await?;
+        let users = self
+            .admin_users
+            .list_users(&caller.tenant_id, query.status)
+            .await
+            .map_err(map_admin_user_error)?;
+        Ok(RebornAdminUserListResponse { users })
+    }
+
+    async fn get_admin_user(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+    ) -> Result<RebornAdminUserResponse, RebornServicesError> {
+        self.authorize_admin(&caller).await?;
+        let user = self
+            .require_admin_target(&caller.tenant_id, &user_id)
+            .await?;
+        Ok(RebornAdminUserResponse { user })
+    }
+
+    async fn create_admin_user(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornAdminCreateUserRequest,
+    ) -> Result<RebornAdminUserCreatedResponse, RebornServicesError> {
+        self.authorize_admin(&caller).await?;
+        let created = self
+            .admin_users
+            .create_user(
+                &caller.tenant_id,
+                &caller.user_id,
+                AdminCreateUserFields {
+                    email: request.email,
+                    display_name: request.display_name,
+                    role: request.role,
+                },
+            )
+            .await
+            .map_err(map_admin_user_error)?;
+        Ok(RebornAdminUserCreatedResponse {
+            user: created.record,
+            // Exposed exactly once, here. The DTO carries it in no other path.
+            api_token: created.api_token.expose_secret().to_string(),
+        })
+    }
+
+    async fn update_admin_user(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+        request: RebornAdminUpdateUserRequest,
+    ) -> Result<RebornAdminUserResponse, RebornServicesError> {
+        self.authorize_admin(&caller).await?;
+        // Surface a 404 before attempting the mutation.
+        self.require_admin_target(&caller.tenant_id, &user_id)
+            .await?;
+        let user = self
+            .admin_users
+            .update_profile(
+                &caller.tenant_id,
+                &user_id,
+                request.display_name,
+                request.metadata,
+            )
+            .await
+            .map_err(map_admin_user_error)?;
+        Ok(RebornAdminUserResponse { user })
+    }
+
+    async fn set_admin_user_status(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+        request: RebornAdminSetStatusRequest,
+    ) -> Result<RebornAdminUserResponse, RebornServicesError> {
+        self.authorize_admin(&caller).await?;
+        let target = self
+            .require_admin_target(&caller.tenant_id, &user_id)
+            .await?;
+        // Activating keeps/raises an admin; suspending drops one.
+        let still_admin_after = matches!(request.status, AdminUserStatus::Active);
+        self.ensure_not_last_admin(&caller.tenant_id, &target, still_admin_after)
+            .await?;
+        let user = self
+            .admin_users
+            .set_status(&caller.tenant_id, &user_id, request.status)
+            .await
+            .map_err(map_admin_user_error)?;
+        Ok(RebornAdminUserResponse { user })
+    }
+
+    async fn set_admin_user_role(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+        request: RebornAdminSetRoleRequest,
+    ) -> Result<RebornAdminUserResponse, RebornServicesError> {
+        self.authorize_admin(&caller).await?;
+        let target = self
+            .require_admin_target(&caller.tenant_id, &user_id)
+            .await?;
+        let still_admin_after = request.role.is_admin();
+        self.ensure_not_last_admin(&caller.tenant_id, &target, still_admin_after)
+            .await?;
+        let user = self
+            .admin_users
+            .set_role(&caller.tenant_id, &user_id, request.role)
+            .await
+            .map_err(map_admin_user_error)?;
+        Ok(RebornAdminUserResponse { user })
+    }
+
+    async fn delete_admin_user(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+    ) -> Result<RebornAdminUserDeletedResponse, RebornServicesError> {
+        self.authorize_admin(&caller).await?;
+        let target = self
+            .require_admin_target(&caller.tenant_id, &user_id)
+            .await?;
+        // Deletion always removes the user, so it can never leave them an admin.
+        self.ensure_not_last_admin(&caller.tenant_id, &target, false)
+            .await?;
+        self.admin_users
+            .delete_user(&caller.tenant_id, &user_id)
+            .await
+            .map_err(map_admin_user_error)?;
+        Ok(RebornAdminUserDeletedResponse {
+            user_id,
+            deleted: true,
+        })
+    }
+
+    async fn list_admin_user_secrets(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+    ) -> Result<RebornAdminUserSecretsListResponse, RebornServicesError> {
+        self.authorize_admin(&caller).await?;
+        self.require_admin_target(&caller.tenant_id, &user_id)
+            .await?;
+        let secrets = self
+            .admin_users
+            .list_secrets(&caller.tenant_id, &user_id)
+            .await
+            .map_err(map_admin_user_error)?;
+        Ok(RebornAdminUserSecretsListResponse { secrets })
+    }
+
+    async fn put_admin_user_secret(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+        handle: String,
+        request: RebornAdminPutSecretRequest,
+    ) -> Result<RebornAdminSecretResponse, RebornServicesError> {
+        self.authorize_admin(&caller).await?;
+        self.require_admin_target(&caller.tenant_id, &user_id)
+            .await?;
+        let secret = self
+            .admin_users
+            .put_secret(
+                &caller.tenant_id,
+                &user_id,
+                handle,
+                SecretString::from(request.value),
+            )
+            .await
+            .map_err(map_admin_user_error)?;
+        Ok(RebornAdminSecretResponse { secret })
+    }
+
+    async fn delete_admin_user_secret(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+        handle: String,
+    ) -> Result<RebornAdminSecretDeletedResponse, RebornServicesError> {
+        self.authorize_admin(&caller).await?;
+        self.require_admin_target(&caller.tenant_id, &user_id)
+            .await?;
+        let deleted = self
+            .admin_users
+            .delete_secret(&caller.tenant_id, &user_id, handle.clone())
+            .await
+            .map_err(map_admin_user_error)?;
+        Ok(RebornAdminSecretDeletedResponse { handle, deleted })
+    }
+
     async fn global_auto_approve_enabled(
         &self,
         caller: WebUiAuthenticatedCaller,

@@ -833,6 +833,12 @@ pub(crate) struct RebornLocalRuntimeServices {
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     #[allow(dead_code)]
     pub(crate) identity_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
+    /// Admin per-user secret provisioner (target-user-scoped secret store over
+    /// the shared root + crypto). `None` when no filesystem secret store was
+    /// built. Read only by the WebUI v2 admin surface.
+    #[cfg(feature = "webui-v2-beta")]
+    pub(crate) admin_secret_provisioner:
+        Option<Arc<dyn crate::admin_secrets::AdminSecretProvisioner>>,
     /// Raw libSQL substrate handle backing `reborn-local-dev.db`. Carried ONLY
     /// for the one-time legacy WebUI `user_identities` fold (a substrate-level
     /// read that belongs in this host layer, not the identity crate); the
@@ -1358,15 +1364,27 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     let local_dev_product_auth_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
     #[cfg(any(feature = "libsql", feature = "postgres"))]
-    let local_dev_secret_store = build_local_dev_secret_store(
+    let local_dev_secret_bundle = build_local_dev_secret_store(
         &root,
         Arc::clone(&local_dev_product_auth_filesystem),
         secret_master_key,
     )?;
     #[cfg(any(feature = "libsql", feature = "postgres"))]
-    let secret_store: Arc<dyn SecretStore> = local_dev_secret_store.clone();
+    let secret_store: Arc<dyn SecretStore> = local_dev_secret_bundle.0.clone();
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     let secret_store: Arc<dyn SecretStore> = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
+    // Admin per-user secret provisioner over the shared root + the SAME crypto
+    // as the runtime's own secret store (webui-v2-beta implies libsql, so the
+    // bundle above always exists here).
+    #[cfg(feature = "webui-v2-beta")]
+    let admin_secret_provisioner: Option<
+        Arc<dyn crate::admin_secrets::AdminSecretProvisioner>,
+    > = Some(Arc::new(
+        crate::admin_secrets::FilesystemAdminSecretProvisioner::new(
+            Arc::clone(&filesystem),
+            local_dev_secret_bundle.1,
+        ),
+    ));
     let local_dev_trust_policy = Arc::new(builtin_first_party_trust_policy()?);
     let local_dev_trust_invalidation_bus = Arc::new(ironclaw_trust::InvalidationBus::new());
     let extension_registry = Arc::new(local_dev_builtin_extension_registry()?);
@@ -1613,6 +1631,12 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         let host_runtime_http_egress =
             host_runtime_http_egress_for_test.unwrap_or(host_runtime_http_egress);
         local_runtime.host_runtime_http_egress = host_runtime_http_egress;
+        // Attach the admin secret provisioner now the secret-store crypto is
+        // built (the store graph was constructed before it existed).
+        #[cfg(feature = "webui-v2-beta")]
+        {
+            local_runtime.admin_secret_provisioner = admin_secret_provisioner;
+        }
     } else {
         return Err(RebornBuildError::InvalidConfig {
             reason: "local-dev extension lifecycle facade could not be attached".to_string(),
@@ -2231,6 +2255,10 @@ async fn build_local_dev_store_graph(
         host_state_filesystem,
         subagent_goal_filesystem: Arc::clone(&scoped_filesystem),
         identity_filesystem: Arc::clone(&scoped_filesystem),
+        // Set later in `build_local_runtime`, once the secret-store crypto
+        // exists, via `Arc::get_mut` on this services value.
+        #[cfg(feature = "webui-v2-beta")]
+        admin_secret_provisioner: None,
         #[cfg(feature = "libsql")]
         identity_substrate_db,
         extension_filesystem: Arc::clone(&filesystem),
@@ -3001,7 +3029,13 @@ pub(crate) fn build_local_dev_secret_store<F>(
     root: &Path,
     scoped_filesystem: Arc<ScopedFilesystem<F>>,
     explicit_master_key: Option<ironclaw_secrets::SecretMaterial>,
-) -> Result<Arc<FilesystemSecretStore<F>>, RebornBuildError>
+) -> Result<
+    (
+        Arc<FilesystemSecretStore<F>>,
+        Arc<ironclaw_secrets::SecretsCrypto>,
+    ),
+    RebornBuildError,
+>
 where
     F: RootFilesystem + 'static,
 {
@@ -3009,11 +3043,16 @@ where
         Some(master_key) => master_key,
         None => resolve_local_dev_secret_master_key(root)?,
     };
+    // The crypto is returned alongside the store so the admin secret
+    // provisioner (`admin_secrets.rs`) can build per-target-user stores that
+    // share the SAME master key — secrets written admin-side decrypt under the
+    // user's own store and vice versa.
     let crypto = Arc::new(ironclaw_secrets::SecretsCrypto::new(master_key)?);
-    Ok(Arc::new(FilesystemSecretStore::new(
+    let store = Arc::new(FilesystemSecretStore::new(
         scoped_filesystem,
-        crypto,
-    )))
+        Arc::clone(&crypto),
+    ));
+    Ok((store, crypto))
 }
 
 /// Where a resolved local-dev master key came from, used to name the source in
@@ -5006,6 +5045,8 @@ mod tests {
             host_state_filesystem: Arc::clone(&base_runtime.host_state_filesystem),
             #[cfg(any(feature = "libsql", feature = "postgres"))]
             identity_filesystem: Arc::clone(&base_runtime.identity_filesystem),
+            #[cfg(feature = "webui-v2-beta")]
+            admin_secret_provisioner: base_runtime.admin_secret_provisioner.clone(),
             #[cfg(feature = "libsql")]
             identity_substrate_db: base_runtime.identity_substrate_db.clone(),
             subagent_goal_filesystem: Arc::new(ScopedFilesystem::with_fixed_view(
@@ -5297,7 +5338,7 @@ mod tests {
         .await
         .expect("local-dev filesystem rebuild")
         .filesystem;
-        let rebuilt_secret_store = build_local_dev_secret_store(
+        let (rebuilt_secret_store, _rebuilt_secret_crypto) = build_local_dev_secret_store(
             &local_dev_root,
             local_dev_scoped_filesystem(rebuilt_filesystem),
             None,

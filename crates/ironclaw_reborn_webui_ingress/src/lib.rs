@@ -43,6 +43,7 @@ pub use session::{SessionAuthenticator, SessionRecord, SessionStore, SessionStor
 // builder; the auth/session model lives here, not in the command crate.
 pub use signed_session_login::{
     SignedSessionLoginConfig, SignedSessionLoginWiring, build_signed_session_login,
+    signed_session_store,
 };
 // `InMemorySessionStore` is gated behind `dev-in-memory-session` so a
 // production binary cannot accidentally wire a process-local store as

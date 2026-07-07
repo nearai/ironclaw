@@ -27,8 +27,12 @@ use ironclaw_product_workflow::{
     CodexLoginStart, FsMount, LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot,
     LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
     NearAiWalletLoginRequest, NearAiWalletLoginResult, ProductWorkflowError, ProjectFsFile,
-    ProjectionCursor, RebornAddMemberRequest, RebornAttachmentRequest,
-    RebornAutomationMutationResponse, RebornCancelRunResponse,
+    ProjectionCursor, RebornAddMemberRequest, RebornAdminCreateUserRequest,
+    RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse, RebornAdminSecretResponse,
+    RebornAdminSetRoleRequest, RebornAdminSetStatusRequest, RebornAdminUpdateUserRequest,
+    RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse, RebornAdminUserListQuery,
+    RebornAdminUserListResponse, RebornAdminUserResponse, RebornAdminUserSecretsListResponse,
+    RebornAttachmentRequest, RebornAutomationMutationResponse, RebornCancelRunResponse,
     RebornConnectableChannelListResponse, RebornCreateProjectRequest, RebornCreateThreadResponse,
     RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
     RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
@@ -59,6 +63,8 @@ use ironclaw_product_workflow::{
     webui_attachment_capabilities,
 };
 use serde::{Deserialize, Serialize};
+
+use ironclaw_host_api::UserId;
 
 use crate::error::WebUiV2HttpError;
 use crate::router::{WebUiV2Capabilities, WebUiV2State};
@@ -177,6 +183,165 @@ pub async fn delete_thread(
         .delete_thread(caller, RebornDeleteThreadRequest { thread_id })
         .await?;
     Ok(Json(response))
+}
+
+// --- Admin user management ---------------------------------------------------
+//
+// Every handler delegates straight to the facade, which enforces admin
+// authorization (operator token or admin/owner role) and last-admin protection.
+// The `{user_id}` path segment is parsed into a `UserId` here so a malformed id
+// is a 400 before the facade runs; the `{handle}` segment stays a String and is
+// validated deeper (the secret store rejects a bad handle).
+
+/// Parse a `{user_id}` path segment into a `UserId`, mapping a malformed value
+/// to a sanitized `400 invalid_request` before the facade is touched.
+fn parse_admin_user_id(raw: String) -> Result<UserId, WebUiV2HttpError> {
+    UserId::new(raw).map_err(|_| {
+        WebUiV2HttpError::from(RebornServicesError::from(WebUiInboundValidationError::new(
+            "user_id",
+            WebUiInboundValidationCode::InvalidId,
+        )))
+    })
+}
+
+/// `GET /api/webchat/v2/admin/users`
+pub async fn admin_list_users(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Query(query): Query<RebornAdminUserListQuery>,
+) -> Result<Json<RebornAdminUserListResponse>, WebUiV2HttpError> {
+    Ok(Json(
+        state.services().list_admin_users(caller, query).await?,
+    ))
+}
+
+/// `POST /api/webchat/v2/admin/users`
+pub async fn admin_create_user(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<RebornAdminCreateUserRequest>,
+) -> Result<Json<RebornAdminUserCreatedResponse>, WebUiV2HttpError> {
+    Ok(Json(
+        state.services().create_admin_user(caller, body).await?,
+    ))
+}
+
+/// `GET /api/webchat/v2/admin/users/{user_id}`
+pub async fn admin_get_user(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(user_id): Path<String>,
+) -> Result<Json<RebornAdminUserResponse>, WebUiV2HttpError> {
+    let user_id = parse_admin_user_id(user_id)?;
+    Ok(Json(
+        state.services().get_admin_user(caller, user_id).await?,
+    ))
+}
+
+/// `PATCH /api/webchat/v2/admin/users/{user_id}`
+pub async fn admin_update_user(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(user_id): Path<String>,
+    Json(body): Json<RebornAdminUpdateUserRequest>,
+) -> Result<Json<RebornAdminUserResponse>, WebUiV2HttpError> {
+    let user_id = parse_admin_user_id(user_id)?;
+    Ok(Json(
+        state
+            .services()
+            .update_admin_user(caller, user_id, body)
+            .await?,
+    ))
+}
+
+/// `DELETE /api/webchat/v2/admin/users/{user_id}`
+pub async fn admin_delete_user(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(user_id): Path<String>,
+) -> Result<Json<RebornAdminUserDeletedResponse>, WebUiV2HttpError> {
+    let user_id = parse_admin_user_id(user_id)?;
+    Ok(Json(
+        state.services().delete_admin_user(caller, user_id).await?,
+    ))
+}
+
+/// `POST /api/webchat/v2/admin/users/{user_id}/status`
+pub async fn admin_set_user_status(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(user_id): Path<String>,
+    Json(body): Json<RebornAdminSetStatusRequest>,
+) -> Result<Json<RebornAdminUserResponse>, WebUiV2HttpError> {
+    let user_id = parse_admin_user_id(user_id)?;
+    Ok(Json(
+        state
+            .services()
+            .set_admin_user_status(caller, user_id, body)
+            .await?,
+    ))
+}
+
+/// `POST /api/webchat/v2/admin/users/{user_id}/role`
+pub async fn admin_set_user_role(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(user_id): Path<String>,
+    Json(body): Json<RebornAdminSetRoleRequest>,
+) -> Result<Json<RebornAdminUserResponse>, WebUiV2HttpError> {
+    let user_id = parse_admin_user_id(user_id)?;
+    Ok(Json(
+        state
+            .services()
+            .set_admin_user_role(caller, user_id, body)
+            .await?,
+    ))
+}
+
+/// `GET /api/webchat/v2/admin/users/{user_id}/secrets`
+pub async fn admin_list_user_secrets(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(user_id): Path<String>,
+) -> Result<Json<RebornAdminUserSecretsListResponse>, WebUiV2HttpError> {
+    let user_id = parse_admin_user_id(user_id)?;
+    Ok(Json(
+        state
+            .services()
+            .list_admin_user_secrets(caller, user_id)
+            .await?,
+    ))
+}
+
+/// `PUT /api/webchat/v2/admin/users/{user_id}/secrets/{handle}`
+pub async fn admin_put_user_secret(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path((user_id, handle)): Path<(String, String)>,
+    Json(body): Json<RebornAdminPutSecretRequest>,
+) -> Result<Json<RebornAdminSecretResponse>, WebUiV2HttpError> {
+    let user_id = parse_admin_user_id(user_id)?;
+    Ok(Json(
+        state
+            .services()
+            .put_admin_user_secret(caller, user_id, handle, body)
+            .await?,
+    ))
+}
+
+/// `DELETE /api/webchat/v2/admin/users/{user_id}/secrets/{handle}`
+pub async fn admin_delete_user_secret(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path((user_id, handle)): Path<(String, String)>,
+) -> Result<Json<RebornAdminSecretDeletedResponse>, WebUiV2HttpError> {
+    let user_id = parse_admin_user_id(user_id)?;
+    Ok(Json(
+        state
+            .services()
+            .delete_admin_user_secret(caller, user_id, handle)
+            .await?,
+    ))
 }
 
 /// `POST /api/webchat/v2/threads/{thread_id}/messages`

@@ -24,6 +24,7 @@
 //! persisted record shapes live in [`record`], path construction in [`paths`],
 //! and the behavioral matrix in the `tests` submodule.
 
+mod directory;
 mod paths;
 mod record;
 #[cfg(test)]
@@ -49,7 +50,9 @@ use crate::{
     SurfaceKind,
 };
 use paths::{identity_path, user_path, verified_email_path};
-use record::{StoredExternalIdentity, StoredUser, StoredVerifiedEmailIndex};
+use record::{
+    StoredExternalIdentity, StoredUser, StoredUserRole, StoredUserStatus, StoredVerifiedEmailIndex,
+};
 
 /// Canonical identity store backed by a host scoped filesystem.
 pub struct FilesystemRebornIdentityStore<F>
@@ -290,6 +293,15 @@ where
                 display_name: identity.display_name.clone(),
                 created_at: now.clone(),
                 updated_at: now.clone(),
+                // A plain SSO login mints an active, non-admin member. The
+                // tenant is carried so admin enumeration can filter without a
+                // per-tenant path partition on user records.
+                status: StoredUserStatus::default(),
+                role: StoredUserRole::default(),
+                created_by: None,
+                last_login_at: None,
+                tenant_id: Some(tenant.to_string()),
+                metadata: std::collections::BTreeMap::new(),
             },
             CasExpectation::Absent,
         )

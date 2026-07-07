@@ -59,8 +59,14 @@ export function useAdminUsers() {
     suspendUser: suspendMut.mutateAsync,
     activateUser: activateMut.mutateAsync,
     createToken: (userId, name) => tokenMut.mutateAsync({ userId, name }),
-    newToken: tokenMut.data,
-    clearToken: () => tokenMut.reset(),
+    // The one-time API bearer is issued at user creation, so the create result
+    // (which carries `.token`) also feeds the token banner. A dedicated
+    // re-issue endpoint would populate `tokenMut` instead.
+    newToken: tokenMut.data || (createMut.data?.token ? createMut.data : null),
+    clearToken: () => {
+      tokenMut.reset();
+      createMut.reset();
+    },
   };
 }
 
