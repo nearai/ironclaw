@@ -140,7 +140,7 @@ async fn capability_io_resolves_staged_inputs_and_materializes_run_scoped_result
         serde_json::json!({ "reply": "terminal" })
     );
 
-    io.prune_run(&run_context).expect("run pruned");
+    io.prune_run(&run_context.run_id.to_string());
     io.resolve_capability_input(&run_context, &input_ref)
         .await
         .expect_err("pruned input refs must no longer resolve");
@@ -247,7 +247,9 @@ async fn capability_io_prunes_refs_for_terminal_runs_without_cross_run_loss() {
     .await
     .unwrap();
 
-    io.prune_run(&first_run).unwrap();
+    // Prune through the runtime-facing trait hook — what the composition's
+    // terminal-run observer calls.
+    LoopCapabilityResultWriter::prune_run(&io, &first_run.run_id.to_string());
 
     io.resolve_capability_input(&first_run, &first_input)
         .await

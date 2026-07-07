@@ -57,4 +57,13 @@ impl LoopCapabilityResultWriter for RecordingCapabilityResultWriter {
         });
         Ok(byte_len)
     }
+
+    // Must forward: the runtime's terminal-run pruner only sees this wrapper,
+    // so swallowing the call here would silently disable pruning in every
+    // HostRuntime-mode integration test.
+    fn prune_run(&self, run_id: &str) {
+        self.inner
+            .prune_run_id(run_id)
+            .expect("prune staged capability io for terminal run");
+    }
 }

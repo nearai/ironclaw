@@ -44,6 +44,14 @@ async fn replies_to_greeting() {
 `RebornScriptedReply::text(..)` — one line each. The harness is single-
 conversation; `submit_turn`/`assert_reply_contains` take just the text.
 
+**Exception — larger stack.** A scenario that nests enough async state (e.g. a
+capability retry that re-dispatches a second full capability state machine)
+can overflow the default debug-build test-thread stack. Wrap the body in
+`reborn_support::stack::run_with_larger_stack("test_name", async { .. })`
+(`support/stack.rs`) instead of `#[tokio::test]` — see
+`project_create_unavailable_fault_retries_and_completes` in
+`project_create.rs` for the shape.
+
 ### Script discipline — one script entry per model call
 
 The script is a FIFO of model calls, consumed across every turn on the harness.
@@ -144,6 +152,8 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
   model-prompt assertion `assert_system_prompt_contains` (reads the scripted
   `TraceLlm`'s captured requests via `captured_system_prompts`, not the egress
   log).
+- `stack.rs` — `run_with_larger_stack`, the 16MB-stack test-thread runner for
+  the larger-stack exception above.
 - Tests live as flat `tests/integration/<name>.rs` bins (Cargo requires
   top-level-per-bin test files), each registered as its own `[[test]]` in the
   workspace `Cargo.toml` with `name = "reborn_integration_<name>"`.

@@ -68,7 +68,10 @@ pub enum ProductLivePlannedRuntimeAdapterError {
 /// (issue #5608 — mirrors `ProviderToolCallInputResolver`'s non-consuming provider-input
 /// map and `LocalDevCapabilityIo`'s input store); staged results are consumed on
 /// successful read. Each store is capped at 1024 staged refs and 4 MiB of serialized
-/// JSON; callers should still prune entries when a run completes.
+/// JSON — a budget shared across every run on the instance, which is why retained
+/// entries must be released: the runtime composition prunes a run's staged I/O when
+/// it reaches a terminal status (via `LoopCapabilityResultWriter::prune_run`), and
+/// direct embedders should call `prune_run`/`prune_run_id` the same way.
 pub struct ProductLiveCapabilityIo {
     inputs: Mutex<HashMap<String, StagedCapabilityInput>>,
     results: Mutex<HashMap<String, StagedCapabilityResult>>,
@@ -166,12 +169,9 @@ impl ProductLiveCapabilityIo {
         Ok(result.output.clone())
     }
 
-    /// Drops all staged inputs and results for the supplied loop run.
-    pub fn prune_run(&self, run_context: &LoopRunContext) -> Result<(), AgentLoopHostError> {
-        self.prune_run_id(&run_context.run_id.to_string())
-    }
-
     /// Drops all staged inputs and results whose stored run id matches `run_id`.
+    /// Infallible callers use `LoopCapabilityResultWriter::prune_run`, which
+    /// delegates here.
     pub fn prune_run_id(&self, run_id: &str) -> Result<(), AgentLoopHostError> {
         self.inputs
             .lock()
@@ -183,6 +183,13 @@ impl ProductLiveCapabilityIo {
             .retain(|_, result| result.run_id != run_id);
         self.display_previews.prune_run(run_id);
         Ok(())
+    }
+
+    /// Number of currently staged capability inputs across all runs. Staged
+    /// inputs draw from a shared global budget, so this is the observable for
+    /// "terminal runs release their retained inputs".
+    pub fn staged_input_count(&self) -> usize {
+        self.inputs.lock().map_or(usize::MAX, |inputs| inputs.len())
     }
 }
 
@@ -398,6 +405,12 @@ impl LoopCapabilityResultWriter for ProductLiveCapabilityIo {
             },
         );
         Ok(byte_len as u64)
+    }
+
+    fn prune_run(&self, run_id: &str) {
+        if let Err(error) = self.prune_run_id(run_id) {
+            tracing::debug!(%error, run_id, "product-live capability io: prune_run failed");
+        }
     }
 
     async fn delete_capability_result(
@@ -1102,7 +1115,8 @@ mod tests {
                 .is_some()
         );
 
-        io.prune_run(&run_context).expect("run pruned");
+        io.prune_run_id(&run_context.run_id.to_string())
+            .expect("run pruned");
         assert!(
             io.display_previews
                 .record_for_invocation(invocation_id)

@@ -858,6 +858,33 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Assert the shared capability io retains no staged inputs — every
+    /// terminal run's staged io was pruned. Staged inputs draw from a global
+    /// budget shared by all runs on the io, so leaked entries eventually fail
+    /// unrelated tool calls with `BudgetExceeded`. Polls briefly: terminal
+    /// lifecycle publication (which triggers pruning) can commit just after
+    /// the terminal status becomes visible to `submit_turn`.
+    pub async fn assert_capability_io_pruned(&self) -> HarnessResult<()> {
+        let mut remaining = usize::MAX;
+        for _ in 0..100 {
+            match self.capability_recorder.staged_capability_input_count() {
+                None => {
+                    return Err(
+                        "staged-input introspection requires a HostRuntime-mode harness".into(),
+                    );
+                }
+                Some(0) => return Ok(()),
+                Some(count) => remaining = count,
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        Err(format!(
+            "staged capability inputs were not pruned after the run reached terminal; \
+             {remaining} still staged"
+        )
+        .into())
+    }
+
     /// This thread's recorded capability invocations, in dispatch order — the
     /// `[baseline_invocation_count..]` delta so a group thread never reads a
     /// prior thread's entries (R2). Mirrors `captured_egress_requests`.

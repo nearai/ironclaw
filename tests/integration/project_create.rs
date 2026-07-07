@@ -225,6 +225,13 @@ fn project_create_unavailable_fault_retries_and_completes() {
                 .assert_reply_contains("after a retry")
                 .await
                 .expect("run completes normally instead of terminating at driver_unavailable");
+            // Inputs are retained (not consumed) so the retry above can
+            // re-resolve them — but only for the life of the run: the terminal
+            // transition must release them back to the io's shared budget.
+            harness
+                .assert_capability_io_pruned()
+                .await
+                .expect("staged capability inputs are released once the run is terminal");
         },
     );
 }

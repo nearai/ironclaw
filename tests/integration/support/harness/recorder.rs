@@ -42,6 +42,15 @@ impl HarnessCapabilityRecorder {
         }
     }
 
+    /// Staged capability inputs retained by the shared io, across all runs.
+    /// `None` in Recording mode (its io is not retained by the recorder).
+    pub(crate) fn staged_capability_input_count(&self) -> Option<usize> {
+        match self {
+            Self::Recording(_) => None,
+            Self::HostRuntime(harness) => Some(harness.staged_capability_input_count()),
+        }
+    }
+
     /// E-PROFILE: local-dev memory filesystem backing the user-profile source, if any.
     /// `None` for the Echo backend and HostRuntime harnesses without a profile filesystem.
     pub(crate) fn profile_filesystem(&self) -> Option<Arc<dyn RootFilesystem>> {
