@@ -16,6 +16,10 @@ import {
   failGateToolActivity,
   resetToolActivityState,
 } from "./tool-activity-state.js";
+import {
+  CONNECTION_LOST_RUN_FAILURE_MESSAGE,
+  rewriteConnectionLostRunFailures,
+} from "./failureMessages.js";
 import { subscribeChannelConnected } from "../../../lib/channel-connection-events.js";
 
 const STATE_SLOT = Object.freeze({
@@ -59,6 +63,7 @@ function runUseChatSource(context) {
     failGateToolActivity,
     resetToolActivityState,
     timelineMessageIdFromAcceptedRef,
+    rewriteConnectionLostRunFailures,
   });
   if (!context.subscribeChannelConnected) {
     context.subscribeChannelConnected = subscribeChannelConnected;
@@ -132,6 +137,77 @@ function createReactStub({
   };
   return react;
 }
+
+test("useChat: disconnected SSE rewrites an active driver_unavailable error", () => {
+  const threadId = "thread-1";
+  let renderedMessages = [
+    {
+      id: "err-run-1",
+      role: "error",
+      content:
+        "The run failed because the execution driver was temporarily unavailable.",
+      failureStatus: "failed",
+      failureCategory: "driver_unavailable",
+      failureSummary:
+        "The run failed because the execution driver was temporarily unavailable.",
+    },
+  ];
+  const initialByIndex = new Map([
+    [STATE_SLOT.activeRun, { runId: "run-1", threadId, status: "running" }],
+    [STATE_SLOT.isProcessing, true],
+  ]);
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({ initialByIndex, runEffects: true }),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearInterval,
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("thread should already exist");
+    },
+    globalThis: {},
+    queryClient: {
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => {
+      throw new Error("send should not run");
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadError: null,
+      loadHistory: () => {},
+      seedThreadMessages: () => {},
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: "disconnected" }),
+  };
+
+  runUseChatSource(context);
+  const chat = context.globalThis.__testExports.useChat(threadId);
+
+  assert.equal(chat.sseStatus, "disconnected");
+  assert.equal(renderedMessages[0].content, CONNECTION_LOST_RUN_FAILURE_MESSAGE);
+});
 
 test("useChat.send: accepted ref reconciles pending message on timeline reload", async () => {
   const threadId = "thread-1";

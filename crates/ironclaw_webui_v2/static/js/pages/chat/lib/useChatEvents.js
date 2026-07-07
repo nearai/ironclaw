@@ -40,6 +40,9 @@ export function useChatEvents({
   activeRunRef,
   locallyResolvedGatesRef,
   toolActivityStateRef,
+  connectionStatusRef,
+  connectionInterruptedRunIdsRef,
+  connectionInterruptedUnknownRef,
   onRunSettled,
 }) {
   // Track which runIds we've already settled so that SSE replays
@@ -64,6 +67,11 @@ export function useChatEvents({
         case "accepted": {
           const ack = frame.ack || {};
           if (ack.run_id) latestRunIdRef.current = ack.run_id;
+          noteInterruptedRunId(
+            ack.run_id,
+            connectionInterruptedRunIdsRef,
+            connectionInterruptedUnknownRef,
+          );
           setActiveRun?.({
             runId: ack.run_id || null,
             threadId: ack.thread_id || threadId,
@@ -78,6 +86,11 @@ export function useChatEvents({
           const progress = frame.progress || {};
           if (progress.turn_run_id) {
             latestRunIdRef.current = progress.turn_run_id;
+            noteInterruptedRunId(
+              progress.turn_run_id,
+              connectionInterruptedRunIdsRef,
+              connectionInterruptedUnknownRef,
+            );
             setActiveRun?.((current) =>
               current && current.runId === progress.turn_run_id
                 ? { ...current, status: "running" }
@@ -176,6 +189,9 @@ export function useChatEvents({
             status: runState.status || "failed",
             failureCategory: failureCategoryFromRunState(runState),
             failureSummary: null,
+            connectionStatusRef,
+            connectionInterruptedRunIdsRef,
+            connectionInterruptedUnknownRef,
           });
           settleRun(settledRunsRef, onRunSettled, runId, false);
           return;
@@ -198,6 +214,9 @@ export function useChatEvents({
             activeRunRef,
             locallyResolvedGatesRef,
             toolActivityStateRef,
+            connectionStatusRef,
+            connectionInterruptedRunIdsRef,
+            connectionInterruptedUnknownRef,
           });
           return;
         }
@@ -216,6 +235,9 @@ export function useChatEvents({
       activeRunRef,
       locallyResolvedGatesRef,
       toolActivityStateRef,
+      connectionStatusRef,
+      connectionInterruptedRunIdsRef,
+      connectionInterruptedUnknownRef,
       onRunSettled,
     ],
   );
@@ -323,6 +345,9 @@ function applyProjectionItems({
   activeRunRef,
   locallyResolvedGatesRef,
   toolActivityStateRef,
+  connectionStatusRef,
+  connectionInterruptedRunIdsRef,
+  connectionInterruptedUnknownRef,
 }) {
   // Snapshot the most recent run id so stale terminal run_status frames can
   // be filtered while a locally resolved gate is resuming a newer run.
@@ -400,6 +425,9 @@ function applyProjectionItems({
             latestRunIdRef,
             promptRunIdRef,
             locallyResolvedGatesRef,
+            connectionStatusRef,
+            connectionInterruptedRunIdsRef,
+            connectionInterruptedUnknownRef,
           });
           activeRunId = null;
         }
@@ -432,6 +460,11 @@ function applyProjectionItems({
         continue;
       }
       if (runId) {
+        noteInterruptedRunId(
+          runId,
+          connectionInterruptedRunIdsRef,
+          connectionInterruptedUnknownRef,
+        );
         activeRunId = runId;
         if (!isTerminalStatus && latestRunIdRef) {
           latestRunIdRef.current = runId;
@@ -477,6 +510,9 @@ function applyProjectionItems({
             status,
             failureCategory,
             failureSummary,
+            connectionStatusRef,
+            connectionInterruptedRunIdsRef,
+            connectionInterruptedUnknownRef,
           });
         }
       } else if (!PROMPT_RUN_STATUSES.has(status)) {
@@ -602,6 +638,9 @@ function settleTerminalRunAfterResolvedPrompt({
   latestRunIdRef,
   promptRunIdRef,
   locallyResolvedGatesRef,
+  connectionStatusRef,
+  connectionInterruptedRunIdsRef,
+  connectionInterruptedUnknownRef,
 }) {
   setIsProcessing(false);
   setPendingGate(null);
@@ -618,6 +657,9 @@ function settleTerminalRunAfterResolvedPrompt({
       status,
       failureCategory,
       failureSummary,
+      connectionStatusRef,
+      connectionInterruptedRunIdsRef,
+      connectionInterruptedUnknownRef,
     });
   }
 }
@@ -638,7 +680,15 @@ function failureCategoryFromRunState(runState) {
 
 function appendRunFailureMessage(
   setMessages,
-  { runId, status, failureCategory, failureSummary },
+  {
+    runId,
+    status,
+    failureCategory,
+    failureSummary,
+    connectionStatusRef,
+    connectionInterruptedRunIdsRef,
+    connectionInterruptedUnknownRef,
+  },
 ) {
   // Dedup by `err-<runId>` so replays of the same projection
   // (SSE reconnect with `last-event-id`, or repeated updates carrying
@@ -650,6 +700,12 @@ function appendRunFailureMessage(
       status,
       failureCategory,
       failureSummary,
+      ...runFailureConnectionContext({
+        runId,
+        connectionStatusRef,
+        connectionInterruptedRunIdsRef,
+        connectionInterruptedUnknownRef,
+      }),
     });
     if (existing >= 0) {
       const hasUsefulUpdate = Boolean(failureSummary || failureCategory);
@@ -658,6 +714,9 @@ function appendRunFailureMessage(
       next[existing] = {
         ...next[existing],
         content,
+        failureStatus: status,
+        failureCategory,
+        failureSummary,
       };
       return next;
     }
@@ -668,9 +727,56 @@ function appendRunFailureMessage(
         role: "error",
         content,
         timestamp: new Date().toISOString(),
+        failureStatus: status,
+        failureCategory,
+        failureSummary,
       },
     ];
   });
+}
+
+function noteInterruptedRunId(
+  runId,
+  connectionInterruptedRunIdsRef,
+  connectionInterruptedUnknownRef,
+) {
+  if (!runId || !connectionInterruptedUnknownRef?.current) return;
+  connectionInterruptedRunIdsRef?.current?.add?.(runId);
+  connectionInterruptedUnknownRef.current = false;
+}
+
+function runFailureConnectionContext({
+  runId,
+  connectionStatusRef,
+  connectionInterruptedRunIdsRef,
+  connectionInterruptedUnknownRef,
+}) {
+  const connectionStatus =
+    typeof connectionStatusRef?.current === "string"
+      ? connectionStatusRef.current
+      : null;
+  const connectionLostNow =
+    connectionStatus === "disconnected" || connectionStatus === "reconnecting";
+  let connectionInterrupted = Boolean(
+    (runId && connectionInterruptedRunIdsRef?.current?.has?.(runId)) ||
+      connectionInterruptedUnknownRef?.current,
+  );
+  if (connectionLostNow && runId) {
+    connectionInterruptedRunIdsRef?.current?.add?.(runId);
+    connectionInterrupted = true;
+  } else if (connectionLostNow && connectionInterruptedUnknownRef) {
+    connectionInterruptedUnknownRef.current = true;
+    connectionInterrupted = true;
+  }
+  if (runId && connectionInterruptedUnknownRef?.current) {
+    connectionInterruptedRunIdsRef?.current?.add?.(runId);
+    connectionInterruptedUnknownRef.current = false;
+    connectionInterrupted = true;
+  }
+  if (!connectionInterrupted && !connectionLostNow) {
+    return {};
+  }
+  return { connectionStatus, connectionInterrupted };
 }
 
 function locallyResolvedStateForRun(locallyResolvedGatesRef, runId) {

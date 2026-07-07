@@ -23,6 +23,7 @@ import {
   failGateToolActivity,
   resetToolActivityState,
 } from "../lib/tool-activity-state.js";
+import { rewriteConnectionLostRunFailures } from "../lib/failureMessages.js";
 import { toRenderAttachment, toWireAttachment } from "../lib/attachments.js";
 import { useHistory } from "./useHistory.js";
 import { useSSE } from "./useSSE.js";
@@ -34,6 +35,7 @@ const APPROVAL_GATE_PENDING_SEND_ERROR = "approval_gate_pending_send_blocked";
 const OAUTH_CALLBACK_CHANNEL = "ironclaw-product-auth";
 const OAUTH_CALLBACK_STORAGE_KEY = "ironclaw:product-auth:oauth-complete";
 const OAUTH_CALLBACK_MESSAGE_TYPE = "ironclaw:product-auth:oauth-complete";
+const CONNECTION_LOST_SSE_STATUSES = new Set(["disconnected", "reconnecting"]);
 
 async function withAuthTokenTimeout(task) {
   const controller = new AbortController();
@@ -130,6 +132,9 @@ export function useChat(threadId) {
   const [now, setNow] = React.useState(Date.now());
   const [activeRun, setActiveRunState] = React.useState(null);
   const activeRunRef = React.useRef(activeRun);
+  const connectionStatusRef = React.useRef("idle");
+  const connectionInterruptedRunIdsRef = React.useRef(new Set());
+  const connectionInterruptedUnknownRef = React.useRef(false);
   const setActiveRun = React.useCallback((next) => {
     const value = typeof next === "function" ? next(activeRunRef.current) : next;
     activeRunRef.current = value;
@@ -265,6 +270,9 @@ export function useChat(threadId) {
   React.useEffect(() => {
     resetToolActivityState(toolActivityStateRef);
     locallyResolvedGatesRef.current.clear();
+    connectionInterruptedRunIdsRef.current.clear();
+    connectionInterruptedUnknownRef.current = false;
+    connectionStatusRef.current = "idle";
   }, [threadId]);
 
   const cooldownSeconds = Math.max(0, Math.ceil((cooldownUntil - now) / 1000));
@@ -339,6 +347,9 @@ export function useChat(threadId) {
     activeRunRef,
     locallyResolvedGatesRef,
     toolActivityStateRef,
+    connectionStatusRef,
+    connectionInterruptedRunIdsRef,
+    connectionInterruptedUnknownRef,
     // Reborn's projection bridge does not yet emit `Text` items for
     // assistant replies, and never emits `capability_display_preview`
     // items in the projection state — the assistant reply and the rich
@@ -379,6 +390,19 @@ export function useChat(threadId) {
     onEvent: handleEvent,
     enabled: Boolean(threadId),
   });
+
+  React.useEffect(() => {
+    connectionStatusRef.current = sseStatus;
+    if (!CONNECTION_LOST_SSE_STATUSES.has(sseStatus)) return;
+    const runId = activeRunRef.current?.runId || null;
+    if (runId) {
+      connectionInterruptedRunIdsRef.current.add(runId);
+    } else if (isProcessingRef.current) {
+      connectionInterruptedUnknownRef.current = true;
+    }
+    if (!runId && !isProcessingRef.current) return;
+    setMessages((prev) => rewriteConnectionLostRunFailures(prev, { runId }));
+  }, [sseStatus, setMessages]);
 
   // Accepts the composer call shape `{ attachments, threadId }`. The
   // `attachments` are staged objects from `lib/attachments.js`
@@ -529,6 +553,10 @@ export function useChat(threadId) {
         }
         let runSettledBeforeResponse = false;
         if (response?.run_id && shouldTrackLocalRun) {
+          if (connectionInterruptedUnknownRef.current) {
+            connectionInterruptedRunIdsRef.current.add(response.run_id);
+            connectionInterruptedUnknownRef.current = false;
+          }
           const localRunAdmission = localRunAdmissionRef.current;
           runSettledBeforeResponse = Boolean(
             localRunAdmission &&
@@ -887,6 +915,8 @@ export function useChat(threadId) {
       ) {
         localRunAdmissionRef.current = null;
       }
+      connectionInterruptedRunIdsRef.current.delete(runId);
+      connectionInterruptedUnknownRef.current = false;
       await cancelRunRequest({ threadId, runId, reason });
     },
     [activeRun, threadId],

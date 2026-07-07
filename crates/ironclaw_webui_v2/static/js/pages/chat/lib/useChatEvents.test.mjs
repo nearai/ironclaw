@@ -8,6 +8,10 @@ import {
   toolCardFromActivity,
   toolCardFromPreview,
 } from "./history-messages.js";
+import {
+  CONNECTION_LOST_RUN_FAILURE_MESSAGE,
+  failureMessageForRunStatus,
+} from "./failureMessages.js";
 import { gateFromProjectionGate } from "./gates.js";
 import {
   createToolActivityState,
@@ -42,6 +46,9 @@ function createUseChatEventsHarness({
   gateFromEvent = () => null,
   failureMessageForRunStatus = () => "run failed",
   locallyResolvedGatesRef = { current: new Map() },
+  connectionStatusRef,
+  connectionInterruptedRunIdsRef,
+  connectionInterruptedUnknownRef,
 } = {}) {
   let messages = [];
   let pendingGate = null;
@@ -91,6 +98,9 @@ function createUseChatEventsHarness({
     activeRunRef,
     locallyResolvedGatesRef,
     toolActivityStateRef,
+    connectionStatusRef,
+    connectionInterruptedRunIdsRef,
+    connectionInterruptedUnknownRef,
     onRunSettled: (runId, { success }) => settledRuns.push({ runId, success }),
   });
 
@@ -699,6 +709,45 @@ test("useChatEvents: failed terminal projection appends visible error", () => {
     harness.messages[0].content,
     "The run failed because the execution driver rejected the request.",
   );
+});
+
+test("useChatEvents: interrupted driver_unavailable projection shows connection error", () => {
+  const runId = "run-disconnected-driver";
+  const harness = createUseChatEventsHarness({
+    failureMessageForRunStatus,
+    connectionStatusRef: { current: "connected" },
+    connectionInterruptedRunIdsRef: { current: new Set([runId]) },
+  });
+
+  harness.setCurrentActiveRun({
+    runId,
+    threadId: "thread-1",
+    status: "running",
+  });
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            run_status: {
+              run_id: runId,
+              status: "failed",
+              failure_category: "driver_unavailable",
+              failure_summary:
+                "The run failed because the execution driver was temporarily unavailable.",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, `err-${runId}`);
+  assert.equal(harness.messages[0].role, "error");
+  assert.equal(harness.messages[0].content, CONNECTION_LOST_RUN_FAILURE_MESSAGE);
 });
 
 test("useChatEvents: repeated failed projection updates existing error content", () => {
