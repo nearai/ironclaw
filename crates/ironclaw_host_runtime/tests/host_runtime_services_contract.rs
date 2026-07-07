@@ -3376,16 +3376,31 @@ async fn host_runtime_spawn_process_sandbox_rejects_invalid_plan_before_executor
     let mut request = process_sandbox_runtime_request_for_scope(scope);
     request.input = invalid_process_sandbox_input();
 
-    let error = runtime
+    // A malformed/invalid plan is model-fixable: it must surface as a
+    // recoverable, model-visible tool error (InvalidInput) so the run
+    // continues and the model can correct its arguments — never a terminal
+    // HostRuntimeError that kills the whole run.
+    let outcome = runtime
         .spawn_capability(request)
         .await
-        .expect_err("invalid sandbox plans must fail at the host runtime boundary");
+        .expect("invalid sandbox plans must not be a terminal host runtime error");
 
-    match error {
-        ironclaw_host_runtime::HostRuntimeError::InvalidRequest { reason } => {
-            assert!(reason.contains("SandboxProcessPlan"));
+    match outcome {
+        RuntimeCapabilityOutcome::Failed(failure) => {
+            assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+            assert_eq!(
+                failure.disposition(),
+                ironclaw_host_runtime::CapabilityFailureDisposition::ModelVisibleToolError,
+            );
+            assert!(
+                failure
+                    .message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("SandboxProcessPlan")
+            );
         }
-        other => panic!("expected invalid request, got {other:?}"),
+        other => panic!("expected recoverable InvalidInput failure, got {other:?}"),
     }
     assert!(
         sandbox_executor.requests().is_empty(),
@@ -3659,7 +3674,10 @@ async fn host_runtime_spawn_process_sandbox_resume_invalid_plan_fails_before_exe
     };
     let lease = approve_spawn_for_services(&services, &scope, approval_request_id, None).await;
 
-    let error = runtime
+    // Same recoverable contract on the resume path: a malformed/invalid plan
+    // is model-fixable, so it must surface as a recoverable InvalidInput tool
+    // error rather than a terminal host runtime error.
+    let outcome = runtime
         .resume_spawn_capability(RuntimeCapabilityResumeRequest::new(
             context,
             approval_request_id,
@@ -3669,13 +3687,24 @@ async fn host_runtime_spawn_process_sandbox_resume_invalid_plan_fails_before_exe
             process_sandbox_trust_decision(),
         ))
         .await
-        .expect_err("invalid sandbox resume input must fail at the host runtime boundary");
+        .expect("invalid sandbox resume input must not be a terminal host runtime error");
 
-    match error {
-        ironclaw_host_runtime::HostRuntimeError::InvalidRequest { reason } => {
-            assert!(reason.contains("SandboxProcessPlan"));
+    match outcome {
+        RuntimeCapabilityOutcome::Failed(failure) => {
+            assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+            assert_eq!(
+                failure.disposition(),
+                ironclaw_host_runtime::CapabilityFailureDisposition::ModelVisibleToolError,
+            );
+            assert!(
+                failure
+                    .message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("SandboxProcessPlan")
+            );
         }
-        other => panic!("expected invalid request, got {other:?}"),
+        other => panic!("expected recoverable InvalidInput failure, got {other:?}"),
     }
     assert!(
         sandbox_executor.requests().is_empty(),

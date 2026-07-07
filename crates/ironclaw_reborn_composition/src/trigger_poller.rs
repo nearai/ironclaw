@@ -30,9 +30,7 @@ pub(crate) use crate::trigger_poller_trusted_submit::ConversationContentRefMater
 pub(crate) use crate::trigger_poller_trusted_submit::TenantScopedTrustedTriggerFireAuthorizer;
 
 mod active_run_lookup;
-pub(crate) use active_run_lookup::{
-    LocalTriggerTurnSnapshotSource, SnapshotActiveRunLookup, TriggerTurnSnapshotSource,
-};
+pub(crate) use active_run_lookup::SnapshotActiveRunLookup;
 
 pub(crate) const TRIGGER_POLLER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 

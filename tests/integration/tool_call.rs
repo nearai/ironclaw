@@ -181,8 +181,8 @@ async fn disabled_spawn_subagent_capability_is_stripped_from_model_surface() {
 /// at the gateway (`CapabilitySurfaceDenyFilter`, before
 /// `register_provider_tool_call` ever stages an invocation) — the whole
 /// provider response fails with `InvalidOutput` → `Unavailable`, reaching a
-/// terminal `TurnStatus::Failed`/`"model_error"` after exactly one scripted
-/// turn. No `ToolResultReference` is persisted; `assert_tool_invoked`
+/// terminal `TurnStatus::Failed`/`"model_unavailable"` after exactly one
+/// scripted turn. No `ToolResultReference` is persisted; `assert_tool_invoked`
 /// returning `Err` proves the capability was never dispatched.
 #[tokio::test]
 async fn disabled_spawn_subagent_capability_call_anyway_fails_the_run() {
@@ -210,8 +210,8 @@ async fn disabled_spawn_subagent_capability_call_anyway_fails_the_run() {
         .expect("a Failed run must carry a failure detail");
     assert_eq!(
         failure.category(),
-        "model_error",
-        "expected LoopFailureKind::ModelError, got {failure:?}"
+        "model_unavailable",
+        "expected the Unavailable fidelity category (InvalidOutput -> Unavailable), got {failure:?}"
     );
 
     // No side effect: the capability was rejected before dispatch, so it was

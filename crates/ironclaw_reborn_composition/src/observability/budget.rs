@@ -116,6 +116,7 @@ mod tests {
         // Drive one `pre_model_call` to fire the seeding policy.
         let context = test_run_context("tenant-shared-helper", "alice-shared-helper");
         let request = ironclaw_turns::run_profile::LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: vec![],
             surface_version: None,
             model_preference: None,

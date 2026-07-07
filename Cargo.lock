@@ -4308,6 +4308,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "blake3",
+ "deadpool",
  "deadpool-postgres",
  "ironclaw_host_api",
  "ironclaw_observability",
@@ -5468,6 +5469,7 @@ dependencies = [
  "blake3",
  "chrono",
  "chrono-tz",
+ "futures-util",
  "hex",
  "ironclaw_filesystem",
  "ironclaw_host_api",

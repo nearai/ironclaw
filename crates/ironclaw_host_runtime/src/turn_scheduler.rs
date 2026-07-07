@@ -166,6 +166,14 @@ impl TurnRunExecutorError {
         SanitizedFailure::new(failure_category).map(|failure| Self { failure })
     }
 
+    /// Build from an already-sanitized failure, preserving its model-visible
+    /// `detail`. The scheduler records `failure()` on the returned error, so
+    /// this is how a driver-computed `SanitizedFailure` (category + scrubbed
+    /// detail) reaches `TurnLifecycleEvent.detail` and the failure explainer.
+    pub fn from_failure(failure: SanitizedFailure) -> Self {
+        Self { failure }
+    }
+
     pub fn failure(&self) -> &SanitizedFailure {
         &self.failure
     }

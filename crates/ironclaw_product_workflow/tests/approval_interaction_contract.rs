@@ -561,6 +561,13 @@ impl TurnCoordinator for FakeTurnCoordinator {
         Ok(response)
     }
 
+    async fn retry_turn(
+        &self,
+        _request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        panic!("approval interactions must not retry a turn")
+    }
+
     async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
         let run_id = request.run_id;
         self.cancellations.lock().expect("lock").push(request);

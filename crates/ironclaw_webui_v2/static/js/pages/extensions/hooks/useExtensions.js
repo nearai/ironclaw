@@ -103,7 +103,9 @@ export function useExtensions() {
     onSuccess: (res, { displayName, kind, configureAfterInstall, onNeedsSetup, packageRef }) => {
       if (res.success) {
         const message = isChannelExtensionKind(kind)
-          ? `${displayName || "Channel"} installed. Connect the account using the setup panel below.`
+          ? t("extensions.channelInstalledSetup", {
+              name: displayName || t("extensions.kind.channel"),
+            })
           : res.message ||
             res.instructions ||
             t("extensions.installedSuccess", {
@@ -116,7 +118,7 @@ export function useExtensions() {
         if (res.auth_url && !openAuthUrl(res.auth_url).ok) {
           setActionResult({
             type: "error",
-            message: "Authentication URL must use HTTPS.",
+            message: t("extensions.authUrlHttpsRequired"),
           });
         } else if (
           !res.auth_url &&
@@ -164,7 +166,7 @@ export function useExtensions() {
         if (res.auth_url && !openAuthUrl(res.auth_url).ok) {
           setActionResult({
             type: "error",
-            message: "Authentication URL must use HTTPS.",
+            message: t("extensions.authUrlHttpsRequired"),
           });
         }
       } else if (res.auth_url) {
@@ -173,7 +175,7 @@ export function useExtensions() {
         } else {
           setActionResult({
             type: "error",
-            message: "Authentication URL must use HTTPS.",
+            message: t("extensions.authUrlHttpsRequired"),
           });
         }
       } else if (res.awaiting_token) {
