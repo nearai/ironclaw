@@ -227,6 +227,14 @@ jobs:
       # Empty when unspecified → the reusable workflow defaults to ironclaw.
       framework: ${{ needs.parse.outputs.framework }}
       trigger-comment-id: ${{ github.event.comment.id }}
+      # Route the harness compile through our OVH sccache-dist build server so a
+      # new PR SHA only recompiles changed crates. Non-secret half (scheduler URL
+      # + SSH host/user/port) — same vars sccache-dist-smoke.yml uses. Empty →
+      # the reusable's setup step no-ops to local compilation.
+      sccache-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+      sccache-cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
+      sccache-cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
+      sccache-cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
     # Scope inherited secrets to only what the reusable workflow needs.
     # Replaces `secrets: inherit`, which gave the called workflow access
     # to every secret available here.
@@ -236,3 +244,8 @@ jobs:
       # workflow reads this for LLM_BACKEND=nearai. Optional there, so legacy
       # ironclaw runs (OpenRouter) are unaffected if it's unset.
       NEARAI_API_KEY: ${{ secrets.NEARAI_API_KEY }}
+      # sccache-dist secret half — forwarded to the reusable's setup step.
+      SCCACHE_DIST_AUTH_TOKEN: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+      SCCACHE_CACHE_SSH_PRIVATE_KEY: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
+      SCCACHE_CACHE_SSH_KNOWN_HOSTS: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
+      SCCACHE_REDIS_PASSWORD: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
