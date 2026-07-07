@@ -70,6 +70,10 @@ function instantiate(createThreadRequest, overrides = {}) {
     createThreadRequest,
     deleteThreadRequest: async () => {},
     listThreads: async () => ({ threads: [] }),
+    normalizeSidebarTitle: (title, threadId) => {
+      const trimmed = String(title || "").trim();
+      return trimmed && trimmed !== threadId ? trimmed : null;
+    },
     queryClient: { invalidateQueries: () => {} },
     upsertThreadInCache: () => {},
     globalThis: {},
@@ -131,4 +135,33 @@ test("handleCreateThread upserts the created thread without refetching the list"
 
   assert.equal(await hook.createThread(), "thread-created");
   assert.deepEqual(upserted, [{ thread_id: "thread-created", title: "Created" }]);
+});
+
+test("normalizes raw thread id titles out of sidebar records", () => {
+  const hook = instantiate(async () => ({ thread: { thread_id: "unused" } }), {
+    useQuery: () => ({
+      data: {
+        threads: [
+          { thread_id: "thread_raw123456", title: "thread_raw123456" },
+          { thread_id: "thread-named", title: "Named conversation" },
+        ],
+      },
+      isLoading: false,
+    }),
+    normalizeSidebarTitle: (title, threadId) => {
+      const trimmed = String(title || "").trim();
+      if (!trimmed || trimmed === threadId || /^thread[_-]/.test(trimmed)) {
+        return null;
+      }
+      return trimmed;
+    },
+  });
+
+  assert.deepEqual(
+    hook.threads.map((thread) => ({ id: thread.id, title: thread.title })),
+    [
+      { id: "thread_raw123456", title: null },
+      { id: "thread-named", title: "Named conversation" },
+    ],
+  );
 });
