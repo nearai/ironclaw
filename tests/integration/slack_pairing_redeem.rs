@@ -192,7 +192,7 @@ async fn slack_pairing_redeem_rejects_unknown_code() {
     );
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn slack_pairing_redeem_rejects_expired_code() {
     let root = tempfile::tempdir().expect("tempdir");
     let db_path = root.path().join("slack-host-state.db");
@@ -203,6 +203,7 @@ async fn slack_pairing_redeem_rejects_expired_code() {
         .issue_challenge(installation_id(), slack_user_id())
         .await
         .expect("issue_challenge must succeed");
+    // Pairing expiry is stored as wall-clock `Utc::now()`, so use real time here.
     tokio::time::sleep(Duration::from_millis(25)).await;
 
     let result = service
