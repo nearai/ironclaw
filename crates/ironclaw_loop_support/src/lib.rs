@@ -335,14 +335,14 @@ where
     }
 }
 
-fn warn_prompt_context_drops(
+fn trace_prompt_context_drops(
     selection: &prompt_context_budget::PromptContextSelection,
     budget: PromptContextTokenBudget,
 ) {
     if selection.dropped_messages == 0 {
         return;
     }
-    tracing::warn!(
+    tracing::debug!(
         dropped_messages = selection.dropped_messages,
         visible_budget_tokens = budget.visible_transcript_tokens(),
         "prompt context exceeded visible budget; older messages dropped from model context"
@@ -421,7 +421,7 @@ where
             context.messages,
             self.prompt_context_budget,
         );
-        warn_prompt_context_drops(&prompt_context_selection, self.prompt_context_budget);
+        trace_prompt_context_drops(&prompt_context_selection, self.prompt_context_budget);
 
         Ok(LoopContextBundle {
             identity_messages,
@@ -487,7 +487,7 @@ where
         }
 
         if dropped > 0 {
-            tracing::warn!(
+            tracing::debug!(
                 admitted = admitted.len(),
                 dropped,
                 admitted_tokens,
@@ -1308,7 +1308,7 @@ where
                 context.messages,
                 self.prompt_context_budget,
             );
-            warn_prompt_context_drops(&prompt_context_selection, self.prompt_context_budget);
+            trace_prompt_context_drops(&prompt_context_selection, self.prompt_context_budget);
             let mut messages = Vec::with_capacity(prompt_context_selection.selected.len());
             for (message, _) in prompt_context_selection.selected {
                 let Some(content_ref) = message_ref_from_context(&message) else {

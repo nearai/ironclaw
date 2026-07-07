@@ -400,7 +400,7 @@ where
             let (body, truncated) =
                 truncate_message_body_for_compaction(&message.body, self.max_message_bytes);
             if truncated {
-                tracing::warn!(
+                tracing::debug!(
                     sequence = message.sequence,
                     original_bytes,
                     kept_bytes = body.len(),
@@ -659,6 +659,10 @@ fn truncate_message_body_for_compaction(body: &str, max_bytes: usize) -> (String
         return (body.to_string(), false);
     }
     let mut omitted_bytes = body.len().saturating_sub(max_bytes);
+    // Fixed-point iteration on the byte count the marker reports: each pass
+    // recomputes `omitted_bytes` from the actual cut. The sequence is
+    // monotonically non-decreasing and bounded by `body.len()`, so the marker's
+    // digit width stabilizes and the loop terminates at the fixed point.
     loop {
         let marker =
             format!("\n…[compaction: omitted {omitted_bytes} bytes of oversized message body]…\n");
@@ -667,17 +671,14 @@ fn truncate_message_body_for_compaction(body: &str, max_bytes: usize) -> (String
         }
 
         let available = max_bytes - marker.len();
-        let mut head_budget = available.saturating_mul(3) / 4;
-        let mut tail_budget = available.saturating_sub(head_budget);
-        let mut head_end = floor_char_boundary(body, head_budget);
-        let mut tail_start = ceil_char_boundary(body, body.len().saturating_sub(tail_budget));
-
-        while head_end > tail_start {
-            head_budget = head_budget.saturating_sub(1);
-            tail_budget = available.saturating_sub(head_budget);
-            head_end = floor_char_boundary(body, head_budget);
-            tail_start = ceil_char_boundary(body, body.len().saturating_sub(tail_budget));
-        }
+        let head_budget = available.saturating_mul(3) / 4;
+        let tail_budget = available.saturating_sub(head_budget);
+        let head_end = floor_char_boundary(body, head_budget);
+        let tail_start = ceil_char_boundary(body, body.len().saturating_sub(tail_budget));
+        // The slices can never overlap: `head_budget + tail_budget = available
+        // < max_bytes < body.len()` (early returns above), so `head_end <=
+        // head_budget < body.len() - tail_budget <= tail_start`.
+        debug_assert!(head_end <= tail_start);
 
         let actual_omitted_bytes = tail_start.saturating_sub(head_end);
         if actual_omitted_bytes == omitted_bytes {
