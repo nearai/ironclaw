@@ -287,6 +287,67 @@ async fn filesystem_list_threads_skips_stale_thread_index_after_partial_delete()
 }
 
 #[tokio::test]
+async fn filesystem_read_thread_ignores_stale_thread_index_generation() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-read-stale-index", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let request_scope = scope("read-stale-index");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-read-stale-index").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let source_updated_at = thread.updated_at;
+
+    let index_path = thread_index_record_path_for_test(&request_scope, thread.thread_id.as_str());
+    let mut stale_index: serde_json::Value = serde_json::from_slice(
+        &scoped
+            .get(&request_scope.to_resource_scope(), &index_path)
+            .await
+            .unwrap()
+            .expect("ensure_thread writes derived index row")
+            .entry
+            .body,
+    )
+    .unwrap();
+    stale_index["created_at"] = serde_json::json!("2000-01-01T00:00:00Z");
+    stale_index["updated_at"] = serde_json::json!("2099-01-01T00:00:00Z");
+    stale_index["title"] = serde_json::json!("stale derived title");
+    stale_index["flags"]["title_present"] = serde_json::json!(true);
+    scoped
+        .put(
+            &request_scope.to_resource_scope(),
+            &index_path,
+            Entry::bytes(serde_json::to_vec_pretty(&stale_index).unwrap()),
+            CasExpectation::Any,
+        )
+        .await
+        .expect("test setup writes stale derived index row");
+
+    let read = service
+        .read_thread(ThreadHistoryRequest {
+            scope: request_scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        read.title, None,
+        "read_thread must not overlay title from a stale index generation"
+    );
+    assert_eq!(
+        read.updated_at, source_updated_at,
+        "read_thread must not overlay updated_at from a stale index generation"
+    );
+}
+
+#[tokio::test]
 async fn filesystem_delete_thread_removes_inbound_idempotency_records() {
     let backend = Arc::new(InMemoryBackend::new());
     let scoped = scoped_threads_fs_at(backend, "tenant-delete-idempotency", "alice");

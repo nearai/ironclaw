@@ -354,9 +354,19 @@ where
             .read_thread_index_record(&stored.record.scope, &stored.record.thread_id)
             .await?
         {
-            stored.record.updated_at = index.record.updated_at;
-            if stored.record.title.is_none() {
-                stored.record.title = index.record.title;
+            let same_source_generation = index.record.created_at.is_some()
+                && index.record.created_at == stored.record.created_at;
+            if same_source_generation {
+                stored.record.updated_at = index.record.updated_at;
+                if stored.record.title.is_none() {
+                    stored.record.title = index.record.title;
+                }
+            } else {
+                self.refresh_thread_index_from_source(
+                    &stored.record.scope,
+                    &stored.record.thread_id,
+                )
+                .await?;
             }
         }
         Ok(stored.record)
