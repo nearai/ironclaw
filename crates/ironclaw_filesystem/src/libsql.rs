@@ -1014,6 +1014,15 @@ impl RootFilesystem for LibSqlRootFilesystem {
         if deleted > 0 {
             return Ok(());
         }
+        // Review fix (PR #5749): `current_version` below opens its own
+        // connection via `self.connect()`. Drop this call's connection first
+        // so the diagnosis never holds two checkouts at once — the bounded
+        // pool landing in PR #5751 enforces one checkout per call stack, and
+        // a nested open here would exhaust it under contention. `put`'s
+        // zero-rows diagnosis will pick up the same pattern in #5751; this
+        // keeps both call sites correct under either the current unbounded
+        // connect() or the future pooled one.
+        drop(conn);
         // 0 rows: absent row → NotFound (already gone, benign); row present
         // at another version → VersionMismatch (gone stale). Distinct from
         // put's diagnosis, which collapses absent into VersionMismatch.

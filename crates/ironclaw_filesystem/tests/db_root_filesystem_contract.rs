@@ -481,6 +481,47 @@ async fn libsql_delete_if_version_deletes_current_and_rejects_stale_or_missing()
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
+async fn libsql_delete_if_version_any_deletes_single_key_unconditionally() {
+    let filesystem = libsql_root().await;
+    let path = VirtualPath::new("/secrets/leases/CAS-DEL-ANY").unwrap();
+
+    let _v1 = filesystem
+        .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+        .await
+        .unwrap();
+    let log_seq = filesystem.append(&path, b"kept".to_vec()).await.unwrap();
+
+    // Any deletes regardless of the current version.
+    filesystem
+        .delete_if_version(&path, CasExpectation::Any)
+        .await
+        .unwrap();
+    assert!(filesystem.get(&path).await.unwrap().is_none());
+
+    // Single-key: the event log at the same path survives (blind `delete`
+    // sweeps it; `delete_if_version` never does).
+    let log = filesystem.tail(&path, SeqNo::ZERO).await.unwrap();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].seq, log_seq);
+
+    // Second Any delete against the now-absent row is NotFound, not a
+    // silent no-op success — matches the Version-branch's "already gone"
+    // semantics.
+    let err = filesystem
+        .delete_if_version(&path, CasExpectation::Any)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        FilesystemError::NotFound {
+            operation: FilesystemOperation::Delete,
+            ..
+        }
+    ));
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
 async fn libsql_native_put_cas_any_increments_existing_version() {
     let filesystem = libsql_root().await;
     let path = VirtualPath::new("/secrets/leases/L4").unwrap();
@@ -1623,6 +1664,47 @@ mod postgres_tests {
         let log = fs.tail(&path, SeqNo::ZERO).await.unwrap();
         assert_eq!(log.len(), 1);
         assert_eq!(log[0].seq, log_seq);
+    }
+
+    #[tokio::test]
+    async fn postgres_delete_if_version_any_deletes_single_key_unconditionally() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let path = vpath(&prefix, "cas_delete_any");
+
+        let _v1 = fs
+            .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+            .await
+            .unwrap();
+        let log_seq = fs.append(&path, b"kept".to_vec()).await.unwrap();
+
+        // Any deletes regardless of the current version.
+        fs.delete_if_version(&path, CasExpectation::Any)
+            .await
+            .unwrap();
+        assert!(fs.get(&path).await.unwrap().is_none());
+
+        // Single-key: the event log at the same path survives (blind
+        // `delete` sweeps it; `delete_if_version` never does).
+        let log = fs.tail(&path, SeqNo::ZERO).await.unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].seq, log_seq);
+
+        // Second Any delete against the now-absent row is NotFound, not a
+        // silent no-op success — matches the Version-branch's "already gone"
+        // semantics.
+        let err = fs
+            .delete_if_version(&path, CasExpectation::Any)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FilesystemError::NotFound {
+                operation: FilesystemOperation::Delete,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

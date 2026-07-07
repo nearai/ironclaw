@@ -530,6 +530,63 @@ async fn begin_with_write_propagates_backend_unsupported() {
     );
 }
 
+#[tokio::test]
+async fn delete_if_version_denies_when_delete_missing() {
+    // Review fix (PR #5749): the delete_if_version boundary had no scoped
+    // permission-gate coverage. Mount grants read/write/list but not delete;
+    // the gate must reject before any backend dispatch.
+    let scoped = scoped_in_memory(no_op(true, true, true, false));
+    let path = ScopedPath::new("/workspace/a").unwrap();
+    scoped
+        .put(
+            &test_scope(),
+            &path,
+            record_with_scope("acme"),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+
+    let err = expect_err(
+        scoped
+            .delete_if_version(&test_scope(), &path, CasExpectation::Any)
+            .await,
+    );
+    assert!(matches!(
+        err,
+        FilesystemError::PermissionDenied {
+            operation: FilesystemOperation::Delete,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn delete_if_version_succeeds_with_delete_and_routes_to_backend() {
+    // Review fix (PR #5749): a mount with delete permission must route a
+    // correct-version CAS delete through to the backend and actually remove
+    // the entry — proving the scoped boundary isn't just a passthrough stub.
+    let scoped = scoped_in_memory(no_op(true, true, true, true));
+    let path = ScopedPath::new("/workspace/a").unwrap();
+    let version = scoped
+        .put(
+            &test_scope(),
+            &path,
+            record_with_scope("acme"),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+
+    scoped
+        .delete_if_version(&test_scope(), &path, CasExpectation::Version(version))
+        .await
+        .unwrap();
+
+    let after = scoped.get(&test_scope(), &path).await.unwrap();
+    assert!(after.is_none(), "entry must be gone after CAS delete");
+}
+
 #[derive(Default)]
 struct TxnStubBackend;
 
