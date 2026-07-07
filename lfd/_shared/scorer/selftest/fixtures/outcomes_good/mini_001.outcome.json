@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "case_id": "mini_001",
+  "status": "ran",
+  "error": null,
+  "replies": [
+    {"channel": "slack", "text": "posted: ack for U123AB, order 90210441, due 2026-07-01", "seq": 5}
+  ],
+  "tool_invocations": [
+    {"name": "builtin.some_tool", "params_json": "{\"x\": 1, \"note\": \"prep U123AB\"}", "ok": true, "seq": 2}
+  ],
+  "egress": [
+    {"method": "POST", "url": "https://slack.com/api/chat.postMessage", "seq": 4}
+  ],
+  "events": [
+    {"kind": "TurnStarted", "seq": 1},
+    {"kind": "TurnCompleted", "seq": 6}
+  ],
+  "gates": [
+    {"kind": "approval", "resolution": "approved", "seq": 3}
+  ],
+  "state": {},
+  "leaks": {"secret_scan_hits": 0},
+  "meta": {"profile": "selftest_profile", "runner_hash": "SELFTEST", "duration_ms": 12}
+}

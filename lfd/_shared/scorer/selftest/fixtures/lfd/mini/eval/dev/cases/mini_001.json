@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "case_id": "mini_001",
+  "profile": "selftest_profile",
+  "title": "inbound mention posts an update and acks",
+  "setup": {
+    "extensions": ["slack"],
+    "secrets": [{"credential_name": "slack_bot_token", "value": "test-token-1"}],
+    "memory_docs": [],
+    "triggers": [],
+    "http_stubs": [{"key": "slack.postMessage", "status": 200, "body": {"ok": true}}],
+    "profile_extra": {"display_name": "Janet Q", "workspace_numeric_id": 90210441}
+  },
+  "llm_script": [
+    {"turn": 1, "steps": [
+      {"tool": "builtin.some_tool", "params": {"x": 1, "note": "prep U123AB"}},
+      {"text": "posted: ack for U123AB, order 90210441, due 2026-07-01"}
+    ]}
+  ],
+  "inbound": [
+    {"channel": "slack", "payload": {"type": "app_mention", "user": "U123AB", "text": "post update for order 90210441 due 2026-07-01 from jane.doe@example.com"}}
+  ],
+  "state_queries": [],
+  "live": false
+}

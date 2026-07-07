@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "base_ref": "d9eaae2bb",
+  "caps": [
+    {
+      "name": "no_smoke_case_branching",
+      "scope": "diff",
+      "paths": [
+        "src/**/*.rs",
+        "crates/**/*.rs",
+        "tests/**/*.rs"
+      ],
+      "pattern": "smoke_dev_",
+      "max_count": 0
+    }
+  ],
+  "holdout_canaries": [
+    "LFDH-smoke-pilot-8c5e1a0d"
+  ],
+  "spend_ceiling_usd": 0.0
+}
