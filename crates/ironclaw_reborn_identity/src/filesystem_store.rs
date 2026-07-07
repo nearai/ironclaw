@@ -149,6 +149,52 @@ where
             .map(|_version| ())
     }
 
+    /// Gate a resolved existing user before a session is minted for it.
+    ///
+    /// Two concerns ride the one record read every existing-identity
+    /// resolution already implies:
+    ///
+    ///  1. **Suspended accounts fail closed.** A suspended user must not mint a
+    ///     fresh session, so resolving their external identity returns
+    ///     [`RebornIdentityError::UserSuspended`] — the SSO adapter maps it to a
+    ///     403, never a 503. New-user creation is unaffected (a freshly minted
+    ///     account is always `Active`).
+    ///  2. **Legacy tenantless records migrate forward.** Records written before
+    ///     the admin surface existed carry `tenant_id: None` and are otherwise
+    ///     visible to every tenant's admin listing. On the owning user's next
+    ///     login we backfill the resolving tenant so the record stops being
+    ///     globally visible. Idempotent — only fires while `tenant_id` is None.
+    ///
+    /// A resolved identity that points at a missing user record is a backend
+    /// inconsistency (the identity record is always written after the user
+    /// record); rather than block the login, the id passes through unchanged,
+    /// preserving the prior behavior of the read-only fast path.
+    async fn gate_resolved_user(
+        &self,
+        user_id: UserId,
+        tenant: &str,
+    ) -> Result<UserId, RebornIdentityError> {
+        let path = user_path(user_id.as_str())?;
+        let Some(user) = self.read_record::<StoredUser>(&path).await? else {
+            return Ok(user_id);
+        };
+        if user.status == StoredUserStatus::Suspended {
+            return Err(RebornIdentityError::UserSuspended(
+                user_id.as_str().to_string(),
+            ));
+        }
+        if user.tenant_id.is_none() {
+            let tenant_owned = tenant.to_string();
+            self.mutate_user(&user_id, move |record| {
+                if record.tenant_id.is_none() {
+                    record.tenant_id = Some(tenant_owned.clone());
+                }
+            })
+            .await?;
+        }
+        Ok(user_id)
+    }
+
     /// Read the user already bound to an external identity, or `None`.
     async fn identity_user(
         &self,
@@ -229,7 +275,9 @@ where
 
         // Fast path: a returning external identity resolves with a read only.
         if let Some(record) = self.read_record::<StoredExternalIdentity>(&id_path).await? {
-            return to_user_id(record.user_id);
+            return self
+                .gate_resolved_user(to_user_id(record.user_id)?, tenant)
+                .await;
         }
 
         let lower_email = verified_email_key(&identity);
@@ -249,7 +297,9 @@ where
         // for the same key may have created it between the read above and the
         // lock, so the create path below must not mint a second user.
         if let Some(record) = self.read_record::<StoredExternalIdentity>(&id_path).await? {
-            return to_user_id(record.user_id);
+            return self
+                .gate_resolved_user(to_user_id(record.user_id)?, tenant)
+                .await;
         }
 
         let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
@@ -264,7 +314,10 @@ where
                 let user_id = to_user_id(index.user_id)?;
                 self.put_identity_reconciling(&id_path, &user_id, &identity, &now)
                     .await?;
-                return Ok(user_id);
+                // The identity link is legitimate even for a suspended account;
+                // we still refuse to mint a session for one. Gating after the
+                // link write means a later unsuspend fast-paths cleanly.
+                return self.gate_resolved_user(user_id, tenant).await;
             }
         }
 

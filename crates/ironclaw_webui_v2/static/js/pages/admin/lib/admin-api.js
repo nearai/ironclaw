@@ -15,10 +15,19 @@ function normalizeUser(record) {
   return { ...record, id: record.user_id };
 }
 
-export async function fetchAdminUsers() {
-  const response = await apiFetch(`${ADMIN_BASE}/users`);
+// Lists one bounded page of users. The server clamps `limit` and returns a
+// `next_cursor` for the following page; callers that omit params get the
+// server's default page size. Backward compatible: `fetchAdminUsers()` with no
+// args still requests the base route with no query string.
+export async function fetchAdminUsers(params) {
+  const query = new URLSearchParams();
+  if (params?.status) query.set("status", params.status);
+  if (params?.limit != null) query.set("limit", String(params.limit));
+  if (params?.cursor) query.set("cursor", params.cursor);
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  const response = await apiFetch(`${ADMIN_BASE}/users${suffix}`);
   const users = Array.isArray(response?.users) ? response.users.map(normalizeUser) : [];
-  return { users, total: users.length };
+  return { users, total: users.length, nextCursor: response?.next_cursor ?? null };
 }
 
 export async function fetchAdminUser(id) {
@@ -85,6 +94,11 @@ export async function activateAdminUser(id) {
 // signed session bearer). Re-issuing a token for an existing user needs a
 // dedicated endpoint that does not exist yet, so this rejects with a clear
 // message rather than hitting a missing route. Tracked as a follow-up.
+//
+// The admin UI no longer calls this: the re-issue "Create Token" controls were
+// removed from the existing-user views (user-detail + users-tab) so an admin
+// can't trigger a guaranteed rejection. The export is kept only so the
+// contract stays covered by admin-api.test.js until a real endpoint lands.
 export function createUserToken(_userId, _name) {
   return Promise.reject(
     new Error("API tokens are issued only when a user is created (re-issue not yet supported)"),

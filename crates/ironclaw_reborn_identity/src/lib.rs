@@ -118,6 +118,12 @@ pub enum RebornIdentityError {
     /// from `Backend` so the product-workflow facade can map it to a 404.
     #[error("no user record for id: {0}")]
     UserNotFound(String),
+    /// `resolve_or_create` resolved an external identity to an existing user
+    /// whose account is suspended. Distinct from `Backend` so the SSO host
+    /// adapter can map it to a fail-closed 403 (login refused) instead of a
+    /// 503 backend fault: a suspended user must not mint a fresh session.
+    #[error("user account is suspended: {0}")]
+    UserSuspended(String),
     /// `resolve_or_create` was called for a `ChannelActor` identity. Channel
     /// actors are never mint-capable — the resolver contract routes them
     /// through [`lookup`](RebornIdentityResolver::lookup) /

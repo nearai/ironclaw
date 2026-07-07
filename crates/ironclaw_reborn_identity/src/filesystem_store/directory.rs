@@ -125,7 +125,7 @@ where
     /// Lock-free read-modify-write of one user record through the shared
     /// `cas_update` helper. `mutate` is re-runnable (it may fire on every CAS
     /// retry), so it must only set fields. Returns the mutated record.
-    async fn mutate_user<M>(
+    pub(super) async fn mutate_user<M>(
         &self,
         user_id: &UserId,
         mutate: M,
@@ -248,23 +248,43 @@ where
         &self,
         tenant_id: &TenantId,
         status: Option<RebornUserStatus>,
+        after: Option<&UserId>,
+        limit: usize,
     ) -> Result<Vec<RebornUser>, RebornIdentityError> {
+        // A zero limit can never fit a record; short-circuit before any I/O.
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let dir = users_dir_path()?;
         let entries = match self.filesystem.list_dir(&self.scope, &dir).await {
             Ok(entries) => entries,
             Err(error) if is_absent_dir(&error) => return Ok(Vec::new()),
             Err(error) => return Err(backend(error)),
         };
+        // Decode candidate user ids from the file names first — cheap, no
+        // record reads. File names are base64url-encoded, so name order is NOT
+        // id order; ordering by the DECODED id is what makes the `after` cursor
+        // a stable, consistent seek point across calls.
+        let mut candidates: Vec<(String, String)> = entries
+            .into_iter()
+            .filter(|entry| entry.file_type == FileType::File)
+            .filter_map(|entry| user_id_from_file_name(&entry.name).map(|id| (id, entry.name)))
+            .collect();
+        candidates.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let after = after.map(UserId::as_str);
         let want_status = status.map(status_to_stored);
-        let mut users = Vec::new();
-        for entry in entries {
-            if entry.file_type != FileType::File {
+        // Only up to `limit` MATCHING records are read past the cursor — the
+        // scan stops early instead of loading and allocating the whole tenant.
+        let mut users = Vec::with_capacity(limit.min(candidates.len()));
+        for (user_id, name) in candidates {
+            // Skip forward to strictly after the cursor.
+            if let Some(after) = after
+                && user_id.as_str() <= after
+            {
                 continue;
             }
-            let Some(user_id) = user_id_from_file_name(&entry.name) else {
-                continue;
-            };
-            let path = child_path(&dir, &entry.name)?;
+            let path = child_path(&dir, &name)?;
             let Some(stored) = self.read_record::<StoredUser>(&path).await? else {
                 continue;
             };
@@ -284,6 +304,9 @@ where
                 continue;
             }
             users.push(to_reborn_user(user_id, stored)?);
+            if users.len() >= limit {
+                break;
+            }
         }
         Ok(users)
     }
@@ -419,8 +442,11 @@ where
         &self,
         tenant_id: &TenantId,
     ) -> Result<usize, RebornIdentityError> {
+        // Last-admin protection needs the TRUE active-admin count, so this scan
+        // is deliberately unbounded (`usize::MAX`) rather than a bounded page.
+        // Active admins are few, so reading them all is cheap.
         let active = self
-            .list_users(tenant_id, Some(RebornUserStatus::Active))
+            .list_users(tenant_id, Some(RebornUserStatus::Active), None, usize::MAX)
             .await?;
         Ok(active
             .into_iter()

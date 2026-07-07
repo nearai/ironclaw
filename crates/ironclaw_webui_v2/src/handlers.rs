@@ -64,7 +64,7 @@ use ironclaw_product_workflow::{
 };
 use serde::{Deserialize, Serialize};
 
-use ironclaw_host_api::UserId;
+use ironclaw_host_api::{SecretHandle, UserId};
 
 use crate::error::WebUiV2HttpError;
 use crate::router::{WebUiV2Capabilities, WebUiV2State};
@@ -189,9 +189,10 @@ pub async fn delete_thread(
 //
 // Every handler delegates straight to the facade, which enforces admin
 // authorization (operator token or admin/owner role) and last-admin protection.
-// The `{user_id}` path segment is parsed into a `UserId` here so a malformed id
-// is a 400 before the facade runs; the `{handle}` segment stays a String and is
-// validated deeper (the secret store rejects a bad handle).
+// The `{user_id}` and `{handle}` path segments are parsed into their domain
+// types (`UserId` / `SecretHandle`) here so a malformed value is a sanitized
+// 400 before the facade runs — raw strings are a boundary format and never
+// travel deeper than this edge (see `.claude/rules/types.md`).
 
 /// Parse a `{user_id}` path segment into a `UserId`, mapping a malformed value
 /// to a sanitized `400 invalid_request` before the facade is touched.
@@ -199,6 +200,18 @@ fn parse_admin_user_id(raw: String) -> Result<UserId, WebUiV2HttpError> {
     UserId::new(raw).map_err(|_| {
         WebUiV2HttpError::from(RebornServicesError::from(WebUiInboundValidationError::new(
             "user_id",
+            WebUiInboundValidationCode::InvalidId,
+        )))
+    })
+}
+
+/// Parse a `{handle}` path segment into a `SecretHandle`, mapping a malformed
+/// value to a sanitized `400 invalid_request` before the facade is touched.
+/// Keeps a bad handle a client fault (400), never an internal 500 downstream.
+fn parse_admin_secret_handle(raw: String) -> Result<SecretHandle, WebUiV2HttpError> {
+    SecretHandle::new(raw).map_err(|_| {
+        WebUiV2HttpError::from(RebornServicesError::from(WebUiInboundValidationError::new(
+            "handle",
             WebUiInboundValidationCode::InvalidId,
         )))
     })
@@ -321,6 +334,7 @@ pub async fn admin_put_user_secret(
     Json(body): Json<RebornAdminPutSecretRequest>,
 ) -> Result<Json<RebornAdminSecretResponse>, WebUiV2HttpError> {
     let user_id = parse_admin_user_id(user_id)?;
+    let handle = parse_admin_secret_handle(handle)?;
     Ok(Json(
         state
             .services()
@@ -336,6 +350,7 @@ pub async fn admin_delete_user_secret(
     Path((user_id, handle)): Path<(String, String)>,
 ) -> Result<Json<RebornAdminSecretDeletedResponse>, WebUiV2HttpError> {
     let user_id = parse_admin_user_id(user_id)?;
+    let handle = parse_admin_secret_handle(handle)?;
     Ok(Json(
         state
             .services()

@@ -825,7 +825,10 @@ async fn legacy_stored_user_json_deserializes_with_defaults() {
     assert!(user.tenant_id.is_none(), "legacy record has no tenant");
     // A legacy record (no tenant) is enumerated for the single configured
     // tenant.
-    let listed = store.list_users(&tenant("t"), None).await.expect("list");
+    let listed = store
+        .list_users(&tenant("t"), None, None, 10_000)
+        .await
+        .expect("list");
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].user_id.as_str(), "legacy-user");
 }
@@ -863,16 +866,71 @@ async fn create_then_list_and_get_roundtrip() {
         .expect("present");
     assert_eq!(fetched, created);
 
-    let listed = store.list_users(&t, None).await.expect("list");
+    let listed = store
+        .list_users(&t, None, None, 10_000)
+        .await
+        .expect("list");
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].user_id, created.user_id);
 
     // A different tenant does not see this user.
     let other = store
-        .list_users(&tenant("other"), None)
+        .list_users(&tenant("other"), None, None, 10_000)
         .await
         .expect("list other");
     assert!(other.is_empty(), "users are tenant-scoped in enumeration");
+}
+
+#[tokio::test]
+async fn list_users_paginates_by_user_id_cursor() {
+    // Regression: the admin listing must return bounded pages and page through
+    // the whole tenant via the cursor without gaps or duplicates, instead of
+    // scanning and allocating every user in one unbounded response.
+    let store = store();
+    let t = tenant("acme");
+    let by = UserId::new("bootstrap").unwrap();
+    for _ in 0..5 {
+        store
+            .create_user(&t, None, None, RebornUserRole::Member, &by)
+            .await
+            .expect("create");
+    }
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut cursor: Option<UserId> = None;
+    loop {
+        let page = store
+            .list_users(&t, None, cursor.as_ref(), 2)
+            .await
+            .expect("page");
+        assert!(
+            page.len() <= 2,
+            "a page must never exceed the requested limit"
+        );
+        for window in page.windows(2) {
+            assert!(
+                window[0].user_id.as_str() < window[1].user_id.as_str(),
+                "records within a page are user_id ascending"
+            );
+        }
+        for user in &page {
+            let id = user.user_id.as_str().to_string();
+            assert!(!seen.contains(&id), "no user appears on two pages");
+            seen.push(id);
+        }
+        if page.len() < 2 {
+            break;
+        }
+        cursor = Some(page.last().expect("non-empty page").user_id.clone());
+    }
+
+    assert_eq!(seen.len(), 5, "pagination visits every user exactly once");
+    let mut globally_sorted = seen.clone();
+    globally_sorted.sort();
+    assert_eq!(
+        seen, globally_sorted,
+        "the concatenation of pages is globally user_id ascending"
+    );
 }
 
 #[tokio::test]
@@ -970,6 +1028,95 @@ async fn count_active_admins_tracks_role_and_status() {
         store.count_active_admins(&t).await.expect("count"),
         1,
         "a suspended admin is not an active admin"
+    );
+}
+
+#[tokio::test]
+async fn resolve_or_create_refuses_a_suspended_account_a_fresh_session() {
+    // Regression: suspending a user must lock them out of the product, not only
+    // the admin routes. A fresh SSO login (resolve_or_create) for a suspended
+    // account fails closed so the host adapter can map it to a 403 instead of
+    // minting a new session.
+    let store = store();
+    let t = tenant("acme");
+    let email = Some("alice@example.com");
+
+    let user = store
+        .resolve_or_create(oauth(&t, "google", "sub-1", email, true))
+        .await
+        .expect("first login mints an active user");
+
+    store
+        .update_status(&user, RebornUserStatus::Suspended)
+        .await
+        .expect("an admin suspends the account");
+
+    let err = store
+        .resolve_or_create(oauth(&t, "google", "sub-1", email, true))
+        .await
+        .expect_err("a suspended account must not resolve a fresh session");
+    assert!(
+        matches!(err, RebornIdentityError::UserSuspended(_)),
+        "suspended re-login must fail closed with UserSuspended, got {err:?}"
+    );
+
+    // Reactivation restores login and converges on the SAME canonical user.
+    store
+        .update_status(&user, RebornUserStatus::Active)
+        .await
+        .expect("reactivate");
+    let reactivated = store
+        .resolve_or_create(oauth(&t, "google", "sub-1", email, true))
+        .await
+        .expect("a reactivated account logs in again");
+    assert_eq!(reactivated, user, "reactivation resolves the same user");
+}
+
+#[tokio::test]
+async fn resolve_or_create_backfills_tenant_onto_a_legacy_tenantless_record() {
+    // Regression: records written before the admin surface existed carry
+    // `tenant_id: None` and would otherwise be visible to every tenant's admin
+    // listing. The owning user's next login backfills the resolving tenant so
+    // the record stops being globally visible.
+    let store = store();
+    let t = tenant("acme");
+    let email = Some("legacy@example.com");
+
+    let user = store
+        .resolve_or_create(oauth(&t, "google", "sub-legacy", email, true))
+        .await
+        .expect("mint");
+
+    // Rewrite the user record as a pre-admin, tenantless legacy row.
+    let path = user_path(user.as_str()).expect("user path");
+    let mut stored = store
+        .read_record::<StoredUser>(&path)
+        .await
+        .expect("read record")
+        .expect("record exists");
+    stored.tenant_id = None;
+    store
+        .write_record(&path, &stored, CasExpectation::Any)
+        .await
+        .expect("rewrite as tenantless");
+
+    // The next login for the same identity resolves the user and backfills.
+    let resolved = store
+        .resolve_or_create(oauth(&t, "google", "sub-legacy", email, true))
+        .await
+        .expect("re-login");
+    assert_eq!(resolved, user);
+
+    let after = store
+        .read_record::<StoredUser>(&path)
+        .await
+        .expect("read record")
+        .expect("record")
+        .tenant_id;
+    assert_eq!(
+        after.as_deref(),
+        Some("acme"),
+        "login must backfill the resolving tenant onto a legacy tenantless record"
     );
 }
 

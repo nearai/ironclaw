@@ -75,10 +75,12 @@ impl AdminUserService for RebornAdminUserDirectory {
         &self,
         tenant: &TenantId,
         status: Option<AdminUserStatus>,
+        after: Option<&UserId>,
+        limit: usize,
     ) -> Result<Vec<AdminUserRecord>, AdminUserError> {
         let users = self
             .directory
-            .list_users(tenant, status.map(status_to_identity))
+            .list_users(tenant, status.map(status_to_identity), after, limit)
             .await
             .map_err(map_identity_error)?;
         Ok(users.into_iter().map(to_admin_record).collect())
@@ -211,14 +213,12 @@ impl AdminUserService for RebornAdminUserDirectory {
         &self,
         tenant: &TenantId,
         user_id: &UserId,
-        handle: String,
+        handle: SecretHandle,
         material: SecretString,
     ) -> Result<AdminUserSecretMeta, AdminUserError> {
-        // The handle comes straight from the request path and is NOT validated
-        // upstream, so a malformed handle is the client's fault → InvalidInput
-        // (400), not an internal 500. Validation is fail-closed: a rejected
-        // handle writes nothing.
-        let handle = SecretHandle::new(&handle).map_err(|_| AdminUserError::InvalidInput)?;
+        // `handle` is already the validated domain type — the WebUI handler
+        // parses `SecretHandle` at the HTTP edge (a malformed handle is a 400
+        // there), so the adapter never sees a raw string to re-validate.
         let meta = self
             .secrets
             .put(tenant, user_id, handle, material)
@@ -231,9 +231,8 @@ impl AdminUserService for RebornAdminUserDirectory {
         &self,
         tenant: &TenantId,
         user_id: &UserId,
-        handle: String,
+        handle: SecretHandle,
     ) -> Result<bool, AdminUserError> {
-        let handle = SecretHandle::new(&handle).map_err(|_| AdminUserError::InvalidInput)?;
         self.secrets
             .delete(tenant, user_id, &handle)
             .await
@@ -305,6 +304,10 @@ fn map_identity_error(error: RebornIdentityError) -> AdminUserError {
         RebornIdentityError::InvalidUserId(_) | RebornIdentityError::ChannelActorNotMintable => {
             AdminUserError::Internal
         }
+        // Only `resolve_or_create` (the SSO login path) raises this; the admin
+        // directory operations never resolve external identities, so reaching
+        // it here is a backend inconsistency rather than the client's fault.
+        RebornIdentityError::UserSuspended(_) => AdminUserError::Internal,
     }
 }
 

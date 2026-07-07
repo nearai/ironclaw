@@ -85,14 +85,20 @@ pub struct RebornUserProfileUpdate {
 /// boundary the architecture tests enforce).
 #[async_trait]
 pub trait RebornUserDirectory: Send + Sync {
-    /// Every user in `tenant_id`, optionally filtered by status. Records with
-    /// no persisted tenant (written before the admin surface) are treated as
+    /// One bounded page of users in `tenant_id`, optionally filtered by status,
+    /// ordered by `user_id` ascending and starting strictly after the `after`
+    /// cursor. At most `limit` records are returned, so the admin surface never
+    /// scans-and-allocates the entire tenant in one call. Records with no
+    /// persisted tenant (written before the admin surface) are treated as
     /// belonging to the requested tenant — correct for single-tenant
-    /// deployments, which is the only shape that has such records.
+    /// deployments, which is the only shape that has such records; a returning
+    /// user's next login backfills the resolving tenant onto them.
     async fn list_users(
         &self,
         tenant_id: &TenantId,
         status: Option<RebornUserStatus>,
+        after: Option<&UserId>,
+        limit: usize,
     ) -> Result<Vec<RebornUser>, RebornIdentityError>;
 
     /// One user by id, or `None` if no record exists.

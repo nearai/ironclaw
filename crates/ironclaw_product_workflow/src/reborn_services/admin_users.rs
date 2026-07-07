@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{TenantId, UserId};
+use ironclaw_host_api::{SecretHandle, TenantId, UserId};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
@@ -119,12 +119,24 @@ pub enum AdminUserError {
 /// body). `get_user` must return `Ok(None)` — not `Err(NotFound)` — for a user
 /// that does not exist in the tenant, so the facade can distinguish "no such
 /// user" (404) from "exists but you may not" (403) at the authorization seam.
+/// Default page size for `list_users` when the caller omits `limit`.
+pub const ADMIN_USER_LIST_DEFAULT_LIMIT: usize = 100;
+/// Hard ceiling on the `list_users` page size, so a caller cannot widen the
+/// response (and the backing directory scan) by passing a huge `limit`.
+pub const ADMIN_USER_LIST_MAX_LIMIT: usize = 200;
+
 #[async_trait]
 pub trait AdminUserService: Send + Sync {
+    /// One bounded page of users in `tenant`, optionally filtered by `status`,
+    /// ordered by `user_id` ascending and starting strictly after the `after`
+    /// cursor. At most `limit` records are returned; the facade derives the
+    /// next cursor from the last record when a full page comes back.
     async fn list_users(
         &self,
         tenant: &TenantId,
         status: Option<AdminUserStatus>,
+        after: Option<&UserId>,
+        limit: usize,
     ) -> Result<Vec<AdminUserRecord>, AdminUserError>;
 
     async fn get_user(
@@ -176,7 +188,7 @@ pub trait AdminUserService: Send + Sync {
         &self,
         tenant: &TenantId,
         user_id: &UserId,
-        handle: String,
+        handle: SecretHandle,
         material: SecretString,
     ) -> Result<AdminUserSecretMeta, AdminUserError>;
 
@@ -184,7 +196,7 @@ pub trait AdminUserService: Send + Sync {
         &self,
         tenant: &TenantId,
         user_id: &UserId,
-        handle: String,
+        handle: SecretHandle,
     ) -> Result<bool, AdminUserError>;
 }
 
@@ -201,6 +213,8 @@ impl AdminUserService for RejectingAdminUserService {
         &self,
         _tenant: &TenantId,
         _status: Option<AdminUserStatus>,
+        _after: Option<&UserId>,
+        _limit: usize,
     ) -> Result<Vec<AdminUserRecord>, AdminUserError> {
         Err(AdminUserError::Unavailable)
     }
@@ -274,7 +288,7 @@ impl AdminUserService for RejectingAdminUserService {
         &self,
         _tenant: &TenantId,
         _user_id: &UserId,
-        _handle: String,
+        _handle: SecretHandle,
         _material: SecretString,
     ) -> Result<AdminUserSecretMeta, AdminUserError> {
         Err(AdminUserError::Unavailable)
@@ -284,7 +298,7 @@ impl AdminUserService for RejectingAdminUserService {
         &self,
         _tenant: &TenantId,
         _user_id: &UserId,
-        _handle: String,
+        _handle: SecretHandle,
     ) -> Result<bool, AdminUserError> {
         Err(AdminUserError::Unavailable)
     }
@@ -297,12 +311,24 @@ impl AdminUserService for RejectingAdminUserService {
 pub struct RebornAdminUserListQuery {
     #[serde(default)]
     pub status: Option<AdminUserStatus>,
+    /// Page size. Clamped to `[1, ADMIN_USER_LIST_MAX_LIMIT]`; omitted means
+    /// `ADMIN_USER_LIST_DEFAULT_LIMIT`.
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Opaque forward cursor: the `next_cursor` echoed from a prior response
+    /// (a `user_id`). The browser never interprets it.
+    #[serde(default)]
+    pub cursor: Option<String>,
 }
 
 /// Response for `GET /admin/users`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RebornAdminUserListResponse {
     pub users: Vec<AdminUserRecord>,
+    /// Cursor to pass as `?cursor=` for the next page, or `None` when the
+    /// caller has reached the end of the tenant's users.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 /// Body for `POST /admin/users`.

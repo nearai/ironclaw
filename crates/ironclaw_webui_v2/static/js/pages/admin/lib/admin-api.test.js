@@ -17,8 +17,10 @@ import assert from "node:assert/strict";
 import { test, beforeEach, afterEach } from "node:test";
 import {
   fetchAdminUsers,
+  fetchAdminUser,
   createAdminUser,
   updateAdminUser,
+  deleteAdminUser,
   suspendAdminUser,
   activateAdminUser,
   fetchUserSecrets,
@@ -115,7 +117,58 @@ test("fetchAdminUsers GETs the users route and normalizes id === user_id", async
 test("fetchAdminUsers returns an empty list when the response has no users array", async () => {
   stubFetch(() => ({}));
   const result = await fetchAdminUsers();
-  assert.deepEqual(result, { users: [], total: 0 });
+  assert.deepEqual(result, { users: [], total: 0, nextCursor: null });
+});
+
+test("fetchAdminUsers forwards status/limit/cursor and surfaces next_cursor", async () => {
+  stubFetch(() => ({ users: [{ user_id: "u-9" }], next_cursor: "u-9" }));
+
+  const result = await fetchAdminUsers({ status: "suspended", limit: 2, cursor: "u-1" });
+
+  assert.equal(calls.length, 1);
+  // Query params are appended when provided; order follows insertion.
+  assert.equal(
+    calls[0].path,
+    "/api/webchat/v2/admin/users?status=suspended&limit=2&cursor=u-1",
+  );
+  assert.equal(result.nextCursor, "u-9");
+  assert.equal(result.users[0].id, "u-9");
+});
+
+test("fetchAdminUser GETs the URL-encoded user route and normalizes id === user_id", async () => {
+  stubFetch(() => ({ user: { user_id: "a b/c", email: "x@example.com" } }));
+
+  const result = await fetchAdminUser("a b/c");
+
+  assert.equal(calls.length, 1);
+  // The id needs percent-encoding: space -> %20, slash -> %2F.
+  assert.equal(calls[0].path, "/api/webchat/v2/admin/users/a%20b%2Fc");
+  // No explicit method => GET.
+  assert.equal(calls[0].init.method, undefined);
+
+  assert.equal(result.id, "a b/c");
+  assert.equal(result.user_id, "a b/c");
+  assert.equal(result.email, "x@example.com");
+});
+
+test("fetchAdminUser returns null WITHOUT calling apiFetch when the id is empty", async () => {
+  stubFetch(() => ({ user: { user_id: "should-not-be-read" } }));
+
+  assert.equal(await fetchAdminUser(null), null);
+  assert.equal(await fetchAdminUser(""), null);
+  assert.equal(await fetchAdminUser(undefined), null);
+  // A missing id must never hit the wire (no `/users/undefined` request).
+  assert.equal(calls.length, 0);
+});
+
+test("deleteAdminUser DELETEs the URL-encoded user route", async () => {
+  stubFetch(() => ({ ok: true }));
+
+  await deleteAdminUser("a b/c");
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, "/api/webchat/v2/admin/users/a%20b%2Fc");
+  assert.equal(calls[0].init.method, "DELETE");
 });
 
 test("createAdminUser POSTs the payload, defaults role, and surfaces the one-time token", async () => {

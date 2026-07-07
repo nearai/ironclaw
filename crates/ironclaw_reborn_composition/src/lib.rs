@@ -762,10 +762,21 @@ fn invocation_mount_view_for_segments(
     grants.push(MountGrant::new(
         MountAlias::new("/tenant-shared")?,
         VirtualPath::new(format!("/tenants/{tenant_id}/shared"))?,
-        // list + delete are needed by the Reborn identity store's admin
-        // user-directory: enumeration (`list_users`) and the delete cascade
-        // (removing a user's identity/verified-email records) live under
-        // `/tenant-shared/reborn-identity/…`.
+        // Broad tenant-shared storage gets read + write + list, but NOT delete:
+        // no tenant-shared consumer other than the identity store needs to
+        // remove records, so withholding delete here keeps the blast radius of
+        // a compromised writer from spanning every tenant-shared subtree.
+        MountPermissions::read_write(),
+    ));
+    grants.push(MountGrant::new(
+        // Delete authority is scoped to the identity subtree specifically: the
+        // Reborn identity store's admin user-directory needs it for the delete
+        // cascade (removing a user's identity / verified-email records) that
+        // lives under `/tenant-shared/reborn-identity/…`. Longest-prefix mount
+        // matching routes identity paths here and everything else to the
+        // delete-less grant above.
+        MountAlias::new("/tenant-shared/reborn-identity")?,
+        VirtualPath::new(format!("/tenants/{tenant_id}/shared/reborn-identity"))?,
         MountPermissions::read_write_list_delete(),
     ));
     #[cfg(feature = "slack-v2-host-beta")]

@@ -8,7 +8,6 @@ import {
   deleteAdminUser,
   suspendAdminUser,
   activateAdminUser,
-  createUserToken,
 } from "../lib/admin-api.js";
 
 export function useAdminUsers() {
@@ -22,7 +21,17 @@ export function useAdminUsers() {
 
   const rawUsers = query.data;
   const users = Array.isArray(rawUsers) ? rawUsers : rawUsers?.users || [];
-  const isForbidden = query.error?.message?.includes("403") || query.error?.message?.includes("Forbidden");
+  // Detect the forbidden state from the structured `ApiError` (see
+  // `lib/api.js`), not the humanized message: a non-admin caller gets HTTP 403
+  // whose body kind is humanized to "Participant denied", so a string match on
+  // "403"/"Forbidden" would miss it and never render the admin-required panel.
+  // Prefer the numeric status; fall back to the parsed error/kind code.
+  const err = query.error;
+  const errorCode = err?.payload?.kind || err?.payload?.error;
+  const isForbidden =
+    err?.status === 403 ||
+    errorCode === "forbidden" ||
+    errorCode === "participant_denied";
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ["admin", "users"] });
 
@@ -43,9 +52,6 @@ export function useAdminUsers() {
     mutationFn: (id) => activateAdminUser(id),
     onSuccess: invalidate,
   });
-  const tokenMut = useMutation({
-    mutationFn: ({ userId, name }) => createUserToken(userId, name),
-  });
 
   return {
     users,
@@ -58,13 +64,12 @@ export function useAdminUsers() {
     deleteUser: deleteMut.mutateAsync,
     suspendUser: suspendMut.mutateAsync,
     activateUser: activateMut.mutateAsync,
-    createToken: (userId, name) => tokenMut.mutateAsync({ userId, name }),
-    // The one-time API bearer is issued at user creation, so the create result
-    // (which carries `.token`) also feeds the token banner. A dedicated
-    // re-issue endpoint would populate `tokenMut` instead.
-    newToken: tokenMut.data || (createMut.data?.token ? createMut.data : null),
+    // The one-time API bearer is issued ONLY at user creation, so the create
+    // result (which carries `.token`) feeds the one-time token banner. There is
+    // no re-issue endpoint for existing users, so no `createToken` action is
+    // exposed here — see `lib/admin-api.js::createUserToken`.
+    newToken: createMut.data?.token ? createMut.data : null,
     clearToken: () => {
-      tokenMut.reset();
       createMut.reset();
     },
   };

@@ -21,7 +21,7 @@ use ironclaw_auth::{
 };
 use ironclaw_host_api::{
     AgentId, CapabilityId, EffectKind, ExtensionId, GrantConstraints, InvocationId, PermissionMode,
-    Principal, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+    Principal, ProjectId, ResourceScope, SecretHandle, TenantId, ThreadId, UserId,
 };
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductWorkflowRejectionKind, ProjectionStream,
@@ -77,7 +77,9 @@ mod projects;
 mod trace_credits;
 mod types;
 
-use admin_users::RejectingAdminUserService;
+use admin_users::{
+    ADMIN_USER_LIST_DEFAULT_LIMIT, ADMIN_USER_LIST_MAX_LIMIT, RejectingAdminUserService,
+};
 pub use admin_users::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
     AdminUserSecretMeta, AdminUserService, AdminUserStatus, RebornAdminCreateUserRequest,
@@ -2514,7 +2516,7 @@ pub trait RebornServicesApi: Send + Sync {
         &self,
         caller: WebUiAuthenticatedCaller,
         user_id: UserId,
-        handle: String,
+        handle: SecretHandle,
         request: RebornAdminPutSecretRequest,
     ) -> Result<RebornAdminSecretResponse, RebornServicesError> {
         let _ = (caller, user_id, handle, request);
@@ -2525,7 +2527,7 @@ pub trait RebornServicesApi: Send + Sync {
         &self,
         caller: WebUiAuthenticatedCaller,
         user_id: UserId,
-        handle: String,
+        handle: SecretHandle,
     ) -> Result<RebornAdminSecretDeletedResponse, RebornServicesError> {
         let _ = (caller, user_id, handle);
         Err(RebornServicesError::service_unavailable(false))
@@ -2890,11 +2892,7 @@ impl RebornServices {
             // the role field but must not act: status gates authorization, so
             // suspending an admin immediately revokes their admin API access
             // (same "read on every call, never cache" contract as role).
-            Some(user)
-                if user.role.is_admin() && user.status == AdminUserStatus::Active =>
-            {
-                Ok(())
-            }
+            Some(user) if user.role.is_admin() && user.status == AdminUserStatus::Active => Ok(()),
             // "No record", "not admin", and "suspended admin" are all a 403: the
             // caller is authenticated but not authorized. Never leak which.
             _ => Err(RebornServicesError::from_status(
@@ -2988,12 +2986,35 @@ impl RebornServicesApi for RebornServices {
         query: RebornAdminUserListQuery,
     ) -> Result<RebornAdminUserListResponse, RebornServicesError> {
         self.authorize_admin(&caller).await?;
+        // Bound the page: clamp the caller's `limit` and parse the opaque
+        // cursor into a `UserId`. A malformed cursor is caller input at fault
+        // (it should only ever be a value we minted), so it is a 400.
+        let limit = query
+            .limit
+            .map(|value| value as usize)
+            .unwrap_or(ADMIN_USER_LIST_DEFAULT_LIMIT)
+            .clamp(1, ADMIN_USER_LIST_MAX_LIMIT);
+        let after = match query.cursor.as_deref() {
+            Some(raw) => Some(UserId::new(raw).map_err(|_| {
+                RebornServicesError::from_status(
+                    RebornServicesErrorCode::InvalidRequest,
+                    400,
+                    false,
+                )
+            })?),
+            None => None,
+        };
         let users = self
             .admin_users
-            .list_users(&caller.tenant_id, query.status)
+            .list_users(&caller.tenant_id, query.status, after.as_ref(), limit)
             .await
             .map_err(map_admin_user_error)?;
-        Ok(RebornAdminUserListResponse { users })
+        // A full page means there may be more rows past it; hand back the last
+        // id as the next cursor. A short page is the end of the tenant's users.
+        let next_cursor = (users.len() == limit)
+            .then(|| users.last().map(|user| user.user_id.as_str().to_string()))
+            .flatten();
+        Ok(RebornAdminUserListResponse { users, next_cursor })
     }
 
     async fn get_admin_user(
@@ -3151,7 +3172,7 @@ impl RebornServicesApi for RebornServices {
         &self,
         caller: WebUiAuthenticatedCaller,
         user_id: UserId,
-        handle: String,
+        handle: SecretHandle,
         request: RebornAdminPutSecretRequest,
     ) -> Result<RebornAdminSecretResponse, RebornServicesError> {
         self.authorize_admin(&caller).await?;
@@ -3174,17 +3195,22 @@ impl RebornServicesApi for RebornServices {
         &self,
         caller: WebUiAuthenticatedCaller,
         user_id: UserId,
-        handle: String,
+        handle: SecretHandle,
     ) -> Result<RebornAdminSecretDeletedResponse, RebornServicesError> {
         self.authorize_admin(&caller).await?;
         self.require_admin_target(&caller.tenant_id, &user_id)
             .await?;
+        // Echo the parsed, canonical handle back on the wire as a plain string.
+        let handle_str = handle.as_str().to_string();
         let deleted = self
             .admin_users
-            .delete_secret(&caller.tenant_id, &user_id, handle.clone())
+            .delete_secret(&caller.tenant_id, &user_id, handle)
             .await
             .map_err(map_admin_user_error)?;
-        Ok(RebornAdminSecretDeletedResponse { handle, deleted })
+        Ok(RebornAdminSecretDeletedResponse {
+            handle: handle_str,
+            deleted,
+        })
     }
 
     async fn global_auto_approve_enabled(

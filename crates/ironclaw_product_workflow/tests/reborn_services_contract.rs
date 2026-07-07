@@ -21,7 +21,7 @@ use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{CredentialAccountId, CredentialAccountProjection};
 use ironclaw_host_api::{
     AgentId, ApprovalRequestId, CapabilityId, EffectKind, ExtensionId, InvocationId,
-    PermissionMode, Principal, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+    PermissionMode, Principal, ProjectId, ResourceScope, SecretHandle, TenantId, ThreadId, UserId,
 };
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductOutboundEnvelope, ProductWorkflowRejectionKind, ProjectionCursor,
@@ -11543,14 +11543,25 @@ impl AdminUserService for FakeAdminUsers {
         &self,
         _tenant: &TenantId,
         status: Option<AdminUserStatus>,
+        after: Option<&UserId>,
+        limit: usize,
     ) -> Result<Vec<AdminUserRecord>, AdminUserError> {
-        Ok(self
+        // Mirror the real port contract: status filter, then user_id-ascending
+        // order, then the `after` cursor, then bound to `limit`.
+        let mut records: Vec<AdminUserRecord> = self
             .users
             .lock()
             .unwrap()
             .values()
             .filter(|record| status.is_none_or(|want| record.status == want))
             .cloned()
+            .collect();
+        records.sort_by(|a, b| a.user_id.as_str().cmp(b.user_id.as_str()));
+        let after = after.map(UserId::as_str);
+        Ok(records
+            .into_iter()
+            .filter(|record| after.is_none_or(|cursor| record.user_id.as_str() > cursor))
+            .take(limit)
             .collect())
     }
 
@@ -11655,11 +11666,11 @@ impl AdminUserService for FakeAdminUsers {
         &self,
         _tenant: &TenantId,
         _user_id: &UserId,
-        handle: String,
+        handle: SecretHandle,
         _material: SecretString,
     ) -> Result<AdminUserSecretMeta, AdminUserError> {
         Ok(AdminUserSecretMeta {
-            handle,
+            handle: handle.as_str().to_string(),
             created_at: None,
             updated_at: None,
         })
@@ -11669,7 +11680,7 @@ impl AdminUserService for FakeAdminUsers {
         &self,
         _tenant: &TenantId,
         _user_id: &UserId,
-        _handle: String,
+        _handle: SecretHandle,
     ) -> Result<bool, AdminUserError> {
         Ok(true)
     }
@@ -11771,7 +11782,7 @@ async fn assert_every_admin_verb_forbidden(services: &RebornServices) {
             .put_admin_user_secret(
                 caller(),
                 target.clone(),
-                "handle".to_string(),
+                SecretHandle::new("handle").unwrap(),
                 RebornAdminPutSecretRequest {
                     value: "v".to_string(),
                 },
@@ -11781,7 +11792,7 @@ async fn assert_every_admin_verb_forbidden(services: &RebornServices) {
     );
     assert_forbidden(
         services
-            .delete_admin_user_secret(caller(), target, "handle".to_string())
+            .delete_admin_user_secret(caller(), target, SecretHandle::new("handle").unwrap())
             .await
             .expect_err("delete_secret"),
     );
@@ -11875,6 +11886,118 @@ async fn admin_caller_lists_and_creates_with_one_time_token() {
 }
 
 #[tokio::test]
+async fn admin_list_forwards_status_filter_to_the_port() {
+    // A dropped `query.status` extractor or a broken active/suspended mapping
+    // would silently return every user. Seed one active + one suspended admin
+    // and assert `?status=` narrows the caller-visible result.
+    let services = admin_services(FakeAdminUsers::with([
+        admin_record("user-active", AdminUserRole::Admin, AdminUserStatus::Active),
+        admin_record(
+            "user-suspended",
+            AdminUserRole::Admin,
+            AdminUserStatus::Suspended,
+        ),
+    ]));
+
+    let suspended = services
+        .list_admin_users(
+            caller().with_operator_webui_config(true),
+            RebornAdminUserListQuery {
+                status: Some(AdminUserStatus::Suspended),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list suspended");
+    assert_eq!(suspended.users.len(), 1, "only the suspended user matches");
+    assert_eq!(suspended.users[0].user_id.as_str(), "user-suspended");
+
+    let active = services
+        .list_admin_users(
+            caller().with_operator_webui_config(true),
+            RebornAdminUserListQuery {
+                status: Some(AdminUserStatus::Active),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list active");
+    assert_eq!(active.users.len(), 1, "only the active user matches");
+    assert_eq!(active.users[0].user_id.as_str(), "user-active");
+
+    let all = services
+        .list_admin_users(
+            caller().with_operator_webui_config(true),
+            RebornAdminUserListQuery::default(),
+        )
+        .await
+        .expect("list all");
+    assert_eq!(all.users.len(), 2, "no filter returns both");
+}
+
+#[tokio::test]
+async fn admin_list_bounds_pages_and_threads_the_cursor() {
+    // The facade must clamp the page and derive a `next_cursor` from a full
+    // page, then honor that cursor on the next call — so a large tenant is
+    // paged, not returned (and scanned) in one unbounded response.
+    let services = admin_services(FakeAdminUsers::with([
+        admin_record("user-a", AdminUserRole::Admin, AdminUserStatus::Active),
+        admin_record("user-b", AdminUserRole::Member, AdminUserStatus::Active),
+        admin_record("user-c", AdminUserRole::Member, AdminUserStatus::Active),
+    ]));
+
+    let page1 = services
+        .list_admin_users(
+            caller().with_operator_webui_config(true),
+            RebornAdminUserListQuery {
+                limit: Some(2),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("page 1");
+    assert_eq!(page1.users.len(), 2, "the page honors the limit");
+    assert_eq!(page1.users[0].user_id.as_str(), "user-a");
+    assert_eq!(page1.users[1].user_id.as_str(), "user-b");
+    let cursor = page1.next_cursor.expect("a full page yields a next cursor");
+    assert_eq!(cursor, "user-b", "the cursor is the last id on the page");
+
+    let page2 = services
+        .list_admin_users(
+            caller().with_operator_webui_config(true),
+            RebornAdminUserListQuery {
+                limit: Some(2),
+                cursor: Some(cursor),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("page 2");
+    assert_eq!(page2.users.len(), 1, "the final page holds the remainder");
+    assert_eq!(page2.users[0].user_id.as_str(), "user-c");
+    assert!(
+        page2.next_cursor.is_none(),
+        "a short page means no more users"
+    );
+}
+
+#[tokio::test]
+async fn admin_list_rejects_a_malformed_cursor() {
+    let services = admin_services(FakeAdminUsers::default());
+    let err = services
+        .list_admin_users(
+            caller().with_operator_webui_config(true),
+            RebornAdminUserListQuery {
+                cursor: Some("not a valid user id \u{7f}".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("a malformed cursor is caller input at fault");
+    assert_eq!(err.status_code, 400);
+}
+
+#[tokio::test]
 async fn admin_operator_bypasses_role_check() {
     // An env-bearer operator has no user record but is an implicit admin.
     let services = admin_services(FakeAdminUsers::default());
@@ -11886,8 +12009,11 @@ async fn admin_operator_bypasses_role_check() {
 }
 
 #[tokio::test]
-async fn admin_last_admin_protection_blocks_demote_and_suspend() {
-    // caller() (user-alpha) is the SOLE active admin.
+async fn admin_last_admin_protection_blocks_demote_suspend_and_delete() {
+    // caller() (user-alpha) is the SOLE active admin. Demote, suspend, AND
+    // delete must all be blocked — any of the three would otherwise strand the
+    // tenant with zero active admins. `delete` has its own guard distinct from
+    // the demote/suspend path, so it is covered here explicitly.
     let services = admin_services(FakeAdminUsers::with([admin_record(
         "user-alpha",
         AdminUserRole::Admin,
@@ -11911,7 +12037,7 @@ async fn admin_last_admin_protection_blocks_demote_and_suspend() {
     let suspend = services
         .set_admin_user_status(
             caller(),
-            target,
+            target.clone(),
             RebornAdminSetStatusRequest {
                 status: AdminUserStatus::Suspended,
             },
@@ -11919,6 +12045,14 @@ async fn admin_last_admin_protection_blocks_demote_and_suspend() {
         .await
         .expect_err("suspending the sole admin must be blocked");
     assert_eq!(suspend.status_code, 409);
+    assert_eq!(suspend.field.as_deref(), Some("last_admin"));
+
+    let delete = services
+        .delete_admin_user(caller(), target)
+        .await
+        .expect_err("deleting the sole admin must be blocked");
+    assert_eq!(delete.status_code, 409);
+    assert_eq!(delete.field.as_deref(), Some("last_admin"));
 }
 
 #[tokio::test]
@@ -11998,5 +12132,8 @@ async fn admin_last_admin_protection_survives_concurrent_demotion() {
         .into_iter()
         .filter(|u| u.role.is_admin() && u.status == AdminUserStatus::Active)
         .count();
-    assert_eq!(remaining, 1, "the tenant must never be stranded without an admin");
+    assert_eq!(
+        remaining, 1,
+        "the tenant must never be stranded without an admin"
+    );
 }
