@@ -111,11 +111,17 @@ Required secrets:
 - `IRONCLAW_REBORN_SLACK_BOT_TOKEN`
 
 Required for `qa_3a_slack_connect`, `qa_5a_slack_connect`, and
-`qa_8a_slack_connect`, which assert personal OAuth readiness and start the
-Slack OAuth flow headlessly:
+`qa_8a_slack_connect`, which assert both sides of the personal OAuth path:
+the Slack OAuth start URL is generated from client credentials, and a real
+live Slack user account is already bound in Reborn product-auth state:
 
 - variable `REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_ID`
 - secret `REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_SECRET`
+- secret `AUTH_LIVE_SLACK_ACCESS_TOKEN`
+
+`AUTH_LIVE_SLACK_ACCESS_TOKEN` must be a real Slack user token for the live QA
+Slack user. The harness validates it with Slack `auth.test`, then seeds the
+generated Reborn home with an encrypted `slack_personal` product-auth account.
 
 ## Commands
 

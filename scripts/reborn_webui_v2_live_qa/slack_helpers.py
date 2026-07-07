@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sqlite3
+import uuid
 from contextlib import closing
 from pathlib import Path
 from datetime import datetime, timezone
@@ -16,14 +17,17 @@ from scripts.live_canary.common import env_secret
 from scripts.reborn_webui_v2_live_qa.env_helpers import (
     _env_present,
     _env_value,
+    _first_env_value,
 )
 from scripts.reborn_webui_v2_live_qa.errors import LiveQaError
 from scripts.reborn_webui_v2_live_qa.root_filesystem import (
     _decrypt_filesystem_secret,
+    _encrypt_filesystem_secret,
     _put_root_filesystem_json,
     _root_filesystem_create_table,
     _root_filesystem_json,
     _root_filesystem_secret_by_handle,
+    _write_new_secret_file_0600,
 )
 
 
@@ -32,6 +36,25 @@ SLACK_SIGNING_SECRET_ENV = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET"
 SLACK_BOT_TOKEN_ENV = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"
 SLACK_OAUTH_CLIENT_ID_ENV = "REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_ID"
 SLACK_OAUTH_CLIENT_SECRET_ENV = "REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_SECRET"
+SLACK_PERSONAL_ACCESS_TOKEN_ENV = "AUTH_LIVE_SLACK_ACCESS_TOKEN"
+SLACK_PERSONAL_ACCESS_TOKEN_ENV_NAMES = [
+    SLACK_PERSONAL_ACCESS_TOKEN_ENV,
+    "AUTH_LIVE_SLACK_USER_TOKEN",
+    "REBORN_WEBUI_V2_LIVE_QA_SLACK_USER_TOKEN",
+]
+SLACK_PERSONAL_OAUTH_SCOPES = [
+    "search:read",
+    "channels:history",
+    "groups:history",
+    "im:history",
+    "mpim:history",
+    "channels:read",
+    "groups:read",
+    "im:read",
+    "mpim:read",
+    "users:read",
+    "chat:write",
+]
 SIGNED_SLACK_EVENT_CASES = {
     "qa_5d_slack_strategy_doc_answer",
     "qa_7d_slack_bug_message_trigger",
@@ -820,6 +843,363 @@ def _slack_auth_test(config_text: str, extra_env: dict[str, str]) -> dict[str, o
         result["error"] = payload.get("error")
         result["needed"] = payload.get("needed")
     return result
+
+
+def _slack_user_token_auth_test(
+    token: str,
+    *,
+    token_source: str,
+) -> dict[str, object]:
+    if not token:
+        return {
+            "checked": False,
+            "ok": False,
+            "error": "Slack user token unavailable",
+            "token_source": token_source,
+        }
+    try:
+        import httpx
+
+        response = httpx.post(
+            "https://slack.com/api/auth.test",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=20.0,
+        )
+        payload = response.json()
+    except Exception as exc:
+        return {
+            "checked": True,
+            "ok": False,
+            "error": type(exc).__name__,
+            "token_source": token_source,
+        }
+    result: dict[str, object] = {
+        "checked": True,
+        "ok": bool(payload.get("ok")),
+        "token_source": token_source,
+        "team_id": payload.get("team_id"),
+        "user_id": payload.get("user_id"),
+        "url": payload.get("url"),
+    }
+    if not payload.get("ok"):
+        result["error"] = payload.get("error")
+        result["needed"] = payload.get("needed")
+    return result
+
+
+def _slack_env_field(
+    names: list[str],
+    extra_env: dict[str, str] | None = None,
+) -> tuple[str, str] | None:
+    return _first_env_value(names, extra_env)
+
+
+def _slack_personal_auth_preflight(
+    reborn_home: Path,
+    user_id: str,
+    extra_env: dict[str, str] | None = None,
+    *,
+    requires_slack_personal_auth: bool,
+) -> dict[str, object]:
+    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    master_key_path = reborn_home / "local-dev" / ".reborn-local-dev-secrets-master-key"
+    token_env = _slack_env_field(SLACK_PERSONAL_ACCESS_TOKEN_ENV_NAMES, extra_env)
+    preflight: dict[str, object] = {
+        "requires_slack_personal_auth": requires_slack_personal_auth,
+        "ready": False,
+        "db_present": db_path.exists(),
+        "master_key_present": master_key_path.exists(),
+        "token_env_present": token_env is not None,
+        "token_env_names": SLACK_PERSONAL_ACCESS_TOKEN_ENV_NAMES,
+        "token_env_source": token_env[0] if token_env else None,
+        "configured_account_count": 0,
+        "accounts": [],
+    }
+    if not db_path.exists():
+        if requires_slack_personal_auth:
+            preflight["reason"] = "no Slack personal product-auth DB is present"
+        return preflight
+
+    with closing(sqlite3.connect(db_path)) as db:
+        try:
+            rows = db.execute(
+                """
+                SELECT path, contents FROM root_filesystem_entries
+                WHERE path LIKE '%product-auth/callback/accounts/%.json'
+                ORDER BY path
+                """
+            ).fetchall()
+        except sqlite3.Error:
+            rows = []
+
+    master_key = None
+    if master_key_path.exists():
+        master_key = master_key_path.read_text(encoding="utf-8").strip()
+
+    accounts: list[dict[str, object]] = []
+    for path, raw in rows:
+        try:
+            account = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if account.get("provider") != "slack_personal" or account.get("status") != "configured":
+            continue
+        scope = account.get("scope")
+        resource = scope.get("resource") if isinstance(scope, dict) else None
+        account_user_id = (
+            str(resource.get("user_id") or "").strip()
+            if isinstance(resource, dict)
+            else ""
+        )
+        if account_user_id and account_user_id != user_id:
+            continue
+        access_handle = str(
+            account.get("access_secret") or account.get("access_secret_handle") or ""
+        ).strip()
+        account_preflight: dict[str, object] = {
+            "path": str(path),
+            "id": account.get("id"),
+            "status": account.get("status"),
+            "user_id": account_user_id or None,
+            "thread_id": (
+                str(resource.get("thread_id") or "").strip()
+                if isinstance(resource, dict)
+                else ""
+            )
+            or None,
+            "invocation_id": (
+                str(resource.get("invocation_id") or "").strip()
+                if isinstance(resource, dict)
+                else ""
+            )
+            or None,
+            "access_secret_present": bool(access_handle),
+            "ready": False,
+        }
+        if access_handle and master_key:
+            try:
+                stored = _root_filesystem_secret_by_handle(db_path, access_handle)
+                token = _decrypt_filesystem_secret(master_key, stored)
+                auth_test = _slack_user_token_auth_test(
+                    token,
+                    token_source=f"product_auth:{access_handle}",
+                )
+                account_preflight["auth_test"] = auth_test
+                account_preflight["ready"] = bool(auth_test.get("ok"))
+            except Exception as exc:
+                account_preflight["auth_test"] = {
+                    "checked": True,
+                    "ok": False,
+                    "error": type(exc).__name__,
+                }
+        elif access_handle:
+            account_preflight["auth_test"] = {
+                "checked": False,
+                "ok": False,
+                "error": "Slack personal secret master key unavailable",
+            }
+        else:
+            account_preflight["auth_test"] = {
+                "checked": False,
+                "ok": False,
+                "error": "Slack personal account has no access secret",
+            }
+        accounts.append(account_preflight)
+
+    ready_accounts = [account for account in accounts if account.get("ready")]
+    preflight["accounts"] = accounts
+    preflight["configured_account_count"] = len(accounts)
+    preflight["ready"] = bool(ready_accounts)
+    if ready_accounts:
+        first_auth = ready_accounts[0].get("auth_test")
+        if isinstance(first_auth, dict):
+            preflight["auth_test"] = first_auth
+    elif requires_slack_personal_auth:
+        if not accounts:
+            preflight["reason"] = "no configured Slack personal product-auth account"
+        else:
+            first_auth = accounts[0].get("auth_test")
+            reason = (
+                first_auth.get("error")
+                if isinstance(first_auth, dict)
+                else "Slack personal product-auth account is not ready"
+            )
+            preflight["reason"] = f"Slack personal product-auth auth.test failed: {reason}"
+    return preflight
+
+
+def _seed_generated_slack_product_auth_if_configured(
+    reborn_home: Path,
+    user_id: str,
+    extra_env: dict[str, str] | None = None,
+) -> dict[str, object]:
+    selected = _slack_env_field(SLACK_PERSONAL_ACCESS_TOKEN_ENV_NAMES, extra_env)
+    preflight: dict[str, object] = {
+        "checked": True,
+        "seeded": False,
+        "token_env_present": selected is not None,
+        "token_env_names": SLACK_PERSONAL_ACCESS_TOKEN_ENV_NAMES,
+        "token_env_source": selected[0] if selected else None,
+    }
+    if not selected:
+        return preflight
+
+    auth_test = _slack_user_token_auth_test(selected[1], token_source=selected[0])
+    preflight["auth_test"] = auth_test
+    if not auth_test.get("ok"):
+        preflight["reason"] = (
+            "Slack personal user token auth.test failed: "
+            f"{auth_test.get('error') or 'unknown Slack auth error'}"
+        )
+        return preflight
+
+    team_id = str(auth_test.get("team_id") or "").strip()
+    slack_user_id = str(auth_test.get("user_id") or "").strip()
+    installation = _slack_env_field(
+        [
+            "REBORN_WEBUI_V2_LIVE_QA_SLACK_INSTALLATION_ID",
+            "IRONCLAW_REBORN_SLACK_INSTALLATION_ID",
+        ],
+        extra_env,
+    )
+    api_app = _slack_env_field(
+        [
+            "REBORN_WEBUI_V2_LIVE_QA_SLACK_API_APP_ID",
+            "IRONCLAW_REBORN_SLACK_APP_ID",
+            "IRONCLAW_REBORN_SLACK_API_APP_ID",
+        ],
+        extra_env,
+    )
+    if not team_id or not slack_user_id or not installation or not api_app:
+        missing = []
+        if not team_id:
+            missing.append("team_id_from_auth_test")
+        if not slack_user_id:
+            missing.append("user_id_from_auth_test")
+        if not installation:
+            missing.append("REBORN_WEBUI_V2_LIVE_QA_SLACK_INSTALLATION_ID")
+        if not api_app:
+            missing.append("REBORN_WEBUI_V2_LIVE_QA_SLACK_API_APP_ID")
+        preflight["reason"] = "missing Slack personal seed fields: " + ", ".join(missing)
+        preflight["missing"] = missing
+        return preflight
+
+    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    master_key_path = reborn_home / "local-dev" / ".reborn-local-dev-secrets-master-key"
+    master_key_path.parent.mkdir(parents=True, exist_ok=True)
+    if master_key_path.exists():
+        master_key = master_key_path.read_text(encoding="utf-8").strip()
+    else:
+        master_key = hashlib.sha256(os.urandom(32)).hexdigest()
+        _write_new_secret_file_0600(master_key_path, master_key)
+
+    _root_filesystem_create_table(db_path)
+    account_id = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"ironclaw-reborn-webui-v2-live-qa/slack_personal/{user_id}",
+        )
+    )
+    invocation_id = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"ironclaw-reborn-webui-v2-live-qa/slack-personal-invocation/{user_id}",
+        )
+    )
+    thread_id = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"ironclaw-reborn-webui-v2-live-qa/slack-personal-thread/{user_id}",
+        )
+    )
+    now_s = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    resource = {
+        "tenant_id": "reborn-cli",
+        "user_id": user_id,
+        "agent_id": "reborn-cli-agent",
+        "project_id": None,
+        "thread_id": thread_id,
+        "invocation_id": invocation_id,
+        "mission_id": None,
+    }
+    secret_scope = dict(resource)
+    access_handle = f"slack-personal-oauth-access-{account_id}-{invocation_id}"
+    secret_root = (
+        f"/tenants/reborn-cli/users/{user_id}/secrets/agents/reborn-cli-agent/secrets"
+    )
+    encrypted_value, key_salt = _encrypt_filesystem_secret(
+        master_key=master_key,
+        scope=secret_scope,
+        handle=access_handle,
+        plaintext=selected[1],
+    )
+    _put_root_filesystem_json(
+        db_path,
+        f"{secret_root}/{access_handle}.json",
+        {
+            "handle": access_handle,
+            "scope": secret_scope,
+            "encrypted_value": encrypted_value,
+            "key_salt": key_salt,
+            "expires_at": None,
+            "created_at": now_s,
+            "updated_at": now_s,
+        },
+    )
+
+    account_path = (
+        f"/tenants/reborn-cli/users/{user_id}/secrets/agents/reborn-cli-agent/"
+        f"product-auth/callback/accounts/{account_id}.json"
+    )
+    _put_root_filesystem_json(
+        db_path,
+        account_path,
+        {
+            "id": account_id,
+            "provider": "slack_personal",
+            "label": "slack_personal",
+            "status": "configured",
+            "ownership": "user_reusable",
+            "owner_extension": None,
+            "granted_extensions": [],
+            "scope": {
+                "resource": resource,
+                "surface": "callback",
+            },
+            "scopes": SLACK_PERSONAL_OAUTH_SCOPES,
+            "access_secret": access_handle,
+            "refresh_secret": None,
+            "provider_identity": {
+                "subject": slack_user_id,
+                "team_id": team_id,
+                "enterprise_id": None,
+                "app_id": api_app[1],
+            },
+            "created_at": now_s,
+            "updated_at": now_s,
+        },
+    )
+    identity_binding = _seed_slack_personal_identity_binding(
+        db_path,
+        installation_id=installation[1],
+        user_id=user_id,
+        slack_user_id=slack_user_id,
+        now=now_s,
+    )
+    preflight.update(
+        {
+            "seeded": True,
+            "account_id": account_id,
+            "account_path": account_path,
+            "identity_binding": identity_binding,
+            "thread_id": thread_id,
+            "invocation_id": invocation_id,
+            "scope_count": len(SLACK_PERSONAL_OAUTH_SCOPES),
+            "team_id": team_id,
+            "slack_user_id": slack_user_id,
+        }
+    )
+    return preflight
 
 
 def _slack_team_id_from_bot_token_env(bot_token_env: str) -> str | None:
