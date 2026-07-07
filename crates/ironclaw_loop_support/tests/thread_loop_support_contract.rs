@@ -52,11 +52,11 @@ use ironclaw_turns::{
         LoopInputCursor, LoopInputCursorToken, LoopModelCapabilityView, LoopModelMessage,
         LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopPromptBundle,
         LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort,
-        LoopRunContext, LoopTranscriptPort, ModelVisibleToolObservation, ObservationTrust,
-        ParentLoopOutput, PersonalContextPolicy, PromptMode, PromptSkillContextMetadata,
-        ProviderToolCallReference, ProviderToolDefinition, SkillVisibility, ToolObservationDetail,
-        ToolObservationStatus, UpdateAssistantDraft, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        LoopRunContext, LoopTranscriptPort, MemoryPromptContextRequest, MemoryPromptContextService,
+        ModelVisibleToolObservation, ObservationTrust, ParentLoopOutput, PersonalContextPolicy,
+        PromptMode, PromptSkillContextMetadata, ProviderToolCallReference, ProviderToolDefinition,
+        SkillVisibility, ToolObservationDetail, ToolObservationStatus, UpdateAssistantDraft,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 use tracing_test::traced_test;
@@ -409,12 +409,14 @@ async fn thread_context_port_accepts_explicit_owner_with_distinct_actor() {
         fixture.run_context.resolved_run_profile,
     )
     .with_actor(TurnActor::new(UserId::new("room-participant").unwrap()));
+    let memory_source = Arc::new(SpyMemoryContextSource::new());
     let adapter = ThreadBackedLoopContextPort::new(
         Arc::clone(&fixture.thread_service),
         fixture.thread_scope.clone(),
         run_context,
         16,
-    );
+    )
+    .with_memory_context_source(memory_source.clone());
 
     let bundle = adapter
         .load_loop_context(LoopContextRequest {
@@ -426,6 +428,40 @@ async fn thread_context_port_accepts_explicit_owner_with_distinct_actor() {
         .expect("explicit owner should allow actor/owner divergence");
 
     assert_eq!(bundle.messages.len(), 1);
+    // Memory recall must key off the thread's explicit owner, not the
+    // diverging submitting actor: a shared route's memory belongs to the
+    // thread it was written into, not to whoever is currently posting.
+    assert_eq!(
+        memory_source.captured_actor(),
+        fixture.thread_scope.owner_user_id
+    );
+}
+
+#[tokio::test]
+async fn thread_context_port_degrades_to_no_snippets_when_memory_context_source_errors() {
+    // Unlike the skill/identity sources (which fail closed — see
+    // `thread_context_port_fails_closed_when_visible_skill_content_is_missing`),
+    // memory recall is best-effort prompt enrichment: a backend error must not
+    // abort the whole turn, just omit the snippets.
+    let fixture = ThreadFixture::new().await;
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    )
+    .with_memory_context_source(Arc::new(ErroringMemoryContextSource));
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        })
+        .await
+        .expect("memory backend error must not fail context loading");
+
+    assert!(bundle.memory_snippets.is_empty());
 }
 
 #[tokio::test]
@@ -3819,6 +3855,53 @@ impl HostIdentityContextSource for StaticIdentityContextSource {
         message_ref: &LoopMessageRef,
     ) -> Result<Option<HostIdentityMessageContent>, HostIdentityContextBuildError> {
         Ok(self.content_by_ref.get(message_ref.as_str()).cloned())
+    }
+}
+
+/// Records the `actor` a `load_memory_snippets` call was made with, so a
+/// test can assert which user the port scoped memory recall to.
+struct SpyMemoryContextSource {
+    captured_actor: Mutex<Option<UserId>>,
+}
+
+impl SpyMemoryContextSource {
+    fn new() -> Self {
+        Self {
+            captured_actor: Mutex::new(None),
+        }
+    }
+
+    fn captured_actor(&self) -> Option<UserId> {
+        self.captured_actor.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl MemoryPromptContextService for SpyMemoryContextSource {
+    async fn load_memory_snippets(
+        &self,
+        request: MemoryPromptContextRequest,
+    ) -> Result<Vec<LoopContextSnippet>, AgentLoopHostError> {
+        *self.captured_actor.lock().unwrap() = Some(request.actor.user_id);
+        Ok(Vec::new())
+    }
+}
+
+/// Always fails, mirroring `StaticSkillContextSource`'s error path so the
+/// port's fail-closed behavior on a memory-backend error is pinned the same
+/// way the adjacent skill-context error tests pin theirs.
+struct ErroringMemoryContextSource;
+
+#[async_trait]
+impl MemoryPromptContextService for ErroringMemoryContextSource {
+    async fn load_memory_snippets(
+        &self,
+        _request: MemoryPromptContextRequest,
+    ) -> Result<Vec<LoopContextSnippet>, AgentLoopHostError> {
+        Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "memory backend unavailable",
+        ))
     }
 }
 

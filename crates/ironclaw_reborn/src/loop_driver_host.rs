@@ -61,8 +61,8 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
         CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityInvocation, CapabilityOutcome,
-        CommunicationContextProvider, FinalizeAssistantMessage, HookMilestoneSink,
-        HostManagedLoopModelPort, HostManagedLoopPromptPort,
+        CommunicationContextProvider, EmptyMemoryPromptContextService, FinalizeAssistantMessage,
+        HookMilestoneSink, HostManagedLoopModelPort, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InstructionBundleMaterializedMessage,
         InstructionMaterializationStore, InstructionSafetyContext, LoadCheckpointPayloadRequest,
         LoadedCheckpointPayload, LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort,
@@ -963,7 +963,11 @@ where
     event_subscription: Option<EventTriggeredHookSubscription>,
     safety_context: InstructionSafetyContext,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
-    memory_context_source: Option<Arc<dyn MemoryPromptContextService>>,
+    /// Source for memory-recall snippets injected into the loop context bundle.
+    /// Defaults to `EmptyMemoryPromptContextService` (always empty snippets, no
+    /// error) so callers that do not wire a memory backend degrade gracefully —
+    /// mirrors `user_profile_source`'s required-with-no-op-fallback shape below.
+    memory_context_source: Arc<dyn MemoryPromptContextService>,
     /// Per-run user agent-context profile source. Resolved once at loop start;
     /// result is stamped into `LoopRuntimeContext.user_profile`. Defaults to
     /// `EmptyUserProfileSource` (returns `None`) so callers that do not wire a
@@ -1034,7 +1038,7 @@ where
             event_subscription: None,
             safety_context,
             identity_context_source: None,
-            memory_context_source: None,
+            memory_context_source: Arc::new(EmptyMemoryPromptContextService),
             user_profile_source: Arc::new(EmptyUserProfileSource),
             communication_context_provider: None,
             input_queue: None,
@@ -1314,11 +1318,13 @@ where
         self
     }
 
+    /// Installs the memory-recall source. When not called the factory
+    /// defaults to `EmptyMemoryPromptContextService`.
     pub fn with_memory_context_source(
         mut self,
         source: Arc<dyn MemoryPromptContextService>,
     ) -> Self {
-        self.memory_context_source = Some(source);
+        self.memory_context_source = source;
         self
     }
 
@@ -1457,9 +1463,8 @@ where
         if let Some(source) = self.identity_context_source.as_ref() {
             context_adapter = context_adapter.with_identity_context_source(source.clone());
         }
-        if let Some(source) = self.memory_context_source.as_ref() {
-            context_adapter = context_adapter.with_memory_context_source(source.clone());
-        }
+        context_adapter =
+            context_adapter.with_memory_context_source(Arc::clone(&self.memory_context_source));
         context_adapter = context_adapter.with_milestone_sink(Arc::clone(&self.milestone_sink));
         let context: Arc<dyn LoopContextPort> = Arc::new(context_adapter);
         // Mint a fresh dispatcher per build when a factory is installed. This

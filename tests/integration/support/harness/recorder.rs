@@ -42,9 +42,12 @@ impl HarnessCapabilityRecorder {
         }
     }
 
-    /// E-PROFILE: local-dev memory filesystem backing the user-profile source, if any.
-    /// `None` for the Echo backend and HostRuntime harnesses without a profile filesystem.
-    pub(crate) fn profile_filesystem(&self) -> Option<Arc<dyn RootFilesystem>> {
+    /// Raw local-dev filesystem backing both the E-PROFILE user-profile source
+    /// and memory-recall (`builtin.memory_write`/prompt-context) composition —
+    /// the two seams share one backing store so a value one writes is visible
+    /// to the other. `None` for the Echo backend and HostRuntime harnesses
+    /// without a local-dev filesystem.
+    pub(crate) fn local_dev_filesystem(&self) -> Option<Arc<dyn RootFilesystem>> {
         match self {
             Self::Recording(_) => None,
             Self::HostRuntime(harness) => harness.profile_filesystem_for_test(),
