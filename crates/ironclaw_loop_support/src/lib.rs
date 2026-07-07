@@ -139,16 +139,17 @@ use ironclaw_turns::{
         AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
         AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityBatchInvocation,
         CapabilityBatchOutcome, CapabilityDenied, CapabilityDeniedReasonKind, CapabilityInvocation,
-        CapabilityOutcome, CapabilitySurfaceVersion, FinalizeAssistantMessage,
-        InstructionMaterializationStore, LoopCapabilityPort, LoopContextBundle,
-        LoopContextCompactionKind, LoopContextCompactionMetadata, LoopContextMessage,
-        LoopContextPort, LoopContextRequest, LoopDriverNoteKind, LoopHostMilestoneEmitter,
-        LoopHostMilestoneSink, LoopInputCursor, LoopModelMessage, LoopModelPort, LoopModelRequest,
-        LoopModelResponse, LoopModelUsage, LoopPromptBundleAuthority, LoopRunContext,
-        LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, MemoryPromptContextRequest,
-        MemoryPromptContextService, ModelStreamChunk, ParentLoopOutput, PromptMode,
-        UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
-        sanitize_model_visible_text, sort_instruction_snippets_for_prompt,
+        CapabilityOutcome, CapabilitySurfaceVersion, EmptyMemoryPromptContextService,
+        FinalizeAssistantMessage, InstructionMaterializationStore, LoopCapabilityPort,
+        LoopContextBundle, LoopContextCompactionKind, LoopContextCompactionMetadata,
+        LoopContextMessage, LoopContextPort, LoopContextRequest, LoopDriverNoteKind,
+        LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputCursor, LoopModelMessage,
+        LoopModelPort, LoopModelRequest, LoopModelResponse, LoopModelUsage,
+        LoopPromptBundleAuthority, LoopRunContext, LoopRunInfoPort, LoopSafeSummary,
+        LoopTranscriptPort, MemoryPromptContextRequest, MemoryPromptContextService,
+        ModelStreamChunk, ParentLoopOutput, PromptMode, UpdateAssistantDraft,
+        VisibleCapabilityRequest, VisibleCapabilitySurface, sanitize_model_visible_text,
+        sort_instruction_snippets_for_prompt,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -213,7 +214,7 @@ where
     max_messages: usize,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
-    memory_context_source: Option<Arc<dyn MemoryPromptContextService>>,
+    memory_context_source: Arc<dyn MemoryPromptContextService>,
     identity_budget: IdentityBudget,
     prompt_context_budget: PromptContextTokenBudget,
     context_window_cache: Option<Arc<ThreadContextWindowCache>>,
@@ -281,7 +282,7 @@ where
             max_messages,
             skill_context_source: None,
             identity_context_source: None,
-            memory_context_source: None,
+            memory_context_source: Arc::new(EmptyMemoryPromptContextService),
             identity_budget: IdentityBudget::default(),
             prompt_context_budget: PromptContextTokenBudget::default(),
             context_window_cache: None,
@@ -307,7 +308,7 @@ where
         mut self,
         source: Arc<dyn MemoryPromptContextService>,
     ) -> Self {
-        self.memory_context_source = Some(source);
+        self.memory_context_source = source;
         self
     }
 
@@ -401,54 +402,52 @@ where
             }
             None => Vec::new(),
         };
-        let memory_snippets = match self.memory_context_source.as_deref() {
-            Some(source) => match latest_user_message_query(&context.messages) {
-                Some(query) => {
-                    // Explicit thread owner wins over the submitting actor: shared
-                    // conversation routes intentionally let actor/owner diverge
-                    // (`validate_thread_scope_for_run`), and memory must recall
-                    // under the thread's owner, not whichever actor is currently
-                    // posting into it.
-                    let actor = self
-                        .run_context
-                        .scope
-                        .explicit_owner_user_id()
-                        .cloned()
-                        .map(TurnActor::new)
-                        .or_else(|| self.run_context.actor().cloned())
-                        .unwrap_or_else(|| {
-                            TurnActor::new(self.run_context.scope.to_resource_scope().user_id)
-                        });
-                    // Unlike the skill/identity sources above, memory recall is
-                    // best-effort prompt enrichment, not required context —
-                    // a backend hiccup (contention, transient unavailability)
-                    // degrades to no snippets rather than failing the turn.
-                    match source
-                        .load_memory_snippets(MemoryPromptContextRequest {
-                            scope: self.run_context.scope.clone(),
-                            actor,
-                            query,
-                            max_snippets: DEFAULT_MEMORY_CONTEXT_MAX_SNIPPETS,
-                            context_profile_id: self
-                                .run_context
-                                .resolved_run_profile
-                                .context_profile_id
-                                .clone(),
-                        })
-                        .await
-                    {
-                        Ok(snippets) => snippets,
-                        Err(error) => {
-                            tracing::debug!(
-                                ?error,
-                                "memory context recall failed; continuing without snippets"
-                            );
-                            Vec::new()
-                        }
+        let memory_snippets = match latest_user_message_query(&context.messages) {
+            Some(query) => {
+                // Explicit thread owner wins over the submitting actor: shared
+                // conversation routes intentionally let actor/owner diverge
+                // (`validate_thread_scope_for_run`), and memory must recall
+                // under the thread's owner, not whichever actor is currently
+                // posting into it.
+                let actor = self
+                    .run_context
+                    .scope
+                    .explicit_owner_user_id()
+                    .cloned()
+                    .map(TurnActor::new)
+                    .or_else(|| self.run_context.actor().cloned())
+                    .unwrap_or_else(|| {
+                        TurnActor::new(self.run_context.scope.to_resource_scope().user_id)
+                    });
+                // Unlike the skill/identity sources above, memory recall is
+                // best-effort prompt enrichment, not required context —
+                // a backend hiccup (contention, transient unavailability)
+                // degrades to no snippets rather than failing the turn.
+                match self
+                    .memory_context_source
+                    .load_memory_snippets(MemoryPromptContextRequest {
+                        scope: self.run_context.scope.clone(),
+                        actor,
+                        query,
+                        max_snippets: DEFAULT_MEMORY_CONTEXT_MAX_SNIPPETS,
+                        context_profile_id: self
+                            .run_context
+                            .resolved_run_profile
+                            .context_profile_id
+                            .clone(),
+                    })
+                    .await
+                {
+                    Ok(snippets) => snippets,
+                    Err(error) => {
+                        tracing::debug!(
+                            ?error,
+                            "memory context recall failed; continuing without snippets"
+                        );
+                        Vec::new()
                     }
                 }
-                None => Vec::new(),
-            },
+            }
             None => Vec::new(),
         };
 

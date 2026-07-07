@@ -331,6 +331,10 @@ impl MemoryService for NativeMemoryService {
         let search_request = MemorySearchRequest::new(&request.query)
             .map_err(|_| MemoryServiceError::input())?
             .with_limit(request.max_snippets)
+            // Prompt-context recall wants only a few snippets per turn, so cap
+            // the pre-fusion candidate budget to a small multiple of the
+            // requested count instead of the default 50-candidate ceiling.
+            .with_pre_fusion_limit(request.max_snippets.saturating_mul(2))
             // Full-text only: the native backend declares vector_search=false and
             // fails closed on a vector request (matches the `search` method).
             .with_vector(false);

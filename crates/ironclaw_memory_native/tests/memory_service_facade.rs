@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_filesystem::InMemoryBackend;
@@ -264,6 +264,40 @@ async fn native_context_retrieve_filters_non_finite_scores_before_ordering() {
     assert_eq!(
         snippets[0].safe_summary,
         "Untrusted memory content: finite score note"
+    );
+}
+
+#[tokio::test]
+async fn native_context_retrieve_bounds_pre_fusion_limit_relative_to_max_snippets() {
+    // Prompt-context recall asks for a handful of snippets per turn; left
+    // unbounded, `MemorySearchRequest`'s default `pre_fusion_limit` (50) is
+    // fetched from the backend regardless of `max_snippets`. It must be
+    // bounded to a small multiple of `max_snippets` instead.
+    let captured = Arc::new(Mutex::new(None));
+    let service = NativeMemoryService::new(Arc::new(PreFusionLimitSpyBackend {
+        captured_pre_fusion_limit: Arc::clone(&captured),
+    }));
+
+    service
+        .retrieve_context(
+            invocation(),
+            MemoryServiceContextRequest {
+                query: "planning".to_string(),
+                max_snippets: 5,
+                context_profile_id: MemoryContextProfileId::new("default").unwrap(),
+            },
+        )
+        .await
+        .expect("context retrieval through IronClaw memory facade");
+
+    let observed = captured
+        .lock()
+        .unwrap()
+        .expect("backend search must be invoked");
+    assert!(
+        (5..50).contains(&observed),
+        "pre_fusion_limit must be bounded below the 50-candidate default \
+         and at least max_snippets, got {observed}"
     );
 }
 
@@ -535,6 +569,31 @@ impl MemoryBackend for MockSearchBackend {
             });
         }
         Ok(self.results.clone())
+    }
+}
+
+/// Records the `pre_fusion_limit` of the `MemorySearchRequest` a `search`
+/// call was made with, so a test can assert `retrieve_context` bounds it.
+struct PreFusionLimitSpyBackend {
+    captured_pre_fusion_limit: Arc<Mutex<Option<usize>>>,
+}
+
+#[async_trait]
+impl MemoryBackend for PreFusionLimitSpyBackend {
+    fn capabilities(&self) -> MemoryBackendCapabilities {
+        MemoryBackendCapabilities {
+            full_text_search: true,
+            ..MemoryBackendCapabilities::default()
+        }
+    }
+
+    async fn search(
+        &self,
+        _context: &MemoryContext,
+        request: MemorySearchRequest,
+    ) -> Result<Vec<MemorySearchResult>, FilesystemError> {
+        *self.captured_pre_fusion_limit.lock().unwrap() = Some(request.pre_fusion_limit());
+        Ok(Vec::new())
     }
 }
 

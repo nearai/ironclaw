@@ -465,6 +465,119 @@ async fn thread_context_port_degrades_to_no_snippets_when_memory_context_source_
 }
 
 #[tokio::test]
+async fn thread_context_port_memory_query_uses_latest_user_and_skips_without_user() {
+    // (a) A window with an assistant reply between two user messages must
+    // search on the latest user message, not an earlier one.
+    let fixture = ThreadFixture::new_with_user_content("first question").await;
+    ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    )
+    .finalize_assistant_message(FinalizeAssistantMessage {
+        reply: AssistantReply {
+            content: "here is an answer".to_string(),
+        },
+    })
+    .await
+    .unwrap();
+    fixture
+        .accept_user_message("event-2", "second question")
+        .await;
+    let latest_user_spy = Arc::new(SpyMemoryContextSource::new());
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    )
+    .with_memory_context_source(latest_user_spy.clone());
+
+    adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(latest_user_spy.call_count(), 1);
+    let query = latest_user_spy
+        .captured_query()
+        .expect("latest user message must drive a memory query");
+    assert!(query.contains("second question"));
+    assert!(!query.contains("first question"));
+
+    // (b) A window with no user message at all (assistant/summary-only) must
+    // skip memory recall entirely. A dedicated [user, assistant] fixture
+    // bounded to a window of size 1 scans only the trailing assistant reply.
+    let assistant_only_fixture = ThreadFixture::new_with_user_content("only question").await;
+    ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&assistant_only_fixture.thread_service),
+        assistant_only_fixture.thread_scope.clone(),
+        assistant_only_fixture.run_context.clone(),
+    )
+    .finalize_assistant_message(FinalizeAssistantMessage {
+        reply: AssistantReply {
+            content: "final answer".to_string(),
+        },
+    })
+    .await
+    .unwrap();
+    let assistant_only_spy = Arc::new(SpyMemoryContextSource::new());
+    let assistant_only_adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&assistant_only_fixture.thread_service),
+        assistant_only_fixture.thread_scope.clone(),
+        assistant_only_fixture.run_context.clone(),
+        16,
+    )
+    .with_memory_context_source(assistant_only_spy.clone());
+
+    assistant_only_adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 1,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        assistant_only_spy.call_count(),
+        0,
+        "a window with no user message must not trigger memory recall"
+    );
+
+    // (c) A whitespace-only user message carries no searchable content and
+    // must also skip memory recall.
+    let whitespace_fixture = ThreadFixture::new_with_user_content("   ").await;
+    let whitespace_spy = Arc::new(SpyMemoryContextSource::new());
+    let whitespace_adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&whitespace_fixture.thread_service),
+        whitespace_fixture.thread_scope.clone(),
+        whitespace_fixture.run_context.clone(),
+        16,
+    )
+    .with_memory_context_source(whitespace_spy.clone());
+
+    whitespace_adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        whitespace_spy.call_count(),
+        0,
+        "whitespace-only user message must not trigger memory recall"
+    );
+}
+
+#[tokio::test]
 async fn thread_context_port_accepts_matching_run_actor_owner() {
     // The same path must still succeed when the run actor owns the thread.
     let fixture = ThreadFixture::new().await;
@@ -3858,21 +3971,35 @@ impl HostIdentityContextSource for StaticIdentityContextSource {
     }
 }
 
-/// Records the `actor` a `load_memory_snippets` call was made with, so a
-/// test can assert which user the port scoped memory recall to.
+/// Records the `actor` and `query` a `load_memory_snippets` call was made
+/// with (plus a call count), so a test can assert which user the port scoped
+/// memory recall to, which message text it searched for, and whether it was
+/// invoked at all.
 struct SpyMemoryContextSource {
     captured_actor: Mutex<Option<UserId>>,
+    captured_query: Mutex<Option<String>>,
+    call_count: AtomicUsize,
 }
 
 impl SpyMemoryContextSource {
     fn new() -> Self {
         Self {
             captured_actor: Mutex::new(None),
+            captured_query: Mutex::new(None),
+            call_count: AtomicUsize::new(0),
         }
     }
 
     fn captured_actor(&self) -> Option<UserId> {
         self.captured_actor.lock().unwrap().clone()
+    }
+
+    fn captured_query(&self) -> Option<String> {
+        self.captured_query.lock().unwrap().clone()
+    }
+
+    fn call_count(&self) -> usize {
+        self.call_count.load(Ordering::SeqCst)
     }
 }
 
@@ -3883,6 +4010,8 @@ impl MemoryPromptContextService for SpyMemoryContextSource {
         request: MemoryPromptContextRequest,
     ) -> Result<Vec<LoopContextSnippet>, AgentLoopHostError> {
         *self.captured_actor.lock().unwrap() = Some(request.actor.user_id);
+        *self.captured_query.lock().unwrap() = Some(request.query);
+        self.call_count.fetch_add(1, Ordering::SeqCst);
         Ok(Vec::new())
     }
 }

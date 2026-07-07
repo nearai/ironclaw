@@ -575,6 +575,11 @@ fn fts_naive_matches(stored: &str, query: &str) -> bool {
 /// else, including an empty or unterminated quote.
 fn fts5_literal_phrase(query: &str) -> Option<String> {
     let inner = query.strip_prefix('"')?.strip_suffix('"')?;
+    if inner.is_empty() {
+        // An empty phrase (`""`) is not a literal-phrase query — treating it
+        // as one would make `contains("")` match every stored row.
+        return None;
+    }
     Some(inner.replace("\"\"", "\""))
 }
 
@@ -956,6 +961,35 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
+
+        // An empty quoted phrase must not degrade to `contains("")`, which
+        // would match every row; it falls back to token matching instead.
+        let empty_phrase_results = fs
+            .query(
+                &vpath("/memory"),
+                &Filter::Fts {
+                    key: key("content"),
+                    query: "\"\"".into(),
+                },
+                Page::default(),
+            )
+            .await
+            .unwrap();
+        assert!(empty_phrase_results.is_empty());
+
+        // An unterminated quote is not a literal phrase either.
+        let unterminated_results = fs
+            .query(
+                &vpath("/memory"),
+                &Filter::Fts {
+                    key: key("content"),
+                    query: "\"unterminated".into(),
+                },
+                Page::default(),
+            )
+            .await
+            .unwrap();
+        assert!(unterminated_results.is_empty());
     }
 
     #[tokio::test]
