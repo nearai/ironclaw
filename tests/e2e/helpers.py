@@ -175,6 +175,11 @@ SEL = {
     # User management (Settings → Users tab)
     "users_tbody":              "#users-tbody",
     "users_tbody_row":          "#users-tbody tr",
+    "users_create_btn":         "#users-create-btn",
+    "users_create_form":        "#users-create-form",
+    "users_display_name":       "#user-display-name",
+    "users_email":              "#user-email",
+    "users_create_submit":      "#users-create-submit",
     # Activity / tool cards (live and history)
     "activity_group":           ".activity-group",
     "activity_tool_card":       ".activity-tool-card",
