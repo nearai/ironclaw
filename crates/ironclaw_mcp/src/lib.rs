@@ -151,7 +151,9 @@ pub trait McpClient: Send + Sync {
         request: McpClientRequest,
     ) -> Result<McpToolDiscoveryOutput, McpClientError> {
         let _ = request;
-        Err(McpClientError::client(request_denied()))
+        Err(McpClientError::client(request_denied(
+            McpRequestDeniedCause::UnsupportedTransport,
+        )))
     }
 }
 
@@ -453,10 +455,9 @@ where
         method: McpJsonRpcMethod,
         params: Option<Value>,
     ) -> Result<PlannedMcpJsonRpc, McpClientError> {
-        let url = request
-            .url
-            .as_deref()
-            .ok_or_else(|| McpClientError::client(request_denied()))?;
+        let url = request.url.as_deref().ok_or_else(|| {
+            McpClientError::client(request_denied(McpRequestDeniedCause::MissingUrl))
+        })?;
         let body =
             encode_json_rpc_request(id, method.as_str(), params).map_err(McpClientError::client)?;
         let policy_headers = vec![
@@ -537,7 +538,9 @@ where
             if is_mcp_auth_response_status(response.status) {
                 return Err(McpClientError::AuthRequired);
             }
-            return Err(McpClientError::client(response_error()));
+            return Err(McpClientError::client(response_error(
+                McpResponseErrorCause::HttpStatus(response.status),
+            )));
         }
         let session_id = mcp_session_id_from_response(&response).map_err(McpClientError::client)?;
 
@@ -545,7 +548,7 @@ where
             return Ok(McpJsonRpcExchange {
                 response: McpJsonRpcResponse {
                     result: None,
-                    error: false,
+                    error: None,
                 },
                 session_id,
                 usage,
@@ -567,7 +570,9 @@ where
             .sessions
             .lock()
             .map(|guard| guard.get(session_key).cloned())
-            .map_err(|_| McpClientError::client(request_denied()))
+            .map_err(|_| {
+                McpClientError::client(request_denied(McpRequestDeniedCause::SessionStatePoisoned))
+            })
     }
 
     fn store_session(
@@ -575,11 +580,9 @@ where
         session_key: &McpHostHttpSessionKey,
         session: McpHostHttpSession,
     ) -> Result<(), McpClientError> {
-        let mut guard = self
-            .state
-            .sessions
-            .lock()
-            .map_err(|_| McpClientError::client(request_denied()))?;
+        let mut guard = self.state.sessions.lock().map_err(|_| {
+            McpClientError::client(request_denied(McpRequestDeniedCause::SessionStatePoisoned))
+        })?;
         guard.insert(session_key.clone(), session);
         Ok(())
     }
@@ -592,11 +595,9 @@ where
         let Some(session_id) = session_id else {
             return Ok(());
         };
-        let mut guard = self
-            .state
-            .sessions
-            .lock()
-            .map_err(|_| McpClientError::client(request_denied()))?;
+        let mut guard = self.state.sessions.lock().map_err(|_| {
+            McpClientError::client(request_denied(McpRequestDeniedCause::SessionStatePoisoned))
+        })?;
         if let Some(session) = guard.get_mut(session_key) {
             session.session_id = Some(session_id);
         }
@@ -620,8 +621,10 @@ where
             )
             .await?;
         accumulate_usage(&mut usage, initialize.usage);
-        if initialize.response.error {
-            return Err(McpClientError::client(response_error()));
+        if let Some(error) = initialize.response.error {
+            return Err(McpClientError::client(response_error(
+                McpResponseErrorCause::JsonRpcError { code: error.code },
+            )));
         }
         self.store_session(
             session_key,
@@ -643,8 +646,10 @@ where
             .await?;
         accumulate_usage(&mut usage, initialized.usage);
         self.update_session_id(session_key, initialized.session_id.clone())?;
-        if initialized.response.error {
-            return Err(McpClientError::client(response_error()));
+        if let Some(error) = initialized.response.error {
+            return Err(McpClientError::client(response_error(
+                McpResponseErrorCause::JsonRpcError { code: error.code },
+            )));
         }
         Ok(usage)
     }
@@ -665,13 +670,14 @@ where
         request: McpClientRequest,
     ) -> Result<McpClientOutput, McpClientError> {
         if !requires_host_http_egress(&request.transport) {
-            return Err(McpClientError::client(request_denied()));
+            return Err(McpClientError::client(request_denied(
+                McpRequestDeniedCause::UnsupportedTransport,
+            )));
         }
 
-        let url = request
-            .url
-            .as_deref()
-            .ok_or_else(|| McpClientError::client(request_denied()))?;
+        let url = request.url.as_deref().ok_or_else(|| {
+            McpClientError::client(request_denied(McpRequestDeniedCause::MissingUrl))
+        })?;
         let session_key = McpHostHttpSessionKey::new(&request.scope, &request.provider, url);
         let _session_cleanup =
             McpHostHttpSessionCleanup::new(Arc::clone(&self.state), session_key.clone());
@@ -698,16 +704,21 @@ where
             .await?;
         accumulate_usage(&mut usage, call.usage);
         self.update_session_id(&session_key, call.session_id.clone())?;
-        if call.response.error {
-            return Err(McpClientError::client(response_error()));
+        if let Some(error) = call.response.error {
+            return Err(McpClientError::client(response_error(
+                McpResponseErrorCause::JsonRpcError { code: error.code },
+            )));
         }
-        let output = call
-            .response
-            .result
-            .ok_or_else(|| McpClientError::client(response_error()))?;
+        let output = call.response.result.ok_or_else(|| {
+            McpClientError::client(response_error(McpResponseErrorCause::MissingResult))
+        })?;
         let output_bytes = serde_json::to_vec(&output)
             .map(|bytes| bytes.len() as u64)
-            .map_err(|_| McpClientError::client(response_error()))?;
+            .map_err(|err| {
+                McpClientError::client(response_error(McpResponseErrorCause::ParseFailed(
+                    err.to_string(),
+                )))
+            })?;
         usage.output_bytes = usage.output_bytes.max(output_bytes);
 
         Ok(McpClientOutput {
@@ -722,13 +733,14 @@ where
         request: McpClientRequest,
     ) -> Result<McpToolDiscoveryOutput, McpClientError> {
         if !requires_host_http_egress(&request.transport) {
-            return Err(McpClientError::client(request_denied()));
+            return Err(McpClientError::client(request_denied(
+                McpRequestDeniedCause::UnsupportedTransport,
+            )));
         }
 
-        let url = request
-            .url
-            .as_deref()
-            .ok_or_else(|| McpClientError::client(request_denied()))?;
+        let url = request.url.as_deref().ok_or_else(|| {
+            McpClientError::client(request_denied(McpRequestDeniedCause::MissingUrl))
+        })?;
         let session_key = McpHostHttpSessionKey::new(&request.scope, &request.provider, url);
         let _session_cleanup =
             McpHostHttpSessionCleanup::new(Arc::clone(&self.state), session_key.clone());
@@ -749,13 +761,14 @@ where
             .await?;
         accumulate_usage(&mut usage, tools.usage);
         self.update_session_id(&session_key, tools.session_id.clone())?;
-        if tools.response.error {
-            return Err(McpClientError::client(response_error()));
+        if let Some(error) = tools.response.error {
+            return Err(McpClientError::client(response_error(
+                McpResponseErrorCause::JsonRpcError { code: error.code },
+            )));
         }
-        let result = tools
-            .response
-            .result
-            .ok_or_else(|| McpClientError::client(response_error()))?;
+        let result = tools.response.result.ok_or_else(|| {
+            McpClientError::client(response_error(McpResponseErrorCause::MissingResult))
+        })?;
         Ok(McpToolDiscoveryOutput {
             tools: parse_tools_list_result(&result).map_err(McpClientError::client)?,
             usage,
@@ -766,7 +779,18 @@ where
 #[derive(Debug, Clone, PartialEq)]
 struct McpJsonRpcResponse {
     result: Option<Value>,
-    error: bool,
+    error: Option<JsonRpcErrorInfo>,
+}
+
+/// Secret-free view of a JSON-RPC `error` object surfaced for diagnostics.
+/// Only the standardized protocol `code` is retained: the server-provided
+/// `message` is untrusted free text (it can echo request args, paths, provider
+/// diagnostics, or credential-shaped values) and is deliberately dropped rather
+/// than carried toward the model-visible reason. Length-bounding is not
+/// redaction, so the message is never captured here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JsonRpcErrorInfo {
+    code: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -809,7 +833,9 @@ impl McpJsonRpcMethod {
             .iter()
             .any(|injection| matches!(injection.source, RuntimeCredentialSource::SecretStoreLease))
         {
-            return Err(request_denied());
+            return Err(request_denied(
+                McpRequestDeniedCause::DeniedCredentialSource,
+            ));
         }
         Ok(credential_injections)
     }
@@ -833,7 +859,9 @@ fn validate_staged_credential_injections(
         .iter()
         .any(|injection| matches!(injection.source, RuntimeCredentialSource::SecretStoreLease))
     {
-        return Err(request_denied());
+        return Err(request_denied(
+            McpRequestDeniedCause::DeniedCredentialSource,
+        ));
     }
     Ok(())
 }
@@ -875,7 +903,7 @@ fn mcp_session_id_from_response(response: &McpHostHttpResponse) -> Result<Option
         return Ok(None);
     }
     if !is_safe_mcp_session_id(trimmed) {
-        return Err(response_error());
+        return Err(response_error(McpResponseErrorCause::InvalidSessionId));
     }
     Ok(Some(trimmed.to_string()))
 }
@@ -898,10 +926,14 @@ fn protocol_version_from_initialize_response(
         .and_then(|result| result.get("protocolVersion"))
         .and_then(Value::as_str)
     else {
-        return Err(response_error());
+        return Err(response_error(
+            McpResponseErrorCause::InvalidProtocolVersion,
+        ));
     };
     if !is_safe_mcp_protocol_version(protocol_version) {
-        return Err(response_error());
+        return Err(response_error(
+            McpResponseErrorCause::InvalidProtocolVersion,
+        ));
     }
     Ok(protocol_version.to_string())
 }
@@ -923,7 +955,8 @@ fn encode_json_rpc_request(
     if let Some(params) = params {
         object.insert("params".to_string(), params);
     }
-    serde_json::to_vec(&Value::Object(object)).map_err(|_| request_denied())
+    serde_json::to_vec(&Value::Object(object))
+        .map_err(|err| request_denied(McpRequestDeniedCause::EncodeFailed(err.to_string())))
 }
 
 fn parse_mcp_response(
@@ -933,8 +966,8 @@ fn parse_mcp_response(
     if response_is_sse(response) {
         parse_mcp_sse_response(&response.body, expected_id)
     } else {
-        let value =
-            serde_json::from_slice::<Value>(&response.body).map_err(|_| response_error())?;
+        let value = serde_json::from_slice::<Value>(&response.body)
+            .map_err(|err| response_error(McpResponseErrorCause::ParseFailed(err.to_string())))?;
         parse_mcp_json_rpc_value(&value, expected_id)
     }
 }
@@ -950,7 +983,8 @@ fn parse_mcp_sse_response(
     body: &[u8],
     expected_id: Option<u64>,
 ) -> Result<McpJsonRpcResponse, String> {
-    let text = std::str::from_utf8(body).map_err(|_| response_error())?;
+    let text = std::str::from_utf8(body)
+        .map_err(|err| response_error(McpResponseErrorCause::ParseFailed(err.to_string())))?;
     for line in text.lines() {
         let Some(payload) = line.strip_prefix("data:") else {
             continue;
@@ -963,7 +997,7 @@ fn parse_mcp_sse_response(
             return parse_mcp_json_rpc_value(&value, expected_id);
         }
     }
-    Err(response_error())
+    Err(response_error(McpResponseErrorCause::NoPayload))
 }
 
 fn parse_mcp_json_rpc_value(
@@ -974,12 +1008,24 @@ fn parse_mcp_json_rpc_value(
     if let Some(expected) = expected_id
         && parsed_id != Some(expected)
     {
-        return Err(response_error());
+        return Err(response_error(McpResponseErrorCause::IdMismatch));
     }
     Ok(McpJsonRpcResponse {
         result: value.get("result").cloned(),
-        error: value.get("error").is_some(),
+        error: parse_json_rpc_error_info(value.get("error")),
     })
+}
+
+/// Extract a bounded, secret-free view of a JSON-RPC `error` object. Returns
+/// `None` when no `error` member is present. A non-object `error` member still
+/// counts as an error, but carries no structured code/message.
+fn parse_json_rpc_error_info(error: Option<&Value>) -> Option<JsonRpcErrorInfo> {
+    let error = error?;
+    // Only the standardized protocol `code` is captured. The server-provided
+    // `message` is untrusted free text and is intentionally not read, so it can
+    // never flow into the model-visible reason.
+    let code = error.get("code").and_then(Value::as_i64);
+    Some(JsonRpcErrorInfo { code })
 }
 
 fn parse_tools_list_result(value: &Value) -> Result<Vec<HostedMcpDiscoveredTool>, String> {
@@ -990,12 +1036,14 @@ fn parse_tools_list_result(value: &Value) -> Result<Vec<HostedMcpDiscoveredTool>
     const MAX_SCHEMA_NODES: usize = 512;
     const MAX_SCHEMA_STRING_BYTES: usize = 1024;
 
+    let invalid_tool_list = || response_error(McpResponseErrorCause::InvalidToolList);
+
     let tools = value
         .get("tools")
         .and_then(Value::as_array)
-        .ok_or_else(response_error)?;
+        .ok_or_else(invalid_tool_list)?;
     if tools.len() > MAX_DISCOVERED_TOOLS {
-        return Err(response_error());
+        return Err(invalid_tool_list());
     }
 
     tools
@@ -1008,7 +1056,7 @@ fn parse_tools_list_result(value: &Value) -> Result<Vec<HostedMcpDiscoveredTool>
                 // discovery rejects unsupported names instead of normalizing
                 // them into potentially colliding capability IDs.
                 .filter(|name| is_supported_mcp_tool_name(name, MAX_TOOL_NAME_BYTES))
-                .ok_or_else(response_error)?;
+                .ok_or_else(invalid_tool_list)?;
             let description = tool
                 .get("description")
                 .and_then(Value::as_str)
@@ -1016,20 +1064,20 @@ fn parse_tools_list_result(value: &Value) -> Result<Vec<HostedMcpDiscoveredTool>
             if description.len() > MAX_TOOL_DESCRIPTION_BYTES
                 || description.chars().any(is_unsupported_description_char)
             {
-                return Err(response_error());
+                return Err(invalid_tool_list());
             }
             let input_schema = tool
                 .get("inputSchema")
                 .filter(|schema| schema.is_object())
                 .cloned()
-                .ok_or_else(response_error)?;
+                .ok_or_else(invalid_tool_list)?;
             if !is_supported_mcp_input_schema(
                 &input_schema,
                 MAX_SCHEMA_DEPTH,
                 MAX_SCHEMA_NODES,
                 MAX_SCHEMA_STRING_BYTES,
             ) {
-                return Err(response_error());
+                return Err(invalid_tool_list());
             }
             let annotations = parse_tool_annotations(tool.get("annotations"))?;
             Ok(HostedMcpDiscoveredTool {
@@ -1112,7 +1160,9 @@ fn parse_tool_annotations(
     let Some(value) = value else {
         return Ok(HostedMcpDiscoveredToolAnnotations::default());
     };
-    let object = value.as_object().ok_or_else(response_error)?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| response_error(McpResponseErrorCause::InvalidToolList))?;
     Ok(HostedMcpDiscoveredToolAnnotations {
         destructive_hint: object
             .get("destructiveHint")
@@ -1186,12 +1236,128 @@ fn accumulate_usage(total: &mut ResourceUsage, usage: ResourceUsage) {
     total.output_bytes = total.output_bytes.saturating_add(usage.output_bytes);
 }
 
-fn request_denied() -> String {
-    "request_denied".to_string()
+/// Maximum byte length for a diagnostic reason string surfaced to the
+/// runtime/model. These tokens carry protocol codes, HTTP statuses, and
+/// bounded JSON-RPC messages — never raw secrets, credentials, or full
+/// response bodies — but caller-shaped JSON-RPC `message` text could be
+/// arbitrarily long, so every reason is capped.
+const MAX_MCP_REASON_BYTES: usize = 512;
+
+/// Bound an untrusted diagnostic fragment to [`MAX_MCP_REASON_BYTES`],
+/// truncating on a char boundary and appending an ellipsis marker so the
+/// reader knows the value was clipped.
+fn bound_mcp_reason_detail(detail: &str) -> String {
+    const ELLIPSIS: &str = "...";
+    let normalized: String = detail
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    if normalized.len() <= MAX_MCP_REASON_BYTES {
+        return normalized;
+    }
+    let budget = MAX_MCP_REASON_BYTES.saturating_sub(ELLIPSIS.len());
+    let mut end = budget;
+    while end > 0 && !normalized.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{ELLIPSIS}", &normalized[..end])
 }
 
-fn response_error() -> String {
-    "response_error".to_string()
+/// Per-cause request-side (pre-send / planning) failure tokens. Each carries
+/// a stable prefix so callers and the model can classify the failure, plus
+/// bounded diagnostic detail where available.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum McpRequestDeniedCause {
+    /// JSON-RPC request body could not be encoded.
+    EncodeFailed(String),
+    /// The planned request has no target URL.
+    MissingUrl,
+    /// The requested transport is not host-mediated HTTP/SSE.
+    UnsupportedTransport,
+    /// A credential injection used a denied source over this boundary.
+    DeniedCredentialSource,
+    /// The in-memory session map lock was poisoned.
+    SessionStatePoisoned,
+}
+
+impl McpRequestDeniedCause {
+    fn into_reason(self) -> String {
+        match self {
+            Self::EncodeFailed(detail) => {
+                format!(
+                    "mcp_request_encode_failed: {}",
+                    bound_mcp_reason_detail(&detail)
+                )
+            }
+            Self::MissingUrl => "mcp_missing_url".to_string(),
+            Self::UnsupportedTransport => "mcp_unsupported_transport".to_string(),
+            Self::DeniedCredentialSource => "mcp_denied_credential_source".to_string(),
+            Self::SessionStatePoisoned => "mcp_session_state_poisoned".to_string(),
+        }
+    }
+}
+
+/// Per-cause response-side failure tokens. Each carries a stable prefix plus
+/// bounded, secret-free diagnostic detail (HTTP status, JSON-RPC code/message,
+/// parse-failure cause).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum McpResponseErrorCause {
+    /// Non-2xx HTTP status from the MCP endpoint.
+    HttpStatus(u16),
+    /// JSON-RPC `error` object with code and bounded message.
+    JsonRpcError { code: Option<i64> },
+    /// Response body failed JSON parsing.
+    ParseFailed(String),
+    /// A successful response carried no `result` field.
+    MissingResult,
+    /// The endpoint returned an unsafe/oversized `Mcp-Session-Id`.
+    InvalidSessionId,
+    /// The `initialize` response carried an unsafe/missing protocol version.
+    InvalidProtocolVersion,
+    /// JSON-RPC response `id` did not match the request id.
+    IdMismatch,
+    /// Response did not contain a usable JSON-RPC payload (e.g. SSE with no
+    /// matching data frame).
+    NoPayload,
+    /// Discovered `tools/list` result was malformed (shape/limits violation).
+    InvalidToolList,
+}
+
+impl McpResponseErrorCause {
+    fn into_reason(self) -> String {
+        match self {
+            Self::HttpStatus(status) => format!("mcp_http_status_{status}"),
+            Self::JsonRpcError { code } => {
+                // The untrusted server-provided `message` is deliberately NOT
+                // included: MCP servers can echo request args, paths, provider
+                // diagnostics, or credential-shaped values, and this reason is a
+                // stable, model-visible token. The standardized protocol `code`
+                // is the safe diagnostic; length-bounding is not redaction.
+                let mut reason = String::from("mcp_jsonrpc_error");
+                if let Some(code) = code {
+                    reason.push_str(&format!(" code={code}"));
+                }
+                reason
+            }
+            Self::ParseFailed(detail) => {
+                format!("mcp_parse_failed: {}", bound_mcp_reason_detail(&detail))
+            }
+            Self::MissingResult => "mcp_missing_result".to_string(),
+            Self::InvalidSessionId => "mcp_invalid_session_id".to_string(),
+            Self::InvalidProtocolVersion => "mcp_invalid_protocol_version".to_string(),
+            Self::IdMismatch => "mcp_jsonrpc_id_mismatch".to_string(),
+            Self::NoPayload => "mcp_no_payload".to_string(),
+            Self::InvalidToolList => "mcp_invalid_tool_list".to_string(),
+        }
+    }
+}
+
+fn request_denied(cause: McpRequestDeniedCause) -> String {
+    cause.into_reason()
+}
+
+fn response_error(cause: McpResponseErrorCause) -> String {
+    cause.into_reason()
 }
 
 /// MCP runtime failures.
@@ -1555,7 +1721,7 @@ mod tests {
         let error = parse_tools_list_result(&json!({ "tools": tools }))
             .expect_err("tool discovery must cap returned tools");
 
-        assert_eq!(error, "response_error");
+        assert_eq!(error, "mcp_invalid_tool_list");
     }
 
     #[test]
@@ -1566,7 +1732,7 @@ mod tests {
         let error = parse_tools_list_result(&json!({ "tools": [tool] }))
             .expect_err("unsupported description control characters must fail");
 
-        assert_eq!(error, "response_error");
+        assert_eq!(error, "mcp_invalid_tool_list");
     }
 
     #[test]
@@ -1582,7 +1748,7 @@ mod tests {
             let error = parse_tools_list_result(&json!({ "tools": [tool] }))
                 .expect_err("schema must be present and object-shaped");
 
-            assert_eq!(error, "response_error");
+            assert_eq!(error, "mcp_invalid_tool_list");
         }
     }
 
@@ -1605,7 +1771,7 @@ mod tests {
             let error = parse_tools_list_result(&json!({ "tools": [tool] }))
                 .expect_err("unsafe schema strings and shape must fail");
 
-            assert_eq!(error, "response_error");
+            assert_eq!(error, "mcp_invalid_tool_list");
         }
     }
 
@@ -1638,7 +1804,7 @@ mod tests {
             .expect("empty SSE data lines should not abort parsing");
 
         assert_eq!(response.result, Some(json!({"ok": true})));
-        assert!(!response.error);
+        assert!(response.error.is_none());
     }
 
     /// Build an `McpHostHttpResponse` with a caller-chosen `content-type` and
@@ -1673,7 +1839,7 @@ mod tests {
         let json = parse_mcp_response(&mcp_response("application/json", ok_body), id)
             .expect("plain JSON framing parses");
         assert_eq!(json.result, Some(json!({"ok": true})));
-        assert!(!json.error);
+        assert!(json.error.is_none());
 
         // SSE single-event framing (content-type text/event-stream).
         let sse_single = parse_mcp_response(
@@ -1713,7 +1879,10 @@ mod tests {
             id,
         )
         .expect("JSON error-object is a valid response, not a parse failure");
-        assert!(json_err.error, "plain-JSON error object flags error");
+        assert!(
+            json_err.error.is_some(),
+            "plain-JSON error object flags error"
+        );
         assert_eq!(json_err.result, None, "error object carries no result");
 
         let sse_err = parse_mcp_response(
@@ -1724,7 +1893,10 @@ mod tests {
             id,
         )
         .expect("SSE error-object is a valid response, not a parse failure");
-        assert!(sse_err.error, "SSE-framed error object flags error");
+        assert!(
+            sse_err.error.is_some(),
+            "SSE-framed error object flags error"
+        );
         assert_eq!(sse_err.result, None, "error object carries no result");
     }
 
@@ -1735,10 +1907,15 @@ mod tests {
     #[test]
     fn parse_mcp_response_rejects_empty_bodies_in_both_framings() {
         let id = Some(9u64);
-        assert_eq!(
-            parse_mcp_response(&mcp_response("application/json", b""), id).unwrap_err(),
-            "response_error",
-            "empty plain-JSON body must not parse as a success"
+        // Per-cause diagnostic tokens replaced the flat "response_error": an
+        // unparseable JSON body reports `mcp_parse_failed` (with a bounded
+        // serde detail), and an SSE stream with no id-matching data reports
+        // `mcp_no_payload`. Both remain hard errors, not silent successes.
+        let empty_json_err = parse_mcp_response(&mcp_response("application/json", b""), id)
+            .expect_err("empty plain-JSON body must not parse as a success");
+        assert!(
+            empty_json_err.starts_with("mcp_parse_failed"),
+            "empty plain-JSON body must report a parse failure, got {empty_json_err:?}"
         );
         assert_eq!(
             parse_mcp_response(
@@ -1746,7 +1923,7 @@ mod tests {
                 id,
             )
             .unwrap_err(),
-            "response_error",
+            "mcp_no_payload",
             "SSE body with only keepalives (no id-matching data) must not parse"
         );
     }
@@ -1772,5 +1949,162 @@ mod tests {
             .map(|index| (format!("field_{index}"), json!({"type": "string"})))
             .collect::<serde_json::Map<_, _>>();
         json!({"type": "object", "properties": properties})
+    }
+
+    fn json_response(status: u16, body: Value) -> McpHostHttpResponse {
+        McpHostHttpResponse {
+            status,
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            body: serde_json::to_vec(&body).expect("serialize test body"),
+            saved_body: None,
+            request_bytes: 0,
+            response_bytes: 0,
+            redaction_applied: false,
+        }
+    }
+
+    #[test]
+    fn non_2xx_http_status_reason_carries_status_code() {
+        // The 404 path is a direct `response_error(HttpStatus(..))` at the
+        // send call site; the cause-to-token mapping is the load-bearing part.
+        let reason = response_error(McpResponseErrorCause::HttpStatus(404));
+        assert_eq!(reason, "mcp_http_status_404");
+        assert!(reason.contains("404"));
+
+        let reason = response_error(McpResponseErrorCause::HttpStatus(503));
+        assert_eq!(reason, "mcp_http_status_503");
+    }
+
+    #[test]
+    fn json_rpc_error_response_reason_carries_code_and_message() {
+        let response = json_response(
+            200,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": { "code": -32601, "message": "Method not found" }
+            }),
+        );
+
+        let parsed = parse_mcp_response(&response, Some(1)).expect("parse json-rpc error response");
+        let error = parsed.error.expect("error object captured");
+
+        // Drive the same reason construction the call sites use.
+        let reason = response_error(McpResponseErrorCause::JsonRpcError { code: error.code });
+        assert!(
+            reason.contains("-32601"),
+            "reason should carry the standardized protocol code: {reason}"
+        );
+        // The untrusted server-provided message must NOT leak into the
+        // model-visible reason (MCP servers can echo secrets/args/paths).
+        assert!(
+            !reason.contains("Method not found"),
+            "raw server message must not leak into the reason: {reason}"
+        );
+        assert!(reason.starts_with("mcp_jsonrpc_error"));
+    }
+
+    #[test]
+    fn json_rpc_error_without_structured_fields_still_classifies() {
+        let response = json_response(200, json!({ "jsonrpc": "2.0", "id": 4, "error": "boom" }));
+
+        let parsed = parse_mcp_response(&response, Some(4)).expect("parse non-object error");
+        let error = parsed.error.expect("error present even when non-object");
+        assert_eq!(error.code, None);
+        let reason = response_error(McpResponseErrorCause::JsonRpcError { code: error.code });
+        assert_eq!(reason, "mcp_jsonrpc_error");
+    }
+
+    #[test]
+    fn malformed_json_body_reason_names_parse_failure() {
+        let response = McpHostHttpResponse {
+            status: 200,
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            body: b"{ this is not json".to_vec(),
+            saved_body: None,
+            request_bytes: 0,
+            response_bytes: 0,
+            redaction_applied: false,
+        };
+
+        let reason = parse_mcp_response(&response, Some(1)).expect_err("malformed body must fail");
+        assert!(
+            reason.starts_with("mcp_parse_failed:"),
+            "reason should name parse failure: {reason}"
+        );
+    }
+
+    #[test]
+    fn successful_result_response_has_no_error() {
+        let response = json_response(
+            200,
+            json!({ "jsonrpc": "2.0", "id": 9, "result": { "ok": true } }),
+        );
+
+        let parsed = parse_mcp_response(&response, Some(9)).expect("success path unchanged");
+        assert_eq!(parsed.result, Some(json!({ "ok": true })));
+        assert!(parsed.error.is_none());
+    }
+
+    #[test]
+    fn id_mismatch_reason_is_stable_token() {
+        let response = json_response(
+            200,
+            json!({ "jsonrpc": "2.0", "id": 2, "result": { "ok": true } }),
+        );
+
+        let reason = parse_mcp_response(&response, Some(1)).expect_err("id mismatch must fail");
+        assert_eq!(reason, "mcp_jsonrpc_id_mismatch");
+    }
+
+    #[test]
+    fn request_denied_causes_map_to_stable_tokens() {
+        assert_eq!(
+            request_denied(McpRequestDeniedCause::MissingUrl),
+            "mcp_missing_url"
+        );
+        assert_eq!(
+            request_denied(McpRequestDeniedCause::UnsupportedTransport),
+            "mcp_unsupported_transport"
+        );
+        assert_eq!(
+            request_denied(McpRequestDeniedCause::DeniedCredentialSource),
+            "mcp_denied_credential_source"
+        );
+        assert_eq!(
+            request_denied(McpRequestDeniedCause::SessionStatePoisoned),
+            "mcp_session_state_poisoned"
+        );
+        let encode = request_denied(McpRequestDeniedCause::EncodeFailed("eof".to_string()));
+        assert!(encode.starts_with("mcp_request_encode_failed: "));
+        assert!(encode.contains("eof"));
+    }
+
+    #[test]
+    fn invalid_session_and_protocol_reasons_are_distinct_tokens() {
+        assert_eq!(
+            response_error(McpResponseErrorCause::InvalidSessionId),
+            "mcp_invalid_session_id"
+        );
+        assert_eq!(
+            response_error(McpResponseErrorCause::InvalidProtocolVersion),
+            "mcp_invalid_protocol_version"
+        );
+        assert_eq!(
+            response_error(McpResponseErrorCause::MissingResult),
+            "mcp_missing_result"
+        );
+    }
+
+    #[test]
+    fn reason_detail_is_bounded_and_strips_control_chars() {
+        let long = "a".repeat(10_000);
+        let bounded = bound_mcp_reason_detail(&long);
+        assert!(bounded.len() <= MAX_MCP_REASON_BYTES);
+        assert!(bounded.ends_with("..."));
+
+        let with_control = bound_mcp_reason_detail("line\nbreak\u{0000}null");
+        assert!(!with_control.contains('\n'));
+        assert!(!with_control.contains('\u{0000}'));
     }
 }

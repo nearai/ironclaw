@@ -4,7 +4,7 @@ use ironclaw_product_adapters::{ProductOutboundEnvelope, ProjectionCursor};
 use ironclaw_threads::{SessionThreadRecord, SummaryArtifact, ThreadMessageRecord};
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunResponse, EventCursor, GateRef, ResumeTurnResponse,
-    SanitizedFailure, TurnCheckpointId, TurnRunId, TurnRunState, TurnStatus,
+    RetryTurnResponse, SanitizedFailure, TurnCheckpointId, TurnRunId, TurnRunState, TurnStatus,
 };
 use secrecy::SecretString;
 use serde::ser::SerializeStruct;
@@ -350,6 +350,23 @@ impl From<ResumeTurnResponse> for RebornResumeGateResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornRetryRunResponse {
+    pub run_id: TurnRunId,
+    pub status: TurnStatus,
+    pub event_cursor: EventCursor,
+}
+
+impl From<RetryTurnResponse> for RebornRetryRunResponse {
+    fn from(value: RetryTurnResponse) -> Self {
+        Self {
+            run_id: value.run_id,
+            status: value.status,
+            event_cursor: value.event_cursor,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum RebornResolveGateResponse {
     Resumed(RebornResumeGateResponse),
@@ -404,7 +421,14 @@ impl From<TurnRunState> for RebornGetRunStateResponse {
             received_at: value.received_at,
             checkpoint_id: value.checkpoint_id,
             gate_ref: value.gate_ref,
-            failure: value.failure,
+            // Public WebUI shape: strip the model-visible `detail` so free-form
+            // backend cause text never reaches the browser. `category` (the
+            // user-facing signal) is retained. See
+            // `SanitizedFailure::public_projection`.
+            failure: value
+                .failure
+                .as_ref()
+                .map(SanitizedFailure::public_projection),
         }
     }
 }

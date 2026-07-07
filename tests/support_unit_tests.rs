@@ -403,9 +403,10 @@ mod reborn_support_tests {
     };
     use ironclaw_turns::{
         CancelRunRequest, CancelRunResponse, GetRunStateRequest, LoopMessageRef,
-        ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
-        RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnCoordinator,
-        TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+        ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest,
+        RetryTurnResponse, RunProfileId, RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse,
+        ThreadBusy, TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope,
+        TurnStatus,
         events::EventCursor,
         run_profile::{
             CapabilityBatchInvocation, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
@@ -2574,6 +2575,13 @@ mod reborn_support_tests {
             _request: ResumeTurnRequest,
         ) -> Result<ResumeTurnResponse, TurnError> {
             panic!("resume_turn is not used by reborn support tests")
+        }
+
+        async fn retry_turn(
+            &self,
+            _request: RetryTurnRequest,
+        ) -> Result<RetryTurnResponse, TurnError> {
+            panic!("retry_turn is not used by reborn support tests")
         }
 
         async fn cancel_run(

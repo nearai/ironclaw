@@ -10,14 +10,18 @@ use tracing::debug;
 
 use crate::{
     state::{CheckpointKind, LoopExecutionState},
-    strategies::{GateKind, ModelErrorSummary, RecoveryOutcome, RetryAlteration, RetryScope},
+    strategies::{
+        GateKind, ModelErrorSummary, RecoveryOutcome, RetryAlteration, RetryScope,
+        model_error_to_failure_kind,
+    },
 };
 
 use super::prompt::build_prompt_bundle_for_surface;
 use super::{
-    AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, HostStage,
-    MAX_MODEL_RETRIES, StageContext, exit_id, failed_exit, honor_retry_alteration, loop_gate_kind,
-    model_error_class, model_preference_to_host, sanitized_strategy_summary,
+    AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, FailedExitDetails,
+    HostStage, MAX_MODEL_RETRIES, StageContext, exit_id, failed_exit, honor_retry_alteration,
+    loop_gate_kind, model_error_class, model_error_failure_category, model_preference_to_host,
+    sanitized_strategy_summary,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -26,6 +30,7 @@ pub(crate) struct ModelStage;
 pub(super) struct ModelInput {
     pub(super) state: LoopExecutionState,
     pub(super) messages: Vec<ironclaw_turns::run_profile::LoopModelMessage>,
+    pub(super) inline_messages: Vec<ironclaw_turns::run_profile::LoopInlineMessage>,
     pub(super) surface_version: ironclaw_turns::run_profile::CapabilitySurfaceVersion,
     pub(super) capability_view: LoopModelCapabilityView,
 }
@@ -70,6 +75,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
         let capability_view = input.capability_view;
         let mut request = LoopModelRequest {
             messages: input.messages,
+            inline_messages: input.inline_messages,
             surface_version: Some(surface_version.clone()),
             model_preference,
             capability_view: Some(capability_view.clone()),
@@ -123,6 +129,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
                         return budget_approval_blocked_exit(ctx, state, gate_ref).await;
                     }
                     let Some(class) = model_error_class(&error) else {
+                        let detail = error.detail.clone();
                         return Err(AgentLoopExecutorError::HostUnavailableWithDiagnostics {
                             stage: HostStage::Model,
                             kind: error.kind,
@@ -130,10 +137,13 @@ impl ExecutorStage<ModelInput> for ModelStage {
                                 .unwrap_or_else(|_| LoopSafeSummary::model_gateway_failed()),
                             reason_kind: error.reason_kind,
                             diagnostic_ref: error.diagnostic_ref,
+                            detail,
                         });
                     };
                     if !recorded_failure {
-                        state.recent_failure_kinds.push(LoopFailureKind::ModelError);
+                        state
+                            .recent_failure_kinds
+                            .push(model_error_to_failure_kind(class));
                         recorded_failure = true;
                     }
                     let summary = ModelErrorSummary {
@@ -182,8 +192,10 @@ impl ExecutorStage<ModelInput> for ModelStage {
                                 &state,
                                 surface_version.clone(),
                                 capability_view.clone(),
+                                alter.as_ref(),
                             )
                             .await?;
+                            request.inline_messages = bundle.inline_messages();
                             match CheckpointStage.cancel_if_requested(ctx, state).await? {
                                 CancelCheck::Continue(next) => state = *next,
                                 CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
@@ -200,6 +212,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
                             failure_kind,
                         } => {
                             state.recovery_state = recovery;
+                            state.recent_failure_kinds.push(failure_kind);
                             match CheckpointStage.cancel_if_requested(ctx, state).await? {
                                 CancelCheck::Continue(next) => state = *next,
                                 CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
@@ -212,6 +225,13 @@ impl ExecutorStage<ModelInput> for ModelStage {
                                 checked.state,
                                 failure_kind,
                                 Some(checked.checkpoint_id),
+                                FailedExitDetails {
+                                    diagnostic_ref: summary.diagnostic_ref.clone(),
+                                    safe_summary: Some(model_error_failure_category(
+                                        summary.class,
+                                    )?),
+                                    explanation_message_ref: None,
+                                },
                             )?));
                         }
                     }
@@ -219,6 +239,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
             }
         }
 
+        state.recent_failure_kinds.push(LoopFailureKind::ModelError);
         let checked = CheckpointStage
             .write(ctx, state, CheckpointKind::Final)
             .await?;
@@ -227,6 +248,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
             checked.state,
             LoopFailureKind::ModelError,
             Some(checked.checkpoint_id),
+            FailedExitDetails::default(),
         )?))
     }
 }
@@ -282,6 +304,13 @@ async fn apply_model_retry_alteration(
             }
             state.compaction_state.force_compact_on_next_iteration = true;
             return Ok(ModelRetryAction::RetryIteration);
+        }
+        Some(RetryAlteration::RepairInvalidModelOutput) => {
+            if scope != RetryScope::Call {
+                return Err(AgentLoopExecutorError::PlannerContract {
+                    detail: "invalid model output repair retry requires call scope",
+                });
+            }
         }
         Some(RetryAlteration::AdvanceFallback) | None => {}
     }

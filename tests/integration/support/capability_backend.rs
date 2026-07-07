@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use super::doubles::ParkingCapabilityGate;
 use super::group::GroupCapability;
 use super::harness::profiles::core_builtin::{self, CoreBuiltinOptions};
 use super::http_matcher::ScriptedHttpResponse;
@@ -88,7 +89,21 @@ impl RebornCapabilityBackend {
         self,
         shell_mode: ShellMode,
         scripting: CapabilityScriptingInputs,
+        park_capability_gate: Option<ParkingCapabilityGate>,
     ) -> HarnessResult<GroupCapability> {
+        // Fail fast rather than silently ignore: only `BuiltinHttpTools` wires
+        // `park_capability_dispatch` below, so a gate paired with any other
+        // backend would otherwise dispatch un-parked with no signal to the
+        // caller.
+        if park_capability_gate.is_some()
+            && !matches!(self, RebornCapabilityBackend::BuiltinHttpTools)
+        {
+            return Err(
+                "park_tool_dispatch is only supported by RebornCapabilityBackend::BuiltinHttpTools \
+                 (select it via .with_builtin_http_tools())"
+                    .into(),
+            );
+        }
         let CapabilityScriptingInputs {
             keyed_http_responses,
             web_access_response_bodies,
@@ -116,6 +131,13 @@ impl RebornCapabilityBackend {
                 if let ShellMode::Scripted(scripted_process) = shell_mode {
                     host_runtime.install_process_script(scripted_process)?;
                 }
+                // E-GATEWAY tool-path analog of `park_model` (lease-wedge coverage,
+                // issue #5476). Only wired for this backend — the guard above
+                // fails the build if a gate is paired with any other backend.
+                let host_runtime = match park_capability_gate {
+                    Some(gate) => host_runtime.park_capability_dispatch(gate),
+                    None => host_runtime,
+                };
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
             RebornCapabilityBackend::MockMcp { mcp_url } => {
