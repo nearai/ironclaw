@@ -2118,7 +2118,7 @@ fn assert_single_wasm_request(
 
     let headers: serde_json::Value = serde_json::from_str(&request.headers_json).unwrap();
     assert_eq!(headers["User-Agent"], "IronClaw-GitHub-Reborn-WASM");
-    assert_eq!(headers["X-GitHub-Api-Version"], "2026-03-10");
+    assert_eq!(headers["X-GitHub-Api-Version"], "2022-11-28");
 }
 
 fn assert_single_wasm_request_json_body(
@@ -2140,7 +2140,7 @@ fn assert_single_wasm_request_json_body(
 
     let headers: serde_json::Value = serde_json::from_str(&request.headers_json).unwrap();
     assert_eq!(headers["User-Agent"], "IronClaw-GitHub-Reborn-WASM");
-    assert_eq!(headers["X-GitHub-Api-Version"], "2026-03-10");
+    assert_eq!(headers["X-GitHub-Api-Version"], "2022-11-28");
 }
 
 fn governor_with_default_limit(account: ResourceAccount) -> InMemoryResourceGovernor {
