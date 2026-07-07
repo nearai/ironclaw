@@ -18,10 +18,8 @@ use tokio::sync::Mutex;
 
 use crate::RebornRuntime;
 use crate::extension_lifecycle::{ExtensionActivationMode, RebornLocalExtensionManagementPort};
-use crate::outbound::{
-    OutboundDeliveryTargetEntry, OutboundDeliveryTargetProvider,
-    OutboundDeliveryTargetRegistrationOutcome,
-};
+use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
+use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
 use crate::slack_actor_identity::{
     RebornUserIdentityLookup, SLACK_IDENTITY_PROVIDER, SlackUserIdentityActorResolver,
     slack_user_identity_provider_user_id,

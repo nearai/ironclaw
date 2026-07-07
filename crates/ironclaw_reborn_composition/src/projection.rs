@@ -1095,6 +1095,9 @@ fn run_status_projection_state(
             status: run_status_wire(run.status).to_string(),
             failure_category: run_failure_category(&run),
             failure_summary: run_failure_summary(&run),
+            // Runtime-replay projections have no retryability signal; the
+            // turn-lifecycle projection is the source of truth for it.
+            retryable: None,
         })
         .collect::<Vec<_>>();
     if items.is_empty() {

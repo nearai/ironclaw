@@ -791,6 +791,13 @@ impl TurnCoordinator for ScriptedTriggerCoordinator {
         unreachable!("triggered delivery driver never resumes turns")
     }
 
+    async fn retry_turn(
+        &self,
+        _request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        unreachable!("triggered delivery driver never retries turns")
+    }
+
     async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
         // Reached only by the OAuth-not-DM backstop (`cancel_auth_blocked_run`),
         // which cancels the run before posting the auth-unavailable notice. The
@@ -2522,6 +2529,13 @@ impl TurnCoordinator for RecordingTurnCoordinator {
         _request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError> {
         panic!("approval test uses fake ApprovalInteractionService")
+    }
+
+    async fn retry_turn(
+        &self,
+        _request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        panic!("retry_turn is not used")
     }
 
     async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {

@@ -4430,7 +4430,7 @@ mod tests {
     struct MissingRuntimeCredentialAccounts;
 
     #[async_trait]
-    impl crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionService
+    impl crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService
         for MissingRuntimeCredentialAccounts
     {
         async fn select_configured_account_for_binding(
@@ -4443,7 +4443,7 @@ mod tests {
 
         async fn select_unique_configured_runtime_account(
             &self,
-            _request: crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionRequest,
+            _request: crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest,
         ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
             Err(ironclaw_auth::AuthProductError::CredentialMissing)
         }
@@ -4452,7 +4452,7 @@ mod tests {
     struct ConfiguredRuntimeCredentialAccounts;
 
     #[async_trait]
-    impl crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionService
+    impl crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService
         for ConfiguredRuntimeCredentialAccounts
     {
         async fn select_configured_account_for_binding(
@@ -4465,7 +4465,7 @@ mod tests {
 
         async fn select_unique_configured_runtime_account(
             &self,
-            _request: crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionRequest,
+            _request: crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest,
         ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
             let now = chrono::Utc::now();
             Ok(ironclaw_auth::CredentialAccount {
@@ -4502,7 +4502,7 @@ mod tests {
     struct BackendUnavailableRuntimeCredentialAccounts;
 
     #[async_trait]
-    impl crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionService
+    impl crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService
         for BackendUnavailableRuntimeCredentialAccounts
     {
         async fn select_configured_account_for_binding(
@@ -4515,7 +4515,7 @@ mod tests {
 
         async fn select_unique_configured_runtime_account(
             &self,
-            _request: crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionRequest,
+            _request: crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest,
         ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
             Err(ironclaw_auth::AuthProductError::BackendUnavailable)
         }

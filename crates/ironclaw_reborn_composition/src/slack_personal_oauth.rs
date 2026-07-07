@@ -2,7 +2,7 @@
 //!
 //! This is one of the two production [`OAuthGateProvider`] implementors. The
 //! shared challenge/turn-gate-reuse/PKCE-store/cleanup/expiry logic lives in
-//! [`crate::oauth_gate::OAuthGateFlowDriver`]; only the flow preparation differs
+//! [`crate::product_auth::oauth::oauth_gate::OAuthGateFlowDriver`]; only the flow preparation differs
 //! from Google — Slack resolves client credentials from its setup slot at
 //! request time and emits `user_scope=` (its `scope=` is reserved for bot
 //! tokens) via the generic authorization-URL builder.
@@ -19,8 +19,8 @@ use ironclaw_auth::{
 };
 use secrecy::SecretString;
 
-use crate::oauth_gate::{OAuthGateProvider, PreparedOAuthGateFlow};
-use crate::oauth_provider_client::{
+use crate::product_auth::oauth::oauth_gate::{OAuthGateProvider, PreparedOAuthGateFlow};
+use crate::product_auth::oauth::oauth_provider_client::{
     ExchangeScopePolicy, HostOAuthProviderSpec, TokenResponseShape,
 };
 use crate::slack_setup::SlackPersonalSetupServiceSlot;
@@ -44,7 +44,7 @@ pub(crate) fn slack_personal_provider_spec() -> HostOAuthProviderSpec {
 
 /// Slack personal (user-token) blocked-turn OAuth gate provider.
 ///
-/// Holds the Slack setup slot; the shared [`crate::oauth_gate::OAuthGateFlowDriver`]
+/// Holds the Slack setup slot; the shared [`crate::product_auth::oauth::oauth_gate::OAuthGateFlowDriver`]
 /// owns everything else.
 #[derive(Clone)]
 pub(crate) struct SlackPersonalOAuthGateProvider {
