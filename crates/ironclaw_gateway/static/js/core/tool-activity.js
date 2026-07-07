@@ -25,15 +25,20 @@ function buildToolFailureText(parameters, error) {
   return detail;
 }
 
+function hasPreformattedToolFailureLabel(text) {
+  return /^(Input|Error):\n/.test(text || '');
+}
+
 function getToolActivityBodyText(entry) {
   if (!entry) return '';
   const sections = [];
-  if (entry.input_summary) {
+  const output = entry.error || entry.result || entry.result_preview || '';
+  const preformattedFailure = entry.error && hasPreformattedToolFailureLabel(entry.error);
+  if (entry.input_summary && !(preformattedFailure && entry.error.startsWith('Input:\n'))) {
     sections.push('Input:\n' + entry.input_summary);
   }
-  const output = entry.error || entry.result || entry.result_preview || '';
   if (output) {
-    sections.push((entry.error ? 'Error' : 'Output') + ':\n' + output);
+    sections.push(preformattedFailure ? output : ((entry.error ? 'Error' : 'Output') + ':\n' + output));
   } else if (entry.status === 'running') {
     sections.push('Status:\nRunning');
   }

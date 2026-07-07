@@ -209,3 +209,31 @@ test("completed tool groups stay expanded with output visible", () => {
   assert.match(output.textContent, /Input:\nls -la/);
   assert.match(output.textContent, /Output:\nfile_a\nfile_b/);
 });
+
+test("failed live tool cards render preformatted failure text once", () => {
+  const { chatMessages, context } = createHarness();
+
+  context._chatToolActivity = context.createToolActivityController({
+    containerId: "chat-messages",
+  });
+  context.addToolCard({
+    call_id: "call_1",
+    name: "shell",
+    detail: "ls -la",
+  });
+  context.completeToolCard({
+    call_id: "call_1",
+    name: "shell",
+    success: false,
+    parameters: "ls -la",
+    error: "permission denied",
+    duration_ms: 42,
+  });
+
+  const output = chatMessages.querySelector(".activity-tool-output");
+
+  assert.equal(
+    output.textContent,
+    "Input:\nls -la\n\nError:\npermission denied",
+  );
+});
