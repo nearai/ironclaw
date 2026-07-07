@@ -5993,12 +5993,17 @@ fn parse_automation_name(
     AutomationName::new(raw_name).map_err(automation_name_validation_error)
 }
 
+impl From<AutomationNameError> for WebUiInboundValidationCode {
+    fn from(error: AutomationNameError) -> Self {
+        match error {
+            AutomationNameError::Empty => WebUiInboundValidationCode::Blank,
+            AutomationNameError::TooLong => WebUiInboundValidationCode::TooLong,
+        }
+    }
+}
+
 fn automation_name_validation_error(error: AutomationNameError) -> RebornServicesError {
-    let code = match error {
-        AutomationNameError::Empty => WebUiInboundValidationCode::Blank,
-        AutomationNameError::TooLong => WebUiInboundValidationCode::TooLong,
-    };
-    RebornServicesError::validation(WebUiInboundValidationError::new("name", code))
+    RebornServicesError::validation(WebUiInboundValidationError::new("name", error.into()))
 }
 
 fn notification_approval_timeout_error() -> RebornServicesError {

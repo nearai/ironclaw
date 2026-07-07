@@ -1405,6 +1405,31 @@ fn route_lookup() -> HashMap<String, IngressRouteDescriptor> {
 }
 
 #[test]
+fn automation_resource_descriptor_pattern_is_dual_method_only() {
+    let mut matching_routes = Vec::new();
+    for route in webui_v2_routes() {
+        if route.route_pattern().as_str() == "/api/webchat/v2/automations/{automation_id}" {
+            matching_routes.push((route.route_id().as_str().to_string(), route.method()));
+        }
+    }
+
+    matching_routes.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(
+        matching_routes,
+        vec![
+            (
+                WEBUI_V2_ROUTE_DELETE_AUTOMATION.to_string(),
+                NetworkMethod::Delete,
+            ),
+            (
+                WEBUI_V2_ROUTE_RENAME_AUTOMATION.to_string(),
+                NetworkMethod::Post,
+            ),
+        ],
+    );
+}
+
+#[test]
 fn route_table_has_exactly_the_expected_routes() {
     let routes = webui_v2_routes();
     let expected = expected_table();

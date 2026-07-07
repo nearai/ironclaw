@@ -53,20 +53,23 @@ async def _wait_for_automation_named(
     timeout: float = 30.0,
 ) -> dict:
     last_body: dict = {}
-    for _ in range(int(timeout * 2)):
-        response = await client.get(
-            f"{base_url}/api/webchat/v2/automations",
-            timeout=15,
-        )
-        response.raise_for_status()
-        last_body = response.json()
-        for automation in last_body.get("automations", []):
-            if automation.get("name") == name:
-                return automation
-        await asyncio.sleep(0.5)
-    raise AssertionError(
-        f"Timed out waiting for automation {name!r}. Last body: {last_body}"
-    )
+    try:
+        async with asyncio.timeout(timeout):
+            while True:
+                response = await client.get(
+                    f"{base_url}/api/webchat/v2/automations",
+                    timeout=5,
+                )
+                response.raise_for_status()
+                last_body = response.json()
+                for automation in last_body.get("automations", []):
+                    if automation.get("name") == name:
+                        return automation
+                await asyncio.sleep(0.5)
+    except TimeoutError:
+        raise AssertionError(
+            f"Timed out waiting for automation {name!r}. Last body: {last_body}"
+        ) from None
 
 
 async def test_reborn_v2_serves_shell_and_gates_auth(reborn_v2_server, reborn_v2_browser):
