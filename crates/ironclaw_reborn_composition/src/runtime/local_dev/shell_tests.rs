@@ -83,7 +83,8 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
     let workspace_mounts = local_runtime.workspace_mounts.clone();
     let memory_mounts = local_runtime.memory_mounts.clone();
     let policy = Arc::new(
-        crate::extension_host::local_dev_capability_policy::local_dev_capability_policy().expect("policy parses"),
+        crate::extension_host::local_dev_capability_policy::local_dev_capability_policy()
+            .expect("policy parses"),
     );
     let capability_io = Arc::new(LocalDevCapabilityIo::default());
     let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();

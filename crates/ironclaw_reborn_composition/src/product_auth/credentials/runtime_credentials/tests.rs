@@ -59,7 +59,9 @@ fn resolver_with_refresh(
         Arc::new(
             ProductAuthRuntimeCredentialAccountSelector::new_with_visibility(
                 accounts.clone(),
-                Arc::new(crate::extension_host::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy),
+                Arc::new(
+                    crate::extension_host::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy,
+                ),
             ),
         ),
         Arc::new(ProductAuthRuntimeCredentialAccountRefresher::new(
@@ -1660,7 +1662,9 @@ fn resolver_with_refresh_and_store(
         Arc::new(
             ProductAuthRuntimeCredentialAccountSelector::new_with_visibility(
                 accounts.clone(),
-                Arc::new(crate::extension_host::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy),
+                Arc::new(
+                    crate::extension_host::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy,
+                ),
             ),
         ),
         Arc::new(ProductAuthRuntimeCredentialAccountRefresher::new(

@@ -3748,16 +3748,18 @@ mod tests {
             .expect("mount system extensions");
         let filesystem = Arc::new(filesystem);
         let root_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
-        let skill_management = Arc::new(crate::extension_host::lifecycle::RebornLocalSkillManagementPort::new(
-            UserId::new("lifecycle-owner").expect("valid user"),
-            root_filesystem.clone(),
-            MountView::new(vec![MountGrant::new(
-                MountAlias::new("/skills").expect("valid alias"),
-                VirtualPath::new("/projects/skills").expect("valid path"),
-                MountPermissions::read_write_list_delete(),
-            )])
-            .expect("valid mount view"),
-        ));
+        let skill_management = Arc::new(
+            crate::extension_host::lifecycle::RebornLocalSkillManagementPort::new(
+                UserId::new("lifecycle-owner").expect("valid user"),
+                root_filesystem.clone(),
+                MountView::new(vec![MountGrant::new(
+                    MountAlias::new("/skills").expect("valid alias"),
+                    VirtualPath::new("/projects/skills").expect("valid path"),
+                    MountPermissions::read_write_list_delete(),
+                )])
+                .expect("valid mount view"),
+            ),
+        );
         let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
         let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
         let extension_management = Arc::new(RebornLocalExtensionManagementPort::new(
@@ -3770,8 +3772,9 @@ mod tests {
                 test_extension_trust_policy(),
             ),
         ));
-        let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(skill_management)
-            .with_extension_management(extension_management);
+        let facade =
+            crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(skill_management)
+                .with_extension_management(extension_management);
         (
             dir,
             storage_root,

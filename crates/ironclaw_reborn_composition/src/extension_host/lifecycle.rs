@@ -401,7 +401,8 @@ impl RebornLocalLifecycleFacade {
                         None => extension_management.activate(package_ref, mode).await,
                     };
                 }
-                let mode = crate::extension_host::extension_lifecycle::ExtensionActivationMode::Static;
+                let mode =
+                    crate::extension_host::extension_lifecycle::ExtensionActivationMode::Static;
                 match credential_gate {
                     Some(credential_gate) => {
                         extension_management

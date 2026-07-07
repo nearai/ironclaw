@@ -170,8 +170,9 @@ mod tests {
         run_context: &LoopRunContext,
         fallback_user_id: &UserId,
     ) -> HostVisibleCapabilityRequest {
-        let policy = crate::extension_host::local_dev_capability_policy::local_dev_capability_policy()
-            .expect("policy parses");
+        let policy =
+            crate::extension_host::local_dev_capability_policy::local_dev_capability_policy()
+                .expect("policy parses");
         let empty_mounts = MountView::default();
 
         local_dev_visible_capability_request(
@@ -971,8 +972,9 @@ mod tests {
 
     #[test]
     fn local_dev_builtin_surface_grants_capability_classes() {
-        let policy = crate::extension_host::local_dev_capability_policy::local_dev_capability_policy()
-            .expect("policy parses");
+        let policy =
+            crate::extension_host::local_dev_capability_policy::local_dev_capability_policy()
+                .expect("policy parses");
         let capability_ids = policy
             .capability_ids()
             .map(|capability| capability.as_str())

@@ -104,8 +104,10 @@ use ironclaw_turns::run_profile::UserProfileContext;
 use self::latency::{trace_runtime_latency_error, trace_runtime_latency_ok};
 use self::runtime_turn_scheduler::RuntimeTurnScheduler;
 use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
+use crate::extension_host::local_dev_capability_policy::{
+    LocalDevCapabilityPolicy, local_dev_capability_policy,
+};
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore, builtin_extension_registry};
-use crate::extension_host::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
 #[cfg(any(test, feature = "test-support"))]
 use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
 use crate::outbound::{
@@ -3364,11 +3366,12 @@ pub async fn build_reborn_runtime(
     if let (Some((learning_provider, learning_model)), Some(local_runtime)) =
         (skill_learning_provider, local_runtime)
     {
-        let inference: Arc<dyn ironclaw_skill_learning::SkillInferencePort> =
-            Arc::new(crate::extension_host::skill_learning::SkillLearningInferenceAdapter::new(
+        let inference: Arc<dyn ironclaw_skill_learning::SkillInferencePort> = Arc::new(
+            crate::extension_host::skill_learning::SkillLearningInferenceAdapter::new(
                 learning_provider,
                 learning_model,
-            ));
+            ),
+        );
         // Reuse the runtime's already-built scoped skill-management port so the
         // learned skill lands exactly where the WebUI lists it and the next run
         // loads it. The writer evolves an existing learned skill in place when a
@@ -3384,10 +3387,15 @@ pub async fn build_reborn_runtime(
             ));
         // Live "learned a skill" bubble on the run's thread stream (reuses the
         // SkillActivation projection -> existing chat bubble).
-        let skill_learned_notifier: Arc<dyn crate::extension_host::skill_learning::SkillLearnedNotifier> = Arc::new(
-            crate::extension_host::skill_learning::LiveSkillLearnedNotifier::new(skill_learning_publisher),
+        let skill_learned_notifier: Arc<
+            dyn crate::extension_host::skill_learning::SkillLearnedNotifier,
+        > = Arc::new(
+            crate::extension_host::skill_learning::LiveSkillLearnedNotifier::new(
+                skill_learning_publisher,
+            ),
         );
-        let extraction_tasks = Arc::new(crate::extension_host::skill_learning::SkillLearningExtractionTasks::new());
+        let extraction_tasks =
+            Arc::new(crate::extension_host::skill_learning::SkillLearningExtractionTasks::new());
         skill_learning_extraction_tasks = Some(Arc::clone(&extraction_tasks));
         turn_event_sinks.push(Arc::new(
             crate::extension_host::skill_learning::SkillLearningTurnEventSink::new(
@@ -3407,9 +3415,10 @@ pub async fn build_reborn_runtime(
         Arc<dyn ironclaw_turns::run_profile::CommunicationContextProvider>,
     > = match (local_runtime, outbound_preferences_facade.clone()) {
         (Some(local_runtime), Some(outbound_preferences_facade)) => {
-            let mut lifecycle_facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
-                Arc::clone(&local_runtime.skill_management),
-            );
+            let mut lifecycle_facade =
+                crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(Arc::clone(
+                    &local_runtime.skill_management,
+                ));
             if let Some(extension_management) = &local_runtime.extension_management {
                 lifecycle_facade =
                     lifecycle_facade.with_extension_management(Arc::clone(extension_management));
@@ -4809,6 +4818,7 @@ output_schema_ref = "schemas/write.output.json"
 
     #[cfg(feature = "libsql")]
     use crate::RebornRuntimeProcessBinding;
+    use crate::extension_host::extension_lifecycle::ExtensionActivationMode;
     use crate::input::RebornBuildInput;
     #[cfg(feature = "libsql")]
     use crate::observability::hooks::HooksActivationConfig;
@@ -4818,7 +4828,6 @@ output_schema_ref = "schemas/write.output.json"
         TriggerPollerSettings,
     };
     use crate::webui::build_webui_services;
-    use crate::extension_host::extension_lifecycle::ExtensionActivationMode;
     use crate::{
         RebornCompositionProfile, RebornReadiness, RebornReadinessState, RebornRuntimeError,
     };
