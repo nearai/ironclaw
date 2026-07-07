@@ -941,6 +941,27 @@ impl RebornIntegrationHarness {
         Err(format!("capability {capability_id:?} was not invoked; saw {seen:?}").into())
     }
 
+    /// Assert the named capability was NOT invoked through the real
+    /// capability path (proves a visibility/gating filter held). Same
+    /// delta-scoping as `assert_tool_invoked` (R2), but the diagnostic
+    /// `seen` list is captured on the failure branch that matters here —
+    /// when the capability unexpectedly WAS dispatched.
+    pub async fn assert_tool_not_invoked(&self, capability_id: &str) -> HarnessResult<()> {
+        let all = self.capability_recorder.invocations();
+        let delta = &all[self.baseline_invocation_count..];
+        if !delta
+            .iter()
+            .any(|invocation| invocation.capability_id.as_str() == capability_id)
+        {
+            return Ok(());
+        }
+        let seen: Vec<&str> = delta
+            .iter()
+            .map(|invocation| invocation.capability_id.as_str())
+            .collect();
+        Err(format!("capability {capability_id:?} was invoked; saw {seen:?}").into())
+    }
+
     /// S2 seam: assert the named capability produced EXACTLY `expected`
     /// recorded RESULTS (`captured_capability_results`) — the proof that a
     /// gate resume dispatched the gated capability's real execution once,

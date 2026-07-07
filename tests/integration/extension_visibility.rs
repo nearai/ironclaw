@@ -56,10 +56,10 @@ async fn host_internal_capability_is_hidden_from_the_model_and_uncallable() {
         .expect("host_internal capability never advertised to the model");
 
     // Dispatch seam: the hidden capability never reached the capability port.
-    assert!(
-        harness.assert_tool_invoked("visprobe.audit").await.is_err(),
-        "host_internal capability call must never reach the capability port"
-    );
+    harness
+        .assert_tool_not_invoked("visprobe.audit")
+        .await
+        .expect("host_internal capability call must never reach the capability port");
     harness
         .assert_reply_contains("audit denied")
         .await
