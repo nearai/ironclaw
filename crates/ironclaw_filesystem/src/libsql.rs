@@ -910,40 +910,33 @@ impl RootFilesystem for LibSqlRootFilesystem {
         // Single-key CAS delete: unlike `delete`, no subtree/event/sequence
         // sweep. `is_dir = 0` scopes it to the record plane, matching `put`'s
         // Version arm and `current_version_libsql`.
-        let expected_raw = record_version_to_i64(path, expected_version)?;
+        //
+        // Review fix (PR #5749): the conditional DELETE and the zero-rows
+        // diagnosis read must be atomic w.r.t. a concurrent delete+recreate
+        // on the same path, or the diagnosis can observe a version written
+        // *after* our DELETE decided 0 rows matched, misclassifying the
+        // outcome. `BEGIN IMMEDIATE` takes the write lock up front (same
+        // idiom as `put`) so the DELETE and the follow-up SELECT run as one
+        // unit on one connection — this also keeps the call stack to a
+        // single checkout, matching the one-checkout-per-call-stack
+        // invariant the bounded pool in #5751 enforces (no nested
+        // `self.connect()`).
         let conn = self.connect().await?;
-        let deleted = conn
-            .execute(
-                "DELETE FROM root_filesystem_entries \
-                 WHERE path = ?1 AND is_dir = 0 AND version = ?2",
-                libsql::params![path.as_str(), expected_raw],
-            )
+        conn.execute("BEGIN IMMEDIATE", ())
             .await
             .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
-        if deleted > 0 {
-            return Ok(());
+        let result = delete_if_version_libsql_inner(&conn, path, expected_version).await;
+        match result {
+            Ok(()) => conn
+                .execute("COMMIT", ())
+                .await
+                .map(|_| ())
+                .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error)),
+            Err(err) => {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(err)
+            }
         }
-        // Review fix (PR #5749): the diagnosis below opens its own
-        // connection via `self.connect()`. Drop this call's connection first
-        // so the diagnosis never holds two checkouts at once — the bounded
-        // pool landing in PR #5751 enforces one checkout per call stack, and
-        // a nested open here would exhaust it under contention. `put`'s
-        // zero-rows diagnosis will pick up the same pattern in #5751; this
-        // keeps both call sites correct under either the current unbounded
-        // connect() or the future pooled one.
-        drop(conn);
-        // 0 rows: absent row → NotFound (already gone, benign); row present
-        // at another version → VersionMismatch (gone stale). Distinct from
-        // put's diagnosis, which collapses absent into VersionMismatch.
-        let conn = self.connect().await?;
-        if let Some(found) = current_version_libsql(&conn, path).await? {
-            return Err(FilesystemError::VersionMismatch {
-                path: path.clone(),
-                expected: Some(expected_version),
-                found: Some(found),
-            });
-        }
-        Err(not_found(path.clone(), FilesystemOperation::Delete))
     }
 
     async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {
@@ -1456,6 +1449,43 @@ async fn current_version_libsql(
         .get(0)
         .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
     Ok(Some(record_version_from_i64(path, version)?))
+}
+
+/// Body of `delete_if_version` extracted so the outer caller can wrap the
+/// conditional DELETE and the zero-rows diagnosis SELECT in one
+/// BEGIN IMMEDIATE / COMMIT transaction, with a single ROLLBACK path.
+/// Running both statements on the same connection inside the same
+/// transaction is what makes the classification atomic: nothing else can
+/// delete-then-recreate the row between the DELETE and the diagnosis read.
+#[cfg(feature = "libsql")]
+async fn delete_if_version_libsql_inner(
+    conn: &libsql::Connection,
+    path: &VirtualPath,
+    expected_version: RecordVersion,
+) -> Result<(), FilesystemError> {
+    let expected_raw = record_version_to_i64(path, expected_version)?;
+    let deleted = conn
+        .execute(
+            "DELETE FROM root_filesystem_entries \
+             WHERE path = ?1 AND is_dir = 0 AND version = ?2",
+            libsql::params![path.as_str(), expected_raw],
+        )
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
+    if deleted > 0 {
+        return Ok(());
+    }
+    // 0 rows: absent row → NotFound (already gone, benign); row present
+    // at another version → VersionMismatch (gone stale). Distinct from
+    // put's diagnosis, which collapses absent into VersionMismatch.
+    if let Some(found) = current_version_libsql(conn, path).await? {
+        return Err(FilesystemError::VersionMismatch {
+            path: path.clone(),
+            expected: Some(expected_version),
+            found: Some(found),
+        });
+    }
+    Err(not_found(path.clone(), FilesystemOperation::Delete))
 }
 
 /// Body of `run_migrations` extracted so the outer caller can wrap the

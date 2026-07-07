@@ -470,6 +470,38 @@ async fn libsql_delete_if_version_deletes_current_and_rejects_stale_or_missing()
     assert_eq!(log[0].seq, log_seq);
 }
 
+/// Review fix (PR #5749): an `expected_version` beyond `i64::MAX` must
+/// surface `CorruptRecordVersion` (audit finding F6's overflow guard) rather
+/// than being silently truncated into a bind parameter that could never
+/// match — and the guard must fire before any DELETE runs, so the entry
+/// survives untouched.
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_delete_if_version_rejects_out_of_range_expected_version() {
+    let filesystem = libsql_root().await;
+    let path = VirtualPath::new("/secrets/leases/CAS-DEL-OVERFLOW").unwrap();
+    let v1 = filesystem
+        .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+        .await
+        .unwrap();
+
+    let err = filesystem
+        .delete_if_version(
+            &path,
+            ironclaw_filesystem::RecordVersion::from_backend(u64::MAX),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, FilesystemError::CorruptRecordVersion { .. }),
+        "expected CorruptRecordVersion, got {err:?}"
+    );
+
+    let got = filesystem.get(&path).await.unwrap().unwrap();
+    assert_eq!(got.version, v1);
+    assert_eq!(got.entry.body, vec![1]);
+}
+
 #[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_native_put_cas_any_increments_existing_version() {
@@ -1676,6 +1708,39 @@ mod postgres_tests {
         let log = fs.tail(&path, SeqNo::ZERO).await.unwrap();
         assert_eq!(log.len(), 1);
         assert_eq!(log[0].seq, log_seq);
+    }
+
+    /// Review fix (PR #5749): mirrors the libsql overflow guard. An
+    /// `expected_version` beyond `i64::MAX` must surface
+    /// `CorruptRecordVersion` before any DELETE runs, so the entry survives
+    /// untouched — never a silently-truncated bind parameter that could
+    /// never match.
+    #[tokio::test]
+    async fn postgres_delete_if_version_rejects_out_of_range_expected_version() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let path = vpath(&prefix, "cas_delete_overflow");
+        let v1 = fs
+            .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+            .await
+            .unwrap();
+
+        let err = fs
+            .delete_if_version(
+                &path,
+                ironclaw_filesystem::RecordVersion::from_backend(u64::MAX),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, FilesystemError::CorruptRecordVersion { .. }),
+            "expected CorruptRecordVersion, got {err:?}"
+        );
+
+        let got = fs.get(&path).await.unwrap().unwrap();
+        assert_eq!(got.version, v1);
+        assert_eq!(got.entry.body, vec![1]);
     }
 
     #[tokio::test]
