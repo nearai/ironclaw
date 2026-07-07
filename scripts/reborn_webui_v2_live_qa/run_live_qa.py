@@ -2181,8 +2181,12 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
         authorization_url = str(oauth_start.get("authorization_url") or "")
         if not authorization_url.startswith("https://slack.com/oauth/"):
             raise AssertionError(f"Slack OAuth start returned unexpected URL: {oauth_start!r}")
-        await expect(page.locator("body")).to_contain_text(title, timeout=15000)  # type: ignore[attr-defined]
-        await expect(page.locator("body")).to_contain_text("Connect Slack with OAuth", timeout=15000)  # type: ignore[attr-defined]
+        if "admin_managed_channels" in observed["slack_strategies"]:
+            await expect(page.locator("body")).to_contain_text("Slack setup", timeout=15000)  # type: ignore[attr-defined]
+            await expect(page.locator("body")).to_contain_text("Slack workspace setup", timeout=15000)  # type: ignore[attr-defined]
+        else:
+            await expect(page.locator("body")).to_contain_text(title, timeout=15000)  # type: ignore[attr-defined]
+            await expect(page.locator("body")).to_contain_text("Connect Slack with OAuth", timeout=15000)  # type: ignore[attr-defined]
         observed["slack_display_name"] = personal.get("display_name")
         observed["slack_connect_title"] = title
         observed["slack_connect_instructions"] = instructions

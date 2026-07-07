@@ -314,8 +314,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
         observed_expectations = [text for _selector, text, _timeout in expected_texts]
         self.assertIn("Channels", observed_expectations)
-        self.assertIn("Slack account connection", observed_expectations)
-        self.assertIn("Connect Slack with OAuth", observed_expectations)
+        self.assertIn("Slack setup", observed_expectations)
+        self.assertIn("Slack workspace setup", observed_expectations)
+        self.assertNotIn("Slack account connection", observed_expectations)
+        self.assertNotIn("Connect Slack with OAuth", observed_expectations)
         self.assertNotIn("Connect Slack", observed_expectations)
         self.assertNotIn("pairing code", observed_expectations)
         self.assertFalse(any("/v2/chat" in url for url, _wait in fake_page.gotos))
