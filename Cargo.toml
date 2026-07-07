@@ -458,6 +458,10 @@ name = "reborn_integration_durable"
 path = "tests/integration/durable.rs"
 
 [[test]]
+name = "reborn_integration_extension_visibility"
+path = "tests/integration/extension_visibility.rs"
+
+[[test]]
 name = "reborn_integration_golden_payload"
 path = "tests/integration/golden_payload.rs"
 
@@ -482,12 +486,16 @@ name = "reborn_integration_identity_resolution_smoke"
 path = "tests/integration/identity_resolution_smoke.rs"
 
 [[test]]
-name = "reborn_integration_memory_prompt_context"
-path = "tests/integration/memory_prompt_context.rs"
+name = "reborn_integration_lease_wedge"
+path = "tests/integration/lease_wedge.rs"
 
 [[test]]
 name = "reborn_integration_mcp"
 path = "tests/integration/mcp.rs"
+
+[[test]]
+name = "reborn_integration_memory_prompt_context"
+path = "tests/integration/memory_prompt_context.rs"
 
 [[test]]
 name = "reborn_integration_oauth_connect"

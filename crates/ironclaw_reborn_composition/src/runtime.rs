@@ -3468,6 +3468,7 @@ pub async fn build_reborn_runtime(
         config: DefaultPlannedRuntimeConfig {
             heartbeat_interval: runner.heartbeat_interval,
             poll_interval: runner.poll_interval,
+            lease_recovery_interval: default_runtime_config.lease_recovery_interval,
             worker_count: runner.worker_count,
             disabled_capability_ids: default_runtime_config.disabled_capability_ids,
             text_only_driver: Default::default(),
