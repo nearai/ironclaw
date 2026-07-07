@@ -683,25 +683,29 @@ where
     let mut capability_factory_builder =
         DecoratingLoopCapabilityPortFactory::new(parts.capability_factory)
             .with_decorator(spawn_decorator);
-    // Built before the disclosure decorator: #5712 threads the SAME resolver
-    // instance into it so tool_search/tool_describe results are narrowed by
-    // the same allow-set the profile filter enforces.
+    // Built before the disclosure decorator: threads the SAME
+    // resolved allow-set (resolved once at the host-build boundary — see
+    // `RebornLoopDriverHostFactory::create_host`) into it so
+    // tool_search/tool_describe results are narrowed by the identical
+    // allow-set the profile filter enforces, rather than a second
+    // independent resolve that could diverge under a transient failure.
     let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
         Arc::new(SubagentCapabilitySurfaceResolver::new(
             parts.capability_surface_resolver,
             Arc::clone(&subagent_prompt_source),
         ));
+    let mut tool_disclosure_decorator: Option<Arc<ToolDisclosureCapabilityDecorator>> = None;
     if parts.config.tool_disclosure.is_bridged() {
         tracing::debug!(
             target: "ironclaw::reborn::runtime",
             "reborn tool disclosure decorator wired (bridged)"
         );
-        capability_factory_builder = capability_factory_builder.with_decorator(Arc::new(
-            ToolDisclosureCapabilityDecorator::new(
-                Arc::clone(&parts.capability_result_writer),
-                Arc::clone(&capability_surface_resolver),
-            ),
-        ));
+        let decorator = Arc::new(ToolDisclosureCapabilityDecorator::new(Arc::clone(
+            &parts.capability_result_writer,
+        )));
+        capability_factory_builder = capability_factory_builder
+            .with_decorator(Arc::clone(&decorator) as Arc<dyn LoopCapabilityPortDecorator>);
+        tool_disclosure_decorator = Some(decorator);
     }
     // TEMP(disable-spawn-subagents): explicit composition decision to remove the
     // spawn_subagent capability from the model-facing surface across all
@@ -762,6 +766,9 @@ where
     .with_profiled_capability_port_factory(capability_factory, capability_surface_resolver)
     .with_subagent_prompt_composer(subagent_prompt_composer)
     .with_driver_requirements(driver_registry.requirements_snapshot());
+    if let Some(decorator) = tool_disclosure_decorator {
+        host_factory = host_factory.with_tool_disclosure_decorator(decorator);
+    }
     if let Some(resolver) = parts.model_route_resolver {
         host_factory = host_factory.with_model_route_resolver(resolver);
     }

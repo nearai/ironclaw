@@ -190,9 +190,12 @@ impl CapabilityCatalog {
     /// model loads the real schema + description on demand via `tool_describe`.
     ///
     /// Core tools are omitted (already advertised with full schemas every turn).
-    /// The discoverable set is fixed at catalog construction (tier never changes
-    /// with promotion), so this index is constant per `CapabilitySurfaceVersion`
-    /// and therefore prefix-cache stable. Sorted by name (the catalog is sorted).
+    /// The base catalog's discoverable TIER is fixed at construction (tier
+    /// never changes with promotion) and constant per `CapabilitySurfaceVersion`
+    /// — but the names *returned here* are additionally filtered by `allow_set`
+    /// (below), so the returned index is stable only for a given
+    /// `(CapabilitySurfaceVersion, effective allow_set)` pair, not for the
+    /// surface version alone. Sorted by name (the catalog is sorted).
     ///
     /// Narrowed by `allow_set`: this index is baked into the always-advertised
     /// `tool_search` bridge description, which is host-exempt from the outer

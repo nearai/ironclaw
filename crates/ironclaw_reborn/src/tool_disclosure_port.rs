@@ -8,11 +8,11 @@ use ironclaw_host_api::{
     AgentId, CapabilityId, InvocationId, ProjectId, ProviderToolName, TenantId, ThreadId,
 };
 use ironclaw_loop_support::{
-    CapabilityAllowSet, CapabilityResultWrite, CapabilitySurfaceProfileResolver,
-    LoopCapabilityPortDecorator, LoopCapabilityResultWriter,
+    CapabilityAllowSet, CapabilityResultWrite, LoopCapabilityPortDecorator,
+    LoopCapabilityResultWriter,
 };
 use ironclaw_turns::{
-    CapabilityActivityId, TurnId,
+    CapabilityActivityId, TurnId, TurnRunId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
         CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityFailure, CapabilityFailureKind,
@@ -55,22 +55,46 @@ pub(crate) struct ToolDisclosureCapabilityDecorator {
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     promoted_by_scope: Arc<Mutex<HashMap<PromotionScopeKey, PromotedSet>>>,
     caps: DisclosureCaps,
-    /// #5712: same resolver the profile filter uses. Resolved once, eagerly,
-    /// in `decorate` (before any sync port method can run) — see that impl.
-    surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver>,
+    /// This decorator no longer resolves its own allow-set. The
+    /// host-build boundary (`RebornLoopDriverHostFactory::create_host`)
+    /// resolves once and calls `prime_allow_set` for this turn before the
+    /// capability-port decorator chain runs, so `decorate` and the outer
+    /// `CapabilitySurfaceProfileFilter` observe the identical resolved value
+    /// instead of two independent resolves that could diverge under a
+    /// transient resolver failure. Keyed by `(turn_id, run_id)` and consumed
+    /// exactly once in `decorate` so concurrent turns sharing this long-lived
+    /// decorator never observe another turn's primed value.
+    primed_allow_sets: Mutex<HashMap<(TurnId, TurnRunId), Arc<CapabilityAllowSet>>>,
 }
 
 impl ToolDisclosureCapabilityDecorator {
-    pub(crate) fn new(
-        result_writer: Arc<dyn LoopCapabilityResultWriter>,
-        surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver>,
-    ) -> Self {
+    pub(crate) fn new(result_writer: Arc<dyn LoopCapabilityResultWriter>) -> Self {
         Self {
             result_writer,
             promoted_by_scope: Arc::new(Mutex::new(HashMap::new())),
             caps: DisclosureCaps::default(),
-            surface_resolver,
+            primed_allow_sets: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Prime this turn's already-resolved allow-set before `decorate` runs.
+    /// Called by the host-build boundary immediately after its single
+    /// resolve, before it asks the capability factory to build (and
+    /// decorate) the port for `run_context`.
+    pub(crate) fn prime_allow_set(
+        &self,
+        run_context: &LoopRunContext,
+        allow_set: Arc<CapabilityAllowSet>,
+    ) -> Result<(), AgentLoopHostError> {
+        self.primed_allow_sets
+            .lock()
+            .map_err(|e| {
+                invalid_invocation(format!(
+                    "tool disclosure primed allow-set lock is poisoned: {e}"
+                ))
+            })?
+            .insert((run_context.turn_id, run_context.run_id), allow_set);
+        Ok(())
     }
 }
 
@@ -81,35 +105,37 @@ impl LoopCapabilityPortDecorator for ToolDisclosureCapabilityDecorator {
         run_context: &LoopRunContext,
         inner: Arc<dyn LoopCapabilityPort>,
     ) -> Arc<dyn LoopCapabilityPort> {
-        // Resolve the caller's allow-set once, here, before any turn/port method
-        // can run. This closes the gap the lazy per-call resolve (pre-#5659-w6)
-        // left open: `tool_definitions()` is a *sync* trait method with no
+        // Consume this turn's primed allow-set (see `prime_allow_set`). Never
+        // resolves here: `tool_definitions()` is a *sync* trait method with no
         // `.await` point, so the tool_search bridge's own advertised
         // `description` (the always-on discoverable-tool-name index, built
         // inside `turn_state()`) could never be narrowed by an async-resolved
-        // allow-set — only tool_search/tool_describe *results*, which run on an
-        // already-async path, could. A resolve failure fails closed (denies
+        // allow-set otherwise — only tool_search/tool_describe *results*, which
+        // run on an already-async path, could. A missing prime (the host-build
+        // boundary skipped it, or a lock is poisoned) fails closed (denies
         // every real capability's *name* from the index) rather than silently
-        // falling back to an unnarrowed index; the outer `CapabilitySurfaceProfileFilter`
-        // resolves the same profile moments later at host construction and is
-        // the one that fails the whole turn if resolution is genuinely broken.
-        let allow_set = match self.surface_resolver.resolve(run_context).await {
-            Ok(allow_set) => allow_set,
-            Err(error) => {
-                tracing::error!(
-                    %error,
-                    "tool disclosure allow-set resolution failed; failing closed to an empty allow-set for this turn's tool_search index"
-                );
-                CapabilityAllowSet::allowlist([])
-            }
-        };
+        // falling back to an unnarrowed index — this should never happen when
+        // wired through `create_host`, which primes before it asks the
+        // capability factory to build this decorator's port.
+        let key = (run_context.turn_id, run_context.run_id);
+        let primed = self
+            .primed_allow_sets
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.remove(&key));
+        let allow_set = primed.unwrap_or_else(|| {
+            tracing::error!(
+                "tool disclosure allow-set was not primed before decorate; failing closed to an empty allow-set for this turn's tool_search index"
+            );
+            Arc::new(CapabilityAllowSet::allowlist([]))
+        });
         Arc::new(ToolDisclosureCapabilityPort {
             inner,
             run_context: run_context.clone(),
             result_writer: Arc::clone(&self.result_writer),
             promoted_by_scope: Arc::clone(&self.promoted_by_scope),
             caps: self.caps,
-            allow_set: Arc::new(allow_set),
+            allow_set,
             turn_state: Mutex::new(None),
             bridge_inputs: Mutex::new(BTreeMap::new()),
             tool_call_target_inputs: Mutex::new(BTreeMap::new()),

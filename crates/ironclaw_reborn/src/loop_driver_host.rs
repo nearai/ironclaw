@@ -17,15 +17,16 @@ use ironclaw_hooks::middleware::{
 };
 use ironclaw_host_api::ExtensionId;
 use ironclaw_loop_support::{
-    ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT, CapabilityResolveError, CapabilitySurfaceProfileFilter,
-    CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, EmptyUserProfileSource,
-    GuardedSystemInferencePort, HostIdentityContextSource, HostInputQueue, HostManagedModelGateway,
-    HostQueueLoopInputPort, HostSkillContextSource, HostUserProfileSource, LoopAttachmentReadPort,
-    LoopCapabilityInputResolver, LoopCapabilityPortFactory, ModelGatewayBackedSystemInferencePort,
-    RunCancellationFactory, RunCancellationObservationKind, RunStateLoopCancellationPort,
-    SubagentLoopPromptPort, SubagentPromptComposer, ThreadBackedLoopContextPort,
-    ThreadBackedLoopTranscriptPort, ThreadContextWindowCache, TurnStateRunCancellationFactory,
-    active_task_compaction_prompt_id, host_managed_loop_compaction_port_with_prompt_id,
+    ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT, CapabilityAllowSet, CapabilityResolveError,
+    CapabilitySurfaceProfileFilter, CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort,
+    EmptyUserProfileSource, GuardedSystemInferencePort, HostIdentityContextSource, HostInputQueue,
+    HostManagedModelGateway, HostQueueLoopInputPort, HostSkillContextSource, HostUserProfileSource,
+    LoopAttachmentReadPort, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
+    ModelGatewayBackedSystemInferencePort, RunCancellationFactory, RunCancellationObservationKind,
+    RunStateLoopCancellationPort, SubagentLoopPromptPort, SubagentPromptComposer,
+    ThreadBackedLoopContextPort, ThreadBackedLoopTranscriptPort, ThreadContextWindowCache,
+    TurnStateRunCancellationFactory, active_task_compaction_prompt_id,
+    host_managed_loop_compaction_port_with_prompt_id,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 
@@ -971,6 +972,14 @@ where
     communication_context_provider: Option<Arc<dyn CommunicationContextProvider>>,
     input_queue: Option<Arc<dyn HostInputQueue>>,
     profiled_capabilities: Option<ProfiledCapabilityHostRuntime>,
+    /// The same tool-disclosure decorator wired into the capability
+    /// factory's decorator chain (if tool disclosure is bridged). `create_host`
+    /// primes it with the single per-turn resolved allow-set before asking the
+    /// capability factory to build (and decorate) the port, so the decorator
+    /// and the `CapabilitySurfaceProfileFilter` built below observe the
+    /// identical value. `None` when tool disclosure isn't wired.
+    tool_disclosure_decorator:
+        Option<Arc<crate::tool_disclosure_port::ToolDisclosureCapabilityDecorator>>,
     subagent_prompt_composer: Option<SubagentPromptComposer>,
     driver_requirements: HashMap<LoopDriverRegistryKey, DriverRequirements>,
 }
@@ -1037,6 +1046,7 @@ where
             communication_context_provider: None,
             input_queue: None,
             profiled_capabilities: None,
+            tool_disclosure_decorator: None,
             subagent_prompt_composer: None,
             driver_requirements: HashMap::new(),
         }
@@ -1341,6 +1351,19 @@ where
         self
     }
 
+    /// Wire the tool-disclosure decorator so `create_host` can prime it with
+    /// the single per-turn resolved allow-set (see the field doc on
+    /// `tool_disclosure_decorator`). Only meaningful alongside
+    /// [`Self::with_profiled_capability_port_factory`]; a no-op if tool
+    /// disclosure isn't wired into the capability factory's decorator chain.
+    pub(crate) fn with_tool_disclosure_decorator(
+        mut self,
+        decorator: Arc<crate::tool_disclosure_port::ToolDisclosureCapabilityDecorator>,
+    ) -> Self {
+        self.tool_disclosure_decorator = Some(decorator);
+        self
+    }
+
     pub fn with_subagent_prompt_composer(mut self, composer: SubagentPromptComposer) -> Self {
         self.subagent_prompt_composer = Some(composer);
         self
@@ -1380,23 +1403,24 @@ where
             .await
     }
 
+    /// Build a host wired with a profiled capability port. `allow_set` must
+    /// already be resolved by the caller — this function no longer resolves
+    /// it itself, so the same value the caller used to prime the
+    /// tool-disclosure decorator (see `create_host`) is exactly what the
+    /// `CapabilitySurfaceProfileFilter` below enforces. `create_host` is the
+    /// production single-resolve site; a test acting as its own host-build
+    /// boundary may resolve directly.
     pub async fn build_text_only_host_with_profiled_capabilities(
         &self,
         request: RebornLoopDriverHostRequest,
         capabilities: Arc<dyn LoopCapabilityPort>,
-        surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver>,
+        allow_set: Arc<CapabilityAllowSet>,
     ) -> Result<RebornLoopDriverHost, RebornLoopDriverHostError> {
         validate_claimed_run_context(&request.claimed_run, &request.loop_run_context)?;
         validate_thread_scope(
             &self.effective_thread_scope(&request.loop_run_context),
             &request.loop_run_context,
         )?;
-        let allow_set = Arc::new(
-            surface_resolver
-                .resolve(&request.loop_run_context)
-                .await
-                .map_err(capability_resolve_error_to_host_error)?,
-        );
         // #5647: bridge meta-tool ids are host-synthesized, not granted
         // capabilities — exempt them so narrowed profiles keep bridged disclosure.
         let capabilities: Arc<dyn LoopCapabilityPort> = Arc::new(
@@ -2145,17 +2169,39 @@ where
                     "profiled capability port factory is required for capability-required driver host",
                 ));
             };
+            // Resolve the allow-set ONCE, here — the single
+            // hard-fail site (via `capability_resolve_error_to_host_error`,
+            // same mapping the filter used to apply internally) — then prime
+            // it into the tool-disclosure decorator (if wired) before asking
+            // the capability factory to build+decorate the port. Both the
+            // decorator's `decorate` and the `CapabilitySurfaceProfileFilter`
+            // built below then observe this identical `Arc`, so a transient
+            // resolver failure can no longer make the model-visible catalog
+            // and the enforcement filter disagree.
+            let allow_set = Arc::new(
+                profiled
+                    .surface_resolver
+                    .resolve(&request.loop_run_context)
+                    .await
+                    .map_err(capability_resolve_error_to_host_error)
+                    .map_err(|error| {
+                        crate::turn_runner::HostFactoryError::new(error.to_string())
+                    })?,
+            );
+            if let Some(decorator) = self.tool_disclosure_decorator.as_ref() {
+                decorator
+                    .prime_allow_set(&request.loop_run_context, Arc::clone(&allow_set))
+                    .map_err(|error| {
+                        crate::turn_runner::HostFactoryError::new(error.safe_summary)
+                    })?;
+            }
             let capabilities = profiled
                 .capability_factory
                 .create_capability_port(&request.loop_run_context)
                 .await
                 .map_err(|error| crate::turn_runner::HostFactoryError::new(error.safe_summary))?;
-            self.build_text_only_host_with_profiled_capabilities(
-                request,
-                capabilities,
-                Arc::clone(&profiled.surface_resolver),
-            )
-            .await
+            self.build_text_only_host_with_profiled_capabilities(request, capabilities, allow_set)
+                .await
         } else {
             self.build_text_only_host(request).await
         };

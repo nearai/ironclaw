@@ -255,6 +255,13 @@ async fn bridged_mode_tool_search_description_is_narrowed_by_allow_set() {
         .await
         .expect("bridge ids stay advertised under a narrowed allow-set (#5647)");
     harness
+        .assert_model_tool_description_contains(TOOL_SEARCH_NAME, FLAT_GITHUB_TOOL_NAME)
+        .await
+        .expect(
+            "the allowlisted tool's name must still be discoverable via tool_search's own \
+                 advertised description index — narrowing must not empty the index outright",
+        );
+    harness
         .assert_model_tool_description_excludes(TOOL_SEARCH_NAME, "github__list_issues")
         .await
         .expect(
@@ -308,8 +315,20 @@ async fn narrowed_allow_set_filters_tool_search_results() {
 
 /// #5712: tool_describe of a non-allowlisted id reads as unknown — same
 /// message as a nonexistent name, so existence itself is not disclosed.
+///
+/// A substring check on `safe_summary` alone would pass even for an empty
+/// index, and would miss an existence oracle hiding in the envelope's other
+/// fields (`model_observation`'s structured diagnostic, in particular). This
+/// scripts BOTH a non-allowlisted target (`github.list_issues`, present in
+/// the catalog but outside the allow-set) and a target that is not in the
+/// catalog at all, then asserts their persisted `ToolResultReferenceEnvelope`s
+/// are identical modulo `result_ref` — which is derived from
+/// `RebornScriptedReply::tool_call`'s process-global call-id counter (see
+/// `synthetic_provider_error_result_ref`) and so differs between the two
+/// calls by construction, carrying no allow-set/existence information.
 #[tokio::test]
 async fn narrowed_allow_set_denies_tool_describe_of_non_allowlisted_id() {
+    const NONEXISTENT_TARGET: &str = "totally_nonexistent_tool";
     let harness = RebornIntegrationHarness::test_default()
         .with_tool_disclosure_bridged()
         .with_github_issue_tools()
@@ -319,6 +338,10 @@ async fn narrowed_allow_set_denies_tool_describe_of_non_allowlisted_id() {
                 "tool_describe",
                 serde_json::json!({"name": "github.list_issues"}),
             ),
+            RebornScriptedReply::tool_call(
+                "tool_describe",
+                serde_json::json!({"name": NONEXISTENT_TARGET}),
+            ),
             RebornScriptedReply::text("done"),
         ])
         .build()
@@ -326,7 +349,7 @@ async fn narrowed_allow_set_denies_tool_describe_of_non_allowlisted_id() {
         .expect("narrowed bridged-disclosure harness builds");
 
     harness
-        .submit_turn("describe list_issues")
+        .submit_turn("describe list_issues, then a made-up tool")
         .await
         .expect("turn completes");
 
@@ -334,6 +357,35 @@ async fn narrowed_allow_set_denies_tool_describe_of_non_allowlisted_id() {
         .assert_tool_error_summary_contains("tool_describe target is unknown")
         .await
         .expect("a non-allowlisted tool_describe target must read as unknown, not return schema");
+
+    let envelopes = harness
+        .persisted_tool_result_envelopes()
+        .await
+        .expect("both tool_describe calls persist a ToolResultReference");
+    assert_eq!(
+        envelopes.len(),
+        2,
+        "expected exactly one ToolResultReference per scripted tool_describe call, got {envelopes:?}"
+    );
+    let (non_allowlisted, nonexistent) = (&envelopes[0], &envelopes[1]);
+    assert_ne!(
+        non_allowlisted.result_ref, nonexistent.result_ref,
+        "sanity: the two calls' result_refs must differ (distinct scripted call ids) — \
+         otherwise this test isn't actually comparing two separate persisted results"
+    );
+    assert_eq!(
+        non_allowlisted.version, nonexistent.version,
+        "envelope schema version must not vary by target"
+    );
+    assert_eq!(
+        non_allowlisted.safe_summary, nonexistent.safe_summary,
+        "non-allowlisted vs nonexistent tool_describe must read byte-identical safe_summary"
+    );
+    assert_eq!(
+        non_allowlisted.model_observation, nonexistent.model_observation,
+        "non-allowlisted vs nonexistent tool_describe must read byte-identical model_observation \
+         — a differing diagnostic/status here would be an existence oracle the safe_summary check alone would miss"
+    );
 }
 
 /// #5712 control: an unnarrowed (All) caller keeps the full search catalog —
