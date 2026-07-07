@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_product_adapters::{
-    AdapterInstallationId, AuthRequirement, DeliveryStatus, ExternalActorRef,
+    AdapterInstallationId, ApprovalDecision, ApprovalResolutionPayload, AuthRequirement,
+    AuthResolutionPayload, AuthResolutionResult, DeliveryStatus, ExternalActorRef,
     ExternalConversationRef, ExternalEventId, OutboundDeliverySink, ParsedProductInbound,
     ProductAdapter, ProductAdapterCapabilities, ProductAdapterError, ProductAdapterHealth,
     ProductAdapterId, ProductInboundEnvelope, ProductInboundPayload, ProductOutboundEnvelope,
@@ -312,6 +313,84 @@ impl RebornTestIngress {
     ) -> Result<ParsedProductInbound, ProductAdapterError> {
         let evidence = ProtocolAuthEvidence::failed(ProtocolAuthFailure::Missing);
         self.adapter.parse_inbound(raw_payload, &evidence)
+    }
+
+    /// A verified `submit_inbound` envelope wrapping an already-built
+    /// resolution payload. Shared by
+    /// [`verified_approval_resolution_envelope`](Self::verified_approval_resolution_envelope)
+    /// and
+    /// [`verified_auth_resolution_envelope`](Self::verified_auth_resolution_envelope),
+    /// which differ only in which `ProductInboundPayload` variant they pass.
+    fn verified_resolution_envelope(
+        &self,
+        event_id: &str,
+        user_id: &str,
+        thread_id: &str,
+        payload: ProductInboundPayload,
+    ) -> Result<ProductInboundEnvelope, ProductAdapterError> {
+        let evidence = ProtocolAuthEvidence::test_verified(AuthRequirement::BearerToken, user_id);
+        let context = TrustedInboundContext::from_verified_evidence(
+            self.adapter.adapter_id().clone(),
+            self.adapter.installation_id().clone(),
+            Utc::now(),
+            &evidence,
+        )?;
+        let parsed = ParsedProductInbound::new(
+            ExternalEventId::new(event_id)?,
+            ExternalActorRef::new("reborn_test_user", user_id, Some(user_id.to_string()))?,
+            ExternalConversationRef::new(None, thread_id.to_string(), None, None)?,
+            payload,
+        )?;
+        ProductInboundEnvelope::from_trusted_parse(context, parsed)
+    }
+
+    /// A verified `ApprovalResolution` envelope for `submit_inbound`, the real
+    /// dispatch arm a product adapter's "approve"/"deny" reply hits.
+    /// `ApprovalResolution` has no wire-format representation in
+    /// `RebornTestProductAdapter`'s JSON payload enum (it only carries
+    /// `UserMessage`/`SubscriptionRequest`), so this builds the
+    /// `ParsedProductInbound` directly instead of round-tripping through
+    /// `parse_inbound` — matching the adapter-shaped value a real adapter would
+    /// hand `submit_inbound`.
+    pub fn verified_approval_resolution_envelope(
+        &self,
+        event_id: &str,
+        user_id: &str,
+        thread_id: &str,
+        gate_ref: &str,
+        decision: ApprovalDecision,
+    ) -> Result<ProductInboundEnvelope, ProductAdapterError> {
+        self.verified_resolution_envelope(
+            event_id,
+            user_id,
+            thread_id,
+            ProductInboundPayload::ApprovalResolution(ApprovalResolutionPayload::new(
+                gate_ref, decision,
+            )?),
+        )
+    }
+
+    /// A verified `AuthResolution` envelope for `submit_inbound`, the real
+    /// dispatch arm a product adapter's auth-gate reply hits. See
+    /// [`verified_approval_resolution_envelope`](Self::verified_approval_resolution_envelope)
+    /// for why this builds the `ParsedProductInbound` directly.
+    pub fn verified_auth_resolution_envelope(
+        &self,
+        event_id: &str,
+        user_id: &str,
+        thread_id: &str,
+        auth_request_ref: &str,
+        result: AuthResolutionResult,
+    ) -> Result<ProductInboundEnvelope, ProductAdapterError> {
+        self.verified_resolution_envelope(
+            event_id,
+            user_id,
+            thread_id,
+            ProductInboundPayload::AuthResolution(AuthResolutionPayload::new(
+                auth_request_ref,
+                result,
+            )?),
+        )
     }
 }
 

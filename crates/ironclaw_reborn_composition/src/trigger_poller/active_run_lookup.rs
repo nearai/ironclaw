@@ -7,14 +7,16 @@ use ironclaw_triggers::{
 };
 use ironclaw_turns::{TurnPersistenceSnapshot, TurnStatus};
 
+use crate::turn_run_snapshot::TurnRunSnapshotSource;
+
 type ActiveRunIndex = HashMap<String, HashMap<ironclaw_turns::TurnRunId, TriggerActiveRunState>>;
 
 pub(crate) struct SnapshotActiveRunLookup {
-    snapshot_source: Arc<dyn TriggerTurnSnapshotSource>,
+    snapshot_source: Arc<dyn TurnRunSnapshotSource>,
 }
 
 impl SnapshotActiveRunLookup {
-    pub(crate) fn new(snapshot_source: Arc<dyn TriggerTurnSnapshotSource>) -> Self {
+    pub(crate) fn new(snapshot_source: Arc<dyn TurnRunSnapshotSource>) -> Self {
         Self { snapshot_source }
     }
 }
@@ -25,7 +27,11 @@ impl TriggerActiveRunLookup for SnapshotActiveRunLookup {
         &self,
         request: TriggerActiveRunStateRequest,
     ) -> Result<TriggerActiveRunState, TriggerError> {
-        let snapshot = self.snapshot_source.snapshot().await?;
+        let snapshot = self
+            .snapshot_source
+            .turn_run_snapshot()
+            .await
+            .map_err(trigger_backend_error)?;
         let run_index = active_run_index(&snapshot);
         Ok(active_run_state_from_index(&run_index, &request))
     }
@@ -37,10 +43,10 @@ impl TriggerActiveRunLookup for SnapshotActiveRunLookup {
         if requests.is_empty() {
             return Vec::new();
         }
-        let snapshot = match self.snapshot_source.snapshot().await {
+        let snapshot = match self.snapshot_source.turn_run_snapshot().await {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                let reason = error.to_string();
+                let reason = trigger_backend_error(error).to_string();
                 return requests
                     .into_iter()
                     .map(|_| {
@@ -109,60 +115,6 @@ fn terminal_run_history_status(status: TurnStatus) -> TriggerRunHistoryStatus {
     }
 }
 
-#[async_trait]
-pub(crate) trait TriggerTurnSnapshotSource: Send + Sync {
-    async fn snapshot(&self) -> Result<TurnPersistenceSnapshot, TriggerError>;
-}
-
-pub(crate) struct LocalTriggerTurnSnapshotSource<S> {
-    store: Arc<S>,
-}
-
-impl<S> LocalTriggerTurnSnapshotSource<S> {
-    pub(crate) fn new(store: Arc<S>) -> Self {
-        Self { store }
-    }
-}
-
-// Durable filesystem store (libSQL/Postgres, without `inmemory-turn-state`):
-// async `Result`.
-#[cfg(all(
-    any(feature = "libsql", feature = "postgres"),
-    not(feature = "inmemory-turn-state")
-))]
-#[async_trait]
-impl<F> TriggerTurnSnapshotSource
-    for LocalTriggerTurnSnapshotSource<ironclaw_turns::FilesystemTurnStateStore<F>>
-where
-    F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
-{
-    async fn snapshot(&self) -> Result<TurnPersistenceSnapshot, TriggerError> {
-        self.store
-            .persistence_snapshot()
-            .await
-            .map_err(trigger_backend_error)
-    }
-}
-
-// In-memory authority (no-DB builds, or any build with `inmemory-turn-state`):
-// sync infallible snapshot.
-#[cfg(any(
-    feature = "inmemory-turn-state",
-    not(any(feature = "libsql", feature = "postgres"))
-))]
-#[async_trait]
-impl TriggerTurnSnapshotSource
-    for LocalTriggerTurnSnapshotSource<ironclaw_turns::InMemoryTurnStateStore>
-{
-    async fn snapshot(&self) -> Result<TurnPersistenceSnapshot, TriggerError> {
-        Ok(self.store.persistence_snapshot())
-    }
-}
-
-#[cfg(all(
-    any(feature = "libsql", feature = "postgres"),
-    not(feature = "inmemory-turn-state")
-))]
 fn trigger_backend_error(error: impl std::fmt::Display) -> TriggerError {
     TriggerError::Backend {
         reason: error.to_string(),
@@ -197,8 +149,10 @@ mod tests {
     }
 
     #[async_trait]
-    impl TriggerTurnSnapshotSource for CountingSnapshotSource {
-        async fn snapshot(&self) -> Result<TurnPersistenceSnapshot, TriggerError> {
+    impl TurnRunSnapshotSource for CountingSnapshotSource {
+        async fn turn_run_snapshot(
+            &self,
+        ) -> Result<TurnPersistenceSnapshot, ironclaw_turns::TurnError> {
             *self.calls.lock().expect("snapshot calls lock") += 1;
             Ok(TurnPersistenceSnapshot::default())
         }
@@ -209,8 +163,10 @@ mod tests {
     }
 
     #[async_trait]
-    impl TriggerTurnSnapshotSource for StaticSnapshotSource {
-        async fn snapshot(&self) -> Result<TurnPersistenceSnapshot, TriggerError> {
+    impl TurnRunSnapshotSource for StaticSnapshotSource {
+        async fn turn_run_snapshot(
+            &self,
+        ) -> Result<TurnPersistenceSnapshot, ironclaw_turns::TurnError> {
             Ok(self.snapshot.clone())
         }
     }
@@ -227,10 +183,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl TriggerTurnSnapshotSource for FailingSnapshotSource {
-        async fn snapshot(&self) -> Result<TurnPersistenceSnapshot, TriggerError> {
+    impl TurnRunSnapshotSource for FailingSnapshotSource {
+        async fn turn_run_snapshot(
+            &self,
+        ) -> Result<TurnPersistenceSnapshot, ironclaw_turns::TurnError> {
             *self.calls.lock().expect("snapshot calls lock") += 1;
-            Err(TriggerError::Backend {
+            Err(ironclaw_turns::TurnError::Unavailable {
                 reason: "snapshot failed".to_string(),
             })
         }

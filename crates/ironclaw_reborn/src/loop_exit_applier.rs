@@ -3,7 +3,7 @@
 //! `ironclaw_turns` owns the trusted applier and the private validation policy.
 //! This module provides Reborn-specific evidence adapters.
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_loop_support::{RunCancellationFactory, SpawnSubagentMode};
@@ -291,54 +291,14 @@ where
         if request.reply_message_refs.is_empty() && request.result_refs.is_empty() {
             return Ok(true);
         }
-        let mut thread_scope = match &self.thread_scope {
-            Some(thread_scope) => {
-                ensure_thread_scope_matches_turn_scope(thread_scope, request.scope)?;
-                thread_scope.clone()
-            }
-            None => thread_scope_from_turn_scope(request.scope)?,
-        };
-        // Multi-user: the loop host wrote this thread under the run's
-        // authenticated owner (`owners/<caller>`), so the completion-ref
-        // read must use the same owner — otherwise it looks in the wrong
-        // subtree and fails with `unknown thread`. Apply the SAME
-        // owner-rewrite rule the loop host uses, via the shared
-        // [`ThreadScopeResolver`], so the two cannot drift. The run-state
-        // read (for the actor) only runs when the base scope is
-        // owner-scoped; an owner-less applier keeps its shared/system slot.
-        if request.scope.has_explicit_thread_owner() {
-            thread_scope = crate::thread_scope::ThreadScopeResolver::resolve_for_turn(
-                &thread_scope,
-                request.scope,
-                None,
-            );
-        } else if thread_scope.owner_user_id.is_some() {
-            let run_state = self
-                .turn_state_store
-                .get_run_state(GetRunStateRequest {
-                    scope: request.scope.clone(),
-                    run_id: request.run_id,
-                })
-                .await?;
-            thread_scope = crate::thread_scope::ThreadScopeResolver::resolve_for_turn(
-                &thread_scope,
-                request.scope,
-                run_state.actor.as_ref(),
-            );
-        }
         let history = self
-            .thread_service
-            .list_thread_history(ThreadHistoryRequest {
-                scope: thread_scope,
-                thread_id: request.scope.thread_id.clone(),
-            })
-            .await
-            .map_err(|error| TurnError::Unavailable {
-                reason: error.to_string(),
-            })?;
+            .load_thread_history_for_turn(request.scope, request.run_id)
+            .await?;
         let expected_run_id = request.run_id.to_string();
+        let verified_reply_ids = verified_reply_message_ids(&history, expected_run_id.as_str());
         let replies_verified = request.reply_message_refs.iter().all(|message_ref| {
-            verify_reply_message_ref(&history, message_ref, expected_run_id.as_str())
+            message_id_from_ref(message_ref)
+                .is_some_and(|message_id| verified_reply_ids.contains(&message_id))
         });
         let results_verified = request.result_refs.iter().all(|result_ref| {
             verify_tool_result_ref(&history, result_ref, expected_run_id.as_str())
@@ -462,10 +422,29 @@ where
             Ok(state) => state,
             Err(_) => return Ok(false),
         };
-        Ok(state
+        if !state
             .recent_failure_kinds
             .iter()
-            .any(|kind| *kind == request.failed.reason_kind))
+            .any(|kind| *kind == request.failed.reason_kind)
+        {
+            return Ok(false);
+        }
+        if request.failed.explanation_message_refs.is_empty() {
+            return Ok(true);
+        }
+        let history = self
+            .load_thread_history_for_turn(request.scope, request.run_id)
+            .await?;
+        let expected_run_id = request.run_id.to_string();
+        let verified_reply_ids = verified_reply_message_ids(&history, expected_run_id.as_str());
+        Ok(request
+            .failed
+            .explanation_message_refs
+            .iter()
+            .all(|message_ref| {
+                message_id_from_ref(message_ref)
+                    .is_some_and(|message_id| verified_reply_ids.contains(&message_id))
+            }))
     }
 
     async fn is_cancellation_observed(
@@ -530,6 +509,52 @@ impl<S> ThreadCheckpointLoopExitEvidencePort<S>
 where
     S: SessionThreadService + ?Sized + Send + Sync,
 {
+    async fn load_thread_history_for_turn(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<ThreadHistory, TurnError> {
+        let mut thread_scope = match &self.thread_scope {
+            Some(thread_scope) => {
+                ensure_thread_scope_matches_turn_scope(thread_scope, scope)?;
+                thread_scope.clone()
+            }
+            None => thread_scope_from_turn_scope(scope)?,
+        };
+        // Multi-user: the loop host wrote this thread under the run's
+        // authenticated owner (`owners/<caller>`), so evidence reads must use
+        // the same owner or they will look in the wrong subtree.
+        if scope.has_explicit_thread_owner() {
+            thread_scope = crate::thread_scope::ThreadScopeResolver::resolve_for_turn(
+                &thread_scope,
+                scope,
+                None,
+            );
+        } else if thread_scope.owner_user_id.is_some() {
+            let run_state = self
+                .turn_state_store
+                .get_run_state(GetRunStateRequest {
+                    scope: scope.clone(),
+                    run_id,
+                })
+                .await?;
+            thread_scope = crate::thread_scope::ThreadScopeResolver::resolve_for_turn(
+                &thread_scope,
+                scope,
+                run_state.actor.as_ref(),
+            );
+        }
+        self.thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: thread_scope,
+                thread_id: scope.thread_id.clone(),
+            })
+            .await
+            .map_err(|error| TurnError::Unavailable {
+                reason: error.to_string(),
+            })
+    }
+
     async fn verify_pending_approval_gate(
         &self,
         request: &BlockedEvidenceRequest<'_>,
@@ -639,20 +664,20 @@ fn message_id_from_ref(message_ref: &LoopMessageRef) -> Option<ThreadMessageId> 
     ThreadMessageId::parse(raw).ok()
 }
 
-fn verify_reply_message_ref(
+fn verified_reply_message_ids(
     history: &ThreadHistory,
-    message_ref: &LoopMessageRef,
     expected_run_id: &str,
-) -> bool {
-    let Some(message_id) = message_id_from_ref(message_ref) else {
-        return false;
-    };
-    history.messages.iter().any(|message| {
-        message.message_id == message_id
-            && message.kind == MessageKind::Assistant
-            && message.status == MessageStatus::Finalized
-            && message.turn_run_id.as_deref() == Some(expected_run_id)
-    })
+) -> HashSet<ThreadMessageId> {
+    history
+        .messages
+        .iter()
+        .filter(|message| {
+            message.kind == MessageKind::Assistant
+                && message.status == MessageStatus::Finalized
+                && message.turn_run_id.as_deref() == Some(expected_run_id)
+        })
+        .map(|message| message.message_id)
+        .collect()
 }
 
 fn verify_tool_result_ref(

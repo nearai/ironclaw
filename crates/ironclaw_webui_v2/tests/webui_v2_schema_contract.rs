@@ -160,6 +160,7 @@ fn projection_state() -> ProductProjectionState {
                 status: "running".to_string(),
                 failure_category: None,
                 failure_summary: None,
+                retryable: None,
             },
             ProductProjectionItem::RunStatus {
                 run_id: run_id(),
@@ -170,6 +171,7 @@ fn projection_state() -> ProductProjectionState {
                 failure_summary: Some(
                     "The run failed because the execution driver reported an error.".to_string(),
                 ),
+                retryable: Some(true),
             },
             ProductProjectionItem::WorkSummary {
                 id: "work-summary-1".to_string(),
@@ -294,6 +296,30 @@ fn webchat_v2_event_schema_has_stable_wire_names() {
         assert_eq!(json["type"], expected_type);
         assert_no_forbidden_metadata(&json);
     }
+}
+
+#[test]
+fn projection_state_schema_serializes_run_retryability() {
+    let json = serde_json::to_value(projection_state()).expect("serialize projection state");
+    let items = json["items"].as_array().expect("projection items array");
+    // Select run_status entries by their `status` field rather than fixture
+    // position, so reordering unrelated projection items does not break this
+    // wire-schema assertion.
+    let find_run_status = |status: &str| {
+        items
+            .iter()
+            .filter_map(|item| item.get("run_status"))
+            .find(|run_status| run_status.get("status").and_then(|s| s.as_str()) == Some(status))
+            .unwrap_or_else(|| panic!("expected a {status} run_status item"))
+    };
+    let running_status = find_run_status("running");
+    let failed_status = find_run_status("failed");
+
+    assert!(
+        running_status.get("retryable").is_none(),
+        "running run status should omit retryable: {running_status}"
+    );
+    assert_eq!(failed_status["retryable"], true);
 }
 
 #[test]
