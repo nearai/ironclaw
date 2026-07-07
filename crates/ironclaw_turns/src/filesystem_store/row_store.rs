@@ -320,21 +320,21 @@ where
                 .await
             {
                 Ok(()) => {
-                    tracing::warn!(
+                    tracing::debug!(
                         active_lock_key = %key,
                         run_id = %lock.run_id,
                         "removed orphan turn-state active-lock row without a durable run row",
                     );
                 }
                 Err(FilesystemError::NotFound { .. }) => {
-                    tracing::warn!(
+                    tracing::debug!(
                         active_lock_key = %key,
                         run_id = %lock.run_id,
                         "orphan turn-state active-lock row disappeared during cleanup",
                     );
                 }
                 Err(error) => {
-                    tracing::warn!(
+                    tracing::debug!(
                         active_lock_key = %key,
                         run_id = %lock.run_id,
                         %error,
@@ -381,7 +381,7 @@ where
             return Ok(current);
         }
 
-        tracing::info!(
+        tracing::debug!(
             turns = legacy.turns.len(),
             runs = legacy.runs.len(),
             events = legacy.events.len(),
@@ -399,7 +399,7 @@ where
             .map_err(RowPersistError::into_turn)?;
         materialize_delta_log(self.filesystem.as_ref(), &self.materialize_gate, None).await?;
         let migrated = self.read_materialized_row_snapshot().await?;
-        tracing::info!(
+        tracing::debug!(
             turns = migrated.turns.len(),
             runs = migrated.runs.len(),
             events = migrated.events.len(),

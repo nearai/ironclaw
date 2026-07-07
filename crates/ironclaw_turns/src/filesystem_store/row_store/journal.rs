@@ -135,7 +135,7 @@ async fn run_delta_journal_materializer<F>(
         if let Err(error) =
             materialize_delta_batch(filesystem.as_ref(), &materialize_gate, &target_seq).await
         {
-            tracing::warn!(
+            tracing::debug!(
                 error = %error,
                 target_seq = target_seq.get(),
                 "turn-state row materialization failed after durable delta append",

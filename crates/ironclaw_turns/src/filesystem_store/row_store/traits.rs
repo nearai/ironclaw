@@ -19,9 +19,6 @@ use crate::{
     },
 };
 
-use super::super::{
-    profile_resolver::PreResolvedRunProfileResolver, projection, runner_lease::RunnerLeaseOverlay,
-};
 use super::{
     FilesystemTurnStateRowStore, PendingRowCommit, RunStateTransitionTarget,
     delta::{
@@ -31,6 +28,9 @@ use super::{
         submit_turn_targeted_delta,
     },
     turn_state_write_span,
+};
+use crate::filesystem_store::{
+    profile_resolver::PreResolvedRunProfileResolver, projection, runner_lease::RunnerLeaseOverlay,
 };
 
 #[async_trait]
