@@ -156,6 +156,11 @@ test("SelectMenu opens, selects an option, and closes after selection", () => {
   let rendered = harness.render({ onChange: (value) => changes.push(value) });
   assert.equal(firstValueAfter(rendered, "aria-expanded="), "true");
   assert.match(collectTemplateText(rendered), /role="listbox"/);
+  assert.ok(
+    collectScalars(rendered).some(
+      (value) => typeof value === "string" && value.includes("v2-canvas-strong")
+    )
+  );
   assert.ok(collectScalars(rendered).includes("Always allow"));
 
   valuesAfter(rendered, "onClick=")[2]();
@@ -189,4 +194,3 @@ test("SelectMenu ignores disabled trigger clicks", () => {
   firstValueAfter(rendered, "onClick=")();
   assert.equal(harness.state.hooks[0], false);
 });
-
