@@ -554,15 +554,28 @@ fn filter_matches(
     }
 }
 
-/// Coarse FTS approximation: tokenize the query on whitespace and require
-/// every token to appear (case-insensitively) in the stored text. This
-/// matches FTS5's default `AND`-of-terms behavior closely enough for the
+/// Coarse FTS approximation: a whole-query FTS5 double-quoted phrase
+/// (`"..."`, embedded `"` doubled) matches as literal substring content;
+/// otherwise tokenize the query on whitespace and require every token to
+/// appear (case-insensitively) in the stored text. This matches FTS5's
+/// phrase and default `AND`-of-terms behavior closely enough for the
 /// in-memory reference; the SQL backends use the real engines.
 fn fts_naive_matches(stored: &str, query: &str) -> bool {
     let stored_lower = stored.to_lowercase();
+    if let Some(phrase) = fts5_literal_phrase(query) {
+        return stored_lower.contains(&phrase.to_lowercase());
+    }
     query
         .split_whitespace()
         .all(|token| stored_lower.contains(&token.to_lowercase()))
+}
+
+/// If `query` is a single FTS5 double-quoted phrase, return its unescaped
+/// literal content (embedded `""` collapsed to `"`). `None` for anything
+/// else, including an empty or unterminated quote.
+fn fts5_literal_phrase(query: &str) -> Option<String> {
+    let inner = query.strip_prefix('"')?.strip_suffix('"')?;
+    Some(inner.replace("\"\"", "\""))
 }
 
 /// If `filter` is a top-level `VectorNearest` (the only shape the SQL
@@ -887,6 +900,62 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn fts_filter_matches_quoted_phrase_as_literal_content() {
+        // Callers that bound and quote attacker-controlled text into a
+        // single FTS5 phrase (loop-support's `memory_search_query_from_message`)
+        // send a query wrapped in `"..."` with embedded `"` doubled. The
+        // naive matcher must treat that as a literal-phrase lookup rather
+        // than whitespace-splitting the query and matching the leading/
+        // trailing quote characters as part of the first/last token.
+        let fs = InMemoryBackend::new();
+        let kind = RecordKind::new("chunk").unwrap();
+        for (path, text) in [
+            ("/memory/A", "shipment tracking id 12345"),
+            ("/memory/B", "unrelated content"),
+        ] {
+            let entry = Entry::record(kind.clone(), &serde_json::json!({}))
+                .unwrap()
+                .with_indexed(key("content"), IndexValue::Text(text.into()));
+            fs.put(&vpath(path), entry, CasExpectation::Absent)
+                .await
+                .unwrap();
+        }
+        let results = fs
+            .query(
+                &vpath("/memory"),
+                &Filter::Fts {
+                    key: key("content"),
+                    query: "\"shipment tracking id\"".into(),
+                },
+                Page::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+
+        // Embedded `"` in the original content is escaped as `""` per FTS5
+        // convention; the phrase match must unescape it before comparing.
+        let entry = Entry::record(kind.clone(), &serde_json::json!({}))
+            .unwrap()
+            .with_indexed(key("content"), IndexValue::Text("say \"hello\" now".into()));
+        fs.put(&vpath("/memory/C"), entry, CasExpectation::Absent)
+            .await
+            .unwrap();
+        let results = fs
+            .query(
+                &vpath("/memory"),
+                &Filter::Fts {
+                    key: key("content"),
+                    query: "\"say \"\"hello\"\" now\"".into(),
+                },
+                Page::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
     }
 
     #[tokio::test]
