@@ -1171,6 +1171,55 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(result.details["delivery_target_present"], True)
         self.assertIn("preflight", result.details)
 
+    def test_start_reborn_server_sets_slack_personal_oauth_redirect(self):
+        captured: dict[str, object] = {}
+
+        class FakeProcess:
+            pass
+
+        def fake_popen(*_args, **kwargs):
+            captured["env"] = kwargs["env"]
+            captured["cwd"] = kwargs["cwd"]
+            kwargs["stdout"].close()
+            kwargs["stderr"].close()
+            return FakeProcess()
+
+        async def fake_wait_for_ready(url: str, *, timeout: float) -> None:
+            captured["health_url"] = url
+            captured["timeout"] = timeout
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            with (
+                patch.object(run_live_qa, "reserve_loopback_port", return_value=38555),
+                patch.object(run_live_qa.subprocess, "Popen", side_effect=fake_popen),
+                patch.object(run_live_qa, "wait_for_ready", side_effect=fake_wait_for_ready),
+            ):
+                proc, base_url = asyncio.run(
+                    run_live_qa.start_reborn_server(
+                        root / "ironclaw-reborn",
+                        root / "reborn-home",
+                        root / "out",
+                        {
+                            "REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_ID": "slack-client",
+                            "REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_SECRET": "slack-secret",
+                        },
+                    )
+                )
+
+        self.assertIsInstance(proc, FakeProcess)
+        self.assertEqual(base_url, "http://127.0.0.1:38555")
+        self.assertEqual(captured["health_url"], "http://127.0.0.1:38555/api/health")
+        env = captured["env"]
+        self.assertIsInstance(env, dict)
+        self.assertEqual(
+            env["IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI"],
+            (
+                "http://127.0.0.1:38555"
+                "/api/reborn/product-auth/oauth/slack_personal/callback"
+            ),
+        )
+
     def test_completed_capability_counts_ignore_stale_completed_runs(self):
         counts = run_live_qa._completed_capability_counts(
             {

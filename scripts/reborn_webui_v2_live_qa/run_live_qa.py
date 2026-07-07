@@ -104,6 +104,8 @@ from scripts.reborn_webui_v2_live_qa.semantic_judge import (  # noqa: E402
 )
 from scripts.reborn_webui_v2_live_qa.slack_helpers import (  # noqa: E402
     SLACK_BOT_TOKEN_ENV,
+    SLACK_OAUTH_CLIENT_ID_ENV,
+    SLACK_OAUTH_CLIENT_SECRET_ENV,
     SLACK_SIGNING_SECRET_ENV,
     _disable_slack_in_config,
     _discover_slack_dm_route_channel,
@@ -721,6 +723,17 @@ async def start_reborn_server(
     ):
         process_extra_env["IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI"] = (
             f"{base_url}/api/reborn/product-auth/oauth/google/callback"
+        )
+    if (
+        _env_present(SLACK_OAUTH_CLIENT_ID_ENV, process_extra_env)
+        and _env_present(SLACK_OAUTH_CLIENT_SECRET_ENV, process_extra_env)
+        and not _env_present(
+            "IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI",
+            process_extra_env,
+        )
+    ):
+        process_extra_env["IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI"] = (
+            f"{base_url}/api/reborn/product-auth/oauth/slack_personal/callback"
         )
     stdout_path = output_dir / "ironclaw-reborn-serve.stdout.log"
     stderr_path = output_dir / "ironclaw-reborn-serve.stderr.log"
