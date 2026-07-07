@@ -68,6 +68,17 @@ impl RunnerLeaseStore {
         }
     }
 
+    pub(super) async fn overlay_run_record(
+        &self,
+        run: TurnRunRecord,
+    ) -> Result<TurnRunRecord, TurnError> {
+        self.with_timeout(
+            self.overlay_run_record_inner(run),
+            "overlay run record lease",
+        )
+        .await
+    }
+
     pub(super) async fn seed_from_snapshot(
         &self,
         snapshot: &TurnPersistenceSnapshot,
@@ -76,6 +87,14 @@ impl RunnerLeaseStore {
         self.with_timeout(
             self.seed_from_snapshot_inner(snapshot, run_id),
             "seed runner lease",
+        )
+        .await
+    }
+
+    pub(super) async fn seed_from_run_record(&self, run: TurnRunRecord) -> Result<(), TurnError> {
+        self.with_timeout(
+            self.seed_from_run_record_inner(run),
+            "seed runner lease from run record",
         )
         .await
     }
@@ -249,6 +268,20 @@ impl RunnerLeaseStore {
         Ok((snapshot, version))
     }
 
+    async fn overlay_run_record_inner(
+        &self,
+        mut run: TurnRunRecord,
+    ) -> Result<TurnRunRecord, TurnError> {
+        if !run_can_use_external_lease(&run) {
+            return Ok(run);
+        }
+        let leases = self.leases.read().await;
+        if let Some(lease) = leases.get(&run.run_id) {
+            apply_runner_lease_overlay(&mut run, lease);
+        }
+        Ok(run)
+    }
+
     async fn seed_from_snapshot_inner(
         &self,
         snapshot: &TurnPersistenceSnapshot,
@@ -258,6 +291,16 @@ impl RunnerLeaseStore {
             return Err(TurnError::ScopeNotFound);
         };
         let Some(record) = runner_lease_from_run(run) else {
+            return Err(TurnError::InvalidTransition {
+                from: run.status,
+                to: TurnStatus::Running,
+            });
+        };
+        self.upsert(record).await
+    }
+
+    async fn seed_from_run_record_inner(&self, run: TurnRunRecord) -> Result<(), TurnError> {
+        let Some(record) = runner_lease_from_run(&run) else {
             return Err(TurnError::InvalidTransition {
                 from: run.status,
                 to: TurnStatus::Running,
@@ -506,6 +549,48 @@ mod tests {
             .cloned()
             .expect("existing lease");
         assert_eq!(stored, existing);
+    }
+
+    #[tokio::test]
+    async fn seed_from_run_record_uses_exact_persisted_lease_metadata() {
+        let run_id = TurnRunId::new();
+        let runner_id = TurnRunnerId::new();
+        let lease_token = TurnLeaseToken::new();
+        let now = Utc::now();
+        let lease_expires_at = now + chrono::Duration::minutes(2);
+        let last_heartbeat_at = now + chrono::Duration::seconds(7);
+        let event_cursor = EventCursor(7);
+        let run = turn_run_record(
+            run_id,
+            runner_id,
+            lease_token,
+            TurnStatus::Running,
+            lease_expires_at,
+            last_heartbeat_at,
+            event_cursor,
+        );
+        let store = RunnerLeaseStore::new(
+            Arc::new(RwLock::new(HashMap::new())),
+            chrono::Duration::minutes(1),
+            Duration::from_secs(1),
+        );
+
+        store.seed_from_run_record(run).await.unwrap();
+
+        let stored = store
+            .leases
+            .read()
+            .await
+            .get(&run_id)
+            .cloned()
+            .expect("seeded lease");
+        assert_eq!(stored.run_id, run_id);
+        assert_eq!(stored.runner_id, runner_id);
+        assert_eq!(stored.lease_token, lease_token);
+        assert_eq!(stored.lease_expires_at, lease_expires_at);
+        assert_eq!(stored.last_heartbeat_at, last_heartbeat_at);
+        assert_eq!(stored.status, TurnStatus::Running);
+        assert_eq!(stored.event_cursor, event_cursor);
     }
 
     fn turn_run_record(

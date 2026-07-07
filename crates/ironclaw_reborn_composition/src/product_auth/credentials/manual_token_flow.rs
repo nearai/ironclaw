@@ -9,7 +9,7 @@ use ironclaw_auth::{
 };
 use ironclaw_filesystem::RootFilesystem;
 
-use crate::product_auth_durable::FilesystemAuthProductServices;
+use crate::product_auth::durable::FilesystemAuthProductServices;
 
 #[async_trait]
 #[doc(hidden)]

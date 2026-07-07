@@ -15,7 +15,7 @@ use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
 use crate::extension_lifecycle_capabilities::{
     EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
 };
-use crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionRequest;
+use crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest;
 use crate::{
     RebornBuildInput, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
     RebornServices, build_reborn_services,
