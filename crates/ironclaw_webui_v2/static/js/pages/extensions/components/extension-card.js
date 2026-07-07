@@ -9,7 +9,10 @@ import {
   STATE_LABELS,
   isChannelExtensionKind,
 } from "../lib/extensions-schema.js";
-import { primaryExtensionAction } from "../lib/extension-actions.js";
+import {
+  extensionHasCredentialConfigurationSurface,
+  primaryExtensionAction,
+} from "../lib/extension-actions.js";
 
 /* Card layout (Option B): self-contained bordered card. Capabilities collapse
    behind a count disclosure; secondary actions (Configure / Setup / Remove)
@@ -164,7 +167,12 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
       run: () => onActivate(configurePayload),
     });
   }
-  if (canManage && (ext.needs_setup || ext.has_auth) && primaryAction !== "configure") {
+  if (
+    canManage &&
+    extensionHasCredentialConfigurationSurface(ext) &&
+    primaryAction !== "configure" &&
+    !isChannelExtensionKind(ext.kind)
+  ) {
     overflowActions.push({
       id: "configure",
       label: configureLabel,

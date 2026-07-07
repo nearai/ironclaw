@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  extensionHasCredentialConfigurationSurface,
   extensionIsActive,
   primaryExtensionAction,
   setupReadyForActivation,
@@ -95,6 +96,53 @@ test("extensionIsActive accepts card payload lifecycle fields", () => {
   assert.equal(extensionIsActive({ active: true }), true);
   assert.equal(extensionIsActive({ activationStatus: "ready" }), true);
   assert.equal(extensionIsActive({ onboardingState: "auth_required" }), false);
+});
+
+test("extensionHasCredentialConfigurationSurface ignores activation-only setup hints", () => {
+  assert.equal(
+    extensionHasCredentialConfigurationSurface({
+      package_ref: { kind: "extension", id: "portfolio" },
+      kind: "wasm_tool",
+      activation_status: "installed",
+      needs_setup: true,
+      has_auth: false,
+      authenticated: false,
+    }),
+    false,
+    "installed no-auth tools may need activation, but not a Configure form",
+  );
+  assert.equal(
+    extensionHasCredentialConfigurationSurface({
+      package_ref: notionRef,
+      kind: "mcp_server",
+      activation_status: "installed",
+      has_auth: true,
+      authenticated: false,
+    }),
+    false,
+    "unauthenticated auth-capable extensions should use auth/setup states before Configure",
+  );
+  assert.equal(
+    extensionHasCredentialConfigurationSurface({
+      package_ref: notionRef,
+      kind: "mcp_server",
+      onboarding_state: "setup_required",
+      has_auth: true,
+      authenticated: false,
+    }),
+    true,
+  );
+  assert.equal(
+    extensionHasCredentialConfigurationSurface({
+      package_ref: notionRef,
+      kind: "mcp_server",
+      activation_status: "active",
+      has_auth: true,
+      authenticated: true,
+    }),
+    true,
+    "configured credential extensions keep a reconfigure affordance",
+  );
 });
 
 test("setupReadyForActivation waits until all setup secrets are provided", () => {

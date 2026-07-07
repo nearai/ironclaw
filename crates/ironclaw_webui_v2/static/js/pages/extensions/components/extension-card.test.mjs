@@ -123,12 +123,19 @@ function makeContext() {
     installed: "installed",
   };
 
-  // Inline primaryExtensionAction from extension-actions.js (exact copy).
-  function primaryExtensionAction(ext) {
-    const state =
+  // Inline extension-actions.js helpers used by extension-card.js.
+  function extensionLifecycleState(ext) {
+    return (
       ext?.onboarding_state ||
+      ext?.onboardingState ||
       ext?.activation_status ||
-      (ext?.active ? "active" : "installed");
+      ext?.activationStatus ||
+      (ext?.active ? "active" : "installed")
+    );
+  }
+
+  function primaryExtensionAction(ext) {
+    const state = extensionLifecycleState(ext);
 
     if (!ext?.package_ref || state === "active" || state === "ready") {
       return null;
@@ -139,6 +146,14 @@ function makeContext() {
     }
 
     return isChannelExtensionKind(ext?.kind) ? null : "activate";
+  }
+
+  function extensionHasCredentialConfigurationSurface(ext) {
+    const state = extensionLifecycleState(ext);
+    if (state === "auth_required" || state === "setup_required") {
+      return true;
+    }
+    return Boolean(ext?.has_auth && ext?.authenticated);
   }
 
   return {
@@ -154,6 +169,7 @@ function makeContext() {
     STATE_TONES,
     STATE_LABELS,
     primaryExtensionAction,
+    extensionHasCredentialConfigurationSurface,
   };
 }
 
@@ -302,6 +318,53 @@ test("installed channel card omits generic Activate while installed MCP card kee
     true,
     "non-channel extensions should still expose their normal activation action",
   );
+});
+
+test("installed no-config tool omits Configure while keeping Activate", () => {
+  const { rendered, OverflowMenu } = renderExtensionCardWithInternals({
+    package_ref: { id: "portfolio" },
+    kind: "wasm_tool",
+    activation_status: "installed",
+    display_name: "Portfolio",
+    needs_setup: true,
+    has_auth: false,
+    authenticated: false,
+    tools: ["portfolio"],
+  });
+  const actions = extractOverflowActions(rendered, OverflowMenu);
+  assert.notEqual(actions, null, "OverflowMenu should still expose Remove");
+  const ids = actions.map((a) => a.id);
+
+  assert.ok(
+    !ids.includes("configure"),
+    `Expected no Configure action, got: ${JSON.stringify(ids)}`,
+  );
+  assert.ok(
+    ids.includes("remove"),
+    `Expected Remove action, got: ${JSON.stringify(ids)}`,
+  );
+  assert.equal(renderedContainsValue(rendered, "activate"), true);
+});
+
+test("authenticated credential extension keeps Reconfigure overflow action", () => {
+  const { rendered, OverflowMenu } = renderExtensionCardWithInternals({
+    package_ref: { id: "github" },
+    kind: "mcp_server",
+    activation_status: "active",
+    display_name: "GitHub",
+    has_auth: true,
+    authenticated: true,
+  });
+  const actions = extractOverflowActions(rendered, OverflowMenu);
+  assert.notEqual(actions, null, "OverflowMenu should be present");
+  const configureAction = actions.find((action) => action.id === "configure");
+
+  assert.notEqual(
+    configureAction,
+    undefined,
+    "credential extensions should remain configurable",
+  );
+  assert.equal(configureAction.label, "reconfigure");
 });
 
 test("setup-required primary action reads Connect for a channel and Configure for a credential extension", () => {

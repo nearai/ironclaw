@@ -36,6 +36,14 @@ export function extensionIsActive(ext) {
   return state === "active" || state === "ready";
 }
 
+export function extensionHasCredentialConfigurationSurface(ext) {
+  const state = extensionLifecycleState(ext);
+  if (state === "auth_required" || state === "setup_required") {
+    return true;
+  }
+  return Boolean(ext?.has_auth && ext?.authenticated);
+}
+
 export function setupReadyForActivation({ extension, secrets = [], fields = [] } = {}) {
   if (extensionIsActive(extension)) {
     return false;
