@@ -122,6 +122,7 @@ test("OnboardingPairingCard shows connection-succeeded copy when the resume faul
         ];
       },
     },
+    useT: () => tForTest,
   };
 
   vm.runInNewContext(onboardingPairingCardSourceForTest(), context);
@@ -295,6 +296,7 @@ test("OnboardingPairingCard shows a spinner while OAuth configuration is waiting
         return [["", "", "idle", true][index] ?? initial, () => {}];
       },
     },
+    useT: () => tForTest,
   };
   vm.runInNewContext(onboardingPairingCardSourceForTest(), context);
 
@@ -332,6 +334,7 @@ test("OnboardingPairingCard keeps OAuth configuration loading after the popup op
         ];
       },
     },
+    useT: () => tForTest,
   };
   vm.runInNewContext(onboardingPairingCardSourceForTest(), context);
 
@@ -369,6 +372,7 @@ test("OnboardingPairingCard exits the connect spinner and surfaces the error whe
         ];
       },
     },
+    useT: () => tForTest,
   };
   vm.runInNewContext(onboardingPairingCardSourceForTest(), context);
 
