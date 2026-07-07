@@ -967,7 +967,14 @@ pub(crate) async fn discard_oauth_egress_policy(
 ) {
     let context = match oauth_execution_context(scope.clone()) {
         Ok(context) => context,
-        Err(_) => return,
+        Err(error) => {
+            tracing::warn!(
+                target: "ironclaw::reborn::oauth",
+                ?error,
+                "skipped OAuth egress-policy discard: execution context unavailable"
+            );
+            return;
+        }
     };
     let estimate = ResourceEstimate {
         network_egress_bytes: policy.max_egress_bytes,
