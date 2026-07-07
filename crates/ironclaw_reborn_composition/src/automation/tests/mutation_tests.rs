@@ -1,12 +1,16 @@
 use std::sync::Arc;
 
 use ironclaw_host_api::UserId;
-use ironclaw_product_workflow::{AutomationProductFacade, RebornAutomationState};
+use ironclaw_product_workflow::{AutomationName, AutomationProductFacade, RebornAutomationState};
 use ironclaw_triggers::{InMemoryTriggerRepository, TriggerId, TriggerRepository, TriggerState};
 
 use crate::automation::RebornAutomationProductFacade;
 
 use super::{caller, make_record, now};
+
+fn automation_name(value: &str) -> AutomationName {
+    AutomationName::new(value).expect("valid automation name")
+}
 
 #[tokio::test]
 async fn pause_and_resume_update_scoped_trigger_state() {
@@ -105,7 +109,11 @@ async fn rename_automation_updates_scoped_trigger_name() {
 
     let facade = RebornAutomationProductFacade::new(repo.clone());
     let response = facade
-        .rename_automation(c.clone(), trigger_id.to_string(), "Inbox sweep".to_string())
+        .rename_automation(
+            c.clone(),
+            trigger_id.to_string(),
+            automation_name("Inbox sweep"),
+        )
         .await
         .expect("rename automation");
 
@@ -143,7 +151,7 @@ async fn rename_automation_returns_not_updated_for_wrong_scope() {
 
     let facade = RebornAutomationProductFacade::new(repo.clone());
     let response = facade
-        .rename_automation(c, trigger_id.to_string(), "Wrong scope".to_string())
+        .rename_automation(c, trigger_id.to_string(), automation_name("Wrong scope"))
         .await
         .expect("rename wrong-scope automation");
 
@@ -283,7 +291,7 @@ async fn rename_automation_rejects_invalid_automation_id_as_bad_request() {
         .rename_automation(
             caller(),
             "not a trigger id".to_string(),
-            "New name".to_string(),
+            automation_name("New name"),
         )
         .await
         .expect_err("invalid automation id should be rejected");

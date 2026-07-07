@@ -2,8 +2,8 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use ironclaw_host_api::ThreadId;
 use ironclaw_product_workflow::{
-    AutomationListRequest, AutomationProductFacade, ProductAgentBoundCaller, RebornAutomationInfo,
-    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    AutomationListRequest, AutomationName, AutomationProductFacade, ProductAgentBoundCaller,
+    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
     TriggerRunThreadScope,
@@ -178,7 +178,7 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
         &self,
         caller: ProductAgentBoundCaller,
         automation_id: String,
-        name: String,
+        name: AutomationName,
     ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
         let trigger_id = parse_trigger_id(&automation_id)?;
         let record = tokio::time::timeout(

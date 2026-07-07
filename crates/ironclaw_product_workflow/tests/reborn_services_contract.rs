@@ -32,7 +32,7 @@ use ironclaw_product_workflow::{
     AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE,
     AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, ApprovalInteractionActionView,
     ApprovalInteractionDecision, ApprovalInteractionScope, ApprovalInteractionService,
-    AuthInteractionDecision, AuthInteractionService, AutomationListRequest,
+    AuthInteractionDecision, AuthInteractionService, AutomationListRequest, AutomationName,
     AutomationProductFacade, CodexLoginStart, ExtensionCredentialSetupService,
     ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, InboundAttachmentLander,
     InboundAttachmentReader, LifecycleExtensionCredentialRequirement,
@@ -987,7 +987,7 @@ struct ListAutomationCall {
 enum AutomationMutationAction {
     Pause,
     Resume,
-    Rename { name: String },
+    Rename { name: AutomationName },
     Delete,
 }
 
@@ -1099,7 +1099,7 @@ impl AutomationProductFacade for RecordingAutomationFacade {
         &self,
         caller: ProductAgentBoundCaller,
         automation_id: String,
-        name: String,
+        name: AutomationName,
     ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
         self.mutation_calls
             .lock()
@@ -6251,7 +6251,7 @@ async fn automation_mutations_forward_caller_scope_to_product_facade() {
     assert_eq!(
         calls[2].action,
         AutomationMutationAction::Rename {
-            name: "Renamed status".to_string()
+            name: AutomationName::new("Renamed status").expect("valid automation name")
         }
     );
     assert_eq!(calls[2].automation_id, "trigger-alpha");

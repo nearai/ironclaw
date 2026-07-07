@@ -6,6 +6,8 @@ use async_trait::async_trait;
 #[cfg(feature = "libsql")]
 use chrono::{DateTime, SecondsFormat, Utc};
 #[cfg(feature = "libsql")]
+use ironclaw_common::AutomationName;
+#[cfg(feature = "libsql")]
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
 #[cfg(feature = "libsql")]
 use ironclaw_turns::TurnRunId;
@@ -33,6 +35,19 @@ const TRIGGER_COLUMNS: &str = "\
     name, source, schedule_expression, schedule_timezone, schedule_kind, prompt, \
     state, next_run_at, last_run_at, last_fired_slot, last_status, \
     active_fire_slot, active_run_ref, created_at, schedule_at";
+#[cfg(feature = "libsql")]
+const RENAME_SCOPED_TRIGGER_SQL: &str = "\
+    UPDATE trigger_records
+       SET name = ?6
+     WHERE tenant_id = ?1
+       AND creator_user_id = ?2
+       AND (CASE WHEN ?3 IS NULL THEN agent_id IS NULL ELSE agent_id = ?3 END)
+       AND (CASE WHEN ?4 IS NULL THEN project_id IS NULL ELSE project_id = ?4 END)
+       AND trigger_id = ?5
+     RETURNING trigger_id, tenant_id, creator_user_id, agent_id, project_id,
+       name, source, schedule_expression, schedule_timezone, schedule_kind, prompt,
+       state, next_run_at, last_run_at, last_fired_slot, last_status,
+       active_fire_slot, active_run_ref, created_at, schedule_at";
 
 #[cfg(feature = "libsql")]
 const TRIGGER_ID_COL: usize = 0;
@@ -625,24 +640,15 @@ impl TriggerRepository for LibSqlTriggerRepository {
         agent_id: Option<AgentId>,
         project_id: Option<ProjectId>,
         trigger_id: TriggerId,
-        name: String,
+        name: AutomationName,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
-        crate::validate_trigger_name(&name)?;
         let conn = self.connect().await?;
         let agent_id = agent_id.as_ref().map(AgentId::as_str);
         let project_id = project_id.as_ref().map(ProjectId::as_str);
+        let name = name.into_inner();
         let mut rows = conn
             .query(
-                &format!(
-                    "UPDATE {TRIGGER_TABLE}
-                     SET name = ?6
-                     WHERE tenant_id = ?1
-                       AND creator_user_id = ?2
-                       AND agent_id IS ?3
-                       AND project_id IS ?4
-                       AND trigger_id = ?5
-                     RETURNING {TRIGGER_COLUMNS}"
-                ),
+                RENAME_SCOPED_TRIGGER_SQL,
                 params![
                     tenant_id.as_str(),
                     creator_user_id.as_str(),

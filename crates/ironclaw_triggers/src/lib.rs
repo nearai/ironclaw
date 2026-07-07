@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use chrono::{SecondsFormat, Utc};
 use chrono_tz::Tz;
 use cron::Schedule;
+use ironclaw_common::{AutomationName, AutomationNameError};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
 use ironclaw_turns::TurnRunId;
 use serde::{Deserialize, Serialize};
@@ -41,7 +42,7 @@ const MAX_DUE_TRIGGER_POLL_LIMIT: usize = 128;
 const MAX_TRIGGER_LIST_LIMIT: usize = 100;
 const MAX_TRIGGER_RUN_HISTORY_LIMIT: usize = 500;
 const MAX_TRIGGER_RUN_HISTORY_RETAINED: usize = 500;
-pub const MAX_TRIGGER_NAME_BYTES: usize = 256;
+pub const MAX_TRIGGER_NAME_BYTES: usize = ironclaw_common::MAX_AUTOMATION_NAME_BYTES;
 pub const MAX_TRIGGER_PROMPT_BYTES: usize = 32 * 1024;
 const IDENTITY_VERSION_LABEL: &str = "ironclaw.trigger-fire.v1";
 const ROUTE_THREAD_DOMAIN: &str = "route-thread";
@@ -363,19 +364,23 @@ impl TriggerRecord {
 }
 
 pub(crate) fn validate_trigger_name(name: &str) -> Result<(), TriggerError> {
-    if name.trim().is_empty() {
-        return Err(TriggerError::InvalidRecord {
-            kind: TriggerRecordValidationKind::NameEmpty,
-            reason: "trigger name must not be empty".to_string(),
-        });
-    }
-    if name.len() > MAX_TRIGGER_NAME_BYTES {
-        return Err(TriggerError::InvalidRecord {
-            kind: TriggerRecordValidationKind::NameTooLong,
-            reason: format!("trigger name must be at most {MAX_TRIGGER_NAME_BYTES} bytes"),
-        });
-    }
-    Ok(())
+    AutomationName::new(name.to_string())
+        .map(|_| ())
+        .map_err(trigger_name_error)
+}
+
+fn trigger_name_error(error: AutomationNameError) -> TriggerError {
+    let (kind, reason) = match error {
+        AutomationNameError::Empty => (
+            TriggerRecordValidationKind::NameEmpty,
+            "trigger name must not be empty".to_string(),
+        ),
+        AutomationNameError::TooLong => (
+            TriggerRecordValidationKind::NameTooLong,
+            format!("trigger name must be at most {MAX_TRIGGER_NAME_BYTES} bytes"),
+        ),
+    };
+    TriggerError::InvalidRecord { kind, reason }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1023,7 +1028,7 @@ pub trait TriggerRepository: Send + Sync {
         _agent_id: Option<AgentId>,
         _project_id: Option<ProjectId>,
         _trigger_id: TriggerId,
-        _name: String,
+        _name: AutomationName,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
         Err(TriggerError::Backend {
             reason: "rename_scoped_trigger not implemented by this repository".to_string(),
@@ -1378,9 +1383,8 @@ impl TriggerRepository for InMemoryTriggerRepository {
         agent_id: Option<AgentId>,
         project_id: Option<ProjectId>,
         trigger_id: TriggerId,
-        name: String,
+        name: AutomationName,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
-        validate_trigger_name(&name)?;
         let mut state = self.lock_state()?;
         let key = TriggerRepositoryKey::new(&tenant_id, trigger_id);
         let Some(record) = state.records.get_mut(&key) else {
@@ -1392,7 +1396,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
         {
             return Ok(None);
         }
-        record.name = name;
+        record.name = name.into_inner();
         Ok(Some(record.clone()))
     }
 

@@ -19,6 +19,7 @@ chrono-tz = "0.10"
 cron = "0.17"
 hex = "0.4"
 deadpool-postgres = { version = "0.14", optional = true }
+ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }

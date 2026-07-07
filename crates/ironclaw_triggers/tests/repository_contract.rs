@@ -1,6 +1,7 @@
 #![cfg(any(feature = "libsql", feature = "postgres"))]
 
 use chrono::{SecondsFormat, TimeZone, Utc};
+use ironclaw_common::AutomationName;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
 use ironclaw_triggers::{
     ActiveTriggerScanCursor, ClearActiveFireRequest, InMemoryTriggerRepository, TriggerError,
@@ -27,6 +28,10 @@ fn tenant(value: &str) -> TenantId {
 
 fn user(value: &str) -> UserId {
     UserId::new(value).expect("valid user")
+}
+
+fn automation_name(value: &str) -> AutomationName {
+    AutomationName::new(value).expect("valid automation name")
 }
 
 fn sample_record(
@@ -1071,7 +1076,7 @@ async fn assert_scoped_rename_updates_only_matching_scope(repo: &impl TriggerRep
             Some(AgentId::new("agent-other").expect("valid agent")),
             Some(ProjectId::new("project-a").expect("valid project")),
             trigger_id,
-            "wrong scope name".to_string(),
+            automation_name("wrong scope name"),
         )
         .await
         .expect("wrong-scope rename");
@@ -1092,7 +1097,7 @@ async fn assert_scoped_rename_updates_only_matching_scope(repo: &impl TriggerRep
             Some(AgentId::new("agent-a").expect("valid agent")),
             Some(ProjectId::new("project-a").expect("valid project")),
             trigger_id,
-            "morning inbox summary".to_string(),
+            automation_name("morning inbox summary"),
         )
         .await
         .expect("matching-scope rename")
@@ -1108,38 +1113,6 @@ async fn assert_scoped_rename_updates_only_matching_scope(repo: &impl TriggerRep
         .expect("get renamed trigger")
         .expect("renamed record");
     assert_eq!(fetched.name, "morning inbox summary");
-
-    assert!(matches!(
-        repo.rename_scoped_trigger(
-            tenant_id.clone(),
-            user("user-a"),
-            Some(AgentId::new("agent-a").expect("valid agent")),
-            Some(ProjectId::new("project-a").expect("valid project")),
-            trigger_id,
-            "   ".to_string(),
-        )
-        .await,
-        Err(TriggerError::InvalidRecord {
-            kind: ironclaw_triggers::TriggerRecordValidationKind::NameEmpty,
-            ..
-        })
-    ));
-
-    assert!(matches!(
-        repo.rename_scoped_trigger(
-            tenant_id,
-            user("user-a"),
-            Some(AgentId::new("agent-a").expect("valid agent")),
-            Some(ProjectId::new("project-a").expect("valid project")),
-            trigger_id,
-            "x".repeat(ironclaw_triggers::MAX_TRIGGER_NAME_BYTES + 1),
-        )
-        .await,
-        Err(TriggerError::InvalidRecord {
-            kind: ironclaw_triggers::TriggerRecordValidationKind::NameTooLong,
-            ..
-        })
-    ));
 }
 
 #[cfg(feature = "libsql")]

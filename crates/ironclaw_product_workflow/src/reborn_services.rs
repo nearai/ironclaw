@@ -19,6 +19,7 @@ use ironclaw_auth::{
     AuthProductScope, AuthProviderId, CredentialAccountId, CredentialAccountProjection,
     CredentialAccountUpdateBinding, ProviderScope,
 };
+use ironclaw_common::{AutomationName, AutomationNameError};
 use ironclaw_host_api::{
     AgentId, CapabilityId, EffectKind, ExtensionId, GrantConstraints, InvocationId, PermissionMode,
     Principal, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
@@ -61,7 +62,6 @@ use crate::{
         bounded_source_binding_ref,
     },
     is_approval_gate_ref, is_auth_gate_ref, thread_metadata_is_automation_trigger,
-    webui_inbound::AUTOMATION_NAME_MAX_BYTES,
 };
 
 mod error;
@@ -679,7 +679,7 @@ pub trait AutomationProductFacade: Send + Sync {
         &self,
         _caller: ProductAgentBoundCaller,
         _automation_id: String,
-        _name: String,
+        _name: AutomationName,
     ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
         Err(automation_unavailable())
     }
@@ -766,7 +766,7 @@ impl AutomationProductFacade for UnsupportedAutomationProductFacade {
         &self,
         _caller: ProductAgentBoundCaller,
         _automation_id: String,
-        _name: String,
+        _name: AutomationName,
     ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
         Err(automation_unavailable())
     }
@@ -5984,24 +5984,21 @@ fn clamp_automation_run_limit(requested: Option<u32>) -> usize {
 
 fn parse_automation_name(
     request: WebUiRenameAutomationRequest,
-) -> Result<String, RebornServicesError> {
+) -> Result<AutomationName, RebornServicesError> {
     let Some(raw_name) = request.name else {
         return Err(RebornServicesError::validation(
             WebUiInboundValidationError::new("name", WebUiInboundValidationCode::MissingField),
         ));
     };
-    let name = raw_name.trim().to_string();
-    if name.is_empty() {
-        return Err(RebornServicesError::validation(
-            WebUiInboundValidationError::new("name", WebUiInboundValidationCode::Blank),
-        ));
-    }
-    if name.len() > AUTOMATION_NAME_MAX_BYTES {
-        return Err(RebornServicesError::validation(
-            WebUiInboundValidationError::new("name", WebUiInboundValidationCode::TooLong),
-        ));
-    }
-    Ok(name)
+    AutomationName::new(raw_name).map_err(automation_name_validation_error)
+}
+
+fn automation_name_validation_error(error: AutomationNameError) -> RebornServicesError {
+    let code = match error {
+        AutomationNameError::Empty => WebUiInboundValidationCode::Blank,
+        AutomationNameError::TooLong => WebUiInboundValidationCode::TooLong,
+    };
+    RebornServicesError::validation(WebUiInboundValidationError::new("name", code))
 }
 
 fn notification_approval_timeout_error() -> RebornServicesError {

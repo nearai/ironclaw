@@ -17,7 +17,6 @@ const CLIENT_ACTION_ID_MAX_BYTES: usize = 256;
 const USER_MESSAGE_TEXT_MAX_BYTES: usize = 64 * 1024;
 const GATE_REF_MAX_BYTES: usize = 256;
 const CREDENTIAL_REF_MAX_BYTES: usize = 512;
-pub const AUTOMATION_NAME_MAX_BYTES: usize = 256;
 /// Inline-attachment budgets, mirroring the v1 web gateway: at most
 /// `MAX_INLINE_ATTACHMENTS` files, `MAX_INLINE_ATTACHMENT_BYTES` decoded bytes
 /// per file, and `MAX_INLINE_TOTAL_ATTACHMENT_BYTES` decoded bytes total.
