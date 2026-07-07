@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_host_api::VirtualPath;
@@ -10,6 +10,8 @@ use crate::db::{
     is_not_found, libsql_db_error, not_found, page_offset_to_i64, record_version_from_i64,
     record_version_to_i64, sql_index_name, system_time_from_unix_seconds, virtual_path_prefixes,
 };
+#[cfg(feature = "libsql")]
+use crate::libsql_pool::{LibSqlPool, PooledLibSqlConnection, build_libsql_pool};
 use crate::vector::{cosine_similarity, decode_embedding_blob};
 use crate::{
     BackendCapabilities, Capability, CasExpectation, ContentType, DirEntry, Entry, FileStat,
@@ -20,61 +22,15 @@ use crate::{
 #[cfg(feature = "libsql")]
 /// libSQL-backed [`RootFilesystem`] storing file contents by virtual path.
 pub struct LibSqlRootFilesystem {
-    db: Arc<libsql::Database>,
+    pool: LibSqlPool,
 }
-
-#[cfg(feature = "libsql")]
-const LIBSQL_CONNECT_ATTEMPTS: u32 = 3;
-#[cfg(feature = "libsql")]
-const LIBSQL_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(50);
-
-/// Per-connection PRAGMAs applied to every libSQL connection.
-///
-/// libSQL/SQLite is a single-writer engine: there is no true "parallel
-/// write" mode for a local file. Concurrent writers always serialise on
-/// the database write lock. The throughput lever is therefore making each
-/// write cheap and keeping readers from blocking the writer — which is
-/// exactly what these PRAGMAs do, alongside `journal_mode=WAL` (set once at
-/// migration time, see `run_migrations`).
-///
-/// - `busy_timeout=5000`: unchanged from the prior policy. A writer that
-///   finds the write lock held waits up to 5s rather than failing fast.
-/// - `synchronous=NORMAL`: in WAL mode this is crash-safe for the
-///   *application* (committed transactions survive a process crash); only an
-///   OS/power loss can roll back the most-recent commits, and the database
-///   stays consistent regardless. It removes one fsync per commit, which is
-///   the dominant cost of the serial-write path under load. This is the
-///   standard high-throughput SQLite setting. Use `FULL` only if per-commit
-///   power-loss durability is required (it is not for turn/loop state).
-/// - `temp_store=MEMORY`: keep transient indexes/sorters off disk.
-/// - `cache_size=-16000`: ~16 MiB page cache per connection (negative =
-///   KiB), so hot pages (the turn-state and resource-snapshot rows that are
-///   read-modify-written every turn) stay resident instead of being
-///   re-read from the OS page cache on each op.
-/// - `mmap_size`: memory-map up to 256 MiB for reads, cutting read syscall
-///   overhead on the many read-before-write checks (`exact_entry`,
-///   `has_child_entry`, snapshot loads) that surround each write.
-/// - `wal_autocheckpoint=1000`: bound WAL growth (checkpoint every ~1000
-///   pages / ~4 MiB) so the WAL does not grow without limit under a burst
-///   of writes.
-///
-/// `journal_mode` is deliberately NOT set here: it is a persistent,
-/// database-level property (stored in the file header) and changing it
-/// inside or alongside ordinary work is wasteful and cannot run inside a
-/// transaction. It is set exactly once in `run_migrations`.
-#[cfg(feature = "libsql")]
-const LIBSQL_CONNECTION_PRAGMAS: &str = "\
-    PRAGMA busy_timeout = 5000;\
-    PRAGMA synchronous = NORMAL;\
-    PRAGMA temp_store = MEMORY;\
-    PRAGMA cache_size = -16000;\
-    PRAGMA mmap_size = 268435456;\
-    PRAGMA wal_autocheckpoint = 1000;";
 
 #[cfg(feature = "libsql")]
 impl LibSqlRootFilesystem {
     pub fn new(db: Arc<libsql::Database>) -> Self {
-        Self { db }
+        Self {
+            pool: build_libsql_pool(db),
+        }
     }
 
     pub async fn run_migrations(&self) -> Result<(), FilesystemError> {
@@ -135,63 +91,19 @@ impl LibSqlRootFilesystem {
         }
     }
 
-    async fn connect(&self) -> Result<libsql::Connection, FilesystemError> {
-        connect_with_retry(|| self.db.connect()).await
+    /// Check out a pooled connection for exclusive use until the guard
+    /// drops. Callers must drop the guard before `.await`-ing any other
+    /// `self` method that also checks out — see the invariant note in
+    /// [`crate::libsql_pool`].
+    async fn connect(&self) -> Result<PooledLibSqlConnection, FilesystemError> {
+        self.pool.get().await.map_err(|error| match error {
+            deadpool::managed::PoolError::Backend(error) => error,
+            other => crate::db::infrastructure_error(
+                FilesystemOperation::Connect,
+                format!("libSQL connection pool checkout failed: {other}"),
+            ),
+        })
     }
-}
-
-#[cfg(feature = "libsql")]
-async fn connect_with_retry<F>(mut open: F) -> Result<libsql::Connection, FilesystemError>
-where
-    F: FnMut() -> Result<libsql::Connection, libsql::Error>,
-{
-    // Match the legacy libSQL backend's connection policy: every
-    // operation gets its own connection, concurrent writers wait on
-    // SQLite locks, and transient file-open races get a short retry
-    // budget before surfacing as infrastructure errors.
-    let mut last_error = None;
-    for attempt in 0..LIBSQL_CONNECT_ATTEMPTS {
-        match open() {
-            Ok(conn) => {
-                // Apply the per-connection PRAGMAs in a single round-trip.
-                // `execute_batch` runs each statement and discards the rows
-                // PRAGMAs like `busy_timeout` return, which is exactly what
-                // we want — we only care about the side effect.
-                conn.execute_batch(LIBSQL_CONNECTION_PRAGMAS)
-                    .await
-                    .map_err(|error| {
-                        infrastructure_libsql_error(FilesystemOperation::Stat, error)
-                    })?;
-                return Ok(conn);
-            }
-            Err(error) => {
-                last_error = Some(error);
-                if attempt + 1 < LIBSQL_CONNECT_ATTEMPTS {
-                    tokio::time::sleep(connect_backoff(attempt)).await;
-                }
-            }
-        }
-    }
-
-    let reason = match last_error {
-        Some(error) => {
-            format!(
-                "failed to create libSQL connection after {LIBSQL_CONNECT_ATTEMPTS} attempts: {error}"
-            )
-        }
-        None => {
-            format!("failed to create libSQL connection after {LIBSQL_CONNECT_ATTEMPTS} attempts")
-        }
-    };
-    Err(crate::db::infrastructure_error(
-        FilesystemOperation::Stat,
-        reason,
-    ))
-}
-
-#[cfg(feature = "libsql")]
-fn connect_backoff(attempt: u32) -> Duration {
-    LIBSQL_CONNECT_INITIAL_BACKOFF * 2u32.pow(attempt)
 }
 
 #[cfg(feature = "libsql")]
@@ -258,6 +170,9 @@ impl RootFilesystem for LibSqlRootFilesystem {
                     .map_err(|error| {
                         libsql_db_error(path.clone(), FilesystemOperation::WriteFile, error)
                     })?;
+                // Release the checkout before `current_version` claims its
+                // own — at most one pooled connection per call stack.
+                drop(conn);
                 if rows == 0 {
                     let found = self.current_version(path).await?;
                     return Err(FilesystemError::VersionMismatch {
@@ -296,6 +211,9 @@ impl RootFilesystem for LibSqlRootFilesystem {
                     .map_err(|error| {
                         libsql_db_error(path.clone(), FilesystemOperation::WriteFile, error)
                     })?;
+                // Release the checkout before `current_version` claims its
+                // own — at most one pooled connection per call stack.
+                drop(conn);
                 if rows == 0 {
                     let found = self.current_version(path).await?;
                     return Err(FilesystemError::VersionMismatch {
@@ -338,6 +256,10 @@ impl RootFilesystem for LibSqlRootFilesystem {
                 if rows == 0 {
                     return Err(directory_write_error(path.clone()));
                 }
+                // Release the checkout before the success-path version
+                // readback claims its own — at most one pooled connection
+                // per call stack.
+                drop(conn);
                 let version =
                     self.current_version(path)
                         .await?
@@ -2012,6 +1934,7 @@ mod tests {
     //! reach.
 
     use super::*;
+    use crate::libsql_pool::{LIBSQL_CONNECT_ATTEMPTS, connect_with_retry};
     use crate::{CasExpectation, Entry, RecordKind};
     use ironclaw_host_api::VirtualPath;
 
