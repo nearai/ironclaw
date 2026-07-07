@@ -184,7 +184,7 @@ export function useHistory(threadId, options = {}) {
             ? {
                 ...s,
                 isLoading: false,
-                loadError: "Failed to load conversation history.",
+                loadError: "chat.history.loadFailed",
               }
             : s,
         );

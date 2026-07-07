@@ -416,6 +416,35 @@ async fn libsql_native_put_cas_version_advances_and_rejects_stale() {
     assert!(matches!(err, FilesystemError::VersionMismatch { .. }));
 }
 
+/// Mirrors `postgres_put_cas_version_on_missing_path_reports_no_found_version`:
+/// a `Version` CAS write against a path with no existing row must fail
+/// closed with `found: None` rather than panicking or reporting a stale
+/// version, so callers can distinguish "never written" from "someone
+/// else won the race" on the version-mismatch error.
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_native_put_cas_version_on_missing_path_reports_no_found_version() {
+    let filesystem = libsql_root().await;
+    let path = VirtualPath::new("/secrets/leases/L3-missing").unwrap();
+    let err = filesystem
+        .put(
+            &path,
+            Entry::bytes(vec![1]),
+            CasExpectation::Version(ironclaw_filesystem::RecordVersion::from_backend(1)),
+        )
+        .await
+        .expect_err("version CAS on a missing path must fail");
+    match err {
+        FilesystemError::VersionMismatch { found, .. } => {
+            assert!(
+                found.is_none(),
+                "missing path should report no found version, got: {found:?}"
+            );
+        }
+        other => panic!("expected VersionMismatch, got: {other:?}"),
+    }
+}
+
 #[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_native_put_cas_any_increments_existing_version() {
@@ -1330,6 +1359,76 @@ async fn libsql_append_distinct_paths_share_global_seq_but_are_isolated_on_tail(
 async fn libsql_capabilities_advertise_events() {
     let filesystem = libsql_root().await;
     assert!(filesystem.capabilities().has(Capability::Events));
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_create_dir_all_concurrent_shared_prefixes_waits_for_writer() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let db_path = db_dir.path().join("root-filesystem.db");
+    let db = std::sync::Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+    let filesystem = std::sync::Arc::new(LibSqlRootFilesystem::new(db));
+    filesystem.run_migrations().await.unwrap();
+
+    let mut tasks = Vec::new();
+    for sample in 0..32 {
+        let filesystem = std::sync::Arc::clone(&filesystem);
+        tasks.push(tokio::spawn(async move {
+            let path = VirtualPath::new(format!(
+                "/engine/tenants/latency/users/libsql/runs/shared-c8/sample-{sample}/d0/d1/d2"
+            ))
+            .unwrap();
+            filesystem.create_dir_all(&path).await
+        }));
+    }
+
+    for task in tasks {
+        task.await.unwrap().unwrap();
+    }
+
+    let shared_prefix =
+        VirtualPath::new("/engine/tenants/latency/users/libsql/runs/shared-c8").unwrap();
+    assert_eq!(
+        filesystem.stat(&shared_prefix).await.unwrap().file_type,
+        FileType::Directory
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_put_concurrent_distinct_children_waits_for_writer() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let db_path = db_dir.path().join("root-filesystem.db");
+    let db = std::sync::Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+    let filesystem = std::sync::Arc::new(LibSqlRootFilesystem::new(db));
+    filesystem.run_migrations().await.unwrap();
+    let parent = VirtualPath::new("/engine/tenants/latency/users/libsql/runs/shared-put").unwrap();
+    filesystem.create_dir_all(&parent).await.unwrap();
+
+    let mut tasks = Vec::new();
+    for sample in 0..32 {
+        let filesystem = std::sync::Arc::clone(&filesystem);
+        tasks.push(tokio::spawn(async move {
+            let path = VirtualPath::new(format!(
+                "/engine/tenants/latency/users/libsql/runs/shared-put/record-{sample}"
+            ))
+            .unwrap();
+            filesystem
+                .put(&path, Entry::bytes(vec![sample as u8]), CasExpectation::Any)
+                .await
+        }));
+    }
+
+    for task in tasks {
+        task.await.unwrap().unwrap();
+    }
+
+    let last =
+        VirtualPath::new("/engine/tenants/latency/users/libsql/runs/shared-put/record-31").unwrap();
+    assert_eq!(
+        filesystem.get(&last).await.unwrap().unwrap().entry.body,
+        vec![31]
+    );
 }
 
 #[cfg(feature = "libsql")]

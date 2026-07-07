@@ -86,6 +86,21 @@ pub struct TurnLifecycleEvent {
     // adapters that persist `TurnLifecycleEvent` do not need a migration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sanitized_reason: Option<String>,
+    /// Present only on `Failed` events: whether the failed run recorded a
+    /// resumable checkpoint and can be retried. Same serde shape as
+    /// `sanitized_reason`, so persisted pre-retry event rows rehydrate as
+    /// `None` without migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
+    /// Secret-scrubbed, model-visible raw cause for a failed run, sourced from
+    /// the failure record's detail channel. Distinct from `sanitized_reason`
+    /// (which is the bounded category): this carries the real fault text so the
+    /// failure explainer can describe it. Same serde shape as the other
+    /// optional fields, so persisted pre-detail event rows rehydrate as `None`
+    /// without migration. This is the internal event record; public projections
+    /// do not expose it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 impl TurnLifecycleEvent {
@@ -108,6 +123,15 @@ impl TurnLifecycleEvent {
         } else {
             None
         };
+        let retryable = (kind == TurnEventKind::Failed).then(|| state.checkpoint_id.is_some());
+        let detail = (kind == TurnEventKind::Failed)
+            .then(|| {
+                state
+                    .failure
+                    .as_ref()
+                    .and_then(|failure| failure.detail().map(str::to_string))
+            })
+            .flatten();
         Self {
             cursor: state.event_cursor,
             scope: state.scope.clone(),
@@ -121,6 +145,8 @@ impl TurnLifecycleEvent {
             kind,
             blocked_gate,
             sanitized_reason,
+            retryable,
+            detail,
         }
     }
 
@@ -553,6 +579,8 @@ mod tests {
                 }],
             }),
             sanitized_reason: Some("approval_required".to_string()),
+            retryable: None,
+            detail: None,
         }
     }
 
@@ -682,6 +710,61 @@ mod tests {
                 .expect("blocked run projects gate metadata")
                 .activity_id,
             Some(activity_id)
+        );
+    }
+
+    #[test]
+    fn failed_run_state_lifecycle_event_carries_failure_detail() {
+        let scope = scope("thread-detail");
+        let state = TurnRunState {
+            scope,
+            actor: Some(TurnActor::new(UserId::new("user:actor").expect("actor"))),
+            turn_id: TurnId::new(),
+            run_id: TurnRunId::new(),
+            status: TurnStatus::Failed,
+            accepted_message_ref: AcceptedMessageRef::new("accepted-a").expect("accepted ref"),
+            source_binding_ref: SourceBindingRef::new("source-a").expect("source ref"),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-a").expect("reply ref"),
+            resolved_run_profile_id: RunProfileId::default_profile(),
+            resolved_run_profile_version: RunProfileVersion::new(1),
+            resolved_model_route: None,
+            received_at: chrono::Utc::now(),
+            checkpoint_id: None,
+            gate_ref: None,
+            blocked_activity_id: None,
+            credential_requirements: Vec::new(),
+            failure: Some(
+                crate::SanitizedFailure::new("model_unavailable")
+                    .expect("category")
+                    .with_detail("HTTP 404 model not found"),
+            ),
+            event_cursor: EventCursor(1),
+            product_context: None,
+            resume_disposition: None,
+        };
+
+        let event = TurnLifecycleEvent::from_run_state(
+            &state,
+            TurnEventKind::Failed,
+            Some("model_unavailable".to_string()),
+        );
+
+        assert_eq!(event.detail.as_deref(), Some("HTTP 404 model not found"));
+    }
+
+    #[test]
+    fn lifecycle_event_legacy_row_without_detail_round_trips() {
+        // Persisted pre-detail event rows omit the field; `serde(default)` must
+        // rehydrate `detail == None` and `skip_serializing_if` must not emit it.
+        let json = r#"{"cursor":7,"scope":{"tenant_id":"tenant-a","agent_id":"agent-a","project_id":"project-a","thread_id":"thread-a"},"run_id":"00000000-0000-0000-0000-000000000001","status":"Failed","kind":"Failed"}"#;
+        let event: TurnLifecycleEvent =
+            serde_json::from_str(json).expect("legacy event row must deserialize");
+        assert_eq!(event.detail, None);
+
+        let reserialized = serde_json::to_string(&event).expect("serialize");
+        assert!(
+            !reserialized.contains("detail"),
+            "absent detail must not be re-introduced on serialize: {reserialized}"
         );
     }
 

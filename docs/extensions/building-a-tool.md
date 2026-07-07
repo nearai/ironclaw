@@ -144,7 +144,7 @@ Use as references:
 
 - `crates/ironclaw_first_party_extensions/assets/notion-mcp/manifest.toml`
 - `crates/ironclaw_reborn_composition/src/mcp.rs`
-- `crates/ironclaw_reborn_composition/src/notion_oauth.rs`
+- `crates/ironclaw_reborn_composition/src/product_auth/oauth/notion_oauth.rs`
 
 Only touch `crates/ironclaw_reborn_composition/src/mcp.rs` if the hosted MCP
 runtime policy needs a new generic rule. Notion already demonstrates the common
@@ -157,11 +157,11 @@ Usually touch only when adding a new product-auth provider:
 
 - `crates/ironclaw_auth` for provider/scopes/account-domain vocabulary when it
   must be shared and durable.
-- `crates/ironclaw_reborn_composition/src/<provider>_oauth.rs` for provider
-  specs like Notion.
-- `crates/ironclaw_reborn_composition/src/oauth_provider_client.rs` only if the
-  provider needs a new generic exchange behavior.
-- `crates/ironclaw_reborn_composition/src/product_auth_serve/` only for product
+- `crates/ironclaw_reborn_composition/src/product_auth/oauth/<provider>_oauth.rs`
+  for provider specs like Notion.
+- `crates/ironclaw_reborn_composition/src/product_auth/oauth/oauth_provider_client.rs`
+  only if the provider needs a new generic exchange behavior.
+- `crates/ironclaw_reborn_composition/src/product_auth/serve/` only for product
   auth HTTP setup/callback surfaces.
 
 Do not create extension-local OAuth maps or store OAuth tokens in runtime code.
@@ -413,7 +413,7 @@ For a new OAuth provider:
 1. Add provider ID and shared scope vocabulary only if it must be shared across
    crates.
 2. Add a provider spec in Reborn composition, like
-   `crates/ironclaw_reborn_composition/src/notion_oauth.rs`.
+   `crates/ironclaw_reborn_composition/src/product_auth/oauth/notion_oauth.rs`.
 3. Wire OAuth start/callback through product-auth services, not an
    extension-local map.
 4. Store access/refresh material as credential-account secret handles.
@@ -679,7 +679,7 @@ shape before extending it.
 - Hosted MCP egress planner:
   `crates/ironclaw_reborn_composition/src/mcp.rs`
 - Notion OAuth provider spec:
-  `crates/ironclaw_reborn_composition/src/notion_oauth.rs`
+  `crates/ironclaw_reborn_composition/src/product_auth/oauth/notion_oauth.rs`
 - Hot capability catalog:
   `crates/ironclaw_host_runtime/src/capability_catalog.rs`
 - Host HTTP egress service:

@@ -584,6 +584,8 @@ mod tests {
             kind,
             blocked_gate: None,
             sanitized_reason: None,
+            detail: None,
+            retryable: None,
         }
     }
 
@@ -610,22 +612,35 @@ mod tests {
     }
 
     fn queued_entries(scope: &str) -> Vec<std::path::PathBuf> {
-        std::fs::read_dir(queue_dir(scope))
-            .map(|entries| {
-                entries
-                    .filter_map(|e| e.ok().map(|e| e.path()))
-                    .filter(|path| {
-                        // Envelope entries only — exclude `.held.json` hold
-                        // sidecars the flush path may write next to them.
-                        path.file_name()
-                            .and_then(|name| name.to_str())
-                            .is_some_and(|name| {
-                                name.ends_with(".json") && !name.ends_with(".held.json")
-                            })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+        // Treat a not-yet-created queue dir as empty, but fail loudly on any
+        // other IO error so negative-path assertions can't pass for the wrong
+        // reason (per .claude/rules/error-handling.md).
+        let dir = queue_dir(scope);
+        match std::fs::read_dir(&dir) {
+            Ok(entries) => entries
+                .map(|entry| {
+                    entry
+                        .unwrap_or_else(|error| {
+                            panic!(
+                                "failed to read a trace queue entry in {}: {error}",
+                                dir.display()
+                            )
+                        })
+                        .path()
+                })
+                .filter(|path| {
+                    // Envelope entries only — exclude `.held.json` hold
+                    // sidecars the flush path may write next to them.
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| {
+                            name.ends_with(".json") && !name.ends_with(".held.json")
+                        })
+                })
+                .collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => panic!("failed to read trace queue directory: {error}"),
+        }
     }
 
     fn cleanup_scope(scope: &str) {

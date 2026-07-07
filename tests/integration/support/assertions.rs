@@ -75,6 +75,19 @@ impl RebornIntegrationHarness {
         Err(format!("expected {expected} captured network egress request(s), saw {actual}").into())
     }
 
+    /// S1 seam: assert exactly `expected` requests reached the
+    /// real-egress-pipeline's wire-level transport recorder
+    /// (`.with_real_egress_pipeline()`) — the true edge below real
+    /// network-policy enforcement and leak scan. `0` proves policy denied the
+    /// call before the transport; `>0` proves the request cleared policy.
+    pub async fn assert_real_egress_transport_count(&self, expected: usize) -> HarnessResult<()> {
+        let actual = self.real_egress_transport_requests().len();
+        if actual == expected {
+            return Ok(());
+        }
+        Err(format!("expected {expected} real-egress transport request(s), saw {actual}").into())
+    }
+
     /// Assert the captured egress URLs, IN CALL ORDER, each contain the matching
     /// substring in `expected` — and that the count matches `expected.len()`.
     /// Covers URL + ordering + count in one terse assertion.

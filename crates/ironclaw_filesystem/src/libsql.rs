@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_host_api::VirtualPath;
@@ -10,6 +10,8 @@ use crate::db::{
     is_not_found, libsql_db_error, not_found, page_offset_to_i64, record_version_from_i64,
     record_version_to_i64, sql_index_name, system_time_from_unix_seconds, virtual_path_prefixes,
 };
+#[cfg(feature = "libsql")]
+use crate::libsql_pool::{LibSqlPool, PooledLibSqlConnection, build_libsql_pool};
 use crate::vector::{cosine_similarity, decode_embedding_blob};
 use crate::{
     BackendCapabilities, Capability, CasExpectation, ContentType, DirEntry, Entry, FileStat,
@@ -20,61 +22,15 @@ use crate::{
 #[cfg(feature = "libsql")]
 /// libSQL-backed [`RootFilesystem`] storing file contents by virtual path.
 pub struct LibSqlRootFilesystem {
-    db: Arc<libsql::Database>,
+    pool: LibSqlPool,
 }
-
-#[cfg(feature = "libsql")]
-const LIBSQL_CONNECT_ATTEMPTS: u32 = 3;
-#[cfg(feature = "libsql")]
-const LIBSQL_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(50);
-
-/// Per-connection PRAGMAs applied to every libSQL connection.
-///
-/// libSQL/SQLite is a single-writer engine: there is no true "parallel
-/// write" mode for a local file. Concurrent writers always serialise on
-/// the database write lock. The throughput lever is therefore making each
-/// write cheap and keeping readers from blocking the writer — which is
-/// exactly what these PRAGMAs do, alongside `journal_mode=WAL` (set once at
-/// migration time, see `run_migrations`).
-///
-/// - `busy_timeout=5000`: unchanged from the prior policy. A writer that
-///   finds the write lock held waits up to 5s rather than failing fast.
-/// - `synchronous=NORMAL`: in WAL mode this is crash-safe for the
-///   *application* (committed transactions survive a process crash); only an
-///   OS/power loss can roll back the most-recent commits, and the database
-///   stays consistent regardless. It removes one fsync per commit, which is
-///   the dominant cost of the serial-write path under load. This is the
-///   standard high-throughput SQLite setting. Use `FULL` only if per-commit
-///   power-loss durability is required (it is not for turn/loop state).
-/// - `temp_store=MEMORY`: keep transient indexes/sorters off disk.
-/// - `cache_size=-16000`: ~16 MiB page cache per connection (negative =
-///   KiB), so hot pages (the turn-state and resource-snapshot rows that are
-///   read-modify-written every turn) stay resident instead of being
-///   re-read from the OS page cache on each op.
-/// - `mmap_size`: memory-map up to 256 MiB for reads, cutting read syscall
-///   overhead on the many read-before-write checks (`exact_entry`,
-///   `has_child_entry`, snapshot loads) that surround each write.
-/// - `wal_autocheckpoint=1000`: bound WAL growth (checkpoint every ~1000
-///   pages / ~4 MiB) so the WAL does not grow without limit under a burst
-///   of writes.
-///
-/// `journal_mode` is deliberately NOT set here: it is a persistent,
-/// database-level property (stored in the file header) and changing it
-/// inside or alongside ordinary work is wasteful and cannot run inside a
-/// transaction. It is set exactly once in `run_migrations`.
-#[cfg(feature = "libsql")]
-const LIBSQL_CONNECTION_PRAGMAS: &str = "\
-    PRAGMA busy_timeout = 5000;\
-    PRAGMA synchronous = NORMAL;\
-    PRAGMA temp_store = MEMORY;\
-    PRAGMA cache_size = -16000;\
-    PRAGMA mmap_size = 268435456;\
-    PRAGMA wal_autocheckpoint = 1000;";
 
 #[cfg(feature = "libsql")]
 impl LibSqlRootFilesystem {
     pub fn new(db: Arc<libsql::Database>) -> Self {
-        Self { db }
+        Self {
+            pool: build_libsql_pool(db),
+        }
     }
 
     pub async fn run_migrations(&self) -> Result<(), FilesystemError> {
@@ -135,63 +91,24 @@ impl LibSqlRootFilesystem {
         }
     }
 
-    async fn connect(&self) -> Result<libsql::Connection, FilesystemError> {
-        connect_with_retry(|| self.db.connect()).await
-    }
-}
-
-#[cfg(feature = "libsql")]
-async fn connect_with_retry<F>(mut open: F) -> Result<libsql::Connection, FilesystemError>
-where
-    F: FnMut() -> Result<libsql::Connection, libsql::Error>,
-{
-    // Match the legacy libSQL backend's connection policy: every
-    // operation gets its own connection, concurrent writers wait on
-    // SQLite locks, and transient file-open races get a short retry
-    // budget before surfacing as infrastructure errors.
-    let mut last_error = None;
-    for attempt in 0..LIBSQL_CONNECT_ATTEMPTS {
-        match open() {
-            Ok(conn) => {
-                // Apply the per-connection PRAGMAs in a single round-trip.
-                // `execute_batch` runs each statement and discards the rows
-                // PRAGMAs like `busy_timeout` return, which is exactly what
-                // we want — we only care about the side effect.
-                conn.execute_batch(LIBSQL_CONNECTION_PRAGMAS)
-                    .await
-                    .map_err(|error| {
-                        infrastructure_libsql_error(FilesystemOperation::Stat, error)
-                    })?;
-                return Ok(conn);
+    /// Check out a pooled connection for exclusive use until the guard
+    /// drops. Callers must drop the guard before `.await`-ing any other
+    /// `self` method that also checks out — see the invariant note in
+    /// [`crate::libsql_pool`].
+    async fn connect(&self) -> Result<PooledLibSqlConnection, FilesystemError> {
+        self.pool.get().await.map_err(|error| match error {
+            deadpool::managed::PoolError::Backend(error) => {
+                let reason = error.to_string();
+                tracing::debug!(%reason, "libSQL root filesystem pool checkout failed");
+                error
             }
-            Err(error) => {
-                last_error = Some(error);
-                if attempt + 1 < LIBSQL_CONNECT_ATTEMPTS {
-                    tokio::time::sleep(connect_backoff(attempt)).await;
-                }
+            other => {
+                let reason = format!("libSQL connection pool checkout failed: {other}");
+                tracing::debug!(%reason, "libSQL root filesystem pool checkout failed");
+                crate::db::infrastructure_error(FilesystemOperation::Connect, reason)
             }
-        }
+        })
     }
-
-    let reason = match last_error {
-        Some(error) => {
-            format!(
-                "failed to create libSQL connection after {LIBSQL_CONNECT_ATTEMPTS} attempts: {error}"
-            )
-        }
-        None => {
-            format!("failed to create libSQL connection after {LIBSQL_CONNECT_ATTEMPTS} attempts")
-        }
-    };
-    Err(crate::db::infrastructure_error(
-        FilesystemOperation::Stat,
-        reason,
-    ))
-}
-
-#[cfg(feature = "libsql")]
-fn connect_backoff(attempt: u32) -> Duration {
-    LIBSQL_CONNECT_INITIAL_BACKOFF * 2u32.pow(attempt)
 }
 
 #[cfg(feature = "libsql")]
@@ -215,16 +132,6 @@ impl RootFilesystem for LibSqlRootFilesystem {
         entry: Entry,
         cas: CasExpectation,
     ) -> Result<RecordVersion, FilesystemError> {
-        // Reject writes that would clobber a directory or a path that has
-        // children (mirrors `write_file` semantics so legacy and new ops
-        // stay consistent).
-        if matches!(
-            self.exact_entry(path).await?,
-            Some((_, FileType::Directory, _))
-        ) || self.has_child_entry(path).await?
-        {
-            return Err(directory_write_error(path.clone()));
-        }
         let indexed_json = serde_json::to_string(&entry.indexed).map_err(|_| {
             FilesystemError::SerializeIndexed {
                 path: path.clone(),
@@ -235,118 +142,31 @@ impl RootFilesystem for LibSqlRootFilesystem {
         let content_type_str = entry.content_type.as_str().to_string();
         let body = entry.body;
 
-        match cas {
-            CasExpectation::Absent => {
-                let conn = self.connect().await?;
-                let rows = conn
-                    .execute(
-                        r#"
-                        INSERT INTO root_filesystem_entries
-                            (path, contents, is_dir, content_type, kind, indexed, version, updated_at)
-                        VALUES (?1, ?2, 0, ?3, ?4, ?5, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-                        ON CONFLICT (path) DO NOTHING
-                        "#,
-                        libsql::params![
-                            path.as_str(),
-                            libsql::Value::Blob(body),
-                            content_type_str,
-                            kind_str,
-                            indexed_json,
-                        ],
-                    )
-                    .await
-                    .map_err(|error| {
-                        libsql_db_error(path.clone(), FilesystemOperation::WriteFile, error)
-                    })?;
-                if rows == 0 {
-                    let found = self.current_version(path).await?;
-                    return Err(FilesystemError::VersionMismatch {
-                        path: path.clone(),
-                        expected: None,
-                        found,
-                    });
-                }
-                Ok(RecordVersion::from_backend(1))
-            }
-            CasExpectation::Version(expected) => {
-                let conn = self.connect().await?;
-                let expected_raw = record_version_to_i64(path, expected)?;
-                let rows = conn
-                    .execute(
-                        r#"
-                        UPDATE root_filesystem_entries
-                        SET contents = ?1,
-                            content_type = ?2,
-                            kind = ?3,
-                            indexed = ?4,
-                            version = version + 1,
-                            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                        WHERE path = ?5 AND is_dir = 0 AND version = ?6
-                        "#,
-                        libsql::params![
-                            libsql::Value::Blob(body),
-                            content_type_str,
-                            kind_str,
-                            indexed_json,
-                            path.as_str(),
-                            expected_raw,
-                        ],
-                    )
-                    .await
-                    .map_err(|error| {
-                        libsql_db_error(path.clone(), FilesystemOperation::WriteFile, error)
-                    })?;
-                if rows == 0 {
-                    let found = self.current_version(path).await?;
-                    return Err(FilesystemError::VersionMismatch {
-                        path: path.clone(),
-                        expected: Some(expected),
-                        found,
-                    });
-                }
-                Ok(expected.next())
-            }
-            CasExpectation::Any => {
-                let conn = self.connect().await?;
-                let rows = conn
-                    .execute(
-                        r#"
-                        INSERT INTO root_filesystem_entries
-                            (path, contents, is_dir, content_type, kind, indexed, version, updated_at)
-                        VALUES (?1, ?2, 0, ?3, ?4, ?5, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-                        ON CONFLICT (path) DO UPDATE SET
-                            contents = excluded.contents,
-                            content_type = excluded.content_type,
-                            kind = excluded.kind,
-                            indexed = excluded.indexed,
-                            version = root_filesystem_entries.version + 1,
-                            updated_at = excluded.updated_at
-                        WHERE root_filesystem_entries.is_dir = 0
-                        "#,
-                        libsql::params![
-                            path.as_str(),
-                            libsql::Value::Blob(body),
-                            content_type_str,
-                            kind_str,
-                            indexed_json,
-                        ],
-                    )
-                    .await
-                    .map_err(|error| {
-                        libsql_db_error(path.clone(), FilesystemOperation::WriteFile, error)
-                    })?;
-                if rows == 0 {
-                    return Err(directory_write_error(path.clone()));
-                }
-                let version =
-                    self.current_version(path)
-                        .await?
-                        .ok_or_else(|| FilesystemError::Backend {
-                            path: path.clone(),
-                            operation: FilesystemOperation::WriteFile,
-                            reason: "put succeeded but version lookup found no row".to_string(),
-                        })?;
-                Ok(version)
+        let conn = self.connect().await?;
+        conn.execute("BEGIN IMMEDIATE", ()).await.map_err(|error| {
+            libsql_db_error(path.clone(), FilesystemOperation::WriteFile, error)
+        })?;
+        let result = put_libsql_inner(
+            &conn,
+            path,
+            body,
+            content_type_str,
+            kind_str,
+            indexed_json,
+            cas,
+        )
+        .await;
+        match result {
+            Ok(version) => conn
+                .execute("COMMIT", ())
+                .await
+                .map(|_| version)
+                .map_err(|error| {
+                    libsql_db_error(path.clone(), FilesystemOperation::WriteFile, error)
+                }),
+            Err(err) => {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(err)
             }
         }
     }
@@ -1211,52 +1031,287 @@ impl RootFilesystem for LibSqlRootFilesystem {
 
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         let conn = self.connect().await?;
-        let transaction = conn.transaction().await.map_err(|error| {
+        conn.execute("BEGIN IMMEDIATE", ()).await.map_err(|error| {
             libsql_db_error(path.clone(), FilesystemOperation::CreateDirAll, error)
         })?;
-        for prefix in virtual_path_prefixes(path)? {
-            let mut rows = transaction
-                .query(
-                    "SELECT is_dir FROM root_filesystem_entries WHERE path = ?1",
-                    libsql::params![prefix.as_str()],
+        let result = create_dir_all_libsql_inner(&conn, path).await;
+        match result {
+            Ok(()) => conn
+                .execute("COMMIT", ())
+                .await
+                .map(|_| ())
+                .map_err(|error| {
+                    libsql_db_error(path.clone(), FilesystemOperation::CreateDirAll, error)
+                }),
+            Err(err) => {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(err)
+            }
+        }
+    }
+}
+
+#[cfg(feature = "libsql")]
+async fn put_libsql_inner(
+    conn: &libsql::Connection,
+    path: &VirtualPath,
+    body: Vec<u8>,
+    content_type_str: String,
+    kind_str: Option<String>,
+    indexed_json: String,
+    cas: CasExpectation,
+) -> Result<RecordVersion, FilesystemError> {
+    // Reject writes that would clobber a directory or a path that has
+    // children (mirrors `write_file` semantics so legacy and new ops stay
+    // consistent). Run these checks inside the write transaction so concurrent
+    // writers queue at BEGIN IMMEDIATE instead of racing read-then-write
+    // upgrades through independent connections.
+    if matches!(
+        exact_entry_libsql(conn, path).await?,
+        Some((_, FileType::Directory, _))
+    ) || has_child_entry_libsql(conn, path).await?
+    {
+        return Err(directory_write_error(path.clone()));
+    }
+
+    match cas {
+        CasExpectation::Absent => {
+            let rows = conn
+                .execute(
+                    r#"
+                    INSERT INTO root_filesystem_entries
+                        (path, contents, is_dir, content_type, kind, indexed, version, updated_at)
+                    VALUES (?1, ?2, 0, ?3, ?4, ?5, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                    ON CONFLICT (path) DO NOTHING
+                    "#,
+                    libsql::params![
+                        path.as_str(),
+                        libsql::Value::Blob(body),
+                        content_type_str,
+                        kind_str,
+                        indexed_json,
+                    ],
                 )
                 .await
                 .map_err(|error| {
-                    libsql_db_error(prefix.clone(), FilesystemOperation::CreateDirAll, error)
+                    libsql_db_error(path.clone(), FilesystemOperation::WriteFile, error)
                 })?;
-            if let Some(row) = rows.next().await.map_err(|error| {
-                libsql_db_error(prefix.clone(), FilesystemOperation::CreateDirAll, error)
-            })? {
-                let is_dir: i64 = row.get(0).map_err(|error| {
-                    libsql_db_error(prefix.clone(), FilesystemOperation::CreateDirAll, error)
-                })?;
-                if is_dir == 0 {
-                    return Err(FilesystemError::Backend {
-                        path: prefix,
-                        operation: FilesystemOperation::CreateDirAll,
-                        reason: "file exists where directory is required".to_string(),
-                    });
-                }
+            if rows == 0 {
+                let found = current_version_libsql(conn, path).await?;
+                return Err(FilesystemError::VersionMismatch {
+                    path: path.clone(),
+                    expected: None,
+                    found,
+                });
             }
-            transaction
+            Ok(RecordVersion::from_backend(1))
+        }
+        CasExpectation::Version(expected) => {
+            let expected_raw = record_version_to_i64(path, expected)?;
+            let rows = conn
                 .execute(
                     r#"
+                    UPDATE root_filesystem_entries
+                    SET contents = ?1,
+                        content_type = ?2,
+                        kind = ?3,
+                        indexed = ?4,
+                        version = version + 1,
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    WHERE path = ?5 AND is_dir = 0 AND version = ?6
+                    "#,
+                    libsql::params![
+                        libsql::Value::Blob(body),
+                        content_type_str,
+                        kind_str,
+                        indexed_json,
+                        path.as_str(),
+                        expected_raw,
+                    ],
+                )
+                .await
+                .map_err(|error| {
+                    libsql_db_error(path.clone(), FilesystemOperation::WriteFile, error)
+                })?;
+            if rows == 0 {
+                let found = current_version_libsql(conn, path).await?;
+                return Err(FilesystemError::VersionMismatch {
+                    path: path.clone(),
+                    expected: Some(expected),
+                    found,
+                });
+            }
+            Ok(expected.next())
+        }
+        CasExpectation::Any => {
+            let mut rows = conn
+                .query(
+                    r#"
+                    INSERT INTO root_filesystem_entries
+                        (path, contents, is_dir, content_type, kind, indexed, version, updated_at)
+                    VALUES (?1, ?2, 0, ?3, ?4, ?5, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                    ON CONFLICT (path) DO UPDATE SET
+                        contents = excluded.contents,
+                        content_type = excluded.content_type,
+                        kind = excluded.kind,
+                        indexed = excluded.indexed,
+                        version = root_filesystem_entries.version + 1,
+                        updated_at = excluded.updated_at
+                    WHERE root_filesystem_entries.is_dir = 0
+                    RETURNING version
+                    "#,
+                    libsql::params![
+                        path.as_str(),
+                        libsql::Value::Blob(body),
+                        content_type_str,
+                        kind_str,
+                        indexed_json,
+                    ],
+                )
+                .await
+                .map_err(|error| {
+                    libsql_db_error(path.clone(), FilesystemOperation::WriteFile, error)
+                })?;
+            let row = rows
+                .next()
+                .await
+                .map_err(|error| {
+                    libsql_db_error(path.clone(), FilesystemOperation::WriteFile, error)
+                })?
+                .ok_or_else(|| directory_write_error(path.clone()))?;
+            let version_raw: i64 = row.get(0).map_err(|error| {
+                libsql_db_error(path.clone(), FilesystemOperation::WriteFile, error)
+            })?;
+            record_version_from_i64(path, version_raw)
+        }
+    }
+}
+
+#[cfg(feature = "libsql")]
+async fn create_dir_all_libsql_inner(
+    conn: &libsql::Connection,
+    path: &VirtualPath,
+) -> Result<(), FilesystemError> {
+    for prefix in virtual_path_prefixes(path)? {
+        let mut rows = conn
+            .query(
+                "SELECT is_dir FROM root_filesystem_entries WHERE path = ?1",
+                libsql::params![prefix.as_str()],
+            )
+            .await
+            .map_err(|error| {
+                libsql_db_error(prefix.clone(), FilesystemOperation::CreateDirAll, error)
+            })?;
+        if let Some(row) = rows.next().await.map_err(|error| {
+            libsql_db_error(prefix.clone(), FilesystemOperation::CreateDirAll, error)
+        })? {
+            let is_dir: i64 = row.get(0).map_err(|error| {
+                libsql_db_error(prefix.clone(), FilesystemOperation::CreateDirAll, error)
+            })?;
+            if is_dir == 0 {
+                return Err(FilesystemError::Backend {
+                    path: prefix,
+                    operation: FilesystemOperation::CreateDirAll,
+                    reason: "file exists where directory is required".to_string(),
+                });
+            }
+        }
+        conn.execute(
+            r#"
                     INSERT INTO root_filesystem_entries (path, contents, is_dir, updated_at)
                     VALUES (?1, X'', 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
                     ON CONFLICT (path) DO NOTHING
                     "#,
-                    libsql::params![prefix.as_str()],
-                )
-                .await
-                .map_err(|error| {
-                    libsql_db_error(path.clone(), FilesystemOperation::CreateDirAll, error)
-                })?;
-        }
-        transaction.commit().await.map_err(|error| {
-            libsql_db_error(path.clone(), FilesystemOperation::CreateDirAll, error)
-        })?;
-        Ok(())
+            libsql::params![prefix.as_str()],
+        )
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::CreateDirAll, error))?;
     }
+    Ok(())
+}
+
+#[cfg(feature = "libsql")]
+async fn exact_entry_libsql(
+    conn: &libsql::Connection,
+    path: &VirtualPath,
+) -> Result<Option<(u64, FileType, Option<std::time::SystemTime>)>, FilesystemError> {
+    let mut rows = conn
+        .query(
+            "SELECT length(contents), is_dir, CAST(strftime('%s', updated_at) AS INTEGER) AS updated_at_epoch FROM root_filesystem_entries WHERE path = ?1",
+            libsql::params![path.as_str()],
+        )
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Stat, error))?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Stat, error))?;
+    let Some(row) = row else { return Ok(None) };
+    let len_raw: i64 = row
+        .get(0)
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Stat, error))?;
+    let is_dir_raw: i64 = row
+        .get(1)
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Stat, error))?;
+    let updated_at_epoch: i64 = row
+        .get(2)
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Stat, error))?;
+    let len = len_raw.max(0) as u64;
+    let is_dir = is_dir_raw != 0;
+    Ok(Some((
+        if is_dir { 0 } else { len },
+        if is_dir {
+            FileType::Directory
+        } else {
+            FileType::File
+        },
+        system_time_from_unix_seconds(updated_at_epoch),
+    )))
+}
+
+#[cfg(feature = "libsql")]
+async fn has_child_entry_libsql(
+    conn: &libsql::Connection,
+    parent: &VirtualPath,
+) -> Result<bool, FilesystemError> {
+    let pattern = child_path_like_pattern(parent);
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM root_filesystem_entries WHERE path LIKE ?1 ESCAPE '!' LIMIT 1",
+            libsql::params![pattern],
+        )
+        .await
+        .map_err(|error| libsql_db_error(parent.clone(), FilesystemOperation::Stat, error))?;
+    Ok(rows
+        .next()
+        .await
+        .map_err(|error| libsql_db_error(parent.clone(), FilesystemOperation::Stat, error))?
+        .is_some())
+}
+
+#[cfg(feature = "libsql")]
+async fn current_version_libsql(
+    conn: &libsql::Connection,
+    path: &VirtualPath,
+) -> Result<Option<RecordVersion>, FilesystemError> {
+    let mut rows = conn
+        .query(
+            "SELECT version FROM root_filesystem_entries WHERE path = ?1 AND is_dir = 0",
+            libsql::params![path.as_str()],
+        )
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?
+    else {
+        return Ok(None);
+    };
+    let version: i64 = row
+        .get(0)
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+    Ok(Some(record_version_from_i64(path, version)?))
 }
 
 /// Body of `run_migrations` extracted so the outer caller can wrap the
@@ -1585,31 +1640,6 @@ impl LibSqlRootFilesystem {
             out.push(versioned);
         }
         Ok(out)
-    }
-
-    async fn current_version(
-        &self,
-        path: &VirtualPath,
-    ) -> Result<Option<RecordVersion>, FilesystemError> {
-        let conn = self.connect().await?;
-        let mut rows = conn
-            .query(
-                "SELECT version FROM root_filesystem_entries WHERE path = ?1 AND is_dir = 0",
-                libsql::params![path.as_str()],
-            )
-            .await
-            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
-        let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?
-        else {
-            return Ok(None);
-        };
-        let version: i64 = row
-            .get(0)
-            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
-        Ok(Some(record_version_from_i64(path, version)?))
     }
 }
 
@@ -2012,6 +2042,7 @@ mod tests {
     //! reach.
 
     use super::*;
+    use crate::libsql_pool::{LIBSQL_CONNECT_ATTEMPTS, connect_with_retry};
     use crate::{CasExpectation, Entry, RecordKind};
     use ironclaw_host_api::VirtualPath;
 
@@ -2179,5 +2210,49 @@ mod tests {
         let mut rows = conn.query("PRAGMA busy_timeout", ()).await.unwrap();
         let busy_timeout: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
         assert_eq!(busy_timeout, 5000, "busy_timeout must remain 5000");
+    }
+
+    /// A pool checkout that times out waiting for a free connection (every
+    /// slot held by another in-flight operation) must surface as a
+    /// `FilesystemOperation::Connect` infrastructure error through
+    /// `connect()`'s `other` match arm — not panic, hang past the
+    /// configured timeout, or lose the fact that this was a pool
+    /// exhaustion rather than some other backend failure. Uses the
+    /// `build_libsql_pool_with_config` test seam to build a deliberately
+    /// tiny (size-1), fast-timing-out pool so the test doesn't wait out
+    /// the real 10s production timeout.
+    #[tokio::test]
+    async fn connect_maps_pool_checkout_timeout_to_connect_infrastructure_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("checkout-timeout-test.db");
+        let db = std::sync::Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+        let fs = LibSqlRootFilesystem {
+            pool: crate::libsql_pool::build_libsql_pool_with_config(
+                db,
+                1,
+                std::time::Duration::from_millis(50),
+            ),
+        };
+        fs.run_migrations().await.unwrap();
+
+        // Hold the pool's only connection for the rest of the test.
+        let _held = fs.connect().await.unwrap();
+
+        // The pool has no free connection and none will be returned before
+        // the 50ms wait_timeout elapses, so this checkout must time out
+        // rather than hang or succeed.
+        let Err(err) = fs.connect().await else {
+            panic!("checkout must fail while the only connection is held");
+        };
+        match err {
+            FilesystemError::BackendInfrastructure { operation, reason } => {
+                assert_eq!(operation, FilesystemOperation::Connect);
+                assert!(
+                    !reason.is_empty(),
+                    "checkout-timeout reason must not be empty"
+                );
+            }
+            other => panic!("expected FilesystemError::BackendInfrastructure, got {other:?}"),
+        }
     }
 }

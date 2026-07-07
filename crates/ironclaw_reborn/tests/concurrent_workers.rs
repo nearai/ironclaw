@@ -92,6 +92,7 @@ impl AgentLoopDriver for BarrierDriver {
         // Return an error (controlled fail) — always valid, no host evidence needed.
         Err(AgentLoopDriverError::Failed {
             reason_kind: "test_concurrent_barrier".to_string(),
+            detail: None,
         })
     }
 
@@ -757,6 +758,8 @@ async fn scheduler_executor_applies_loop_exit_end_to_end() {
                 checkpoint_id: None,
                 usage_summary_ref: None,
                 diagnostic_ref: None,
+                explanation_message_refs: Vec::new(),
+                safe_summary: None,
                 exit_id: LoopExitId::new("exit:test-applier-path").expect("valid exit id"),
             }))
         }
