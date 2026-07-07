@@ -26,7 +26,7 @@ use serde::Deserialize;
 
 use crate::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
 use crate::extension_lifecycle::{ExtensionActivationMode, RebornLocalExtensionManagementPort};
-use crate::product_auth_runtime_credentials::RuntimeCredentialAccountSelectionService;
+use crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService;
 
 pub(crate) const EXTENSION_SEARCH_CAPABILITY_ID: &str = "builtin.extension_search";
 pub(crate) const EXTENSION_INSTALL_CAPABILITY_ID: &str = "builtin.extension_install";
