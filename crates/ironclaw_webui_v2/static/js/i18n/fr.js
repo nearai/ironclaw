@@ -368,18 +368,6 @@ registerPack("fr", {
   "llm.missingBaseUrl": "URL de base manquante",
   "llm.addApiKey": "Ajouter une clé API",
 
-  // Settings — inference groups
-  "settings.group.embeddings": "Intégrations",
-  "settings.group.sampling": "Échantillonnage",
-  "settings.field.embeddingsEnabled": "Activer les embeddings",
-  "settings.field.embeddingsEnabledDesc": "Recherche sémantique sur la mémoire du workspace",
-  "settings.field.embeddingsProvider": "Fournisseur",
-  "settings.field.embeddingsProviderDesc": "Fournisseur du modèle d’embeddings",
-  "settings.field.embeddingsModel": "Modèle",
-  "settings.field.embeddingsModelDesc": "Identifiant du modèle d’embeddings",
-  "settings.field.temperature": "Température",
-  "settings.field.temperatureDesc": "Température d’échantillonnage par défaut (0.0–2.0)",
-
   // Settings — agent groups
   "settings.group.core": "Cœur",
   "settings.group.heartbeat": "Battement de cœur",

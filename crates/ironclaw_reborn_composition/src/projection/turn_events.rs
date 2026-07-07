@@ -53,6 +53,13 @@ pub(super) struct TurnEventPayload {
 pub(crate) struct FailureExplanationInput {
     pub(crate) failure_category: String,
     pub(crate) fallback_summary: String,
+    /// Model-visible, secret-scrubbed raw cause carried from the failure
+    /// record (e.g. a provider HTTP status line or a missing schema-ref path).
+    /// Unlike `fallback_summary`, this is the original error text so the
+    /// explainer is given the real facts rather than only the coarse category.
+    /// Producers scrub secret VALUES before populating it; the prompt builder
+    /// re-runs [`sanitize_model_visible_text`] as defense in depth.
+    pub(crate) detail: Option<String>,
 }
 
 #[async_trait]
@@ -717,6 +724,7 @@ fn turn_event_projection_state(
         status: turn_status_wire(event.status).to_string(),
         failure_category: failure_details.category,
         failure_summary: failure_details.summary,
+        retryable: event.retryable,
     }];
     if let Some(item) = gate_projection_item(event, blocked_prompt)? {
         items.push(item);
@@ -876,12 +884,17 @@ async fn failure_details_for_turn_event(
         return FailureProjectionDetails::default();
     };
     let fallback_summary = reborn_failure_summary_for_category(Some(&category)).to_string();
+    // The model-visible raw cause for the failure travels on the failure
+    // record's detail channel, surfaced on `TurnLifecycleEvent.detail` by the
+    // upstream runner. Source it here so the explainer (and model) get the real
+    // cause instead of only the bounded category.
+    let detail = detail_for_turn_event(event, &category);
     let cache_key = FailureExplanationCacheKey {
         run_id: event.run_id,
         category: category.clone(),
     };
     let summary = cached_failure_summary(failure_explanation_cache, cache_key, || async {
-        failure_summary_for_turn_event(failure_explainer, &category, fallback_summary).await
+        failure_summary_for_turn_event(failure_explainer, &category, fallback_summary, detail).await
     })
     .await;
     FailureProjectionDetails {
@@ -907,6 +920,7 @@ async fn failure_summary_for_turn_event(
     failure_explainer: &dyn FailureExplanationProvider,
     category: &str,
     fallback_summary: String,
+    detail: Option<String>,
 ) -> String {
     if let Some(summary) = pinned_failure_summary_for_category(category) {
         return summary.to_string();
@@ -915,9 +929,23 @@ async fn failure_summary_for_turn_event(
         .explain_failure(FailureExplanationInput {
             failure_category: category.to_string(),
             fallback_summary: fallback_summary.clone(),
+            detail,
         })
         .await
         .unwrap_or(fallback_summary)
+}
+
+/// Resolve the model-visible detail to hand the failure explainer.
+///
+/// Sources the secret-scrubbed raw cause from `TurnLifecycleEvent.detail`, the
+/// dedicated channel distinct from `sanitized_reason` (which is consumed as the
+/// `failure_category`). The detail originates on
+/// `AgentLoopHostError`/`HostManagedModelError` upstream and is threaded through
+/// the executor/driver diagnostics into the failure record and onto the event.
+/// `None` when the failed run recorded no distinct cause, in which case the
+/// explainer falls back to the category summary.
+fn detail_for_turn_event(event: &TurnLifecycleEvent, _category: &str) -> Option<String> {
+    event.detail.clone()
 }
 
 fn failure_category_for_turn_event(event: &TurnLifecycleEvent) -> Option<String> {
@@ -951,12 +979,35 @@ fn failure_explanation_system_prompt() -> &'static str {
     ironclaw_loop_support::FAILURE_EXPLANATION_SYSTEM_PROMPT
 }
 
-fn failure_explanation_user_prompt(input: &FailureExplanationInput) -> String {
-    format!(
+pub(super) fn failure_explanation_user_prompt(input: &FailureExplanationInput) -> String {
+    let mut prompt = format!(
         "status: failed\nfailure_category: {}\nfallback_summary: {}\n",
         sanitize_model_visible_text(&input.failure_category),
         sanitize_model_visible_text(&input.fallback_summary),
-    )
+    );
+    // Give the explainer the real cause when one survived from the failure
+    // record. Re-run the value-scrubber as defense in depth even though the
+    // producer is expected to have scrubbed secret VALUES already; skip the
+    // line entirely when the detail is absent or scrubs to empty.
+    //
+    // Unlike `failure_category`/`fallback_summary` (host-authored, derived from
+    // the category), `detail` is untrusted provider/tool/runtime error text.
+    // `sanitize_model_visible_text` redacts credential-shaped tokens but keeps
+    // newlines and instruction-like content, so appending it raw would let a
+    // crafted error (e.g. from an MCP server or provider body) inject extra
+    // prompt fields or directives — a `\nfallback_summary: ...\nIgnore previous
+    // instructions...` — into the explainer, whose output becomes the public
+    // `failure_summary`. JSON-string-escape it so it stays a single quoted data
+    // value the model reads as data, never as prompt structure.
+    if let Some(detail) = input.detail.as_deref() {
+        let scrubbed = sanitize_model_visible_text(detail);
+        if !scrubbed.trim().is_empty() {
+            let quoted = serde_json::to_string(&scrubbed)
+                .unwrap_or_else(|_| "\"<undisplayable detail>\"".to_string());
+            prompt.push_str(&format!("detail: {quoted}\n"));
+        }
+    }
+    prompt
 }
 
 pub(super) fn bounded_failure_explanation(content: &str) -> Option<String> {

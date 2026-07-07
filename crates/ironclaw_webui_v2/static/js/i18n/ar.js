@@ -368,18 +368,6 @@ registerPack("ar", {
   "llm.missingBaseUrl": "عنوان URL الأساسي مفقود",
   "llm.addApiKey": "أضف مفتاح واجهة برمجة التطبيقات",
 
-  // Settings — inference groups
-  "settings.group.embeddings": "التضمينات",
-  "settings.group.sampling": "أخذ العينات",
-  "settings.field.embeddingsEnabled": "تمكين التضمينات",
-  "settings.field.embeddingsEnabledDesc": "بحث دلالي عبر ذاكرة مساحة العمل",
-  "settings.field.embeddingsProvider": "المزوّد",
-  "settings.field.embeddingsProviderDesc": "مزوّد نموذج التضمينات",
-  "settings.field.embeddingsModel": "النموذج",
-  "settings.field.embeddingsModelDesc": "معرّف نموذج التضمينات",
-  "settings.field.temperature": "الحرارة",
-  "settings.field.temperatureDesc": "حرارة أخذ العينات الافتراضية (0.0–2.0)",
-
   // Settings — agent groups
   "settings.group.core": "الأساسيات",
   "settings.group.heartbeat": "النبض",

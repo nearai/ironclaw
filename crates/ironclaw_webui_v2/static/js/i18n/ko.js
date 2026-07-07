@@ -368,18 +368,6 @@ registerPack("ko", {
   "llm.missingBaseUrl": "기본 URL 누락",
   "llm.addApiKey": "API 키 추가",
 
-  // Settings — inference groups
-  "settings.group.embeddings": "임베딩",
-  "settings.group.sampling": "샘플링",
-  "settings.field.embeddingsEnabled": "임베딩 활성화",
-  "settings.field.embeddingsEnabledDesc": "워크스페이스 메모리의 시맨틱 검색",
-  "settings.field.embeddingsProvider": "제공자",
-  "settings.field.embeddingsProviderDesc": "임베딩 모델 제공자",
-  "settings.field.embeddingsModel": "모델",
-  "settings.field.embeddingsModelDesc": "임베딩 모델 식별자",
-  "settings.field.temperature": "온도",
-  "settings.field.temperatureDesc": "기본 샘플링 온도 (0.0–2.0)",
-
   // Settings — agent groups
   "settings.group.core": "핵심",
   "settings.group.heartbeat": "하트비트",

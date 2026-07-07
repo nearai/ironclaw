@@ -52,9 +52,10 @@ mod tests {
         EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
         EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
     };
+    use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
     use crate::outbound::{
-        OutboundDeliveryTargetEntry, OutboundDeliveryTargetProvider,
-        OutboundDeliveryTargetRegistry, RebornOutboundPreferencesFacade,
+        OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistry,
+        RebornOutboundPreferencesFacade,
     };
     use crate::runtime::local_dev_filesystem_skill_context_source;
 
@@ -478,18 +479,10 @@ mod tests {
         .await
         .expect("local-dev services build");
         let run_context = run_context(label).await;
-        let thread_scope = ThreadScope {
-            tenant_id: run_context.scope.tenant_id.clone(),
-            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
-            project_id: run_context.scope.project_id.clone(),
-            owner_user_id: None,
-            mission_id: None,
-        };
         install_gsuite_extensions(&services, extension_state).await;
         let wiring = capability_wiring(
             &services,
             Arc::new(InMemorySessionThreadService::default()),
-            thread_scope,
             UserId::new(user).expect("user id"),
             Arc::new(
                 crate::local_dev_capability_policy::local_dev_capability_policy()
@@ -610,13 +603,12 @@ mod tests {
     #[tokio::test]
     async fn capability_io_writes_durable_preview_message_and_live_upsert_id() {
         let run_context = run_context("durable-preview").await;
-        let thread_scope = ThreadScope {
-            tenant_id: run_context.scope.tenant_id.clone(),
-            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
-            project_id: run_context.scope.project_id.clone(),
-            owner_user_id: None,
-            mission_id: None,
-        };
+        let fallback_user_id = UserId::new("durable-preview-owner").expect("fallback user id");
+        // The durable preview sink derives the thread scope from the run context
+        // (matching where the run's thread was registered), not a fixed
+        // composition-time scope. Register the thread under that derived scope.
+        let thread_scope = local_dev_thread_scope_for_run(&run_context, &fallback_user_id)
+            .expect("run scope has an agent");
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         thread_service
             .ensure_thread(EnsureThreadRequest {
@@ -632,7 +624,7 @@ mod tests {
         let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
             Arc::clone(&display_previews),
             thread_service.clone(),
-            thread_scope.clone(),
+            fallback_user_id.clone(),
         );
         let input_ref = capability_io
             .register_provider_tool_call_input(
@@ -687,6 +679,92 @@ mod tests {
         );
     }
 
+    /// Regression: the durable preview sink must write under the RUN's own
+    /// thread scope, not a fixed composition-time/fallback scope. A run with an
+    /// explicit owner, whose thread is registered under that owner, must still
+    /// get its durable preview even when the sink's fallback user differs — the
+    /// prior fixed-scope sink produced a spurious `UnknownThread` here, which is
+    /// the "thread is unknown to the durable store" symptom seen in the field.
+    #[tokio::test]
+    async fn durable_preview_uses_run_scope_not_fixed_fallback() {
+        let owner = UserId::new("run-owner").expect("owner user id");
+        let run_context = run_context_with_scope(TurnScope::new_with_owner(
+            TenantId::new("tenant-scope-fix").expect("tenant id"),
+            Some(AgentId::new("agent-scope-fix").expect("agent id")),
+            Some(ProjectId::new("project-scope-fix").expect("project id")),
+            ThreadId::new("thread-scope-fix").expect("thread id"),
+            Some(owner.clone()),
+        ))
+        .await;
+        // Register the thread under the RUN's scope (owner = the run owner).
+        let thread_scope =
+            local_dev_thread_scope_for_run(&run_context, &owner).expect("run scope has an agent");
+        assert_eq!(thread_scope.owner_user_id.as_ref(), Some(&owner));
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: thread_scope.clone(),
+                thread_id: Some(run_context.thread_id.clone()),
+                created_by_actor_id: "actor-a".to_string(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .expect("thread exists");
+        let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
+        // Sink built with a DIFFERENT fallback user. The old fixed-scope sink
+        // would have appended under a mismatched scope and failed; the run-scope
+        // derivation must ignore this fallback because the run carries an owner.
+        let unrelated_fallback = UserId::new("env-operator-unrelated").expect("fallback user id");
+        let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
+            Arc::clone(&display_previews),
+            thread_service.clone(),
+            unrelated_fallback,
+        );
+        let input_ref = capability_io
+            .register_provider_tool_call_input(
+                &run_context,
+                &provider_tool_call(serde_json::json!({"message": "hello"})),
+            )
+            .await
+            .expect("input stages");
+        let invocation_id = InvocationId::new();
+        let capability_id = CapabilityId::new("builtin.echo").expect("capability id");
+        capability_io
+            .write_capability_result(CapabilityResultWrite {
+                run_context: &run_context,
+                input_ref: &input_ref,
+                invocation_id,
+                capability_id: &capability_id,
+                output: serde_json::json!({"content": "hello"}),
+                display_preview: None,
+            })
+            .await
+            .expect("result stages");
+
+        let history = thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: thread_scope,
+                thread_id: run_context.thread_id.clone(),
+            })
+            .await
+            .expect("history loads");
+        assert!(
+            history
+                .messages
+                .iter()
+                .any(|message| message.kind == MessageKind::CapabilityDisplayPreview),
+            "durable preview must be written under the run's own scope, not the fallback"
+        );
+        let preview_record = display_previews
+            .record_for_invocation(invocation_id)
+            .expect("live preview record");
+        assert!(
+            preview_record.timeline_message_id.is_some(),
+            "durable append should have linked a timeline message id under the run scope"
+        );
+    }
+
     #[tokio::test]
     async fn capability_io_writes_durable_preview_under_run_actor_owner() {
         let actor_user_id = UserId::new("preview-actor").expect("actor user id");
@@ -698,7 +776,7 @@ mod tests {
             tenant_id: run_context.scope.tenant_id.clone(),
             agent_id: run_context.scope.agent_id.clone().expect("agent id"),
             project_id: run_context.scope.project_id.clone(),
-            owner_user_id: Some(runtime_owner_id),
+            owner_user_id: Some(runtime_owner_id.clone()),
             mission_id: None,
         };
         let actor_thread_scope = ThreadScope {
@@ -720,7 +798,7 @@ mod tests {
         let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
             Arc::clone(&display_previews),
             thread_service.clone(),
-            base_thread_scope,
+            runtime_owner_id,
         );
         let input_ref = capability_io
             .register_provider_tool_call_input(
@@ -772,19 +850,15 @@ mod tests {
     #[tokio::test]
     async fn capability_io_keeps_result_when_durable_preview_append_fails() {
         let run_context = run_context("durable-preview-failure").await;
-        let thread_scope = ThreadScope {
-            tenant_id: run_context.scope.tenant_id.clone(),
-            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
-            project_id: run_context.scope.project_id.clone(),
-            owner_user_id: None,
-            mission_id: None,
-        };
+        let fallback_user_id = UserId::new("durable-preview-owner").expect("fallback user id");
+        // No thread is registered, so the durable append fails (UnknownThread)
+        // and the staged result must still be preserved.
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
         let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
             Arc::clone(&display_previews),
             thread_service,
-            thread_scope,
+            fallback_user_id,
         );
         let input_ref = capability_io
             .register_provider_tool_call_input(
@@ -1310,13 +1384,6 @@ mod tests {
             .as_ref()
             .expect("local runtime substrate");
         let run_context = run_context("skill-activate-wiring").await;
-        let thread_scope = ThreadScope {
-            tenant_id: run_context.scope.tenant_id.clone(),
-            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
-            project_id: run_context.scope.project_id.clone(),
-            owner_user_id: None,
-            mission_id: None,
-        };
         let skill_context = local_dev_filesystem_skill_context_source(
             local_runtime,
             &run_context.scope.tenant_id,
@@ -1330,7 +1397,6 @@ mod tests {
         let wiring = capability_wiring(
             &services,
             Arc::new(InMemorySessionThreadService::default()),
-            thread_scope,
             UserId::new("skill-activate-wiring-user").expect("user id"),
             policy,
             Arc::new(UnavailableModelGateway),
@@ -1925,11 +1991,12 @@ mod tests {
             .expect("approved missing-target set call returns a capability outcome");
         match missing_set_outcome {
             CapabilityOutcome::Failed(failure) => {
+                // Missing target routes through `outbound_delivery_outcome`
+                // (recoverable, model-visible InvalidInput) rather than the
+                // former host-error special-case; the disposition function
+                // gives a fixed, host-authored summary.
                 assert_eq!(failure.error_kind, CapabilityFailureKind::InvalidInput);
-                assert_eq!(
-                    failure.safe_summary,
-                    "outbound delivery target is not available"
-                );
+                assert_eq!(failure.safe_summary, "invalid outbound delivery request");
             }
             outcome => {
                 panic!("approved missing target should fail non-terminally, got {outcome:?}")
@@ -2234,17 +2301,9 @@ mod tests {
         let expected_provider_caller =
             expected_outbound_delivery_caller(&run_context, owner_user_id.clone());
         slack_provider.expect_caller(expected_provider_caller.clone());
-        let thread_scope = ThreadScope {
-            tenant_id: run_context.scope.tenant_id.clone(),
-            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
-            project_id: run_context.scope.project_id.clone(),
-            owner_user_id: Some(owner_user_id.clone()),
-            mission_id: None,
-        };
         let wiring = capability_wiring(
             &services,
             Arc::new(InMemorySessionThreadService::default()),
-            thread_scope,
             UserId::new("local-yolo-outbound-fallback").expect("user id"),
             Arc::clone(&local_runtime.capability_policy),
             Arc::new(UnavailableModelGateway),
@@ -2285,11 +2344,11 @@ mod tests {
             .expect("missing-target set call returns a capability outcome");
         match missing_set_outcome {
             CapabilityOutcome::Failed(failure) => {
+                // Missing target routes through `outbound_delivery_outcome`
+                // (recoverable, model-visible InvalidInput); the disposition
+                // function gives a fixed, host-authored summary.
                 assert_eq!(failure.error_kind, CapabilityFailureKind::InvalidInput);
-                assert_eq!(
-                    failure.safe_summary,
-                    "outbound delivery target is not available"
-                );
+                assert_eq!(failure.safe_summary, "invalid outbound delivery request");
             }
             outcome => panic!("missing target should fail non-terminally, got {outcome:?}"),
         }
@@ -3019,17 +3078,9 @@ mod tests {
         .await
         .expect("local-dev services rebuild");
         let run_context = run_context("github-surface").await;
-        let thread_scope = ThreadScope {
-            tenant_id: run_context.scope.tenant_id.clone(),
-            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
-            project_id: run_context.scope.project_id.clone(),
-            owner_user_id: None,
-            mission_id: None,
-        };
         let wiring = capability_wiring(
             &services,
             Arc::new(InMemorySessionThreadService::default()),
-            thread_scope,
             UserId::new("local-dev-github-user").expect("user id"),
             Arc::new(
                 crate::local_dev_capability_policy::local_dev_capability_policy()
@@ -3056,17 +3107,9 @@ mod tests {
         .await
         .expect("local-dev services build");
         let run_context = run_context("github-live-surface").await;
-        let thread_scope = ThreadScope {
-            tenant_id: run_context.scope.tenant_id.clone(),
-            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
-            project_id: run_context.scope.project_id.clone(),
-            owner_user_id: None,
-            mission_id: None,
-        };
         let wiring = capability_wiring(
             &services,
             Arc::new(InMemorySessionThreadService::default()),
-            thread_scope,
             UserId::new("local-dev-live-github-user").expect("user id"),
             Arc::new(
                 crate::local_dev_capability_policy::local_dev_capability_policy()
@@ -3185,17 +3228,9 @@ mod tests {
             &UserId::new("local-dev-extension-search-user").expect("user id"),
         )
         .await;
-        let thread_scope = ThreadScope {
-            tenant_id: run_context.scope.tenant_id.clone(),
-            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
-            project_id: run_context.scope.project_id.clone(),
-            owner_user_id: None,
-            mission_id: None,
-        };
         let wiring = capability_wiring(
             &services,
             Arc::new(InMemorySessionThreadService::default()),
-            thread_scope,
             UserId::new("local-dev-extension-search-user").expect("user id"),
             Arc::new(
                 crate::local_dev_capability_policy::local_dev_capability_policy()
@@ -3263,17 +3298,9 @@ mod tests {
         .await
         .expect("local-dev services build");
         let run_context = run_context("mid-response").await;
-        let thread_scope = ThreadScope {
-            tenant_id: run_context.scope.tenant_id.clone(),
-            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
-            project_id: run_context.scope.project_id.clone(),
-            owner_user_id: None,
-            mission_id: None,
-        };
         let wiring = capability_wiring(
             &services,
             Arc::new(InMemorySessionThreadService::default()),
-            thread_scope,
             UserId::new("local-dev-mid-response-user").expect("user id"),
             Arc::new(
                 crate::local_dev_capability_policy::local_dev_capability_policy()

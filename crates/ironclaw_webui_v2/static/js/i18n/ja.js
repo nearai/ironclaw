@@ -368,18 +368,6 @@ registerPack("ja", {
   "llm.missingBaseUrl": "ベース URL がありません",
   "llm.addApiKey": "API キーを追加",
 
-  // Settings — inference groups
-  "settings.group.embeddings": "埋め込み",
-  "settings.group.sampling": "サンプリング",
-  "settings.field.embeddingsEnabled": "埋め込みを有効化",
-  "settings.field.embeddingsEnabledDesc": "ワークスペースメモリのセマンティック検索",
-  "settings.field.embeddingsProvider": "プロバイダー",
-  "settings.field.embeddingsProviderDesc": "埋め込みモデルのプロバイダー",
-  "settings.field.embeddingsModel": "モデル",
-  "settings.field.embeddingsModelDesc": "埋め込みモデル識別子",
-  "settings.field.temperature": "温度",
-  "settings.field.temperatureDesc": "デフォルトのサンプリング温度 (0.0–2.0)",
-
   // Settings — agent groups
   "settings.group.core": "コア",
   "settings.group.heartbeat": "ハートビート",
