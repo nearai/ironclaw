@@ -115,6 +115,26 @@ impl ReadScope {
         Self::default()
     }
 
+    pub fn set_project_id(mut self, project_id: ProjectId) -> Self {
+        self.project_id = Some(project_id);
+        self
+    }
+
+    pub fn set_mission_id(mut self, mission_id: MissionId) -> Self {
+        self.mission_id = Some(mission_id);
+        self
+    }
+
+    pub fn set_thread_id(mut self, thread_id: ThreadId) -> Self {
+        self.thread_id = Some(thread_id);
+        self
+    }
+
+    pub fn set_process_id(mut self, process_id: ProcessId) -> Self {
+        self.process_id = Some(process_id);
+        self
+    }
+
     /// True iff every `Some` field in the filter has a matching value in the
     /// supplied [`ResourceScope`]. `process_id` is checked against the
     /// caller-supplied `process_id` because runtime events carry it on the
