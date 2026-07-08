@@ -121,7 +121,7 @@ targets those two.
 | `host_api + common + prompt_envelope → one contracts crate` | Pure churn: ~350 combined reverse-dep references repoint, zero enforcement gained. Directory placement delivers the orientation win. |
 | `events + reborn_event_store (+projections +streams)` | `events` is 2.5k-line vocabulary with fan-in 70; welding storage backends and read models onto it makes every edit to a backend ripple through 70 consumers. The 4-way split is load-bearing. |
 | `memory + memory_native` | On audit watch (architecture-review skill names it unjustified), but `memory` is fan-in-24 vocabulary and `memory_native` is 8k of behavior — same ripple argument. Revisit only when a second memory provider decision is made either way (add one, or commit to never adding one). |
-| A single `ironclaw_kernel` mega-crate | Merging `turns` (fan-in 110) with capability/scheduler behavior puts kernel churn into 110 consumers' rebuild path. The kernel stays a *directory* of crates with allowlisted edges; co-location fixes (Wave 4) are targeted moves, not a merge. |
+| A single `ironclaw_kernel` mega-crate **today** | **Deferred, not rejected** — see Wave 7. Merging `turns` (fan-in 110) with capability/scheduler behavior *before* the W4.3 type split puts kernel churn into 110 consumers' rebuild path. After W4.3 moves the fan-in to `turn_contracts`, the behavior remainder has low fan-in and the consolidation becomes cheap; the single-crate kernel's auditability win (one reviewable security perimeter) then stands unopposed. Until then the kernel stays a *directory* of crates with allowlisted edges. |
 | `webui_v2 + ingress + static → one product crate` | Ingress/CLAUDE.md contracts and the static-asset crate's build profile are deliberate boundaries; directory grouping suffices. |
 
 ### 2.4 The agent_loop / loop_support question — decision required
@@ -173,6 +173,7 @@ Summary (each wave = independently shippable, repo green after every PR):
 | W4 | Kernel co-location (+ JIT turn_contracts) | ±1, 1 rename | medium | W3 domains it doesn't touch |
 | W5 | Loop boundary decision | 0 or −1 | low | W3/W4 |
 | W6 | Directory re-layout + legacy move + docs/tooling sweep | paths only | low, high-conflict | nothing (atomic, quiet window) |
+| W7 | Kernel consolidation (ratification-gated, after W4.3) | −3 to −5 | medium | — |
 
 ### Wave 0 — allowlist layer gate (1 PR, land first)
 
@@ -358,6 +359,49 @@ Gates: full G1–G6 across the workspace, layer gate, and a zero-diff check that
 `git diff --find-renames=100% --stat` shows only renames plus the bookkeeping
 files.
 
+### Wave 7 — kernel consolidation (ratification-gated; only after W4.3 has landed)
+
+The end-state the original restructure proposal argued for and §2.3 defers: one
+auditable kernel crate instead of authority spread across `turns`, `capabilities`,
+`host_runtime`, and `runner`. The fan-in objection that blocks it today is
+*removed by W4.3*: once `turn_contracts` carries the type surface (and with it
+the fan-in ≈ 110), the behavior remainders are low-fan-in and merging them stops
+rippling.
+
+Preconditions (all hard):
+
+1. W4.3 has actually executed (it is JIT — if its trigger never fired, fire it
+   as W7.0 first) and the post-split fan-in of each candidate is measured and
+   recorded here: `turns`-behavior, `capabilities`, `host_runtime`,
+   `runner`. Proceed only if each is below ~25.
+2. §5 item 6 ratified.
+
+Shape:
+
+- **W7.1** `ironclaw_kernel` = `turns`-behavior (coordinator, state machine,
+  stores, `LoopExitApplier`) + `runner` (scheduler + executor + driver registry)
+  — the turn-lifecycle control plane in one crate.
+- **W7.2** fold `capabilities` (CapabilityHost) and the capability-hosting parts
+  of `host_runtime` into `ironclaw_kernel`; `dispatcher` folds in as a
+  `pub(crate)`-heavy module (it is already "composition-only contracts" —
+  below-authorization routing belongs inside the perimeter it serves).
+- Decision crates stay out: `authorization`, `approvals`, `trust`,
+  `runtime_policy`, `resources` remain separate pure-decision crates — the
+  kernel *calls* policy; merging policy engines in would recreate the
+  everything-crate this plan exists to prevent.
+- Visibility kit mandatory: `#![warn(unreachable_pub)]`, sealed traits on
+  strategy slots, and a boundary test that the merged crate's public surface is
+  ≤ the union of the pre-merge public surfaces (no accidental exposure widening).
+
+What this buys: the security/recovery perimeter becomes one crate a reviewer or
+auditor can hold; intra-kernel edges (e.g. "dispatcher is below authorization")
+become module discipline, which is acceptable *inside* a mutually-trusting
+perimeter — the edges that carry security weight (loops → kernel internals,
+products → substrates) remain crate edges and W0-matrix rules.
+
+If ratification declines W7, delete this section and move the §2.3 row back to
+a plain rejection, so the doc never carries a permanently-pending wave.
+
 ## 5. Ratification checklist (a human answers these before W3)
 
 1. Approve amending the 2026-07-02 plan's §6.1/§9 freeze: new crates for
@@ -371,6 +415,10 @@ files.
 5. Confirm the composition mass budget number (S6 end-state; default 25k
    non-test lines) and the `ironclaw_runner` rename (W4.2 — it is the only
    rename with real churn).
+6. Approve or decline Wave 7 (kernel consolidation). Declining is a valid
+   end-state — record it by deleting the W7 section per its last paragraph.
+   This item may be deferred until W4.3's fan-in measurements exist; it does
+   not block Waves 0–6.
 
 ## 6. Amended and added gates
 
@@ -432,7 +480,9 @@ stacks; W6 is one scheduled afternoon.
 ## 9. What we are explicitly NOT doing
 
 - No merging of backbone vocabulary crates (fan-in ≥ 24) — unchanged from the
-  ACTIVE plan; §2.3 lists the specific rejections with reasons.
+  ACTIVE plan; §2.3 lists the specific rejections with reasons. (Wave 7, if
+  ratified, merges low-fan-in *behavior* remainders after the W4.3 type split;
+  it does not touch vocabulary crates and its preconditions enforce that.)
 - No renames beyond `ironclaw_reborn → ironclaw_runner` and (option A)
   `loop_support → loop_host`. The `reborn_` prefix inconsistency resolves itself
   when Tier B retires v1, not by renaming 60 crates.
