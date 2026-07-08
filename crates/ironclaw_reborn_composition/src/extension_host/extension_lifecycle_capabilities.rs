@@ -19,7 +19,8 @@ use ironclaw_host_runtime::{
 use ironclaw_product_workflow::{
     ChannelConnectionFacade, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload,
     LifecycleProductResponse, ProductWorkflowError, RebornServicesError, RemovableChannelCleanup,
-    WebUiAuthenticatedCaller, removable_channel_cleanup_for_summary,
+    WebUiAuthenticatedCaller, disconnect_channel_for_cleanup,
+    removable_channel_cleanup_for_summary,
 };
 use serde::Deserialize;
 
@@ -191,8 +192,8 @@ impl ExtensionLifecycleToolHandler {
         scope: &ResourceScope,
         cleanup: RemovableChannelCleanup,
     ) -> Result<(), FirstPartyCapabilityError> {
-        let (channel, requires_connection_facade_support) = cleanup.into_parts();
         let Some(channel_connection) = self.channel_connection.get().cloned() else {
+            let (channel, requires_connection_facade_support) = cleanup.into_parts();
             if requires_connection_facade_support {
                 return Ok(());
             }
@@ -206,21 +207,9 @@ impl ExtensionLifecycleToolHandler {
             ));
         };
         let caller = caller_from_scope(scope);
-        let should_disconnect = if requires_connection_facade_support {
-            channel_connection
-                .caller_channel_connections(caller.clone())
-                .await
-                .map_err(channel_connection_error)?
-                .contains_key(&channel)
-        } else {
-            true
-        };
-        if should_disconnect {
-            channel_connection
-                .disconnect_channel_for_caller(caller, &channel)
-                .await
-                .map_err(channel_connection_error)?;
-        }
+        disconnect_channel_for_cleanup(channel_connection.as_ref(), caller, cleanup)
+            .await
+            .map_err(channel_connection_error)?;
         Ok(())
     }
 }

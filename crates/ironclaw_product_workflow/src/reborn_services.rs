@@ -172,7 +172,7 @@ const AUTO_APPROVE_CONFIG_KEY: &str = "agent.auto_approve_tools";
 const TOOL_CONFIG_PREFIX: &str = "tool.";
 const SLACK_EXTENSION_ID: &str = "slack";
 const SLACK_PERSONAL_PROVIDER_ID: &str = "slack_personal";
-const SLACK_CHANNEL_ID: &str = "slack";
+pub(crate) const SLACK_CHANNEL_ID: &str = "slack";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebornOperatorToolInfo {
@@ -295,6 +295,8 @@ pub fn removable_channel_cleanup_for_summary(
             summary.package_ref.id.as_str().to_string(),
         ));
     }
+    // Slack tools use a personal OAuth token, but the DM/app-mention binding
+    // is still owned by the Slack channel connection facade.
     if summary.package_ref.kind == LifecyclePackageKind::Extension
         && summary.package_ref.id.as_str() == SLACK_EXTENSION_ID
         && summary
@@ -307,6 +309,28 @@ pub fn removable_channel_cleanup_for_summary(
         ));
     }
     None
+}
+
+pub async fn disconnect_channel_for_cleanup(
+    facade: &dyn ChannelConnectionFacade,
+    caller: WebUiAuthenticatedCaller,
+    cleanup: RemovableChannelCleanup,
+) -> Result<(), RebornServicesError> {
+    let (channel, requires_connection_facade_support) = cleanup.into_parts();
+    let should_disconnect = if requires_connection_facade_support {
+        facade
+            .caller_channel_connections(caller.clone())
+            .await?
+            .contains_key(&channel)
+    } else {
+        true
+    };
+    if should_disconnect {
+        facade
+            .disconnect_channel_for_caller(caller, &channel)
+            .await?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Default)]

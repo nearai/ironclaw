@@ -14,7 +14,7 @@ use crate::{
     RebornExtensionActionResponse, RebornExtensionInfo, RebornExtensionListResponse,
     RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
     RebornServicesError, RemovableChannelCleanup, WebUiAuthenticatedCaller,
-    removable_channel_cleanup_for_summary,
+    disconnect_channel_for_cleanup, removable_channel_cleanup_for_summary,
 };
 
 use super::{
@@ -141,20 +141,7 @@ pub(super) async fn remove_extension(
     let context = lifecycle_surface_context(caller.clone());
     let cleanup = removable_channel_cleanup(facade, context.clone(), &package_ref).await?;
     if let Some(cleanup) = cleanup {
-        let (channel, requires_connection_facade_support) = cleanup.into_parts();
-        let should_disconnect = if requires_connection_facade_support {
-            channel_connection_facade
-                .caller_channel_connections(caller.clone())
-                .await?
-                .contains_key(&channel)
-        } else {
-            true
-        };
-        if should_disconnect {
-            channel_connection_facade
-                .disconnect_channel_for_caller(caller, &channel)
-                .await?;
-        }
+        disconnect_channel_for_cleanup(channel_connection_facade.as_ref(), caller, cleanup).await?;
     }
     let lifecycle = execute_lifecycle(
         facade,
@@ -599,7 +586,10 @@ mod tests {
     async fn remove_action_disconnects_slack_when_removing_visible_slack_extension() {
         let facade = RemoveFacade::slack_tools_extension();
         let caller = caller();
-        let connections = Arc::new(TestConnections::with_connections(&[("slack", false)]));
+        let connections = Arc::new(TestConnections::with_connections(&[(
+            super::super::SLACK_CHANNEL_ID,
+            false,
+        )]));
         let channel_connections: Arc<dyn ChannelConnectionFacade> = connections.clone();
 
         let response = remove_extension(

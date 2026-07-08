@@ -223,7 +223,7 @@ pub use reborn_services::{
     StaticOperatorStatusService, TriggerRunThreadScope, UnsupportedAutomationProductFacade,
     UnsupportedOperatorLogsService, UnsupportedOperatorServiceLifecycleService,
     UnsupportedOperatorStatusService, UnsupportedOutboundPreferencesProductFacade,
-    UpsertLlmProviderRequest, normalize_operator_log_context_value,
+    UpsertLlmProviderRequest, disconnect_channel_for_cleanup, normalize_operator_log_context_value,
     removable_channel_cleanup_for_summary,
 };
 
