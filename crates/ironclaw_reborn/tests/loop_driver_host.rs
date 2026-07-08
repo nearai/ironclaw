@@ -45,9 +45,9 @@ use ironclaw_loop_support::{
     HostIdentityContextSource, HostIdentityMessageContent, HostInputBatch, HostInputEnvelope,
     HostInputQueue, HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind,
     HostManagedModelGateway, HostManagedModelMessageRole, HostManagedModelRequest,
-    HostManagedModelResponse, HostRuntimeLoopCapabilityPort, HostSkillContextBuildError,
-    HostSkillContextCandidate, HostSkillContextSource, HostUserProfileSource,
-    IdentityApplicability, IdentityFileName, JsonSpawnSubagentInputCodec,
+    HostManagedModelResponse, HostManagedModelStreamSink, HostRuntimeLoopCapabilityPort,
+    HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
+    HostUserProfileSource, IdentityApplicability, IdentityFileName, JsonSpawnSubagentInputCodec,
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
     ProductLiveCancellationProbe, RunCancellationFactory, RunCancellationHandle,
     identity_message_ref, loop_driver_execution_extension_id,
@@ -315,6 +315,76 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
         ]
     );
     assert_public_milestones_hide_raw_payloads(&fixture.milestones());
+}
+
+#[tokio::test]
+async fn text_only_host_stream_model_publishes_progress_before_completion() {
+    use tokio::time::{Duration, sleep, timeout};
+
+    let fixture = HostFixture::new("thread-host-stream-progress", "hello streaming").await;
+    fixture.gateway.set_progress_updates(["partial answer"]);
+    fixture
+        .gateway
+        .set_response_delay(std::time::Duration::from_millis(500));
+    let host = fixture.build_host().await;
+    let prompt_bundle = host
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+            inline_messages: Vec::new(),
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+    let milestone_sink = Arc::clone(&fixture.milestone_sink);
+
+    let stream_task = tokio::spawn(async move {
+        host.stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
+            messages: prompt_bundle.messages,
+            surface_version: None,
+            model_preference: None,
+            capability_view: None,
+        })
+        .await
+    });
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if milestone_sink.milestones().iter().any(|milestone| {
+                matches!(
+                    &milestone.kind,
+                    LoopHostMilestoneKind::ModelTextDelta { safe_text }
+                        if safe_text == "partial answer"
+                )
+            }) {
+                break;
+            }
+            assert!(
+                !stream_task.is_finished(),
+                "model call completed before live progress milestone was observed"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("live progress milestone should arrive before model completion");
+    assert!(
+        !stream_task.is_finished(),
+        "gateway response delay should still be holding final completion after progress"
+    );
+
+    let model_response = stream_task
+        .await
+        .expect("stream task should join")
+        .expect("stream model should succeed");
+    let ParentLoopOutput::AssistantReply(reply) = model_response.output else {
+        panic!("expected assistant reply");
+    };
+    assert_eq!(reply.content, "model says hi");
 }
 
 #[tokio::test]
@@ -8882,6 +8952,7 @@ struct RecordingGateway {
     response: Mutex<Result<HostManagedModelResponse, HostManagedModelError>>,
     queued_responses: Mutex<VecDeque<Result<HostManagedModelResponse, HostManagedModelError>>>,
     response_delay: Mutex<Option<std::time::Duration>>,
+    progress_updates: Mutex<Vec<String>>,
 }
 
 impl RecordingGateway {
@@ -8891,6 +8962,7 @@ impl RecordingGateway {
             response: Mutex::new(Ok(HostManagedModelResponse::assistant_reply(content))),
             queued_responses: Mutex::new(VecDeque::new()),
             response_delay: Mutex::new(None),
+            progress_updates: Mutex::new(Vec::new()),
         }
     }
 
@@ -8908,6 +8980,10 @@ impl RecordingGateway {
 
     fn set_response_delay(&self, delay: std::time::Duration) {
         *self.response_delay.lock().unwrap() = Some(delay);
+    }
+
+    fn set_progress_updates(&self, updates: impl IntoIterator<Item = impl Into<String>>) {
+        *self.progress_updates.lock().unwrap() = updates.into_iter().map(Into::into).collect();
     }
 
     fn respond_with_capability_calls(&self) {
@@ -8973,6 +9049,27 @@ impl HostManagedModelGateway for RecordingGateway {
             return response;
         }
         self.response.lock().unwrap().clone()
+    }
+
+    async fn stream_model_with_progress(
+        &self,
+        request: HostManagedModelRequest,
+        sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let progress_updates = self.progress_updates.lock().unwrap().clone();
+        for update in progress_updates {
+            sink.safe_text_update(update).await;
+        }
+        self.stream_model(request).await
+    }
+
+    async fn stream_model_with_capabilities_and_progress(
+        &self,
+        request: HostManagedModelRequest,
+        _capabilities: Arc<dyn LoopCapabilityPort>,
+        sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        self.stream_model_with_progress(request, sink).await
     }
 }
 
