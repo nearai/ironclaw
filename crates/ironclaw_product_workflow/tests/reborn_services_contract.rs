@@ -5200,18 +5200,18 @@ async fn list_connectable_channels_returns_configured_action_metadata() {
     )
     .with_connectable_channels_facade(Arc::new(StaticConnectableChannelsProductFacade::new(vec![
         RebornConnectableChannelInfo {
-            channel: "slack".to_string(),
-            display_name: "Slack".to_string(),
+            channel: "telegram".to_string(),
+            display_name: "Telegram".to_string(),
             strategy: RebornChannelConnectStrategy::InboundProofCode,
             action: RebornChannelConnectAction {
-                title: "Slack account connection".to_string(),
-                instructions: "Run /pair in Slack to get a code, then paste it here. Codes expire in 10 minutes.".to_string(),
-                input_placeholder: "Enter Slack pairing code...".to_string(),
+                title: "Telegram account connection".to_string(),
+                instructions: "Message the Telegram bot to get a code, then paste it here. Codes expire in 10 minutes.".to_string(),
+                input_placeholder: "Enter Telegram pairing code...".to_string(),
                 submit_label: "Connect".to_string(),
-                success_message: "Slack account connected.".to_string(),
-                error_message: "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one.".to_string(),
+                success_message: "Telegram account connected.".to_string(),
+                error_message: "Invalid or expired Telegram pairing code. Message the bot to get a new one.".to_string(),
             },
-            command_aliases: vec!["slack".to_string(), "slack account".to_string()],
+            command_aliases: vec!["telegram".to_string(), "telegram account".to_string()],
         },
     ])));
 
@@ -5221,25 +5221,24 @@ async fn list_connectable_channels_returns_configured_action_metadata() {
         .expect("connectable channels response");
 
     let channel = response.channels.first().expect("configured channel");
-    assert_eq!(channel.channel, "slack");
-    assert_eq!(channel.display_name, "Slack");
+    assert_eq!(channel.channel, "telegram");
+    assert_eq!(channel.display_name, "Telegram");
     assert_eq!(
         channel.strategy,
         RebornChannelConnectStrategy::InboundProofCode
     );
     assert_eq!(
         channel.action.instructions,
-        "Run /pair in Slack to get a code, then paste it here. Codes expire in 10 minutes."
+        "Message the Telegram bot to get a code, then paste it here. Codes expire in 10 minutes."
     );
     assert_eq!(
         channel.command_aliases,
-        vec!["slack".to_string(), "slack account".to_string()]
+        vec!["telegram".to_string(), "telegram account".to_string()]
     );
 }
 
 #[test]
-fn channel_connect_action_serializes_neutral_input_placeholder_and_accepts_legacy_code_placeholder()
-{
+fn channel_connect_action_serializes_neutral_input_placeholder() {
     let action = RebornChannelConnectAction {
         title: "Slack channel access".to_string(),
         instructions: "Choose allowed channels.".to_string(),
@@ -5251,18 +5250,6 @@ fn channel_connect_action_serializes_neutral_input_placeholder_and_accepts_legac
 
     let serialized = serde_json::to_value(&action).expect("action serializes");
     assert_eq!(serialized["input_placeholder"], "C0123456789");
-    assert!(serialized.get("code_placeholder").is_none());
-
-    let legacy: RebornChannelConnectAction = serde_json::from_value(serde_json::json!({
-        "title": "Slack account connection",
-        "instructions": "Run /pair in Slack to get a code, then paste it here. Codes expire in 10 minutes.",
-        "code_placeholder": "Enter Slack pairing code...",
-        "submit_label": "Connect",
-        "success_message": "Slack account connected.",
-        "error_message": "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one."
-    }))
-    .expect("legacy action deserializes");
-    assert_eq!(legacy.input_placeholder, "Enter Slack pairing code...");
 }
 
 #[tokio::test]

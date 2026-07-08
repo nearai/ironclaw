@@ -57,17 +57,16 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
   const canClear = Boolean(currentTargetId) && !isBusy;
 
   const hasTargets = deliveryState.finalReplyTargets.length > 0;
-  // Whether we have at least one Slack-style (external) pairable target that is
-  // NOT yet available — used to render the "not paired" notice row.
-  const hasUnpairedTargets = deliveryState.targets.some(
+  // Whether we have at least one external target that is not yet available.
+  const hasUnavailableTargets = deliveryState.targets.some(
     (opt) =>
       opt?.capabilities?.final_replies &&
       opt?.target?.status === "unavailable",
   );
-  // The Slack approval footnote only makes sense when an external (Slack-style)
-  // target exists at all — paired or not. Web-only deployments shouldn't see a
+  // The Slack approval footnote only makes sense when an external target exists
+  // at all. Web-only deployments shouldn't see a
   // "reply in Slack" hint.
-  const hasExternalTargets = hasTargets || hasUnpairedTargets;
+  const hasExternalTargets = hasTargets || hasUnavailableTargets;
 
   // Flash the "Saved" confirmation; the mutation's rejection is reflected
   // through `deliveryState.saveError` (rendered below), so the catch here only
@@ -235,9 +234,9 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
               `;
             })}
 
-            <!-- Unpaired notice rows (targets present but status=unavailable
+            <!-- Unavailable notice rows (targets present but status=unavailable
                  and NOT already shown above because they lack final_replies) -->
-            ${hasUnpairedTargets &&
+            ${hasUnavailableTargets &&
             html`
               <div
                 className="flex items-center gap-3 rounded-xl border border-dashed border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3.5 text-sm text-[var(--v2-text-muted)]"
@@ -245,10 +244,10 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
                 <span className="text-base shrink-0 opacity-70">📎</span>
                 <div className="flex-1 min-w-0">
                   <span className="text-sm font-semibold text-[var(--v2-text-muted)]">
-                    ${t("automations.delivery.unpairedNotice")}
+                    ${t("automations.delivery.unavailableNotice")}
                   </span>
                   <div className="mt-0.5 text-xs leading-5 text-[var(--v2-text-faint)]">
-                    ${t("automations.delivery.unpairedDesc")}
+                    ${t("automations.delivery.unavailableDesc")}
                   </div>
                 </div>
                 <${Badge}

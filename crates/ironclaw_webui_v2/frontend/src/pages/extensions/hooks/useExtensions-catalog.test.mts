@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
+import { productAuthOAuthEventsSource } from "../../../lib/product-auth-oauth-events.vm-inline.mjs";
 
 function useExtensionsSourceForTest() {
   const source = readFileSync(new URL("./useExtensions.ts", import.meta.url), "utf8");
@@ -19,7 +20,7 @@ function useExtensionsSourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { useExtensions };`;
+  return `${productAuthOAuthEventsSource()}\n${lines.join("\n")}\nglobalThis.__testExports = { useExtensions };`;
 }
 
 function useExtensionsForTest({ extensions, registry }) {
@@ -135,4 +136,90 @@ test("useExtensions merges registry and installed entries with installed first",
     catalogEntries.length,
     "id-less registry and installed entries receive stable fallback ids",
   );
+});
+
+test("install/activate auth popups: noopener null is not an error; insecure URLs are", () => {
+  const stateUpdates = [];
+  const mutationConfigs = [];
+  const openCalls = [];
+  const context = {
+    Date,
+    Error,
+    URL,
+    React: {
+      useCallback: (fn) => fn,
+      useEffect: () => {},
+      useRef: () => ({ current: null }),
+      useState: (initial) => [
+        typeof initial === "function" ? initial() : initial,
+        (value) => stateUpdates.push(value),
+      ],
+    },
+    activateExtension: () => {},
+    approvePairingCode: () => {},
+    fetchExtensionRegistry: () => {},
+    fetchExtensionSetup: () => {},
+    fetchExtensions: () => {},
+    fetchPairingRequests: () => {},
+    gatewayStatus: () => {},
+    globalThis: {},
+    installExtension: () => {},
+    isChannelExtensionKind: () => false,
+    listConnectableChannels: () => {},
+    removeExtension: () => {},
+    startExtensionOauth: () => {},
+    submitExtensionSetup: () => {},
+    useMutation: (config) => {
+      mutationConfigs.push(config);
+      return { isPending: false, mutate: () => {} };
+    },
+    useQuery: () => ({ data: {}, isLoading: false }),
+    useQueryClient: () => ({ invalidateQueries: () => {} }),
+    useT: () => (key) => key,
+    // Spec-compliant browser: window.open with "noopener" returns null EVEN
+    // when the popup opens, so null on this branch must not surface an error.
+    window: {
+      clearInterval: () => {},
+      setInterval: () => 1,
+      open: (url, target, features) => {
+        openCalls.push({ url, target, features });
+        return null;
+      },
+    },
+  };
+  vm.runInNewContext(useExtensionsSourceForTest(), context);
+  context.globalThis.__testExports.useExtensions();
+
+  // useExtensions declares its mutations in a fixed order: install first,
+  // activate second (same order-coupling convention the other vm tests use).
+  const [installConfig, activateConfig] = mutationConfigs;
+  const lastError = () =>
+    stateUpdates.filter((value) => value && value.type === "error").at(-1);
+
+  installConfig.onSuccess(
+    { success: true, auth_url: "https://slack.com/oauth/v2/authorize" },
+    { displayName: "Slack", kind: "extension" },
+  );
+  assert.equal(lastError(), undefined, "noopener null must not read as a blocked popup");
+  // The fresh open must pass the full hardened argument set (see
+  // .claude/rules/testing.md mock-hygiene: assert EVERY argument the
+  // production call passes — dropping "noopener" would be a security bug).
+  assert.deepEqual(openCalls.at(-1), {
+    url: "https://slack.com/oauth/v2/authorize",
+    target: "_blank",
+    features: "noopener,noreferrer",
+  });
+
+  activateConfig.onSuccess(
+    { success: false, auth_url: "https://slack.com/oauth/v2/authorize" },
+    { displayName: "Slack" },
+  );
+  assert.equal(lastError(), undefined);
+
+  // A genuinely non-HTTPS URL still reports the HTTPS problem.
+  activateConfig.onSuccess(
+    { success: false, auth_url: "http://insecure.example/authorize" },
+    { displayName: "Slack" },
+  );
+  assert.match(lastError().message, /HTTPS/);
 });

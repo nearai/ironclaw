@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
+import { productAuthOAuthEventsSource } from "../../../lib/product-auth-oauth-events.vm-inline.mjs";
 
 function useExtensionsSourceForTest() {
   const source = readFileSync(new URL("./useExtensions.ts", import.meta.url), "utf8");
@@ -19,7 +20,7 @@ function useExtensionsSourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { useExtensions };`;
+  return `${productAuthOAuthEventsSource()}\n${lines.join("\n")}\nglobalThis.__testExports = { useExtensions };`;
 }
 
 function contextFor(mutationState, queryCalls) {
@@ -54,7 +55,7 @@ function contextFor(mutationState, queryCalls) {
   };
 }
 
-test("useExtensions shows setup-panel copy after channel install succeeds", () => {
+test("useExtensions points channel install success at the setup panel", () => {
   const mutationConfigs = [];
   const actionResults = [];
   const context = {

@@ -948,18 +948,18 @@ impl RebornServicesApi for StubServices {
         }
         Ok(RebornConnectableChannelListResponse {
             channels: vec![RebornConnectableChannelInfo {
-                channel: "slack".to_string(),
-                display_name: "Slack".to_string(),
+                channel: "telegram".to_string(),
+                display_name: "Telegram".to_string(),
                 strategy: RebornChannelConnectStrategy::InboundProofCode,
                 action: RebornChannelConnectAction {
-                    title: "Slack account connection".to_string(),
-                    instructions: "Run /pair in Slack to get a code, then paste it here. Codes expire in 10 minutes.".to_string(),
-                    input_placeholder: "Enter Slack pairing code...".to_string(),
+                    title: "Telegram account connection".to_string(),
+                    instructions: "Message the Telegram bot to get a code, then paste it here. Codes expire in 10 minutes.".to_string(),
+                    input_placeholder: "Enter Telegram pairing code...".to_string(),
                     submit_label: "Connect".to_string(),
-                    success_message: "Slack account connected.".to_string(),
-                    error_message: "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one.".to_string(),
+                    success_message: "Telegram account connected.".to_string(),
+                    error_message: "Invalid or expired Telegram pairing code. Message the bot to get a new one.".to_string(),
                 },
-                command_aliases: vec!["slack".to_string()],
+                command_aliases: vec!["telegram".to_string()],
             }],
         })
     }
@@ -2877,15 +2877,15 @@ async fn list_connectable_channels_dispatches_through_facade() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_json(response).await;
-    assert_eq!(body["channels"][0]["channel"], "slack");
+    assert_eq!(body["channels"][0]["channel"], "telegram");
     assert_eq!(body["channels"][0]["strategy"], "inbound_proof_code");
     assert_eq!(
         body["channels"][0]["action"]["instructions"],
-        "Run /pair in Slack to get a code, then paste it here. Codes expire in 10 minutes."
+        "Message the Telegram bot to get a code, then paste it here. Codes expire in 10 minutes."
     );
     assert_eq!(
         body["channels"][0]["action"]["error_message"],
-        "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one."
+        "Invalid or expired Telegram pairing code. Message the bot to get a new one."
     );
     assert_eq!(
         *services

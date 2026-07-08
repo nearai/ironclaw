@@ -2,7 +2,6 @@ import { StatusPill } from "../../../design-system/primitives.js";
 import { html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
 import { SlackAdminManagedSection } from "../../../components/slack-setup-panel.js";
-import { SlackPairingSection } from "../../../components/slack-pairing-section.js";
 import { ExtensionCard, RegistryCard } from "./extension-card.js";
 import { PairingSection } from "./pairing-section.js";
 import { redeemPairingCode } from "../lib/pairing-api.js";
@@ -23,12 +22,12 @@ export function isInboundProofCodeAction(connectAction) {
   return connectAction?.strategy === "inbound_proof_code";
 }
 
-export function isSlackAdminManagedAction(connectAction) {
-  return connectAction?.channel === "slack" && isAdminManagedChannelsAction(connectAction);
+export function isGenericInboundProofCodeAction(connectAction) {
+  return connectAction?.channel !== "slack" && isInboundProofCodeAction(connectAction);
 }
 
-export function isSlackInboundProofCodeAction(connectAction) {
-  return connectAction?.channel === "slack" && isInboundProofCodeAction(connectAction);
+export function isSlackAdminManagedAction(connectAction) {
+  return connectAction?.channel === "slack" && isAdminManagedChannelsAction(connectAction);
 }
 
 export function findSlackConnectAction(connectableChannels) {
@@ -46,11 +45,15 @@ export function connectActionsForPackage(connectableChannels, item) {
 export function connectActionsForChannel(connectableChannels, channel) {
   if (!channel) return [];
   const channels = connectableChannels || [];
+  const adminAction = channels.find(
+    (connectAction) =>
+      connectAction?.channel === channel && isAdminManagedChannelsAction(connectAction)
+  );
+  if (channel === "slack") {
+    return adminAction ? [adminAction] : [];
+  }
   const actions = [
-    channels.find(
-      (connectAction) =>
-        connectAction?.channel === channel && isAdminManagedChannelsAction(connectAction)
-    ),
+    adminAction,
     channels.find(
       (connectAction) =>
         connectAction?.channel === channel && isInboundProofCodeAction(connectAction)
@@ -72,10 +75,7 @@ export function ChannelConnectActionSections({
       if (isSlackAdminManagedAction(action)) {
         return html`<${SlackAdminManagedSection} action=${action.action} />`;
       }
-      if (isSlackInboundProofCodeAction(action)) {
-        return html`<${SlackPairingSection} action=${action.action} />`;
-      }
-      if (isInboundProofCodeAction(action)) {
+      if (isGenericInboundProofCodeAction(action)) {
         return html`
           <${PairingSection}
             channel=${action.channel}
@@ -191,8 +191,9 @@ export function ChannelsTab({
             ${installedChannels.map(
               (ch) => {
                 const connectActions = connectActionsForPackage(connectableChannels, ch);
+                const isSlack = isSlackPackage(ch);
                 const pairingHandledByConnectAction =
-                  connectActions.some(isInboundProofCodeAction);
+                  connectActions.some(isGenericInboundProofCodeAction);
                 return html`
                   <div key=${packageId(ch)} className="flex flex-col gap-3">
                     <${ExtensionCard}
@@ -206,7 +207,8 @@ export function ChannelsTab({
                     html`<${ChannelConnectActionSections}
                       connectActions=${connectActions}
                     />`}
-                    ${!pairingHandledByConnectAction &&
+                    ${!isSlack &&
+                    !pairingHandledByConnectAction &&
                     (ch.onboarding_state === "pairing_required" ||
                       ch.onboarding_state === "pairing") &&
                     html` <${PairingSection}

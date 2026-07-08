@@ -57,14 +57,12 @@ use tower_http::cors::{AllowHeaders, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 
+#[cfg(feature = "slack-v2-host-beta")]
+use crate::product_auth::serve::SlackPersonalOAuthBindingConfig;
 use crate::product_auth::serve::{ProductAuthRouteState, product_auth_route_mount};
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, slack_channel_route_admin_route_mount,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-use crate::slack_personal_binding_pairing_serve::{
-    SlackPersonalBindingPairingRouteConfig, slack_personal_binding_pairing_route_mount,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::slack_personal_binding_serve::{
@@ -258,14 +256,17 @@ pub struct WebuiServeConfig {
     /// credential onboarding. When absent, the mounted Google setup
     /// route fails closed with a sanitized service-unavailable response.
     pub(crate) google_oauth: Option<GoogleOAuthRouteConfig>,
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) slack_personal_oauth: Option<crate::slack_setup::SlackPersonalSetupServiceSlot>,
+    /// Optional host hook that binds a successful Slack personal OAuth identity
+    /// to the authenticated Reborn user.
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) slack_personal_oauth_binding: Option<SlackPersonalOAuthBindingConfig>,
     /// Optional Slack personal-binding WebUI OAuth route config.
     /// Host binaries must opt in explicitly after wiring a host-owned
     /// Slack OAuth client plus identity binding store.
     #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) slack_personal_binding: Option<SlackPersonalBindingRouteConfig>,
-    /// Optional Slack personal-binding pairing-code redeem route config.
-    #[cfg(feature = "slack-v2-host-beta")]
-    pub(crate) slack_personal_binding_pairing: Option<SlackPersonalBindingPairingRouteConfig>,
     /// Optional Slack channel route admin surface mounted under the WebUI
     /// channels settings path.
     #[cfg(feature = "slack-v2-host-beta")]
@@ -376,9 +377,11 @@ impl WebuiServeConfig {
             protected_mounts: Vec::new(),
             google_oauth: None,
             #[cfg(feature = "slack-v2-host-beta")]
-            slack_personal_binding: None,
+            slack_personal_oauth: None,
             #[cfg(feature = "slack-v2-host-beta")]
-            slack_personal_binding_pairing: None,
+            slack_personal_oauth_binding: None,
+            #[cfg(feature = "slack-v2-host-beta")]
+            slack_personal_binding: None,
             #[cfg(feature = "slack-v2-host-beta")]
             slack_channel_routes: None,
         }
@@ -389,19 +392,29 @@ impl WebuiServeConfig {
         self
     }
 
+    /// Slack personal (user-token) OAuth lazy slot for the WebUI setup flow.
     #[cfg(feature = "slack-v2-host-beta")]
-    #[rustfmt::skip]
-    pub fn with_slack_personal_binding(mut self, config: SlackPersonalBindingRouteConfig) -> Self { // pub-api-exempt: host OAuth hook
-        self.slack_personal_binding = Some(config);
+    pub fn with_slack_personal_oauth(
+        mut self,
+        slot: crate::slack_setup::SlackPersonalSetupServiceSlot,
+    ) -> Self {
+        self.slack_personal_oauth = Some(slot);
         self
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
-    pub fn with_slack_personal_binding_pairing(
+    pub fn with_slack_personal_oauth_binding(
         mut self,
-        config: SlackPersonalBindingPairingRouteConfig,
+        config: SlackPersonalOAuthBindingConfig,
     ) -> Self {
-        self.slack_personal_binding_pairing = Some(config);
+        self.slack_personal_oauth_binding = Some(config);
+        self
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[rustfmt::skip]
+    pub fn with_slack_personal_binding(mut self, config: SlackPersonalBindingRouteConfig) -> Self { // pub-api-exempt: host OAuth hook
+        self.slack_personal_binding = Some(config);
         self
     }
 
@@ -605,6 +618,14 @@ pub fn webui_v2_app_with_lifecycle(
         if let Some(google_oauth) = config.google_oauth.clone() {
             state = state.with_google_oauth(google_oauth);
         }
+        #[cfg(feature = "slack-v2-host-beta")]
+        if let Some(slack_personal_oauth) = config.slack_personal_oauth.clone() {
+            state = state.with_slack_personal_oauth(slack_personal_oauth);
+        }
+        #[cfg(feature = "slack-v2-host-beta")]
+        if let Some(slack_personal_oauth_binding) = config.slack_personal_oauth_binding.clone() {
+            state = state.with_slack_personal_oauth_binding(slack_personal_oauth_binding);
+        }
         product_auth_route_mount(state)
     });
     #[cfg(feature = "slack-v2-host-beta")]
@@ -613,11 +634,6 @@ pub fn webui_v2_app_with_lifecycle(
         .clone()
         .map(SlackPersonalBindingRouteState::new)
         .map(slack_personal_binding_route_mount);
-    #[cfg(feature = "slack-v2-host-beta")]
-    let slack_personal_binding_pairing_mount = config
-        .slack_personal_binding_pairing
-        .clone()
-        .map(slack_personal_binding_pairing_route_mount);
     let mount_operator_routes = config.authenticator.mounts_operator_webui_config_routes();
     #[cfg(feature = "slack-v2-host-beta")]
     let slack_channel_routes_mount = config
@@ -651,10 +667,6 @@ pub fn webui_v2_app_with_lifecycle(
     }
     #[cfg(feature = "slack-v2-host-beta")]
     if let Some(mount) = &slack_personal_binding_mount {
-        descriptors.extend(mount.descriptors.iter().cloned());
-    }
-    #[cfg(feature = "slack-v2-host-beta")]
-    if let Some(mount) = &slack_personal_binding_pairing_mount {
         descriptors.extend(mount.descriptors.iter().cloned());
     }
     #[cfg(feature = "slack-v2-host-beta")]
@@ -714,10 +726,6 @@ pub fn webui_v2_app_with_lifecycle(
             Some(existing) => existing.merge(mount.public),
             None => mount.public,
         });
-    }
-    #[cfg(feature = "slack-v2-host-beta")]
-    if let Some(mount) = slack_personal_binding_pairing_mount {
-        protected_inner = protected_inner.merge(mount.protected);
     }
     #[cfg(feature = "slack-v2-host-beta")]
     if let Some(mount) = slack_channel_routes_mount
