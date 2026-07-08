@@ -1417,6 +1417,15 @@ fn push_explicit_capability_request_token(
 }
 
 fn is_likely_capability_reference(token: &str) -> bool {
+    // A decimal number lifted from prose (e.g. "use 0.95 in formulas") tokenizes
+    // as `digits.digits`, which satisfies the `namespace.name` shape below and is
+    // otherwise mistaken for an explicitly requested capability id. That trips the
+    // unavailable-capability guard and suppresses the entire turn's tool calls,
+    // stranding the model ("…will not route it through another tool"). A real
+    // capability id is never a bare number, so reject anything that parses as one.
+    if token.parse::<f64>().is_ok() {
+        return false;
+    }
     token.starts_with("builtin.") || token.split('.').count() == 2
 }
 
@@ -2413,6 +2422,47 @@ mod tests {
             repair_assistant.reasoning_details,
             Some(expected_reasoning),
             "repaired assistant message must preserve typed reasoning_details"
+        );
+    }
+
+    #[test]
+    fn is_likely_capability_reference_rejects_decimal_numbers() {
+        // Decimals from prose ("use 0.95 in formulas") tokenize as `digits.digits`
+        // and must NOT be treated as capability references — that false positive
+        // trips the unavailable-capability guard and suppresses the whole turn.
+        for token in ["0.95", "1.5", "95.0", "3.524", "0.0158"] {
+            assert!(
+                !is_likely_capability_reference(token),
+                "decimal {token} must not look like a capability reference"
+            );
+        }
+        // Real capability ids are still recognized.
+        for token in ["builtin.shell", "builtin.read_file", "gmail.send"] {
+            assert!(
+                is_likely_capability_reference(token),
+                "{token} should be a capability reference"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_capability_request_ids_ignore_decimals_in_prose() {
+        // Regression for OfficeQA UID0242: the user prompt "compute the
+        // correlation-adjusted 95% = 0.95 (use 0.95 in formulas)" previously had
+        // "0.95" extracted as an explicitly requested (but unavailable) capability,
+        // suppressing every tool call so the model gave up.
+        let content = "compute the correlation-adjusted 95% = 0.95 (use 0.95 in formulas)";
+        assert!(
+            extract_explicit_capability_request_ids(content).is_empty(),
+            "decimals in prose must not parse as explicit capability requests"
+        );
+        // A genuine explicit request is still extracted.
+        let real = "please use builtin.shell to run the script";
+        assert!(
+            extract_explicit_capability_request_ids(real)
+                .iter()
+                .any(|id| id.as_str() == "builtin.shell"),
+            "an explicit builtin.shell request must still be extracted"
         );
     }
 }
