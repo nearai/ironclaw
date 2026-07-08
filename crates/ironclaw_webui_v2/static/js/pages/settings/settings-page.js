@@ -2,6 +2,7 @@ import { Navigate, useOutletContext, useParams } from "react-router";
 import { React, html } from "../../lib/html.js";
 import { useT } from "../../lib/i18n.js";
 import { AgentTab } from "./components/agent-tab.js";
+import { AppearanceTab } from "./components/appearance-tab.js";
 import { ChannelsTab } from "./components/channels-tab.js";
 import { InferenceTab } from "./components/inference-tab.js";
 import { LanguageTab } from "./components/language-tab.js";
@@ -18,7 +19,7 @@ export function SettingsPage() {
   const t = useT();
   const { tab: requestedTab } = useParams();
   const { gatewayStatus, gatewayStatusQuery, isAdmin = false } = useOutletContext();
-  const defaultTab = isAdmin ? "inference" : "language";
+  const defaultTab = isAdmin ? "inference" : "appearance";
   const tab = requestedTab || defaultTab;
   const {
     settings,
@@ -48,6 +49,7 @@ export function SettingsPage() {
       isLoading=${isLoading}
       searchQuery=${searchQuery}
     />`,
+    appearance: html`<${AppearanceTab} searchQuery=${searchQuery} />`,
     agent: html`<${AgentTab}
       settings=${settings}
       onSave=${save}

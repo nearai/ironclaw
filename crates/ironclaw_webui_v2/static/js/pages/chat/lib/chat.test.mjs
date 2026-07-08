@@ -64,6 +64,7 @@ function renderChat({
   runEffects = false,
   threadStateUpdates = [],
   globalAutoApproveEnabled = false,
+  showChatLogsShortcut = true,
 }) {
   const components = {
     ApprovalCard() {},
@@ -110,6 +111,7 @@ function renderChat({
       removeEventListener: () => {},
     },
     useChat: () => hookState,
+    useInterfacePreferences: () => ({ showChatLogsShortcut }),
     useT: () => (key) => key,
   };
 
@@ -507,6 +509,35 @@ test("Chat does not render a top-level logs header for the active thread run", (
     null,
     "active run logs link should not render as a duplicate top header bar",
   );
+});
+
+test("Chat hides the floating thread logs shortcut when the preference is off", () => {
+  const { tree, components } = renderChat({
+    showChatLogsShortcut: false,
+    hookState: {
+      messages: [{ id: "message-1" }],
+      isProcessing: true,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: { runId: "run-1", threadId: "thread-1", status: "running" },
+      send: async () => ({}),
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  const messageList = findComponent(tree, components.MessageList);
+  assert.equal(componentProps(messageList, components.MessageList).logsPath, null);
 });
 
 test("Chat deny gate callback routes through approve compatibility path", () => {

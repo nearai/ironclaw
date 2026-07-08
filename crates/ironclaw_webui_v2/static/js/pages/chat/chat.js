@@ -22,6 +22,7 @@ import { useChat } from "./hooks/useChat.js";
 import { NEW_DRAFT_KEY } from "./lib/draft-store.js";
 import { buildRuntimeContext } from "./lib/runtime-context.js";
 import { buildScopedLogsPath } from "../logs/lib/logs-data.js";
+import { useInterfacePreferences } from "../../lib/interface-preferences.js";
 
 /* Grace window before an active thread's sidebar state is cleared to idle.
  * Long enough for SSE to rehydrate a gate/run after a thread switch (so a
@@ -71,6 +72,7 @@ export function Chat({
   globalAutoApproveEnabled = false,
 }) {
   const t = useT();
+  const { showChatLogsShortcut } = useInterfacePreferences();
   const {
     messages,
     isProcessing,
@@ -130,7 +132,10 @@ export function Chat({
   // Scope the persisted composer draft to the open thread (or the
   // shared new-conversation slot when there's no active thread yet).
   const composerDraftKey = activeThreadId || NEW_DRAFT_KEY;
-  const logsPath = activeThreadId ? buildScopedLogsPath({ threadId: activeThreadId }) : null;
+  const logsPath =
+    activeThreadId && showChatLogsShortcut
+      ? buildScopedLogsPath({ threadId: activeThreadId })
+      : null;
   const canCancelRun = Boolean(
     activeThreadId &&
       activeRun?.runId &&

@@ -9,3 +9,10 @@ test("Settings sidebar exposes the tools permissions tab", () => {
     "Tools permissions must be reachable from the Settings sidebar"
   );
 });
+
+test("Settings sidebar exposes the appearance preferences tab", () => {
+  assert.ok(
+    SETTINGS_SUB_ROUTES.some((route) => route.id === "appearance"),
+    "Appearance preferences must be reachable from the Settings sidebar"
+  );
+});
