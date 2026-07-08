@@ -293,12 +293,10 @@ mod tests {
 
     #[test]
     fn section_layer_overrides_compiled() {
-        let section = BudgetSection {
-            user_daily_usd: Some(10.0),
-            warn_at: Some(0.6),
-            pause_at: Some(0.8),
-            ..Default::default()
-        };
+        let section = BudgetSection::default()
+            .set_user_daily_usd(10.0)
+            .set_warn_at(0.6)
+            .set_pause_at(0.8);
         let d = BudgetDefaults::compiled_defaults().with_section(&section);
         assert_eq!(d.user_daily_usd, 10.0);
         assert_eq!(d.warn_at, 0.6);
@@ -361,12 +359,10 @@ mod tests {
     fn env_layer_overrides_section_and_rejects_invalid_f64() {
         let _lock = env_lock();
         // Establish a section override that env should win against.
-        let section = BudgetSection {
-            user_daily_usd: Some(10.0),
-            warn_at: Some(0.60),
-            pause_at: Some(0.80),
-            ..Default::default()
-        };
+        let section = BudgetSection::default()
+            .set_user_daily_usd(10.0)
+            .set_warn_at(0.60)
+            .set_pause_at(0.80);
 
         // Valid env override path.
         {
