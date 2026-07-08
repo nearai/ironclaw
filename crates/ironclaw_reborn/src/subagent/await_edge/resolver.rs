@@ -252,9 +252,16 @@ where
     /// comment above); `SubagentThreadMetadata.parent_run_context`/`gate_ref`
     /// (spawn-time-cached, `ironclaw_loop_support::subagent_spawn_port`) now
     /// supply everything that lookup used to provide. Same anti-tamper
-    /// cross-check as before: the parent's identity is anchored to the
-    /// trusted child record's own axes + the recovered event owner, never to
-    /// the subagent's own (tamperable) thread metadata alone.
+    /// cross-check as before for the axes that matter: tenant/agent/project
+    /// and owner come from the trusted child record + recovered event owner,
+    /// never from the subagent's own (tamperable) thread metadata. `thread_id`
+    /// itself is *not* similarly anchored here — it is read straight from
+    /// `metadata.parent_thread_id` — so the real safety net against a
+    /// tampered value is downstream: `update_parent_result_reference` keys its
+    /// write on `(thread_id, turn_run_id, result_ref)` against an existing
+    /// placeholder, and `resume_parent`'s `resume_turn` keys on `(scope,
+    /// run_id)` against a live run record; both fail closed rather than
+    /// silently acting on the wrong thread.
     async fn reconstruct_edge(
         &self,
         child_record: &TurnRunRecord,
@@ -313,11 +320,13 @@ where
             )),
         };
         // Anti-tamper pin: only `scope`/`thread_id`/`actor`/`run_id` are
-        // overridden with the trusted anchor above — every other field
-        // (turn_id, resolved profile/model route, driver/checkpoint
-        // versions, product_context) is trusted wholesale from the cached
-        // `parent_run_context`, since those carry no scope/identity
-        // authority of their own.
+        // overridden with `parent_scope` above — note `thread_id` there is
+        // only partially anchored (see this method's doc comment: it comes
+        // from `metadata.parent_thread_id`, not the trusted child record).
+        // Every other field (turn_id, resolved profile/model route,
+        // driver/checkpoint versions, product_context) is trusted wholesale
+        // from the cached `parent_run_context`, since those carry no
+        // scope/identity authority of their own.
         let mut parent_run_context = metadata.parent_run_context.clone();
         parent_run_context.scope = parent_scope.clone();
         parent_run_context.thread_id = parent_scope.thread_id.clone();

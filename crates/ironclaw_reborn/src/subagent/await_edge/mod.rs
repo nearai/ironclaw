@@ -96,9 +96,10 @@ impl EdgeTerminalKind {
     }
 }
 
-/// One await-edge: parent-awaits-child bookkeeping, §5.6 assembled — plus two
-/// additive fields beyond the design doc's exact list, both named as spec
-/// deviations in the PR:
+/// One await-edge: parent-awaits-child bookkeeping, §5.6 assembled — plus
+/// four additive fields beyond the design doc's exact list (`gate_ref`, the
+/// `source_binding_ref`/`reply_target_binding_ref` pair, `parent_run_context`,
+/// and `terminal_reason`), each named as a spec deviation in the PR:
 ///
 /// - `gate_ref` (D3): the pre-existing shared-batch-gate mechanism (one
 ///   `GateRef` covering N children spawned in one call, parent resumes once

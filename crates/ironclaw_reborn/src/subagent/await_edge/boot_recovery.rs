@@ -157,17 +157,30 @@ where
 /// (listing/closing edges never needs a real `ThreadId`). The literal
 /// placeholder thread id is never persisted or resolved against — it exists
 /// only because `TurnScope` requires the field.
+///
+/// Must preserve `key.user_id` as the scope's explicit owner (mirroring
+/// `TurnScope::to_resource_scope`'s forward mapping in reverse): multi-user
+/// edges live under the owner's mount, so a bare `TurnScope::new` here would
+/// probe the system/`ActorFallback` mount and silently see zero unclosed
+/// edges for every owner-scoped roster entry (external review finding on
+/// this PR, #5720-class).
 fn roster_key_to_probe_scope(key: &RosterKey) -> TurnScope {
     // `from_trusted` bypasses `validate_scope_id` — safe here because this
     // is a fixed literal, never caller-supplied, and never persisted or
     // resolved against a real thread (recovery only lists/closes edges by
     // scope axes). Avoids `.expect()` on a "known-valid" literal per repo
     // style (no unwrap/expect in production code).
-    TurnScope::new(
+    let owner = if key.user_id.as_str() == ironclaw_host_api::SYSTEM_RESERVED_ID {
+        None
+    } else {
+        Some(key.user_id.clone())
+    };
+    TurnScope::new_with_owner(
         key.tenant_id.clone(),
         key.agent_id.clone(),
         key.project_id.clone(),
         ironclaw_host_api::ThreadId::from_trusted("await-edge-recovery-probe".to_string()),
+        owner,
     )
 }
 
@@ -219,6 +232,32 @@ where
     /// [`run_boot_recovery`] rather than constructing a second `Semaphore`.
     pub fn semaphore(&self) -> Arc<Semaphore> {
         Arc::clone(&self.semaphore)
+    }
+}
+
+/// RAII release of one `in_progress` claim, so a panic anywhere in the
+/// spawned lazy-recovery task (most notably inside `recover_scope`) still
+/// unblocks the scope for a future admission attempt instead of wedging it
+/// shut forever. Hand-rolled rather than pulling in `scopeguard` — the whole
+/// type is this one field plus a three-line `Drop` impl.
+struct InProgressReleaseGuard {
+    in_progress: Arc<Mutex<HashSet<String>>>,
+    key: String,
+}
+
+impl InProgressReleaseGuard {
+    fn new(in_progress: Arc<Mutex<HashSet<String>>>, key: String) -> Self {
+        Self { in_progress, key }
+    }
+}
+
+impl Drop for InProgressReleaseGuard {
+    fn drop(&mut self) {
+        let mut in_progress = self
+            .in_progress
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        in_progress.remove(&self.key);
     }
 }
 
@@ -292,9 +331,17 @@ where
         let scope = scope.clone();
         let key = key.clone();
         tokio::spawn(async move {
+            // Panic-safety (external review finding on this PR): a panic
+            // inside `recover_scope` must still release the `in_progress`
+            // claim, or the scope is wedged shut (never admitted again)
+            // until process restart. The guard is constructed before the
+            // permit/recovery work so it covers the whole task, and only
+            // releases `in_progress` — `booted` is intentionally left alone
+            // here, since wedging admission *open* on panic (retry from
+            // scratch next touch) is safer than wedging it permanently shut.
+            let _release_guard = InProgressReleaseGuard::new(Arc::clone(&in_progress), key.clone());
             let _permit = semaphore.acquire().await;
             let _ = recover_scope(&resolver, &store, &scope).await;
-            Self::lock_set(&in_progress).remove(&key);
             Self::lock_set(&booted).insert(key);
         });
         Err(ScopeRecoveryInProgress {
@@ -323,12 +370,18 @@ where
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use ironclaw_filesystem::{
+        CasExpectation, DirEntry, Entry, FileStat, FilesystemError, InMemoryBackend, RecordVersion,
+        ScopedFilesystem, VersionedEntry,
+    };
     use ironclaw_host_api::{
         MountAlias, MountGrant, MountPermissions, MountView, TenantId, UserId, VirtualPath,
     };
     use ironclaw_threads::{InMemorySessionThreadService, ThreadScope};
     use ironclaw_turns::TurnSpawnTreeStateStore;
+    use tokio::sync::Notify;
 
     use super::*;
 
@@ -345,6 +398,207 @@ mod tests {
                 "not exercised by shared-semaphore tests",
             ))
         }
+    }
+
+    // External review finding on this PR (#5720-class): a roster key
+    // carrying a real, non-system owner must probe a scope with that same
+    // explicit owner, not silently fall back to `ActorFallback` (which
+    // resolves to the system mount, not the owner's) — otherwise boot
+    // recovery would list zero unclosed edges for every multi-user scope.
+    // Mutation: revert `roster_key_to_probe_scope` to `TurnScope::new(...)`
+    // -> RED (`explicit_owner_user_id()` becomes `None` for a real owner).
+    #[test]
+    fn roster_key_to_probe_scope_preserves_explicit_owner() {
+        let key = RosterKey {
+            tenant_id: TenantId::new("probe-tenant").unwrap(),
+            user_id: UserId::new("probe-owner").unwrap(),
+            agent_id: None,
+            project_id: None,
+        };
+        let scope = roster_key_to_probe_scope(&key);
+        assert_eq!(
+            scope.explicit_owner_user_id(),
+            Some(&UserId::new("probe-owner").unwrap()),
+            "probe scope must carry the roster key's owner explicitly"
+        );
+        assert_eq!(
+            scope.to_resource_scope().user_id,
+            UserId::new("probe-owner").unwrap(),
+            "reverse mapping must round-trip through to_resource_scope's forward mapping"
+        );
+    }
+
+    // The system-sentinel roster key (agent-scoped / ownerless edges) must
+    // probe with `ActorFallback`, not an explicit "owner" of the system
+    // sentinel string — mirrors `to_resource_scope`'s forward direction where
+    // an absent explicit owner is *encoded* as the sentinel.
+    #[test]
+    fn roster_key_to_probe_scope_maps_system_sentinel_to_actor_fallback() {
+        let key = RosterKey {
+            tenant_id: TenantId::new("probe-tenant").unwrap(),
+            user_id: UserId::from_trusted(ironclaw_host_api::SYSTEM_RESERVED_ID.to_string()),
+            agent_id: None,
+            project_id: None,
+        };
+        let scope = roster_key_to_probe_scope(&key);
+        assert_eq!(scope.explicit_owner_user_id(), None);
+    }
+
+    /// Wraps an `InMemoryBackend`, counting every `list_dir` call and — on
+    /// the very first call only — holding it open behind a `Notify` gate
+    /// until the test explicitly releases it, so a second concurrent caller
+    /// can be raced against the first while it is provably still in flight.
+    /// Same delegating-decorator shape as
+    /// `ironclaw_authorization`'s `CountingFilesystem` test helper
+    /// (`capability_lease_contract.rs`), adapted to add the gate.
+    struct GatedCountingBackend {
+        inner: InMemoryBackend,
+        list_dir_calls: Arc<AtomicUsize>,
+        gate_armed: AtomicBool,
+        entered: Notify,
+        release: Notify,
+    }
+
+    impl GatedCountingBackend {
+        fn new(inner: InMemoryBackend) -> Self {
+            Self {
+                inner,
+                list_dir_calls: Arc::new(AtomicUsize::new(0)),
+                gate_armed: AtomicBool::new(true),
+                entered: Notify::new(),
+                release: Notify::new(),
+            }
+        }
+
+        fn list_dir_calls(&self) -> usize {
+            self.list_dir_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RootFilesystem for GatedCountingBackend {
+        async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+            self.list_dir_calls.fetch_add(1, Ordering::SeqCst);
+            if self.gate_armed.swap(false, Ordering::SeqCst) {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            self.inner.list_dir(path).await
+        }
+
+        async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+            self.inner.stat(path).await
+        }
+
+        async fn put(
+            &self,
+            path: &VirtualPath,
+            entry: Entry,
+            cas: CasExpectation,
+        ) -> Result<RecordVersion, FilesystemError> {
+            self.inner.put(path, entry, cas).await
+        }
+
+        async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+            self.inner.get(path).await
+        }
+
+        async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+            self.inner.delete(path).await
+        }
+
+        async fn delete_if_version(
+            &self,
+            path: &VirtualPath,
+            expected_version: RecordVersion,
+        ) -> Result<(), FilesystemError> {
+            self.inner.delete_if_version(path, expected_version).await
+        }
+    }
+
+    // External review finding on this PR: `check_scope_recovered`'s claim
+    // (the sync `in_progress` insert) must happen *before* the async
+    // `list_unclosed_for_scope` call, not after — otherwise two concurrent
+    // first-touches for the same never-seen scope would both pass the
+    // claim check while the first is still awaiting its list call, and both
+    // redundantly run it. Proven here by gating the backend's first
+    // `list_dir` call open and racing a second `check_scope_recovered` call
+    // against it while it is provably still in flight.
+    // Mutation: swap the two blocks in `check_scope_recovered` (list before
+    // claim) -> RED (`list_dir_calls()` observes 2, and/or B is wrongly
+    // admitted instead of rejected).
+    #[tokio::test]
+    async fn check_scope_recovered_claims_before_listing_so_two_concurrent_first_touches_list_exactly_once()
+     {
+        let backend = Arc::new(GatedCountingBackend::new(InMemoryBackend::new()));
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/turns").unwrap(),
+            VirtualPath::new("/turns").unwrap(),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .unwrap();
+        let fs = Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::clone(&backend),
+            mounts,
+        ));
+        let store = Arc::new(FilesystemAwaitEdgeStore::new(Arc::clone(&fs)));
+        let goal_store: Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore> =
+            Arc::new(crate::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new());
+        let turn_state_store: Arc<dyn TurnSpawnTreeStateStore> =
+            Arc::new(ironclaw_turns::InMemoryTurnStateStore::default());
+        let result_writer: Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter> =
+            Arc::new(NoopResultWriter);
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        let resolver = Arc::new(AwaitEdgeResolver::new_unbound(
+            Arc::clone(&store),
+            goal_store,
+            turn_state_store,
+            result_writer,
+            thread_service,
+        ));
+        let driver = Arc::new(ScopeRecoveryDriver::new(resolver, store));
+
+        let scope = TurnScope::new(
+            TenantId::new("concurrent-first-touch-tenant").unwrap(),
+            None,
+            None,
+            ironclaw_host_api::ThreadId::from_trusted("concurrent-first-touch-thread".to_string()),
+        );
+
+        let driver_a = Arc::clone(&driver);
+        let scope_a = scope.clone();
+        let mut task_a =
+            tokio::spawn(async move { driver_a.check_scope_recovered(&scope_a).await });
+
+        // Wait until A's list call is actually in flight before racing B
+        // against it -- not a fixed sleep.
+        backend.entered.notified().await;
+
+        let result_b = driver.check_scope_recovered(&scope).await;
+        assert!(
+            result_b.is_err(),
+            "a concurrent first-touch for the same never-seen scope must be rejected \
+             while A's claim is live, not independently re-list"
+        );
+        assert_eq!(
+            backend.list_dir_calls(),
+            1,
+            "claim must be staked before the async list call so a second concurrent \
+             caller never reaches it"
+        );
+
+        backend.release.notify_one();
+
+        let result_a = tokio::time::timeout(Duration::from_secs(5), &mut task_a)
+            .await
+            .expect("task a should not hang")
+            .expect("task a should not panic");
+        assert!(
+            result_a.is_ok(),
+            "the sole caller that actually listed sees no unclosed edges on a \
+             never-touched scope and must be admitted"
+        );
+        assert_eq!(backend.list_dir_calls(), 1);
     }
 
     fn boot_sem_scoped_fs() -> Arc<ScopedFilesystem<InMemoryBackend>> {
@@ -719,6 +973,44 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    // External review finding on this PR: a panic inside the lazy-recovery
+    // task (most likely `recover_scope`) must not leave the scope's
+    // `in_progress` claim set forever -- that would wedge the scope shut,
+    // rejecting every future admission attempt until process restart.
+    // Exercises `InProgressReleaseGuard` directly (not the full spawned-task
+    // path, which needs cooperative-scheduling yields to observe a
+    // backgrounded panic and would be flaky under `#[tokio::test]`'s
+    // current-thread runtime) -- this still pins the exact defect: the guard
+    // must release the claim across an unwind, not just on a normal return.
+    // Mutation: delete the `Drop` impl's body (or skip constructing the
+    // guard) -> RED (`in_progress` still contains the key after the panic).
+    #[test]
+    fn in_progress_release_guard_releases_the_claim_across_a_panic_unwind() {
+        let in_progress: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        in_progress
+            .lock()
+            .unwrap()
+            .insert("panic-guard-scope-key".to_string());
+
+        let guard_in_progress = Arc::clone(&in_progress);
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = InProgressReleaseGuard::new(
+                Arc::clone(&guard_in_progress),
+                "panic-guard-scope-key".to_string(),
+            );
+            panic!("simulated recover_scope crash");
+        }));
+        assert!(unwound.is_err(), "the closure should have panicked");
+        assert!(
+            !in_progress
+                .lock()
+                .unwrap()
+                .contains("panic-guard-scope-key"),
+            "the in_progress claim must be released even when the recovery task \
+             panics, or the scope is wedged shut until process restart"
         );
     }
 }
