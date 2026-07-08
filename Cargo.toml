@@ -510,6 +510,10 @@ name = "reborn_integration_process_port"
 path = "tests/integration/process_port.rs"
 
 [[test]]
+name = "reborn_integration_prompt_context_budget"
+path = "tests/integration/prompt_context_budget.rs"
+
+[[test]]
 name = "reborn_integration_profile"
 path = "tests/integration/profile.rs"
 

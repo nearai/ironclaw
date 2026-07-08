@@ -92,7 +92,7 @@ use ironclaw_resources::{
 use ironclaw_threads::SessionThreadService;
 use ironclaw_turns::run_profile::{
     CommunicationContextProvider, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
-    ModelProfileId,
+    ModelProfileId, PromptContextTokenBudget,
 };
 use ironclaw_turns::{
     FilesystemTurnStateStore, InMemoryCheckpointStateStore, InMemoryTurnEventSink,
@@ -345,6 +345,7 @@ impl RebornIntegrationGroup {
         RebornIntegrationGroupBuilder {
             storage: StorageMode::InMemory,
             safety_context: None,
+            prompt_context_budget: None,
             turn_event_sink: None,
             trace_capture: false,
             tool_disclosure: None,
@@ -514,6 +515,11 @@ impl GroupBaseData {
 pub struct RebornIntegrationGroupBuilder {
     storage: StorageMode,
     safety_context: Option<InstructionSafetyContext>,
+    /// Prompt-window override wired through production's
+    /// `DefaultPlannedRuntimeParts::prompt_context_budget` into
+    /// `RebornLoopDriverHostFactory`; default `None` preserves the lower-port
+    /// `PromptContextTokenBudget::default()` behavior.
+    prompt_context_budget: Option<PromptContextTokenBudget>,
     /// C-TRACECAP seam: `Some` once `.with_turn_event_sink()` has been called.
     turn_event_sink: Option<Arc<InMemoryTurnEventSink>>,
     /// Enabler (c): `true` once `.with_trace_capture()` has been called —
@@ -830,6 +836,7 @@ impl RebornIntegrationGroupBuilder {
             // by `reborn_integration_cancel`). Supplying one here would only add
             // the product-live wake-notifier fan-out, unexercised by this test.
             cancellation_factory: None,
+            prompt_context_budget: self.prompt_context_budget,
             // E-SKILL: wire the local-dev skill context source so an activated
             // skill's instructions inject into the model request. `Some` only for
             // `skill_activation_tools()` harnesses; `None` for every other backend,

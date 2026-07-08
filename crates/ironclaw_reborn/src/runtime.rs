@@ -26,7 +26,7 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, CommunicationContextProvider, InstructionSafetyContext,
         LoopCapabilityPort, LoopHostMilestoneSink, LoopModelBudgetAccountant, LoopModelPolicyGuard,
-        LoopRunContext,
+        LoopRunContext, PromptContextTokenBudget,
     },
     runner::TurnRunTransitionPort,
 };
@@ -300,6 +300,7 @@ where
     pub model_route_resolver: Option<Arc<dyn ModelRouteResolver>>,
     pub cancellation_factory: Option<Arc<dyn RunCancellationFactory>>,
     pub skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
+    pub prompt_context_budget: Option<PromptContextTokenBudget>,
     /// Reads landed attachment bytes so the model port can build multimodal
     /// image parts for vision-capable models. Genuinely optional, not a
     /// fail-closed gap: a reader can only exist where a local runtime composed a
@@ -767,6 +768,9 @@ where
     }
     if let Some(source) = parts.skill_context_source {
         host_factory = host_factory.with_skill_context_source(source);
+    }
+    if let Some(budget) = parts.prompt_context_budget {
+        host_factory = host_factory.with_prompt_context_token_budget(budget);
     }
     if let Some(queue) = parts.input_queue {
         host_factory = host_factory.with_input_queue(queue);

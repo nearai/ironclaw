@@ -74,9 +74,10 @@ use ironclaw_turns::{
         LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
         LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopRunInfoPort,
         LoopRuntimeContext, LoopTranscriptPort, NoOpBudgetAccountant, NoOpPolicyGuard,
-        ProviderToolCall, ProviderToolDefinition, RegisterProviderToolCallRequest,
-        RunScopedHookMilestoneSink, StageCheckpointPayloadRequest, SystemInferencePort,
-        UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        PromptContextTokenBudget, ProviderToolCall, ProviderToolDefinition,
+        RegisterProviderToolCallRequest, RunScopedHookMilestoneSink, StageCheckpointPayloadRequest,
+        SystemInferencePort, UpdateAssistantDraft, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
     runner::ClaimedTurnRun,
 };
@@ -914,6 +915,7 @@ where
     cancellation_factory: Arc<dyn RunCancellationFactory>,
     config: TextOnlyLoopHostConfig,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
+    prompt_context_budget: Option<PromptContextTokenBudget>,
     attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
     /// Optional hook dispatcher factory. When set, the factory invokes the
     /// closure on every `build_text_only_host*` call to obtain a fresh
@@ -1023,6 +1025,7 @@ where
             cancellation_factory,
             config,
             skill_context_source: None,
+            prompt_context_budget: None,
             attachment_read_port: None,
             hook_dispatcher_factory: None,
             hook_dispatcher_builder_factory: None,
@@ -1110,6 +1113,11 @@ where
 
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
         self.skill_context_source = Some(source);
+        self
+    }
+
+    pub fn with_prompt_context_token_budget(mut self, budget: PromptContextTokenBudget) -> Self {
+        self.prompt_context_budget = Some(budget);
         self
     }
 
@@ -1446,6 +1454,9 @@ where
         }
         if let Some(source) = self.identity_context_source.as_ref() {
             context_adapter = context_adapter.with_identity_context_source(source.clone());
+        }
+        if let Some(budget) = self.prompt_context_budget {
+            context_adapter = context_adapter.with_prompt_context_token_budget(budget);
         }
         context_adapter = context_adapter.with_milestone_sink(Arc::clone(&self.milestone_sink));
         let context: Arc<dyn LoopContextPort> = Arc::new(context_adapter);

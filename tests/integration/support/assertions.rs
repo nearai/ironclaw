@@ -251,6 +251,45 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Assert that the latest model request this thread sent to the scripted
+    /// provider contains `needle`. Multi-turn transcript-window tests need this
+    /// narrower scope because older requests legitimately contain older turns.
+    pub async fn assert_last_model_request_contains(&self, needle: &str) -> HarnessResult<()> {
+        let requests = self.scripted_llm.captured_requests();
+        let Some(messages) = requests.last() else {
+            return Err("no captured model requests".into());
+        };
+        let rendered = serde_json::to_string(messages)
+            .map_err(|e| format!("serialize captured model request: {e}"))?;
+        if rendered.contains(needle) {
+            return Ok(());
+        }
+        Err(format!(
+            "latest model request did not contain {needle:?}; captured {} request(s)",
+            requests.len()
+        )
+        .into())
+    }
+
+    /// Inverse of [`assert_last_model_request_contains`]. Errors when there is
+    /// no request so a missing model call cannot masquerade as absence.
+    pub async fn assert_last_model_request_not_contains(&self, needle: &str) -> HarnessResult<()> {
+        let requests = self.scripted_llm.captured_requests();
+        let Some(messages) = requests.last() else {
+            return Err("no captured model requests".into());
+        };
+        let rendered = serde_json::to_string(messages)
+            .map_err(|e| format!("serialize captured model request: {e}"))?;
+        if rendered.contains(needle) {
+            return Err(format!(
+                "latest model request unexpectedly contained {needle:?}; captured {} request(s)",
+                requests.len()
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     /// Assert some SINGLE model request contains EVERY needle in `needles`
     /// (all in one request, not spread across several) — the multi-turn "sees
     /// prior context" proof: an earlier-turn needle plus a current-turn needle

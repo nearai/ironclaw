@@ -1346,6 +1346,7 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
         model_route_resolver: Some(adapters.model_route_resolver),
         cancellation_factory: Some(adapters.cancellation_factory),
         skill_context_source: None,
+        prompt_context_budget: None,
         input_queue: Some(adapters.input_queue),
         identity_context_source: adapters.identity_context_source,
         user_profile_source: Arc::new(EmptyUserProfileSource),

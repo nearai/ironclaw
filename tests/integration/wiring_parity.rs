@@ -59,12 +59,13 @@ use reborn_support::planned_runtime_parts_shape::DefaultPlannedRuntimePartsShape
 /// below for the exact code path.
 const EXPECTED_PRODUCTION_SHAPE: DefaultPlannedRuntimePartsShape =
     DefaultPlannedRuntimePartsShape {
-        model_route_resolver: false, // :3406 hardcoded None
-        cancellation_factory: false, // :3407 hardcoded None
-        skill_context_source: true,  // :2917-2929 local_dev_filesystem_skill_context_source
-        attachment_read_port: true,  // :3372-3376 local_runtime.map(ProjectScopedAttachmentReader)
-        input_queue: false,          // hardcoded None
-        model_policy_guard: false,   // hardcoded None
+        model_route_resolver: false,  // :3406 hardcoded None
+        cancellation_factory: false,  // :3407 hardcoded None
+        skill_context_source: true,   // :2917-2929 local_dev_filesystem_skill_context_source
+        prompt_context_budget: false, // default path: no override, lower ports use Default
+        attachment_read_port: true,   // :3372-3376 local_runtime.map(ProjectScopedAttachmentReader)
+        input_queue: false,           // hardcoded None
+        model_policy_guard: false,    // hardcoded None
         // :3027-3073 — scope: this constant models the NO-LLM local-dev
         // shape. When `model_gateway_override` is set (the harness's
         // scripted `TraceLlm` path, and any test build), `llm_cost_table` is
