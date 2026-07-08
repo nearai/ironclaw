@@ -311,6 +311,9 @@ SEL_V2 = {
     "settings_tool_row_for": (
         "[data-testid='settings-tool-row'][data-tool-name='{name}']"
     ),
+    "settings_tool_permission": (
+        "[data-testid='settings-tool-permission-select'] button[aria-haspopup='listbox']"
+    ),
     "settings_tool_lock": "[data-testid='settings-tool-lock']",
     "llm_provider_card_for": (
         "[data-testid='llm-provider-card'][data-provider-id='{provider_id}']"

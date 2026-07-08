@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::slack_setup::{SlackInstallationSetup, SlackSetupError, SlackSetupService};
+use crate::slack::slack_setup::{SlackInstallationSetup, SlackSetupError, SlackSetupService};
 
 mod allowed;
 mod setup;
@@ -1054,7 +1054,7 @@ mod tests {
     use ironclaw_secrets::InMemorySecretStore;
     use tower::ServiceExt;
 
-    use crate::slack_setup::SlackInstallationSetupStore;
+    use crate::slack::slack_setup::SlackInstallationSetupStore;
 
     use super::*;
 

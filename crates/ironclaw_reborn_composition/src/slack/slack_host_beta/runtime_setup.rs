@@ -20,31 +20,33 @@ use crate::extension_host::extension_lifecycle::{
 };
 use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
 use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
-use crate::slack_actor_identity::{RebornUserIdentityLookup, SlackUserIdentityActorResolver};
-use crate::slack_channel_routes::{
+use crate::slack::slack_actor_identity::{
+    RebornUserIdentityLookup, SlackUserIdentityActorResolver,
+};
+use crate::slack::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteAssignment, SlackChannelRouteError,
     SlackChannelRouteStore, SlackChannelRouteSubjectResolver, SlackChannelSetupActivation,
     SlackChannelSetupActivationError,
 };
-use crate::slack_delivery::{PostSubmitDeliveryHook, TriggeredRunDeliveryDriver};
-use crate::slack_host_state::FilesystemSlackHostState;
-use crate::slack_outbound_targets::{
+use crate::slack::slack_delivery::{PostSubmitDeliveryHook, TriggeredRunDeliveryDriver};
+use crate::slack::slack_host_state::FilesystemSlackHostState;
+use crate::slack::slack_outbound_targets::{
     SlackHostBetaOutboundTargetProvider, SlackOutboundTargetProviderConfig, SlackPersonalDmTarget,
     SlackPersonalDmTargetError, SlackPersonalDmTargetProvisioner, SlackPersonalDmTargetStore,
 };
-use crate::slack_personal_binding::{
+use crate::slack::slack_personal_binding::{
     RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
     RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
     SlackPersonalBindingInstallation, SlackPersonalBindingPrincipal, SlackPersonalUserBinder,
     SlackPersonalUserBindingError, SlackPersonalUserBindingRequest,
     SlackPersonalUserBindingService,
 };
-use crate::slack_serve::{
+use crate::slack::slack_serve::{
     ResolvedSlackIngress, SlackEventsRouteState, SlackIngressError, SlackInstallationResolver,
     SlackInstallationSelector, SlackTeamId, SlackUserId, StaticSlackInstallationResolver,
     slack_events_route_mount,
 };
-use crate::slack_setup::{
+use crate::slack::slack_setup::{
     SlackInstallationSetup, SlackInstallationSetupStore, SlackInstallationSetupUpdate,
     SlackSetupService,
 };
@@ -366,7 +368,7 @@ async fn seed_legacy_slack_setup(
 
 fn map_legacy_setup_error(
     field: &'static str,
-) -> impl FnOnce(crate::slack_setup::SlackSetupError) -> SlackHostBetaBuildError {
+) -> impl FnOnce(crate::slack::slack_setup::SlackSetupError) -> SlackHostBetaBuildError {
     move |error| SlackHostBetaBuildError::InvalidConfig {
         field,
         reason: error.to_string(),
@@ -637,7 +639,7 @@ impl DynamicSlackInstallationResolver {
             .map_err(map_build_error_to_ingress_not_found(
                 "build Slack setup config",
             ))?;
-        let identity_lookup: Arc<dyn crate::slack_actor_identity::RebornUserIdentityLookup> =
+        let identity_lookup: Arc<dyn crate::slack::slack_actor_identity::RebornUserIdentityLookup> =
             self.state.clone();
         let actor_user_resolver = Arc::new(SlackHostBetaActorUserResolver::new(Arc::new(
             SlackUserIdentityActorResolver::new(Arc::clone(&identity_lookup)),
@@ -932,8 +934,10 @@ fn slack_dynamic_target_unavailable() -> RebornServicesError {
 async fn slack_host_beta_config_from_setup(
     setup_service: &SlackSetupService,
     setup: SlackInstallationSetup,
-) -> Result<Result<SlackHostBetaConfig, SlackHostBetaBuildError>, crate::slack_setup::SlackSetupError>
-{
+) -> Result<
+    Result<SlackHostBetaConfig, SlackHostBetaBuildError>,
+    crate::slack::slack_setup::SlackSetupError,
+> {
     let user_id = setup.user_id()?;
     let shared_subject_user_id = setup.shared_subject_user_id()?;
     let signing_secret = setup_service.signing_secret(&setup).await?;
@@ -958,7 +962,7 @@ async fn slack_host_beta_config_from_setup(
 
 fn map_setup_error_to_ingress_not_found(
     context: &'static str,
-) -> impl FnOnce(crate::slack_setup::SlackSetupError) -> SlackIngressError {
+) -> impl FnOnce(crate::slack::slack_setup::SlackSetupError) -> SlackIngressError {
     move |error| {
         tracing::debug!(%error, context, "Slack setup unavailable for dynamic ingress");
         SlackIngressError::InstallationNotFound
@@ -976,7 +980,7 @@ fn map_build_error_to_ingress_not_found(
 
 fn map_setup_error_to_dynamic_target_unavailable(
     context: &'static str,
-) -> impl FnOnce(crate::slack_setup::SlackSetupError) -> RebornServicesError {
+) -> impl FnOnce(crate::slack::slack_setup::SlackSetupError) -> RebornServicesError {
     move |error| {
         tracing::debug!(
             %error,
@@ -997,7 +1001,7 @@ mod tests {
     use tokio::sync::RwLock;
 
     use super::*;
-    use crate::slack_channel_routes::{
+    use crate::slack::slack_channel_routes::{
         SlackChannelRoute, SlackChannelRouteKey, SlackChannelRouteListPage,
     };
     use crate::{SlackHostBetaChannelRoute, SlackHostBetaLegacySetup};
@@ -1184,21 +1188,22 @@ mod tests {
     impl SlackInstallationSetupStore for InMemorySetupStore {
         async fn get_slack_installation_setup(
             &self,
-        ) -> Result<Option<SlackInstallationSetup>, crate::slack_setup::SlackSetupError> {
+        ) -> Result<Option<SlackInstallationSetup>, crate::slack::slack_setup::SlackSetupError>
+        {
             Ok(self.setup.read().await.clone())
         }
 
         async fn put_slack_installation_setup(
             &self,
             setup: &SlackInstallationSetup,
-        ) -> Result<(), crate::slack_setup::SlackSetupError> {
+        ) -> Result<(), crate::slack::slack_setup::SlackSetupError> {
             self.put(setup.clone()).await;
             Ok(())
         }
 
         async fn delete_slack_installation_setup(
             &self,
-        ) -> Result<(), crate::slack_setup::SlackSetupError> {
+        ) -> Result<(), crate::slack::slack_setup::SlackSetupError> {
             *self.setup.write().await = None;
             Ok(())
         }

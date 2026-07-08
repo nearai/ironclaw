@@ -193,6 +193,21 @@ def _tool_row(page, name: str):
     return page.locator(SEL_V2["settings_tool_row_for"].format(name=name))
 
 
+def _permission_button(page, name: str):
+    return _tool_row(page, name).locator(SEL_V2["settings_tool_permission"])
+
+
+async def _choose_permission(page, name: str, label: str):
+    button = _permission_button(page, name)
+    await button.click()
+    listbox_id = await button.get_attribute("aria-controls")
+    assert listbox_id
+    listbox = page.locator(f"#{listbox_id}")
+    await expect(listbox).to_be_visible(timeout=5000)
+    await listbox.get_by_role("option", name=label).click()
+    return button
+
+
 @pytest.fixture
 def reborn_approval_artifact_cleanup():
     yield
@@ -274,17 +289,20 @@ async def test_reborn_legacy_tool_permissions_tab_visible(
         await harness["context"].close()
 
 
-async def test_reborn_legacy_tool_permission_select_persists_after_reload(
+async def test_reborn_legacy_tool_permission_menu_persists_after_reload(
     reborn_v2_server, reborn_v2_browser
 ):
     harness = await _open_mocked_tools_page(reborn_v2_server, reborn_v2_browser)
     try:
         page = harness["page"]
-        select = page.get_by_label("Permission for echo")
-        await expect(select).to_have_value("always_allow", timeout=5000)
+        row = _tool_row(page, "echo")
+        await expect(row.locator("select")).to_have_count(0)
 
-        await select.select_option("ask_each_time")
-        await expect(select).to_have_value("ask_each_time")
+        button = _permission_button(page, "echo")
+        await expect(button).to_contain_text("Always allow", timeout=5000)
+
+        await _choose_permission(page, "echo", "Ask each time")
+        await expect(button).to_contain_text("Ask each time")
         await expect(_tool_row(page, "echo").get_by_text("saved")).to_be_visible(timeout=5000)
         assert harness["permission_requests"][-1] == {
             "name": "echo",
@@ -295,13 +313,13 @@ async def test_reborn_legacy_tool_permission_select_persists_after_reload(
         await expect(
             page.get_by_placeholder(SEL_V2["settings_search_placeholder"])
         ).to_be_visible(timeout=15000)
-        await expect(page.get_by_label("Permission for echo")).to_have_value(
-            "ask_each_time",
+        await expect(_permission_button(page, "echo")).to_contain_text(
+            "Ask each time",
             timeout=5000,
         )
 
-        await page.get_by_label("Permission for echo").select_option("default")
-        await expect(page.get_by_label("Permission for echo")).to_have_value("default")
+        await _choose_permission(page, "echo", "Follow global")
+        await expect(_permission_button(page, "echo")).to_contain_text("Follow global")
         assert harness["permission_requests"][-1] == {
             "name": "echo",
             "body": {"state": "default"},
@@ -320,16 +338,16 @@ async def test_reborn_legacy_tool_permission_save_failure_shows_error(
     )
     try:
         page = harness["page"]
-        select = page.get_by_label("Permission for echo")
-        await expect(select).to_have_value("always_allow", timeout=5000)
+        button = _permission_button(page, "echo")
+        await expect(button).to_contain_text("Always allow", timeout=5000)
 
-        await select.select_option("ask_each_time")
+        await _choose_permission(page, "echo", "Ask each time")
 
         await expect(page.get_by_role("alert")).to_contain_text(
             "Save failed: Permission denied",
             timeout=5000,
         )
-        await expect(select).to_have_value("always_allow", timeout=5000)
+        await expect(button).to_contain_text("Always allow", timeout=5000)
         assert harness["permission_requests"][-1] == {
             "name": "echo",
             "body": {"state": "ask_each_time"},
@@ -347,9 +365,8 @@ async def test_reborn_legacy_locked_tool_shows_badge_without_select(
         locked = _tool_row(page, "tool.financial")
         await expect(locked).to_be_visible(timeout=5000)
         await expect(locked.locator(SEL_V2["settings_tool_lock"])).to_be_visible()
-        await expect(
-            locked.get_by_label("Permission for tool.financial")
-        ).to_have_count(0)
+        await expect(locked.locator(SEL_V2["settings_tool_permission"])).to_have_count(0)
+        await expect(locked.locator("select")).to_have_count(0)
         await expect(locked.get_by_text("Ask each time")).to_be_visible()
     finally:
         await harness["context"].close()

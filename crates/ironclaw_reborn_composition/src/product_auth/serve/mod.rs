@@ -67,9 +67,9 @@ use uuid::Uuid;
 
 use crate::product_auth::api::auth::{RebornDcrOAuthStartFlowRequest, RebornOAuthStartFlowRequest};
 #[cfg(feature = "slack-v2-host-beta")]
-use crate::slack_host_beta::SlackPersonalConnectionScopeResolver;
+use crate::slack::slack_host_beta::SlackPersonalConnectionScopeResolver;
 #[cfg(feature = "slack-v2-host-beta")]
-use crate::slack_personal_binding::{
+use crate::slack::slack_personal_binding::{
     RebornUserIdentityBindingDeleteStore, SlackPersonalUserBinder,
 };
 use crate::{
@@ -172,7 +172,7 @@ pub(crate) struct ProductAuthRouteState {
     default_project_id: Option<ProjectId>,
     google_oauth: Option<GoogleOAuthRouteConfig>,
     #[cfg(feature = "slack-v2-host-beta")]
-    slack_personal_oauth: Option<crate::slack_setup::SlackPersonalSetupServiceSlot>,
+    slack_personal_oauth: Option<crate::slack::slack_setup::SlackPersonalSetupServiceSlot>,
     #[cfg(feature = "slack-v2-host-beta")]
     slack_personal_oauth_binding: Option<SlackPersonalOAuthBindingConfig>,
     // First-slice WebUI OAuth stores the raw PKCE verifier process-locally
@@ -220,7 +220,7 @@ impl ProductAuthRouteState {
     #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) fn with_slack_personal_oauth(
         mut self,
-        slot: crate::slack_setup::SlackPersonalSetupServiceSlot,
+        slot: crate::slack::slack_setup::SlackPersonalSetupServiceSlot,
     ) -> Self {
         self.slack_personal_oauth = Some(slot);
         self

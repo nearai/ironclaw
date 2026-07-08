@@ -158,10 +158,15 @@ function roleForRecord(record) {
 }
 
 function timestampForRecord(record) {
-  // ThreadMessageRecord has no top-level timestamp; surfaces use
-  // the sequence ordering for now. Browsers render the wall-clock
-  // when an event arrives (FinalReplyView.generated_at).
-  return record.received_at || record.created_at || null;
+  // Prefer durable server-side timestamps from the timeline. For finalized
+  // rows, `updated_at` captures the durable receive/finalization time shown in
+  // chat history.
+  if (record.received_at) return record.received_at;
+  const status = record.status || "";
+  if (status === "finalized") {
+    return record.updated_at || record.created_at || null;
+  }
+  return record.created_at || record.updated_at || null;
 }
 
 function toolCardFromPreviewRecord(record) {

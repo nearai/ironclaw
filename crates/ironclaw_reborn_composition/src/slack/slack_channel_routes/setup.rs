@@ -11,7 +11,7 @@ use ironclaw_product_workflow::WebUiAuthenticatedCaller;
 use secrecy::SecretString;
 use serde::Deserialize;
 
-use crate::slack_setup::{SlackInstallationSetupStatus, SlackInstallationSetupUpdate};
+use crate::slack::slack_setup::{SlackInstallationSetupStatus, SlackInstallationSetupUpdate};
 
 use super::{
     SLACK_CHANNEL_ROUTES_BODY_LIMIT_BYTES, SlackChannelRouteAdminRouteConfig, SlackRouteError,

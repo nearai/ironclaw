@@ -11,11 +11,11 @@ use crate::product_auth::api::auth::OAuthProviderIdentityCheck;
 use crate::product_auth::api::auth::OAuthProviderIdentityCheckFuture;
 use crate::product_auth::oauth::oauth_dcr::DcrOAuthCallbackState;
 #[cfg(feature = "slack-v2-host-beta")]
-use crate::slack_personal_binding::{
+use crate::slack::slack_personal_binding::{
     SlackPersonalBindingPrincipal, SlackPersonalUserBindingError, SlackPersonalUserBindingRequest,
 };
 #[cfg(feature = "slack-v2-host-beta")]
-use crate::slack_serve::{SlackApiAppId, SlackEnterpriseId, SlackTeamId, SlackUserId};
+use crate::slack::slack_serve::{SlackApiAppId, SlackEnterpriseId, SlackTeamId, SlackUserId};
 #[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_auth::OAuthProviderIdentity;
 
@@ -902,10 +902,11 @@ async fn bind_slack_personal_oauth_identity_for_callback(
 
     // Computed before the request takes ownership of the installation id so
     // the rollback can target exactly the binding this callback writes.
-    let bound_provider_user_id = crate::slack_actor_identity::slack_user_identity_provider_user_id(
-        &connection_scope.installation_id,
-        identity.subject.as_str(),
-    );
+    let bound_provider_user_id =
+        crate::slack::slack_actor_identity::slack_user_identity_provider_user_id(
+            &connection_scope.installation_id,
+            identity.subject.as_str(),
+        );
     config
         .binding_service
         .bind_personal_user(
@@ -933,7 +934,7 @@ async fn bind_slack_personal_oauth_identity_for_callback(
         // credential", which Disconnect already repairs.
         if let Err(error) = rollback_store
             .delete_user_identity_bindings_for_user(
-                crate::slack_actor_identity::SLACK_IDENTITY_PROVIDER,
+                crate::slack::slack_actor_identity::SLACK_IDENTITY_PROVIDER,
                 &rollback_user_id,
                 Some(bound_provider_user_id.as_str()),
             )
@@ -1289,18 +1290,18 @@ mod tests {
     };
 
     #[cfg(feature = "slack-v2-host-beta")]
-    use crate::slack_host_beta::{
+    use crate::slack::slack_host_beta::{
         SlackPersonalConnectionScope, StaticSlackPersonalConnectionScopeResolver,
     };
     #[cfg(feature = "slack-v2-host-beta")]
-    use crate::slack_personal_binding::{
+    use crate::slack::slack_personal_binding::{
         RebornUserIdentityBinding, RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
         SlackPersonalBindingInstallation, SlackPersonalUserBindingService,
     };
     #[cfg(feature = "slack-v2-host-beta")]
-    use crate::slack_serve::{SlackInstallationSelector, SlackTeamId};
+    use crate::slack::slack_serve::{SlackInstallationSelector, SlackTeamId};
     #[cfg(feature = "slack-v2-host-beta")]
-    use crate::slack_setup::{
+    use crate::slack::slack_setup::{
         SlackInstallationSetup, SlackInstallationSetupStore, SlackInstallationSetupUpdate,
         SlackPersonalSetupServiceSlot, SlackSetupError, SlackSetupService,
     };
@@ -2307,7 +2308,9 @@ mod tests {
 
     #[cfg(feature = "slack-v2-host-beta")]
     #[async_trait]
-    impl crate::slack_personal_binding::RebornUserIdentityBindingDeleteStore for RecordingBindingStore {
+    impl crate::slack::slack_personal_binding::RebornUserIdentityBindingDeleteStore
+        for RecordingBindingStore
+    {
         async fn delete_user_identity_bindings_for_user(
             &self,
             provider: &str,

@@ -3990,7 +3990,8 @@ struct RebornProductionBuildContext {
     oauth_provider_configs: Vec<crate::input::OAuthProviderBackendConfig>,
     oauth_dcr_provider_configs: Vec<crate::input::OAuthDcrProviderBackendConfig>,
     #[cfg(feature = "slack-v2-host-beta")]
-    slack_personal_oauth_lazy_slot: Option<crate::slack_setup::SlackPersonalSetupServiceSlot>,
+    slack_personal_oauth_lazy_slot:
+        Option<crate::slack::slack_setup::SlackPersonalSetupServiceSlot>,
     owner_id: String,
     local_runtime_identity: Option<RebornLocalRuntimeIdentity>,
     turn_state_store_limits: ironclaw_turns::InMemoryTurnStateStoreLimits,

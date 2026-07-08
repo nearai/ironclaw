@@ -6607,6 +6607,7 @@ fn map_timeline_probe_error(error: SessionThreadError) -> RebornServicesError {
     match error {
         SessionThreadError::Serialization(_)
         | SessionThreadError::Deserialization(_)
+        | SessionThreadError::InvalidMessageTimestamp { .. }
         | SessionThreadError::Backend(_) => RebornServicesError::from_status_kind(
             RebornServicesErrorCode::Unavailable,
             RebornServicesErrorKind::TimelineUnavailable,
@@ -6647,6 +6648,7 @@ fn map_thread_error(error: SessionThreadError) -> RebornServicesError {
         SessionThreadError::GeneratedThreadId(_)
         | SessionThreadError::Serialization(_)
         | SessionThreadError::Deserialization(_)
+        | SessionThreadError::InvalidMessageTimestamp { .. }
         | SessionThreadError::Backend(_) => RebornServicesError::service_unavailable(true),
     }
 }
