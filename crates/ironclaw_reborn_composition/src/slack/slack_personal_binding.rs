@@ -71,6 +71,8 @@ pub struct RebornUserIdentityBinding {
 pub enum RebornUserIdentityBindingError {
     #[error("reborn user identity binding backend unavailable: {0}")]
     Backend(String),
+    #[error("provider identity is already bound to a different reborn user")]
+    ProviderIdentityAlreadyBound,
     #[error("invalid reborn user identity {field}: {reason}")]
     InvalidIdentityField {
         field: &'static str,
