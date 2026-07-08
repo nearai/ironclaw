@@ -2,10 +2,12 @@ name: Nightly Watchdog
 
 # Dead-man's switch for Nightly Deep CI. The in-run nightly-alert job cannot
 # report a startup_failure — a run that fails workflow validation executes
-# zero jobs, alert included — which is how the deep tier went dark silently
-# (startup_failure every night from 2026-06-20 to 2026-07-08). This watchdog
-# inspects the latest scheduled Nightly Deep CI run from OUTSIDE that run and
-# drives the same alert issue via .github/scripts/nightly-alert-issue.sh.
+# zero jobs, alert included — which is how the deep tier stayed dark from its
+# creation (2026-05-06) through 2026-07-08 without a single successful run:
+# nightly startup_failures with zero jobs, invisible from inside. This
+# watchdog inspects the latest scheduled Nightly Deep CI run from OUTSIDE
+# that run and drives the same alert issue via
+# .github/scripts/nightly-alert-issue.sh.
 #
 # It alarms when the latest scheduled run is missing, older than 26 hours
 # (cron never fired), or concluded anything other than success. On success it

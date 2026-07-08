@@ -68,12 +68,13 @@ configuration:
   `workflow_call`.
 - **A called workflow that references `secrets.*` needs `secrets: inherit` at
   the call site.** Otherwise the entire caller run dies at trigger time as a
-  `startup_failure` with zero jobs — including any in-run alert job. This
-  killed Nightly Deep CI silently from 2026-06-20 to 2026-07-08.
-  `nightly-watchdog.yml` (08:00 UTC) exists for exactly that failure mode: it
-  checks the latest scheduled nightly run from outside and raises/updates the
-  "Nightly Deep CI failed" issue even when the nightly run itself never
-  started.
+  `startup_failure` with zero jobs — including any in-run alert job. Nightly
+  Deep CI had zero successful runs from its creation (2026-05-06) through
+  2026-07-08 — 65 of its 74 retained runs are startup_failures — precisely
+  because this failure mode is invisible from inside the run.
+  `nightly-watchdog.yml` (08:00 UTC) exists for exactly that: it checks the
+  latest scheduled nightly run from outside and raises/updates the "Nightly
+  Deep CI failed" issue even when the nightly run itself never started.
 
 ## Known accepted gaps (deliberate, revisit as needed)
 

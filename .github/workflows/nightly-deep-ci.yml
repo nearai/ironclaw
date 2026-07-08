@@ -51,6 +51,16 @@ jobs:
   platform-and-compat:
     name: Platform & Compat
     uses: ./.github/workflows/platform-and-compat.yml
+    # The called workflow's version-check job declares job-level
+    # `pull-requests: read` + `issues: read`. A called workflow may not
+    # request more than the caller grants, and that is validated at trigger
+    # time even though the job itself is event-gated off schedule runs — the
+    # caller must grant the superset or the whole run is a startup_failure
+    # with zero jobs.
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
     secrets: inherit
     with:
       ref: ${{ github.sha }}
@@ -59,11 +69,19 @@ jobs:
   reborn-tests:
     name: Reborn Tests
     uses: ./.github/workflows/reborn-tests.yml
-    # reborn-tests.yml references secrets.SCCACHE_* for the sccache-dist
-    # setup. A called workflow that references secrets the caller does not
-    # pass fails validation at trigger time — the whole nightly run becomes a
-    # startup_failure with zero jobs (including nightly-alert, which is why
-    # the breakage was silent from 2026-06-20 to 2026-07-08).
+    # Two call-contract requirements, both validated at trigger time; a
+    # violation turns the whole nightly run into a startup_failure with ZERO
+    # jobs — including nightly-alert, so nothing reports it. This workflow
+    # had no successful run from its creation (2026-05-06) through 2026-07-08
+    # (65 of 74 retained runs are startup_failures) because of stacked
+    # violations of exactly these rules:
+    # 1. The called workflow's coverage-report job declares job-level
+    #    `pull-requests: write`; the caller must grant it.
+    # 2. reborn-tests.yml references secrets.SCCACHE_*; the caller must pass
+    #    secrets (`secrets: inherit`).
+    permissions:
+      contents: read
+      pull-requests: write
     secrets: inherit
     with:
       ref: ${{ github.sha }}
