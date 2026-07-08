@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::PathBuf,
     process::Command,
 };
@@ -39,6 +39,132 @@ fn reborn_boundary_rules_active_crates_are_workspace_members() {
             manifest.display()
         );
     }
+}
+
+#[test]
+fn reborn_workspace_crates_declare_layers_and_follow_layer_matrix() {
+    let metadata = cargo_metadata();
+    let packages = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata must include packages");
+
+    let mut layers = BTreeMap::new();
+    for package in packages {
+        let Some(name) = package["name"].as_str() else {
+            continue;
+        };
+        if !is_ironclaw_workspace_package(name) {
+            continue;
+        }
+
+        let manifest_path = package["manifest_path"]
+            .as_str()
+            .unwrap_or("<unknown manifest>");
+        let layer = package_layer(package).unwrap_or_else(|| {
+            panic!(
+                "{name} at {manifest_path} must declare \
+                 [package.metadata.ironclaw] layer = \"...\""
+            )
+        });
+        assert!(
+            IRONCLAW_CRATE_LAYERS.contains(&layer),
+            "{name} declares unknown IronClaw layer `{layer}`; valid layers are {IRONCLAW_CRATE_LAYERS:?}"
+        );
+        layers.insert(name.to_string(), layer.to_string());
+    }
+
+    let mut used_exceptions = BTreeSet::new();
+    let mut violations = Vec::new();
+    for package in packages {
+        let Some(crate_name) = package["name"].as_str() else {
+            continue;
+        };
+        let Some(crate_layer) = layers.get(crate_name) else {
+            continue;
+        };
+        for dependency in
+            workspace_dependency_names(package).filter(|dep| is_normal_dependency(dep))
+        {
+            let Some(dependency_name) = dependency["name"].as_str() else {
+                continue;
+            };
+            let Some(dependency_layer) = layers.get(dependency_name) else {
+                continue;
+            };
+            if !layer_allows_dependency(crate_layer, dependency_layer) {
+                if let Some(exception) = layer_matrix_exception(crate_name, dependency_name) {
+                    used_exceptions.insert((exception.crate_name, exception.dependency_name));
+                    continue;
+                }
+                violations.push(format!(
+                    "{crate_name} ({crate_layer}) must not depend on \
+                     {dependency_name} ({dependency_layer})"
+                ));
+            }
+            if crate_name == "ironclaw_agent_loop" && *dependency_layer != "contracts" {
+                if let Some(exception) = layer_matrix_exception(crate_name, dependency_name) {
+                    used_exceptions.insert((exception.crate_name, exception.dependency_name));
+                    continue;
+                }
+                violations.push(format!(
+                    "ironclaw_agent_loop userland rule allows only contracts-layer normal \
+                     dependencies, but it depends on {dependency_name} ({dependency_layer})"
+                ));
+            }
+        }
+
+        for dependency in workspace_dependency_names(package) {
+            let Some(dependency_name) = dependency["name"].as_str() else {
+                continue;
+            };
+            let Some(dependency_layer) = layers.get(dependency_name) else {
+                continue;
+            };
+            if dependency_layer == "legacy" && crate_name != "ironclaw" {
+                if let Some(exception) = layer_matrix_exception(crate_name, dependency_name) {
+                    used_exceptions.insert((exception.crate_name, exception.dependency_name));
+                    continue;
+                }
+                let kind = dependency
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or("normal");
+                violations.push(format!(
+                    "{crate_name} ({crate_layer}) must not depend on legacy crate \
+                     {dependency_name} via a {kind} dependency"
+                ));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "IronClaw crate layer matrix violations:\n{}",
+        violations.join("\n")
+    );
+
+    let stale_exceptions = LAYER_MATRIX_EXCEPTIONS
+        .iter()
+        .filter(|exception| {
+            !used_exceptions.contains(&(exception.crate_name, exception.dependency_name))
+        })
+        .map(|exception| {
+            format!(
+                "{} -> {} from {} should be removed in {}: {}",
+                exception.crate_name,
+                exception.dependency_name,
+                exception.introduced,
+                exception.removes_in,
+                exception.reason
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        stale_exceptions.is_empty(),
+        "Stale IronClaw crate layer matrix exceptions:\n{}",
+        stale_exceptions.join("\n")
+    );
 }
 
 #[test]
@@ -2940,6 +3066,260 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
     ]
+}
+
+const IRONCLAW_CRATE_LAYERS: [&str; 8] = [
+    "contracts",
+    "substrates",
+    "runtimes",
+    "kernel",
+    "loops",
+    "products",
+    "app",
+    "legacy",
+];
+
+struct LayerMatrixException {
+    crate_name: &'static str,
+    dependency_name: &'static str,
+    introduced: &'static str,
+    removes_in: &'static str,
+    reason: &'static str,
+}
+
+const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
+    LayerMatrixException {
+        crate_name: "ironclaw_host_runtime",
+        dependency_name: "ironclaw_extensions",
+        introduced: "2026-07-09",
+        removes_in: "W7",
+        reason: "host_runtime still owns extension-hosting wiring until kernel consolidation moves only the execution perimeter into kernel",
+    },
+    LayerMatrixException {
+        crate_name: "ironclaw_host_runtime",
+        dependency_name: "ironclaw_first_party_extensions",
+        introduced: "2026-07-09",
+        removes_in: "W7",
+        reason: "host_runtime still owns first-party extension activation wiring until kernel consolidation separates host policy from loop/product concerns",
+    },
+    LayerMatrixException {
+        crate_name: "ironclaw_host_runtime",
+        dependency_name: "ironclaw_product_adapter_registry",
+        introduced: "2026-07-09",
+        removes_in: "W3",
+        reason: "the active product-adapter registry path is still wired through host_runtime until product eviction settles the adapter boundary",
+    },
+    LayerMatrixException {
+        crate_name: "ironclaw_host_runtime",
+        dependency_name: "ironclaw_skills",
+        introduced: "2026-07-09",
+        removes_in: "W5",
+        reason: "host_runtime still wires skill host behavior that should move behind the loop-host boundary",
+    },
+    LayerMatrixException {
+        crate_name: "ironclaw_capabilities",
+        dependency_name: "ironclaw_extensions",
+        introduced: "2026-07-09",
+        removes_in: "W7",
+        reason: "capability hosting still reaches the extension surface until the kernel perimeter is consolidated",
+    },
+    LayerMatrixException {
+        crate_name: "ironclaw_processes",
+        dependency_name: "ironclaw_resources",
+        introduced: "2026-07-09",
+        removes_in: "W7",
+        reason: "runtime process management still depends on resource contracts currently classed with kernel behavior",
+    },
+    LayerMatrixException {
+        crate_name: "ironclaw_dispatcher",
+        dependency_name: "ironclaw_extensions",
+        introduced: "2026-07-09",
+        removes_in: "W7",
+        reason: "dispatcher still reaches extension routing until the kernel consolidation makes dispatcher an internal kernel module",
+    },
+    LayerMatrixException {
+        crate_name: "ironclaw_event_projections",
+        dependency_name: "ironclaw_turns",
+        introduced: "2026-07-09",
+        removes_in: "W4.3",
+        reason: "projection state reads turn DTOs that move to turn_contracts if the JIT split fires",
+    },
+    LayerMatrixException {
+        crate_name: "ironclaw_triggers",
+        dependency_name: "ironclaw_turns",
+        introduced: "2026-07-09",
+        removes_in: "W4.3",
+        reason: "trigger state reads turn DTOs that move to turn_contracts if the JIT split fires",
+    },
+    LayerMatrixException {
+        crate_name: "ironclaw_conversations",
+        dependency_name: "ironclaw_turns",
+        introduced: "2026-07-09",
+        removes_in: "W4.3",
+        reason: "conversation ingress still names turn DTOs that move to turn_contracts if the JIT split fires",
+    },
+    LayerMatrixException {
+        crate_name: "ironclaw_product_context",
+        dependency_name: "ironclaw_turns",
+        introduced: "2026-07-09",
+        removes_in: "W4.3",
+        reason: "product context still names turn DTOs that move to turn_contracts if the JIT split fires",
+    },
+    LayerMatrixException {
+        crate_name: "ironclaw_hooks",
+        dependency_name: "ironclaw_turns",
+        introduced: "2026-07-09",
+        removes_in: "W4.3",
+        reason: "hook payloads still name turn DTOs that move to turn_contracts if the JIT split fires",
+    },
+    LayerMatrixException {
+        crate_name: "ironclaw_hooks",
+        dependency_name: "ironclaw_wasm_limiter",
+        introduced: "2026-07-09",
+        removes_in: "W6",
+        reason: "hooks still reuse the WASM limiter crate before the directory re-layout verifies runtime/substrate placement",
+    },
+    LayerMatrixException {
+        crate_name: "ironclaw_outbound",
+        dependency_name: "ironclaw_turns",
+        introduced: "2026-07-09",
+        removes_in: "W4.3",
+        reason: "outbound delivery still names turn DTOs that move to turn_contracts if the JIT split fires",
+    },
+    LayerMatrixException {
+        crate_name: "ironclaw_event_streams",
+        dependency_name: "ironclaw_turns",
+        introduced: "2026-07-09",
+        removes_in: "W4.3",
+        reason: "event stream contracts still name turn DTOs that move to turn_contracts if the JIT split fires",
+    },
+    LayerMatrixException {
+        crate_name: "ironclaw_agent_loop",
+        dependency_name: "ironclaw_observability",
+        introduced: "2026-07-09",
+        removes_in: "W5",
+        reason: "agent_loop still emits shared observability events directly until the loop boundary decision defines the userland telemetry port",
+    },
+    LayerMatrixException {
+        crate_name: "ironclaw_agent_loop",
+        dependency_name: "ironclaw_turns",
+        introduced: "2026-07-09",
+        removes_in: "W4.3",
+        reason: "agent_loop still names turn DTOs directly until the turn_contracts JIT split moves the type surface to contracts",
+    },
+    LayerMatrixException {
+        crate_name: "ironclaw_mcp",
+        dependency_name: "ironclaw_extensions",
+        introduced: "2026-07-09",
+        removes_in: "W5",
+        reason: "MCP runtime support still exposes extension-host wiring that should move behind the loop-host boundary",
+    },
+    LayerMatrixException {
+        crate_name: "ironclaw_mcp",
+        dependency_name: "ironclaw_resources",
+        introduced: "2026-07-09",
+        removes_in: "W7",
+        reason: "MCP runtime support still depends on resource contracts currently classed with kernel behavior",
+    },
+    LayerMatrixException {
+        crate_name: "ironclaw_scripts",
+        dependency_name: "ironclaw_extensions",
+        introduced: "2026-07-09",
+        removes_in: "W5",
+        reason: "script runtime support still exposes extension-host wiring that should move behind the loop-host boundary",
+    },
+    LayerMatrixException {
+        crate_name: "ironclaw_scripts",
+        dependency_name: "ironclaw_resources",
+        introduced: "2026-07-09",
+        removes_in: "W7",
+        reason: "script runtime support still depends on resource contracts currently classed with kernel behavior",
+    },
+    LayerMatrixException {
+        crate_name: "ironclaw_reborn",
+        dependency_name: "ironclaw_agent_loop",
+        introduced: "2026-07-09",
+        removes_in: "W4/W5",
+        reason: "the runner still directly hosts loop-userland contracts until the loop boundary decision is executed",
+    },
+    LayerMatrixException {
+        crate_name: "ironclaw_reborn",
+        dependency_name: "ironclaw_loop_support",
+        introduced: "2026-07-09",
+        removes_in: "W4/W5",
+        reason: "the runner still directly hosts loop support until scheduler co-location and the loop boundary decision settle the edge",
+    },
+    LayerMatrixException {
+        crate_name: "ironclaw_wasm_product_adapters",
+        dependency_name: "ironclaw_product_adapters",
+        introduced: "2026-07-09",
+        removes_in: "W3",
+        reason: "WASM product adapter hosting still depends on product adapter vocabulary until product/runtime adapter ownership is settled",
+    },
+    LayerMatrixException {
+        crate_name: "ironclaw_reborn_webui_ingress",
+        dependency_name: "ironclaw_reborn_composition",
+        introduced: "2026-07-09",
+        removes_in: "W3.6",
+        reason: "webui ingress still reaches composition until the composition webui module is folded into ingress and runtime handles are inverted",
+    },
+    LayerMatrixException {
+        crate_name: "ironclaw_reborn_migration",
+        dependency_name: "ironclaw",
+        introduced: "2026-07-09",
+        removes_in: "Tier B",
+        reason: "the migration app intentionally reads v1 state until the legacy root is retired",
+    },
+];
+
+fn layer_matrix_exception(
+    crate_name: &str,
+    dependency_name: &str,
+) -> Option<&'static LayerMatrixException> {
+    LAYER_MATRIX_EXCEPTIONS.iter().find(|exception| {
+        exception.crate_name == crate_name && exception.dependency_name == dependency_name
+    })
+}
+
+fn package_layer(package: &Value) -> Option<&str> {
+    package
+        .get("metadata")?
+        .get("ironclaw")?
+        .get("layer")?
+        .as_str()
+}
+
+fn is_ironclaw_workspace_package(name: &str) -> bool {
+    name == "ironclaw" || name.starts_with("ironclaw_")
+}
+
+fn layer_allows_dependency(crate_layer: &str, dependency_layer: &str) -> bool {
+    match crate_layer {
+        "contracts" => matches!(dependency_layer, "contracts"),
+        "substrates" => matches!(dependency_layer, "contracts" | "substrates"),
+        "runtimes" => matches!(dependency_layer, "contracts" | "substrates" | "runtimes"),
+        "kernel" => matches!(
+            dependency_layer,
+            "contracts" | "substrates" | "runtimes" | "kernel"
+        ),
+        "loops" => matches!(
+            dependency_layer,
+            "contracts" | "substrates" | "runtimes" | "kernel" | "loops"
+        ),
+        "products" => matches!(
+            dependency_layer,
+            "contracts" | "substrates" | "runtimes" | "kernel" | "loops" | "products"
+        ),
+        "app" => matches!(
+            dependency_layer,
+            "contracts" | "substrates" | "runtimes" | "kernel" | "loops" | "products" | "app"
+        ),
+        // The v1 package/crates may still depend on Reborn while parity work
+        // is in flight, but Reborn layers are intentionally not allowed to
+        // depend back on legacy.
+        "legacy" => true,
+        _ => false,
+    }
 }
 
 fn cargo_metadata() -> Value {
