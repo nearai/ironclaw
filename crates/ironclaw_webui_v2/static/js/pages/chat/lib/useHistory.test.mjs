@@ -611,6 +611,61 @@ test("mergeFullRefresh carries live assistant timestamps onto confirmed replies"
   assert.equal(merged[0].timestamp, "2026-06-25T07:18:00.000Z");
 });
 
+test("mergeFullRefresh preserves live assistant text before same-run activity", () => {
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { mergeFullRefresh } = context.globalThis.__testExports;
+
+  const merged = mergeFullRefresh(
+    [
+      {
+        id: "msg-user-1",
+        role: "user",
+        turnRunId: "run-1",
+      },
+      {
+        id: "tool-web-search",
+        role: "tool_activity",
+        toolName: "web_search",
+        turnRunId: "run-1",
+      },
+      {
+        id: "msg-assistant-1",
+        role: "assistant",
+        content: "PRETOOL text and final answer.",
+        isFinalReply: true,
+        turnRunId: "run-1",
+      },
+    ],
+    [
+      {
+        id: "msg-user-1",
+        role: "user",
+        turnRunId: "run-1",
+      },
+      {
+        id: "text-text:run-1",
+        role: "assistant",
+        content: "PRETOOL text",
+        isFinalReply: false,
+        turnRunId: "run-1",
+      },
+      {
+        id: "tool-web-search",
+        role: "tool_activity",
+        toolName: "web_search",
+        turnRunId: "run-1",
+      },
+    ],
+  );
+
+  assert.equal(
+    merged.map((message) => message.id).join(","),
+    "msg-user-1,msg-assistant-1,tool-web-search",
+  );
+  assert.equal(merged[1].keepFollowingActivityAfter, true);
+});
+
 test("mergeFullRefresh uses run-settled time for confirmed assistant replies", () => {
   const context = { globalThis: {}, React: createReactStub() };
   vm.runInNewContext(useHistorySourceForTest(), context);

@@ -214,7 +214,7 @@ test("groupMessages: delayed same-run activity moves before its final reply", ()
   );
 });
 
-test("groupMessages: delayed same-run activity moves before streaming assistant text", () => {
+test("groupMessages: same-run activity does not jump above streaming assistant text", () => {
   const grouped = groupMessages([
     { id: "u1", role: "user", content: "what is GPT-5.6?", turnRunId: "run-1" },
     {
@@ -235,10 +235,40 @@ test("groupMessages: delayed same-run activity moves before streaming assistant 
   assert.equal(grouped.length, 3);
   assert.deepEqual(
     grouped.map((item) => item.type === "activity-run" ? item.id : item.message.id),
-    ["u1", "activity-run-tool-web-search", "text-text:run-1"],
+    ["u1", "text-text:run-1", "activity-run-tool-web-search"],
   );
   assert.deepEqual(
-    grouped[1].activity.map((item) => item.id),
+    grouped[2].activity.map((item) => item.id),
+    ["tool-web-search"],
+  );
+});
+
+test("groupMessages: final reply can preserve live position before following activity", () => {
+  const grouped = groupMessages([
+    { id: "u1", role: "user", content: "what is GPT-5.6?", turnRunId: "run-1" },
+    {
+      id: "msg-final",
+      role: "assistant",
+      content: "PRETOOL text.",
+      isFinalReply: true,
+      keepFollowingActivityAfter: true,
+      turnRunId: "run-1",
+    },
+    {
+      id: "tool-web-search",
+      role: "tool_activity",
+      toolName: "web_search",
+      turnRunId: "run-1",
+    },
+  ]);
+
+  assert.equal(grouped.length, 3);
+  assert.deepEqual(
+    grouped.map((item) => item.type === "activity-run" ? item.id : item.message.id),
+    ["u1", "msg-final", "activity-run-tool-web-search"],
+  );
+  assert.deepEqual(
+    grouped[2].activity.map((item) => item.id),
     ["tool-web-search"],
   );
 });

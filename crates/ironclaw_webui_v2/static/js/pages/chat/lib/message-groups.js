@@ -1,7 +1,9 @@
 /* Collapse ordered reasoning/tool events into one activity run. If delayed
-   same-run activity arrives after an assistant answer boundary, render that
-   activity before the answer so the answer still closes its turn, including
-   when a later user follow-up has already been appended. */
+   same-run activity arrives after a final assistant answer boundary, render
+   that activity before the answer so the answer still closes its turn,
+   including when a later user follow-up has already been appended. Streaming
+   assistant text stays where it first appeared so tool cards do not jump above
+   already-visible text. */
 export function groupMessages(messages) {
   const orderedMessages = moveDelayedActivityBeforeAssistantReply(messages);
   const items = [];
@@ -9,7 +11,7 @@ export function groupMessages(messages) {
   for (let index = 0; index < orderedMessages.length; index += 1) {
     const msg = orderedMessages[index];
 
-    if (isFinalAssistantReply(msg)) {
+    if (isFinalAssistantReply(msg) && !msg.keepFollowingActivityAfter) {
       const activity = followingActivity(orderedMessages, index + 1);
       const boundary = orderedMessages[index + 1 + activity.length];
       if (activity.length > 0 && (!boundary || boundary.role === "user")) {
@@ -113,17 +115,7 @@ function isFinalAssistantReply(msg) {
 }
 
 function isAssistantReplyBoundary(msg) {
-  return isFinalAssistantReply(msg) || isStreamingAssistantReply(msg);
-}
-
-function isStreamingAssistantReply(msg) {
-  return (
-    msg.role === "assistant" &&
-    !hasToolCalls(msg) &&
-    msg.isFinalReply === false &&
-    typeof msg.id === "string" &&
-    msg.id.startsWith("text-text:")
-  );
+  return isFinalAssistantReply(msg) && !msg.keepFollowingActivityAfter;
 }
 
 function isActivity(msg) {
