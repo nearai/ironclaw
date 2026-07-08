@@ -192,7 +192,12 @@ async fn slack_pairing_redeem_rejects_unknown_code() {
     );
 }
 
-#[tokio::test(start_paused = true)]
+// NOT `start_paused`: the store's expiry check compares against the WALL clock
+// (`slack_host_state.rs`: `record.expires_at > Utc::now()`), so a paused-tokio
+// virtual sleep advances no wall time and the code only "expires" if the runner
+// happens to burn >1ms of real time between issue and redeem — a coin flip that
+// failed consistently on fast CI runners. The sleep must be real.
+#[tokio::test]
 async fn slack_pairing_redeem_rejects_expired_code() {
     let root = tempfile::tempdir().expect("tempdir");
     let db_path = root.path().join("slack-host-state.db");
