@@ -279,15 +279,14 @@ mod tests {
         let message_bubble = source_text("pages/chat/components/message-bubble.ts");
         assert!(message_bubble.contains("group flex w-full min-w-0 flex-col"));
         assert!(message_bubble.contains("const bubbleWidthClass = isUser"));
+        assert!(message_bubble.contains("const isNotice = role === \"system\";"));
+        assert!(message_bubble.contains("const isError = role === \"error\";"));
         assert!(message_bubble.contains("\"v2-chat-readable-width\""));
         assert!(message_bubble.contains("\"mx-auto v2-chat-readable-width\""));
+        assert!(message_bubble.contains("\"mr-auto v2-chat-readable-width\""));
         assert!(message_bubble.contains("\"w-full v2-chat-readable-width\""));
         assert!(!message_bubble.contains("sm:max-w-["));
-        assert!(
-            message_bubble.contains(
-                "const contentWidthClass = isUser ? \"min-w-0 max-w-full\" : \"w-full min-w-0 max-w-full\";"
-            )
-        );
+        assert!(message_bubble.contains("isUser || isError ? \"min-w-0 max-w-full\""));
         assert!(message_bubble.contains("contentWidthClass,"));
     }
 
