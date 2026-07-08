@@ -242,16 +242,19 @@ impl TurnRunnerSettings {
         self
     }
 
-    pub fn set_worker_count(mut self, worker_count: std::num::NonZeroUsize) -> Self {
-        self.worker_count = Some(worker_count);
+    pub fn set_worker_count(
+        mut self,
+        worker_count: impl Into<Option<std::num::NonZeroUsize>>,
+    ) -> Self {
+        self.worker_count = worker_count.into();
         self
     }
 
     pub fn set_max_concurrent_runs_per_user(
         mut self,
-        max_concurrent_runs_per_user: std::num::NonZeroU32,
+        max_concurrent_runs_per_user: impl Into<Option<std::num::NonZeroU32>>,
     ) -> Self {
-        self.max_concurrent_runs_per_user = Some(max_concurrent_runs_per_user);
+        self.max_concurrent_runs_per_user = max_concurrent_runs_per_user.into();
         self
     }
 }

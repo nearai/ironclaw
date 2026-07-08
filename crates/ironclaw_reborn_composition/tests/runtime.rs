@@ -507,7 +507,7 @@ async fn build_reborn_runtime_wires_per_user_cap_from_turn_runner_settings() {
     .with_runner_settings(
         TurnRunnerSettings::default()
             // Cap = 1 per user. Verifies this value flows from settings → store limits.
-            .set_max_concurrent_runs_per_user(NonZeroU32::new(1).unwrap())
+            .set_max_concurrent_runs_per_user(NonZeroU32::new(1))
             .set_heartbeat_interval(Duration::from_millis(25))
             .set_poll_interval(Duration::from_millis(10)),
     );
@@ -582,7 +582,7 @@ async fn multi_worker_runtime_does_not_raise_worker_stopped_while_workers_are_al
         TurnRunnerSettings::default()
             // Explicitly set 2 workers — ensures the guard uses .all() semantics
             // and does not fire when only a subset of workers have finished.
-            .set_worker_count(NonZeroUsize::new(2).unwrap())
+            .set_worker_count(NonZeroUsize::new(2))
             .set_heartbeat_interval(Duration::from_millis(25))
             .set_poll_interval(Duration::from_secs(60)),
     );

@@ -4664,8 +4664,8 @@ mod tests {
         CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
         ExecutionContext, ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant,
         MountPermissions, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Principal,
-        ResourceEstimate, ResourceScope, RuntimeKind, ScopedPath, SecretHandle, TenantId,
-        TrustClass, UserId, VirtualPath,
+        ResourceEstimate, ResourceScope, ResourceUsage, RuntimeKind, ScopedPath, SecretHandle,
+        TenantId, TrustClass, UserId, VirtualPath,
     };
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     use ironclaw_host_api::{
