@@ -522,6 +522,7 @@ enum CallbackScopeResolution {
     /// The provider does not echo granted scopes on the redirect; submit the
     /// requested scopes from the encoded state directly (Slack personal — the
     /// granted scopes arrive later in the token response under `authed_user`).
+    #[cfg(feature = "slack-v2-host-beta")]
     RequestedOnly,
 }
 
@@ -577,6 +578,7 @@ fn resolve_callback_scopes(
     query_scopes: Option<&str>,
 ) -> Result<CallbackScopeOutcome, ProductAuthRouteFailure> {
     match resolution {
+        #[cfg(feature = "slack-v2-host-beta")]
         CallbackScopeResolution::RequestedOnly => {
             Ok(CallbackScopeOutcome::Scopes(requested_scopes.to_vec()))
         }

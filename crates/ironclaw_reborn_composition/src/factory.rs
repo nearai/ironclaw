@@ -4192,6 +4192,7 @@ where
 enum FilesystemProductionEventStoresInput {
     #[cfg(feature = "libsql")]
     Config(ironclaw_reborn_event_store::RebornEventStoreConfig),
+    #[cfg(feature = "postgres")]
     Prebuilt(ironclaw_reborn_event_store::RebornEventStores),
 }
 
@@ -4284,6 +4285,7 @@ where
                 )
                 .await?
         }
+        #[cfg(feature = "postgres")]
         FilesystemProductionEventStoresInput::Prebuilt(stores) => {
             services.with_production_reborn_event_stores(stores)
         }
