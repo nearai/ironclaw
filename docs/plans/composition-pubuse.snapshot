@@ -2,7 +2,7 @@ pub use product_auth::api::auth_prompt::{
     AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller,
 };
 pub use admin_token::AdminApiTokenMinter;
-pub use automation::RebornAutomationProductFacade;
+pub use automation::facade::RebornAutomationProductFacade;
 pub use error::RebornBuildError;
 pub use extension_host::extension_lifecycle_command::{
     RebornExtensionLifecycleCommand, RebornExtensionLifecycleCommandError,
