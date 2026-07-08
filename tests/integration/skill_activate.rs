@@ -127,55 +127,63 @@ async fn skill_criteria_auto_activation_stays_off_on_coordinator_path() {
 /// error. An oversized system skill (~10k tokens, over
 /// `DEFAULT_MAX_SKILL_CONTEXT_TOKENS = 4000`) drives the real selection path
 /// (`reserve_skill_budget` → `ContextBudgetExceeded` → `Failed`).
-#[tokio::test]
-async fn skill_activate_over_budget_surfaces_recoverable_failed() {
-    let group = RebornIntegrationGroup::skill_activation_tools()
-        .await
-        .expect("skill-activation group builds");
-    let capability_harness = group
-        .capability_harness()
-        .expect("skill-activation group has a host-runtime capability harness");
-    let oversized_prompt = "BLOAT_SKILL_FILLER ".repeat(2200); // ~41.8k chars ≈ 10k tokens > 4000 budget
-    capability_harness
-        .seed_system_skill_for_test("bloat", "an oversized skill", &oversized_prompt)
-        .expect("oversized system skill seeds");
+#[test]
+fn skill_activate_over_budget_surfaces_recoverable_failed() {
+    run_async_test_with_stack(
+        "skill_activate_over_budget_surfaces_recoverable_failed",
+        || async {
+            let group = RebornIntegrationGroup::skill_activation_tools()
+                .await
+                .expect("skill-activation group builds");
+            let capability_harness = group
+                .capability_harness()
+                .expect("skill-activation group has a host-runtime capability harness");
+            let oversized_prompt = "BLOAT_SKILL_FILLER ".repeat(2200); // ~41.8k chars ≈ 10k tokens > 4000 budget
+            capability_harness
+                .seed_system_skill_for_test("bloat", "an oversized skill", &oversized_prompt)
+                .expect("oversized system skill seeds");
 
-    let harness = group
-        .thread("conv-skill-activate-over-budget")
-        .script([
-            RebornScriptedReply::tool_call("builtin.skill_activate", json!({"names": ["bloat"]})),
-            RebornScriptedReply::text("could not activate"),
-        ])
-        .build()
-        .await
-        .expect("thread builds");
+            let harness = group
+                .thread("conv-skill-activate-over-budget")
+                .script([
+                    RebornScriptedReply::tool_call(
+                        "builtin.skill_activate",
+                        json!({"names": ["bloat"]}),
+                    ),
+                    RebornScriptedReply::text("could not activate"),
+                ])
+                .build()
+                .await
+                .expect("thread builds");
 
-    harness
-        .submit_turn("activate the big one")
-        .await
-        .expect("turn completes despite the failed activation");
+            harness
+                .submit_turn("activate the big one")
+                .await
+                .expect("turn completes despite the failed activation");
 
-    // Model-visible Failed, not a terminal driver_unavailable.
-    harness
-        .assert_tool_error(ToolErrorClass::Failed, "skill context budget")
-        .await
-        .expect("over-budget activation surfaced as a recoverable Failed tool error");
-    harness
-        .assert_reply_contains("could not activate")
-        .await
-        .expect("run recovered and finalized");
-    // Specific error check (not generic `is_err()`): `assert_model_request_contains`
-    // has a second, unrelated `Err` path (JSON serialization failure of the
-    // captured request) — asserting the exact "not found" message text rules
-    // that out, so an infra-level failure can't masquerade as proof the
-    // skill's instructions were absent.
-    let err = harness
-        .assert_model_request_contains("BLOAT_SKILL_FILLER")
-        .await
-        .expect_err("a failed activation must not inject the skill's instructions");
-    assert!(
-        err.to_string().starts_with("no model request contained"),
-        "expected the intended \"not found\" assertion failure, got a different harness error: {err}"
+            // Model-visible Failed, not a terminal driver_unavailable.
+            harness
+                .assert_tool_error(ToolErrorClass::Failed, "skill context budget")
+                .await
+                .expect("over-budget activation surfaced as a recoverable Failed tool error");
+            harness
+                .assert_reply_contains("could not activate")
+                .await
+                .expect("run recovered and finalized");
+            // Specific error check (not generic `is_err()`): `assert_model_request_contains`
+            // has a second, unrelated `Err` path (JSON serialization failure of the
+            // captured request) — asserting the exact "not found" message text rules
+            // that out, so an infra-level failure can't masquerade as proof the
+            // skill's instructions were absent.
+            let err = harness
+                .assert_model_request_contains("BLOAT_SKILL_FILLER")
+                .await
+                .expect_err("a failed activation must not inject the skill's instructions");
+            assert!(
+                err.to_string().starts_with("no model request contained"),
+                "expected the intended \"not found\" assertion failure, got a different harness error: {err}"
+            );
+        },
     );
 }
 
