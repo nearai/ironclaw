@@ -35,7 +35,7 @@ use ironclaw_product_workflow::{
 use ironclaw_reborn_config::{LlmSlotSelection, RebornBootConfig};
 use secrecy::{ExposeSecret as _, SecretString};
 
-use crate::llm_catalog::{apply_stored_api_key, resolve_against_registry};
+use crate::llm_admin::llm_catalog::{apply_stored_api_key, resolve_against_registry};
 use crate::{LlmKeyStore, ProviderRepo, RebornProviderAdmin};
 
 const NEARAI_LOGIN_STATE_TTL: Duration = Duration::from_secs(15 * 60);
@@ -1927,16 +1927,17 @@ mod tests {
         let reborn_home = temp.path().join("reborn-home");
         let boot = boot_for_home(&reborn_home);
 
-        crate::provider_admin::RebornProviderAdmin::new(boot.clone())
+        crate::llm_admin::provider_admin::RebornProviderAdmin::new(boot.clone())
             .set_provider("nearai", Some("deepseek-ai/DeepSeek-V4-Flash"))
             .expect("persist active selection");
         let config_file =
             ironclaw_reborn_config::RebornConfigFile::load(&boot.home().config_file_path())
                 .expect("load config file");
 
-        let resolved = crate::llm_catalog::resolve_reborn_runtime_llm(&boot, config_file.as_ref())
-            .expect("resolution succeeds")
-            .expect("a provider is resolved from the selection");
+        let resolved =
+            crate::llm_admin::llm_catalog::resolve_reborn_runtime_llm(&boot, config_file.as_ref())
+                .expect("resolution succeeds")
+                .expect("a provider is resolved from the selection");
         assert_eq!(resolved.provider_id(), "nearai");
         assert_eq!(resolved.model(), "deepseek-ai/DeepSeek-V4-Flash");
     }

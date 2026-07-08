@@ -25,7 +25,7 @@ use ironclaw_reborn_config::RebornBootConfig;
 use serde::Deserialize;
 
 use crate::LlmReloadTrigger;
-use crate::llm_config_service::{
+use crate::llm_admin::llm_config_service::{
     NEARAI_LOGIN_CALLBACK_PATH, NearAiLoginStateStore, apply_nearai_login,
 };
 use crate::webui_serve::PublicRouteMount;

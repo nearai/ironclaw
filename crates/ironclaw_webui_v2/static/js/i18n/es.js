@@ -250,6 +250,12 @@ registerPack("es", {
   "traceCommons.lastSyncDesc": "Vista local a fecha de la última sincronización",
   "traceCommons.never": "nunca",
   "traceCommons.recentExplanations": "Explicaciones de crédito recientes",
+  "traceCommons.submittedTracesTitle": "Trazas enviadas",
+  "traceCommons.tracesLoadFailed": "No se pudieron cargar tus trazas enviadas.",
+  "traceCommons.traceStatus": "Estado",
+  "traceCommons.tracePendingCredit": "Crédito pendiente",
+  "traceCommons.traceFinalCredit": "Crédito final",
+  "traceCommons.traceReceivedAt": "Recibido",
   "traceCommons.note": "Vista local a fecha de la última sincronización — el libro mayor de créditos autorizado está en el servidor. El crédito final puede cambiar tras la revisión de privacidad, replay/eval, comprobaciones de duplicados y la puntuación de utilidad posterior.",
 
 

@@ -7,7 +7,7 @@ use ironclaw_extensions::{
 use ironclaw_host_api::{ResourceScope, RuntimeHttpEgress};
 use ironclaw_mcp::{McpClient, McpClientRequest, McpHostHttpClient, McpRuntimeHttpAdapter};
 
-use crate::mcp::{MCP_RESPONSE_BODY_LIMIT, RegistryMcpEgressPlanner};
+use crate::extension_host::mcp::{MCP_RESPONSE_BODY_LIMIT, RegistryMcpEgressPlanner};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HostedMcpDiscoveryError {

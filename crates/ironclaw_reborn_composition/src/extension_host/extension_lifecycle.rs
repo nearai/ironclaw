@@ -25,17 +25,17 @@ mod active_publication;
 #[cfg(test)]
 mod hosted_mcp_test_support;
 
-use crate::available_extensions::{
+use crate::extension_host::available_extensions::{
     AvailableExtensionCatalog, AvailableExtensionPackage, materialize_available_extension,
     visible_capability_ids,
 };
-use crate::extension_activation_credentials::{
+use crate::extension_host::extension_activation_credentials::{
     ExtensionActivationCredentialGate, RuntimeExtensionActivationCredentialGate,
     UnavailableExtensionActivationCredentialGate,
 };
-use crate::extension_credential_requirements::package_runtime_credential_auth_requirements;
-use crate::lifecycle::response_with_payload;
-use crate::mcp_discovery::{
+use crate::extension_host::extension_credential_requirements::package_runtime_credential_auth_requirements;
+use crate::extension_host::lifecycle::response_with_payload;
+use crate::extension_host::mcp_discovery::{
     HostedMcpDiscoveryError, discover_hosted_mcp_package, is_hosted_http_mcp_package,
 };
 
@@ -466,7 +466,7 @@ impl RebornLocalExtensionManagementPort {
         mode: ExtensionActivationMode,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let credential_gate =
-            crate::extension_activation_credentials::PrecheckedExtensionActivationCredentialGate;
+            crate::extension_host::extension_activation_credentials::PrecheckedExtensionActivationCredentialGate;
         self.activate_inner(package_ref, mode, &credential_gate)
             .await
     }
@@ -1440,7 +1440,7 @@ mod tests {
 
     use super::hosted_mcp_test_support::HostedMcpDiscoveryEgress;
     use super::*;
-    use crate::available_extensions::{
+    use crate::extension_host::available_extensions::{
         AvailableExtensionAsset, AvailableExtensionAssetContent, AvailableExtensionPackage,
     };
     use async_trait::async_trait;
@@ -3577,7 +3577,7 @@ mod tests {
     fn extension_lifecycle_fixture() -> (
         tempfile::TempDir,
         std::path::PathBuf,
-        crate::lifecycle::RebornLocalLifecycleFacade,
+        crate::extension_host::lifecycle::RebornLocalLifecycleFacade,
         Arc<SharedExtensionRegistry>,
         Arc<InMemoryExtensionInstallationStore>,
     ) {
@@ -3592,7 +3592,7 @@ mod tests {
     ) -> (
         tempfile::TempDir,
         std::path::PathBuf,
-        crate::lifecycle::RebornLocalLifecycleFacade,
+        crate::extension_host::lifecycle::RebornLocalLifecycleFacade,
         Arc<SharedExtensionRegistry>,
         Arc<InMemoryExtensionInstallationStore>,
     ) {
@@ -3605,7 +3605,7 @@ mod tests {
     fn github_extension_lifecycle_fixture() -> (
         tempfile::TempDir,
         std::path::PathBuf,
-        crate::lifecycle::RebornLocalLifecycleFacade,
+        crate::extension_host::lifecycle::RebornLocalLifecycleFacade,
         Arc<SharedExtensionRegistry>,
         Arc<InMemoryExtensionInstallationStore>,
     ) {
@@ -3725,7 +3725,7 @@ mod tests {
     ) -> (
         tempfile::TempDir,
         std::path::PathBuf,
-        crate::lifecycle::RebornLocalLifecycleFacade,
+        crate::extension_host::lifecycle::RebornLocalLifecycleFacade,
         Arc<SharedExtensionRegistry>,
         Arc<InMemoryExtensionInstallationStore>,
     ) {
@@ -3748,16 +3748,18 @@ mod tests {
             .expect("mount system extensions");
         let filesystem = Arc::new(filesystem);
         let root_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
-        let skill_management = Arc::new(crate::lifecycle::RebornLocalSkillManagementPort::new(
-            UserId::new("lifecycle-owner").expect("valid user"),
-            root_filesystem.clone(),
-            MountView::new(vec![MountGrant::new(
-                MountAlias::new("/skills").expect("valid alias"),
-                VirtualPath::new("/projects/skills").expect("valid path"),
-                MountPermissions::read_write_list_delete(),
-            )])
-            .expect("valid mount view"),
-        ));
+        let skill_management = Arc::new(
+            crate::extension_host::lifecycle::RebornLocalSkillManagementPort::new(
+                UserId::new("lifecycle-owner").expect("valid user"),
+                root_filesystem.clone(),
+                MountView::new(vec![MountGrant::new(
+                    MountAlias::new("/skills").expect("valid alias"),
+                    VirtualPath::new("/projects/skills").expect("valid path"),
+                    MountPermissions::read_write_list_delete(),
+                )])
+                .expect("valid mount view"),
+            ),
+        );
         let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
         let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
         let extension_management = Arc::new(RebornLocalExtensionManagementPort::new(
@@ -3770,8 +3772,9 @@ mod tests {
                 test_extension_trust_policy(),
             ),
         ));
-        let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(skill_management)
-            .with_extension_management(extension_management);
+        let facade =
+            crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(skill_management)
+                .with_extension_management(extension_management);
         (
             dir,
             storage_root,

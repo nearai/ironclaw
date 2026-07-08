@@ -11,351 +11,15 @@
 //! (passed into `execution_context_with_network`) so onboarding state written
 //! by one test cannot bleed into another running concurrently.
 
-use std::{
-    net::SocketAddr,
-    sync::{Arc, Mutex},
-};
+#[path = "support/trace_commons_dispatch.rs"]
+mod tc_support;
 
-use axum::{Router, extract::State, routing::post};
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use ironclaw_authorization::GrantAuthorizer;
-use ironclaw_extensions::ExtensionRegistry;
-use ironclaw_filesystem::LocalFilesystem;
-use ironclaw_host_api::{
-    runtime_policy::{
-        ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
-        NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
-    },
-    *,
-};
 use ironclaw_host_runtime::{
-    CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeFailureKind, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
-    TRACE_COMMONS_STATUS_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
+    TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+    TRACE_COMMONS_STATUS_CAPABILITY_ID,
 };
-use ironclaw_network::{PolicyNetworkHttpEgress, ReqwestNetworkTransport};
-use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_secrets::InMemorySecretStore;
-use ironclaw_triggers::InMemoryTriggerRepository;
-use ironclaw_trust::{
-    AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
-    HostTrustPolicy, TrustDecision, TrustProvenance,
-};
-use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
-use tempfile::TempDir;
-
-// ── Process-wide base-dir setup ──────────────────────────────────────────────
-
-static BASE_DIR: std::sync::OnceLock<TempDir> = std::sync::OnceLock::new();
-
-/// Point `IRONCLAW_BASE_DIR` at a process-lifetime temp dir before any code
-/// reads it. `#[tokio::test]` uses a multi-threaded runtime and tests in this
-/// binary run concurrently, so this must be the FIRST call in every test:
-/// the `OnceLock` serializes initialization (concurrent callers block until
-/// the variable is set) and no test reads `ironclaw_base_dir()` before its
-/// own `setup_base_dir()` call returns.
-fn setup_base_dir() -> &'static TempDir {
-    BASE_DIR.get_or_init(|| {
-        let dir = tempfile::tempdir().expect("tempdir for IRONCLAW_BASE_DIR");
-        // SAFETY: executed exactly once inside `OnceLock::get_or_init`; every
-        // test calls `setup_base_dir()` before any env read, so there is no
-        // concurrent reader during this write.
-        unsafe {
-            std::env::set_var("IRONCLAW_BASE_DIR", dir.path());
-        }
-        dir
-    })
-}
-
-// ── Mock issuer helpers ──────────────────────────────────────────────────────
-
-/// Axum handler state: (canned response JSON, status code, received bodies).
-type MockState = Arc<(
-    serde_json::Value,
-    axum::http::StatusCode,
-    Arc<Mutex<Vec<serde_json::Value>>>,
-)>;
-
-/// Derive `sha256:<lowercase_hex>` from a base64-STANDARD-encoded public key —
-/// mirrors `device_key::device_key_id_from_pubkey` on the server side.
-fn derive_device_key_id(pubkey_b64: &str) -> Option<String> {
-    let bytes = BASE64_STANDARD.decode(pubkey_b64).ok()?;
-    Some(format!("sha256:{}", hex::encode(Sha256::digest(&bytes))))
-}
-
-/// Sentinel: the mock replaces this with the derived key id for the request's
-/// submitted public key, so the client's cross-check always passes.
-const ECHO_DEVICE_KEY_ID: &str = "ECHO_DEVICE_KEY_ID";
-
-/// Spawn a mock `/v1/onboard` axum server on `127.0.0.1:0`.
-/// `make_response` receives the bound address so it can embed the correct
-/// `issuer_url` in the JSON.
-async fn spawn_mock_issuer<F>(
-    make_response: F,
-    status: axum::http::StatusCode,
-) -> (SocketAddr, Arc<Mutex<Vec<serde_json::Value>>>)
-where
-    F: Fn(SocketAddr) -> serde_json::Value + Send + Sync + 'static,
-{
-    let received: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("mock issuer binds");
-    let addr = listener.local_addr().expect("mock issuer local addr");
-
-    let response_body = make_response(addr);
-    let state: MockState = Arc::new((response_body, status, Arc::clone(&received)));
-
-    async fn handler(
-        State(state): State<MockState>,
-        axum::Json(body): axum::Json<serde_json::Value>,
-    ) -> axum::response::Response {
-        let mut response = state.0.clone();
-        // Echo the correct device_key_id if the canned response uses the sentinel.
-        if response.get("device_key_id").and_then(|v| v.as_str()) == Some(ECHO_DEVICE_KEY_ID)
-            && let Some(pubkey_b64) = body.get("device_public_key").and_then(|v| v.as_str())
-            && let Some(derived) = derive_device_key_id(pubkey_b64)
-        {
-            response["device_key_id"] = serde_json::Value::String(derived);
-        }
-        state.2.lock().unwrap().push(body);
-        let json_bytes = serde_json::to_vec(&response).unwrap();
-        axum::response::Response::builder()
-            .status(state.1)
-            .header("content-type", "application/json")
-            .body(axum::body::Body::from(json_bytes))
-            .unwrap()
-    }
-
-    let app = Router::new()
-        .route("/v1/onboard", post(handler))
-        .with_state(state);
-
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-
-    (addr, received)
-}
-
-// ── Runtime / dispatch helpers ───────────────────────────────────────────────
-
-fn registry() -> ExtensionRegistry {
-    let mut r = ExtensionRegistry::new();
-    r.insert(builtin_first_party_package().unwrap()).unwrap();
-    r
-}
-
-fn builtin_effects() -> Vec<EffectKind> {
-    vec![
-        EffectKind::DispatchCapability,
-        EffectKind::ReadFilesystem,
-        EffectKind::WriteFilesystem,
-        EffectKind::Network,
-        EffectKind::SpawnProcess,
-        EffectKind::ExecuteCode,
-        EffectKind::ExternalWrite,
-    ]
-}
-
-fn trust_policy() -> HostTrustPolicy {
-    HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries(vec![
-        AdminEntry::for_local_manifest(
-            PackageId::new("builtin").unwrap(),
-            "/system/extensions/builtin/manifest.toml".to_string(),
-            None,
-            HostTrustAssignment::first_party(),
-            builtin_effects(),
-            None,
-        ),
-    ]))])
-    .unwrap()
-}
-
-fn trust_decision() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: builtin_effects(),
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::Default,
-        evaluated_at: chrono::Utc::now(),
-    }
-}
-
-/// A runtime policy that permits outbound network calls (DirectLogged = no
-/// deny; allows loopback HTTP that onboarding uses).
-fn network_permitted_policy() -> EffectiveRuntimePolicy {
-    EffectiveRuntimePolicy {
-        deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::LocalDev,
-        resolved_profile: RuntimeProfile::LocalDev,
-        filesystem_backend: FilesystemBackendKind::HostWorkspace,
-        process_backend: ProcessBackendKind::LocalHost,
-        network_mode: NetworkMode::DirectLogged,
-        secret_mode: SecretMode::ScrubbedEnv,
-        approval_policy: ApprovalPolicy::AskDestructive,
-        audit_mode: AuditMode::LocalMinimal,
-    }
-}
-
-fn capability_id(value: &str) -> CapabilityId {
-    CapabilityId::new(value).unwrap()
-}
-
-fn dispatch_grant_with_network(
-    caller_extension_id: &str,
-    capability: &str,
-    network: NetworkPolicy,
-) -> CapabilityGrant {
-    CapabilityGrant {
-        id: CapabilityGrantId::new(),
-        capability: capability_id(capability),
-        grantee: Principal::Extension(ExtensionId::new(caller_extension_id).unwrap()),
-        issued_by: Principal::HostRuntime,
-        constraints: GrantConstraints {
-            allowed_effects: builtin_effects(),
-            mounts: MountView::default(),
-            network,
-            secrets: Vec::new(),
-            resource_ceiling: None,
-            expires_at: None,
-            max_invocations: None,
-        },
-    }
-}
-
-/// `execution_context` granting the given capability with network allowed.
-///
-/// The base dir is process-wide across this test binary, so onboarding state
-/// is keyed by `user_id`. Each test must pass a distinct `user_id` (and
-/// matching `caller_extension_id`) so its enrollment state cannot bleed into
-/// another test running concurrently in the same process.
-fn execution_context_with_network(
-    user_id: &str,
-    caller_extension_id: &str,
-    capability: &str,
-    network: NetworkPolicy,
-) -> ExecutionContext {
-    let capability_set = CapabilitySet {
-        grants: vec![dispatch_grant_with_network(
-            caller_extension_id,
-            capability,
-            network,
-        )],
-    };
-    ExecutionContext::local_default(
-        UserId::new(user_id).unwrap(),
-        ExtensionId::new(caller_extension_id).unwrap(),
-        RuntimeKind::FirstParty,
-        TrustClass::FirstParty,
-        capability_set,
-        MountView::default(),
-    )
-    .unwrap()
-}
-
-/// Execution context granting a read-only capability (no network needed).
-fn execution_context_read_only(
-    user_id: &str,
-    caller_extension_id: &str,
-    capability: &str,
-) -> ExecutionContext {
-    execution_context_with_network(
-        user_id,
-        caller_extension_id,
-        capability,
-        NetworkPolicy::default(),
-    )
-}
-
-/// Network policy that allows loopback HTTP to the mock issuer.
-///
-/// The real `PolicyNetworkHttpEgress` does exact-host matching (a bare `"*"`
-/// host pattern does NOT wildcard-match), so we allowlist `127.0.0.1`
-/// explicitly and opt out of the private-IP block so the agent onboard POST can
-/// reach the loopback mock.
-fn allow_all_network_policy() -> NetworkPolicy {
-    NetworkPolicy {
-        allowed_targets: vec![NetworkTargetPattern {
-            scheme: None,
-            host_pattern: "127.0.0.1".to_string(),
-            port: None,
-        }],
-        deny_private_ip_ranges: false,
-        max_egress_bytes: None,
-    }
-}
-
-/// Production-default network policy: private/loopback IP ranges are denied.
-/// Allowlists `127.0.0.1` by host pattern, but the private-IP block must still
-/// reject the loopback destination — demonstrating #4560: the agent cannot
-/// reach private destinations through onboarding once the policy is enforced.
-fn deny_private_ip_network_policy() -> NetworkPolicy {
-    NetworkPolicy {
-        allowed_targets: vec![NetworkTargetPattern {
-            scheme: None,
-            host_pattern: "127.0.0.1".to_string(),
-            port: None,
-        }],
-        deny_private_ip_ranges: true,
-        max_egress_bytes: None,
-    }
-}
-
-fn runtime() -> impl HostRuntime {
-    // Use a real PolicyNetworkHttpEgress backed by ReqwestNetworkTransport so the
-    // InvocationServices builder is satisfied (it requires an egress when the
-    // capability declares EffectKind::Network). The trace_commons.onboard handler
-    // makes its own reqwest calls internally; the egress here is only needed to
-    // pass the service-builder check.
-    let network = PolicyNetworkHttpEgress::new(ReqwestNetworkTransport::new(
-        std::time::Duration::from_secs(30),
-    ));
-    HostRuntimeServices::new(
-        Arc::new(registry()),
-        Arc::new(LocalFilesystem::new()),
-        Arc::new(InMemoryResourceGovernor::new()),
-        Arc::new(GrantAuthorizer::new()),
-        ironclaw_processes::ProcessServices::in_memory(),
-        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
-    )
-    .with_first_party_capabilities(Arc::new(
-        builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
-    ))
-    .with_secret_store(Arc::new(InMemorySecretStore::new()))
-    .try_with_host_http_egress(network)
-    .expect("real http egress wiring must succeed")
-    .with_runtime_policy(network_permitted_policy())
-    .with_trust_policy(Arc::new(trust_policy()))
-    .host_runtime_for_local_testing()
-}
-
-async fn invoke_with_context(
-    runtime: &impl HostRuntime,
-    capability: &str,
-    input: Value,
-    context: ExecutionContext,
-) -> Result<Value, RuntimeFailureKind> {
-    let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
-            context,
-            capability_id(capability),
-            ResourceEstimate::default(),
-            input,
-            trust_decision(),
-        ))
-        .await
-        .unwrap();
-    match outcome {
-        RuntimeCapabilityOutcome::Completed(completed) => Ok(completed.output),
-        RuntimeCapabilityOutcome::Failed(failure) => Err(failure.kind),
-        other => panic!("unexpected capability outcome: {other:?}"),
-    }
-}
+use serde_json::json;
+use tc_support::*;
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
@@ -618,5 +282,214 @@ async fn onboard_unconfirmed_makes_no_network_call() {
         requests.len(),
         0,
         "no HTTP requests must reach the mock when confirmed=false"
+    );
+}
+
+/// Verify the consent gate: `account_login_link` with no `confirmed` must
+/// return `consent_required=true` without making any network call.
+#[tokio::test]
+async fn account_login_link_requires_consent() {
+    let _base_dir = setup_base_dir();
+
+    let rt = runtime();
+
+    // Use allow_all_network_policy because the capability manifest declares
+    // EffectKind::Network; the host runtime stages the network grant before
+    // dispatching. The consent gate short-circuits inside the handler before
+    // making any actual network call.
+    let result = invoke_with_context(
+        &rt,
+        TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
+        json!({}),
+        execution_context_with_network(
+            "user_login_link_consent",
+            "caller_login_link_consent",
+            TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
+            allow_all_network_policy(),
+        ),
+    )
+    .await
+    .expect("consent-gate dispatch must succeed (Ok envelope, not an Err)");
+
+    assert_eq!(
+        result["minted"],
+        json!(false),
+        "minted must be false when confirmed is absent"
+    );
+    assert_eq!(
+        result["consent_required"],
+        json!(true),
+        "consent_required must be true when confirmed is absent"
+    );
+    assert!(
+        result["message"].as_str().is_some_and(|m| !m.is_empty()),
+        "message must be non-empty"
+    );
+}
+
+/// Build a syntactically valid JWT string with the given header object.
+/// The signature segment is a literal ASCII placeholder — JWT validation
+/// in this codebase only inspects the header fields (alg, kid) and the
+/// presence of a non-empty access_token, so this is sufficient for tests.
+/// Verify the full dispatch chain for account_login_link:
+///   1. Onboard via mock server (writes local enrollment state).
+///   2. Agent invokes `builtin.trace_commons.account_login_link` with confirmed=true.
+///   3. The tool fetches a bearer token from `/v1/trace-upload-claim` (reqwest path).
+///   4. The tool POSTs to `/v1/account/login-links` (via host egress sink).
+///   5. The tool returns `minted=true` and the login URL.
+#[tokio::test]
+async fn account_login_link_through_dispatch() {
+    let _base_dir = setup_base_dir();
+
+    let claim_jwt = test_jwt_eddsa("e2e-key-1");
+    let claim_jwt_for_mock = claim_jwt.clone();
+
+    // Spawn a mock server that handles all three routes needed:
+    //   /v1/onboard              — onboarding POST (standard mock response)
+    //   /v1/trace-upload-claim   — bearer-token issuer (reqwest path, not sink)
+    //   /v1/account/login-links  — the endpoint under test (via host egress sink)
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("mock server binds");
+    let addr = listener.local_addr().expect("mock server local addr");
+
+    let app = {
+        let claim_jwt_handler = claim_jwt_for_mock.clone();
+        let addr_for_onboard = addr;
+        axum::Router::new()
+            .route(
+                "/v1/onboard",
+                axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                    let port = addr_for_onboard.port();
+                    async move {
+                        // Echo the device_key_id from the submitted public key —
+                        // mirrors spawn_mock_issuer's ECHO_DEVICE_KEY_ID logic.
+                        let pubkey_b64 = body["device_public_key"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string();
+                        let device_key_id = derive_device_key_id(&pubkey_b64)
+                            .unwrap_or_else(|| "sha256:unknown".to_string());
+                        axum::Json(serde_json::json!({
+                            "schema_version": "trace_commons.onboard_response.v1",
+                            "tenant_id": "tenant-login-link",
+                            "ingest_url": "https://ingest.example.com",
+                            "issuer_url": format!("http://127.0.0.1:{}/v1/trace-upload-claim", port),
+                            "audience": "trace-commons-ingest",
+                            "device_key_id": device_key_id,
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/v1/trace-upload-claim",
+                axum::routing::post(move || {
+                    let jwt = claim_jwt_handler.clone();
+                    async move {
+                        axum::Json(serde_json::json!({
+                            "access_token": jwt,
+                            "token_type": "Bearer",
+                            "expires_in": 300
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/v1/account/login-links",
+                axum::routing::post(|| async {
+                    axum::Json(serde_json::json!({
+                        "account_id": "acc123",
+                        "url": "/account/login?code=testcode123"
+                    }))
+                }),
+            )
+    };
+
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let invite_url = format!("http://127.0.0.1:{}/onboard#LOGINLINKE2E", addr.port());
+    let rt = runtime();
+
+    // ── Step 1: Onboard ───────────────────────────────────────────────────────
+    let onboard_result = invoke_with_context(
+        &rt,
+        TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+        json!({
+            "invite_url": invite_url,
+            "include_message_text": false,
+            "include_tool_payloads": false,
+            "confirmed": true,
+        }),
+        execution_context_with_network(
+            "user_login_link_dispatch",
+            "caller_login_link_dispatch",
+            TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+            allow_all_network_policy(),
+        ),
+    )
+    .await
+    .expect("onboard must succeed before login-link test");
+    assert_eq!(
+        onboard_result["enrolled"],
+        json!(true),
+        "must be enrolled before testing login link"
+    );
+
+    // ── Step 2: Invoke account_login_link with confirmed=true ─────────────────
+    let result = invoke_with_context(
+        &rt,
+        TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
+        json!({ "confirmed": true }),
+        execution_context_with_network(
+            "user_login_link_dispatch",
+            "caller_login_link_dispatch",
+            TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
+            allow_all_network_policy(),
+        ),
+    )
+    .await
+    .expect("account_login_link dispatch must succeed");
+
+    assert_eq!(
+        result["minted"],
+        json!(true),
+        "minted must be true on success; error_code={:?}, message={:?}",
+        result.get("error_code"),
+        result.get("message"),
+    );
+    assert_eq!(
+        result["account_id"],
+        json!("acc123"),
+        "account_id must match mock response"
+    );
+    // SECURITY: the one-time login URL is a code-bearing account-access
+    // credential. It must NOT be returned on the model-visible surface (that
+    // copies it into the LLM transcript and any downstream logging). The result
+    // delivers an opaque out-of-band marker instead — mirroring profile_token.
+    assert!(
+        result.get("url").is_none(),
+        "the login URL credential must not be returned on the model-visible surface; got: {result}"
+    );
+    assert_eq!(
+        result["link_delivery"],
+        json!("local_private_account_login_link_file"),
+        "out-of-band delivery must be signaled by an opaque marker"
+    );
+    assert!(
+        !result.to_string().contains("testcode123"),
+        "the one-time login code must never appear anywhere in the model-visible result"
+    );
+
+    // The URL is delivered out-of-band: persisted to a 0600 private
+    // `account_login_link.url` file in the caller scope's local state dir for the
+    // local UI/CLI to open. Locate it under the base dir without recomputing the
+    // exact scope path.
+    let persisted = find_persisted_login_link(setup_base_dir().path())
+        .expect("the login URL must be persisted to the private account-login-link file");
+    assert!(
+        persisted.contains("/account/login?code=testcode123"),
+        "the persisted private file must hold the one-time login URL; got: {persisted}"
     );
 }

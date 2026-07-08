@@ -250,6 +250,12 @@ registerPack("ja", {
   "traceCommons.lastSyncDesc": "最終同期時点のローカル表示",
   "traceCommons.never": "なし",
   "traceCommons.recentExplanations": "最近のクレジット明細",
+  "traceCommons.submittedTracesTitle": "送信したトレース",
+  "traceCommons.tracesLoadFailed": "送信したトレースを読み込めませんでした。",
+  "traceCommons.traceStatus": "ステータス",
+  "traceCommons.tracePendingCredit": "保留中のクレジット",
+  "traceCommons.traceFinalCredit": "確定クレジット",
+  "traceCommons.traceReceivedAt": "受信",
   "traceCommons.note": "最終同期時点のローカル表示です — 正式なクレジット台帳はサーバー側にあります。確定クレジットはプライバシー審査、リプレイ/評価、重複チェック、後段の有用性スコアリングの後に変わる可能性があります。",
 
 

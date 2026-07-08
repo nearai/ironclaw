@@ -138,28 +138,14 @@ use ironclaw_turns::{
 use ironclaw_turns::{InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore};
 
 use crate::RebornProductAuthServicePorts;
-#[cfg(feature = "slack-v2-host-beta")]
-use crate::available_extensions::slack_manifest_digest;
 use crate::default_system_prompt::seed_default_system_prompt;
-use crate::input::{RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput};
-use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
-use crate::local_dev_authorization::{StoreApprovalSettingsProvider, local_dev_authorizer};
-use crate::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
-use crate::local_dev_mounts::{
-    ambient_workspace_mount_view, memory_mount_view, scoped_skill_context_mount_view,
-    skill_management_mount_view, system_extensions_lifecycle_mount_view, workspace_mount_view,
+#[cfg(feature = "slack-v2-host-beta")]
+use crate::extension_host::available_extensions::slack_manifest_digest;
+use crate::extension_host::lifecycle::{
+    RebornLocalSkillManagementPort, build_local_skill_management_port,
 };
-use crate::mcp::hosted_http_mcp_runtime;
-use crate::product_auth::credentials::product_auth_providers::{
-    OAuthProviderComposition, compose_provider_client,
-};
-use crate::product_auth::credentials::runtime_credentials::ProductAuthRuntimeCredentialResolver;
-use crate::runtime_input::RebornRuntimeIdentity;
-use crate::{
-    RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
-    RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornWorkerReadiness,
-};
-use crate::{
+use crate::extension_host::mcp::hosted_http_mcp_runtime;
+use crate::extension_host::{
     available_extensions::{
         AvailableExtensionCatalog, gmail_manifest_digest, google_calendar_manifest_digest,
         google_docs_manifest_digest, google_drive_manifest_digest, google_sheets_manifest_digest,
@@ -176,7 +162,23 @@ use crate::{
     gsuite::{
         ProductAuthRuntimeGsuiteCredentialStager, register_bundled_gsuite_first_party_handlers,
     },
-    web_access::register_bundled_web_access_first_party_handlers,
+};
+use crate::input::{RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput};
+use crate::local_dev_authorization::{StoreApprovalSettingsProvider, local_dev_authorizer};
+use crate::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
+use crate::local_dev_mounts::{
+    ambient_workspace_mount_view, memory_mount_view, scoped_skill_context_mount_view,
+    skill_management_mount_view, system_extensions_lifecycle_mount_view, workspace_mount_view,
+};
+use crate::product_auth::credentials::product_auth_providers::{
+    OAuthProviderComposition, compose_provider_client,
+};
+use crate::product_auth::credentials::runtime_credentials::ProductAuthRuntimeCredentialResolver;
+use crate::runtime_input::RebornRuntimeIdentity;
+use crate::web_access::register_bundled_web_access_first_party_handlers;
+use crate::{
+    RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
+    RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornWorkerReadiness,
 };
 
 pub(crate) type LocalDevRootFilesystem = CompositeRootFilesystem;
@@ -1248,7 +1250,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             reason: error.to_string(),
         }
     })?;
-    crate::bundled_skills::ensure_bundled_reborn_skills_installed(&root).await?;
+    crate::extension_host::bundled_skills::ensure_bundled_reborn_skills_installed(&root).await?;
     let filesystem_bundle = build_local_dev_root_filesystem(
         &root,
         &workspace_root,
@@ -1596,7 +1598,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         extension_lifecycle_service,
         active_extensions,
     ));
-    let nearai_mcp_bootstrap_outcome = crate::nearai_mcp::bootstrap_nearai_mcp(
+    let nearai_mcp_bootstrap_outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
         nearai_mcp_bootstrap_config,
         &product_auth,
         &extension_management,
@@ -4747,13 +4749,12 @@ mod tests {
     #[cfg(feature = "libsql")]
     use secrecy::ExposeSecret;
 
+    use crate::extension_host::extension_lifecycle::ExtensionActivationMode;
+    use crate::local_dev_capability_policy::{
+        LocalDevApprovalPolicyAction, LocalDevCapabilityPolicyError,
+    };
     use crate::{
-        RebornReadinessDiagnostic, RebornReadinessState,
-        extension_lifecycle::ExtensionActivationMode,
-        local_dev_capability_policy::{
-            LocalDevApprovalPolicyAction, LocalDevCapabilityPolicyError,
-        },
-        runtime::SKILL_ACTIVATE_CAPABILITY_ID,
+        RebornReadinessDiagnostic, RebornReadinessState, runtime::SKILL_ACTIVATE_CAPABILITY_ID,
     };
 
     #[cfg(feature = "libsql")]
@@ -5859,7 +5860,7 @@ mod tests {
         api_key: &str,
     ) -> RebornBuildInput {
         RebornBuildInput::local_dev(owner, root).with_nearai_mcp_bootstrap_config(
-            crate::nearai_mcp::NearAiMcpBootstrapConfig::new(
+            crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
                 base_url,
                 secrecy::SecretString::from(api_key.to_string()),
             )
@@ -6425,9 +6426,9 @@ mod tests {
             .extension_management
             .as_ref()
             .expect("extension management");
-        let outcome = crate::nearai_mcp::bootstrap_nearai_mcp(
+        let outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
             Some(
-                crate::nearai_mcp::NearAiMcpBootstrapConfig::new(
+                crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
                     "https://private.near.ai",
                     secrecy::SecretString::from("nearai-second-key"),
                 )
@@ -6441,7 +6442,7 @@ mod tests {
         .expect("second NEAR AI MCP bootstrap");
         assert_eq!(
             outcome,
-            crate::nearai_mcp::NearAiMcpBootstrapOutcome::ReusedCredential
+            crate::llm_admin::nearai_mcp::NearAiMcpBootstrapOutcome::ReusedCredential
         );
         let accounts = first
             .product_auth
@@ -6495,9 +6496,9 @@ mod tests {
             .remove(nearai_ref.clone())
             .await
             .expect("disable NEAR AI MCP extension");
-        let outcome = crate::nearai_mcp::bootstrap_nearai_mcp(
+        let outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
             Some(
-                crate::nearai_mcp::NearAiMcpBootstrapConfig::new(
+                crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
                     "https://private.near.ai",
                     secrecy::SecretString::from("nearai-test-key"),
                 )
@@ -6512,7 +6513,7 @@ mod tests {
         .expect("bootstrap should reinstall discovered extension");
         assert_eq!(
             outcome,
-            crate::nearai_mcp::NearAiMcpBootstrapOutcome::Activated
+            crate::llm_admin::nearai_mcp::NearAiMcpBootstrapOutcome::Activated
         );
         let projection = extension_management
             .project(nearai_ref)
@@ -6535,7 +6536,7 @@ mod tests {
     #[tokio::test]
     async fn local_dev_nearai_mcp_invalid_base_url_fails_build() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let config = crate::nearai_mcp::NearAiMcpBootstrapConfig::new(
+        let config = crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
             "http://private.near.ai",
             secrecy::SecretString::from("nearai-test-key"),
         )

@@ -250,6 +250,12 @@ registerPack("uk", {
   "traceCommons.lastSyncDesc": "Локальний перегляд станом на останню синхронізацію",
   "traceCommons.never": "ніколи",
   "traceCommons.recentExplanations": "Останні пояснення кредитів",
+  "traceCommons.submittedTracesTitle": "Надіслані трейси",
+  "traceCommons.tracesLoadFailed": "Не вдалося завантажити ваші надіслані трейси.",
+  "traceCommons.traceStatus": "Статус",
+  "traceCommons.tracePendingCredit": "Очікуваний кредит",
+  "traceCommons.traceFinalCredit": "Остаточний кредит",
+  "traceCommons.traceReceivedAt": "Отримано",
   "traceCommons.note": "Локальний перегляд станом на останню синхронізацію — офіційний реєстр кредитів знаходиться на сервері. Остаточний кредит може змінитися після перевірки конфіденційності, повторного відтворення/оцінювання, перевірок дублікатів і подальшого оцінювання корисності.",
 
 

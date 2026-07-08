@@ -250,6 +250,12 @@ registerPack("de", {
   "traceCommons.lastSyncDesc": "Lokale Ansicht zum Zeitpunkt der letzten Synchronisierung",
   "traceCommons.never": "nie",
   "traceCommons.recentExplanations": "Aktuelle Guthaben-Erläuterungen",
+  "traceCommons.submittedTracesTitle": "Eingereichte Traces",
+  "traceCommons.tracesLoadFailed": "Ihre eingereichten Traces konnten nicht geladen werden.",
+  "traceCommons.traceStatus": "Status",
+  "traceCommons.tracePendingCredit": "Ausstehendes Guthaben",
+  "traceCommons.traceFinalCredit": "Endgültiges Guthaben",
+  "traceCommons.traceReceivedAt": "Empfangen",
   "traceCommons.note": "Lokale Ansicht zum Zeitpunkt der letzten Synchronisierung — das maßgebliche Guthaben-Hauptbuch liegt serverseitig. Das endgültige Guthaben kann sich nach Datenschutzprüfung, Replay/Eval, Duplikatprüfungen und nachgelagerter Nützlichkeitsbewertung ändern.",
 
 

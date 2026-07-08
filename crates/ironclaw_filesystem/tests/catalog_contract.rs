@@ -301,6 +301,69 @@ async fn composite_routes_append_batch_to_matching_backend() {
 }
 
 #[tokio::test]
+async fn composite_routes_delete_if_version_to_matching_backend() {
+    // Without the composite override, delete_if_version would hit the trait's
+    // Unsupported default instead of routing to the matched mount.
+    let broad = Arc::new(InMemoryBackend::new());
+    let specific = Arc::new(InMemoryBackend::new());
+
+    let mut root = CompositeRootFilesystem::new();
+    root.mount(
+        event_log_descriptor("/events", "broad-events"),
+        Arc::clone(&broad),
+    )
+    .unwrap();
+    root.mount(
+        event_log_descriptor("/events/engine", "specific-events"),
+        Arc::clone(&specific),
+    )
+    .unwrap();
+
+    let path = VirtualPath::new("/events/engine/record").unwrap();
+    let v1 = root
+        .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+        .await
+        .unwrap();
+
+    let err = root
+        .delete_if_version(&path, RecordVersion::from_backend(v1.get() + 1))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, FilesystemError::VersionMismatch { .. }));
+
+    root.delete_if_version(&path, v1).await.unwrap();
+    assert!(specific.get(&path).await.unwrap().is_none());
+}
+
+/// Round-B review: mirrors `composite_append_batch_returns_mount_not_found`.
+/// A path outside every mount must fail closed with `MountNotFound` before
+/// any backend is touched, rather than e.g. falling through to the trait's
+/// `Unsupported` default or panicking on an absent mount lookup.
+#[tokio::test]
+async fn composite_delete_if_version_returns_mount_not_found() {
+    let backend = Arc::new(InMemoryBackend::new());
+
+    let mut root = CompositeRootFilesystem::new();
+    root.mount(
+        event_log_descriptor("/events", "events-backend"),
+        Arc::clone(&backend),
+    )
+    .unwrap();
+
+    let unmapped = VirtualPath::new("/memory/system.jsonl").unwrap();
+
+    let err = root
+        .delete_if_version(&unmapped, RecordVersion::from_backend(1))
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, FilesystemError::MountNotFound { .. }),
+        "expected MountNotFound, got {err:?}"
+    );
+}
+
+#[tokio::test]
 async fn composite_append_batch_returns_mount_not_found() {
     // A composite with one mount at /events.  An append_batch to /logs/…
     // (outside all mounts) must return MountNotFound and leave the /events

@@ -77,6 +77,12 @@ const CHANNEL_ROUTE_REPLACE_LOCK_RENEW_INTERVAL: Duration = Duration::from_secs(
 #[cfg(test)]
 const CHANNEL_ROUTE_REPLACE_LOCK_RENEW_INTERVAL: Duration = Duration::from_millis(100);
 
+/// Time source for pairing-challenge TTL comparisons. Production always
+/// gets the default (`Utc::now`); tests can inject a controllable clock via
+/// [`FilesystemSlackHostState::with_clock`] so expiry is deterministic
+/// instead of racing real wall-clock time against a millisecond TTL.
+type PairingClock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
+
 pub(crate) struct FilesystemSlackHostState<F>
 where
     F: RootFilesystem + 'static,
@@ -84,6 +90,7 @@ where
     filesystem: Arc<ScopedFilesystem<F>>,
     scope: ResourceScope,
     pairing_ttl: Duration,
+    clock: PairingClock,
     locks: Arc<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>>,
 }
 
@@ -96,6 +103,7 @@ where
             filesystem: Arc::clone(&self.filesystem),
             scope: self.scope.clone(),
             pairing_ttl: self.pairing_ttl,
+            clock: Arc::clone(&self.clock),
             locks: Arc::clone(&self.locks),
         }
     }
@@ -137,6 +145,7 @@ where
                 invocation_id: InvocationId::new(),
             },
             pairing_ttl: DEFAULT_PAIRING_TTL,
+            clock: Arc::new(Utc::now),
             locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -147,6 +156,23 @@ where
     pub(crate) fn with_pairing_ttl(mut self, pairing_ttl: Duration) -> Self {
         self.pairing_ttl = pairing_ttl;
         self
+    }
+
+    // Same visibility rationale as `with_pairing_ttl` above: lets pairing-TTL
+    // tests advance a deterministic clock instead of racing real wall-clock
+    // time against a millisecond TTL under `tokio::time::pause` (which never
+    // advances `chrono::Utc::now`, the wall clock `active_pairing_challenge`
+    // reads). Production never calls this, so it always gets `Utc::now`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn with_clock(mut self, clock: PairingClock) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// Current time as seen by pairing-TTL comparisons — `Utc::now()` in
+    /// production, an injected deterministic clock under test.
+    fn now(&self) -> DateTime<Utc> {
+        (self.clock)()
     }
 
     fn lock_for(&self, key: String) -> Arc<tokio::sync::Mutex<()>> {
@@ -1278,7 +1304,7 @@ where
             return Ok(issued);
         }
         if let Some((actor_record, _)) = existing_actor.as_ref()
-            && actor_record.expires_at <= Utc::now()
+            && actor_record.expires_at <= self.now()
         {
             self.cleanup_actor_pairing_code_record(actor_record).await?;
         }
@@ -1332,7 +1358,7 @@ where
             return Err(SlackPersonalBindingPairingError::ChallengeNotFound);
         };
 
-        active_pairing_challenge(&record)
+        active_pairing_challenge(&record, self.now())
     }
 
     async fn consume_challenge(
@@ -1349,7 +1375,7 @@ where
         else {
             return Err(SlackPersonalBindingPairingError::ChallengeNotFound);
         };
-        let challenge = active_pairing_challenge(&record)?;
+        let challenge = active_pairing_challenge(&record, self.now())?;
         let actor_path = Self::pairing_actor_path_for(
             &challenge.installation_id,
             challenge.slack_user_id.as_str(),
@@ -1570,7 +1596,7 @@ where
         actor_path: &ScopedPath,
         existing_actor_version: Option<RecordVersion>,
     ) -> Result<IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError> {
-        let expires_at = Utc::now()
+        let expires_at = self.now()
             + chrono::Duration::from_std(self.pairing_ttl).map_err(|_| {
                 SlackPersonalBindingPairingError::Backend(
                     "Slack pairing TTL could not be represented".into(),
@@ -1644,7 +1670,7 @@ where
     {
         if actor_record.installation_id != requested.installation_id.as_str()
             || actor_record.slack_user_id != requested.slack_user_id.as_str()
-            || actor_record.expires_at <= Utc::now()
+            || actor_record.expires_at <= self.now()
         {
             return Ok(None);
         }
@@ -1657,7 +1683,7 @@ where
         else {
             return Ok(None);
         };
-        let challenge = match active_pairing_challenge(&code_record) {
+        let challenge = match active_pairing_challenge(&code_record, self.now()) {
             Ok(challenge) => challenge,
             Err(SlackPersonalBindingPairingError::ChallengeNotFound) => return Ok(None),
             Err(error) => return Err(error),
@@ -2043,8 +2069,9 @@ fn stored_channel_route(
 
 fn active_pairing_challenge(
     record: &StoredSlackPairingChallenge,
+    now: DateTime<Utc>,
 ) -> Result<SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError> {
-    if record.status != StoredSlackPairingStatus::Pending || record.expires_at <= Utc::now() {
+    if record.status != StoredSlackPairingStatus::Pending || record.expires_at <= now {
         return Err(SlackPersonalBindingPairingError::ChallengeNotFound);
     }
     Ok(SlackPersonalBindingPairingChallenge {

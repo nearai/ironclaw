@@ -507,7 +507,7 @@ pub struct RebornRuntime {
     trace_flush_worker: crate::observability::trace_capture::TraceQueueFlushWorkerHandle,
     #[cfg(feature = "root-llm-provider")]
     skill_learning_extraction_tasks:
-        Option<Arc<crate::skill_learning::SkillLearningExtractionTasks>>,
+        Option<Arc<crate::extension_host::skill_learning::SkillLearningExtractionTasks>>,
     /// Late-binding slot shared with the poller's `PostSubmitHookWrappedSubmitter`.
     /// `set_trigger_post_submit_hook` fills this after `build_reborn_runtime` returns.
     /// `None` when the trigger poller is not enabled.
@@ -1271,7 +1271,7 @@ impl RebornRuntime {
     #[cfg(feature = "root-llm-provider")]
     pub(crate) fn webui_nearai_login_states(
         &self,
-    ) -> Option<Arc<crate::llm_config_service::NearAiLoginStateStore>> {
+    ) -> Option<Arc<crate::llm_admin::llm_config_service::NearAiLoginStateStore>> {
         self.llm_reload
             .as_ref()
             .map(|parts| Arc::clone(&parts.nearai_login_states))
@@ -1287,9 +1287,11 @@ impl RebornRuntime {
         let session = self.webui_llm_session()?;
         let reload = self.webui_llm_reload_trigger()?;
         let states = self.webui_nearai_login_states()?;
-        Some(crate::nearai_login_serve::nearai_login_callback_mount(
-            session, reload, boot, states,
-        ))
+        Some(
+            crate::llm_admin::nearai_login_serve::nearai_login_callback_mount(
+                session, reload, boot, states,
+            ),
+        )
     }
 
     /// Live LLM-provider reload trigger for the settings service. Returns the
@@ -1300,12 +1302,14 @@ impl RebornRuntime {
     pub(crate) fn webui_llm_reload_trigger(&self) -> Option<Arc<dyn crate::LlmReloadTrigger>> {
         let boot = self.boot.as_ref()?;
         let parts = self.llm_reload.as_ref()?;
-        Some(Arc::new(crate::llm_reload::RebornLlmReloadAdapter::new(
-            boot.clone(),
-            Arc::clone(&parts.reload_handle),
-            Arc::clone(&parts.session),
-            crate::LlmKeyStore::new(self.services.secret_store()),
-        )))
+        Some(Arc::new(
+            crate::llm_admin::llm_reload::RebornLlmReloadAdapter::new(
+                boot.clone(),
+                Arc::clone(&parts.reload_handle),
+                Arc::clone(&parts.session),
+                crate::LlmKeyStore::new(self.services.secret_store()),
+            ),
+        ))
     }
 
     /// Diagnostic id for the no-profile run profile selected by this runtime.
@@ -2855,7 +2859,7 @@ pub async fn build_reborn_runtime(
     if !has_nearai_mcp_bootstrap_config
         && let Some(llm) = llm.as_ref()
         && let Some(config) =
-            crate::nearai_mcp::nearai_mcp_bootstrap_config_from_llm_config(&llm.config)
+            crate::llm_admin::nearai_mcp::nearai_mcp_bootstrap_config_from_llm_config(&llm.config)
                 .await
                 .map_err(|error| RebornRuntimeError::InvalidArgument {
                     reason: format!("NEAR AI MCP bootstrap config: {error}"),
@@ -3144,6 +3148,9 @@ pub async fn build_reborn_runtime(
         Arc::clone(&loop_checkpoint_store) as Arc<dyn ironclaw_turns::LoopCheckpointStore>,
         await_dependent_run_evidence,
         thread_scope.clone(),
+    )
+    .with_checkpoint_state_store(
+        Arc::clone(&checkpoint_state_store) as Arc<dyn ironclaw_turns::CheckpointStateStore>
     );
     if let Some(local_runtime) = local_runtime {
         loop_exit_evidence = loop_exit_evidence.with_approval_gate_evidence(Arc::new(
@@ -3354,39 +3361,45 @@ pub async fn build_reborn_runtime(
         vec![trace_capture_sink];
     #[cfg(feature = "root-llm-provider")]
     let mut skill_learning_extraction_tasks: Option<
-        Arc<crate::skill_learning::SkillLearningExtractionTasks>,
+        Arc<crate::extension_host::skill_learning::SkillLearningExtractionTasks>,
     > = None;
     #[cfg(feature = "root-llm-provider")]
     if let (Some((learning_provider, learning_model)), Some(local_runtime)) =
         (skill_learning_provider, local_runtime)
     {
-        let inference: Arc<dyn ironclaw_skill_learning::SkillInferencePort> =
-            Arc::new(crate::skill_learning::SkillLearningInferenceAdapter::new(
+        let inference: Arc<dyn ironclaw_skill_learning::SkillInferencePort> = Arc::new(
+            crate::extension_host::skill_learning::SkillLearningInferenceAdapter::new(
                 learning_provider,
                 learning_model,
-            ));
+            ),
+        );
         // Reuse the runtime's already-built scoped skill-management port so the
         // learned skill lands exactly where the WebUI lists it and the next run
         // loads it. The writer evolves an existing learned skill in place when a
         // recurring task is re-learned, using the same learning model to refine
         // it (accumulated gotchas, bumped version) instead of accreting siblings.
-        let skill_refiner: Arc<dyn crate::skill_learning::SkillRefiner> = Arc::new(
-            crate::skill_learning::LlmSkillRefiner::new(Arc::clone(&inference)),
+        let skill_refiner: Arc<dyn crate::extension_host::skill_learning::SkillRefiner> = Arc::new(
+            crate::extension_host::skill_learning::LlmSkillRefiner::new(Arc::clone(&inference)),
         );
-        let skill_writer: Arc<dyn crate::skill_learning::SkillWriter> =
-            Arc::new(crate::skill_learning::PortSkillWriter::new(
+        let skill_writer: Arc<dyn crate::extension_host::skill_learning::SkillWriter> =
+            Arc::new(crate::extension_host::skill_learning::PortSkillWriter::new(
                 Arc::clone(&local_runtime.skill_management),
                 skill_refiner,
             ));
         // Live "learned a skill" bubble on the run's thread stream (reuses the
         // SkillActivation projection -> existing chat bubble).
-        let skill_learned_notifier: Arc<dyn crate::skill_learning::SkillLearnedNotifier> = Arc::new(
-            crate::skill_learning::LiveSkillLearnedNotifier::new(skill_learning_publisher),
+        let skill_learned_notifier: Arc<
+            dyn crate::extension_host::skill_learning::SkillLearnedNotifier,
+        > = Arc::new(
+            crate::extension_host::skill_learning::LiveSkillLearnedNotifier::new(
+                skill_learning_publisher,
+            ),
         );
-        let extraction_tasks = Arc::new(crate::skill_learning::SkillLearningExtractionTasks::new());
+        let extraction_tasks =
+            Arc::new(crate::extension_host::skill_learning::SkillLearningExtractionTasks::new());
         skill_learning_extraction_tasks = Some(Arc::clone(&extraction_tasks));
         turn_event_sinks.push(Arc::new(
-            crate::skill_learning::SkillLearningTurnEventSink::new(
+            crate::extension_host::skill_learning::SkillLearningTurnEventSink::new(
                 Arc::clone(&thread_service),
                 inference,
                 skill_writer,
@@ -3396,16 +3409,17 @@ pub async fn build_reborn_runtime(
         ));
     }
     let turn_event_sink: Arc<dyn ironclaw_turns::TurnEventSink> = Arc::new(
-        crate::skill_learning::CompositeTurnEventSink::new(turn_event_sinks),
+        crate::extension_host::skill_learning::CompositeTurnEventSink::new(turn_event_sinks),
     );
 
     let communication_context_provider: Option<
         Arc<dyn ironclaw_turns::run_profile::CommunicationContextProvider>,
     > = match (local_runtime, outbound_preferences_facade.clone()) {
         (Some(local_runtime), Some(outbound_preferences_facade)) => {
-            let mut lifecycle_facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
-                Arc::clone(&local_runtime.skill_management),
-            );
+            let mut lifecycle_facade =
+                crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(Arc::clone(
+                    &local_runtime.skill_management,
+                ));
             if let Some(extension_management) = &local_runtime.extension_management {
                 lifecycle_facade =
                     lifecycle_facade.with_extension_management(Arc::clone(extension_management));
@@ -3994,7 +4008,7 @@ async fn apply_startup_stored_llm_key(
         .await
         .map_err(|error| RebornRuntimeError::LlmProvider(error.to_string()))?
     {
-        crate::llm_catalog::apply_stored_api_key(&mut llm.config, stored);
+        crate::llm_admin::llm_catalog::apply_stored_api_key(&mut llm.config, stored);
     }
 
     Ok(Some(llm))
@@ -4009,11 +4023,12 @@ async fn bootstrap_nearai_mcp_from_effective_llm(
     let Some(llm) = llm else {
         return Ok(());
     };
-    let Some(config) = crate::nearai_mcp::nearai_mcp_bootstrap_config_from_llm_config(&llm.config)
-        .await
-        .map_err(|error| RebornRuntimeError::InvalidArgument {
-            reason: format!("NEAR AI MCP bootstrap config: {error}"),
-        })?
+    let Some(config) =
+        crate::llm_admin::nearai_mcp::nearai_mcp_bootstrap_config_from_llm_config(&llm.config)
+            .await
+            .map_err(|error| RebornRuntimeError::InvalidArgument {
+                reason: format!("NEAR AI MCP bootstrap config: {error}"),
+            })?
     else {
         return Ok(());
     };
@@ -4034,7 +4049,7 @@ async fn bootstrap_nearai_mcp_from_effective_llm(
     else {
         return Ok(());
     };
-    let outcome = crate::nearai_mcp::bootstrap_nearai_mcp(
+    let outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
         Some(config),
         product_auth,
         extension_management,
@@ -4208,7 +4223,8 @@ struct LlmGatewayBundle {
 pub(crate) struct RebornLlmReloadParts {
     pub(crate) reload_handle: Arc<ironclaw_llm::LlmReloadHandle>,
     pub(crate) session: Arc<ironclaw_llm::SessionManager>,
-    pub(crate) nearai_login_states: Arc<crate::llm_config_service::NearAiLoginStateStore>,
+    pub(crate) nearai_login_states:
+        Arc<crate::llm_admin::llm_config_service::NearAiLoginStateStore>,
 }
 
 #[cfg(feature = "root-llm-provider")]
@@ -4281,7 +4297,9 @@ fn wrap_swappable_gateway(
         reload: RebornLlmReloadParts {
             reload_handle,
             session,
-            nearai_login_states: Arc::new(crate::llm_config_service::NearAiLoginStateStore::new()),
+            nearai_login_states: Arc::new(
+                crate::llm_admin::llm_config_service::NearAiLoginStateStore::new(),
+            ),
         },
     })
 }
@@ -4801,6 +4819,7 @@ output_schema_ref = "schemas/write.output.json"
 
     #[cfg(feature = "libsql")]
     use crate::RebornRuntimeProcessBinding;
+    use crate::extension_host::extension_lifecycle::ExtensionActivationMode;
     use crate::input::RebornBuildInput;
     #[cfg(feature = "libsql")]
     use crate::observability::hooks::HooksActivationConfig;
@@ -4812,7 +4831,6 @@ output_schema_ref = "schemas/write.output.json"
     use crate::webui::build_webui_services;
     use crate::{
         RebornCompositionProfile, RebornReadiness, RebornReadinessState, RebornRuntimeError,
-        extension_lifecycle::ExtensionActivationMode,
     };
 
     use super::{
@@ -4846,6 +4864,11 @@ output_schema_ref = "schemas/write.output.json"
     struct RecordingGateway {
         reply: String,
         requests: Arc<StdMutex<Vec<HostManagedModelRequest>>>,
+    }
+
+    #[derive(Debug, Default)]
+    struct ModelOutageGateway {
+        calls: AtomicUsize,
     }
 
     #[derive(Debug, Default)]
@@ -4916,6 +4939,20 @@ output_schema_ref = "schemas/write.output.json"
                 .push(request);
             Ok(HostManagedModelResponse::assistant_reply(
                 self.reply.clone(),
+            ))
+        }
+    }
+
+    #[async_trait]
+    impl HostManagedModelGateway for ModelOutageGateway {
+        async fn stream_model(
+            &self,
+            _request: HostManagedModelRequest,
+        ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(HostManagedModelError::safe(
+                HostManagedModelErrorKind::Unavailable,
+                "model service is unavailable",
             ))
         }
     }
@@ -6948,6 +6985,50 @@ output_schema_ref = "schemas/write.output.json"
         assert_eq!(reply.status, TurnStatus::Completed);
         assert_eq!(reply.text.as_deref(), Some("recorded runtime reply"));
         assert_eq!(recorded_request_count(&requests), 1);
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn send_user_message_preserves_model_unavailable_after_retry_budget() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(ModelOutageGateway::default());
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-model-outage-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-model-outage-tenant".to_string(),
+            agent_id: "runtime-model-outage-agent".to_string(),
+            source_binding_id: "runtime-model-outage-source".to_string(),
+            reply_target_binding_id: "runtime-model-outage-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: RUNTIME_POLL_TIMEOUT,
+        })
+        .with_model_gateway_override(gateway.clone());
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            RUNTIME_SEND_TIMEOUT,
+            runtime.send_user_message(&conversation, "please write a long report"),
+        )
+        .await
+        .expect("runtime send should finish")
+        .expect("runtime send should succeed");
+
+        assert_eq!(reply.status, TurnStatus::Failed);
+        assert_eq!(reply.failure_category.as_deref(), Some("model_unavailable"));
+        assert_eq!(reply.text, None);
+        assert!(
+            gateway.calls.load(Ordering::SeqCst) >= 3,
+            "model outage should be retried before the run fails"
+        );
 
         runtime.shutdown().await.expect("runtime shutdown");
     }
@@ -9983,7 +10064,7 @@ output_schema_ref = "schemas/write.output.json"
 
         // Gateway state seeded after runtime build.
         struct LifecycleFacadeHandle {
-            facade: crate::lifecycle::RebornLocalLifecycleFacade,
+            facade: crate::extension_host::lifecycle::RebornLocalLifecycleFacade,
         }
 
         impl std::fmt::Debug for LifecycleFacadeHandle {
@@ -10158,7 +10239,7 @@ output_schema_ref = "schemas/write.output.json"
             .as_ref()
             .expect("extension management")
             .clone();
-        let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
+        let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
             local_runtime.skill_management.clone(),
         )
         .with_extension_management(extension_management)
