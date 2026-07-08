@@ -101,9 +101,7 @@ impl TriggerRepository for PostgresTriggerRepository {
         let active_run_ref = record.active_run_ref.as_ref().map(ToString::to_string);
         let created_at = fmt_ts(&record.created_at);
 
-        client
-            .execute(
-                r#"
+        let sql = r#"
                 INSERT INTO trigger_records (
                     trigger_id, tenant_id, creator_user_id, agent_id, project_id,
                     name, source, schedule_expression, schedule_timezone, schedule_kind, prompt,
@@ -133,32 +131,35 @@ impl TriggerRepository for PostgresTriggerRepository {
                     active_fire_slot = EXCLUDED.active_fire_slot,
                     active_run_ref = EXCLUDED.active_run_ref,
                     schedule_at = EXCLUDED.schedule_at
-                "#,
-                &[
-                    &trigger_id,
-                    &tenant_id,
-                    &creator_user_id,
-                    &agent_id,
-                    &project_id,
-                    &record.name,
-                    &source,
-                    &schedule_expression,
-                    &schedule_timezone,
-                    &schedule_kind,
-                    &record.prompt,
-                    &state,
-                    &next_run_at,
-                    &last_run_at,
-                    &last_fired_slot,
-                    &last_status,
-                    &active_fire_slot,
-                    &active_run_ref,
-                    &created_at,
-                    &schedule_at,
-                ],
-            )
-            .await
-            .map_err(|error| backend_error("upsert trigger record", error))?;
+                "#;
+        cached_execute(
+            &client,
+            sql,
+            &[
+                &trigger_id,
+                &tenant_id,
+                &creator_user_id,
+                &agent_id,
+                &project_id,
+                &record.name,
+                &source,
+                &schedule_expression,
+                &schedule_timezone,
+                &schedule_kind,
+                &record.prompt,
+                &state,
+                &next_run_at,
+                &last_run_at,
+                &last_fired_slot,
+                &last_status,
+                &active_fire_slot,
+                &active_run_ref,
+                &created_at,
+                &schedule_at,
+            ],
+        )
+        .await
+        .map_err(|error| backend_error("upsert trigger record", error))?;
         Ok(())
     }
 
@@ -189,16 +190,13 @@ impl TriggerRepository for PostgresTriggerRepository {
 
     async fn list_triggers(&self, tenant_id: TenantId) -> Result<Vec<TriggerRecord>, TriggerError> {
         let client = self.connect().await?;
-        let rows = client
-            .query(
-                &format!(
-                    "SELECT {TRIGGER_COLUMNS}
+        let sql = format!(
+            "SELECT {TRIGGER_COLUMNS}
                      FROM {TRIGGER_TABLE}
                      WHERE tenant_id = $1
                      ORDER BY created_at, trigger_id"
-                ),
-                &[&tenant_id.as_str()],
-            )
+        );
+        let rows = cached_query(&client, &sql, &[&tenant_id.as_str()])
             .await
             .map_err(|error| backend_error("query tenant trigger records", error))?;
         rows.into_iter().map(|row| row_to_record(&row)).collect()
@@ -224,10 +222,8 @@ impl TriggerRepository for PostgresTriggerRepository {
             .iter()
             .map(|s| crate::state_text_codec(*s))
             .collect();
-        let rows = client
-            .query(
-                &format!(
-                    "SELECT {TRIGGER_COLUMNS}
+        let sql = format!(
+            "SELECT {TRIGGER_COLUMNS}
                      FROM {TRIGGER_TABLE}
                      WHERE tenant_id = $1
                        AND creator_user_id = $2
@@ -236,22 +232,26 @@ impl TriggerRepository for PostgresTriggerRepository {
                        AND ($6::text[] IS NULL OR state != ALL($6))
                      ORDER BY created_at, trigger_id
                      LIMIT $5"
-                ),
-                &[
-                    &tenant_id.as_str(),
-                    &creator_user_id.as_str(),
-                    &agent_id,
-                    &project_id,
-                    &limit,
-                    &if excluded_texts.is_empty() {
-                        None::<Vec<&str>>
-                    } else {
-                        Some(excluded_texts)
-                    },
-                ],
-            )
-            .await
-            .map_err(|error| backend_error("query scoped trigger records", error))?;
+        );
+        let excluded_texts = if excluded_texts.is_empty() {
+            None::<Vec<&str>>
+        } else {
+            Some(excluded_texts)
+        };
+        let rows = cached_query(
+            &client,
+            &sql,
+            &[
+                &tenant_id.as_str(),
+                &creator_user_id.as_str(),
+                &agent_id,
+                &project_id,
+                &limit,
+                &excluded_texts,
+            ],
+        )
+        .await
+        .map_err(|error| backend_error("query scoped trigger records", error))?;
         rows.into_iter().map(|row| row_to_record(&row)).collect()
     }
 
@@ -1395,6 +1395,24 @@ fn backend_error(operation: &str, error: impl std::fmt::Display) -> TriggerError
     TriggerError::Backend {
         reason: format!("{operation}: {error}"),
     }
+}
+
+async fn cached_query(
+    client: &deadpool_postgres::Object,
+    sql: &str,
+    params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+) -> Result<Vec<Row>, tokio_postgres::Error> {
+    let statement = client.prepare_cached(sql).await?;
+    client.query(&statement, params).await
+}
+
+async fn cached_execute(
+    client: &deadpool_postgres::Object,
+    sql: &str,
+    params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+) -> Result<u64, tokio_postgres::Error> {
+    let statement = client.prepare_cached(sql).await?;
+    client.execute(&statement, params).await
 }
 
 const POSTGRES_TRIGGER_SCHEMA: &str = r#"

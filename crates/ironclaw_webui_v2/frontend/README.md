@@ -1,51 +1,46 @@
-# WebUI v2 frontend build tooling
+# WebUI v2 Frontend
 
-This directory builds the WebUI v2 frontend artifacts that the Rust crate
-embeds. When `webui-v2-beta` is enabled, Cargo runs the esbuild bundle step
-from `build.rs`, writes the SPA bundle into `OUT_DIR`, and embeds that generated
-output as `/v2/dist/*`. The `../static/vendor/` assets remain committed so the
-main SPA keeps loading all runtime assets from the same origin.
+This directory owns the WebUI v2 frontend toolchain. Use Node 22 with Corepack
+enabled; the committed `pnpm-lock.yaml` is the source of truth for dependency
+resolution.
 
-## When to run
-
-You do not need to run this after ordinary `../static/js/**` edits: Cargo
-rebuilds the ignored `/v2/dist/*` bundle for WebUI-enabled builds.
-
-Run it when you want a local `../static/dist/` preview, or when upgrading a
-pinned vendored dependency:
+## Commands
 
 ```bash
-./build.sh              # re-vendor CDN assets + npm ci + esbuild bundle
-./build.sh --no-vendor  # just re-bundle (skip re-downloading vendored deps)
+corepack pnpm install --frozen-lockfile
+corepack pnpm dev
+corepack pnpm typecheck
+corepack pnpm test
+corepack pnpm build
 ```
 
-Then commit only the changed files under `../static/vendor/` when refreshing
-vendored dependencies. `../static/dist/` is generated output and is ignored.
+`corepack pnpm build` runs Vite and writes ignored preview output to
+`frontend/dist/`. Cargo does not embed that local preview directory. When
+`webui-v2-beta` is enabled, `crates/ironclaw_webui_v2/build.rs` runs
+`corepack pnpm install --frozen-lockfile` and a Vite production build into
+Cargo's `OUT_DIR`, then embeds that generated output into the Rust binary.
 
-## What it produces
+`./build.sh` is the one-shot local refresh helper. It vendors pinned browser
+assets, installs dependencies with Corepack, and runs the Vite production build.
+Use `./build.sh --no-vendor` when you only want to rebuild the SPA.
 
-| Output | Made by | Loaded in index.html as |
+## Outputs
+
+| Output | Made by | Commit? |
 |---|---|---|
-| `/v2/dist/app.js` + `/v2/dist/chunks/*` | `build.mjs` (esbuild), run by Cargo into `OUT_DIR` or by `./build.sh` into local `static/dist/` | `<script type="module" src="/v2/dist/app.js">` |
-| `static/vendor/tailwindcss-browser.js` | `vendor.sh` | `<script>` |
-| `static/vendor/purify.min.js` | `vendor.sh` | `<script>` (window.DOMPurify) |
-| `static/vendor/marked.umd.min.js` | `vendor.sh` | `<script>` (window.marked) |
-| `static/vendor/highlight.min.js` | `vendor.sh` | `<script>` (window.hljs) |
-| `static/vendor/fonts/fonts.css` + `*.woff2` | `vendor.sh` | `<link rel="stylesheet">` |
+| `frontend/dist/` | `corepack pnpm build` / `./build.sh` | No |
+| Cargo `OUT_DIR/webui-v2-frontend-dist/` | `build.rs` during Rust builds | No |
+| `frontend/public/vendor/` | `vendor.sh` / `./build.sh` | Yes, only when intentionally refreshing vendor assets |
 
-## What is intentionally NOT bundled
+## Runtime Assets
 
-- **Tailwind runtime, DOMPurify, marked, highlight.js** — consumed as
-  `window` globals / a DOM-scanning IIFE, not ES modules. Vendored as
-  separate same-origin `<script>`s.
-- **wallet-connect.js / wallet-connect.html** — a separate isolated
-  popup entry with a deliberately relaxed CSP that loads remote NEAR
-  wallet executors. It keeps its own importmap and must never be merged
-  into the app bundle.
+Vite owns the SPA entrypoint, CSS, hashed assets, and the NEAR wallet connect
+entrypoint. The vendored browser globals remain separate same-origin files:
 
-## The source modules under `static/js/**`
+- DOMPurify
+- marked
+- highlight.js
+- bundled fonts
 
-These are still embedded by the crate's `build.rs` (and covered by the crate's
-Rust asset tests), but the browser no longer loads them individually — only the
-generated bundle. They are the source of truth for the bundle; keep editing
-them, not `dist/`.
+The NEAR wallet connect popup is still a separate entrypoint with its own CSP and
+must not be merged into the main SPA bundle.

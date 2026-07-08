@@ -105,7 +105,9 @@ pub use skill_activation::{
 };
 #[cfg(all(feature = "test-support", feature = "slack-v2-host-beta"))]
 pub use slack_host_state::{
-    SlackHostStateTestParts, slack_host_state_for_test, slack_host_state_for_test_with_pairing_ttl,
+    SlackHostStateTestParts, SlackPairingTestClock, slack_host_state_for_test,
+    slack_host_state_for_test_with_pairing_ttl,
+    slack_host_state_for_test_with_pairing_ttl_and_clock,
 };
 #[cfg(feature = "test-support")]
 pub use trace_capture::trace_capture_turn_event_sink_for_test;
