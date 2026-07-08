@@ -183,16 +183,28 @@ pub fn webui_v2_auth_router(config: OAuthRouterConfig) -> PublicRouteMount {
     PublicRouteMount::new(router, sso_route_descriptors())
 }
 
+/// Build the inert auth discovery mount used when no SSO providers are
+/// configured. This deliberately does not mount the login/session/logout
+/// handlers because there is no revocable SSO session store in env-bearer mode.
+pub fn empty_webui_v2_auth_providers_mount() -> PublicRouteMount {
+    let router = axum::Router::new().route(PATH_PROVIDERS, get(empty_providers_handler));
+    PublicRouteMount::new(router, vec![providers_descriptor()])
+}
+
 // ── descriptors ───────────────────────────────────────────────────────
+
+fn providers_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        ROUTE_ID_PROVIDERS,
+        NetworkMethod::Get,
+        PATH_PROVIDERS,
+        public_policy(BodyLimitPolicy::NoBody, SSO_PROVIDERS_MAX_REQUESTS),
+    )
+}
 
 fn sso_route_descriptors() -> Vec<IngressRouteDescriptor> {
     vec![
-        descriptor(
-            ROUTE_ID_PROVIDERS,
-            NetworkMethod::Get,
-            PATH_PROVIDERS,
-            public_policy(BodyLimitPolicy::NoBody, SSO_PROVIDERS_MAX_REQUESTS),
-        ),
+        providers_descriptor(),
         descriptor(
             ROUTE_ID_LOGIN,
             NetworkMethod::Get,
@@ -317,6 +329,12 @@ async fn providers_handler(State(state): State<RouterStateHandle>) -> Json<Provi
         .collect();
     providers.sort_unstable();
     Json(ProvidersResponse { providers })
+}
+
+async fn empty_providers_handler() -> Json<ProvidersResponse> {
+    Json(ProvidersResponse {
+        providers: Vec::new(),
+    })
 }
 
 // ─── /auth/login/{provider} ───────────────────────────────────────────

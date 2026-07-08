@@ -142,12 +142,23 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
+      - name: Enable pnpm for setup-node cache
+        run: corepack enable pnpm
+
       - name: Install Node.js for WebUI bundle build
         uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
         with:
           node-version: "22"
-          cache: "npm"
-          cache-dependency-path: crates/ironclaw_webui_v2/frontend/package-lock.json
+          cache: "pnpm"
+          cache-dependency-path: crates/ironclaw_webui_v2/frontend/pnpm-lock.yaml
+
+      - name: Enable pnpm
+        run: corepack enable pnpm
+
+      - name: Install WebUI frontend dependencies
+        run: |
+          cd crates/ironclaw_webui_v2/frontend
+          pnpm install --frozen-lockfile
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
