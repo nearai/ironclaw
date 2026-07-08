@@ -189,9 +189,14 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 async-trait = "0.1"
+chrono = "0.4"
 hmac = "0.13"
 http = "1"
 http-body-util = "0.1"
+# Admin-user-management e2e test drives the composed app with a real session
+# authenticator so a minted API token can be validated (login-with-token).
+ironclaw_reborn_webui_ingress = { path = "../ironclaw_reborn_webui_ingress" }
+secrecy = { version = "0.10", features = ["serde"] }
 ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime", features = ["test-support"] }

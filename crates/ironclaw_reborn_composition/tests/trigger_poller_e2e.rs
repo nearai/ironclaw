@@ -316,23 +316,6 @@ impl HostManagedModelGateway for TriggerMutatorAttemptGateway {
     }
 }
 
-async fn wait_for_registration_outcomes(
-    gateway: &TriggerMutatorAttemptGateway,
-    expected_count: usize,
-    deadline: Duration,
-) -> BTreeMap<String, Result<(), String>> {
-    let stop = Instant::now() + deadline;
-    let mut last = gateway.registration_outcomes().await;
-    while Instant::now() < stop {
-        if last.len() >= expected_count {
-            return last;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        last = gateway.registration_outcomes().await;
-    }
-    last
-}
-
 /// Poll `repo` until `predicate` returns `true` or `deadline` elapses.
 ///
 /// Returns the last record seen. If the predicate is satisfied before the
@@ -369,6 +352,21 @@ where
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     last.expect("at least one read should have succeeded in wait_for_settled")
+}
+
+async fn wait_for_mutator_registration_outcomes(
+    gateway: &TriggerMutatorAttemptGateway,
+    deadline: Duration,
+) -> (Vec<String>, BTreeMap<String, Result<(), String>>) {
+    let stop = Instant::now() + deadline;
+    loop {
+        let captured_contents = gateway.captured_message_contents().await;
+        let outcomes = gateway.registration_outcomes().await;
+        if outcomes.len() == 4 || Instant::now() >= stop {
+            return (captured_contents, outcomes);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 fn current_minute_slot() -> chrono::DateTime<Utc> {
@@ -1464,13 +1462,9 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
     // legitimate trigger's id before the fire runs.
     gateway.set_mutator_target_trigger_id(trigger_id).await;
 
-    // Wait for the fired turn's model gateway to make the mutator registration
-    // attempts before shutting the runtime down. The poller can mark the fire
-    // accepted before the turn runner reaches the model, so `last_status` alone
-    // is not a safe proxy for the gateway having run.
-    let registration_outcomes =
-        wait_for_registration_outcomes(&gateway, 4, Duration::from_secs(15)).await;
-
+    // Wait for the submit settlement first. `mark_fire_accepted` sets
+    // `last_status` when the turn is accepted, before the scheduler has
+    // necessarily executed the fired run's model turn.
     let settled = wait_for_settled(
         &repo,
         &tenant_id,
@@ -1480,16 +1474,23 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
     )
     .await;
 
-    runtime.shutdown().await.expect("runtime shutdown");
+    // This is the model's only turn where a capability call can be attempted
+    // (`invoke_trigger_create` above never touched the model). Wait for the
+    // gateway-side registration attempts before shutting the runtime down; a
+    // shutdown immediately after submit settlement can stop a queued run before
+    // it reaches the model.
+    let (captured_contents, registration_outcomes) =
+        wait_for_mutator_registration_outcomes(gateway.as_ref(), Duration::from_secs(15)).await;
 
-    let captured_contents = gateway.captured_message_contents().await;
+    runtime.shutdown().await.expect("runtime shutdown");
 
     assert_eq!(
         registration_outcomes.len(),
         4,
         "the fired run must have attempted all 4 scheduled-trigger mutator \
          registrations (create/remove/pause/resume) — captured_messages: \
-         {captured_contents:?}, outcomes: {registration_outcomes:?}"
+         {captured_contents:?}, outcomes: {registration_outcomes:?}, \
+         settled_record: {settled:?}"
     );
 
     // Core assertion, mechanism-level: the surface must deny EVERY mutator

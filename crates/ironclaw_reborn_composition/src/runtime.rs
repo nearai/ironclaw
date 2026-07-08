@@ -520,6 +520,11 @@ pub struct RebornRuntime {
     outbound_delivery_target_registry: Option<Arc<MutableOutboundDeliveryTargetRegistry>>,
     budget_event_projection: Option<crate::observability::budget_events::BudgetEventProjection>,
     poll_settings: PollSettings,
+    /// Mints the one-time API bearer on admin user creation. Read by
+    /// `build_webui_services` when wiring the admin surface. `None` leaves the
+    /// admin create path reporting the token minter unavailable.
+    #[cfg(feature = "webui-v2-beta")]
+    admin_api_token_minter: Option<Arc<dyn crate::AdminApiTokenMinter>>,
     actor_user_id: UserId,
     source_binding_ref: SourceBindingRef,
     reply_target_binding_ref: ReplyTargetBindingRef,
@@ -1398,6 +1403,49 @@ impl RebornRuntime {
         Some(Ok(
             Arc::new(store) as Arc<dyn ironclaw_reborn_identity::RebornIdentityResolver>
         ))
+    }
+
+    /// Open the admin user-directory surface over the host-owned identity
+    /// substrate. Same store [`open_reborn_identity_resolver`] uses
+    /// (`FilesystemRebornIdentityStore` implements both traits), so admin CRUD
+    /// enumerates exactly the users SSO login persists. `None` when the runtime
+    /// has no local-runtime substrate (fail closed). Synchronous and fold-free
+    /// (the legacy fold seeds identity/index records, not `StoredUser` rows the
+    /// directory reads), so `build_webui_services` can call it directly.
+    #[cfg(feature = "webui-v2-beta")]
+    pub(crate) fn reborn_user_directory(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_reborn_identity::RebornUserDirectory>> {
+        let local = self.services.local_runtime.as_ref()?;
+        let store = ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
+            Arc::clone(&local.identity_filesystem),
+            self.thread_scope.tenant_id.clone(),
+            self.actor_user_id.clone(),
+            self.thread_scope.agent_id.clone(),
+            self.thread_scope.project_id.clone(),
+        );
+        Some(Arc::new(store) as Arc<dyn ironclaw_reborn_identity::RebornUserDirectory>)
+    }
+
+    /// Admin per-user secret provisioner over the host-owned secret substrate,
+    /// scoped to an arbitrary target user (not the runtime owner). `None` when
+    /// no filesystem secret store was built. See `admin_secrets.rs`.
+    #[cfg(feature = "webui-v2-beta")]
+    pub(crate) fn reborn_admin_secret_provisioner(
+        &self,
+    ) -> Option<Arc<dyn crate::admin_secrets::AdminSecretProvisioner>> {
+        self.services
+            .local_runtime
+            .as_ref()?
+            .admin_secret_provisioner
+            .clone()
+    }
+
+    /// The admin API-token minter supplied via
+    /// [`RebornRuntimeInput::with_admin_api_token_minter`], if any.
+    #[cfg(feature = "webui-v2-beta")]
+    pub(crate) fn reborn_admin_token_minter(&self) -> Option<Arc<dyn crate::AdminApiTokenMinter>> {
+        self.admin_api_token_minter.clone()
     }
 
     pub(crate) fn webui_thread_service(&self) -> Arc<dyn SessionThreadService> {
@@ -2813,6 +2861,8 @@ pub async fn build_reborn_runtime(
         budget_defaults,
         budget_event_observer,
         trajectory_observer,
+        #[cfg(feature = "webui-v2-beta")]
+        admin_api_token_minter,
         #[cfg(any(test, feature = "test-support"))]
         model_gateway_override,
         #[cfg(any(test, feature = "test-support"))]
@@ -3775,6 +3825,8 @@ pub async fn build_reborn_runtime(
         outbound_delivery_target_registry,
         budget_event_projection,
         poll_settings: poll,
+        #[cfg(feature = "webui-v2-beta")]
+        admin_api_token_minter,
         actor_user_id,
         source_binding_ref: validated_identity.source_binding_ref,
         reply_target_binding_ref: validated_identity.reply_target_binding_ref,
@@ -9741,6 +9793,7 @@ output_schema_ref = "schemas/write.output.json"
         .with_model_gateway_override(gateway);
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        stop_turn_runner_worker_for_manual_state_test(&runtime).await;
         let bundle = build_webui_services(&runtime, None).expect("webui bundle");
         let caller = WebUiAuthenticatedCaller::new(
             TenantId::new("runtime-webui-audit-tenant").unwrap(),

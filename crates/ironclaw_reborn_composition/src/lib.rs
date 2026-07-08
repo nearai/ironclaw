@@ -20,6 +20,11 @@
 
 use std::sync::Arc;
 
+#[cfg(feature = "webui-v2-beta")]
+mod admin_secrets;
+mod admin_token;
+#[cfg(feature = "webui-v2-beta")]
+mod admin_user_directory;
 #[cfg(test)]
 mod approval_test_support;
 mod automation;
@@ -115,6 +120,7 @@ mod webui_serve;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_ws_origin;
 
+pub use admin_token::AdminApiTokenMinter;
 pub use automation::RebornAutomationProductFacade;
 pub use error::RebornBuildError;
 pub use extension_host::extension_lifecycle_command::{
@@ -637,9 +643,9 @@ use ironclaw_processes::{FilesystemProcessResultStore, FilesystemProcessStore};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn_event_store::RebornEventStoreConfig;
 use ironclaw_reborn_event_store::RebornEventStoreError;
-use ironclaw_resources::ResourceError;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_resources::{FilesystemResourceGovernorStore, PersistentResourceGovernor};
+use ironclaw_resources::FilesystemResourceGovernor;
+use ironclaw_resources::ResourceError;
 use ironclaw_run_state::RunStateError;
 use ironclaw_secrets::SecretError;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -654,7 +660,7 @@ use thiserror::Error;
 #[cfg(feature = "libsql")]
 pub type LibSqlProductionHostRuntimeServices = HostRuntimeServices<
     LibSqlRootFilesystem,
-    PersistentResourceGovernor<FilesystemResourceGovernorStore<LibSqlRootFilesystem>>,
+    FilesystemResourceGovernor<LibSqlRootFilesystem>,
     FilesystemProcessStore<LibSqlRootFilesystem>,
     FilesystemProcessResultStore<LibSqlRootFilesystem>,
 >;
@@ -662,7 +668,7 @@ pub type LibSqlProductionHostRuntimeServices = HostRuntimeServices<
 #[cfg(feature = "postgres")]
 pub type PostgresProductionHostRuntimeServices = HostRuntimeServices<
     PostgresRootFilesystem,
-    PersistentResourceGovernor<FilesystemResourceGovernorStore<PostgresRootFilesystem>>,
+    FilesystemResourceGovernor<PostgresRootFilesystem>,
     FilesystemProcessStore<PostgresRootFilesystem>,
     FilesystemProcessResultStore<PostgresRootFilesystem>,
 >;
@@ -742,7 +748,22 @@ fn invocation_mount_view_for_segments(
     grants.push(MountGrant::new(
         MountAlias::new("/tenant-shared")?,
         VirtualPath::new(format!("/tenants/{tenant_id}/shared"))?,
+        // Broad tenant-shared storage gets read + write + list, but NOT delete:
+        // no tenant-shared consumer other than the identity store needs to
+        // remove records, so withholding delete here keeps the blast radius of
+        // a compromised writer from spanning every tenant-shared subtree.
         MountPermissions::read_write(),
+    ));
+    grants.push(MountGrant::new(
+        // Delete authority is scoped to the identity subtree specifically: the
+        // Reborn identity store's admin user-directory needs it for the delete
+        // cascade (removing a user's identity / verified-email records) that
+        // lives under `/tenant-shared/reborn-identity/…`. Longest-prefix mount
+        // matching routes identity paths here and everything else to the
+        // delete-less grant above.
+        MountAlias::new("/tenant-shared/reborn-identity")?,
+        VirtualPath::new(format!("/tenants/{tenant_id}/shared/reborn-identity"))?,
+        MountPermissions::read_write_list_delete(),
     ));
     #[cfg(feature = "slack-v2-host-beta")]
     grants.push(MountGrant::new(
@@ -817,6 +838,10 @@ where
 {
     pub database: Arc<libsql::Database>,
     pub event_store: RebornEventStoreConfig,
+    /// Set this only when deployment guarantees exactly one runtime process, or
+    /// one elected runtime owner, is allowed to enforce resource quotas for this
+    /// database. The filesystem governor keeps in-process tallies as authority.
+    pub process_local_resource_governor_singleton: bool,
     pub secret_master_key: Option<SecretMaterial>,
     pub trust_policy: Arc<TPolicy>,
     pub runtime_policy: RebornProductionRuntimePolicy,
@@ -833,6 +858,10 @@ where
 {
     pub pool: deadpool_postgres::Pool,
     pub event_store: RebornEventStoreConfig,
+    /// Set this only when deployment guarantees exactly one runtime process, or
+    /// one elected runtime owner, is allowed to enforce resource quotas for this
+    /// database. The filesystem governor keeps in-process tallies as authority.
+    pub process_local_resource_governor_singleton: bool,
     pub secret_master_key: Option<SecretMaterial>,
     pub trust_policy: Arc<TPolicy>,
     pub runtime_policy: RebornProductionRuntimePolicy,
