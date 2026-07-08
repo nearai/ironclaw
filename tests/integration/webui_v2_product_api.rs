@@ -14,6 +14,7 @@ mod support;
 use std::sync::Arc;
 
 use axum::http::StatusCode;
+use chrono::{DateTime, Utc};
 use ironclaw_events::InMemoryDurableEventLog;
 use ironclaw_filesystem::{CompositeRootFilesystem, LibSqlRootFilesystem};
 use ironclaw_host_api::{CapabilityId, EffectKind, ExtensionId, PermissionMode};
@@ -100,12 +101,11 @@ async fn thread_history_cold_get_and_libsql_reopen() {
             )
         });
     for field in ["created_at", "updated_at"] {
-        assert!(
-            finalized_reply
-                .get(field)
-                .is_some_and(|value| !value.is_null()),
-            "expected finalized assistant message {field} to be present after a fresh libsql reopen: {body}"
-        );
+        finalized_reply[field]
+            .as_str()
+            .unwrap_or_else(|| panic!("{field} missing after libsql reopen: {body}"))
+            .parse::<DateTime<Utc>>()
+            .unwrap_or_else(|error| panic!("{field} not RFC3339 after libsql reopen: {error}"));
     }
 }
 
