@@ -1,7 +1,7 @@
-// Static-analysis gate for the WebUI v2 SPA source in `static/js`.
+// Static-analysis gate for the WebUI v2 SPA JavaScript source in `frontend/src`.
 //
 // Scope is deliberately narrow: this config enforces `no-undef` only. The
-// `node --test` suites for these components stub every collaborator
+// The VM-based component suites stub every collaborator
 // (`html`, `React`, `Button`, `Spinner`, …) through a `vm` context, so a
 // production module that *references* a symbol it never imported still passes
 // its unit test — the stub silently supplies the missing binding. `no-undef`
@@ -10,9 +10,9 @@
 // global (the class of bug that shipped in the htm `${Component}` templates).
 //
 // eslint + globals are resolved from `frontend/node_modules` (the crate's single
-// npm install root); CI runs `frontend/node_modules/.bin/eslint .` from this
-// directory. `globals` is imported by relative path so the config resolves it
-// from that same install without needing a second node_modules at the crate root.
+// package install root). `globals` is imported by relative path so the config
+// resolves it from that same install without needing a second node_modules at
+// the crate root.
 import globals from "./frontend/node_modules/globals/index.js";
 
 export default [
@@ -20,12 +20,14 @@ export default [
     ignores: [
       "static/vendor/**",
       "static/dist/**",
-      "frontend/**",
+      "frontend/dist/**",
+      "frontend/node_modules/**",
+      "frontend/public/vendor/**",
       "**/*.min.js",
     ],
   },
   {
-    files: ["static/js/**/*.js", "static/js/**/*.mjs"],
+    files: ["frontend/src/**/*.js", "frontend/src/**/*.mjs"],
     languageOptions: {
       ecmaVersion: 2024,
       sourceType: "module",
@@ -41,7 +43,7 @@ export default [
   {
     // Test modules import Node builtins and drive components through a `vm`
     // context, so they legitimately see Node globals on top of the browser set.
-    files: ["static/js/**/*.test.mjs", "static/js/**/*.test.js"],
+    files: ["frontend/src/**/*.test.mjs", "frontend/src/**/*.test.js"],
     languageOptions: {
       globals: {
         ...globals.node,
