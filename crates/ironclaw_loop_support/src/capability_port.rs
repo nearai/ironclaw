@@ -2852,8 +2852,6 @@ fn runtime_failure_kind_to_loop(
         RuntimeFailureKind::Resource => CapabilityFailureKind::Resource,
         RuntimeFailureKind::Transient => CapabilityFailureKind::Transient,
         RuntimeFailureKind::Unavailable => CapabilityFailureKind::Unavailable,
-        RuntimeFailureKind::Unknown => capability_failure_kind("unknown")?,
-        _ => capability_failure_kind(kind.as_str())?,
     })
 }
 
@@ -3307,13 +3305,6 @@ mod tests {
                 "{runtime:?}"
             );
         }
-
-        assert_eq!(
-            runtime_failure_kind_to_loop(RuntimeFailureKind::Unknown)
-                .expect("unknown failure kind")
-                .as_str(),
-            "unknown"
-        );
     }
 
     #[test]
