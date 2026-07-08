@@ -1971,6 +1971,7 @@ async fn run_secret_consume_in_process(
             process,
             db_probe: Some(db_probe),
             prefill: None,
+            api_capacity: None,
         },
     );
     eprintln!(
