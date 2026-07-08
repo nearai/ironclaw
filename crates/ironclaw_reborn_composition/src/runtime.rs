@@ -135,16 +135,16 @@ impl OutboundDeliveryTargetProvider for StaticOutboundDeliveryTargetProvider {
         Ok(vec![self.entry.clone()])
     }
 }
-use crate::runtime_input::{
-    PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerAuthorizerConfig,
-    TriggerPollerSettings,
-};
 #[cfg(any(test, feature = "test-support"))]
 use crate::automation::trigger_poller::TenantScopedTrustedTriggerFireAuthorizer;
 use crate::automation::trigger_poller::{
     AccessCheckerTriggerFireAuthorizer, ConversationContentRefMaterializer,
     SnapshotActiveRunLookup, TRIGGER_POLLER_SHUTDOWN_TIMEOUT, TriggerPollerCompositionDeps,
     TriggerPollerRuntimeHandle, spawn_trigger_poller,
+};
+use crate::runtime_input::{
+    PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerAuthorizerConfig,
+    TriggerPollerSettings,
 };
 use crate::{
     RebornBuildError, RebornCompositionProfile, RebornProductAuthServices, RebornReadiness,
@@ -950,8 +950,10 @@ fn build_trigger_fire_authorizer(
     authorizer_config: TriggerPollerAuthorizerConfig,
     access_checker: Option<Arc<dyn crate::runtime_input::TriggerFireAccessChecker>>,
     tenant_id: TenantId,
-) -> Result<Arc<dyn crate::automation::trigger_poller_trusted_submit::TriggerFireAuthorizer>, RebornRuntimeError>
-{
+) -> Result<
+    Arc<dyn crate::automation::trigger_poller_trusted_submit::TriggerFireAuthorizer>,
+    RebornRuntimeError,
+> {
     #[cfg(not(any(test, feature = "test-support")))]
     let _ = tenant_id;
     match authorizer_config {
@@ -962,7 +964,9 @@ fn build_trigger_fire_authorizer(
         TriggerPollerAuthorizerConfig::CreatorAccessRequired => access_checker
             .map(|checker| {
                 Arc::new(AccessCheckerTriggerFireAuthorizer::new(checker))
-                    as Arc<dyn crate::automation::trigger_poller_trusted_submit::TriggerFireAuthorizer>
+                    as Arc<
+                        dyn crate::automation::trigger_poller_trusted_submit::TriggerFireAuthorizer,
+                    >
             })
             .ok_or_else(trigger_poller_authorization_required_error),
     }
