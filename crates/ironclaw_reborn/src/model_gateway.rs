@@ -1366,14 +1366,26 @@ fn unavailable_requested_capability_guard(
         .iter()
         .map(|definition| definition.capability_id.as_str())
         .collect::<HashSet<_>>();
+    // Namespaces the agent actually has (a visible capability shares the prefix,
+    // e.g. `builtin`). Used only to rescue backticked references to REAL
+    // capability namespaces from the inline-code skip — a backticked `builtin.echo`
+    // is still a request, whereas a backticked `playwright.sync_api` (a library
+    // whose namespace this agent doesn't have) is a code reference.
+    let visible_namespaces = visible_capability_ids
+        .iter()
+        .filter_map(|id| id.split('.').next())
+        .collect::<HashSet<_>>();
 
-    extract_explicit_capability_request_ids(&latest_user.content)
+    extract_explicit_capability_request_ids(&latest_user.content, &visible_namespaces)
         .into_iter()
         .find(|capability_id| !visible_capability_ids.contains(capability_id.as_str()))
         .map(|capability_id| UnavailableCapabilityGuard { capability_id })
 }
 
-fn extract_explicit_capability_request_ids(content: &str) -> Vec<CapabilityId> {
+fn extract_explicit_capability_request_ids(
+    content: &str,
+    visible_namespaces: &HashSet<&str>,
+) -> Vec<CapabilityId> {
     let mut ids = Vec::new();
     let mut token_start = None;
     // Track Markdown inline-code parity (per line) in this same single pass so we
@@ -1390,7 +1402,14 @@ fn extract_explicit_capability_request_ids(content: &str) -> Vec<CapabilityId> {
             continue;
         }
         if let Some(start) = token_start.take() {
-            push_explicit_capability_request_token(content, start, index, token_in_code, &mut ids);
+            push_explicit_capability_request_token(
+                content,
+                start,
+                index,
+                token_in_code,
+                visible_namespaces,
+                &mut ids,
+            );
         }
         match character {
             '\n' => in_inline_code = false,
@@ -1404,6 +1423,7 @@ fn extract_explicit_capability_request_ids(content: &str) -> Vec<CapabilityId> {
             start,
             content.len(),
             token_in_code,
+            visible_namespaces,
             &mut ids,
         );
     }
@@ -1421,6 +1441,7 @@ fn push_explicit_capability_request_token(
     start: usize,
     end: usize,
     in_inline_code: bool,
+    visible_namespaces: &HashSet<&str>,
     ids: &mut Vec<CapabilityId>,
 ) {
     let token = &content[start..end];
@@ -1430,11 +1451,16 @@ fn push_explicit_capability_request_token(
         return;
     }
     // Tokens written in Markdown inline code (e.g. "use `playwright.sync_api`", a
-    // Python module) are code references, not capability requests — ignore them,
-    // UNLESS the prompt also explicitly labels the token a tool/capability (e.g.
-    // "use the `builtin.http` capability"), in which case the backticks are just
-    // formatting on a genuine request and the guard must still fire.
-    if in_inline_code && !has_capability_noun_context(content, start, end) {
+    // Python module) are code references, not capability requests — ignore them.
+    // Two exceptions keep genuine requests covered even when backticked:
+    //  - the prompt explicitly labels the token a tool/capability
+    //    ("use the `builtin.http` capability"), or
+    //  - the token names a real capability namespace this agent has
+    //    (`builtin.echo` — `builtin` is a live namespace, unlike `playwright`).
+    if in_inline_code
+        && !has_capability_noun_context(content, start, end)
+        && !token_namespace_is_visible(token, visible_namespaces)
+    {
         return;
     }
     if let Ok(capability_id) = CapabilityId::new(token)
@@ -1446,6 +1472,16 @@ fn push_explicit_capability_request_token(
 
 fn is_likely_capability_reference(token: &str) -> bool {
     token.starts_with("builtin.") || token.split('.').count() == 2
+}
+
+/// True when the token's namespace (its first dotted segment) is one the agent
+/// actually has — a backticked reference to a real capability namespace is still
+/// a request, unlike a library reference (`playwright.sync_api`).
+fn token_namespace_is_visible(token: &str, visible_namespaces: &HashSet<&str>) -> bool {
+    token
+        .split('.')
+        .next()
+        .is_some_and(|namespace| visible_namespaces.contains(namespace))
 }
 
 /// The request-word immediately before `start` (alphanumeric/`_`/`-` run).
@@ -2120,6 +2156,21 @@ mod tests {
             "explicitly-labeled capability must still fire even when backticked"
         );
         assert_eq!(guard.unwrap().capability_id.as_str(), "builtin.http");
+    }
+
+    #[test]
+    fn guard_fires_on_backticked_known_namespace_capability() {
+        // A backticked reference to a REAL capability namespace this agent has
+        // (`builtin`) is still a request, even with only a request verb and no
+        // tool/capability noun — unlike a library ref such as `playwright.sync_api`.
+        let messages = vec![ChatMessage::user("Use `builtin.echo` to print the banner.")];
+        let tools = vec![tool_def("builtin.write_file", "builtin__write_file")];
+        let guard = unavailable_requested_capability_guard(&messages, &tools);
+        assert!(
+            guard.is_some(),
+            "backticked known-namespace capability must still fire"
+        );
+        assert_eq!(guard.unwrap().capability_id.as_str(), "builtin.echo");
     }
 
     #[test]
