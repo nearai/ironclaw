@@ -70,7 +70,7 @@ export function SettingsPage() {
       isLoading=${isLoading}
       searchQuery=${searchQuery}
     />`,
-    skills: html`<${SkillsTab} searchQuery=${searchQuery} />`,
+    skills: html`<${SkillsTab} searchQuery=${searchQuery} isAdmin=${isAdmin} />`,
     traces: html`<${TraceCommonsTab} searchQuery=${searchQuery} />`,
     users: html`<${UsersTab} searchQuery=${searchQuery} />`,
     language: html`<${LanguageTab} searchQuery=${searchQuery} />`,

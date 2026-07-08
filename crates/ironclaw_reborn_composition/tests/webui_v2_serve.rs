@@ -1073,6 +1073,7 @@ impl RebornServicesApi for StubServices {
         _caller: WebUiAuthenticatedCaller,
         _name: String,
         _content: Option<String>,
+        _shared: bool,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
         Err(unused_services_error())
     }

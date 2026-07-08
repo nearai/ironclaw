@@ -559,6 +559,8 @@ registerPack("es", {
   "skills.urlPlaceholder": "https://example.com/SKILL.md",
   "skills.content": "Contenido de SKILL.md",
   "skills.contentHint": "Utilice esto en lugar de la URL al importar contenido de habilidades local o copiado.",
+  "skills.shareWithAllUsers": "Compartir con todos los usuarios",
+  "skills.shareWithAllUsersHint": "Se instala como skill compartida administrada por el admin (el nombre recibe el prefijo shared-). Visible para todos los usuarios, de solo lectura.",
   "skills.contentPlaceholder": "---\\nnombre: ejemplo\\ndescripción: ...\\n---\\n",
   "skills.install": "Importar",
   "skills.installing": "Importando...",
@@ -1153,6 +1155,7 @@ registerPack("es", {
   "skills.edit": "Editar",
   "skills.group.system": "Skills del sistema",
   "skills.group.user": "Tus skills",
+  "skills.group.tenantShared": "Skills compartidas",
   "skills.group.workspace": "Skills del espacio de trabajo",
   "skills.loading": "Cargando...",
   "skills.save": "Guardar",
@@ -1161,6 +1164,7 @@ registerPack("es", {
   "skills.source.system": "sistema",
   "skills.source.user": "usuario",
   "skills.source.workspace": "espacio de trabajo",
+  "skills.source.tenant_shared": "compartida",
   "skills.updateFailed": "Error al actualizar.",
   "skills.updated": "Skill \"{name}\" actualizada"
 });

@@ -1183,11 +1183,18 @@ pub async fn search_skills(
 pub async fn install_skill(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Json(body): Json<InstallSkillBody>,
 ) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
+    // Tenant-shared installs are admin-only. The facade re-checks from the
+    // caller; this route-level gate exists so the two layers fail closed
+    // together (same pattern as the extension import route).
+    if body.shared {
+        require_operator_webui_config(capabilities)?;
+    }
     let response = state
         .services()
-        .install_skill(caller, body.name, body.content)
+        .install_skill(caller, body.name, body.content, body.shared)
         .await?;
     Ok(Json(response))
 }
@@ -1863,6 +1870,10 @@ pub struct SearchSkillsBody {
 pub struct InstallSkillBody {
     pub name: String,
     pub content: Option<String>,
+    /// Install into the tenant-shared tier (admin-only). Defaults to a
+    /// user-private install so pre-existing clients keep today's behavior.
+    #[serde(default)]
+    pub shared: bool,
 }
 
 #[derive(Debug, Deserialize)]

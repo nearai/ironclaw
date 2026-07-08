@@ -559,6 +559,8 @@ registerPack("zh-CN", {
   "skills.urlPlaceholder": "https://example.com/SKILL.md",
   "skills.content": "SKILL.md 内容",
   "skills.contentHint": "如果您从本地直接复制内容也可在此输入而可以不必使用 URL。",
+  "skills.shareWithAllUsers": "与所有用户共享",
+  "skills.shareWithAllUsersHint": "安装为由管理员管理的共享技能（名称会加上 shared- 前缀）。对所有用户可见，且为只读。",
   "skills.contentPlaceholder": "---\\\\nname: example\\\\ndescription: ...\\\\n---\\\\n",
   "skills.install": "导入",
   "skills.installing": "导入中...",
@@ -1152,6 +1154,7 @@ registerPack("zh-CN", {
   "skills.edit": "编辑",
   "skills.group.system": "系统技能",
   "skills.group.user": "你的技能",
+  "skills.group.tenantShared": "共享技能",
   "skills.group.workspace": "工作区技能",
   "skills.loading": "加载中...",
   "skills.save": "保存",
@@ -1160,6 +1163,7 @@ registerPack("zh-CN", {
   "skills.source.system": "系统",
   "skills.source.user": "用户",
   "skills.source.workspace": "工作区",
+  "skills.source.tenant_shared": "共享",
   "skills.updateFailed": "更新失败。",
   "skills.updated": "已更新技能“{name}”"
 });

@@ -559,6 +559,8 @@ registerPack("uk", {
   "skills.urlPlaceholder": "https://example.com/SKILL.md",
   "skills.content": "Вміст SKILL.md",
   "skills.contentHint": "Використовуйте це замість URL-адреси, коли імпортуєте локальний або скопійований вміст навичок.",
+  "skills.shareWithAllUsers": "Поділитися з усіма користувачами",
+  "skills.shareWithAllUsersHint": "Встановлюється як спільна skill під керуванням адміністратора (ім'я отримує префікс shared-). Видима всім користувачам, лише для читання.",
   "skills.contentPlaceholder": "---\\nназва: приклад\\ndeопис: ...\\n---\\n",
   "skills.install": "Імпорт",
   "skills.installing": "Імпорт...",
@@ -1152,6 +1154,7 @@ registerPack("uk", {
   "skills.edit": "Редагувати",
   "skills.group.system": "Системні навички",
   "skills.group.user": "Ваші навички",
+  "skills.group.tenantShared": "Спільні skills",
   "skills.group.workspace": "Навички робочої області",
   "skills.loading": "Завантаження...",
   "skills.save": "Зберегти",
@@ -1160,6 +1163,7 @@ registerPack("uk", {
   "skills.source.system": "система",
   "skills.source.user": "користувач",
   "skills.source.workspace": "робоча область",
+  "skills.source.tenant_shared": "спільна",
   "skills.updateFailed": "Не вдалося оновити.",
   "skills.updated": "Навичку \"{name}\" оновлено"
 });

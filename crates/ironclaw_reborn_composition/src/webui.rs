@@ -17,6 +17,7 @@ use ironclaw_product_workflow::{
     RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel, SkillsProductFacade,
     WebUiAuthenticatedCaller,
 };
+use ironclaw_skills::SkillInstallTarget;
 
 use ironclaw_triggers::TriggerRepository;
 
@@ -428,6 +429,7 @@ impl SkillsProductFacade for LocalSkillsProductFacade {
         &self,
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornSkillListResponse, RebornServicesError> {
+        let admin = caller.operator_webui_config;
         let scope = caller_skill_scope(caller);
         let skills = self
             .skill_management
@@ -436,6 +438,7 @@ impl SkillsProductFacade for LocalSkillsProductFacade {
             .map_err(map_skill_management_error)?;
         Ok(skill_list_response(
             skills,
+            admin,
             self.auto_activate_learned
                 .as_ref()
                 .map(|flag| flag.load(Ordering::Relaxed))
@@ -448,6 +451,7 @@ impl SkillsProductFacade for LocalSkillsProductFacade {
         caller: WebUiAuthenticatedCaller,
         query: String,
     ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
+        let admin = caller.operator_webui_config;
         let scope = caller_skill_scope(caller);
         let result = self
             .skill_management
@@ -456,7 +460,11 @@ impl SkillsProductFacade for LocalSkillsProductFacade {
             .map_err(map_skill_management_error)?;
         Ok(RebornSkillSearchResponse {
             catalog: Vec::new(),
-            installed: result.skills.into_iter().map(skill_info).collect(),
+            installed: result
+                .skills
+                .into_iter()
+                .map(|skill| skill_info(skill, admin))
+                .collect(),
             registry_url: String::new(),
             catalog_error: None,
         })
@@ -467,13 +475,23 @@ impl SkillsProductFacade for LocalSkillsProductFacade {
         caller: WebUiAuthenticatedCaller,
         name: String,
         content: Option<String>,
+        shared: bool,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let admin = caller.operator_webui_config;
+        if shared && !admin {
+            return Err(forbidden_skill_request());
+        }
         let scope = caller_skill_scope(caller);
         let content = content.ok_or_else(invalid_skill_request)?;
         validate_skill_content_safety(&content)?;
+        let target = if shared {
+            SkillInstallTarget::TenantShared
+        } else {
+            SkillInstallTarget::UserPrivate
+        };
         let installed = self
             .skill_management
-            .install_for_scope(scope, Some(&name), &content)
+            .install_for_scope(scope, admin, Some(&name), &content, target)
             .await
             .map_err(map_skill_management_error)?;
         Ok(RebornSkillActionResponse {
@@ -505,11 +523,15 @@ impl SkillsProductFacade for LocalSkillsProductFacade {
         name: String,
         content: String,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let admin = caller.operator_webui_config;
+        if ironclaw_skills::is_tenant_shared_skill_name(&name) && !admin {
+            return Err(forbidden_skill_request());
+        }
         let scope = caller_skill_scope(caller);
         validate_skill_content_safety(&content)?;
         let updated = self
             .skill_management
-            .update_for_scope(scope, &name, &content)
+            .update_for_scope(scope, admin, &name, &content)
             .await
             .map_err(map_skill_management_error)?;
         Ok(RebornSkillActionResponse {
@@ -523,10 +545,14 @@ impl SkillsProductFacade for LocalSkillsProductFacade {
         caller: WebUiAuthenticatedCaller,
         name: String,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let admin = caller.operator_webui_config;
+        if ironclaw_skills::is_tenant_shared_skill_name(&name) && !admin {
+            return Err(forbidden_skill_request());
+        }
         let scope = caller_skill_scope(caller);
         let removed = self
             .skill_management
-            .remove_for_scope(scope, &name)
+            .remove_for_scope(scope, admin, &name)
             .await
             .map_err(map_skill_management_error)?;
         Ok(RebornSkillActionResponse {
@@ -541,6 +567,10 @@ impl SkillsProductFacade for LocalSkillsProductFacade {
         name: String,
         enabled: bool,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
+        let admin = caller.operator_webui_config;
+        if ironclaw_skills::is_tenant_shared_skill_name(&name) && !admin {
+            return Err(forbidden_skill_request());
+        }
         let scope = caller_skill_scope(caller);
         let current = self
             .skill_management
@@ -555,7 +585,7 @@ impl SkillsProductFacade for LocalSkillsProductFacade {
         // not an in-turn tool call.
         let result = self
             .skill_management
-            .update_for_scope(scope, &name, &updated)
+            .update_for_scope(scope, admin, &name, &updated)
             .await
             .map_err(map_skill_management_error)?;
         Ok(RebornSkillActionResponse {
@@ -613,9 +643,13 @@ fn caller_skill_scope(caller: WebUiAuthenticatedCaller) -> ResourceScope {
 
 fn skill_list_response(
     skills: Vec<ironclaw_skills::SkillSummary>,
+    admin: bool,
     auto_activate_learned: bool,
 ) -> RebornSkillListResponse {
-    let skills: Vec<_> = skills.into_iter().map(skill_info).collect();
+    let skills: Vec<_> = skills
+        .into_iter()
+        .map(|skill| skill_info(skill, admin))
+        .collect();
     RebornSkillListResponse {
         count: skills.len(),
         skills,
@@ -623,21 +657,28 @@ fn skill_list_response(
     }
 }
 
-fn skill_info(skill: ironclaw_skills::SkillSummary) -> RebornSkillInfo {
+fn skill_info(skill: ironclaw_skills::SkillSummary, admin: bool) -> RebornSkillInfo {
     let source_kind = match skill.source {
         ironclaw_skills::ManagedSkillSource::System => RebornSkillSourceKind::System,
+        ironclaw_skills::ManagedSkillSource::TenantShared => RebornSkillSourceKind::TenantShared,
         ironclaw_skills::ManagedSkillSource::User => RebornSkillSourceKind::User,
         ironclaw_skills::ManagedSkillSource::Installed => RebornSkillSourceKind::Installed,
     };
-    let can_manage = matches!(
-        source_kind,
-        RebornSkillSourceKind::User | RebornSkillSourceKind::Installed
-    );
+    // Tenant-shared skills render like system skills for regular users
+    // (read-only); only the admin can edit or remove them.
+    let can_manage = match source_kind {
+        RebornSkillSourceKind::User | RebornSkillSourceKind::Installed => true,
+        RebornSkillSourceKind::TenantShared => admin,
+        RebornSkillSourceKind::System | RebornSkillSourceKind::Workspace => false,
+    };
     RebornSkillInfo {
         name: skill.name.clone(),
         description: skill.description,
         version: skill.version,
-        trust: if source_kind == RebornSkillSourceKind::Installed {
+        trust: if matches!(
+            source_kind,
+            RebornSkillSourceKind::Installed | RebornSkillSourceKind::TenantShared
+        ) {
             RebornSkillTrustLevel::Installed
         } else {
             RebornSkillTrustLevel::Trusted
@@ -719,6 +760,21 @@ fn invalid_skill_request() -> RebornServicesError {
         code: RebornServicesErrorCode::InvalidRequest,
         kind: RebornServicesErrorKind::Validation,
         status_code: 400,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    }
+}
+
+/// Non-admin caller attempted a tenant-shared skill mutation (shared install,
+/// or update/remove/toggle of a `shared-*` name). Same shape the
+/// `FilesystemDenied` mount-layer rejection maps to, so the two defense layers
+/// are indistinguishable to the browser.
+fn forbidden_skill_request() -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::Forbidden,
+        kind: RebornServicesErrorKind::ParticipantDenied,
+        status_code: 403,
         retryable: false,
         field: None,
         validation_code: None,
@@ -1136,7 +1192,8 @@ mod tests {
         let skill_management = Arc::new(RebornLocalSkillManagementPort::new_with_mount_resolver(
             UserId::new("runtime-owner").expect("user"),
             filesystem,
-            Arc::new(scoped_skill_mounts),
+            Arc::new(crate::local_dev_mounts::scoped_skill_management_mount_view),
+            Arc::new(crate::local_dev_mounts::scoped_skill_management_admin_mount_view),
         ));
         // Share the flag the way production composition does: the activation
         // selector holds the same `Arc`, so a toggle here must be observable on
@@ -1203,7 +1260,8 @@ mod tests {
         let skill_management = Arc::new(RebornLocalSkillManagementPort::new_with_mount_resolver(
             UserId::new("runtime-owner").expect("user"),
             filesystem,
-            Arc::new(scoped_skill_mounts),
+            Arc::new(crate::local_dev_mounts::scoped_skill_management_mount_view),
+            Arc::new(crate::local_dev_mounts::scoped_skill_management_admin_mount_view),
         ));
         let facade = LocalSkillsProductFacade::new(skill_management, None);
         let owner = caller("runtime-owner");
@@ -1249,7 +1307,8 @@ mod tests {
         let skill_management = Arc::new(RebornLocalSkillManagementPort::new_with_mount_resolver(
             UserId::new("runtime-owner").expect("user"),
             filesystem,
-            Arc::new(scoped_skill_mounts),
+            Arc::new(crate::local_dev_mounts::scoped_skill_management_mount_view),
+            Arc::new(crate::local_dev_mounts::scoped_skill_management_admin_mount_view),
         ));
         let facade =
             LocalSkillsProductFacade::new(skill_management, Some(Arc::new(AtomicBool::new(true))));
@@ -1260,8 +1319,9 @@ mod tests {
         facade
             .install_skill(
                 owner.clone(),
-                "shared-name".to_string(),
-                Some(skill_content("shared-name", "alice skill")),
+                "same-name".to_string(),
+                Some(skill_content("same-name", "alice skill")),
+                false,
             )
             .await
             .expect("owner installs skill");
@@ -1271,13 +1331,13 @@ mod tests {
             .await
             .expect("owner lists skills")
             .skills;
-        assert!(owner_skills.iter().any(|skill| skill.name == "shared-name"));
+        assert!(owner_skills.iter().any(|skill| skill.name == "same-name"));
         let bob_skills = facade
             .list_skills(bob.clone())
             .await
             .expect("bob lists skills")
             .skills;
-        assert!(!bob_skills.iter().any(|skill| skill.name == "shared-name"));
+        assert!(!bob_skills.iter().any(|skill| skill.name == "same-name"));
         assert!(bob_skills.iter().any(|skill| skill.name == "system-helper"));
         let other_tenant_skills = facade
             .list_skills(other_tenant_owner.clone())
@@ -1287,16 +1347,16 @@ mod tests {
         assert!(
             !other_tenant_skills
                 .iter()
-                .any(|skill| skill.name == "shared-name")
+                .any(|skill| skill.name == "same-name")
         );
 
         let bob_read = facade
-            .read_skill_content(bob.clone(), "shared-name".to_string())
+            .read_skill_content(bob.clone(), "same-name".to_string())
             .await
             .expect_err("bob must not read the owner skill root");
         assert_eq!(bob_read.status_code, 404);
         let other_tenant_read = facade
-            .read_skill_content(other_tenant_owner.clone(), "shared-name".to_string())
+            .read_skill_content(other_tenant_owner.clone(), "same-name".to_string())
             .await
             .expect_err("same user id in another tenant must not read the owner skill root");
         assert_eq!(other_tenant_read.status_code, 404);
@@ -1306,6 +1366,7 @@ mod tests {
                 bob.clone(),
                 "bob-skill".to_string(),
                 Some(skill_content("bob-skill", "bob skill")),
+                false,
             )
             .await
             .expect("bob installs own skill");
@@ -1322,13 +1383,153 @@ mod tests {
 
         assert!(
             storage_root
-                .join("tenants/tenant-alpha/users/runtime-owner/skills/shared-name/SKILL.md")
+                .join("tenants/tenant-alpha/users/runtime-owner/skills/same-name/SKILL.md")
                 .exists()
         );
         assert!(
             storage_root
                 .join("tenants/tenant-alpha/users/bob/skills/bob-skill/SKILL.md")
                 .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn skills_product_facade_shares_admin_installed_skill_with_all_users() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        std::fs::create_dir_all(&storage_root).expect("storage root");
+        let facade = local_skills_facade(&storage_root);
+        let admin = admin_caller("runtime-owner");
+        let bob = caller("bob");
+
+        // Non-admin cannot request a shared install at all.
+        let denied = facade
+            .install_skill(
+                bob.clone(),
+                "team-brief".to_string(),
+                Some(skill_content("team-brief", "team brief")),
+                true,
+            )
+            .await
+            .expect_err("non-admin shared install must be denied");
+        assert_eq!(denied.status_code, 403);
+
+        // Nor can a user squat the reserved prefix with a private install.
+        let reserved = facade
+            .install_skill(
+                bob.clone(),
+                "shared-cheat".to_string(),
+                Some(skill_content("shared-cheat", "cheat")),
+                false,
+            )
+            .await
+            .expect_err("reserved prefix must be rejected for private installs");
+        assert_eq!(reserved.status_code, 400);
+
+        // Raw, unvalidated names hit the prefix gate before name validation —
+        // a non-ASCII char straddling the prefix boundary must surface as a
+        // clean error, never a panic (byte-slice regression guard).
+        let non_ascii = facade
+            .update_skill(
+                bob.clone(),
+                "shared\u{00e9}".to_string(),
+                skill_content("whatever", "whatever"),
+            )
+            .await
+            .expect_err("invalid non-ASCII name must error cleanly");
+        assert_eq!(non_ascii.status_code, 400);
+
+        // Admin shared install auto-prefixes and lands in the shared tier.
+        facade
+            .install_skill(
+                admin.clone(),
+                "team-brief".to_string(),
+                Some(skill_content("team-brief", "team brief")),
+                true,
+            )
+            .await
+            .expect("admin installs shared skill");
+        assert!(
+            storage_root
+                .join("tenant-shared/skills/shared-team-brief/SKILL.md")
+                .exists(),
+            "shared skill must land under the tenant-shared tier"
+        );
+
+        // Every user sees it, read-only, with tenant-shared provenance.
+        let bob_skills = facade
+            .list_skills(bob.clone())
+            .await
+            .expect("bob lists skills")
+            .skills;
+        let shared = bob_skills
+            .iter()
+            .find(|skill| skill.name == "shared-team-brief")
+            .expect("shared skill visible to another user");
+        assert_eq!(shared.source_kind, RebornSkillSourceKind::TenantShared);
+        assert_eq!(shared.trust, RebornSkillTrustLevel::Installed);
+        assert!(!shared.can_edit);
+        assert!(!shared.can_delete);
+        let bob_read = facade
+            .read_skill_content(bob.clone(), "shared-team-brief".to_string())
+            .await
+            .expect("every user can read a shared skill");
+        assert!(bob_read.content.contains("team brief"));
+
+        // Non-admin mutations of the shared skill fail closed.
+        let update_denied = facade
+            .update_skill(
+                bob.clone(),
+                "shared-team-brief".to_string(),
+                skill_content("shared-team-brief", "tampered"),
+            )
+            .await
+            .expect_err("non-admin update must be denied");
+        assert_eq!(update_denied.status_code, 403);
+        let remove_denied = facade
+            .remove_skill(bob.clone(), "shared-team-brief".to_string())
+            .await
+            .expect_err("non-admin remove must be denied");
+        assert_eq!(remove_denied.status_code, 403);
+        let toggle_denied = facade
+            .set_skill_auto_activate(bob.clone(), "shared-team-brief".to_string(), false)
+            .await
+            .expect_err("non-admin auto-activate toggle must be denied");
+        assert_eq!(toggle_denied.status_code, 403);
+
+        // The admin manages it: list shows manageable, update + remove work.
+        let admin_skills = facade
+            .list_skills(admin.clone())
+            .await
+            .expect("admin lists skills")
+            .skills;
+        let shared_admin = admin_skills
+            .iter()
+            .find(|skill| skill.name == "shared-team-brief")
+            .expect("admin sees shared skill");
+        assert!(shared_admin.can_edit);
+        assert!(shared_admin.can_delete);
+        facade
+            .update_skill(
+                admin.clone(),
+                "shared-team-brief".to_string(),
+                skill_content("shared-team-brief", "team brief v2"),
+            )
+            .await
+            .expect("admin updates shared skill");
+        facade
+            .remove_skill(admin, "shared-team-brief".to_string())
+            .await
+            .expect("admin removes shared skill");
+        let bob_after = facade
+            .list_skills(bob)
+            .await
+            .expect("bob lists after removal")
+            .skills;
+        assert!(
+            !bob_after
+                .iter()
+                .any(|skill| skill.name == "shared-team-brief")
         );
     }
 
@@ -1347,6 +1548,7 @@ mod tests {
                 caller.clone(),
                 "unsafe-skill".to_string(),
                 Some(unsafe_content.to_string()),
+                false,
             )
             .await
             .expect_err("unsafe install should fail");
@@ -1362,6 +1564,7 @@ mod tests {
                 caller.clone(),
                 "safe-skill".to_string(),
                 Some(skill_content("safe-skill", "safe skill")),
+                false,
             )
             .await
             .expect("safe install succeeds");
@@ -1398,6 +1601,7 @@ mod tests {
                 caller.clone(),
                 "draft-helper".to_string(),
                 Some(skill_content("draft-helper", "draft helper")),
+                false,
             )
             .await
             .expect("install skill");
@@ -1438,6 +1642,12 @@ mod tests {
 
     fn caller(user_id: &str) -> WebUiAuthenticatedCaller {
         caller_in_tenant("tenant-alpha", user_id)
+    }
+
+    /// Caller carrying the `operator_webui_config` capability — the admin
+    /// signal the env-bearer authenticator sets in production.
+    fn admin_caller(user_id: &str) -> WebUiAuthenticatedCaller {
+        caller(user_id).with_operator_webui_config(true)
     }
 
     fn test_extension_package(extension_id: &str, capability_name: &str) -> ExtensionPackage {
@@ -1486,28 +1696,6 @@ output_schema_ref = "schemas/{capability_name}.output.json"
         )
     }
 
-    fn scoped_skill_mounts(
-        scope: &ResourceScope,
-    ) -> Result<MountView, ironclaw_host_api::HostApiError> {
-        let user_skills = format!(
-            "/projects/tenants/{}/users/{}/skills",
-            scope.tenant_id.as_str(),
-            scope.user_id.as_str()
-        );
-        MountView::new(vec![
-            MountGrant::new(
-                MountAlias::new("/skills")?,
-                VirtualPath::new(user_skills)?,
-                MountPermissions::read_write_list_delete(),
-            ),
-            MountGrant::new(
-                MountAlias::new("/system/skills")?,
-                VirtualPath::new("/projects/system/skills")?,
-                MountPermissions::read_only(),
-            ),
-        ])
-    }
-
     fn local_skills_facade(storage_root: &Path) -> LocalSkillsProductFacade {
         let mut filesystem = LocalFilesystem::new();
         filesystem
@@ -1517,10 +1705,14 @@ output_schema_ref = "schemas/{capability_name}.output.json"
             )
             .expect("mount storage root");
         let filesystem: Arc<dyn ironclaw_filesystem::RootFilesystem> = Arc::new(filesystem);
+        // Drive the REAL production mount resolvers (user view + admin view)
+        // so these facade tests exercise the same tenant-shared permission
+        // split production composition wires.
         let skill_management = Arc::new(RebornLocalSkillManagementPort::new_with_mount_resolver(
             UserId::new("runtime-owner").expect("user"),
             filesystem,
-            Arc::new(scoped_skill_mounts),
+            Arc::new(crate::local_dev_mounts::scoped_skill_management_mount_view),
+            Arc::new(crate::local_dev_mounts::scoped_skill_management_admin_mount_view),
         ));
         LocalSkillsProductFacade::new(skill_management, Some(Arc::new(AtomicBool::new(true))))
     }

@@ -3989,7 +3989,11 @@ fn local_dev_filesystem_skill_context_source(
 ) -> Result<LocalDevSkillContextSource, RebornRuntimeError> {
     let extension = FirstPartySkillsExtension::new(
         Arc::clone(&local_runtime.skill_filesystem),
-        FirstPartySkillsExtensionHandles::without_tenant_shared().map_err(|reason| {
+        // Tenant-shared skills are live (#5459 P4): admin-installed `shared-*`
+        // skills under /tenant-shared/skills join activation with
+        // `SkillTrust::Installed`. The backing read mount already exists in
+        // `scoped_skill_context_mount_view`.
+        FirstPartySkillsExtensionHandles::with_tenant_shared().map_err(|reason| {
             RebornRuntimeError::InvalidArgument {
                 reason: format!("first-party skills extension handles: {reason}"),
             }

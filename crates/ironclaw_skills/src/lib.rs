@@ -65,13 +65,17 @@ pub use install_metadata::{
 pub use management::{
     MAX_INSTALL_BUNDLE_FILE_BYTES, MAX_INSTALL_BUNDLE_FILES, MAX_INSTALL_BUNDLE_TOTAL_BYTES,
     SkillContentRequest, SkillContentResult, SkillInstallFile, SkillInstallRequest,
-    SkillInstallResult, SkillInstallSource, SkillManagementContext, SkillManagementError,
-    SkillManagementErrorKind, SkillRemoveRequest, SkillRemoveResult, SkillSearchRequest,
-    SkillSearchResult, SkillSource as ManagedSkillSource, SkillSummary, SkillUpdateRequest,
-    SkillUpdateResult, install_skill, list_skills, read_skill_content, remove_skill, search_skills,
+    SkillInstallResult, SkillInstallSource, SkillInstallTarget, SkillManagementContext,
+    SkillManagementError, SkillManagementErrorKind, SkillRemoveRequest, SkillRemoveResult,
+    SkillSearchRequest, SkillSearchResult, SkillSource as ManagedSkillSource, SkillSummary,
+    SkillUpdateRequest, SkillUpdateResult, TENANT_SHARED_SKILL_NAME_PREFIX, install_skill,
+    is_tenant_shared_skill_name, list_skills, read_skill_content, remove_skill, search_skills,
     skill_summary_json, update_skill,
 };
-pub use parser::{ParsedSkill, SkillParseError, parse_skill_md, set_skill_auto_activate};
+pub use parser::{
+    ParsedSkill, SkillParseError, parse_skill_md, set_skill_auto_activate,
+    set_skill_frontmatter_name,
+};
 pub use selector::{
     MAX_SKILL_CONTEXT_TOKENS, SelectionOutcome, SkillSelectionOptions, extract_skill_mentions,
     prefilter_skills_with_options, skill_token_cost,

@@ -559,6 +559,8 @@ registerPack("hi", {
   "skills.urlPlaceholder": "https://example.com/SKILL.md",
   "skills.content": "SKILL.md सामग्री",
   "skills.contentHint": "स्थानीय या कॉपी की गई कौशल सामग्री आयात करते समय URL के बजाय इसका उपयोग करें।",
+  "skills.shareWithAllUsers": "सभी उपयोगकर्ताओं के साथ साझा करें",
+  "skills.shareWithAllUsersHint": "एडमिन द्वारा प्रबंधित साझा skill के रूप में इंस्टॉल होती है (नाम में shared- उपसर्ग जुड़ता है)। सभी उपयोगकर्ताओं को दिखती है, केवल पढ़ने के लिए।",
   "skills.contentPlaceholder": "---\\nनाम: उदाहरण\\nविवरण: ...\\n---\\n",
   "skills.install": "आयात",
   "skills.installing": "आयात...",
@@ -1152,6 +1154,7 @@ registerPack("hi", {
   "skills.edit": "संपादित करें",
   "skills.group.system": "सिस्टम स्किल",
   "skills.group.user": "आपकी स्किल",
+  "skills.group.tenantShared": "साझा skills",
   "skills.group.workspace": "वर्कस्पेस स्किल",
   "skills.loading": "लोड हो रहा है...",
   "skills.save": "सहेजें",
@@ -1160,6 +1163,7 @@ registerPack("hi", {
   "skills.source.system": "सिस्टम",
   "skills.source.user": "उपयोगकर्ता",
   "skills.source.workspace": "वर्कस्पेस",
+  "skills.source.tenant_shared": "साझा",
   "skills.updateFailed": "अपडेट विफल।",
   "skills.updated": "स्किल \"{name}\" अपडेट की गई"
 });

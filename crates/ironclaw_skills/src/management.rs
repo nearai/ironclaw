@@ -32,6 +32,13 @@ use install_bundle::{
 
 pub(super) const USER_SKILLS_ROOT: &str = "/skills";
 const SYSTEM_SKILLS_ROOT: &str = "/system/skills";
+pub(super) const TENANT_SHARED_SKILLS_ROOT: &str = "/tenant-shared/skills";
+/// Reserved name prefix for tenant-shared skills. Reserving the prefix makes
+/// the shared and user-private name namespaces disjoint by construction, so no
+/// dedupe/precedence logic is needed anywhere downstream: a name carrying the
+/// prefix lives only under [`TENANT_SHARED_SKILLS_ROOT`], every other name only
+/// under [`USER_SKILLS_ROOT`].
+pub const TENANT_SHARED_SKILL_NAME_PREFIX: &str = "shared-";
 pub(super) const SKILL_FILE_NAME: &str = "SKILL.md";
 const SKILL_SEARCH_ENTRY_SCAN_LIMIT: usize = 250;
 type SkillMutationLock = Arc<tokio::sync::Mutex<()>>;
@@ -163,6 +170,8 @@ pub struct SkillSummary {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillSource {
     System,
+    /// Admin-installed, visible read-only to every user in the tenant.
+    TenantShared,
     User,
     Installed,
 }
@@ -171,9 +180,48 @@ impl SkillSource {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::System => "system",
+            Self::TenantShared => "tenant_shared",
             Self::User => "user",
             Self::Installed => "installed",
         }
+    }
+}
+
+/// Whether `name` belongs to the tenant-shared skill namespace (carries the
+/// reserved [`TENANT_SHARED_SKILL_NAME_PREFIX`]). Case-insensitive so a user
+/// cannot smuggle `Shared-x` past the reservation. Byte-wise (not `name[..n]`)
+/// because callers pass raw, unvalidated names — a `str` slice would panic on
+/// a non-ASCII char straddling the prefix boundary.
+pub fn is_tenant_shared_skill_name(name: &str) -> bool {
+    name.as_bytes()
+        .get(..TENANT_SHARED_SKILL_NAME_PREFIX.len())
+        .is_some_and(|prefix| {
+            prefix.eq_ignore_ascii_case(TENANT_SHARED_SKILL_NAME_PREFIX.as_bytes())
+        })
+}
+
+/// Root a skill name resolves to under the disjoint-namespace rule.
+fn skill_tier_root(name: &str) -> &'static str {
+    if is_tenant_shared_skill_name(name) {
+        TENANT_SHARED_SKILLS_ROOT
+    } else {
+        USER_SKILLS_ROOT
+    }
+}
+
+/// Whether a directory entry name is addressable in `scoped_root` under the
+/// disjoint-namespace rule. On-disk state that violates the rule (a
+/// `shared-*` directory inside a user root, or an unprefixed directory
+/// dropped into the tenant-shared root) would list fine but 404 on every
+/// read/update/remove, because name-based routing resolves it to the OTHER
+/// root — so the listers skip it, like they already skip invalid names. The
+/// files stay on disk untouched.
+fn entry_belongs_to_root(name: &str, scoped_root: &str) -> bool {
+    match scoped_root {
+        USER_SKILLS_ROOT => !is_tenant_shared_skill_name(name),
+        TENANT_SHARED_SKILLS_ROOT => is_tenant_shared_skill_name(name),
+        // System skills are read-only and not name-routed; list everything.
+        _ => true,
     }
 }
 
@@ -195,6 +243,16 @@ pub enum SkillInstallSource {
     InstalledUrl,
 }
 
+/// Which tier an install writes to. `UserPrivate` is the default and the only
+/// shape reachable from model/agent input; `TenantShared` is host-gated
+/// (admin-only at the facade, read-only shared mounts everywhere else).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SkillInstallTarget {
+    #[default]
+    UserPrivate,
+    TenantShared,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SkillInstallRequest<'a> {
     pub name: Option<&'a str>,
@@ -202,6 +260,7 @@ pub struct SkillInstallRequest<'a> {
     pub files: &'a [SkillInstallFile<'a>],
     pub source: SkillInstallSource,
     pub source_url: Option<&'a str>,
+    pub target: SkillInstallTarget,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -266,6 +325,14 @@ pub async fn list_skills(
 ) -> Result<Vec<SkillSummary>, SkillManagementError> {
     let mut skills = Vec::new();
     skills.extend(list_skill_root(context, SYSTEM_SKILLS_ROOT, SkillSource::System).await?);
+    skills.extend(
+        list_skill_root(
+            context,
+            TENANT_SHARED_SKILLS_ROOT,
+            SkillSource::TenantShared,
+        )
+        .await?,
+    );
     skills.extend(list_skill_root(context, USER_SKILLS_ROOT, SkillSource::User).await?);
     tracing::debug!(skill_count = skills.len(), "skill management listed skills");
     Ok(skills)
@@ -293,6 +360,18 @@ pub async fn search_skills(
         &mut skills,
     )
     .await?;
+    if !truncated {
+        truncated = collect_matching_skill_root(
+            context,
+            TENANT_SHARED_SKILLS_ROOT,
+            SkillSource::TenantShared,
+            &normalized_query,
+            request.limit,
+            &mut remaining_entries,
+            &mut skills,
+        )
+        .await?;
+    }
     if !truncated {
         truncated = collect_matching_skill_root(
             context,
@@ -337,6 +416,9 @@ pub async fn install_skill(
     }
 
     let prepared = prepare_install_content(request.content, request.name)?;
+    validate_install_bundle_files(request.files)?;
+    let (prepared, root, result_source) =
+        resolve_install_tier(prepared, request.target, request.source)?;
     if prepared.content.len() as u64 > MAX_PROMPT_FILE_SIZE {
         tracing::debug!(
             max_bytes = MAX_PROMPT_FILE_SIZE,
@@ -346,18 +428,18 @@ pub async fn install_skill(
             SkillManagementErrorKind::Resource,
         ));
     }
-    validate_install_bundle_files(request.files)?;
 
     let skill_name = prepared.parsed.manifest.name;
     let mutation_lock = skill_mutation_lock(&skill_name);
     let _mutation_guard = mutation_lock.lock().await;
-    let skill_dir = skill_root_scoped_path(USER_SKILLS_ROOT, &skill_name)?;
-    let skill_path = skill_scoped_path(USER_SKILLS_ROOT, &skill_name, SKILL_FILE_NAME)?;
+    let skill_dir = skill_root_scoped_path(root, &skill_name)?;
+    let skill_path = skill_scoped_path(root, &skill_name, SKILL_FILE_NAME)?;
 
     log_skill_filesystem_phase("stat_existing_dir", &skill_name, &skill_dir);
     if stat_optional(context, &skill_dir).await?.is_some() {
         if existing_skill_install_matches(
             context,
+            root,
             &skill_name,
             &prepared.content,
             request.files,
@@ -373,8 +455,8 @@ pub async fn install_skill(
             );
             return Ok(SkillInstallResult {
                 name: skill_name.clone(),
-                scoped_path: format!("{USER_SKILLS_ROOT}/{skill_name}/{SKILL_FILE_NAME}"),
-                source: installed_skill_source(request.source),
+                scoped_path: format!("{root}/{skill_name}/{SKILL_FILE_NAME}"),
+                source: result_source,
             });
         }
         tracing::debug!(
@@ -401,6 +483,7 @@ pub async fn install_skill(
 
     publish_skill_install(
         context,
+        root,
         &skill_name,
         &prepared.content,
         request.files,
@@ -417,9 +500,85 @@ pub async fn install_skill(
 
     Ok(SkillInstallResult {
         name: skill_name.clone(),
-        scoped_path: format!("{USER_SKILLS_ROOT}/{skill_name}/{SKILL_FILE_NAME}"),
-        source: installed_skill_source(request.source),
+        scoped_path: format!("{root}/{skill_name}/{SKILL_FILE_NAME}"),
+        source: result_source,
     })
+}
+
+/// Route an install to its tier under the disjoint-namespace rule.
+///
+/// `UserPrivate` rejects names carrying the reserved tenant-shared prefix —
+/// this is the single choke point both the WebUI facade and the agent
+/// `skill_install` tool converge on, so neither path can plant a
+/// `shared-*`-named skill in a private root. `TenantShared` auto-prefixes the
+/// name (rewriting the frontmatter `name:` to match) and re-parses so the
+/// on-disk directory name and manifest can never disagree.
+fn resolve_install_tier(
+    prepared: PreparedSkillInstall,
+    target: SkillInstallTarget,
+    source: SkillInstallSource,
+) -> Result<(PreparedSkillInstall, &'static str, SkillSource), SkillManagementError> {
+    match target {
+        SkillInstallTarget::UserPrivate => {
+            if is_tenant_shared_skill_name(&prepared.parsed.manifest.name) {
+                tracing::debug!(
+                    skill_name = %prepared.parsed.manifest.name,
+                    "skill install rejected reserved tenant-shared name prefix"
+                );
+                return Err(SkillManagementError::with_reason(
+                    SkillManagementErrorKind::InvalidInput,
+                    format!(
+                        "the '{TENANT_SHARED_SKILL_NAME_PREFIX}' skill name prefix is reserved \
+                         for tenant-shared skills"
+                    ),
+                ));
+            }
+            Ok((prepared, USER_SKILLS_ROOT, installed_skill_source(source)))
+        }
+        SkillInstallTarget::TenantShared => {
+            let prepared = ensure_tenant_shared_prefix(prepared)?;
+            Ok((
+                prepared,
+                TENANT_SHARED_SKILLS_ROOT,
+                SkillSource::TenantShared,
+            ))
+        }
+    }
+}
+
+fn ensure_tenant_shared_prefix(
+    prepared: PreparedSkillInstall,
+) -> Result<PreparedSkillInstall, SkillManagementError> {
+    if is_tenant_shared_skill_name(&prepared.parsed.manifest.name) {
+        return Ok(prepared);
+    }
+    let prefixed = format!(
+        "{TENANT_SHARED_SKILL_NAME_PREFIX}{}",
+        prepared.parsed.manifest.name
+    );
+    if !validate_skill_name(&prefixed) {
+        return Err(SkillManagementError::with_reason(
+            SkillManagementErrorKind::InvalidInput,
+            format!(
+                "skill name '{}' cannot take the '{TENANT_SHARED_SKILL_NAME_PREFIX}' prefix \
+                 (prefixed name is not a valid skill name)",
+                prepared.parsed.manifest.name
+            ),
+        ));
+    }
+    let content = crate::parser::set_skill_frontmatter_name(&prepared.content, &prefixed);
+    let parsed = parse_skill_md(&content).map_err(skill_parse_error)?;
+    if parsed.manifest.name != prefixed {
+        // The frontmatter used a shape the line-based rewriter cannot handle
+        // (e.g. a quoted or folded `name:` value). Fail loudly instead of
+        // installing a skill whose directory and manifest names disagree.
+        return Err(SkillManagementError::with_reason(
+            SkillManagementErrorKind::InvalidInput,
+            "tenant-shared name rewrite did not take effect; use a plain top-level \
+             `name:` frontmatter key",
+        ));
+    }
+    Ok(PreparedSkillInstall { content, parsed })
 }
 
 fn prepare_install_content(
@@ -520,8 +679,9 @@ pub async fn remove_skill(
     }
     let mutation_lock = skill_mutation_lock(request.name);
     let _mutation_guard = mutation_lock.lock().await;
-    let skill_dir = skill_root_scoped_path(USER_SKILLS_ROOT, request.name)?;
-    let skill_path = skill_scoped_path(USER_SKILLS_ROOT, request.name, SKILL_FILE_NAME)?;
+    let root = skill_tier_root(request.name);
+    let skill_dir = skill_root_scoped_path(root, request.name)?;
+    let skill_path = skill_scoped_path(root, request.name, SKILL_FILE_NAME)?;
     log_skill_filesystem_phase("stat_existing", request.name, &skill_path);
     if stat_optional(context, &skill_path).await?.is_none() {
         tracing::debug!(
@@ -556,7 +716,8 @@ pub async fn read_skill_content(
             SkillManagementErrorKind::InvalidInput,
         ));
     }
-    let skill_path = skill_scoped_path(USER_SKILLS_ROOT, request.name, SKILL_FILE_NAME)?;
+    let skill_path =
+        skill_scoped_path(skill_tier_root(request.name), request.name, SKILL_FILE_NAME)?;
     let content = read_skill_file(context, &skill_path)
         .await?
         .ok_or_else(|| SkillManagementError::new(SkillManagementErrorKind::NotFound))?;
@@ -592,7 +753,8 @@ pub async fn update_skill(
 
     let mutation_lock = skill_mutation_lock(request.name);
     let _mutation_guard = mutation_lock.lock().await;
-    let skill_path = skill_scoped_path(USER_SKILLS_ROOT, request.name, SKILL_FILE_NAME)?;
+    let skill_path =
+        skill_scoped_path(skill_tier_root(request.name), request.name, SKILL_FILE_NAME)?;
     if stat_optional(context, &skill_path).await?.is_none() {
         return Err(SkillManagementError::new(
             SkillManagementErrorKind::NotFound,
@@ -644,6 +806,14 @@ async fn list_skill_root(
         if !validate_skill_name(name) {
             continue;
         }
+        if !entry_belongs_to_root(name, scoped_root) {
+            tracing::debug!(
+                skill_name = %name,
+                scoped_root = %scoped_root,
+                "skipping tier-mismatched skill directory"
+            );
+            continue;
+        }
         let skill_path = skill_scoped_path(scoped_root, name, SKILL_FILE_NAME)?;
         if let Some(skill) = read_skill_summary(context, &skill_path, source).await? {
             skills.push(skill);
@@ -680,6 +850,9 @@ async fn collect_matching_skill_root(
         }
         let name = entry.name.as_str();
         if !validate_skill_name(name) {
+            continue;
+        }
+        if !entry_belongs_to_root(name, scoped_root) {
             continue;
         }
         if skills.len() >= limit {

@@ -1547,19 +1547,14 @@ where
             .map_err(map_binding_error)?;
         let package = ExtensionPackage::from_manifest_toml(manifest, entry.path, record.raw_toml())
             .map_err(map_binding_error)?;
-        let mut assets = vec![AvailableExtensionAsset {
-            path: "manifest.toml".to_string(),
-            content: AvailableExtensionAssetContent::Bytes(record.raw_toml().as_bytes().to_vec()),
-        }];
-        if let ExtensionRuntime::Wasm { module } = &package.manifest.runtime {
-            let module_path = module
-                .resolve_under(&package.root)
-                .map_err(map_binding_error)?;
-            assets.push(AvailableExtensionAsset {
-                path: module.as_str().to_string(),
-                content: AvailableExtensionAssetContent::Filesystem(module_path),
-            });
-        }
+        // Catalog EVERY file in the extension dir as inline bytes, exactly
+        // like a fresh import. Assets stored as `Filesystem(path)` pointers
+        // into the extension's own materialized dir dangle after `remove`
+        // (which deletes that dir) and break the intended
+        // remove -> available -> reinstall flow with
+        // "failed to read available extension asset"; and cataloging only
+        // manifest + wasm module would lose schemas/prompt docs on reinstall.
+        let assets = inline_extension_dir_assets(fs, &package.root).await?;
         packages.push(AvailableExtensionPackage {
             package_ref: LifecyclePackageRef::new(
                 LifecyclePackageKind::Extension,
@@ -1578,6 +1573,69 @@ where
         });
     }
     Ok(packages)
+}
+
+/// Read every file under `root` into inline-bytes assets (paths relative to
+/// `root`), so a filesystem-discovered package is as self-contained as a fresh
+/// import. Bounded by the same file-count/byte caps as the zip import path —
+/// an extension dir that a zip upload could not have produced fails discovery
+/// loudly instead of silently ballooning catalog memory.
+async fn inline_extension_dir_assets<F>(
+    fs: &F,
+    root: &VirtualPath,
+) -> Result<Vec<AvailableExtensionAsset>, ProductWorkflowError>
+where
+    F: RootFilesystem + ?Sized,
+{
+    let root_prefix = format!("{}/", root.as_str().trim_end_matches('/'));
+    let mut assets = Vec::new();
+    let mut total_bytes = 0usize;
+    let mut pending = vec![root.clone()];
+    while let Some(dir) = pending.pop() {
+        let entries = fs
+            .list_dir(&dir)
+            .await
+            .map_err(|error| ProductWorkflowError::Transient {
+                reason: format!("failed to list available extension assets: {error}"),
+            })?;
+        for child in entries {
+            if child.file_type == FileType::Directory {
+                pending.push(child.path);
+                continue;
+            }
+            if assets.len() >= crate::extension_lifecycle::MAX_EXTENSION_BUNDLE_FILES {
+                return Err(map_binding_error(format!(
+                    "extension at {} has too many files (limit {})",
+                    root.as_str(),
+                    crate::extension_lifecycle::MAX_EXTENSION_BUNDLE_FILES
+                )));
+            }
+            let bytes = fs.read_file(&child.path).await.map_err(|error| {
+                ProductWorkflowError::Transient {
+                    reason: format!(
+                        "failed to read available extension asset {}: {error}",
+                        child.path.as_str()
+                    ),
+                }
+            })?;
+            total_bytes = total_bytes.saturating_add(bytes.len());
+            if total_bytes > crate::extension_lifecycle::MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES {
+                return Err(map_binding_error(format!(
+                    "extension at {} exceeds the {}-byte asset limit",
+                    root.as_str(),
+                    crate::extension_lifecycle::MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES
+                )));
+            }
+            let Some(relative) = child.path.as_str().strip_prefix(&root_prefix) else {
+                continue;
+            };
+            assets.push(AvailableExtensionAsset {
+                path: relative.to_string(),
+                content: AvailableExtensionAssetContent::Bytes(bytes),
+            });
+        }
+    }
+    Ok(assets)
 }
 
 /// Build an [`AvailableExtensionPackage`] from the files of an uploaded tool
@@ -2546,6 +2604,14 @@ handle = "web_token"
     }
 
     #[tokio::test]
+    /// Filesystem-discovered packages must be SELF-CONTAINED: every file under
+    /// the extension dir cataloged as in-memory bytes, exactly like a fresh
+    /// import. When assets are stored as `Filesystem(path)` pointers into the
+    /// extension's own materialized dir, `remove` (which deletes that dir)
+    /// leaves a dangling catalog entry and the intended
+    /// remove -> available -> reinstall flow 503s with
+    /// "failed to read available extension asset". Regression for that exact
+    /// production failure.
     async fn filesystem_catalog_loads_manifest_and_runtime_assets() {
         let fs = InMemoryBackend::default();
         let extension = test_extension_package();
@@ -2556,6 +2622,14 @@ handle = "web_token"
             };
             fs.write_file(&path, bytes).await.unwrap();
         }
+        // Files discovery previously did NOT catalog (only manifest + wasm
+        // module were kept): they must survive a remove -> reinstall cycle too.
+        fs.write_file(
+            &VirtualPath::new("/system/extensions/fixture/schemas/search.input.json").unwrap(),
+            b"{}",
+        )
+        .await
+        .unwrap();
 
         let catalog = AvailableExtensionCatalog::from_filesystem_root(
             &fs,
@@ -2567,13 +2641,52 @@ handle = "web_token"
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].package_ref, extension.package_ref);
+        let mut asset_paths = results[0]
+            .assets
+            .iter()
+            .map(|asset| asset.path.as_str())
+            .collect::<Vec<_>>();
+        asset_paths.sort_unstable();
         assert_eq!(
+            asset_paths,
+            vec![
+                "manifest.toml",
+                "schemas/search.input.json",
+                "wasm/fixture.wasm"
+            ],
+            "discovery must catalog EVERY file in the extension dir"
+        );
+        assert!(
             results[0]
                 .assets
                 .iter()
-                .map(|asset| asset.path.as_str())
-                .collect::<Vec<_>>(),
-            vec!["manifest.toml", "wasm/fixture.wasm"]
+                .all(|asset| matches!(asset.content, AvailableExtensionAssetContent::Bytes(_))),
+            "discovered assets must be inline bytes, not pointers into the dir remove deletes"
+        );
+
+        // The remove -> reinstall shape: delete the materialized dir, then
+        // re-materialize from the catalog entry alone.
+        fs.delete(&VirtualPath::new("/system/extensions/fixture").unwrap())
+            .await
+            .unwrap();
+        materialize_available_extension(&fs, results[0])
+            .await
+            .expect("reinstall after remove must re-materialize from the self-contained entry");
+        assert!(
+            fs.read_file(
+                &VirtualPath::new("/system/extensions/fixture/wasm/fixture.wasm").unwrap()
+            )
+            .await
+            .is_ok(),
+            "wasm module restored"
+        );
+        assert!(
+            fs.read_file(
+                &VirtualPath::new("/system/extensions/fixture/schemas/search.input.json").unwrap()
+            )
+            .await
+            .is_ok(),
+            "schema restored"
         );
     }
 

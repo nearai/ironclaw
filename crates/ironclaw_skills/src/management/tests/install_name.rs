@@ -13,6 +13,7 @@ async fn install_normalizes_plain_markdown_requested_display_name() {
             files: &[],
             source: SkillInstallSource::User,
             source_url: None,
+            target: SkillInstallTarget::UserPrivate,
         },
     )
     .await
@@ -48,6 +49,7 @@ async fn install_accepts_frontmatter_matching_requested_display_name() {
             files: &[],
             source: SkillInstallSource::User,
             source_url: None,
+            target: SkillInstallTarget::UserPrivate,
         },
     )
     .await

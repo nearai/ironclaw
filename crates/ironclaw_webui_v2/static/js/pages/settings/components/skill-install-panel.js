@@ -5,10 +5,11 @@ import { Icon } from "../../../design-system/icons.js";
 import { React, html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
 
-export function SkillInstallPanel({ onInstall, isInstalling }) {
+export function SkillInstallPanel({ onInstall, isInstalling, isAdmin = false }) {
   const t = useT();
   const [name, setName] = React.useState("");
   const [content, setContent] = React.useState("");
+  const [shared, setShared] = React.useState(false);
   const [fieldErrors, setFieldErrors] = React.useState({ name: "", content: "" });
   const [formError, setFormError] = React.useState("");
   const [result, setResult] = React.useState("");
@@ -21,7 +22,7 @@ export function SkillInstallPanel({ onInstall, isInstalling }) {
   }, []);
 
   const submit = React.useCallback(async () => {
-    const payload = buildPayload({ name, content });
+    const payload = buildPayload({ name, content, shared: isAdmin && shared });
     const validationErrors = validatePayload(payload, t);
     if (validationErrors.name || validationErrors.content) {
       setFieldErrors(validationErrors);
@@ -42,11 +43,12 @@ export function SkillInstallPanel({ onInstall, isInstalling }) {
 
       setName("");
       setContent("");
+      setShared(false);
       setResult(response.message || t("skills.installedSuccess", { name: payload.name }));
     } catch (err) {
       setFormError(err.message || t("skills.installFailed"));
     }
-  }, [content, name, onInstall, t]);
+  }, [content, isAdmin, name, onInstall, shared, t]);
 
   return html`
     <${Card} padding="md">
@@ -97,6 +99,24 @@ export function SkillInstallPanel({ onInstall, isInstalling }) {
         />
       <//>
 
+      ${isAdmin &&
+      html`
+        <label className="mt-3 flex items-start gap-2 text-sm text-[var(--v2-text)]">
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked=${shared}
+            onChange=${(event) => setShared(event.currentTarget.checked)}
+          />
+          <span>
+            ${t("skills.shareWithAllUsers")}
+            <span className="block text-xs text-[var(--v2-text-muted)]">
+              ${t("skills.shareWithAllUsersHint")}
+            </span>
+          </span>
+        </label>
+      `}
+
       ${formError &&
       html`<p className="mt-3 text-sm text-[var(--v2-danger-text)]">${formError}</p>`}
       ${result &&
@@ -112,9 +132,12 @@ export function SkillInstallPanel({ onInstall, isInstalling }) {
   `;
 }
 
-function buildPayload({ name, content }) {
+function buildPayload({ name, content, shared }) {
   const payload = { name: name.trim() };
   if (content.trim()) payload.content = content.trim();
+  // Omitted (not `false`) when unset so pre-existing backends see the exact
+  // pre-#5459 request shape.
+  if (shared) payload.shared = true;
   return payload;
 }
 

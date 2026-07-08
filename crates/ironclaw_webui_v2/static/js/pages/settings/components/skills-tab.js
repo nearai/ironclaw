@@ -8,7 +8,7 @@ import { SkillCard } from "./skill-card.js";
 import { SkillInstallPanel } from "./skill-install-panel.js";
 import { SettingsSearchEmpty } from "./settings-search-empty.js";
 
-export function SkillsTab({ searchQuery = "" }) {
+export function SkillsTab({ searchQuery = "", isAdmin = false }) {
   const t = useT();
   const {
     skills,
@@ -177,7 +177,7 @@ export function SkillsTab({ searchQuery = "" }) {
         isSaving=${isSettingAutoActivateLearned}
         onToggle=${handleSetAutoActivateLearned}
       />
-      <${SkillInstallPanel} onInstall=${installSkill} isInstalling=${isInstalling} />
+      <${SkillInstallPanel} onInstall=${installSkill} isInstalling=${isInstalling} isAdmin=${isAdmin} />
       <${SkillActionResult} error=${actionError} result=${actionResult} />
       ${body}
     </div>
@@ -267,6 +267,7 @@ function SkillGroup({
 function groupSkills(skills) {
   const groups = [
     { id: "user", labelKey: "skills.group.user", skills: [] },
+    { id: "tenant_shared", labelKey: "skills.group.tenantShared", skills: [] },
     { id: "system", labelKey: "skills.group.system", skills: [] },
     { id: "workspace", labelKey: "skills.group.workspace", skills: [] },
   ];
@@ -275,11 +276,13 @@ function groupSkills(skills) {
   for (const skill of skills) {
     const sourceKind = skill.source_kind || "";
     const group =
-      sourceKind === "system"
+      sourceKind === "tenant_shared"
         ? groups[1]
-        : sourceKind === "workspace"
+        : sourceKind === "system"
           ? groups[2]
-          : fallback;
+          : sourceKind === "workspace"
+            ? groups[3]
+            : fallback;
     group.skills.push(skill);
   }
 

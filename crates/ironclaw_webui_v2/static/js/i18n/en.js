@@ -566,12 +566,14 @@ registerPack("en", {
   // Settings — skills tab
   "skills.installed": "Installed skills",
   "skills.group.user": "Your skills",
+  "skills.group.tenantShared": "Shared skills",
   "skills.group.system": "System skills",
   "skills.group.workspace": "Workspace skills",
   "skills.source.user": "user",
   "skills.source.installed": "installed",
   "skills.source.system": "system",
   "skills.source.workspace": "workspace",
+  "skills.source.tenant_shared": "shared",
   "skills.noInstalled": "No skills installed",
   "skills.noInstalledDesc":
     "Skills extend the agent with domain-specific instructions. Add a SKILL.md bundle or place SKILL.md files in your workspace.",
@@ -587,6 +589,8 @@ registerPack("en", {
   "skills.importSourceRequired": "Provide an HTTPS URL or SKILL.md content.",
   "skills.content": "SKILL.md content",
   "skills.contentHint": "Use the full SKILL.md frontmatter and prompt content.",
+  "skills.shareWithAllUsers": "Share with all users",
+  "skills.shareWithAllUsersHint": "Installs as an admin-managed shared skill (the name gets the shared- prefix). Visible to every user, read-only for them.",
   "skills.contentPlaceholder": "---\\nname: example\\ndescription: ...\\n---\\n",
   "skills.install": "Add",
   "skills.installing": "Adding...",

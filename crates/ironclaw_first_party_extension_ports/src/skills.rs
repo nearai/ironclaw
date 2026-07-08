@@ -39,6 +39,16 @@ impl FirstPartySkillsExtensionHandles {
         })
     }
 
+    /// Handles for deployments exposing the tenant-shared skills tier
+    /// alongside the system and user roots (#5459 P4).
+    pub fn with_tenant_shared() -> Result<Self, FirstPartySkillsExtensionError> {
+        Ok(Self {
+            system_skills: Some(scoped_root(SYSTEM_SKILLS_ROOT)?),
+            user_skills: Some(scoped_root(USER_SKILLS_ROOT)?),
+            tenant_shared_skills: Some(scoped_root(TENANT_SHARED_SKILLS_ROOT)?),
+        })
+    }
+
     /// Builds handles from explicit roots and validates that each handle points
     /// at its Reborn-owned skill namespace.
     pub fn new(
@@ -383,6 +393,65 @@ mod tests {
             Some("/skills")
         );
         assert_eq!(handles.tenant_shared_skills().map(ScopedPath::as_str), None);
+    }
+
+    #[test]
+    fn with_tenant_shared_handles_expose_all_three_roots() {
+        let handles = FirstPartySkillsExtensionHandles::with_tenant_shared().unwrap();
+
+        assert_eq!(
+            handles.system_skills().map(ScopedPath::as_str),
+            Some("/system/skills")
+        );
+        assert_eq!(
+            handles.user_skills().map(ScopedPath::as_str),
+            Some("/skills")
+        );
+        assert_eq!(
+            handles.tenant_shared_skills().map(ScopedPath::as_str),
+            Some("/tenant-shared/skills")
+        );
+    }
+
+    /// #5459 P4 activation seam: a bundle under the tenant-shared root joins
+    /// the discoverable candidate set with attenuated (`Installed`) trust —
+    /// this is the loader half of "admin-installed skills reach every user".
+    #[tokio::test]
+    async fn extension_discovers_tenant_shared_bundles_with_installed_trust() {
+        let root = Arc::new(InMemoryBackend::default());
+        write_file(
+            &root,
+            "/tenants/tenant-a/shared/skills/shared-team-brief/SKILL.md",
+            skill_md(
+                "shared-team-brief",
+                "tenant shared description",
+                "TENANT_SHARED_PROMPT_SENTINEL",
+            ),
+        )
+        .await;
+        let extension = FirstPartySkillsExtension::new(
+            scoped_filesystem(root),
+            FirstPartySkillsExtensionHandles::with_tenant_shared().unwrap(),
+            TenantId::new("tenant-a").unwrap(),
+        )
+        .unwrap();
+
+        let context_source = SkillBundleContextSource::new(extension.bundle_source());
+        let candidates = context_source
+            .load_skill_context_candidates(&run_context().await)
+            .await
+            .unwrap();
+        let snapshot = build_skill_run_snapshot(candidates).unwrap();
+        let entries = &snapshot.entries;
+
+        assert_eq!(entries.len(), 1);
+        assert!(entries.iter().any(|entry| {
+            entry.name == "shared-team-brief"
+                && entry.trust == SkillTrustLevel::Installed
+                && entry.visibility == SkillVisibility::Visible
+                && entry.activation_state == SkillActivationState::Discoverable
+                && entry.safe_description == "tenant shared description"
+        }));
     }
 
     #[test]

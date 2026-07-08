@@ -299,14 +299,21 @@ mod learning {
                 };
                 return self
                     .port
-                    .update_for_scope(scope, &existing_name, &merged)
+                    .update_for_scope(scope, false, &existing_name, &merged)
                     .await
                     .map(|_| existing_name)
                     .map_err(|error| error.to_string());
             }
             match self
                 .port
-                .install_for_scope(scope.clone(), Some(name), content)
+                // Learned skills are always user-private, non-admin writes.
+                .install_for_scope(
+                    scope.clone(),
+                    false,
+                    Some(name),
+                    content,
+                    ironclaw_skills::SkillInstallTarget::UserPrivate,
+                )
                 .await
             {
                 Ok(result) => Ok(result.name),
@@ -316,7 +323,7 @@ mod learning {
                     if error.kind() == SkillManagementErrorKind::Conflict =>
                 {
                     self.port
-                        .update_for_scope(scope, name, content)
+                        .update_for_scope(scope, false, name, content)
                         .await
                         .map(|_| name.to_string())
                         .map_err(|error| error.to_string())

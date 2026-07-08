@@ -377,13 +377,18 @@ pub trait SkillsProductFacade: Send + Sync {
         Err(RebornServicesError::service_unavailable(false))
     }
 
+    /// Install a skill for the caller. `shared: true` targets the tenant-shared
+    /// tier (visible read-only to every user); it requires the caller's
+    /// `operator_webui_config` capability and implementations must reject it
+    /// otherwise.
     async fn install_skill(
         &self,
         caller: WebUiAuthenticatedCaller,
         name: String,
         content: Option<String>,
+        shared: bool,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        let _ = (caller, name, content);
+        let _ = (caller, name, content, shared);
         Err(RebornServicesError::service_unavailable(false))
     }
 
@@ -2117,11 +2122,14 @@ pub trait RebornServicesApi: Send + Sync {
         query: String,
     ) -> Result<RebornSkillSearchResponse, RebornServicesError>;
 
+    /// Install a skill for the caller. `shared: true` targets the tenant-shared
+    /// tier and requires the caller's `operator_webui_config` capability.
     async fn install_skill(
         &self,
         caller: WebUiAuthenticatedCaller,
         name: String,
         content: Option<String>,
+        shared: bool,
     ) -> Result<RebornSkillActionResponse, RebornServicesError>;
 
     async fn read_skill_content(
@@ -4027,9 +4035,10 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
         name: String,
         content: Option<String>,
+        shared: bool,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
         self.skills_facade
-            .install_skill(caller, name, content)
+            .install_skill(caller, name, content, shared)
             .await
     }
 

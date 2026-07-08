@@ -559,6 +559,8 @@ registerPack("de", {
   "skills.urlPlaceholder": "https://example.com/SKILL.md",
   "skills.content": "SKILL.md-Inhalt",
   "skills.contentHint": "Verwenden Sie dies anstelle der URL, wenn Sie lokale oder kopierte Skill-Inhalte importieren.",
+  "skills.shareWithAllUsers": "Mit allen Benutzern teilen",
+  "skills.shareWithAllUsersHint": "Installiert als vom Admin verwalteten geteilten Skill (der Name erhält das Präfix shared-). Für alle Benutzer sichtbar, schreibgeschützt.",
   "skills.contentPlaceholder": "---\\nName: Beispiel\\Beschreibung: ...\\n---\\n",
   "skills.install": "Importieren",
   "skills.installing": "Importieren...",
@@ -1152,6 +1154,7 @@ registerPack("de", {
   "skills.edit": "Bearbeiten",
   "skills.group.system": "System-Skills",
   "skills.group.user": "Ihre Skills",
+  "skills.group.tenantShared": "Geteilte Skills",
   "skills.group.workspace": "Workspace-Skills",
   "skills.loading": "Wird geladen...",
   "skills.save": "Speichern",
@@ -1160,6 +1163,7 @@ registerPack("de", {
   "skills.source.system": "System",
   "skills.source.user": "Benutzer",
   "skills.source.workspace": "Workspace",
+  "skills.source.tenant_shared": "geteilt",
   "skills.updateFailed": "Aktualisierung fehlgeschlagen.",
   "skills.updated": "Skill \"{name}\" aktualisiert"
 });

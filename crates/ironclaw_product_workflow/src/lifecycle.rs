@@ -468,6 +468,8 @@ pub struct LifecycleSkillSummary {
 pub enum LifecycleSkillSource {
     System,
     User,
+    /// Admin-installed, visible read-only to every user in the tenant.
+    TenantShared,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

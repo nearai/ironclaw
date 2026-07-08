@@ -304,6 +304,10 @@ struct StubServices {
     /// Records the `enabled` value each `set_auto_activate_learned` call passes,
     /// so the handler test can assert the request body reaches the facade.
     set_auto_activate_learned_calls: Mutex<Vec<bool>>,
+    /// Records `(name, shared)` for each `install_skill` call, so the handler
+    /// tests can assert the route forwards the body's `shared` flag verbatim
+    /// and that the operator gate stops the call before the facade.
+    install_skill_calls: Mutex<Vec<(String, bool)>>,
     // Project routes — recorded requests so path-param-override behavior can be
     // asserted (the path id must win over any body value).
     update_project_calls: Mutex<Vec<RebornUpdateProjectRequest>>,
@@ -880,10 +884,18 @@ impl RebornServicesApi for StubServices {
     async fn install_skill(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        _name: String,
+        name: String,
         _content: Option<String>,
+        shared: bool,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
+        self.install_skill_calls
+            .lock()
+            .expect("lock")
+            .push((name.clone(), shared));
+        Ok(RebornSkillActionResponse {
+            success: true,
+            message: format!("Skill '{name}' installed"),
+        })
     }
 
     async fn read_skill_content(
@@ -1657,6 +1669,94 @@ async fn set_auto_activate_learned_forwards_enabled_flag_to_facade() {
             .expect("lock"),
         vec![false],
         "handler must forward body.enabled=false to the facade verbatim"
+    );
+}
+
+// Tenant-shared skill installs (#5459 P4) are operator-gated at the route:
+// `shared: true` without `operator_webui_config` must 403 BEFORE the facade
+// runs, so a compromised session cannot even probe the shared-install path.
+#[tokio::test]
+async fn install_skill_shared_requires_operator_capability() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/skills/install")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"name":"team-brief","content":"---\nname: team-brief\n---\nBody.","shared":true}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(
+        services
+            .install_skill_calls
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "operator gate must reject before the facade is called"
+    );
+}
+
+// Test-through-the-caller: the handler must forward the body's `shared` flag
+// to the facade verbatim (operator caller), and an absent flag must
+// deserialize to `false` so pre-existing clients keep private installs.
+#[tokio::test]
+async fn install_skill_forwards_shared_flag_and_defaults_to_private() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(
+        services.clone(),
+        WebUiV2Capabilities {
+            operator_webui_config: true,
+            ..WebUiV2Capabilities::default()
+        },
+    );
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/skills/install")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"name":"team-brief","content":"---\nname: team-brief\n---\nBody.","shared":true}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/skills/install")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"name":"my-notes","content":"---\nname: my-notes\n---\nBody."}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    assert_eq!(
+        *services.install_skill_calls.lock().expect("lock"),
+        vec![
+            ("team-brief".to_string(), true),
+            ("my-notes".to_string(), false)
+        ],
+        "handler must forward body.shared verbatim and default it to false"
     );
 }
 
@@ -4726,6 +4826,7 @@ async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime(
             _caller: WebUiAuthenticatedCaller,
             _name: String,
             _content: Option<String>,
+            _shared: bool,
         ) -> Result<RebornSkillActionResponse, RebornServicesError> {
             unreachable!("not exercised by this test")
         }

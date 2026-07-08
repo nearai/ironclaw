@@ -11,8 +11,8 @@ use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{MountView, ResourceScope, RuntimeDispatchErrorKind};
 use ironclaw_skills::{
     InstalledSkillMetadataSource, SkillInstallFile, SkillInstallRequest, SkillInstallSource,
-    SkillManagementContext, SkillManagementError, SkillManagementErrorKind, SkillRemoveRequest,
-    install_skill, list_skills, remove_skill, skill_summary_json,
+    SkillInstallTarget, SkillManagementContext, SkillManagementError, SkillManagementErrorKind,
+    SkillRemoveRequest, install_skill, list_skills, remove_skill, skill_summary_json,
 };
 use serde_json::{Value, json};
 
@@ -146,6 +146,9 @@ async fn dispatch_install(
             files: &files,
             source,
             source_url,
+            // Model/agent input can never reach the tenant-shared tier: the
+            // target is fixed here, not parsed from the capability input.
+            target: SkillInstallTarget::UserPrivate,
         },
     )
     .await
@@ -307,6 +310,41 @@ mod tests {
 
         let error = dispatch(&request).await.unwrap_err();
 
+        assert_eq!(error.kind(), RuntimeDispatchErrorKind::InputEncode);
+    }
+
+    /// The agent capability path is structurally user-private (#5459 P4): the
+    /// install target is fixed to `UserPrivate` in this module, so the shared
+    /// choke point in `ironclaw_skills::install_skill` rejects the reserved
+    /// `shared-` name prefix no matter what the model puts in the input —
+    /// including a smuggled `"shared": true` key, which is ignored.
+    #[tokio::test]
+    async fn install_rejects_reserved_tenant_shared_prefix_from_model_input() {
+        let scope =
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap();
+        let mounts = MountView::new(vec![ironclaw_host_api::MountGrant::new(
+            ironclaw_host_api::MountAlias::new("/skills").unwrap(),
+            ironclaw_host_api::VirtualPath::new("/projects/skills").unwrap(),
+            ironclaw_host_api::MountPermissions::read_write_list_delete(),
+        )])
+        .unwrap();
+        let input = json!({
+            "name": "shared-sneak",
+            "content": "---\nname: shared-sneak\n---\nBody.",
+            "shared": true,
+        });
+        let request = SkillManagementCapabilityRequest::new(
+            SkillManagementCapabilityKind::Install,
+            &scope,
+            Some(&mounts),
+            Arc::new(InMemoryBackend::new()),
+            &input,
+        );
+
+        let error = dispatch(&request).await.unwrap_err();
+
+        // InvalidInput maps to InputEncode at this boundary.
         assert_eq!(error.kind(), RuntimeDispatchErrorKind::InputEncode);
     }
 }
