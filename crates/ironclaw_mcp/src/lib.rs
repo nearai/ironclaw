@@ -529,10 +529,7 @@ where
             .await
             .map_err(mcp_client_http_error)?;
 
-        let usage = ResourceUsage {
-            network_egress_bytes: response.request_bytes,
-            ..ResourceUsage::default()
-        };
+        let usage = ResourceUsage::default().set_network_egress_bytes(response.request_bytes);
 
         if !(200..300).contains(&response.status) {
             if is_mcp_auth_response_status(response.status) {
