@@ -213,6 +213,31 @@ OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID = "builtin.outbound_delivery_target
 QA_7C_BUG_LOGGING_SHEET_TITLE = "bug logging Google Sheet"
 
 
+def _qa_7c_bug_logger_prompt(
+    *,
+    sheet_fixture: dict[str, object],
+    routine_name: str,
+) -> str:
+    title = str(
+        sheet_fixture.get("title") or QA_7C_BUG_LOGGING_SHEET_TITLE
+    ).strip()
+    spreadsheet_url = str(sheet_fixture.get("spreadsheet_url") or "").strip()
+    spreadsheet_id = str(sheet_fixture.get("spreadsheet_id") or "").strip()
+    sheet_name = str(sheet_fixture.get("sheet_name") or "Sheet1").strip()
+    header_columns = "Summary, Reporter, Slack Timestamp, Status, QA Marker"
+    return (
+        f"{_qa_sheet_prompt('qa_7c_slack_bug_logger_routine')}\n\n"
+        "Use this exact Google Sheet for \"my bug logging Google Sheet\":\n"
+        f"- Title: {title}\n"
+        f"- Spreadsheet URL: {spreadsheet_url}\n"
+        f"- Spreadsheet ID: {spreadsheet_id}\n"
+        f"- Sheet/tab name: {sheet_name}\n"
+        f"- Header columns: {header_columns}\n\n"
+        f"Create the routine/trigger named `{routine_name}`. Do not ask for "
+        "spreadsheet details; use the sheet information above."
+    )
+
+
 class LiveQaContext:
     def __init__(
         self,
@@ -3804,7 +3829,10 @@ async def case_qa_7c_slack_bug_logger_routine(ctx: LiveQaContext) -> ProbeResult
             routine_name=routine_name,
             marker=None,
             required_text=["trigger|routine|automation|cron|schedule|fires|watches", "bug"],
-            prompt=_qa_sheet_prompt("qa_7c_slack_bug_logger_routine"),
+            prompt=_qa_7c_bug_logger_prompt(
+                sheet_fixture=sheet_fixture,
+                routine_name=routine_name,
+            ),
             extensions=[
                 {
                     "package_id": "google-drive",

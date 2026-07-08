@@ -1572,9 +1572,19 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             captured_routine["required_text"],
             ["trigger|routine|automation|cron|schedule|fires|watches", "bug"],
         )
-        self.assertEqual(
-            captured_routine["prompt"],
+        self.assertIn(
             run_live_qa._qa_sheet_prompt("qa_7c_slack_bug_logger_routine"),
+            captured_routine["prompt"],
+        )
+        self.assertIn("bug logging Google Sheet", captured_routine["prompt"])
+        self.assertIn(
+            "https://docs.google.com/spreadsheets/d/sheet-123/edit",
+            captured_routine["prompt"],
+        )
+        self.assertIn("Sheet1", captured_routine["prompt"])
+        self.assertIn(
+            "Summary, Reporter, Slack Timestamp, Status, QA Marker",
+            captured_routine["prompt"],
         )
         package_ids = [
             extension["package_id"] for extension in captured_routine["extensions"]
