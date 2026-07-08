@@ -189,7 +189,7 @@ async fn skill_activate_over_budget_surfaces_recoverable_failed() {
 fn skill_activate_ambiguous_name_surfaces_recoverable_failed() {
     run_async_test_with_stack(
         "skill_activate_ambiguous_name_surfaces_recoverable_failed",
-        async {
+        || async {
             let group = RebornIntegrationGroup::skill_activation_tools()
                 .await
                 .expect("skill-activation group builds");
@@ -264,9 +264,10 @@ fn skill_activate_ambiguous_name_surfaces_recoverable_failed() {
     );
 }
 
-fn run_async_test_with_stack<F>(name: &'static str, test: F)
+fn run_async_test_with_stack<F, Fut>(name: &'static str, test: F)
 where
-    F: std::future::Future<Output = ()> + Send + 'static,
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
 {
     let handle = std::thread::Builder::new()
         .name(name.to_string())
@@ -276,7 +277,7 @@ where
                 .enable_all()
                 .build()
                 .expect("tokio test runtime")
-                .block_on(test);
+                .block_on(test());
         })
         .expect("spawn stack-sized test thread");
     if let Err(panic) = handle.join() {

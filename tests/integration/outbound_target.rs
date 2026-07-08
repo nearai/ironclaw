@@ -182,7 +182,7 @@ async fn target_set_unknown_target_routes_to_invalid_input() {
 fn target_set_disabled_by_settings_routes_to_policy_denied() {
     run_async_test_with_stack(
         "target_set_disabled_by_settings_routes_to_policy_denied",
-        async {
+        || async {
             let group = RebornIntegrationGroup::outbound_target_tools()
                 .await
                 .expect("outbound-target-tools group builds");
@@ -355,9 +355,10 @@ async fn target_set_approval_gate_deny_leaves_preference_unchanged() {
     );
 }
 
-fn run_async_test_with_stack<F>(name: &'static str, test: F)
+fn run_async_test_with_stack<F, Fut>(name: &'static str, test: F)
 where
-    F: std::future::Future<Output = ()> + Send + 'static,
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
 {
     let handle = std::thread::Builder::new()
         .name(name.to_string())
@@ -367,7 +368,7 @@ where
                 .enable_all()
                 .build()
                 .expect("tokio test runtime")
-                .block_on(test);
+                .block_on(test());
         })
         .expect("spawn stack-sized test thread");
     if let Err(panic) = handle.join() {
