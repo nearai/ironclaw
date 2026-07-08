@@ -3962,7 +3962,7 @@ test("useChat: Slack OAuth completion consumes the in-chat connection card", asy
     fetchExtensionSetup: async () => ({
       secrets: [
         {
-          provider: "slack_personal",
+          provider: "slack",
           setup: { kind: "oauth", invocation_id: "invocation-slack" },
         },
       ],
@@ -4050,7 +4050,7 @@ test("useChat: a failed Slack OAuth signal surfaces a retryable error on the con
     fetchExtensionSetup: async () => ({
       secrets: [
         {
-          provider: "slack_personal",
+          provider: "slack",
           setup: { kind: "oauth", invocation_id: "invocation-slack" },
         },
       ],
@@ -4166,7 +4166,7 @@ test("useChat: an abandoned Slack OAuth flow times out instead of polling foreve
     fetchExtensionSetup: async () => ({
       secrets: [
         {
-          provider: "slack_personal",
+          provider: "slack",
           setup: { kind: "oauth", invocation_id: "invocation-slack" },
         },
       ],
@@ -4259,7 +4259,7 @@ test("useChat: dismissing the connection card stops the pending OAuth flow's pol
     fetchExtensionSetup: async () => ({
       secrets: [
         {
-          provider: "slack_personal",
+          provider: "slack",
           setup: { kind: "oauth", invocation_id: "invocation-slack" },
         },
       ],
@@ -4332,7 +4332,7 @@ test("useChat: Slack OAuth completion polls per-user extension state when callba
     fetchExtensionSetup: async () => ({
       secrets: [
         {
-          provider: "slack_personal",
+          provider: "slack",
           setup: { kind: "oauth", invocation_id: "invocation-slack" },
         },
       ],

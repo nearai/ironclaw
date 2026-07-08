@@ -13,7 +13,7 @@ use ironclaw_auth::{
     AuthFlowId, AuthProductError, AuthProductScope, CredentialAccountLabel,
     OAuthAuthorizationEndpoint, OAuthAuthorizeUrlRequest, OAuthCallbackState,
     OAuthCallbackStateKind, OAuthScopeParam, PkceVerifierSecret, ProviderScope,
-    SLACK_PERSONAL_AUTHORIZATION_ENDPOINT, SLACK_PERSONAL_PROVIDER_ID,
+    SLACK_PERSONAL_AUTHORIZATION_ENDPOINT, SLACK_PROVIDER_ID,
     build_authorization_url_with_scope_param, opaque_state_hash, pkce_s256_challenge,
     pkce_verifier_hash,
 };
@@ -32,10 +32,10 @@ use crate::slack::slack_setup::SlackPersonalSetupServiceSlot;
 /// standard `scope` field, so the exchange falls back to the requested scopes.
 pub(crate) fn slack_personal_provider_spec() -> HostOAuthProviderSpec {
     HostOAuthProviderSpec {
-        provider_id: SLACK_PERSONAL_PROVIDER_ID,
+        provider_id: SLACK_PROVIDER_ID,
         capability_id: "ironclaw_auth.slack_personal_oauth",
         token_endpoint: ironclaw_auth::SLACK_PERSONAL_TOKEN_ENDPOINT,
-        secret_handle_prefix: "slack_personal",
+        secret_handle_prefix: "slack",
         resource: None,
         exchange_scope_policy: ExchangeScopePolicy::FallbackToRequested,
         token_response_shape: TokenResponseShape::SlackAuthedUser,
@@ -60,7 +60,7 @@ impl SlackPersonalOAuthGateProvider {
 #[async_trait::async_trait]
 impl OAuthGateProvider for SlackPersonalOAuthGateProvider {
     fn provider_id(&self) -> &'static str {
-        SLACK_PERSONAL_PROVIDER_ID
+        SLACK_PROVIDER_ID
     }
 
     fn pkce_secret_handle_label(&self) -> &'static str {
@@ -81,7 +81,7 @@ impl OAuthGateProvider for SlackPersonalOAuthGateProvider {
             tracing::warn!(error = %e, "Slack personal OAuth credentials not configured");
             AuthProductError::BackendUnavailable
         })?;
-        let account_label = CredentialAccountLabel::new("slack_personal")?;
+        let account_label = CredentialAccountLabel::new("slack")?;
         let state = OAuthCallbackState::new(
             OAuthCallbackStateKind::SLACK_PERSONAL,
             flow_id,

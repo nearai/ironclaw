@@ -70,12 +70,12 @@ mod active_publication;
 mod hosted_mcp_test_support;
 
 use crate::extension_host::available_extensions::{
-    AvailableExtensionCatalog, AvailableExtensionPackage, is_internal_extension_package_ref,
-    materialize_available_extension, visible_capability_ids,
+    AvailableExtensionCatalog, AvailableExtensionPackage, materialize_available_extension,
+    visible_capability_ids,
 };
 use crate::extension_host::extension_activation_credentials::{
-    ExtensionActivationCredentialGate, RuntimeExtensionActivationCredentialGate,
-    UnavailableExtensionActivationCredentialGate,
+    ChannelSetupActivationCredentialGate, ExtensionActivationCredentialGate,
+    RuntimeExtensionActivationCredentialGate, UnavailableExtensionActivationCredentialGate,
 };
 use crate::extension_host::extension_credential_requirements::package_runtime_credential_auth_requirements;
 use crate::extension_host::lifecycle::response_with_payload;
@@ -408,9 +408,6 @@ impl RebornLocalExtensionManagementPort {
             ) else {
                 continue;
             };
-            if is_internal_extension_package_ref(&package_ref) {
-                continue;
-            }
             let Ok(available) = self.catalog.resolve(&package_ref) else {
                 continue;
             };
@@ -541,6 +538,22 @@ impl RebornLocalExtensionManagementPort {
         let credential_gate = UnavailableExtensionActivationCredentialGate;
         self.activate_inner(package_ref, mode, &credential_gate)
             .await
+    }
+
+    /// Operator channel-setup activation: activates the channel surface after
+    /// workspace setup save without demanding per-caller product-auth
+    /// accounts — see [`ChannelSetupActivationCredentialGate`].
+    pub(crate) async fn activate_for_channel_setup(
+        &self,
+        package_ref: LifecyclePackageRef,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        let credential_gate = ChannelSetupActivationCredentialGate;
+        self.activate_inner(
+            package_ref,
+            ExtensionActivationMode::Static,
+            &credential_gate,
+        )
+        .await
     }
 
     pub(crate) async fn activate_with_credential_gate(
@@ -1469,7 +1482,7 @@ fn activation_success_message(
     visible_capability_ids: &[String],
 ) -> String {
     if package_declares_inbound_product_adapter(package) {
-        if package_ref.id.as_str() == "slack_bot" {
+        if package_ref.id.as_str() == "slack" {
             return "Slack is installed as an inbound entrypoint. If WebChat shows a Slack account connection panel, tell the user to configure Slack OAuth for this extension rather than pasting anything into normal chat. If the user's Slack account is already connected, continue the user's original request; Slack DMs and WebUI chat can use the same user-scoped Slack tools.".to_string();
         }
         return format!(
@@ -1491,11 +1504,10 @@ fn activation_success_message(
     message
 }
 
-// Build the structured connect requirement for an inbound channel. The Slack OAuth
-// copy is kept identical to the connectable-channels descriptor so the in-chat
-// panel and the Settings panel read identically — enforced by
-// `slack_requirement_copy_matches_connectable_descriptor`, not just by convention.
-// Any other inbound channel gets a generic proof-code prompt. NOTE: no such
+// Build the structured connect requirement for an inbound channel. This is
+// the single source of the Slack OAuth connect copy: the in-chat panel and
+// the Settings channels tab both render it from the extension's channel
+// surface. Any other inbound channel gets a generic proof-code prompt. NOTE: no such
 // channel ships today (Slack is the only inbound product adapter), and no
 // backend mounts the generic proof-code redeem route — the first non-Slack
 // inbound channel must mount one alongside this requirement or its submit
@@ -1504,7 +1516,7 @@ pub(crate) fn channel_connection_requirement(
     channel_id: &str,
     display_name: &str,
 ) -> ChannelConnectionRequirement {
-    if channel_id == "slack_bot" {
+    if channel_id == "slack" {
         ChannelConnectionRequirement {
             channel: "slack".to_string(),
             strategy: RebornChannelConnectStrategy::OAuth,
@@ -1928,13 +1940,12 @@ mod tests {
         let (_dir, _storage_root, facade, _active_registry, _installation_store) =
             extension_lifecycle_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_packages(vec![fixture_external_channel_package(
-                    "slack_bot",
-                    "Slack",
+                    "slack", "Slack",
                 )]),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
             );
-        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack_bot")
-            .expect("valid ref");
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("valid ref");
         facade
             .execute(
                 lifecycle_surface_context(),
@@ -2236,7 +2247,7 @@ mod tests {
             .expect("Slack activation requirements");
         assert_eq!(requirements.len(), 1);
         let requirement = &requirements[0];
-        assert_eq!(requirement.provider.as_str(), "slack_personal");
+        assert_eq!(requirement.provider.as_str(), "slack");
         assert_eq!(requirement.requester_extension.as_str(), "slack");
         let expected_scopes = [
             "channels:history",

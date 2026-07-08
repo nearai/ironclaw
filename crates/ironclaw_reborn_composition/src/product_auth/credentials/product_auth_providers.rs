@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 #[cfg(feature = "slack-v2-host-beta")]
-use ironclaw_auth::SLACK_PERSONAL_PROVIDER_ID;
+use ironclaw_auth::SLACK_PROVIDER_ID;
 use ironclaw_auth::{
     AuthProductError, AuthProviderClient, GOOGLE_PROVIDER_ID, OAuthProviderCallbackRequest,
     OAuthProviderExchange, OAuthProviderExchangeContext, OAuthProviderRefresh,
@@ -101,7 +101,7 @@ fn compose_provider_client_with_runtime(
             Arc::clone(&secret_store),
         )));
         clients.push((
-            SLACK_PERSONAL_PROVIDER_ID,
+            SLACK_PROVIDER_ID,
             Arc::new(LazySlackPersonalExchangeClient {
                 slot,
                 spec: slack_personal_provider_spec(),

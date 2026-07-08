@@ -2,7 +2,8 @@ use async_trait::async_trait;
 use ironclaw_extensions::{
     ExtensionActivationState, ExtensionHealthSnapshot, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
-    ExtensionManifestRecord, InMemoryExtensionInstallationStore, ManifestHash, ManifestSource,
+    ExtensionManifestRecord, ExtensionManifestRef, InMemoryExtensionInstallationStore,
+    ManifestHash, ManifestSource,
 };
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{ExtensionId, VirtualPath};
@@ -26,9 +27,23 @@ impl FilesystemExtensionInstallationStore {
         let inner = InMemoryExtensionInstallationStore::default();
         match filesystem.read_file(&state_path).await {
             Ok(bytes) => {
-                let state: WireState =
+                let mut state: WireState =
                     serde_json::from_slice(&bytes).map_err(invalid_installation_error)?;
+                let migrated = migrate_retired_slack_bot_identity(&mut state);
                 state.load_into(&inner).await?;
+                if migrated {
+                    tracing::debug!(
+                        "migrated retired slack_bot installation state to the unified slack extension"
+                    );
+                    let store = Self {
+                        filesystem,
+                        state_path,
+                        inner,
+                        save_lock: Mutex::new(()),
+                    };
+                    store.save_snapshot().await?;
+                    return Ok(store);
+                }
             }
             Err(FilesystemError::NotFound { .. }) => {}
             Err(error) => {
@@ -175,6 +190,113 @@ impl ExtensionInstallationStore for FilesystemExtensionInstallationStore {
         self.inner.update_health(installation_id, health).await?;
         self.save_snapshot().await
     }
+}
+
+/// One-time forward migration (NEA-25 unified Slack extension): the Slack
+/// channel package identity `slack_bot` merged into the unified `slack`
+/// extension. Persisted state written by earlier builds may still carry
+/// `slack_bot` manifest records and installation rows; fold them forward so
+/// the store only ever holds the unified identity. The `slack_bot` manifest
+/// record is dropped (the unified manifest ships host-bundled). Its
+/// installation state merges into `slack`'s: an enabled `slack_bot` install
+/// keeps the unified extension enabled, and credential bindings union. This
+/// is a load-time data migration persisted immediately — no code path
+/// resolves the retired identity afterwards.
+fn migrate_retired_slack_bot_identity(state: &mut WireState) -> bool {
+    let manifest_count = state.manifests.len();
+    state
+        .manifests
+        .retain(|record| !record.raw_toml.contains("\nid = \"slack_bot\""));
+    let mut changed = state.manifests.len() != manifest_count;
+
+    let retired: Vec<ExtensionInstallation> = state
+        .installations
+        .iter()
+        .filter(|installation| installation.extension_id().as_str() == "slack_bot")
+        .cloned()
+        .collect();
+    if retired.is_empty() {
+        return changed;
+    }
+    state
+        .installations
+        .retain(|installation| installation.extension_id().as_str() != "slack_bot");
+    changed = true;
+
+    let retired_enabled = retired
+        .iter()
+        .any(|installation| installation.activation_state() == ExtensionActivationState::Enabled);
+    let retired_bindings: Vec<_> = retired
+        .iter()
+        .flat_map(|installation| installation.credential_bindings().iter().cloned())
+        .collect();
+
+    let Ok(unified_id) = ExtensionId::new("slack") else {
+        return changed;
+    };
+    // The store fails closed on installations without a matching manifest
+    // record. If the legacy state only ever installed the bot channel, no
+    // `slack` record exists yet — seed the host-bundled unified manifest so
+    // the folded installation stays loadable.
+    let has_unified_record = state
+        .manifests
+        .iter()
+        .any(|record| record.raw_toml.contains("\nid = \"slack\""));
+    if !has_unified_record {
+        #[cfg(feature = "slack-v2-host-beta")]
+        {
+            state.manifests.push(WireManifestRecord {
+                raw_toml: super::available_extensions::slack_manifest_toml().to_string(),
+                source: WireManifestSource::HostBundled,
+                manifest_hash: None,
+            });
+        }
+        #[cfg(not(feature = "slack-v2-host-beta"))]
+        {
+            // Without the Slack feature the unified manifest is not bundled;
+            // drop the orphaned installation instead of failing the load.
+            return changed;
+        }
+    }
+    if let Some(existing) = state
+        .installations
+        .iter_mut()
+        .find(|installation| installation.extension_id() == &unified_id)
+    {
+        let activation = if retired_enabled {
+            ExtensionActivationState::Enabled
+        } else {
+            existing.activation_state()
+        };
+        let mut bindings = existing.credential_bindings().to_vec();
+        for binding in retired_bindings {
+            if !bindings.contains(&binding) {
+                bindings.push(binding);
+            }
+        }
+        if let Ok(merged) = ExtensionInstallation::new(
+            existing.installation_id().clone(),
+            unified_id.clone(),
+            activation,
+            ExtensionManifestRef::new(unified_id, None),
+            bindings,
+            chrono::Utc::now(),
+        ) {
+            *existing = merged;
+        }
+    } else if let Some(first) = retired.into_iter().next()
+        && let Ok(renamed) = ExtensionInstallation::new(
+            first.installation_id().clone(),
+            unified_id.clone(),
+            first.activation_state(),
+            ExtensionManifestRef::new(unified_id, None),
+            first.credential_bindings().to_vec(),
+            chrono::Utc::now(),
+        )
+    {
+        state.installations.push(renamed);
+    }
+    changed
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -327,6 +449,91 @@ mod tests {
                 .await
                 .expect("list installations")
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn load_at_migrates_retired_slack_bot_identity_forward() {
+        // One-time forward migration: persisted state from the split-identity
+        // era carries slack_bot installation rows. Loading folds them into
+        // the unified slack extension and persists immediately, so no code
+        // path ever resolves the retired identity.
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+        let state_path =
+            VirtualPath::new("/tenants/acme/system/extensions/.installations/state.json")
+                .expect("valid state path");
+
+        let slack_bot_id = ExtensionId::new("slack_bot").expect("extension id");
+        let slack_id = ExtensionId::new("slack").expect("extension id");
+        let legacy_state = WireState {
+            manifests: vec![WireManifestRecord {
+                raw_toml: "schema_version = \"reborn.extension_manifest.v2\"\nid = \"slack_bot\"\n(historical split-identity record; dropped without parsing)".to_string(),
+                source: WireManifestSource::HostBundled,
+                manifest_hash: None,
+            }],
+            installations: vec![
+                ExtensionInstallation::new(
+                    ExtensionInstallationId::new("slack_bot".to_string())
+                        .expect("installation id"),
+                    slack_bot_id.clone(),
+                    ExtensionActivationState::Enabled,
+                    ExtensionManifestRef::new(slack_bot_id, None),
+                    Vec::new(),
+                    Utc::now(),
+                )
+                .expect("legacy installation"),
+                ExtensionInstallation::new(
+                    ExtensionInstallationId::new("slack".to_string()).expect("installation id"),
+                    slack_id.clone(),
+                    ExtensionActivationState::Installed,
+                    ExtensionManifestRef::new(slack_id.clone(), None),
+                    Vec::new(),
+                    Utc::now(),
+                )
+                .expect("tools installation"),
+            ],
+        };
+        filesystem
+            .write_file(
+                &state_path,
+                &serde_json::to_vec(&legacy_state).expect("state serializes"),
+            )
+            .await
+            .expect("seed legacy state");
+
+        let store = FilesystemExtensionInstallationStore::load_at(
+            Arc::clone(&filesystem),
+            state_path.clone(),
+        )
+        .await
+        .expect("store loads with migration");
+
+        let installations = store.list_installations().await.expect("list");
+        assert_eq!(installations.len(), 1, "{installations:?}");
+        let unified = &installations[0];
+        assert_eq!(unified.extension_id(), &slack_id);
+        assert_eq!(
+            unified.activation_state(),
+            ExtensionActivationState::Enabled,
+            "an enabled slack_bot install keeps the unified extension enabled"
+        );
+
+        // The migrated snapshot is persisted immediately: reloading from disk
+        // sees only the unified identity.
+        let persisted = filesystem
+            .read_file(&state_path)
+            .await
+            .expect("read migrated snapshot");
+        let rendered = String::from_utf8(persisted).expect("utf8 snapshot");
+        // The unified manifest legitimately keeps the `slack_bot_token`
+        // credential HANDLE; only the extension identity is retired.
+        assert!(
+            !rendered.contains("\"slack_bot\""),
+            "migrated snapshot must not carry the retired identity: {rendered}"
+        );
+        assert!(
+            !rendered.contains("id = \\\"slack_bot\\\""),
+            "migrated snapshot must not carry the retired manifest record"
         );
     }
 

@@ -213,13 +213,13 @@ test("ConfigureModal renders the code-entry panel for a channel extension that u
 
 test("ConfigureModal renders Slack OAuth without opening the popup automatically", () => {
   const slackOauthSecret = {
-    name: "slack_personal_oauth",
-    provider: "slack_personal",
+    name: "slack_oauth",
+    provider: "slack",
     prompt: "Slack credential",
     provided: false,
     setup: {
       kind: "oauth",
-      account_label: "slack slack_personal",
+      account_label: "slack slack",
       scopes: ["users:read"],
       invocation_id: "invocation-alpha",
     },
@@ -253,13 +253,13 @@ test("ConfigureModal renders Slack OAuth without opening the popup automatically
 
 test("ConfigureModal does not show a generic activate action beside Slack OAuth", () => {
   const slackOauthSecret = {
-    name: "slack_personal_oauth",
-    provider: "slack_personal",
+    name: "slack_oauth",
+    provider: "slack",
     prompt: "Slack credential",
     provided: true,
     setup: {
       kind: "oauth",
-      account_label: "slack slack_personal",
+      account_label: "slack slack",
       scopes: ["users:read"],
       invocation_id: "invocation-alpha",
     },
@@ -290,13 +290,13 @@ test("ConfigureModal does not show a generic activate action beside Slack OAuth"
 
 test("ConfigureModal activates the Slack extension after OAuth setup completes", async () => {
   const slackOauthSecret = {
-    name: "slack_personal_oauth",
-    provider: "slack_personal",
+    name: "slack_oauth",
+    provider: "slack",
     prompt: "Slack credential",
     provided: false,
     setup: {
       kind: "oauth",
-      account_label: "slack slack_personal",
+      account_label: "slack slack",
       scopes: ["users:read"],
       invocation_id: "invocation-alpha",
     },
@@ -356,8 +356,8 @@ test("ConfigureModal surfaces a failed OAuth flow as a retryable error", () => {
     setupResult: {
       secrets: [
         {
-          name: "slack_personal_oauth",
-          provider: "slack_personal",
+          name: "slack_oauth",
+          provider: "slack",
           provided: false,
           setup: { kind: "oauth", invocation_id: "invocation-alpha" },
         },
@@ -378,13 +378,13 @@ test("ConfigureModal surfaces a failed OAuth flow as a retryable error", () => {
 
 test("ConfigureModal closes as soon as Slack OAuth setup completes", async () => {
   const slackOauthSecret = {
-    name: "slack_personal_oauth",
-    provider: "slack_personal",
+    name: "slack_oauth",
+    provider: "slack",
     prompt: "Slack credential",
     provided: false,
     setup: {
       kind: "oauth",
-      account_label: "slack slack_personal",
+      account_label: "slack slack",
       scopes: ["users:read"],
       invocation_id: "invocation-alpha",
     },
@@ -427,13 +427,13 @@ test("ConfigureModal closes as soon as Slack OAuth setup completes", async () =>
 
 test("ConfigureModal keeps Slack OAuth visibly loading while waiting for authorization", () => {
   const slackOauthSecret = {
-    name: "slack_personal_oauth",
-    provider: "slack_personal",
+    name: "slack_oauth",
+    provider: "slack",
     prompt: "Slack credential",
     provided: false,
     setup: {
       kind: "oauth",
-      account_label: "slack slack_personal",
+      account_label: "slack slack",
       scopes: ["users:read"],
       invocation_id: "invocation-alpha",
     },
@@ -699,13 +699,13 @@ test("ConfigureModal treats post-redeem activation failure as best-effort", asyn
 
 test("ConfigureModal surfaces a blocked popup and does not start the OAuth flow", () => {
   const slackOauthSecret = {
-    name: "slack_personal_oauth",
-    provider: "slack_personal",
+    name: "slack_oauth",
+    provider: "slack",
     prompt: "Slack credential",
     provided: false,
     setup: {
       kind: "oauth",
-      account_label: "slack slack_personal",
+      account_label: "slack slack",
       scopes: ["users:read"],
       invocation_id: "invocation-alpha",
     },
@@ -748,13 +748,13 @@ test("ConfigureModal surfaces a blocked popup and does not start the OAuth flow"
 
 test("ConfigureModal starts the OAuth flow when the popup pre-open succeeds", () => {
   const slackOauthSecret = {
-    name: "slack_personal_oauth",
-    provider: "slack_personal",
+    name: "slack_oauth",
+    provider: "slack",
     prompt: "Slack credential",
     provided: false,
     setup: {
       kind: "oauth",
-      account_label: "slack slack_personal",
+      account_label: "slack slack",
       scopes: ["users:read"],
       invocation_id: "invocation-alpha",
     },

@@ -38,7 +38,7 @@ use ironclaw_auth::{
     CredentialRefreshReport, CredentialRefreshRequest, GOOGLE_PROVIDER_ID, GoogleOAuthRouteConfig,
     OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthCallbackState, OAuthCallbackStateKind,
     OAuthProviderCallbackRequest, OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret,
-    ProviderScope, SLACK_PERSONAL_PROVIDER_ID, SecretCleanupAction, SecretCleanupReport,
+    ProviderScope, SLACK_PROVIDER_ID, SecretCleanupAction, SecretCleanupReport,
     SecretCleanupRequest, Timestamp, TurnRunRef, binding_scope_owns_account,
     build_google_authorization_url, parse_google_callback_scopes, parse_google_requested_scopes,
     pkce_s256_challenge,

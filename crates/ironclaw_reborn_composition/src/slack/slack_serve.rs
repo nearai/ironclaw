@@ -227,7 +227,7 @@ pub fn slack_events_route_descriptors() -> Vec<IngressRouteDescriptor> {
 /// the process lifetime).
 ///
 /// The route's path/method/policy are declared as data in
-/// `assets/slack_bot/manifest.toml` (`[[product_adapter.inbound.host_ingress]]`)
+/// `assets/slack/manifest.toml` (`[[product_adapter.inbound.host_ingress]]`)
 /// and validated by `ironclaw_host_api` (incl. the fail-closed floor that a
 /// `public_webhook` listener must require `webhook_signature`) plus
 /// `ironclaw_product_adapter_registry` (ingress credential coherence). Only the
@@ -240,7 +240,7 @@ pub fn slack_events_route_descriptors() -> Vec<IngressRouteDescriptor> {
 /// surfaced at startup.
 static SLACK_INGRESS_DESCRIPTORS: LazyLock<SlackIngressDescriptors> = LazyLock::new(|| {
     let descriptors = crate::host_ingress::bundled_host_ingress_descriptors(
-        crate::extension_host::available_extensions::slack_bot_manifest_toml(),
+        crate::extension_host::available_extensions::slack_manifest_toml(),
     )
     .unwrap_or_else(|error| {
         panic!("bundled Slack manifest must project host-ingress routes: {error}")

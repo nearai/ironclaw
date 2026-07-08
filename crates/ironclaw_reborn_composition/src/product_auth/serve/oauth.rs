@@ -129,7 +129,7 @@ pub(super) async fn extension_oauth_start_handler(
 ) -> Result<Json<ProductOAuthStartResponse>, ProductAuthRouteFailure> {
     let requester_extension =
         ExtensionId::new(package_id).map_err(|_| ProductAuthRouteFailure::invalid_request())?;
-    if request.provider == SLACK_PERSONAL_PROVIDER_ID {
+    if request.provider == SLACK_PROVIDER_ID {
         #[cfg(feature = "slack-v2-host-beta")]
         return start_slack_personal_oauth_flow(state, caller, request, requester_extension).await;
         #[cfg(not(feature = "slack-v2-host-beta"))]
@@ -260,8 +260,8 @@ async fn start_slack_personal_oauth_flow(
             AuthErrorCode::BackendUnavailable,
         )
     };
-    let provider = AuthProviderId::new(SLACK_PERSONAL_PROVIDER_ID)
-        .map_err(|_| internal_invariant("provider_id"))?;
+    let provider =
+        AuthProviderId::new(SLACK_PROVIDER_ID).map_err(|_| internal_invariant("provider_id"))?;
     let account_label = CredentialAccountLabel::new(request.account_label)
         .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
     let requested_scopes = slack_personal_oauth_setup_scopes()
@@ -563,7 +563,7 @@ static GOOGLE_CALLBACK_DESCRIPTOR: OAuthCallbackDescriptor = OAuthCallbackDescri
 #[cfg(feature = "slack-v2-host-beta")]
 static SLACK_PERSONAL_CALLBACK_DESCRIPTOR: OAuthCallbackDescriptor = OAuthCallbackDescriptor {
     state_kind: OAuthCallbackStateKind::SLACK_PERSONAL,
-    provider_id: SLACK_PERSONAL_PROVIDER_ID,
+    provider_id: SLACK_PROVIDER_ID,
     scope_resolution: CallbackScopeResolution::RequestedOnly,
     identity_hook: slack_personal_identity_hook,
 };
@@ -1782,7 +1782,7 @@ mod tests {
             )),
             Path("slack".to_string()),
             Json(ExtensionOAuthStartRequest {
-                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                provider: SLACK_PROVIDER_ID.to_string(),
                 account_label: "personal slack".to_string(),
                 scopes: vec!["admin".to_string()],
                 expires_at: Utc::now() + ChronoDuration::minutes(5),
@@ -1837,7 +1837,7 @@ mod tests {
             )),
             Path("notion".to_string()),
             Json(ExtensionOAuthStartRequest {
-                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                provider: SLACK_PROVIDER_ID.to_string(),
                 account_label: "personal slack".to_string(),
                 scopes: Vec::new(),
                 expires_at: Utc::now() + ChronoDuration::minutes(5),
@@ -1908,7 +1908,7 @@ mod tests {
             )),
             Path("slack".to_string()),
             Json(ExtensionOAuthStartRequest {
-                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                provider: SLACK_PROVIDER_ID.to_string(),
                 account_label: "personal slack".to_string(),
                 scopes: vec!["search:read".to_string()],
                 expires_at: Utc::now() + ChronoDuration::minutes(5),
@@ -2033,7 +2033,7 @@ mod tests {
             )),
             Path("slack".to_string()),
             Json(ExtensionOAuthStartRequest {
-                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                provider: SLACK_PROVIDER_ID.to_string(),
                 account_label: "personal slack".to_string(),
                 scopes: vec!["users:read".to_string()],
                 expires_at: Utc::now() + ChronoDuration::minutes(5),
@@ -2257,7 +2257,7 @@ mod tests {
             )),
             Path("slack".to_string()),
             Json(ExtensionOAuthStartRequest {
-                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                provider: SLACK_PROVIDER_ID.to_string(),
                 account_label: "personal slack".to_string(),
                 scopes: vec!["search:read".to_string()],
                 expires_at: Utc::now() + ChronoDuration::minutes(5),
@@ -2620,7 +2620,7 @@ mod tests {
             )),
             Path("slack".to_string()),
             Json(ExtensionOAuthStartRequest {
-                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                provider: SLACK_PROVIDER_ID.to_string(),
                 account_label: "personal slack".to_string(),
                 scopes: vec!["search:read".to_string()],
                 expires_at: Utc::now() + ChronoDuration::minutes(5),

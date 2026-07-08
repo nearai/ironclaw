@@ -64,7 +64,7 @@ pub use oauth::{
     OAuthCallbackStateKind, OAuthClientId, OAuthExtraParam, OAuthProviderIdentity,
     OAuthProviderIdentitySubject, OAuthRedirectUri, OAuthScopeParam, OAuthState,
     OAuthTokenResponse, PkceCodeChallenge, SLACK_PERSONAL_AUTHORIZATION_ENDPOINT,
-    SLACK_PERSONAL_PROVIDER_ID, SLACK_PERSONAL_TOKEN_ENDPOINT, authorization_code_hash,
+    SLACK_PERSONAL_TOKEN_ENDPOINT, SLACK_PROVIDER_ID, authorization_code_hash,
     build_authorization_url, build_authorization_url_with_scope_param,
     build_google_authorization_url, is_allowed_google_scope, opaque_state_hash,
     parse_google_callback_scopes, parse_google_requested_scopes, pkce_s256_challenge,

@@ -1287,27 +1287,6 @@ mod tests {
         }
     }
 
-    struct MixedSessionAndOperatorAuthenticator;
-
-    #[async_trait]
-    impl WebuiAuthenticator for MixedSessionAndOperatorAuthenticator {
-        async fn authenticate(&self, token: &str) -> Option<WebuiAuthentication> {
-            match token {
-                "session-token" => {
-                    Some(WebuiAuthentication::user(UserId::new(USER).expect("user")))
-                }
-                "operator-token" => Some(WebuiAuthentication::operator(
-                    UserId::new(USER).expect("user"),
-                )),
-                _ => None,
-            }
-        }
-
-        fn mounts_operator_webui_config_routes(&self) -> bool {
-            true
-        }
-    }
-
     struct HiddenOperatorRouteAuthenticator;
 
     #[async_trait]
@@ -2179,7 +2158,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slack_tools_extension_lists_as_auth_required_until_personal_oauth_connected() {
+    async fn unified_slack_extension_projects_surfaces_and_lists_auth_required_until_oauth_connected()
+     {
         let (runtime, _root) = runtime().await;
         let mounts =
             build_slack_host_beta_mounts(&runtime, config_without_legacy_actor()).expect("mounts");
@@ -2187,10 +2167,10 @@ mod tests {
             build_webui_services_with_slack_host_beta_mounts(&runtime, None, Some(&mounts))
                 .expect("webui bundle");
         let caller = operator_caller();
-        // Model B: the user installs the tools extension (`slack`); the bot
-        // channel (`slack_bot`) is hidden operator infrastructure. The tools
-        // extension carries the slack_personal OAuth requirement, so — like any
-        // OAuth extension — it lists as SetupRequired until the user connects.
+        // Unified model: one `slack` extension declares the channel surface
+        // (Events API ingress + host-authored bot egress) and the user-scoped
+        // tool surfaces. It carries the `slack` provider OAuth requirement,
+        // so it lists as auth-gated until the user connects.
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack")
             .expect("valid slack package ref");
 
@@ -2210,16 +2190,37 @@ mod tests {
             .find(|extension| extension.package_ref.id.as_str() == "slack")
             .expect("Slack tools extension is listed");
 
-        assert_ne!(
+        assert_eq!(
             slack.kind, "channel",
-            "the user-installable Slack extension is the tools package, not the bot channel"
+            "the unified Slack extension declares the channel surface"
+        );
+        let channel_surface = slack
+            .surfaces
+            .iter()
+            .find_map(|surface| match surface {
+                ironclaw_product_workflow::RebornExtensionSurface::Channel {
+                    inbound,
+                    outbound,
+                    ..
+                } => Some((*inbound, *outbound)),
+                _ => None,
+            })
+            .expect("unified Slack extension projects a channel surface");
+        assert!(channel_surface.0, "Slack channel surface is inbound");
+        assert!(channel_surface.1, "Slack channel surface is outbound");
+        assert!(
+            slack.surfaces.iter().any(|surface| matches!(
+                surface,
+                ironclaw_product_workflow::RebornExtensionSurface::Tool
+            )),
+            "unified Slack extension projects tool surfaces"
         );
         assert_eq!(
             slack.onboarding_state,
-            // The tools extension is credential-gated (an OAuth extension, not a
-            // channel), so it reports AuthRequired — not the channel-specific
-            // SetupRequired — until the slack_personal OAuth is connected.
-            Some(RebornExtensionOnboardingState::AuthRequired)
+            // The channel-connection gate is live for the unified identity:
+            // the caller has not connected Slack, so the extension surfaces
+            // the Configure affordance.
+            Some(RebornExtensionOnboardingState::SetupRequired)
         );
         assert!(!slack.authenticated);
 
@@ -2227,7 +2228,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dynamic_slack_setup_save_succeeds_and_bot_channel_stays_hidden_from_catalog() {
+    async fn dynamic_slack_setup_save_succeeds_and_unified_extension_stays_listed() {
         let (runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_runtime_mounts(
             &runtime,
@@ -2239,11 +2240,9 @@ mod tests {
             build_webui_services_with_slack_host_beta_mounts(&runtime, None, Some(&mounts))
                 .expect("webui bundle");
         let caller = operator_caller();
-        // Model B: the Slack bot channel is operator-provisioned infrastructure,
-        // configured through the operator setup route (not the user catalog). Even
-        // when installed, it must never surface in the user-facing extension list —
-        // only the tools extension (`slack`) does.
-        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack_bot")
+        // Unified model: operator setup provisions the channel surface of the
+        // one `slack` extension, which stays visible in the extension list.
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack")
             .expect("valid slack package ref");
         bundle
             .api
@@ -2285,8 +2284,8 @@ mod tests {
             extensions
                 .extensions
                 .iter()
-                .all(|extension| extension.package_ref.id.as_str() != "slack_bot"),
-            "the operator-provisioned Slack bot channel must stay hidden from the user extension catalog"
+                .any(|extension| extension.package_ref.id.as_str() == "slack"),
+            "the unified Slack extension stays visible after operator setup"
         );
 
         runtime.shutdown().await.expect("runtime shuts down");

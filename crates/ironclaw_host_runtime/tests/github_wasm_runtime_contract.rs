@@ -991,7 +991,7 @@ async fn host_runtime_services_missing_github_runtime_secret_blocks_on_auth() {
 /// Audit F-010: per-user token isolation for the `slack_user` first-party
 /// tool. A `slack_user` capability dispatch must inject the *authenticated
 /// user's personal* Slack token — the `xoxp-` user token resolved from the
-/// per-user `slack_personal` product-auth account — as the
+/// per-user `slack` product-auth account — as the
 /// `Authorization: Bearer` header on the slack.com egress, and never the
 /// workspace bot (`xoxb-`) token. This mirrors the github/google search
 /// injection contracts above, driven through the full `invoke_capability`
@@ -1010,7 +1010,7 @@ async fn host_runtime_services_injects_personal_xoxp_token_for_slack_user_search
     );
     let secret_store = Arc::new(InMemorySecretStore::new());
     let slot_handle = SecretHandle::new("slack_user_token").unwrap();
-    let account_access_secret = SecretHandle::new("slack_personal_access").unwrap();
+    let account_access_secret = SecretHandle::new("slack_access").unwrap();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_slack_user_package()),
         Arc::new(filesystem_with_slack_user_package()),
@@ -1021,7 +1021,7 @@ async fn host_runtime_services_injects_personal_xoxp_token_for_slack_user_search
             },
             Obligation::InjectCredentialAccountOnce {
                 handle: slot_handle,
-                provider: RuntimeCredentialAccountProviderId::new("slack_personal").unwrap(),
+                provider: RuntimeCredentialAccountProviderId::new("slack").unwrap(),
                 setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
                     scopes: slack_user_scopes(),
                 },
@@ -1081,7 +1081,7 @@ async fn host_runtime_services_injects_personal_xoxp_token_for_slack_user_search
     );
     assert_eq!(requests[0].policy, policy);
     // The injected credential is the per-user personal xoxp token that was
-    // resolved from the `slack_personal` account and stored under this scope.
+    // resolved from the `slack` account and stored under this scope.
     let authorization = requests[0]
         .headers
         .iter()
@@ -1102,13 +1102,13 @@ async fn host_runtime_services_injects_personal_xoxp_token_for_slack_user_search
     );
 }
 
-/// Audit F-010 companion: a MISSING `slack_personal` account must gate the
+/// Audit F-010 companion: a MISSING `slack` account must gate the
 /// `slack_user` tool on auth — it must never silently fall back to another
 /// credential (e.g. the workspace bot token). Mirrors the github
 /// missing-secret contract: the resolver returns `AuthRequired`, and no
 /// slack.com egress happens.
 #[tokio::test]
-async fn host_runtime_services_missing_slack_personal_account_blocks_slack_user_on_auth() {
+async fn host_runtime_services_missing_slack_account_blocks_slack_user_on_auth() {
     let capability_id = CapabilityId::new("slack.search_messages").unwrap();
     let scope = sample_scope(InvocationId::new());
     let policy = slack_policy();
@@ -1127,7 +1127,7 @@ async fn host_runtime_services_missing_slack_personal_account_blocks_slack_user_
             },
             Obligation::InjectCredentialAccountOnce {
                 handle: slot_handle,
-                provider: RuntimeCredentialAccountProviderId::new("slack_personal").unwrap(),
+                provider: RuntimeCredentialAccountProviderId::new("slack").unwrap(),
                 setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
                     scopes: slack_user_scopes(),
                 },
@@ -1169,7 +1169,7 @@ async fn host_runtime_services_missing_slack_personal_account_blocks_slack_user_
     }
     assert!(
         network.requests().is_empty(),
-        "missing slack_personal account must block before slack.com egress"
+        "missing slack account must block before slack.com egress"
     );
 }
 
@@ -2003,7 +2003,7 @@ impl RuntimeCredentialAccountResolver for FixedGoogleRuntimeCredentialAccountRes
 // `invoke_capability`, and assert the per-user personal-token injection.
 
 /// Credential-account resolver for the `slack_user` tool. Asserts the runtime
-/// asks for the per-user *personal* account (`slack_personal`) on behalf of the
+/// asks for the per-user *personal* account (`slack`) on behalf of the
 /// `slack_user` extension — never a workspace/bot credential — before handing
 /// back the fixed access-secret handle (or an auth-required error).
 #[derive(Debug)]
@@ -2018,7 +2018,7 @@ impl RuntimeCredentialAccountResolver for FixedSlackRuntimeCredentialAccountReso
         &self,
         request: RuntimeCredentialAccountRequest<'_>,
     ) -> Result<RuntimeCredentialAccessSecret, CredentialStageError> {
-        assert_eq!(request.provider.as_str(), "slack_personal");
+        assert_eq!(request.provider.as_str(), "slack");
         assert_eq!(request.requester_extension.as_str(), "slack");
         assert_eq!(request.provider_scopes, self.expected_scopes.as_slice());
         self.result
