@@ -18,7 +18,6 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     channelRegistry,
     mcpRegistry,
     catalogEntries,
-    connectableChannels,
     isLoading,
     isBusy,
     actionResult,
@@ -81,7 +80,6 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     channels: (<ChannelsTab
       status={status}
       channels={channels}
-      connectableChannels={connectableChannels}
       channelRegistry={channelRegistry}
       onActivate={activate}
       onConfigure={handleConfigure}

@@ -785,14 +785,27 @@ impl ExtensionManifestV2 {
     /// adapter loads never decides whether the extension is a tool provider,
     /// a channel, or both.
     pub fn capability_surfaces(&self) -> Vec<CapabilitySurfaceDeclV2> {
-        let mut surfaces: Vec<CapabilitySurfaceDeclV2> = self
-            .capabilities
+        capability_surfaces_from_parts(&self.capabilities, &self.host_api_surfaces)
+    }
+}
+
+/// Shared surface derivation for the v2 manifest and the package-level
+/// [`crate::ExtensionManifest`] mirror: one tool surface per capability
+/// (declaration order), then host-API projected surfaces (declaration
+/// order), then one auth surface per distinct product-auth provider
+/// (sorted by provider id).
+pub(crate) fn capability_surfaces_from_parts(
+    capabilities: &[CapabilityDeclV2],
+    host_api_surfaces: &[CapabilitySurfaceDeclV2],
+) -> Vec<CapabilitySurfaceDeclV2> {
+    {
+        let mut surfaces: Vec<CapabilitySurfaceDeclV2> = capabilities
             .iter()
             .map(|capability| CapabilitySurfaceDeclV2::Tool {
                 capability: capability.id.clone(),
             })
             .collect();
-        surfaces.extend(self.host_api_surfaces.iter().cloned());
+        surfaces.extend(host_api_surfaces.iter().cloned());
 
         // One auth surface per provider. OAuth setups fold to the union of
         // their scopes and mask manual-token setups; a provider referenced
@@ -806,7 +819,7 @@ impl ExtensionManifestV2 {
         }
         let mut providers: BTreeMap<RuntimeCredentialAccountProviderId, AuthAccumulator> =
             BTreeMap::new();
-        for capability in &self.capabilities {
+        for capability in capabilities {
             for credential in &capability.runtime_credentials {
                 let RuntimeCredentialRequirementSource::ProductAuthAccount { provider, setup } =
                     &credential.source
@@ -848,7 +861,9 @@ impl ExtensionManifestV2 {
         }));
         surfaces
     }
+}
 
+impl ExtensionManifestV2 {
     /// Construct a manifest from an already-deserialized raw representation.
     fn from_raw(
         raw: RawManifestV2,

@@ -1870,7 +1870,7 @@ impl RebornRuntime {
     /// call is silently ignored. Returns `false` when the local-runtime slot is
     /// unavailable or already occupied, `true` on first successful set. Shares
     /// the same `OnceLock` the handler reads
-    /// (`RebornLocalRuntimeServices::channel_connection_facade_slot`).
+    /// (`RebornLocalRuntimeServices::channel_connection_facade`).
     #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) fn set_channel_connection_facade(
         &self,
@@ -1879,10 +1879,7 @@ impl RebornRuntime {
         let Some(local_runtime) = self.services.local_runtime.as_ref() else {
             return false;
         };
-        local_runtime
-            .channel_connection_facade_slot
-            .set(facade)
-            .is_ok()
+        local_runtime.channel_connection_facade.set(facade).is_ok()
     }
 
     #[cfg(test)]

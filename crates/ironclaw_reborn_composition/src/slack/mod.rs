@@ -1,11 +1,7 @@
 #[cfg(feature = "slack-v2-host-beta")]
-pub(crate) mod slack_actor_identity;
-#[cfg(feature = "slack-v2-host-beta")]
 pub(crate) mod slack_channel_connection;
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) mod slack_channel_routes;
-#[cfg(feature = "slack-v2-host-beta")]
-pub(crate) mod slack_connectable_channel;
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) mod slack_delivery;
 #[cfg(feature = "slack-v2-host-beta")]

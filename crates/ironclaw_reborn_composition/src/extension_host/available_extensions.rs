@@ -10,16 +10,15 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::{DirEntry, FileType, FilesystemError, RootFilesystem};
 use ironclaw_first_party_extensions::is_gsuite_extension_id;
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, HostPortCatalog, RuntimeCredentialAccountProviderId, VirtualPath,
-    sha256_digest_token,
+    CapabilityId, CapabilitySurfaceKind, ExtensionId, HostPortCatalog,
+    RuntimeCredentialAccountProviderId, VirtualPath, sha256_digest_token,
 };
-use ironclaw_product_adapter_registry::product_adapter_sections;
-use ironclaw_product_adapters::ProductSurfaceKind;
+use ironclaw_product_adapters::{ProductCapabilityFlag, ProductSurfaceKind};
 use ironclaw_product_workflow::{
+    ChannelConnectionRequirement, LifecycleChannelDirections,
     LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
     LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
-    LifecycleExtensionSummary, LifecycleExtensionSurfaceKind, LifecyclePackageKind,
-    LifecyclePackageRef, ProductWorkflowError,
+    LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError,
 };
 use toml::Value;
 
@@ -179,7 +178,12 @@ pub(crate) struct AvailableExtensionPackage {
     /// (`product_adapter_sections`) needs the full `ExtensionManifestRecord`, and
     /// each loader parses the manifest exactly once (see
     /// `surface_kinds_from_manifest_record`). Keep in sync at construction.
-    pub(crate) surface_kinds: Vec<LifecycleExtensionSurfaceKind>,
+    pub(crate) surface_kinds: Vec<CapabilitySurfaceKind>,
+    /// Directional shape of the channel surface (from the product-adapter
+    /// section's capability flags), present iff `surface_kinds` contains
+    /// [`CapabilitySurfaceKind::Channel`]. Cached at construction like
+    /// `surface_kinds`.
+    pub(crate) channel_directions: Option<LifecycleChannelDirections>,
     pub(crate) assets: Vec<AvailableExtensionAsset>,
 }
 
@@ -199,12 +203,32 @@ impl AvailableExtensionPackage {
             source: LifecycleExtensionSource::HostBundled,
             runtime_kind: runtime_kind(&self.package.manifest.runtime),
             surface_kinds: self.surface_kinds.clone(),
+            channel_directions: self.channel_directions,
+            channel_connection: channel_connection_for_package(&self.package_ref, self),
             visible_capability_ids,
             visible_read_only_capability_ids,
             credential_requirements: credential_requirements(self),
             onboarding: onboarding(&self.package_ref),
         }
     }
+}
+
+/// Connect affordance for the package's channel surface: inbound channel
+/// surfaces require a caller-scoped account binding before messages map to a
+/// user, so their summaries carry the connect strategy + copy. Outbound-only
+/// and non-channel packages have nothing to connect.
+fn channel_connection_for_package(
+    package_ref: &LifecyclePackageRef,
+    package: &AvailableExtensionPackage,
+) -> Option<ChannelConnectionRequirement> {
+    let directions = package.channel_directions?;
+    if !directions.inbound {
+        return None;
+    }
+    Some(super::extension_lifecycle::channel_connection_requirement(
+        package_ref.id.as_str(),
+        &package.package.manifest.name,
+    ))
 }
 
 fn onboarding(package_ref: &LifecyclePackageRef) -> Option<LifecycleExtensionOnboarding> {
@@ -781,6 +805,7 @@ fn bundled_extension_package(
         reason: format!("bundled {label} extension manifest is invalid: {error}"),
     })?;
     let surface_kinds = surface_kinds_from_manifest_record(&record, label)?;
+    let channel_directions = channel_directions_from_manifest_record(&record, label)?;
     let manifest = record.manifest().clone().try_into().map_err(|error| {
         ProductWorkflowError::InvalidBindingRequest {
             reason: format!("bundled {label} extension manifest is invalid: {error}"),
@@ -797,27 +822,56 @@ fn bundled_extension_package(
         source: ManifestSource::HostBundled,
         package,
         surface_kinds,
+        channel_directions,
         assets,
     })
 }
 
 pub(crate) fn surface_kinds_from_manifest_record(
     record: &ExtensionManifestRecord,
-    label: &str,
-) -> Result<Vec<LifecycleExtensionSurfaceKind>, ProductWorkflowError> {
-    let adapters = product_adapter_sections(record).map_err(|error| {
-        ProductWorkflowError::InvalidBindingRequest {
-            reason: format!("{label} ProductAdapter manifest projection is invalid: {error}"),
-        }
-    })?;
+    _label: &str,
+) -> Result<Vec<CapabilitySurfaceKind>, ProductWorkflowError> {
+    // Deduplicated, order-stable projection of the manifest's declared
+    // surfaces (tool, channel, auth, ...) — the manifest is the single source
+    // of truth; no section re-parse.
     let mut surface_kinds = Vec::new();
-    if adapters
-        .iter()
-        .any(|adapter| adapter.surface_kind() == ProductSurfaceKind::ExternalChannel)
-    {
-        surface_kinds.push(LifecycleExtensionSurfaceKind::ExternalChannel);
+    for surface in record.manifest().capability_surfaces() {
+        let kind = surface.kind();
+        if !surface_kinds.contains(&kind) {
+            surface_kinds.push(kind);
+        }
     }
     Ok(surface_kinds)
+}
+
+/// Directional shape of the package's channel surface, read from the
+/// product-adapter section's typed capability flags: `inbound_messages` marks
+/// message ingress, `external_final_reply_push` marks host-owned outbound
+/// delivery. `None` when the manifest declares no external-channel section.
+pub(crate) fn channel_directions_from_manifest_record(
+    record: &ExtensionManifestRecord,
+    label: &str,
+) -> Result<Option<LifecycleChannelDirections>, ProductWorkflowError> {
+    let sections =
+        ironclaw_product_adapter_registry::product_adapter_sections(record).map_err(|error| {
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("{label} ProductAdapter manifest projection is invalid: {error}"),
+            }
+        })?;
+    let mut directions: Option<LifecycleChannelDirections> = None;
+    for section in sections
+        .iter()
+        .filter(|section| section.surface_kind() == ProductSurfaceKind::ExternalChannel)
+    {
+        let flags = section.capabilities();
+        let entry = directions.get_or_insert(LifecycleChannelDirections {
+            inbound: false,
+            outbound: false,
+        });
+        entry.inbound |= flags.contains(ProductCapabilityFlag::InboundMessages);
+        entry.outbound |= flags.contains(ProductCapabilityFlag::ExternalFinalReplyPush);
+    }
+    Ok(directions)
 }
 
 fn github_assets() -> Vec<AvailableExtensionAsset> {
@@ -1691,6 +1745,7 @@ where
     )
     .map_err(map_binding_error)?;
     let surface_kinds = surface_kinds_from_manifest_record(&record, entry.name.as_str())?;
+    let channel_directions = channel_directions_from_manifest_record(&record, entry.name.as_str())?;
     let manifest = record
         .manifest()
         .clone()
@@ -1724,6 +1779,7 @@ where
         source: ManifestSource::InstalledLocal,
         package,
         surface_kinds,
+        channel_directions,
         assets,
     }))
 }
@@ -2640,10 +2696,7 @@ mod tests {
         }));
 
         let summary = package.summary();
-        assert_eq!(
-            summary.surface_kinds,
-            vec![LifecycleExtensionSurfaceKind::ExternalChannel]
-        );
+        assert_eq!(summary.surface_kinds, vec![CapabilitySurfaceKind::Channel]);
         assert_eq!(summary.visible_capability_ids, Vec::<String>::new());
     }
 
@@ -2919,7 +2972,7 @@ credential_handle = "channel_ext_token"
         let package = results.into_iter().next().unwrap();
         assert_eq!(
             package.summary().surface_kinds,
-            vec![LifecycleExtensionSurfaceKind::ExternalChannel],
+            vec![CapabilitySurfaceKind::Channel],
             "filesystem-loaded external_channel manifest must project ExternalChannel surface kind"
         );
     }
@@ -3107,6 +3160,7 @@ output_schema_ref = "schemas/write.output.json"
             source: ManifestSource::HostBundled,
             package,
             surface_kinds: Vec::new(),
+            channel_directions: None,
             assets: vec![
                 AvailableExtensionAsset {
                     path: "manifest.toml".to_string(),

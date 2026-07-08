@@ -322,7 +322,7 @@ fn slack_personal_oauth_abandon_hook(
         match config
             .binding_rollback_store
             .user_identity_bindings_for_user_at_epoch(
-                crate::slack::slack_actor_identity::SLACK_IDENTITY_PROVIDER,
+                crate::slack::slack_channel_connection::SLACK_IDENTITY_PROVIDER,
                 &callback_scope.resource.user_id,
                 Some(provider_user_id_prefix.as_str()),
                 Some(connection_epoch),

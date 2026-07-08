@@ -17,17 +17,17 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, NetworkTargetPattern,
-    PermissionMode, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement,
-    RuntimeHttpEgress, UserId, VirtualPath, sha256_digest_token,
+    CapabilityDescriptor, CapabilityId, CapabilitySurfaceKind, EffectKind, ExtensionId,
+    NetworkTargetPattern, PermissionMode, ResourceScope, RuntimeCredentialAuthRequirement,
+    RuntimeCredentialRequirement, RuntimeHttpEgress, UserId, VirtualPath, sha256_digest_token,
 };
 use ironclaw_product_adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
 use ironclaw_product_workflow::{
     ChannelConnectionFacade, ChannelConnectionRequirement, LifecycleExtensionSummary,
-    LifecycleExtensionSurfaceKind, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
-    LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleSearchExtensionSummary, ProductWorkflowError, RebornChannelConnectStrategy,
-    RebornServicesError, WebUiAuthenticatedCaller,
+    LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
+    LifecycleProductPayload, LifecycleProductResponse, LifecycleSearchExtensionSummary,
+    ProductWorkflowError, RebornChannelConnectStrategy, RebornServicesError,
+    WebUiAuthenticatedCaller,
 };
 use tokio::sync::{Mutex, RwLock, Semaphore};
 
@@ -121,7 +121,7 @@ fn removable_channel_cleanup_for_summary(
     if summary.package_ref.id.as_str() == SLACK_EXTENSION_ID
         || summary
             .surface_kinds
-            .contains(&LifecycleExtensionSurfaceKind::ExternalChannel)
+            .contains(&CapabilitySurfaceKind::Channel)
     {
         return Some(RemovableChannelCleanup::Required(
             summary.package_ref.id.as_str().to_string(),
@@ -392,7 +392,7 @@ impl RebornLocalExtensionManagementPort {
         }
     }
 
-    pub(crate) fn with_channel_connection_facade_slot(
+    pub(crate) fn with_channel_connection_facade(
         mut self,
         channel_connection: Arc<OnceLock<Arc<dyn ChannelConnectionFacade>>>,
     ) -> Self {
@@ -2166,7 +2166,7 @@ fn extension_search_has_ready_result(payload: Option<&LifecycleProductPayload>) 
         ) && !extension
             .summary
             .surface_kinds
-            .contains(&LifecycleExtensionSurfaceKind::ExternalChannel)
+            .contains(&CapabilitySurfaceKind::Channel)
             && extension.summary.credential_requirements.is_empty()
             && extension.summary.onboarding.is_none()
     })
@@ -2185,7 +2185,7 @@ fn extension_search_has_installed_external_channel_result(
         ) && extension
             .summary
             .surface_kinds
-            .contains(&LifecycleExtensionSurfaceKind::ExternalChannel)
+            .contains(&CapabilitySurfaceKind::Channel)
     })
 }
 
@@ -2428,7 +2428,9 @@ mod tests {
                     description: "Slack channel".to_string(),
                     source: LifecycleExtensionSource::HostBundled,
                     runtime_kind: LifecycleExtensionRuntimeKind::WasmTool,
-                    surface_kinds: vec![LifecycleExtensionSurfaceKind::ExternalChannel],
+                    surface_kinds: vec![CapabilitySurfaceKind::Channel],
+                    channel_directions: None,
+                    channel_connection: None,
                     visible_capability_ids: Vec::new(),
                     visible_read_only_capability_ids: Vec::new(),
                     credential_requirements: Vec::new(),
@@ -6508,7 +6510,7 @@ credential_handle = "{id}_bot_token"
         );
         let mut package =
             fixture_extension_package_from_manifest_with_product_adapter_contracts(&manifest, id);
-        package.surface_kinds = vec![LifecycleExtensionSurfaceKind::ExternalChannel];
+        package.surface_kinds = vec![CapabilitySurfaceKind::Channel];
         package
     }
 
@@ -6701,6 +6703,7 @@ output_schema_ref = "schemas/search.output.json"
             source: ManifestSource::HostBundled,
             package,
             surface_kinds: Vec::new(),
+            channel_directions: None,
             assets: vec![
                 AvailableExtensionAsset {
                     path: "manifest.toml".to_string(),

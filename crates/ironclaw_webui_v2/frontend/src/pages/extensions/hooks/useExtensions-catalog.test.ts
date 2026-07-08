@@ -27,7 +27,6 @@ function useExtensionsForTest({ extensions, registry }) {
   const queryData = new Map([
     ["extensions", { extensions }],
     ["extension-registry", { entries: registry }],
-    ["connectable-channels", { channels: [] }],
     ["gateway-status-extensions", {}],
   ]);
   const context = {
@@ -47,15 +46,22 @@ function useExtensionsForTest({ extensions, registry }) {
     globalThis: {},
     installExtension: () => {},
     isChannelExtensionKind: (kind) => kind === "wasm_channel" || kind === "channel",
-    listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth: () => {},
     submitExtensionSetup: () => {},
     useMutation: () => ({ isPending: false, mutate: () => {} }),
-    useQuery: (config) => ({
-      data: queryData.get(config.queryKey[0]) || {},
-      isLoading: false,
-    }),
+    useQuery: (config) => {
+      // Channel discovery rides on the extensions snapshot's `surfaces`; the
+      // hook must not resurrect a separate connectable-channels query.
+      assert.ok(
+        queryData.has(config.queryKey[0]),
+        `useExtensions created an unexpected query: ${config.queryKey[0]}`,
+      );
+      return {
+        data: queryData.get(config.queryKey[0]),
+        isLoading: false,
+      };
+    },
     useQueryClient: () => ({ invalidateQueries: () => {} }),
     useT: () => (key, params = {}) =>
       `${key}${params.name ? `:${params.name}` : ""}`,
@@ -165,7 +171,6 @@ test("install/activate auth popups: noopener null is not an error; insecure URLs
     globalThis: {},
     installExtension: () => {},
     isChannelExtensionKind: () => false,
-    listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth: () => {},
     submitExtensionSetup: () => {},
@@ -288,7 +293,6 @@ test("useOauthSetup waits for flow completion after the OAuth popup closes", asy
     globalThis: {},
     installExtension: () => {},
     isChannelExtensionKind: () => false,
-    listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth: () => {},
     submitExtensionSetup: () => {},

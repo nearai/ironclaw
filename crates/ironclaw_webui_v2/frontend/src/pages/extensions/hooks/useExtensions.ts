@@ -2,7 +2,6 @@
 import React from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { gatewayStatus } from "../../../lib/api";
-import { listConnectableChannels } from "../../../lib/channel-connect";
 import {
   completionMatchesFlow,
   failureMatchesFlow,
@@ -113,17 +112,10 @@ export function useExtensions() {
     refetchOnMount: "always",
   });
 
-  const connectableChannelsQuery = useQuery({
-    queryKey: ["connectable-channels"],
-    queryFn: listConnectableChannels,
-    refetchOnMount: "always",
-  });
-
   const invalidate = React.useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ["extensions"] });
     queryClient.invalidateQueries({ queryKey: ["extension-registry"] });
     queryClient.invalidateQueries({ queryKey: ["gateway-status-extensions"] });
-    queryClient.invalidateQueries({ queryKey: ["connectable-channels"] });
   }, [queryClient]);
 
   const [actionResult, setActionResult] = React.useState(null);
@@ -253,7 +245,6 @@ export function useExtensions() {
   const status = statusQuery.data || {};
   const extensions = extensionsQuery.data?.extensions || [];
   const registry = registryQuery.data?.entries || [];
-  const connectableChannels = connectableChannelsQuery.data?.channels || [];
   const extensionById = new Map(
     extensions
       .map((extension) => [packageId(extension), extension])
@@ -338,7 +329,6 @@ export function useExtensions() {
     toolRegistry,
     registry,
     catalogEntries,
-    connectableChannels,
     isLoading,
     isBusy,
     actionResult,

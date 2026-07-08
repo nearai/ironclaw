@@ -1,7 +1,13 @@
-//! Reborn-owned Slack actor identity resolution.
+//! Provider-identity → Reborn user resolution for channel surfaces.
 //!
-//! This module adapts the Reborn-owned Slack OAuth identity lookup to the
-//! product workflow's actor-to-user resolver contract.
+//! One generic, manifest-parameterized [`ProductActorUserResolver`]: the
+//! channel surface supplies the adapter id and external actor kind, the auth
+//! surface supplies the provider id, and the resolver maps
+//! `(provider, installation-scoped external actor id) → UserId` against the
+//! host-owned identity binding store. Adapters extract protocol-shaped
+//! external refs and stop there; resolution, binding, and scoping stay
+//! host-owned and product-blind — a new channel gets identity binding by
+//! declaring surfaces, not by writing a resolver.
 
 use std::sync::Arc;
 
@@ -12,10 +18,7 @@ use ironclaw_product_workflow::{
     ProductActorUserResolutionRequest, ProductActorUserResolver, ProductWorkflowError,
     ResolvedProductActorUser,
 };
-use ironclaw_slack_v2_adapter::{SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID};
 use thiserror::Error;
-
-pub(crate) const SLACK_IDENTITY_PROVIDER: &str = "slack";
 
 #[derive(Debug, Error)]
 pub enum RebornUserIdentityLookupError {
@@ -60,18 +63,18 @@ pub trait RebornUserIdentityLookup: Send + Sync {
     }
 
     /// Whether the given IronClaw user has any binding for `provider` — the
-    /// reverse of [`resolve_user_identity`]. Used to tell whether the calling
-    /// user has personally connected a channel (e.g. Slack personal OAuth).
+    /// reverse of [`Self::resolve_user_identity`]. Used to tell whether the
+    /// calling user has personally connected a channel.
     async fn user_has_provider_binding(
         &self,
         provider: &str,
         user_id: &UserId,
     ) -> Result<bool, RebornUserIdentityLookupError>;
 
-    /// Whether the given IronClaw user has a provider binding whose provider
-    /// user id starts with `provider_user_id_prefix`. Channel connection state
-    /// uses this for installation-scoped providers such as Slack, where a user
-    /// bound in one Slack installation must not satisfy setup in another.
+    /// Like [`Self::user_has_provider_binding`], but only counts bindings
+    /// whose provider user id starts with `provider_user_id_prefix` (the
+    /// installation-scoped composite key prefix). Backends that cannot
+    /// enumerate bindings report unavailability instead of guessing.
     async fn user_has_provider_binding_with_provider_user_id_prefix(
         &self,
         provider: &str,
@@ -87,41 +90,65 @@ pub trait RebornUserIdentityLookup: Send + Sync {
     }
 }
 
+/// The generic actor→user resolver for a channel surface.
+///
+/// Parameterized entirely by data (`provider`, `adapter_id`, `actor_kind`) so
+/// per-channel resolver implementations are structurally unnecessary. Requests
+/// for a different adapter or actor kind resolve to `None` so multiple
+/// channel surfaces can stack their resolvers.
 #[derive(Clone)]
-pub struct SlackUserIdentityActorResolver {
+pub struct ProviderIdentityActorResolver {
+    provider: String,
+    adapter_id: String,
+    actor_kind: String,
     lookup: Arc<dyn RebornUserIdentityLookup>,
 }
 
-impl SlackUserIdentityActorResolver {
-    pub fn new(lookup: Arc<dyn RebornUserIdentityLookup>) -> Self {
-        Self { lookup }
+impl ProviderIdentityActorResolver {
+    pub fn new(
+        provider: impl Into<String>,
+        adapter_id: impl Into<String>,
+        actor_kind: impl Into<String>,
+        lookup: Arc<dyn RebornUserIdentityLookup>,
+    ) -> Self {
+        Self {
+            provider: provider.into(),
+            adapter_id: adapter_id.into(),
+            actor_kind: actor_kind.into(),
+            lookup,
+        }
     }
 }
 
-impl std::fmt::Debug for SlackUserIdentityActorResolver {
+impl std::fmt::Debug for ProviderIdentityActorResolver {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("SlackUserIdentityActorResolver(..)")
+        formatter
+            .debug_struct("ProviderIdentityActorResolver")
+            .field("provider", &self.provider)
+            .field("adapter_id", &self.adapter_id)
+            .field("actor_kind", &self.actor_kind)
+            .finish_non_exhaustive()
     }
 }
 
 #[async_trait::async_trait]
-impl ProductActorUserResolver for SlackUserIdentityActorResolver {
+impl ProductActorUserResolver for ProviderIdentityActorResolver {
     async fn resolve_product_actor_user(
         &self,
         request: ProductActorUserResolutionRequest,
     ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError> {
-        if request.adapter_id.as_str() != SLACK_V2_ADAPTER_ID {
+        if request.adapter_id.as_str() != self.adapter_id {
             return Ok(None);
         }
-        if request.external_actor_ref.kind() != SLACK_USER_ACTOR_KIND {
+        if request.external_actor_ref.kind() != self.actor_kind {
             return Ok(None);
         }
-        let provider_user_id = slack_user_identity_provider_user_id(
+        let provider_user_id = installation_scoped_provider_user_id(
             &request.installation_id,
             request.external_actor_ref.id(),
         );
         self.lookup
-            .resolve_user_identity_with_binding_epoch(SLACK_IDENTITY_PROVIDER, &provider_user_id)
+            .resolve_user_identity_with_binding_epoch(&self.provider, &provider_user_id)
             .await
             .map(|resolved| {
                 resolved.map(|(user_id, binding_epoch)| match binding_epoch {
@@ -141,8 +168,8 @@ impl ProductActorUserResolver for SlackUserIdentityActorResolver {
         request: &ProductActorUserResolutionRequest,
         expected: &ResolvedProductActorUser,
     ) -> Result<bool, ProductWorkflowError> {
-        if request.adapter_id.as_str() != SLACK_V2_ADAPTER_ID
-            || request.external_actor_ref.kind() != SLACK_USER_ACTOR_KIND
+        if request.adapter_id.as_str() != self.adapter_id
+            || request.external_actor_ref.kind() != self.actor_kind
         {
             return Ok(false);
         }
@@ -153,13 +180,13 @@ impl ProductActorUserResolver for SlackUserIdentityActorResolver {
                 .as_ref()
                 == Some(expected));
         };
-        let provider_user_id = slack_user_identity_provider_user_id(
+        let provider_user_id = installation_scoped_provider_user_id(
             &request.installation_id,
             request.external_actor_ref.id(),
         );
         self.lookup
             .user_identity_binding_epoch_is_current(
-                SLACK_IDENTITY_PROVIDER,
+                &self.provider,
                 &provider_user_id,
                 &expected.user_id,
                 expected_epoch,
@@ -171,14 +198,16 @@ impl ProductActorUserResolver for SlackUserIdentityActorResolver {
     }
 }
 
-pub fn slack_user_identity_provider_user_id(
+/// Installation-scoped composite key for a provider identity binding: the
+/// same external user id under two adapter installations is two bindings.
+pub fn installation_scoped_provider_user_id(
     installation_id: &AdapterInstallationId,
-    slack_user_id: &str,
+    external_actor_id: &str,
 ) -> String {
-    format!("{}:{slack_user_id}", installation_id.as_str())
+    format!("{}:{external_actor_id}", installation_id.as_str())
 }
 
-pub(crate) fn parse_slack_user_identity_provider_user_id(
+pub(crate) fn parse_installation_scoped_provider_user_id(
     provider_user_id: &str,
 ) -> Option<(AdapterInstallationId, &str)> {
     let (installation_id, slack_user_id) = provider_user_id.rsplit_once(':')?;
@@ -199,14 +228,18 @@ mod tests {
 
     use super::*;
 
+    fn resolver(lookup: Arc<dyn RebornUserIdentityLookup>) -> ProviderIdentityActorResolver {
+        ProviderIdentityActorResolver::new("slack", "slack_v2", "slack_user", lookup)
+    }
+
     #[tokio::test]
-    async fn slack_actor_identity_resolver_uses_installation_scoped_provider_user_id() {
+    async fn resolver_uses_installation_scoped_provider_user_id() {
         let installation_id = installation("install-alpha");
         let lookup = Arc::new(RecordingLookup::new([(
-            slack_user_identity_provider_user_id(&installation_id, "U123"),
+            installation_scoped_provider_user_id(&installation_id, "U123"),
             user("user:alice"),
         )]));
-        let resolver = SlackUserIdentityActorResolver::new(lookup.clone());
+        let resolver = resolver(lookup.clone());
 
         let resolved = resolver
             .resolve_product_actor_user(request("slack_v2", installation_id, "slack_user", "U123"))
@@ -224,12 +257,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slack_actor_identity_resolver_scopes_same_slack_user_per_installation() {
+    async fn resolver_scopes_same_external_user_per_installation() {
         let lookup = Arc::new(RecordingLookup::new([(
             "install-beta:U123".to_string(),
             user("user:bob"),
         )]));
-        let resolver = SlackUserIdentityActorResolver::new(lookup);
+        let resolver = resolver(lookup);
 
         let resolved = resolver
             .resolve_product_actor_user(request(
@@ -245,12 +278,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slack_actor_identity_resolver_ignores_non_slack_actor_shapes() {
+    async fn resolver_ignores_other_adapters_and_actor_kinds() {
         let lookup = Arc::new(RecordingLookup::new([(
             "install-alpha:U123".to_string(),
             user("user:alice"),
         )]));
-        let resolver = SlackUserIdentityActorResolver::new(lookup.clone());
+        let resolver = resolver(lookup.clone());
 
         assert_eq!(
             resolver
@@ -280,8 +313,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slack_actor_identity_resolver_propagates_backend_error_as_binding_resolution_failed() {
-        let resolver = SlackUserIdentityActorResolver::new(Arc::new(FailingLookup));
+    async fn resolver_propagates_backend_error_as_binding_resolution_failed() {
+        let resolver = resolver(Arc::new(FailingLookup));
 
         let err = resolver
             .resolve_product_actor_user(request(
@@ -300,14 +333,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slack_actor_identity_resolver_rereads_after_revocation() {
+    async fn provider_identity_resolver_rereads_after_revocation() {
         let installation_id = installation("install-alpha");
-        let provider_user_id = slack_user_identity_provider_user_id(&installation_id, "U123");
+        let provider_user_id = installation_scoped_provider_user_id(&installation_id, "U123");
         let lookup = Arc::new(RecordingLookup::new([(
             provider_user_id.clone(),
             user("user:alice"),
         )]));
-        let resolver = SlackUserIdentityActorResolver::new(lookup.clone());
+        let resolver = resolver(lookup.clone());
         let request = request("slack_v2", installation_id, "slack_user", "U123");
 
         let first = resolver
@@ -341,7 +374,7 @@ mod tests {
             "install-alpha:U123".to_string(),
             user("user:alice"),
         )]));
-        let resolver = SlackUserIdentityActorResolver::new(lookup.clone());
+        let resolver = resolver(lookup.clone());
         let request = request(
             "slack_v2",
             installation("install-alpha"),
@@ -367,12 +400,12 @@ mod tests {
     }
 
     #[test]
-    fn slack_user_identity_provider_user_id_parser_is_reversible_for_delimited_installation_ids() {
+    fn installation_scoped_provider_user_id_parser_is_reversible_for_delimited_installation_ids() {
         let installation_id = installation("org:install-alpha");
-        let provider_user_id = slack_user_identity_provider_user_id(&installation_id, "U123");
+        let provider_user_id = installation_scoped_provider_user_id(&installation_id, "U123");
 
         let (parsed_installation_id, slack_user_id) =
-            parse_slack_user_identity_provider_user_id(&provider_user_id)
+            parse_installation_scoped_provider_user_id(&provider_user_id)
                 .expect("provider user id parses");
 
         assert_eq!(parsed_installation_id, installation_id);
@@ -380,13 +413,13 @@ mod tests {
     }
 
     #[test]
-    fn slack_user_identity_provider_user_id_parser_rejects_malformed_values() {
-        assert_eq!(parse_slack_user_identity_provider_user_id("U123"), None);
+    fn installation_scoped_provider_user_id_parser_rejects_malformed_values() {
+        assert_eq!(parse_installation_scoped_provider_user_id("U123"), None);
         assert_eq!(
-            parse_slack_user_identity_provider_user_id("install-alpha:"),
+            parse_installation_scoped_provider_user_id("install-alpha:"),
             None
         );
-        assert_eq!(parse_slack_user_identity_provider_user_id(":U123"), None);
+        assert_eq!(parse_installation_scoped_provider_user_id(":U123"), None);
     }
 
     fn request(

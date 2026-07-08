@@ -13,9 +13,8 @@ use ironclaw_product_adapters::AdapterInstallationId;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::slack::slack_actor_identity::{
-    SLACK_IDENTITY_PROVIDER, slack_user_identity_provider_user_id,
-};
+use crate::provider_identity::installation_scoped_provider_user_id;
+use crate::slack::slack_channel_connection::SLACK_IDENTITY_PROVIDER;
 use crate::slack::slack_serve::{
     SlackApiAppId, SlackEnterpriseId, SlackInstallationSelector, SlackTeamId, SlackUserId,
 };
@@ -525,7 +524,7 @@ impl SlackPersonalUserBindingService {
         let binding = RebornUserIdentityBinding {
             provider: RebornIdentityProviderId::new(SLACK_IDENTITY_PROVIDER)?,
             provider_user_id: RebornIdentityProviderUserId::new(
-                slack_user_identity_provider_user_id(&installation_id, slack_user_id.as_str()),
+                installation_scoped_provider_user_id(&installation_id, slack_user_id.as_str()),
             )?,
             user_id,
         };
@@ -550,7 +549,7 @@ impl SlackPersonalUserBindingService {
         Ok(RebornUserIdentityBinding {
             provider: RebornIdentityProviderId::new(SLACK_IDENTITY_PROVIDER)?,
             provider_user_id: RebornIdentityProviderUserId::new(
-                slack_user_identity_provider_user_id(&installation_id, slack_user_id.as_str()),
+                installation_scoped_provider_user_id(&installation_id, slack_user_id.as_str()),
             )?,
             user_id,
         })

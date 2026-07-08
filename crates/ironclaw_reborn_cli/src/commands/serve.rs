@@ -21,8 +21,7 @@ use ironclaw_reborn_composition::{
 };
 #[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_reborn_composition::{
-    SlackOperatorRouteVisibility, build_slack_host_beta_runtime_mounts,
-    build_webui_services_with_slack_host_beta_mounts,
+    build_slack_host_beta_runtime_mounts, build_webui_services_with_slack_host_beta_mounts,
 };
 use ironclaw_reborn_config::{
     IdentitySection, RebornConfigFile, seed_default_config_file_if_missing,
@@ -495,14 +494,10 @@ impl ServeCommand {
                 None
             };
             #[cfg(feature = "slack-v2-host-beta")]
-            let operator_route_visibility =
-                slack_operator_route_visibility_for_authenticator(env_authenticator.as_ref());
-            #[cfg(feature = "slack-v2-host-beta")]
             let bundle: RebornWebuiBundle = build_webui_services_with_slack_host_beta_mounts(
                 &runtime,
                 None,
                 slack_mounts.as_ref(),
-                operator_route_visibility,
             )?;
             #[cfg(not(feature = "slack-v2-host-beta"))]
             let bundle: RebornWebuiBundle = build_webui_services(&runtime, None)?;
@@ -979,17 +974,6 @@ fn resolve_webui_runtime_owner(
     Ok(webui_user_id.to_string())
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
-fn slack_operator_route_visibility_for_authenticator(
-    authenticator: &dyn WebuiAuthenticator,
-) -> SlackOperatorRouteVisibility {
-    if authenticator.mounts_operator_webui_config_routes() {
-        SlackOperatorRouteVisibility::Visible
-    } else {
-        SlackOperatorRouteVisibility::Hidden
-    }
-}
-
 fn print_serve_banner(
     listen_addr: SocketAddr,
     env_token_var: &str,
@@ -1257,46 +1241,6 @@ slack_user_id = "U123"
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
-    #[test]
-    fn slack_operator_route_visibility_follows_authenticator_route_mount_capability() {
-        struct HiddenAuth;
-
-        #[async_trait::async_trait]
-        impl WebuiAuthenticator for HiddenAuth {
-            async fn authenticate(
-                &self,
-                _token: &str,
-            ) -> Option<ironclaw_reborn_composition::WebuiAuthentication> {
-                None
-            }
-        }
-
-        struct OperatorRouteAuth;
-
-        #[async_trait::async_trait]
-        impl WebuiAuthenticator for OperatorRouteAuth {
-            async fn authenticate(
-                &self,
-                _token: &str,
-            ) -> Option<ironclaw_reborn_composition::WebuiAuthentication> {
-                None
-            }
-
-            fn mounts_operator_webui_config_routes(&self) -> bool {
-                true
-            }
-        }
-
-        assert_eq!(
-            slack_operator_route_visibility_for_authenticator(&HiddenAuth),
-            SlackOperatorRouteVisibility::Hidden
-        );
-        assert_eq!(
-            slack_operator_route_visibility_for_authenticator(&OperatorRouteAuth),
-            SlackOperatorRouteVisibility::Visible
-        );
-    }
-
     #[tokio::test]
     async fn trigger_poller_disabled_does_not_wire_local_access_checker() {
         struct PanicLocalTriggerAccessStore;

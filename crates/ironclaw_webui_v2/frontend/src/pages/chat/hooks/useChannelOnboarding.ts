@@ -454,7 +454,6 @@ export function useChannelOnboarding(
       // "needs setup" cache; without this a freshly connected account can
       // still surface a "Connect" panel for up to the query staleTime.
       queryClient.invalidateQueries?.({ queryKey: ["extensions"] });
-      queryClient.invalidateQueries?.({ queryKey: ["connectable-channels"] });
       const onboarding = pendingOnboardingRef.current;
       if (!connectionEventMatchesOnboarding(event, onboarding)) return;
       // Hide the mounted panel (the account IS connected now), but do NOT

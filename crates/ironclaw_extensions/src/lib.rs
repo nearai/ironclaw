@@ -159,6 +159,11 @@ pub struct ExtensionManifest {
     pub runtime: ExtensionRuntime,
     pub host_apis: Vec<HostApiRefV2>,
     pub capabilities: Vec<CapabilityManifest>,
+    /// Surfaces projected by host API contract sections (channel and future
+    /// section-declared kinds); tool and auth surfaces derive from
+    /// capability declarations on demand — see
+    /// [`Self::capability_surfaces`].
+    pub host_api_surfaces: Vec<CapabilitySurfaceDeclV2>,
     /// Declarative hook entries the extension declared. Structurally
     /// validated by the v2 parser; projected into typed hook entries by the
     /// composition loader. Empty for the common no-hooks case.
@@ -166,6 +171,13 @@ pub struct ExtensionManifest {
 }
 
 impl ExtensionManifest {
+    /// Derived, order-stable projection of every product-facing surface this
+    /// manifest declares. See [`ExtensionManifestV2::capability_surfaces`]
+    /// for the derivation rules; this mirror carries the identical data.
+    pub fn capability_surfaces(&self) -> Vec<CapabilitySurfaceDeclV2> {
+        v2::capability_surfaces_from_parts(&self.capabilities, &self.host_api_surfaces)
+    }
+
     pub fn parse(
         input: &str,
         source: ManifestSource,
@@ -196,6 +208,7 @@ impl TryFrom<ExtensionManifestV2> for ExtensionManifest {
             runtime: ExtensionRuntime::from_v2(manifest.runtime)?,
             host_apis: manifest.host_apis,
             capabilities: manifest.capabilities,
+            host_api_surfaces: manifest.host_api_surfaces,
             hooks: manifest.hooks,
         })
     }

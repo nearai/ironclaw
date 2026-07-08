@@ -15,7 +15,7 @@ function slackSetupPanelSourceForTest() {
         .replace("export function SlackSetupPanel", "function SlackSetupPanel"),
     );
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { SlackSetupPanel, FIELD_HELP, FieldHint, slackSetupCopy };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { SlackAdminManagedSection, SlackSetupPanel, FIELD_HELP, FieldHint, slackSetupCopy };`;
 }
 
 function createReactStub(state) {
@@ -85,7 +85,7 @@ function collectValuesAfter(value, fragment, matches) {
   value.values.forEach((item) => collectValuesAfter(item, fragment, matches));
 }
 
-function setupContext(state, saveResponses = []) {
+function setupContext(state, saveResponses = [], useQueryImpl = () => ({})) {
   const invalidations = [];
   const setQueryDataCalls = [];
   const context = {
@@ -98,7 +98,7 @@ function setupContext(state, saveResponses = []) {
     getSlackSetup: () => ({}),
     saveSlackSetup: () => saveResponses.shift(),
     slackSetupError: () => "error",
-    useQuery: () => ({}),
+    useQuery: useQueryImpl,
     useQueryClient: () => ({
       setQueryData: (...args) => setQueryDataCalls.push(args),
       invalidateQueries: (query) => invalidations.push(query.queryKey),
@@ -246,9 +246,50 @@ test("SlackSetupPanel clears secrets and accepts saved status after successful s
     ["slack-setup"],
     ["slack-allowed-channels"],
     ["slack-routable-subjects"],
-    ["connectable-channels"],
     ["extensions"],
   ]);
+});
+
+test("SlackAdminManagedSection self-gates on the operator-scoped setup query", () => {
+  const state = { hookIndex: 0, values: {}, refs: {}, effectDeps: {} };
+  const queryConfigs = [];
+  let queryResult = { isError: true, error: new Error("forbidden") };
+  const { context } = setupContext(state, [], (config) => {
+    queryConfigs.push(config);
+    return queryResult;
+  });
+  const { SlackAdminManagedSection, SlackSetupPanel } = context.globalThis.__testExports;
+
+  // Non-operators get an error from the operator-scoped setup endpoint: the
+  // section renders nothing at all (they connect via the configure modal).
+  assert.equal(SlackAdminManagedSection(), null);
+  assert.equal(queryConfigs.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(queryConfigs[0].queryKey)), ["slack-setup"]);
+  assert.equal(queryConfigs[0].queryFn, context.getSlackSetup);
+  assert.equal(
+    queryConfigs[0].retry,
+    false,
+    "the operator probe must fail fast instead of retrying a rejection",
+  );
+
+  // Operators see the setup panel, and the channel picker once configured.
+  // The section takes no props at all — copy comes from i18n.
+  queryResult = { isError: false, data: { configured: true } };
+  const rendered = SlackAdminManagedSection();
+  const [panelNode, pickerNode] = rendered.children;
+  assert.equal(panelNode.values[0], SlackSetupPanel);
+  assert.equal(
+    panelNode.values[1],
+    queryResult,
+    "the setup panel receives the section's own query, not a second fetch",
+  );
+  assert.equal(pickerNode.values[0], context.SlackChannelPicker);
+
+  // Not yet configured: the setup panel renders alone, without the picker.
+  queryResult = { isError: false, data: { configured: false } };
+  const unconfigured = SlackAdminManagedSection();
+  assert.equal(unconfigured.children[0].values[0], SlackSetupPanel);
+  assert.equal(unconfigured.children[1], false);
 });
 
 test("SlackSetupPanel rejects whitespace-only fresh secrets", () => {
