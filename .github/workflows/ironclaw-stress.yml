@@ -157,26 +157,3 @@ jobs:
             target/ironclaw-stress/concurrency-ramp-summary.json
             target/ironclaw-stress/concurrency-ramp-report.txt
           if-no-files-found: ignore
-
-  nightly-alert:
-    name: IronClaw Stress Nightly Alert
-    runs-on: ubuntu-latest
-    if: always() && github.event_name == 'schedule'
-    permissions:
-      actions: read
-      contents: read
-      issues: write
-    needs: [libsql-bottleneck-suite, libsql-concurrency-ramp]
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-      - name: Report nightly stress result
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          ALERT_WORKFLOW_NAME: IronClaw Stress
-          ALERT_ISSUE_TITLE: IronClaw Stress nightly failed
-          ALERT_RESULT: ${{ (needs.libsql-bottleneck-suite.result == 'success' && needs.libsql-concurrency-ramp.result == 'success') && 'success' || 'failure' }}
-          ALERT_SLACK_WEBHOOK_URL: ${{ secrets.SLACK_CI_ALERTS_WEBHOOK_URL }}
-        run: .github/scripts/nightly-alert-issue.sh

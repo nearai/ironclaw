@@ -1,17 +1,19 @@
 name: Nightly Watchdog
 
-# Dead-man's switch for the scheduled nightlies. An in-run alert job cannot
-# report a startup_failure — a run that fails workflow validation executes
-# zero jobs, alert included — which is how Nightly Deep CI stayed dark from
-# its creation (2026-05-06) through 2026-07-08 without a single successful
-# run. This watchdog inspects each nightly's latest scheduled run from
-# OUTSIDE it and drives the same per-workflow alert issue (plus the optional
-# Slack mirror) via .github/scripts/nightly-alert-issue.sh.
+# Single alerting path for the scheduled nightlies (Nightly Deep CI, Nightly
+# E2E, Reborn Playwright, IronClaw Stress): checks each workflow's latest
+# scheduled run and posts failures to Slack. Watching from OUTSIDE the runs
+# is deliberate — an in-run alert job dies with its own run on a
+# startup_failure (zero jobs execute; Nightly Deep CI was dark from its
+# creation 2026-05-06 through 2026-07-08 exactly this way) and can never see
+# "the cron didn't fire at all".
 #
-# Each matrix entry alarms when that workflow's latest scheduled run is
-# missing, older than 26 hours (cron never fired), or concluded anything
-# other than success. On success it lets the script close any open alert
-# issue, same as the in-run alerts.
+# A workflow alarms when its latest scheduled run is missing, older than 26
+# hours (cron never fired), or concluded anything but success. Failures post
+# to the Slack channel behind secrets.SLACK_WEBHOOK_URL (the same webhook the
+# live-canary report uses) and turn this watchdog's matrix job red, so the
+# watchdog's own run history doubles as the failure record. Successes post
+# nothing.
 
 on:
   schedule:
@@ -21,7 +23,6 @@ on:
 permissions:
   contents: read
   actions: read
-  issues: write
 
 jobs:
   check-nightly:
@@ -30,26 +31,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - workflow: Nightly Deep CI
-            issue_title: Nightly Deep CI failed
-          - workflow: Nightly E2E
-            issue_title: Nightly E2E failed
-          - workflow: Reborn Playwright
-            issue_title: Reborn Playwright nightly failed
-          - workflow: IronClaw Stress
-            issue_title: IronClaw Stress nightly failed
+        workflow:
+          - Nightly Deep CI
+          - Nightly E2E
+          - Reborn Playwright
+          - IronClaw Stress
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-      - name: Evaluate latest scheduled run
-        id: evaluate
+      - name: Check latest scheduled run and post failures to Slack
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           WATCHED_WORKFLOW: ${{ matrix.workflow }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           MAX_AGE_SECONDS: "93600" # 26h — one cron period plus slack
         run: |
           run_json="$(gh run list \
@@ -57,42 +50,47 @@ jobs:
             --workflow "$WATCHED_WORKFLOW" \
             --event schedule \
             --limit 1 \
-            --json databaseId,conclusion,createdAt,headSha,url)"
+            --json databaseId,conclusion,createdAt,url)"
           echo "Latest scheduled run: ${run_json}"
 
           run_id="$(printf '%s' "$run_json" | jq -r '.[0].databaseId // empty')"
           conclusion="$(printf '%s' "$run_json" | jq -r '.[0].conclusion // "missing"')"
           created_at="$(printf '%s' "$run_json" | jq -r '.[0].createdAt // empty')"
-          head_sha="$(printf '%s' "$run_json" | jq -r '.[0].headSha // "unknown"')"
           run_url="$(printf '%s' "$run_json" | jq -r '.[0].url // empty')"
 
-          result=failure
+          detail=""
           if [ -n "$created_at" ] && [ "$conclusion" = "success" ]; then
             age_seconds=$(( $(date -u +%s) - $(date -u -d "$created_at" +%s) ))
             if [ "$age_seconds" -lt "$MAX_AGE_SECONDS" ]; then
-              result=success
-            else
-              echo "Latest successful run is ${age_seconds}s old (> ${MAX_AGE_SECONDS}s) — the cron did not fire since."
+              echo "${WATCHED_WORKFLOW}: latest scheduled run succeeded — nothing to report."
+              exit 0
             fi
+            detail="last successful run is $(( age_seconds / 3600 ))h old — the cron has not fired since (workflow disabled or renamed?)"
+          elif [ "$conclusion" = "startup_failure" ]; then
+            detail="startup failure: zero jobs ran (workflow-validation error — open the run page for the error banner)"
+          elif [ "$conclusion" = "missing" ]; then
+            detail="no scheduled run found at all"
           else
-            echo "Latest scheduled run conclusion: ${conclusion:-<none>}"
+            failed_jobs=""
+            if [ -n "$run_id" ]; then
+              failed_jobs="$(gh api "repos/${REPO}/actions/runs/${run_id}/jobs?per_page=100" \
+                --jq '[.jobs[] | select(.conclusion == "failure") | .name] | .[0:10] | join(", ")' 2>/dev/null || true)"
+            fi
+            detail="concluded ${conclusion}${failed_jobs:+ — failed jobs: ${failed_jobs}}"
           fi
 
-          {
-            echo "result=${result}"
-            echo "run_id=${run_id:-${GITHUB_RUN_ID}}"
-            echo "run_url=${run_url:-${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}}"
-            echo "head_sha=${head_sha}"
-          } >> "$GITHUB_OUTPUT"
-      - name: Drive the nightly alert issue
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          ALERT_WORKFLOW_NAME: ${{ matrix.workflow }}
-          ALERT_ISSUE_TITLE: ${{ matrix.issue_title }}
-          ALERT_RESULT: ${{ steps.evaluate.outputs.result }}
-          ALERT_RUN_ID: ${{ steps.evaluate.outputs.run_id }}
-          ALERT_RUN_URL: ${{ steps.evaluate.outputs.run_url }}
-          ALERT_SHA: ${{ steps.evaluate.outputs.head_sha }}
-          ALERT_SLACK_WEBHOOK_URL: ${{ secrets.SLACK_CI_ALERTS_WEBHOOK_URL }}
-        run: .github/scripts/nightly-alert-issue.sh
+          text="❌ *${WATCHED_WORKFLOW}* nightly: ${detail}${run_url:+ — <${run_url}|run>}"
+          echo "$text"
+
+          if [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
+            payload="$(jq -n --arg text "$text" '{text: $text}')"
+            curl -fsS -X POST -H 'Content-type: application/json' \
+              --data "$payload" "$SLACK_WEBHOOK_URL" > /dev/null \
+              || echo "Warning: Slack delivery failed" >&2
+          else
+            echo "SLACK_WEBHOOK_URL secret is not set — failure was NOT posted to Slack." >&2
+          fi
+
+          # Red matrix job = the durable failure record now that there is no
+          # issue trail.
+          exit 1
