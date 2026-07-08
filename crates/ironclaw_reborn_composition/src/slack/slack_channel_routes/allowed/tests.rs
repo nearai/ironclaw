@@ -9,12 +9,12 @@ use tokio::sync::RwLock;
 use tower::ServiceExt;
 
 use super::*;
-use crate::slack_channel_routes::{
+use crate::slack::slack_channel_routes::{
     DEFAULT_LIST_LIMIT, InMemorySlackChannelRouteStore, SlackChannelRouteError,
     SlackChannelRouteKey, SlackChannelRouteListPage, SlackChannelRouteStore,
     slack_channel_route_admin_route_mount,
 };
-use crate::slack_setup::{
+use crate::slack::slack_setup::{
     SlackInstallationSetup, SlackInstallationSetupStore, SlackSetupError, SlackSetupService,
 };
 
@@ -783,7 +783,7 @@ impl SlackInstallationSetupStore for MemorySetupStore {
 }
 
 async fn save_single_channel_subject(
-    mount: &crate::slack_channel_routes::SlackChannelRouteAdminRouteMount,
+    mount: &crate::slack::slack_channel_routes::SlackChannelRouteAdminRouteMount,
     tenant_id: &str,
     channel_id: &str,
 ) -> String {
@@ -868,7 +868,7 @@ impl SlackChannelRouteStore for UnavailableAllowedRouteStore {
         _tenant_id: &TenantId,
         _installation_id: &AdapterInstallationId,
         _team_id: &str,
-        _assignments: Vec<crate::slack_channel_routes::SlackChannelRouteAssignment>,
+        _assignments: Vec<crate::slack::slack_channel_routes::SlackChannelRouteAssignment>,
     ) -> Result<Vec<SlackChannelRoute>, SlackChannelRouteError> {
         Err(SlackChannelRouteError::StoreUnavailable)
     }

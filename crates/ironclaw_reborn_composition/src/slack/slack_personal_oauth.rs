@@ -23,7 +23,7 @@ use crate::product_auth::oauth::oauth_gate::{OAuthGateProvider, PreparedOAuthGat
 use crate::product_auth::oauth::oauth_provider_client::{
     ExchangeScopePolicy, HostOAuthProviderSpec, TokenResponseShape,
 };
-use crate::slack_setup::SlackPersonalSetupServiceSlot;
+use crate::slack::slack_setup::SlackPersonalSetupServiceSlot;
 
 /// Host OAuth provider spec for the Slack personal (user-token) provider.
 ///
