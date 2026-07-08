@@ -38,6 +38,7 @@ use ironclaw_host_api::{
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
+    HostManagedModelStreamSink,
 };
 use ironclaw_reborn_composition::{
     PollSettings, RebornBuildInput, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
@@ -48,6 +49,7 @@ use ironclaw_turns::run_profile::{
     CapabilityCallCandidate, LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
 };
 use serde_json::{Value, json};
+use tokio::sync::oneshot;
 use tower::ServiceExt;
 
 // ─── identities ───────────────────────────────────────────────────────
@@ -217,6 +219,77 @@ impl HostManagedModelGateway for ToolCallingGateway {
             vec![candidate],
             "",
         ))
+    }
+}
+
+#[derive(Debug)]
+struct DelayedStreamingTextGateway {
+    first_update: StdMutex<Option<oneshot::Sender<()>>>,
+    release: StdMutex<Option<oneshot::Receiver<()>>>,
+}
+
+impl DelayedStreamingTextGateway {
+    fn new(first_update: oneshot::Sender<()>, release: oneshot::Receiver<()>) -> Self {
+        Self {
+            first_update: StdMutex::new(Some(first_update)),
+            release: StdMutex::new(Some(release)),
+        }
+    }
+
+    async fn stream_with_progress(
+        &self,
+        sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        sink.safe_text_update("Hel".to_string()).await;
+        if let Some(first_update) = self
+            .first_update
+            .lock()
+            .expect("first update lock poisoned")
+            .take()
+        {
+            let _ = first_update.send(());
+        }
+
+        let release = self
+            .release
+            .lock()
+            .expect("release lock poisoned")
+            .take()
+            .expect("delayed streaming gateway should be called once");
+        let _ = release.await;
+
+        sink.safe_text_update("Hello".to_string()).await;
+        Ok(HostManagedModelResponse::assistant_reply("Hello"))
+    }
+}
+
+#[async_trait]
+impl HostManagedModelGateway for DelayedStreamingTextGateway {
+    async fn stream_model(
+        &self,
+        _request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        Err(HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidRequest,
+            "DelayedStreamingTextGateway requires a progress sink",
+        ))
+    }
+
+    async fn stream_model_with_progress(
+        &self,
+        _request: HostManagedModelRequest,
+        sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        self.stream_with_progress(sink).await
+    }
+
+    async fn stream_model_with_capabilities_and_progress(
+        &self,
+        _request: HostManagedModelRequest,
+        _capabilities: Arc<dyn LoopCapabilityPort>,
+        sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        self.stream_with_progress(sink).await
     }
 }
 
@@ -735,6 +808,20 @@ fn event_has_assistant_text_update(event: &ParsedSseEvent, needle: &str) -> bool
     })
 }
 
+fn event_has_exact_assistant_text_update(event: &ParsedSseEvent, expected: &str) -> bool {
+    if event.event.as_deref() != Some("projection_update") {
+        return false;
+    }
+    let payload = event_payload_json(event);
+    payload["state"]["items"].as_array().is_some_and(|items| {
+        items.iter().any(|item| {
+            item["text"]["body"]
+                .as_str()
+                .is_some_and(|body| body == expected)
+        })
+    })
+}
+
 fn event_has_completed_run_status(event: &ParsedSseEvent) -> bool {
     if !matches!(
         event.event.as_deref(),
@@ -1056,6 +1143,80 @@ async fn webui_v2_sse_streams_assistant_text_before_terminal_completion() {
         text_index < completed_index,
         "assistant text projection must be observable before terminal completion; events={events:?}; raw={}",
         String::from_utf8_lossy(&sse_bytes)
+    );
+
+    harness
+        .runtime
+        .shutdown()
+        .await
+        .expect("runtime shutdown clean");
+}
+
+#[tokio::test]
+async fn webui_v2_sse_streams_first_assistant_text_update_before_model_completion() {
+    let (first_update_tx, first_update_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let harness = build_harness_with_gateway(Arc::new(DelayedStreamingTextGateway::new(
+        first_update_tx,
+        release_rx,
+    )))
+    .await;
+
+    let thread_id = create_thread(&harness.router, "e2e-first-token-create").await;
+    let response = open_sse(&harness.router, &thread_id, None).await;
+    let mut body = response.into_body();
+
+    send_message(&harness.router, &thread_id, "e2e-first-token-send").await;
+    tokio::time::timeout(Duration::from_secs(20), first_update_rx)
+        .await
+        .expect("model gateway should emit its first text update")
+        .expect("first text update signal should be sent");
+
+    let first_bytes = collect_sse_until(&mut body, Duration::from_secs(5), |bytes| {
+        parse_sse_events(bytes)
+            .iter()
+            .any(|event| event_has_exact_assistant_text_update(event, "Hel"))
+    })
+    .await;
+    let first_events = parse_sse_events(&first_bytes);
+    assert!(
+        first_events
+            .iter()
+            .any(|event| event_has_exact_assistant_text_update(event, "Hel")),
+        "SSE stream must expose the first assistant text update before the model completes; events={first_events:?}; raw={}",
+        String::from_utf8_lossy(&first_bytes)
+    );
+    assert!(
+        !first_events
+            .iter()
+            .any(|event| event_has_exact_assistant_text_update(event, "Hello")),
+        "SSE stream delivered the final accumulated text before the model was released; events={first_events:?}; raw={}",
+        String::from_utf8_lossy(&first_bytes)
+    );
+    assert!(
+        !first_events.iter().any(event_has_completed_run_status),
+        "SSE stream delivered terminal completion before the model was released; events={first_events:?}; raw={}",
+        String::from_utf8_lossy(&first_bytes)
+    );
+
+    release_tx.send(()).expect("release delayed model");
+    let final_bytes = collect_sse_until(&mut body, Duration::from_secs(10), |bytes| {
+        events_include_completed_status_and_assistant_text(bytes, "Hello")
+    })
+    .await;
+    drop(body);
+    let final_events = parse_sse_events(&final_bytes);
+    assert!(
+        final_events
+            .iter()
+            .any(|event| event_has_exact_assistant_text_update(event, "Hello")),
+        "SSE stream must expose the accumulated assistant text after the model completes; events={final_events:?}; raw={}",
+        String::from_utf8_lossy(&final_bytes)
+    );
+    assert!(
+        final_events.iter().any(event_has_completed_run_status),
+        "SSE stream must still finalize the run after the model completes; events={final_events:?}; raw={}",
+        String::from_utf8_lossy(&final_bytes)
     );
 
     harness
