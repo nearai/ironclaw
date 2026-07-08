@@ -2581,7 +2581,8 @@ async fn static_i18n_module_guards_locale_race_and_clears_failed_pack_cache() {
     // the deferred JS/e2e scaffold.
     let body = served_app_javascript().await;
     let loader_segment = bundle_segment(&body, "ironclaw_language", "createContext({lang:");
-    let provider_segment = bundle_segment(&body, "createContext({lang:", "QueryClient({defaultOptions");
+    let provider_segment =
+        bundle_segment(&body, "createContext({lang:", "QueryClient({defaultOptions");
 
     assert!(
         provider_segment.contains(".useState(()=>")
