@@ -1115,6 +1115,36 @@ impl HostRuntimeCapabilityHarness {
         Ok(())
     }
 
+    /// E-SKILL tenant-shared seeding arm: seed a TENANT-SHARED skill (writes
+    /// `<storage_root>/tenant-shared/skills/<name>/SKILL.md`) — the
+    /// admin-installed tier every user in the tenant can read. The production
+    /// `scoped_skill_context_mount_view` already grants
+    /// `/tenant-shared/skills` read-only, and the skills extension is built
+    /// `with_tenant_shared()` for the group's `skill_activation_tenant`, so
+    /// the seeded bundle joins activation for any run in that tenant. Bundles
+    /// under this root carry `SkillTrust::Installed` by construction
+    /// (`FilesystemSkillBundleRoot::tenant_shared`) — which is the point of
+    /// the tests that use this seam: admin-vetted `Installed`-tier content
+    /// must still activate by name and inject its body. Tests only.
+    pub(crate) fn seed_tenant_shared_skill_for_test(
+        &self,
+        name: &str,
+        description: &str,
+        prompt: &str,
+    ) -> HarnessResult<()> {
+        let dir = self
+            .storage_root_for_test()
+            .join("tenant-shared")
+            .join("skills")
+            .join(name);
+        std::fs::create_dir_all(&dir)?;
+        let body = format!(
+            "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [\"{name}\"]\n---\n\n{prompt}"
+        );
+        std::fs::write(dir.join("SKILL.md"), body)?;
+        Ok(())
+    }
+
     /// C-SYNTH `skill_activate` `AmbiguousSkill` seeding arm: seed a
     /// USER-scoped skill (writes
     /// `<storage_root>/tenants/<tenant>/users/<user>/skills/<name>/SKILL.md`)

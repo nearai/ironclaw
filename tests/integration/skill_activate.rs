@@ -67,6 +67,77 @@ async fn skill_activate_dispatches_and_injects_skill_context() {
         .expect("activated skill instructions must inject into a model request");
 }
 
+/// #5459 vision pin — an ADMIN-INSTALLED TENANT-SHARED skill (the
+/// `/tenant-shared/skills` tier, `SkillTrust::Installed` by construction)
+/// activates through the real `builtin.skill_activate` capability and its
+/// body instructs a subsequent model request in a tenant user's turn.
+///
+/// Regression for the silent-drop bug: `select_named_skill_activations`
+/// filtered named activation to `Trusted`-only candidates, so a tenant-shared
+/// skill was dropped with `count: 0` — and the handler discarded the
+/// selection feedback, leaving the model no reason. Since criteria
+/// auto-activation is intentionally OFF on this path (#5530, test below),
+/// named activation is the ONLY way a tenant-shared skill can inject here —
+/// making the drop a total block on the admin-shared-skills feature.
+#[tokio::test]
+async fn skill_activate_admits_tenant_shared_skill_and_injects_context() {
+    let group = RebornIntegrationGroup::skill_activation_tools()
+        .await
+        .expect("skill-activation group builds");
+    let capability_harness = group
+        .capability_harness()
+        .expect("skill-activation group has a host-runtime capability harness");
+    capability_harness
+        .seed_tenant_shared_skill_for_test(
+            "shared-critters",
+            "an admin-installed tenant-shared skill",
+            "SHARED_CRITTERS_PROMPT_SENTINEL",
+        )
+        .expect("tenant-shared skill seeds");
+
+    let harness = group
+        .thread("conv-skill-activate-tenant-shared")
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.skill_activate",
+                json!({"names": ["shared-critters"]}),
+            ),
+            RebornScriptedReply::text("done"),
+        ])
+        .build()
+        .await
+        .expect("thread builds");
+
+    // The user message omits the skill's keyword so nothing but the explicit
+    // `skill_activate` call could inject the sentinel.
+    harness
+        .submit_turn("please help me out")
+        .await
+        .expect("turn completes");
+
+    // Half A: the capability dispatched, admitted the tenant-shared skill, and
+    // reported it with per-name feedback (previously discarded).
+    harness
+        .assert_tool_invoked("builtin.skill_activate")
+        .await
+        .expect("skill_activate dispatched through the real capability");
+    harness
+        .assert_tool_result_contains("\"count\":1")
+        .await
+        .expect("named activation admitted the tenant-shared skill");
+    harness
+        .assert_tool_result_contains("shared-critters: activated after model selection")
+        .await
+        .expect("tool output surfaces this call's selection feedback");
+
+    // Half B: the admin-installed skill's instructions reached a later model
+    // request — the `Installed`-tier body is disclosable for tenant-shared.
+    harness
+        .assert_model_request_contains("SHARED_CRITTERS_PROMPT_SENTINEL")
+        .await
+        .expect("tenant-shared skill instructions must inject into a model request");
+}
+
 // INTENTIONAL: `SkillActivationMode::ActivationCriteria` (keyword/regex
 // auto-activation) does not fire on the `TurnCoordinator`/agent-loop path —
 // disabled on purpose (product decision, closed issue #5530). It only runs
