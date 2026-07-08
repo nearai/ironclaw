@@ -67,8 +67,6 @@ mod runtime_profile_approval_policy;
 mod support;
 #[cfg(feature = "test-support")]
 pub mod test_support;
-mod trigger_poller;
-mod trigger_poller_trusted_submit;
 mod turn_run_snapshot;
 mod web_access;
 mod webui;
@@ -86,7 +84,7 @@ mod webui_serve;
 mod webui_ws_origin;
 
 pub use admin_token::AdminApiTokenMinter;
-pub use automation::RebornAutomationProductFacade;
+pub use automation::facade::RebornAutomationProductFacade;
 pub use error::RebornBuildError;
 pub use extension_host::extension_lifecycle_command::{
     RebornExtensionLifecycleCommand, RebornExtensionLifecycleCommandError,

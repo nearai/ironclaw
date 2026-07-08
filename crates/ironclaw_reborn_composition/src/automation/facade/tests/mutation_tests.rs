@@ -4,7 +4,7 @@ use ironclaw_host_api::UserId;
 use ironclaw_product_workflow::{AutomationName, AutomationProductFacade, RebornAutomationState};
 use ironclaw_triggers::{InMemoryTriggerRepository, TriggerId, TriggerRepository, TriggerState};
 
-use crate::automation::RebornAutomationProductFacade;
+use crate::automation::facade::RebornAutomationProductFacade;
 
 use super::{caller, make_record, now};
 
