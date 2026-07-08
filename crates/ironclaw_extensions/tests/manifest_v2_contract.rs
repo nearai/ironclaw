@@ -3,15 +3,18 @@
 use std::sync::Arc;
 
 use ironclaw_extensions::{
-    CapabilityVisibility, ExtensionManifestV2, ExtensionRuntimeV2, HostApiContractRegistry,
-    HostApiId, HostApiManifestContract, HostApiMultiplicity, HostApiRefV2, MANIFEST_SCHEMA_VERSION,
-    ManifestSectionPath, ManifestSource, ManifestV2Error,
+    CapabilityProviderHostApiContract, CapabilitySurfaceDeclV2, CapabilityVisibility,
+    ExtensionManifestV2, ExtensionRuntimeV2, HostApiContractRegistry, HostApiId,
+    HostApiManifestContext, HostApiManifestContract, HostApiManifestProjection,
+    HostApiMultiplicity, HostApiRefV2, MANIFEST_SCHEMA_VERSION, ManifestSectionPath,
+    ManifestSource, ManifestV2Error,
 };
 use ironclaw_host_api::{
-    CapabilityProfileId, ExtensionId, HostPortCatalog, HostPortCatalogEntry, HostPortId,
-    NetworkScheme, NetworkTargetPattern, PermissionMode, RequestedTrustClass,
-    RuntimeCredentialAccountProviderId, RuntimeCredentialRequirementSource,
-    RuntimeCredentialTarget, RuntimeKind, SecretHandle, TrustClass,
+    CapabilityProfileId, CapabilitySurfaceKind, ExtensionId, HostPortCatalog, HostPortCatalogEntry,
+    HostPortId, NetworkScheme, NetworkTargetPattern, PermissionMode, RequestedTrustClass,
+    RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
+    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeKind, SecretHandle,
+    TrustClass,
 };
 
 const TELEGRAM_TOKEN_PORT: &str = "host.secrets.telegram_bot_token";
@@ -1526,4 +1529,349 @@ surface_kind = "telegram"
         matches!(err, ManifestV2Error::DuplicateHostApiSection { .. }),
         "{err:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Capability surface projection
+//
+// The manifest is the single source of truth for which product-facing
+// surfaces an extension declares. `capability_surfaces()` derives tool and
+// auth surfaces from capability declarations and retains contract-projected
+// surfaces (e.g. channel) from `[[host_api]]` sections. Runtime kind must
+// never leak into this taxonomy.
+// ---------------------------------------------------------------------------
+
+/// Fake contract that projects declared surface kinds for its section, the
+/// way `ironclaw.product_adapter/v1` projects a channel surface for
+/// `external_channel` sections.
+struct SurfaceProjectingContract {
+    id: HostApiId,
+    prefix: &'static str,
+    surfaces: Vec<CapabilitySurfaceKind>,
+}
+
+impl HostApiManifestContract for SurfaceProjectingContract {
+    fn id(&self) -> &HostApiId {
+        &self.id
+    }
+
+    fn multiplicity(&self) -> HostApiMultiplicity {
+        HostApiMultiplicity::Multiple
+    }
+
+    fn accepts_section_path(&self, section: &ManifestSectionPath) -> bool {
+        section
+            .as_str()
+            .strip_prefix(self.prefix)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+    }
+
+    fn validate_section(
+        &self,
+        _host_api: &HostApiRefV2,
+        _section: &toml::Value,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn project_section_with_context(
+        &self,
+        _context: &HostApiManifestContext<'_>,
+        _host_api: &HostApiRefV2,
+        _section: &toml::Value,
+    ) -> Result<HostApiManifestProjection, String> {
+        Ok(HostApiManifestProjection {
+            surfaces: self.surfaces.clone(),
+            ..HostApiManifestProjection::default()
+        })
+    }
+}
+
+fn google_backed_manifest(extension_id: &str, handle: &str, scopes: &str) -> String {
+    format!(
+        r#"
+schema_version = "{schema}"
+id = "{ext}"
+name = "Example Google-backed Extension"
+version = "0.1.0"
+description = "test"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/example.wasm"
+
+[[capabilities]]
+id = "{ext}.read"
+description = "Reads provider data"
+effects = ["network", "use_secret"]
+runtime_credentials = [
+  {{ handle = "{handle}", source = {{ type = "product_auth_account", provider = "google", setup = {{ kind = "oauth", scopes = {scopes} }} }}, audience = {{ scheme = "https", host_pattern = "www.googleapis.com" }}, target = {{ type = "header", name = "authorization", prefix = "Bearer " }} }},
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/example/read.input.v1.json"
+output_schema_ref = "schemas/example/read.output.v1.json"
+"#,
+        schema = MANIFEST_SCHEMA_VERSION,
+        ext = extension_id,
+        handle = handle,
+        scopes = scopes,
+    )
+}
+
+#[test]
+fn tool_only_manifest_projects_one_tool_surface_per_capability_and_nothing_else() {
+    let toml = third_party_wasm_manifest("acme-tools", "acme-tools.echo");
+    let manifest =
+        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap();
+
+    let surfaces = manifest.capability_surfaces();
+    assert_eq!(surfaces.len(), 1, "{surfaces:?}");
+    match &surfaces[0] {
+        CapabilitySurfaceDeclV2::Tool { capability } => {
+            assert_eq!(capability.as_str(), "acme-tools.echo");
+        }
+        other => panic!("expected a tool surface, got {other:?}"),
+    }
+    assert_eq!(surfaces[0].kind(), CapabilitySurfaceKind::Tool);
+}
+
+#[test]
+fn product_auth_credentials_project_one_auth_surface_per_provider_with_unioned_scopes() {
+    // Three capabilities against one provider: two OAuth requirements with
+    // overlapping scopes and one manual-token requirement. The extension
+    // needs ONE provider account whose OAuth grant is the union of the
+    // declared scopes (sorted, deduplicated); the weaker manual-token setup
+    // must not mask the OAuth setup.
+    let toml = format!(
+        r#"
+schema_version = "{schema}"
+id = "acme-tools"
+name = "Acme"
+version = "0.1.0"
+description = "test"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/example.wasm"
+
+[[capabilities]]
+id = "acme-tools.search"
+description = "Search"
+effects = ["network", "use_secret"]
+runtime_credentials = [
+  {{ handle = "acme_account", source = {{ type = "product_auth_account", provider = "acme", setup = {{ kind = "oauth", scopes = ["read:b", "read:a"] }} }}, audience = {{ scheme = "https", host_pattern = "api.acme.com" }}, target = {{ type = "header", name = "authorization", prefix = "Bearer " }} }},
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/acme/search.input.v1.json"
+output_schema_ref = "schemas/acme/search.output.v1.json"
+
+[[capabilities]]
+id = "acme-tools.send"
+description = "Send"
+effects = ["network", "use_secret"]
+runtime_credentials = [
+  {{ handle = "acme_account", source = {{ type = "product_auth_account", provider = "acme", setup = {{ kind = "oauth", scopes = ["read:a", "write:a"] }} }}, audience = {{ scheme = "https", host_pattern = "api.acme.com" }}, target = {{ type = "header", name = "authorization", prefix = "Bearer " }} }},
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/acme/send.input.v1.json"
+output_schema_ref = "schemas/acme/send.output.v1.json"
+
+[[capabilities]]
+id = "acme-tools.legacy"
+description = "Legacy manual-token path"
+effects = ["network", "use_secret"]
+runtime_credentials = [
+  {{ handle = "acme_manual", source = {{ type = "product_auth_account", provider = "acme", setup = {{ kind = "manual_token" }} }}, audience = {{ scheme = "https", host_pattern = "api.acme.com" }}, target = {{ type = "header", name = "authorization", prefix = "Bearer " }} }},
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/acme/legacy.input.v1.json"
+output_schema_ref = "schemas/acme/legacy.output.v1.json"
+"#,
+        schema = MANIFEST_SCHEMA_VERSION,
+    );
+    let manifest =
+        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap();
+
+    let auth_surfaces: Vec<_> = manifest
+        .capability_surfaces()
+        .into_iter()
+        .filter(|surface| surface.kind() == CapabilitySurfaceKind::Auth)
+        .collect();
+    assert_eq!(auth_surfaces.len(), 1, "{auth_surfaces:?}");
+    match &auth_surfaces[0] {
+        CapabilitySurfaceDeclV2::Auth { provider, setup } => {
+            assert_eq!(
+                provider,
+                &RuntimeCredentialAccountProviderId::new("acme").unwrap()
+            );
+            assert_eq!(
+                setup,
+                &RuntimeCredentialAccountSetup::OAuth {
+                    scopes: vec![
+                        "read:a".to_string(),
+                        "read:b".to_string(),
+                        "write:a".to_string(),
+                    ],
+                }
+            );
+        }
+        other => panic!("expected an auth surface, got {other:?}"),
+    }
+}
+
+#[test]
+fn extensions_sharing_one_provider_project_the_same_auth_provider() {
+    // Gmail and Google Drive stay separate extensions but share the `google`
+    // credential authority: the provider id is a credential-authority
+    // namespace, distinct from every extension id that uses it.
+    let gmail = ExtensionManifestV2::parse(
+        &google_backed_manifest(
+            "gmail",
+            "gmail_account",
+            r#"["https://www.googleapis.com/auth/gmail.readonly"]"#,
+        ),
+        ManifestSource::InstalledLocal,
+        &catalog(),
+    )
+    .unwrap();
+    let drive = ExtensionManifestV2::parse(
+        &google_backed_manifest(
+            "google-drive",
+            "google_runtime_token",
+            r#"["https://www.googleapis.com/auth/drive.readonly"]"#,
+        ),
+        ManifestSource::InstalledLocal,
+        &catalog(),
+    )
+    .unwrap();
+
+    let provider_of = |manifest: &ExtensionManifestV2| {
+        manifest
+            .capability_surfaces()
+            .into_iter()
+            .find_map(|surface| match surface {
+                CapabilitySurfaceDeclV2::Auth { provider, .. } => Some(provider),
+                _ => None,
+            })
+            .expect("google-backed manifest must project an auth surface")
+    };
+
+    let gmail_provider = provider_of(&gmail);
+    let drive_provider = provider_of(&drive);
+    let google = RuntimeCredentialAccountProviderId::new("google").unwrap();
+    assert_eq!(gmail_provider, google);
+    assert_eq!(drive_provider, google);
+    // The provider namespace is not the extension id.
+    assert_ne!(gmail_provider.as_str(), gmail.id.as_str());
+    assert_ne!(drive_provider.as_str(), drive.id.as_str());
+}
+
+#[test]
+fn contract_projected_channel_surface_is_retained_with_origin() {
+    // Tool + channel extension: the real capability-provider contract
+    // projects the tool capability; a channel-projecting host API contract
+    // (the product-adapter shape) projects the channel surface. Both must
+    // surface from one manifest, and runtime kind must not decide either.
+    let mut registry = HostApiContractRegistry::new();
+    registry
+        .register(Arc::new(CapabilityProviderHostApiContract::new().unwrap()))
+        .unwrap();
+    registry
+        .register(Arc::new(SurfaceProjectingContract {
+            id: HostApiId::new("ironclaw.product_adapter/v1").unwrap(),
+            prefix: "product_adapter",
+            surfaces: vec![CapabilitySurfaceKind::Channel],
+        }))
+        .unwrap();
+
+    let manifest = ExtensionManifestV2::parse_with_host_api_contracts(
+        &telegram_multi_host_api_manifest(),
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &registry,
+    )
+    .unwrap();
+
+    let surfaces = manifest.capability_surfaces();
+    let kinds: Vec<_> = surfaces.iter().map(|surface| surface.kind()).collect();
+    assert_eq!(
+        kinds,
+        vec![CapabilitySurfaceKind::Tool, CapabilitySurfaceKind::Channel],
+        "{surfaces:?}"
+    );
+    match &surfaces[0] {
+        CapabilitySurfaceDeclV2::Tool { capability } => {
+            assert_eq!(capability.as_str(), "telegram.send_message");
+        }
+        other => panic!("expected a tool surface, got {other:?}"),
+    }
+    match &surfaces[1] {
+        CapabilitySurfaceDeclV2::HostApiSection {
+            kind,
+            host_api,
+            section,
+        } => {
+            assert_eq!(*kind, CapabilitySurfaceKind::Channel);
+            assert_eq!(host_api.as_str(), "ironclaw.product_adapter/v1");
+            assert_eq!(section.as_str(), "product_adapter.inbound");
+        }
+        other => panic!("expected a channel surface, got {other:?}"),
+    }
+}
+
+#[test]
+fn contracts_cannot_project_tool_or_auth_section_surfaces() {
+    // Tool and auth surfaces each have a dedicated declaration path
+    // (capability declarations and product-auth credential requirements). A
+    // contract that tries to project them as opaque section surfaces is a
+    // contract-implementation bug and must fail closed.
+    for bad_kind in [CapabilitySurfaceKind::Tool, CapabilitySurfaceKind::Auth] {
+        let mut registry = HostApiContractRegistry::new();
+        registry
+            .register(Arc::new(SurfaceProjectingContract {
+                id: HostApiId::new("ironclaw.product_adapter/v1").unwrap(),
+                prefix: "product_adapter",
+                surfaces: vec![bad_kind],
+            }))
+            .unwrap();
+        let toml = format!(
+            r#"
+schema_version = "{schema}"
+id = "telegram"
+name = "Telegram"
+version = "0.1.0"
+description = "Telegram product adapter"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/telegram.wasm"
+
+[[host_api]]
+id = "ironclaw.product_adapter/v1"
+section = "product_adapter.inbound"
+
+[product_adapter.inbound]
+surface_kind = "telegram"
+"#,
+            schema = MANIFEST_SCHEMA_VERSION,
+        );
+        let err = ExtensionManifestV2::parse_with_host_api_contracts(
+            &toml,
+            ManifestSource::InstalledLocal,
+            &catalog(),
+            &registry,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ManifestV2Error::HostApiSectionRejected { .. }),
+            "projecting {bad_kind:?} must fail closed, got {err:?}"
+        );
+    }
 }

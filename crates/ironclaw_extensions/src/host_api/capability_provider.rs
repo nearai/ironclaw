@@ -58,6 +58,7 @@ impl HostApiManifestContract for CapabilityProviderHostApiContract {
     ) -> Result<HostApiManifestProjection, String> {
         Ok(HostApiManifestProjection {
             capabilities: project_capabilities(context, section)?,
+            surfaces: Vec::new(),
         })
     }
 }

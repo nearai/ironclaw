@@ -38,11 +38,12 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
 use ironclaw_host_api::{
-    CapabilityId, CapabilityProfileId, CapabilityProfileSchemaRef, EffectKind, ExtensionId,
-    HostApiError, HostPortCatalog, HostPortId, NetworkScheme, NetworkTargetPattern, PermissionMode,
-    RequestedTrustClass, ResourceProfile, RuntimeCredentialRequirement,
-    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeKind, SecretHandle,
-    TrustClass,
+    CapabilityId, CapabilityProfileId, CapabilityProfileSchemaRef, CapabilitySurfaceKind,
+    EffectKind, ExtensionId, HostApiError, HostPortCatalog, HostPortId, NetworkScheme,
+    NetworkTargetPattern, PermissionMode, RequestedTrustClass, ResourceProfile,
+    RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
+    RuntimeCredentialRequirement, RuntimeCredentialRequirementSource, RuntimeCredentialTarget,
+    RuntimeKind, SecretHandle, TrustClass,
 };
 use serde::{Deserialize, Deserializer};
 use thiserror::Error;
@@ -238,6 +239,12 @@ pub struct HostApiManifestContext<'a> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HostApiManifestProjection {
     pub capabilities: Vec<CapabilityDeclV2>,
+    /// Product-facing surface kinds the validated section declares (e.g. a
+    /// `channel` surface for an external-channel product-adapter section).
+    /// Tool and auth kinds are rejected here — they have dedicated
+    /// declaration paths (capability declarations and product-auth
+    /// credential requirements); see [`CapabilitySurfaceDeclV2`].
+    pub surfaces: Vec<CapabilitySurfaceKind>,
 }
 
 /// Host API contract validator registered by composition.
@@ -310,9 +317,9 @@ impl HostApiContractRegistry {
         manifest: &ExtensionManifestV2,
         sections: &ManifestSectionsV2,
         host_port_catalog: &HostPortCatalog,
-    ) -> Result<HostApiManifestProjection, ManifestV2Error> {
+    ) -> Result<ProjectedManifestV2, ManifestV2Error> {
         let mut counts: BTreeMap<&HostApiId, usize> = BTreeMap::new();
-        let mut projected = HostApiManifestProjection::default();
+        let mut projected = ProjectedManifestV2::default();
         let mut seen_capabilities = BTreeSet::new();
         for host_api in &manifest.host_apis {
             let contract = self.contracts.get(&host_api.id).ok_or_else(|| {
@@ -352,6 +359,32 @@ impl HostApiContractRegistry {
                 }
                 projected.capabilities.push(capability);
             }
+            for kind in section_projection.surfaces {
+                if matches!(
+                    kind,
+                    CapabilitySurfaceKind::Tool | CapabilitySurfaceKind::Auth
+                ) {
+                    // Fail closed: tool and auth surfaces derive from their
+                    // dedicated declaration paths. A contract projecting them
+                    // as opaque section surfaces is an implementation bug.
+                    return Err(ManifestV2Error::HostApiSectionRejected {
+                        id: host_api.id.clone(),
+                        section: host_api.section.clone(),
+                        reason: format!(
+                            "host API contracts must not project '{kind}' section surfaces; \
+                             tool surfaces derive from capability declarations and auth \
+                             surfaces from product-auth credential requirements"
+                        ),
+                    });
+                }
+                projected
+                    .surfaces
+                    .push(CapabilitySurfaceDeclV2::HostApiSection {
+                        kind,
+                        host_api: host_api.id.clone(),
+                        section: host_api.section.clone(),
+                    });
+            }
         }
         sections.reject_unreferenced_operational_sections(&manifest.host_apis)?;
         Ok(projected)
@@ -362,6 +395,15 @@ impl Default for HostApiContractRegistry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Aggregate of every host API contract projection for one manifest:
+/// projected capability declarations plus origin-stamped section surfaces.
+/// Internal to the parse path — contracts see [`HostApiManifestProjection`].
+#[derive(Debug, Default)]
+struct ProjectedManifestV2 {
+    capabilities: Vec<CapabilityDeclV2>,
+    surfaces: Vec<CapabilitySurfaceDeclV2>,
 }
 
 /// Validated v2 capability declaration.
@@ -379,6 +421,50 @@ pub struct CapabilityDeclV2 {
     pub required_host_ports: Vec<HostPortId>,
     pub runtime_credentials: Vec<RuntimeCredentialRequirement>,
     pub resource_profile: Option<ResourceProfile>,
+}
+
+/// One product-facing surface a validated manifest declares, with the
+/// manifest declaration it derives from.
+///
+/// The surface set answers "which faces of this extension can be configured
+/// and enabled?" — tools, an external channel, provider accounts. It is
+/// derived vocabulary: the owning declarations (capability entries, host API
+/// sections, credential requirements) stay the single source of truth, and
+/// [`ExtensionManifestV2::capability_surfaces`] projects them on demand.
+/// Runtime kind deliberately plays no part in this taxonomy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CapabilitySurfaceDeclV2 {
+    /// A model/host-callable capability. One per capability declaration
+    /// (top-level or host-API projected).
+    Tool { capability: CapabilityId },
+    /// A provider-account requirement, derived from `product_auth_account`
+    /// runtime-credential sources across all capabilities: one surface per
+    /// distinct provider. When several requirements name the same provider,
+    /// OAuth setups fold to the union of their scopes (sorted, deduplicated)
+    /// and mask weaker manual-token setups — the account is shared, so its
+    /// grant is the union of what the declaring capabilities need.
+    Auth {
+        provider: RuntimeCredentialAccountProviderId,
+        setup: RuntimeCredentialAccountSetup,
+    },
+    /// A surface projected by a host API contract section, stamped with the
+    /// owning contract id and section path (e.g. a `channel` surface from an
+    /// `ironclaw.product_adapter/v1` external-channel section).
+    HostApiSection {
+        kind: CapabilitySurfaceKind,
+        host_api: HostApiId,
+        section: ManifestSectionPath,
+    },
+}
+
+impl CapabilitySurfaceDeclV2 {
+    pub fn kind(&self) -> CapabilitySurfaceKind {
+        match self {
+            Self::Tool { .. } => CapabilitySurfaceKind::Tool,
+            Self::Auth { .. } => CapabilitySurfaceKind::Auth,
+            Self::HostApiSection { kind, .. } => *kind,
+        }
+    }
 }
 
 /// v2 runtime declaration.
@@ -466,6 +552,13 @@ pub struct ExtensionManifestV2 {
     /// [`requested_trust`](Self::requested_trust) request.
     pub host_apis: Vec<HostApiRefV2>,
     pub capabilities: Vec<CapabilityDeclV2>,
+    /// Surfaces projected by host API contract sections during
+    /// `parse_with_host_api_contracts` (channel and future section-declared
+    /// kinds). Tool and auth surfaces are *not* stored here — they derive on
+    /// demand from capability declarations; [`Self::capability_surfaces`]
+    /// returns the complete set. Empty when the manifest was parsed without
+    /// contracts or declares no surface-projecting sections.
+    pub host_api_surfaces: Vec<CapabilitySurfaceDeclV2>,
     /// Declarative hook entries the extension wants installed. Carried as
     /// structurally-typed [`HookSectionEntryV2`] payloads; the composition
     /// loader projects them into typed `ironclaw_hooks::HookManifestEntry`
@@ -700,7 +793,83 @@ impl ExtensionManifestV2 {
     ) -> Result<(), ManifestV2Error> {
         let projection = registry.project_manifest(self, sections, host_port_catalog)?;
         self.capabilities.extend(projection.capabilities);
+        self.host_api_surfaces.extend(projection.surfaces);
         Ok(())
+    }
+
+    /// Derived, order-stable projection of every product-facing surface this
+    /// manifest declares: one tool surface per capability (declaration
+    /// order), then host-API projected surfaces (declaration order), then
+    /// one auth surface per distinct product-auth provider (sorted by
+    /// provider id).
+    ///
+    /// This is the product taxonomy of the extension. Runtime kind (`wasm`,
+    /// `mcp`, `first_party`, ...) deliberately plays no part in it: how an
+    /// adapter loads never decides whether the extension is a tool provider,
+    /// a channel, or both.
+    pub fn capability_surfaces(&self) -> Vec<CapabilitySurfaceDeclV2> {
+        let mut surfaces: Vec<CapabilitySurfaceDeclV2> = self
+            .capabilities
+            .iter()
+            .map(|capability| CapabilitySurfaceDeclV2::Tool {
+                capability: capability.id.clone(),
+            })
+            .collect();
+        surfaces.extend(self.host_api_surfaces.iter().cloned());
+
+        // One auth surface per provider. OAuth setups fold to the union of
+        // their scopes and mask manual-token setups; a provider referenced
+        // only through retired setups still surfaces (as Retired) so
+        // discovery can see the unserviceable requirement instead of
+        // silently dropping it.
+        #[derive(Default)]
+        struct AuthAccumulator {
+            oauth_scopes: Option<BTreeSet<String>>,
+            saw_manual_token: bool,
+        }
+        let mut providers: BTreeMap<RuntimeCredentialAccountProviderId, AuthAccumulator> =
+            BTreeMap::new();
+        for capability in &self.capabilities {
+            for credential in &capability.runtime_credentials {
+                let RuntimeCredentialRequirementSource::ProductAuthAccount { provider, setup } =
+                    &credential.source
+                else {
+                    continue;
+                };
+                let accumulator = providers.entry(provider.clone()).or_default();
+                match setup {
+                    RuntimeCredentialAccountSetup::OAuth { scopes } => {
+                        accumulator
+                            .oauth_scopes
+                            .get_or_insert_with(BTreeSet::new)
+                            .extend(scopes.iter().cloned());
+                    }
+                    RuntimeCredentialAccountSetup::ManualToken => {
+                        accumulator.saw_manual_token = true;
+                    }
+                    RuntimeCredentialAccountSetup::Retired => {}
+                }
+            }
+        }
+        surfaces.extend(providers.into_iter().map(|(provider, accumulator)| {
+            CapabilitySurfaceDeclV2::Auth {
+                provider,
+                setup: match accumulator {
+                    AuthAccumulator {
+                        oauth_scopes: Some(scopes),
+                        ..
+                    } => RuntimeCredentialAccountSetup::OAuth {
+                        scopes: scopes.into_iter().collect(),
+                    },
+                    AuthAccumulator {
+                        saw_manual_token: true,
+                        ..
+                    } => RuntimeCredentialAccountSetup::ManualToken,
+                    AuthAccumulator { .. } => RuntimeCredentialAccountSetup::Retired,
+                },
+            }
+        }));
+        surfaces
     }
 
     /// Construct a manifest from an already-deserialized raw representation.
@@ -806,6 +975,7 @@ impl ExtensionManifestV2 {
             runtime,
             host_apis,
             capabilities,
+            host_api_surfaces: Vec::new(),
             hooks,
         })
     }

@@ -422,11 +422,12 @@ pub use hosted_mcp_discovery::{
     package_with_discovered_hosted_mcp_tools,
 };
 pub use v2::{
-    CapabilityDeclV2, CapabilityVisibility, ExtensionManifestV2, ExtensionRuntimeV2,
-    HookSectionEntryV2, HostApiContractRegistry, HostApiId, HostApiManifestContext,
-    HostApiManifestContract, HostApiManifestProjection, HostApiMultiplicity, HostApiRefV2,
-    MANIFEST_SCHEMA_VERSION, MAX_HOOK_ENTRY_BYTES, MAX_MANIFEST_BYTES, MAX_MANIFEST_HOOKS,
-    ManifestSectionPath, ManifestSource, ManifestV2Error, RESERVED_HOST_BUNDLED_ID_PREFIX,
+    CapabilityDeclV2, CapabilitySurfaceDeclV2, CapabilityVisibility, ExtensionManifestV2,
+    ExtensionRuntimeV2, HookSectionEntryV2, HostApiContractRegistry, HostApiId,
+    HostApiManifestContext, HostApiManifestContract, HostApiManifestProjection,
+    HostApiMultiplicity, HostApiRefV2, MANIFEST_SCHEMA_VERSION, MAX_HOOK_ENTRY_BYTES,
+    MAX_MANIFEST_BYTES, MAX_MANIFEST_HOOKS, ManifestSectionPath, ManifestSource, ManifestV2Error,
+    RESERVED_HOST_BUNDLED_ID_PREFIX,
 };
 
 pub type CapabilityManifest = CapabilityDeclV2;

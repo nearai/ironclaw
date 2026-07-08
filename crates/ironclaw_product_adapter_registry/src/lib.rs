@@ -18,11 +18,12 @@ use std::sync::Arc;
 use ironclaw_extensions::{
     ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationStore,
     ExtensionManifestRecord, ExtensionManifestV2, HostApiContractRegistry, HostApiId,
-    HostApiManifestContext, HostApiManifestContract, HostApiMultiplicity, HostApiRefV2,
-    ManifestSectionPath, ManifestSource, ManifestV2Error,
+    HostApiManifestContext, HostApiManifestContract, HostApiManifestProjection,
+    HostApiMultiplicity, HostApiRefV2, ManifestSectionPath, ManifestSource, ManifestV2Error,
 };
 use ironclaw_host_api::{
-    ExtensionId, HostPortCatalog, IngressAuthPolicy, IngressRouteDescriptor, IngressRouteId,
+    CapabilitySurfaceKind, ExtensionId, HostPortCatalog, IngressAuthPolicy, IngressRouteDescriptor,
+    IngressRouteId,
 };
 use ironclaw_product_adapters::{
     AuthRequirement, DeclaredEgressTarget, EgressCredentialHandle, ProductAdapterCapabilities,
@@ -418,6 +419,34 @@ impl HostApiManifestContract for ProductAdapterHostApiContract {
         )
         .map(|_| ())
         .map_err(|e| e.to_string())
+    }
+
+    fn project_section_with_context(
+        &self,
+        context: &HostApiManifestContext<'_>,
+        host_api: &HostApiRefV2,
+        section: &toml::Value,
+    ) -> Result<HostApiManifestProjection, String> {
+        let parsed = ProductAdapterHostApiSection::from_value(
+            context.extension_id,
+            host_api.section.clone(),
+            section.clone(),
+        )
+        .map_err(|e| e.to_string())?;
+        // External-channel adapter sections are the extension's channel
+        // surface. The other product surface kinds (`web`, `cli`,
+        // `synchronous_api`) describe host-native surfaces and project no
+        // extension surface.
+        let surfaces = match parsed.surface_kind() {
+            ProductSurfaceKind::ExternalChannel => vec![CapabilitySurfaceKind::Channel],
+            ProductSurfaceKind::Web
+            | ProductSurfaceKind::Cli
+            | ProductSurfaceKind::SynchronousApi => Vec::new(),
+        };
+        Ok(HostApiManifestProjection {
+            capabilities: Vec::new(),
+            surfaces,
+        })
     }
 }
 
