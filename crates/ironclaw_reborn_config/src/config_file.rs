@@ -452,18 +452,73 @@ pub struct BudgetSection {
 }
 
 impl BudgetSection {
-    pub fn set_user_daily_usd(mut self, user_daily_usd: f64) -> Self {
-        self.user_daily_usd = Some(user_daily_usd);
+    pub fn set_user_daily_usd(mut self, user_daily_usd: impl Into<Option<f64>>) -> Self {
+        self.user_daily_usd = user_daily_usd.into();
         self
     }
 
-    pub fn set_warn_at(mut self, warn_at: f64) -> Self {
-        self.warn_at = Some(warn_at);
+    pub fn set_project_daily_usd(mut self, project_daily_usd: impl Into<Option<f64>>) -> Self {
+        self.project_daily_usd = project_daily_usd.into();
         self
     }
 
-    pub fn set_pause_at(mut self, pause_at: f64) -> Self {
-        self.pause_at = Some(pause_at);
+    pub fn set_mission_per_tick_usd(
+        mut self,
+        mission_per_tick_usd: impl Into<Option<f64>>,
+    ) -> Self {
+        self.mission_per_tick_usd = mission_per_tick_usd.into();
+        self
+    }
+
+    pub fn set_heartbeat_per_tick_usd(
+        mut self,
+        heartbeat_per_tick_usd: impl Into<Option<f64>>,
+    ) -> Self {
+        self.heartbeat_per_tick_usd = heartbeat_per_tick_usd.into();
+        self
+    }
+
+    pub fn set_routine_lightweight_usd(
+        mut self,
+        routine_lightweight_usd: impl Into<Option<f64>>,
+    ) -> Self {
+        self.routine_lightweight_usd = routine_lightweight_usd.into();
+        self
+    }
+
+    pub fn set_routine_standard_usd(
+        mut self,
+        routine_standard_usd: impl Into<Option<f64>>,
+    ) -> Self {
+        self.routine_standard_usd = routine_standard_usd.into();
+        self
+    }
+
+    pub fn set_background_job_default_usd(
+        mut self,
+        background_job_default_usd: impl Into<Option<f64>>,
+    ) -> Self {
+        self.background_job_default_usd = background_job_default_usd.into();
+        self
+    }
+
+    pub fn set_default_tz(mut self, default_tz: impl Into<String>) -> Self {
+        self.default_tz = Some(default_tz.into());
+        self
+    }
+
+    pub fn set_warn_at(mut self, warn_at: impl Into<Option<f64>>) -> Self {
+        self.warn_at = warn_at.into();
+        self
+    }
+
+    pub fn set_pause_at(mut self, pause_at: impl Into<Option<f64>>) -> Self {
+        self.pause_at = pause_at.into();
+        self
+    }
+
+    pub fn set_overestimate_factor(mut self, overestimate_factor: impl Into<Option<f64>>) -> Self {
+        self.overestimate_factor = overestimate_factor.into();
         self
     }
 }

@@ -295,14 +295,28 @@ mod tests {
     fn section_layer_overrides_compiled() {
         let section = BudgetSection::default()
             .set_user_daily_usd(10.0)
+            .set_project_daily_usd(4.0)
+            .set_mission_per_tick_usd(0.75)
+            .set_heartbeat_per_tick_usd(0.07)
+            .set_routine_lightweight_usd(0.03)
+            .set_routine_standard_usd(0.12)
+            .set_background_job_default_usd(1.25)
+            .set_default_tz("America/Los_Angeles")
             .set_warn_at(0.6)
-            .set_pause_at(0.8);
+            .set_pause_at(0.8)
+            .set_overestimate_factor(1.5);
         let d = BudgetDefaults::compiled_defaults().with_section(&section);
         assert_eq!(d.user_daily_usd, 10.0);
+        assert_eq!(d.project_daily_usd, 4.0);
+        assert_eq!(d.mission_per_tick_usd, 0.75);
+        assert_eq!(d.heartbeat_per_tick_usd, 0.07);
+        assert_eq!(d.routine_lightweight_usd, 0.03);
+        assert_eq!(d.routine_standard_usd, 0.12);
+        assert_eq!(d.background_job_default_usd, 1.25);
+        assert_eq!(d.default_tz, "America/Los_Angeles");
         assert_eq!(d.warn_at, 0.6);
         assert_eq!(d.pause_at, 0.8);
-        // Untouched defaults remain.
-        assert_eq!(d.heartbeat_per_tick_usd, 0.05);
+        assert_eq!(d.overestimate_factor, 1.5);
     }
 
     // Process env is global state; serialize env-mutating tests behind a
