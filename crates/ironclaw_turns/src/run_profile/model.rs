@@ -614,7 +614,7 @@ fn sanitize_model_response(mut response: LoopModelResponse) -> LoopModelResponse
 }
 
 fn should_emit_fallback_text_delta(chunk_index: usize, chunk_count: usize) -> bool {
-    chunk_index == chunk_count || chunk_index % FALLBACK_TEXT_DELTA_MILESTONE_STEP == 0
+    chunk_index == chunk_count || chunk_index.is_multiple_of(FALLBACK_TEXT_DELTA_MILESTONE_STEP)
 }
 
 #[cfg(test)]

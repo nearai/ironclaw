@@ -978,11 +978,19 @@ fn sse_error_event(error: RebornServicesError) -> Event {
         kind: error.kind,
         retryable: error.retryable,
     };
-    Event::default()
-        .event("error")
-        .json_data(payload)
-        .expect("SseErrorPayload is a tagged enum + bool with derived Serialize; cannot fail")
-    // safety: typed struct with derived Serialize on serde-compatible fields only
+    match Event::default().event("error").json_data(payload) {
+        Ok(event) => event,
+        Err(error) => {
+            tracing::debug!(
+                target = "ironclaw_webui_v2::sse",
+                error = %error,
+                "failed to serialize redacted SSE error payload",
+            );
+            Event::default()
+                .event("error")
+                .data(r#"{"error":"unavailable","kind":"service_unavailable","retryable":true}"#)
+        }
+    }
 }
 
 fn build_sse_stream(
