@@ -1261,7 +1261,7 @@ async fn filesystem_turn_state_row_store_persists_rows_without_state_blob() {
         .claim_next_run(ClaimRunRequest {
             runner_id,
             lease_token,
-            scope_filter: None,
+            scope_filter: Some(request.scope.clone()),
         })
         .await
         .unwrap()
@@ -3920,7 +3920,7 @@ async fn filesystem_turn_state_store_persists_lineage_and_tree_reservations() {
         Err(TurnError::CapacityExceeded { .. })
     ));
     store
-        .release_tree_descendants(&child_b_scope, parent, 1)
+        .release_tree_descendants(&child_b_scope, parent, 1, parent)
         .await
         .unwrap();
 

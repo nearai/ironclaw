@@ -267,11 +267,6 @@ SEL_V2 = {
     "pairing_submit": "[data-testid='pairing-submit']",
     "pairing_success": "[data-testid='pairing-success']",
     "pairing_error": "[data-testid='pairing-error']",
-    "slack_pairing_section": "[data-testid='slack-pairing-section']",
-    "slack_pairing_code_input": "[data-testid='slack-pairing-code-input']",
-    "slack_pairing_submit": "[data-testid='slack-pairing-submit']",
-    "slack_pairing_success": "[data-testid='slack-pairing-success']",
-    "slack_pairing_error": "[data-testid='slack-pairing-error']",
     "approval_card":  "[data-testid='approval-card']",  # approval gate card
     "busy_gate_notice": "[data-testid='busy-gate-notice']",  # gate busy notice
     "activity_run":   "[data-testid='activity-run']",
@@ -315,6 +310,9 @@ SEL_V2 = {
     "settings_search_placeholder": "Search settings...",
     "settings_tool_row_for": (
         "[data-testid='settings-tool-row'][data-tool-name='{name}']"
+    ),
+    "settings_tool_permission": (
+        "[data-testid='settings-tool-permission-select'] button[aria-haspopup='listbox']"
     ),
     "settings_tool_lock": "[data-testid='settings-tool-lock']",
     "llm_provider_card_for": (

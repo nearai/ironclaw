@@ -14,6 +14,10 @@ ignore = [
     "RUSTSEC-2026-0098",
     "RUSTSEC-2026-0099",
     "RUSTSEC-2026-0104",
+    # rsa Marvin timing side-channel — test-only dependency used to mint
+    # throwaway local OIDC JWT fixtures; no production network-observable
+    # private-key operation is exposed by this dependency.
+    "RUSTSEC-2023-0071",
 ]
 
 [licenses]

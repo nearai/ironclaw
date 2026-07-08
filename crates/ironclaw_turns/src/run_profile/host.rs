@@ -1965,7 +1965,17 @@ pub struct CapabilityFailure {
     pub detail: Option<CapabilityFailureDetail>,
 }
 
-#[non_exhaustive]
+// Deliberately NOT `#[non_exhaustive]`: the `Unknown(CapabilityFailureKindValue)`
+// variant is the forward-compat / open-set escape hatch (a newer producer's
+// unrecognized wire string deserializes into `Unknown`), and the manual
+// `Serialize`/`Deserialize` impls below route every value through `as_str()` /
+// that variant. Leaving the attribute on would force callers — notably the
+// recovery classifier `capability_error_class` — to keep a wildcard `_ =>` arm,
+// which silently buckets any newly-added *named* variant (e.g. a future
+// `QuotaExceeded`) into a run-aborting class. Without the attribute, those
+// classifiers match exhaustively, so a new named variant fails to compile until
+// it is deliberately classified. See
+// `docs/plans/2026-06-28-reborn-error-recoverability-audit.md` §6.1.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CapabilityFailureKind {
     Authorization,
