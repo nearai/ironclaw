@@ -138,7 +138,7 @@ use ironclaw_turns::{
 use ironclaw_turns::{InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore};
 
 use crate::RebornProductAuthServicePorts;
-use crate::default_system_prompt::seed_default_system_prompt;
+use crate::root::default_system_prompt::seed_default_system_prompt;
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::extension_host::available_extensions::{
     slack_bot_manifest_digest, slack_manifest_digest,

@@ -106,7 +106,7 @@ use ironclaw_turns::run_profile::UserProfileContext;
 
 use self::latency::{trace_runtime_latency_error, trace_runtime_latency_ok};
 use self::runtime_turn_scheduler::RuntimeTurnScheduler;
-use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
+use crate::root::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore, builtin_extension_registry};
 use crate::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
 #[cfg(any(test, feature = "test-support"))]
@@ -3639,7 +3639,7 @@ pub async fn build_reborn_runtime(
                     lifecycle_facade.with_extension_management(Arc::clone(extension_management));
             }
             Some(Arc::new(
-                crate::communication_context::RuntimeCommunicationContextProvider::new(
+                crate::root::communication_context::RuntimeCommunicationContextProvider::new(
                     outbound_preferences_facade,
                 )
                 .with_lifecycle_facade(Arc::new(lifecycle_facade)),
