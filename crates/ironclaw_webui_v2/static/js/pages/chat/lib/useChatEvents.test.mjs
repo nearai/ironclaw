@@ -42,6 +42,7 @@ function createUseChatEventsHarness({
   gateFromEvent = () => null,
   failureMessageForRunStatus = () => "run failed",
   locallyResolvedGatesRef = { current: new Map() },
+  rememberTextBeforeActivity = () => {},
 } = {}) {
   let messages = [];
   let pendingGate = null;
@@ -64,6 +65,7 @@ function createUseChatEventsHarness({
     globalThis: {},
     ensureGateToolActivity,
     isTerminalToolStatus,
+    rememberTextBeforeActivity,
     toolCardFromActivity,
     toolCardFromPreview,
     upsertToolActivityMessage,
@@ -232,6 +234,55 @@ test("useChatEvents: projection text streams into one assistant bubble without e
   assert.equal(harness.isProcessing, false);
   assert.equal(harness.activeRun, null);
   assert.deepEqual(harness.settledRuns, [{ runId: "run-1", success: true }]);
+});
+
+test("useChatEvents: remembers streamed text before same-run activity for refresh", () => {
+  const remembered = [];
+  const harness = createUseChatEventsHarness({
+    rememberTextBeforeActivity: (threadId, runId) =>
+      remembered.push([threadId, runId]),
+  });
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-1", status: "running" } },
+          { text: { id: "text:run-1", body: "pre-tool text" } },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(remembered, [["thread-1", "run-1"]]);
+
+  harness.handleEvent({
+    type: "capability_activity",
+    frame: {
+      activity: {
+        invocation_id: "invocation-1",
+        turn_run_id: "run-1",
+        thread_id: "thread-1",
+        capability_id: "builtin.web_search",
+        status: "started",
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ text: { id: "text:run-1", body: "post-tool text" } }],
+      },
+    },
+  });
+
+  assert.deepEqual(
+    remembered,
+    [["thread-1", "run-1"]],
+    "text updates after same-run activity do not create a refresh-order hint",
+  );
 });
 
 test("useChatEvents: final_reply replaces matching streamed projection bubble", () => {

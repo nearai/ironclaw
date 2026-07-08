@@ -9,6 +9,7 @@ import {
   ensureGateToolActivity,
   upsertToolActivityMessage,
 } from "./tool-activity-state.js";
+import { rememberTextBeforeActivity } from "./stream-order-memory.js";
 
 // Handler factory for v2 `WebChatV2EventFrame` events.
 //
@@ -530,6 +531,7 @@ function applyProjectionItems({
         !activitySeenRunIdsRef?.current?.has(textRunId)
       ) {
         textSeenRunIdsRef?.current?.add(textRunId);
+        rememberTextBeforeActivity(threadId, textRunId);
       }
       setMessages((prev) => {
         if (

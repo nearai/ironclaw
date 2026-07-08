@@ -4,6 +4,25 @@ import test from "node:test";
 import { ATTACHMENTS_ONLY_CONTENT } from "./attachment-sentinel.js";
 import { messagesFromTimeline } from "./history-messages.js";
 
+function withSessionStorage(entries, callback) {
+  const original = globalThis.sessionStorage;
+  const values = new Map(entries);
+  globalThis.sessionStorage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, String(value)),
+    removeItem: (key) => values.delete(key),
+  };
+  try {
+    return callback(values);
+  } finally {
+    if (original === undefined) {
+      delete globalThis.sessionStorage;
+    } else {
+      globalThis.sessionStorage = original;
+    }
+  }
+}
+
 test("messagesFromTimeline: pending messages default to optimistic user messages", () => {
   const messages = messagesFromTimeline([], [
     {
@@ -222,6 +241,110 @@ test("messagesFromTimeline: tool previews use timeline sequence as activity orde
       ["tool-invocation-extension-b", "extension_search", "success", 3, 11, "projection"],
     ],
   );
+});
+
+test("messagesFromTimeline: remembered pre-tool text keeps final reply before same-run activity", () => {
+  withSessionStorage(
+    [
+      [
+        "ironclaw:chat:text-before-activity:thread-1",
+        JSON.stringify(["run-1"]),
+      ],
+    ],
+    () => {
+      const messages = messagesFromTimeline(
+        [
+          {
+            message_id: "user-1",
+            kind: "user",
+            content: "search first",
+            sequence: 1,
+            status: "accepted",
+            turn_run_id: "run-1",
+          },
+          {
+            message_id: "tool-preview-1",
+            kind: "capability_display_preview",
+            sequence: 2,
+            status: "finalized",
+            turn_run_id: "run-1",
+            content: JSON.stringify({
+              version: 1,
+              invocation_id: "invocation-web-search",
+              capability_id: "builtin.web_search",
+              status: "completed",
+              title: "web_search",
+              activity_order: 1,
+            }),
+          },
+          {
+            message_id: "assistant-1",
+            kind: "assistant",
+            content: "I started answering before searching.",
+            sequence: 4,
+            status: "finalized",
+            turn_run_id: "run-1",
+          },
+        ],
+        [],
+        "thread-1",
+      );
+
+      assert.deepEqual(
+        messages.map((message) => message.id),
+        ["msg-user-1", "msg-assistant-1", "tool-invocation-web-search"],
+      );
+      assert.equal(messages[1].keepFollowingActivityAfter, true);
+    },
+  );
+});
+
+test("messagesFromTimeline: unremembered timeline keeps durable sequence order", () => {
+  withSessionStorage([], () => {
+    const messages = messagesFromTimeline(
+      [
+        {
+          message_id: "user-1",
+          kind: "user",
+          content: "search first",
+          sequence: 1,
+          status: "accepted",
+          turn_run_id: "run-1",
+        },
+        {
+          message_id: "tool-preview-1",
+          kind: "capability_display_preview",
+          sequence: 2,
+          status: "finalized",
+          turn_run_id: "run-1",
+          content: JSON.stringify({
+            version: 1,
+            invocation_id: "invocation-web-search",
+            capability_id: "builtin.web_search",
+            status: "completed",
+            title: "web_search",
+            activity_order: 1,
+          }),
+        },
+        {
+          message_id: "assistant-1",
+          kind: "assistant",
+          content: "I answered after searching.",
+          sequence: 4,
+          status: "finalized",
+          turn_run_id: "run-1",
+        },
+      ],
+      [],
+      "thread-1",
+    );
+
+    assert.deepEqual(
+      messages.map((message) => message.id),
+      ["msg-user-1", "tool-invocation-web-search", "msg-assistant-1"],
+    );
+    assert.equal(messages[2].keepFollowingActivityAfter, undefined);
+  });
 });
 
 // Refresh-persistence contract (#3272): the timeline returns
