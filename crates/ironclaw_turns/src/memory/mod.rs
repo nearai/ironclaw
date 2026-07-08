@@ -25,17 +25,18 @@ use crate::{
     TurnActor, TurnAdmissionClass, TurnAdmissionLimitProvider, TurnAdmissionPolicy,
     TurnAdmissionReservationRecord, TurnCapacityResource, TurnCheckpointId, TurnCheckpointRecord,
     TurnError, TurnEventKind, TurnIdempotencyErrorReplay, TurnIdempotencyOperationKind,
-    TurnIdempotencyOutcomeKind, TurnIdempotencyRecord, TurnIdempotencyReplay, TurnLifecycleEvent,
-    TurnLockVersion, TurnPersistenceSnapshot, TurnRecord, TurnRunId, TurnRunProfile, TurnRunRecord,
-    TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
+    TurnIdempotencyOutcomeKind, TurnIdempotencyRecord, TurnIdempotencyReplay, TurnLeaseToken,
+    TurnLifecycleEvent, TurnLockVersion, TurnPersistenceSnapshot, TurnRecord, TurnRunId,
+    TurnRunProfile, TurnRunRecord, TurnRunState, TurnScope, TurnSpawnTreeStateStore,
+    TurnStateStore, TurnStatus,
     admission::{TurnAdmissionBucket, admission_buckets},
     events::{EventCursor, TurnEventPage, TurnEventProjectionSource, project_turn_events},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
-        ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RecoverExpiredLeasesRequest,
-        RecoverExpiredLeasesResponse, RelinquishRunRequest, TurnRunTransitionPort,
-        TurnRunnerOutcome,
+        ClaimRunRequest, ClaimRunsRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest,
+        HeartbeatRequest, RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest,
+        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, RelinquishRunRequest,
+        TurnRunTransitionPort, TurnRunnerOutcome,
     },
 };
 
@@ -1845,6 +1846,41 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
         inner.push_event(&record, TurnEventKind::RunnerClaimed, None, None);
         inner.records.insert(run_id, record);
         Ok(Some(claimed))
+    }
+
+    async fn claim_next_runs(
+        &self,
+        request: ClaimRunsRequest,
+    ) -> Result<Vec<ClaimedTurnRun>, TurnError> {
+        let mut inner = self.lock_inner()?;
+        let mut claimed_runs = Vec::new();
+        for _ in 0..request.max_runs {
+            let Some(run_id) = inner.pop_matching_queued_run(request.scope_filter.as_ref()) else {
+                break;
+            };
+            let mut record = inner.take_record(run_id)?;
+            let now = Utc::now();
+            let lease_token = TurnLeaseToken::new();
+            let transition = record.status.set(TurnStatus::Running);
+            record.runner_id = Some(request.runner_id);
+            record.lease_token = Some(lease_token);
+            record.lease_expires_at = Some(inner.next_lease_expiry(now));
+            record.last_heartbeat_at = Some(now);
+            record.claim_count = record.claim_count.saturating_add(1);
+            record.event_cursor = inner.next_cursor();
+            inner.update_active_lock(&record, now);
+            inner.apply_status_transition(transition, &record);
+            let claimed = ClaimedTurnRun {
+                state: record.state(),
+                resolved_run_profile: record.profile.resolved.clone(),
+                runner_id: request.runner_id,
+                lease_token,
+            };
+            inner.push_event(&record, TurnEventKind::RunnerClaimed, None, None);
+            inner.records.insert(run_id, record);
+            claimed_runs.push(claimed);
+        }
+        Ok(claimed_runs)
     }
 
     async fn heartbeat(&self, request: HeartbeatRequest) -> Result<EventCursor, TurnError> {

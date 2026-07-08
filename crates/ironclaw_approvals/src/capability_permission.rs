@@ -21,7 +21,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_filesystem::{
-    CasExpectation, FilesystemError, RecordVersion, RootFilesystem, ScopedFilesystem,
+    CasExpectation, FileType, FilesystemError, RecordVersion, RootFilesystem, ScopedFilesystem,
     VersionedEntry,
 };
 use ironclaw_host_api::{
@@ -190,6 +190,17 @@ pub trait CapabilityPermissionOverrideStore: Send + Sync {
         key: &CapabilityPermissionOverrideKey,
     ) -> Result<Option<CapabilityPermissionOverrideRecord>, CapabilityPermissionStoreError>;
 
+    fn supports_scope_listing(&self) -> bool {
+        false
+    }
+
+    async fn list_for_scope(
+        &self,
+        _scope: &ResourceScope,
+    ) -> Result<Vec<CapabilityPermissionOverrideRecord>, CapabilityPermissionStoreError> {
+        Ok(Vec::new())
+    }
+
     /// Remove the explicit override, reverting the capability to its default.
     /// Idempotent: clearing an absent override is a no-op.
     async fn clear(
@@ -245,6 +256,25 @@ impl CapabilityPermissionOverrideStore for InMemoryCapabilityPermissionOverrideS
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(key)
             .cloned())
+    }
+
+    fn supports_scope_listing(&self) -> bool {
+        true
+    }
+
+    async fn list_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<CapabilityPermissionOverrideRecord>, CapabilityPermissionStoreError> {
+        let target_scope = PersistentApprovalScope::from_resource_scope(scope);
+        Ok(self
+            .overrides
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .filter(|record| record.key.scope == target_scope)
+            .cloned()
+            .collect())
     }
 
     async fn clear(
@@ -329,6 +359,48 @@ where
             .lookup_versioned(key)
             .await?
             .and_then(|(record, _version)| record.into_active()))
+    }
+
+    fn supports_scope_listing(&self) -> bool {
+        true
+    }
+
+    async fn list_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<CapabilityPermissionOverrideRecord>, CapabilityPermissionStoreError> {
+        let target_scope = PersistentApprovalScope::from_resource_scope(scope);
+        let root = override_scope_path(&target_scope)?;
+        let entries = match self.records.filesystem.list_dir(scope, &root).await {
+            Ok(entries) => entries,
+            Err(FilesystemError::NotFound { .. }) => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+
+        let mut records = Vec::new();
+        for entry in entries {
+            if entry.file_type != FileType::File || !entry.name.ends_with(".json") {
+                continue;
+            }
+            let path = scoped_child_path(&root, &entry.name)?;
+            let Some(versioned) = self.records.get(scope, &path).await? else {
+                continue;
+            };
+            let stored =
+                deserialize::<StoredCapabilityPermissionOverrideRecord>(&versioned.entry.body)?;
+            if stored.key.scope != target_scope {
+                tracing::error!(
+                    stored = ?stored.key.scope,
+                    expected = ?target_scope,
+                    "capability permission override scope mismatch while listing"
+                );
+                continue;
+            }
+            if let Some(active) = stored.into_active() {
+                records.push(active);
+            }
+        }
+        Ok(records)
     }
 
     async fn clear(
@@ -438,6 +510,17 @@ fn override_path(
     .map_err(invalid_path)
 }
 
+fn override_scope_path(
+    scope: &PersistentApprovalScope,
+) -> Result<ScopedPath, CapabilityPermissionStoreError> {
+    ScopedPath::new(format!(
+        "{}/{}",
+        OVERRIDE_PREFIX,
+        within_tenant_scope(scope)
+    ))
+    .map_err(invalid_path)
+}
+
 fn within_tenant_scope(scope: &PersistentApprovalScope) -> String {
     let mut segments = Vec::new();
     if let Some(agent_id) = &scope.agent_id {
@@ -451,6 +534,18 @@ fn within_tenant_scope(scope: &PersistentApprovalScope) -> String {
     } else {
         segments.join("/")
     }
+}
+
+fn scoped_child_path(
+    parent: &ScopedPath,
+    child: &str,
+) -> Result<ScopedPath, CapabilityPermissionStoreError> {
+    ScopedPath::new(format!(
+        "{}/{}",
+        parent.as_str().trim_end_matches('/'),
+        child
+    ))
+    .map_err(invalid_path)
 }
 
 fn override_digest(

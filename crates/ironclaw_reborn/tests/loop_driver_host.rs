@@ -1163,6 +1163,70 @@ impl CommunicationContextProvider for RecordingCommunicationContextProvider {
     }
 }
 
+#[tokio::test]
+async fn webui_origin_skips_communication_context_fetch_for_plain_chat_prompt() {
+    let mut fixture = HostFixture::new("thread-webui-comm-skip", "hello webui").await;
+    let driver = TextOnlyModelReplyDriver::default();
+    assign_driver_to_fixture(&mut fixture, driver.descriptor());
+
+    let loop_run_context =
+        fixture
+            .context
+            .clone()
+            .with_product_context(ironclaw_turns::ProductTurnContext::new(
+                ironclaw_turns::TurnOriginKind::WebUi,
+                None,
+                None,
+                ironclaw_turns::TurnOwner::Personal {
+                    user: UserId::new("user-webui-comm-skip").unwrap(),
+                },
+            ));
+    let recording_provider = RecordingCommunicationContextProvider::new();
+
+    let host = fixture
+        .factory()
+        .with_communication_context_provider(
+            Arc::clone(&recording_provider) as Arc<dyn CommunicationContextProvider>
+        )
+        .build_text_only_host(RebornLoopDriverHostRequest {
+            claimed_run: fixture.claimed.clone(),
+            loop_run_context: loop_run_context.clone(),
+        })
+        .await
+        .unwrap();
+
+    driver
+        .run(driver_request(&loop_run_context), &host)
+        .await
+        .unwrap();
+
+    assert!(
+        recording_provider.thread_id().is_none(),
+        "WebUI plain-chat host build should not fetch advisory communication context"
+    );
+
+    let requests = fixture.gateway.requests();
+    assert_eq!(requests.len(), 1);
+    let rendered = requests[0]
+        .messages
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("Run origin: WebUI chat; replies render in this chat."),
+        "WebUI origin line must remain in the prompt"
+    );
+    assert!(
+        !rendered.contains("Connected channels:"),
+        "WebUI plain-chat prompt should not include advisory connected-channel context"
+    );
+    assert!(
+        !rendered.contains("Outbound delivery target:"),
+        "WebUI plain-chat prompt should not include advisory outbound-delivery context"
+    );
+}
+
 // f-test-5: when the visible surface includes BOTH builtin.outbound_delivery_target_set
 // AND builtin.outbound_delivery_targets_list, the host derives delivery_tools_visible=true
 // and stamps it onto the resolved communication context. Asserted end-to-end via the

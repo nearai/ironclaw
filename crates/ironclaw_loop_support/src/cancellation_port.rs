@@ -290,7 +290,7 @@ impl TurnStateRunCancellationFactory {
         run_id: TurnRunId,
     ) -> Result<TurnStatus, AgentLoopHostError> {
         self.store
-            .get_run_state(GetRunStateRequest {
+            .get_run_state_for_cancellation(GetRunStateRequest {
                 scope: scope.clone(),
                 run_id,
             })
@@ -378,18 +378,16 @@ impl RunCancellationFactory for TurnStateRunCancellationFactory {
     ) -> Result<RunCancellationHandle, AgentLoopHostError> {
         let handle = RunCancellationHandle::default();
         let requester = handle.requester();
-        let first_status = self.seed_from_state(scope, &requester, run_id).await?;
-        if first_status == TurnStatus::CancelRequested || first_status.is_terminal() {
-            return Ok(handle);
-        }
         self.register(run_id, requester.clone());
-        // Once registered, any error path MUST drop the entry; otherwise the
-        // caller never receives `handle`, the `Weak<()>` owner dies, and the
-        // `RunCancellationRequester` leaks in `self.handles` forever.
+        // Register before the durable read so there is no missed-wake window:
+        // a cancel that lands after registration flips this requester via the
+        // wake notifier, while a cancel that landed earlier is observed by the
+        // state read below. Any error/terminal path must drop the entry;
+        // otherwise the caller never receives `handle`, the `Weak<()>` owner
+        // dies, and the `RunCancellationRequester` leaks in `self.handles`
+        // forever.
         match self.seed_from_state(scope, &requester, run_id).await {
-            Ok(second_status)
-                if second_status == TurnStatus::CancelRequested || second_status.is_terminal() =>
-            {
+            Ok(status) if status == TurnStatus::CancelRequested || status.is_terminal() => {
                 self.remove_run(run_id);
             }
             Ok(_) => {
@@ -497,7 +495,10 @@ fn remove_run_handles(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
     use std::time::Duration;
 
     use async_trait::async_trait;
@@ -539,6 +540,69 @@ mod tests {
     impl StaticTurnStateStore {
         fn new(state: TurnRunState) -> Self {
             Self { state }
+        }
+    }
+
+    struct CountingTurnStateStore {
+        state: TurnRunState,
+        get_run_state_calls: AtomicUsize,
+    }
+
+    impl CountingTurnStateStore {
+        fn new(state: TurnRunState) -> Self {
+            Self {
+                state,
+                get_run_state_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn get_run_state_calls(&self) -> usize {
+            self.get_run_state_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl TurnStateStore for CountingTurnStateStore {
+        async fn submit_turn(
+            &self,
+            _request: SubmitTurnRequest,
+            _admission_policy: &dyn TurnAdmissionPolicy,
+            _run_profile_resolver: &dyn RunProfileResolver,
+        ) -> Result<SubmitTurnResponse, TurnError> {
+            panic!("submit_turn should not be called by cancellation factory tests")
+        }
+
+        async fn resume_turn(
+            &self,
+            _request: ResumeTurnRequest,
+        ) -> Result<ResumeTurnResponse, TurnError> {
+            panic!("resume_turn should not be called by cancellation factory tests")
+        }
+
+        async fn retry_turn(
+            &self,
+            request: ironclaw_turns::RetryTurnRequest,
+        ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+            Err(TurnError::RunNotRetryable {
+                run_id: request.run_id,
+            })
+        }
+
+        async fn request_cancel(
+            &self,
+            _request: CancelRunRequest,
+        ) -> Result<CancelRunResponse, TurnError> {
+            panic!("request_cancel should not be called by cancellation factory tests")
+        }
+
+        async fn get_run_state(
+            &self,
+            request: GetRunStateRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            assert_eq!(request.scope, self.state.scope);
+            assert_eq!(request.run_id, self.state.run_id);
+            self.get_run_state_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.state.clone())
         }
     }
 
@@ -804,6 +868,23 @@ mod tests {
             .unwrap();
 
         assert!(handle.is_requested());
+    }
+
+    #[tokio::test]
+    async fn turn_state_factory_reads_run_state_once_when_registering_running_run() {
+        let state = test_run_state(TurnStatus::Running);
+        let store = Arc::new(CountingTurnStateStore::new(state.clone()));
+        let factory = TurnStateRunCancellationFactory::new(store.clone())
+            .with_poll_interval(Duration::from_secs(60));
+
+        let handle = factory
+            .handle_for_run(&state.scope, state.run_id)
+            .await
+            .unwrap();
+
+        assert!(!handle.is_requested());
+        assert_eq!(store.get_run_state_calls(), 1);
+        assert_eq!(factory.registered_run_count(), 1);
     }
 
     #[tokio::test]

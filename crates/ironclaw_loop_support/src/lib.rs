@@ -11,6 +11,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Instant,
 };
 
 mod await_edge_port;
@@ -158,6 +159,30 @@ use serde::{Deserialize, Serialize};
 
 const EMPTY_SURFACE_VERSION: &str = "empty:v1";
 const LOOP_SYSTEM_ROLE: &str = "system";
+
+fn trace_loop_support_latency_ok(
+    operation: &'static str,
+    context: &LoopRunContext,
+    started_at: Option<Instant>,
+    max_messages: usize,
+    message_count: usize,
+) {
+    ironclaw_observability::live_latency_trace_ok!(
+        "loop_support",
+        operation,
+        started_at,
+        tenant_id = %context.scope.tenant_id,
+        agent_id = context.scope.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        project_id = context.scope.project_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        thread_id = %context.thread_id,
+        owner_user_id = context.scope.explicit_owner_user_id().map(|id| id.as_str()).unwrap_or(""),
+        run_id = %context.run_id,
+        turn_id = %context.turn_id,
+        max_messages = max_messages as u64,
+        message_count = message_count as u64,
+        "loop support operation completed",
+    );
+}
 
 pub fn raw_agent_loop_host_error(
     component: &'static str,
@@ -348,6 +373,7 @@ where
         validate_thread_scope_for_run(&self.thread_scope, &self.run_context)?;
         validate_context_cursor(request.after.as_ref(), &self.run_context)?;
         let max_messages = bounded_limit(request.limit, self.max_messages);
+        let started_at = ironclaw_observability::live_latency_started_at();
         let context = self
             .thread_service
             .load_context_window(LoadContextWindowRequest {
@@ -357,18 +383,42 @@ where
             })
             .await
             .map_err(context_read_error)?;
+        trace_loop_support_latency_ok(
+            "context_load_window",
+            &self.run_context,
+            started_at,
+            max_messages,
+            context.messages.len(),
+        );
         if let Some(cache) = self.context_window_cache.as_ref() {
+            let started_at = ironclaw_observability::live_latency_started_at();
             cache
                 .store(self.thread_scope.clone(), max_messages, context.clone())
                 .await;
+            trace_loop_support_latency_ok(
+                "context_cache_store",
+                &self.run_context,
+                started_at,
+                max_messages,
+                context.messages.len(),
+            );
         }
 
+        let started_at = ironclaw_observability::live_latency_started_at();
         let instruction_snippets = match self.skill_context_source.as_deref() {
             Some(source) => {
                 skill_context::build_skill_instruction_snippets(source, &self.run_context).await?
             }
             None => Vec::new(),
         };
+        trace_loop_support_latency_ok(
+            "context_skill_snippets",
+            &self.run_context,
+            started_at,
+            max_messages,
+            instruction_snippets.len(),
+        );
+        let started_at = ironclaw_observability::live_latency_started_at();
         let identity_messages = match self.identity_context_source.as_deref() {
             Some(source) => {
                 let mode = request.mode;
@@ -396,7 +446,15 @@ where
             }
             None => Vec::new(),
         };
+        trace_loop_support_latency_ok(
+            "context_identity_messages",
+            &self.run_context,
+            started_at,
+            max_messages,
+            identity_messages.len(),
+        );
 
+        let started_at = ironclaw_observability::live_latency_started_at();
         let compaction_message_index = context
             .messages
             .iter()
@@ -405,6 +463,13 @@ where
         let messages = prompt_context_budget::select_prompt_context_messages(
             context.messages,
             self.prompt_context_budget,
+        );
+        trace_loop_support_latency_ok(
+            "context_select_messages",
+            &self.run_context,
+            started_at,
+            max_messages,
+            messages.len(),
         );
 
         Ok(LoopContextBundle {
@@ -1228,7 +1293,9 @@ where
         &self,
         requested_messages: Vec<LoopModelMessage>,
     ) -> Result<Vec<HostManagedModelMessage>, AgentLoopHostError> {
-        let context = self.load_model_context_window().await?;
+        let context = self
+            .load_model_context_window(!requested_messages.is_empty())
+            .await?;
 
         if requested_messages.is_empty() {
             let context_messages = prompt_context_budget::select_prompt_context_messages(
@@ -1419,27 +1486,54 @@ where
 
     async fn load_model_context_window(
         &self,
+        allow_smaller_cached_context: bool,
     ) -> Result<ironclaw_threads::ContextWindow, AgentLoopHostError> {
+        let started_at = ironclaw_observability::live_latency_started_at();
         if let Some(cache) = self.context_window_cache.as_ref()
             && let Some(context) = cache
                 .take_matching(
                     &self.thread_scope,
                     &self.run_context.thread_id,
                     self.max_messages,
+                    allow_smaller_cached_context,
                 )
                 .await
         {
+            trace_loop_support_latency_ok(
+                "model_context_cache_hit",
+                &self.run_context,
+                started_at,
+                self.max_messages,
+                context.messages.len(),
+            );
             return Ok(context);
         }
+        trace_loop_support_latency_ok(
+            "model_context_cache_miss",
+            &self.run_context,
+            started_at,
+            self.max_messages,
+            0,
+        );
 
-        self.thread_service
+        let started_at = ironclaw_observability::live_latency_started_at();
+        let context = self
+            .thread_service
             .load_context_window(LoadContextWindowRequest {
                 scope: self.thread_scope.clone(),
                 thread_id: self.run_context.thread_id.clone(),
                 max_messages: self.max_messages,
             })
             .await
-            .map_err(context_read_error)
+            .map_err(context_read_error)?;
+        trace_loop_support_latency_ok(
+            "model_context_load_window",
+            &self.run_context,
+            started_at,
+            self.max_messages,
+            context.messages.len(),
+        );
+        Ok(context)
     }
 
     async fn instruction_snippet_messages_by_ref(

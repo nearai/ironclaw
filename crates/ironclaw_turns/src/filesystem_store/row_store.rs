@@ -540,6 +540,27 @@ where
         Ok(Some(projection::run_state_from_record(run, turn.actor)))
     }
 
+    pub(crate) async fn read_run_state_for_cancellation(
+        &self,
+        request: &GetRunStateRequest,
+    ) -> Result<Option<TurnRunState>, TurnError> {
+        let (snapshot, _) = self
+            .read_snapshot_with_runner_lease_overlay(RunnerLeaseOverlay::Run(request.run_id))
+            .await?;
+        let Some(run) = projection::run_record(&snapshot, &request.scope, request.run_id) else {
+            return Ok(None);
+        };
+        let turn = snapshot
+            .turns
+            .iter()
+            .find(|record| record.turn_id == run.turn_id && record.scope == request.scope)
+            .cloned()
+            .ok_or_else(|| TurnError::Unavailable {
+                reason: "turn run references missing cached turn row".to_string(),
+            })?;
+        Ok(Some(projection::run_state_from_record(run, turn.actor)))
+    }
+
     async fn read_turn_events_from_durable_rows(
         &self,
         scope: &TurnScope,

@@ -45,6 +45,18 @@ pub trait TurnStateStore: Send + Sync {
     /// [`TurnError::ScopeNotFound`]. This keeps scoped lookups non-enumerating
     /// and gives higher-level helpers one canonical missing-run shape.
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError>;
+
+    /// Return run state for live cancellation-handle seeding.
+    ///
+    /// The default path is the canonical scoped lookup. Stores with an
+    /// authoritative hot cache may override this to avoid forcing durable row
+    /// materialization on the turn execution hot path.
+    async fn get_run_state_for_cancellation(
+        &self,
+        request: GetRunStateRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.get_run_state(request).await
+    }
 }
 
 /// Classify an active run reference through the shared turn-state lookup.

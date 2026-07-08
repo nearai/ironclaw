@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     fmt,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
@@ -54,10 +54,62 @@ const LEGACY_TEXT_ONLY_DRIVER_VERSION: u64 = 1;
 const LEGACY_TEXT_ONLY_CHECKPOINT_SCHEMA_ID: &str = "interactive_checkpoint_v1";
 const LEGACY_TEXT_ONLY_CHECKPOINT_SCHEMA_VERSION: u64 = 1;
 
+fn should_fetch_communication_context(context: &LoopRunContext) -> bool {
+    !matches!(
+        context
+            .product_context
+            .as_ref()
+            .map(|product_context| product_context.origin),
+        Some(TurnOriginKind::WebUi)
+    )
+}
+
+fn trace_host_factory_latency_ok(
+    operation: &'static str,
+    context: &LoopRunContext,
+    started_at: Option<Instant>,
+) {
+    ironclaw_observability::live_latency_trace_ok!(
+        "reborn_loop_host_factory",
+        operation,
+        started_at,
+        tenant_id = %context.scope.tenant_id,
+        agent_id = context.scope.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        project_id = context.scope.project_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        thread_id = %context.thread_id,
+        owner_user_id = context.scope.explicit_owner_user_id().map(|id| id.as_str()).unwrap_or(""),
+        run_id = %context.run_id,
+        turn_id = %context.turn_id,
+        "reborn loop host factory operation completed",
+    );
+}
+
+fn trace_host_factory_latency_error<E: ?Sized>(
+    operation: &'static str,
+    context: &LoopRunContext,
+    started_at: Option<Instant>,
+    _error: &E,
+) {
+    ironclaw_observability::live_latency_trace_error!(
+        "reborn_loop_host_factory",
+        operation,
+        started_at,
+        "host_factory_error",
+        tenant_id = %context.scope.tenant_id,
+        agent_id = context.scope.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        project_id = context.scope.project_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        thread_id = %context.thread_id,
+        owner_user_id = context.scope.explicit_owner_user_id().map(|id| id.as_str()).unwrap_or(""),
+        run_id = %context.run_id,
+        turn_id = %context.turn_id,
+        "reborn loop host factory operation failed",
+    );
+}
+
 use ironclaw_turns::{
     CheckpointStateStore, LoopCheckpointStateRef, LoopCheckpointStore, RunProfileId,
-    TurnCheckpointId, TurnError, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
-    TurnStateStore, TurnStatus,
+    TurnCheckpointId, TurnError, TurnOriginKind, TurnRunWake, TurnRunWakeNotifier,
+    TurnRunWakeNotifyError, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
         CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityInvocation, CapabilityOutcome,
@@ -1423,15 +1475,36 @@ where
         // capability-surface computation below, rather than blocking prompt
         // construction. Joined (and stamped with `delivery_tools_visible`) at the
         // prompt-build site once the surface is known.
-        let communication_fetch = self
-            .communication_context_provider
-            .as_ref()
-            .map(|provider| {
-                provider.begin_communication_context(
-                    run_context.scope.clone(),
-                    run_context.actor().cloned(),
-                )
-            });
+        let communication_fetch =
+            self.communication_context_provider
+                .as_ref()
+                .and_then(|provider| {
+                    should_fetch_communication_context(&run_context).then(|| {
+                        provider.begin_communication_context(
+                            run_context.scope.clone(),
+                            run_context.actor().cloned(),
+                        )
+                    })
+                });
+        let user_profile_source = Arc::clone(&self.user_profile_source);
+        let user_profile_run_context = run_context.clone();
+        let user_profile_fetch = tokio::spawn(async move {
+            user_profile_source
+                .resolve_user_profile(&user_profile_run_context)
+                .await
+        });
+        // Build the live cancellation handle in parallel with the rest of host
+        // setup. The factory performs a durable seed read to close the
+        // missed-wake window, but that read does not need to sit at the end of
+        // the model-prompt critical path.
+        let cancellation_factory = Arc::clone(&self.cancellation_factory);
+        let cancellation_scope = run_context.scope.clone();
+        let cancellation_run_id = run_context.run_id;
+        let cancellation_handle_fetch = tokio::spawn(async move {
+            cancellation_factory
+                .handle_for_run(&cancellation_scope, cancellation_run_id)
+                .await
+        });
 
         let context_window_cache = Arc::new(ThreadContextWindowCache::default());
         let mut context_adapter = ThreadBackedLoopContextPort::new(
@@ -1464,6 +1537,7 @@ where
         // depending on the closure capturing the right context (which
         // would silently misattribute across reuses — henrypark133
         // Critical #4).
+        let dispatcher_started_at = ironclaw_observability::live_latency_started_at();
         let per_build_dispatcher = match (
             self.hook_dispatcher_builder_factory.as_ref(),
             self.hook_dispatcher_factory.as_ref(),
@@ -1483,6 +1557,9 @@ where
             (None, Some(factory)) => Some(factory()),
             (None, None) => None,
         };
+        trace_host_factory_latency_ok("dispatcher_setup", &run_context, dispatcher_started_at);
+
+        let event_subscription_started_at = ironclaw_observability::live_latency_started_at();
         let event_subscription = match (
             per_build_dispatcher.as_ref(),
             self.event_subscription.as_ref(),
@@ -1514,6 +1591,11 @@ where
             }
             _ => None,
         };
+        trace_host_factory_latency_ok(
+            "event_subscription_setup",
+            &run_context,
+            event_subscription_started_at,
+        );
         let instruction_materialization_store: Arc<dyn InstructionMaterializationStore> =
             Arc::new(InMemoryInstructionMaterializationStore::default());
         let surface_state = Arc::new(CapabilitySurfaceState::default());
@@ -1565,12 +1647,32 @@ where
                 hooked
             };
         }
-        let visible_surface = capabilities
+        let visible_surface_started_at = ironclaw_observability::live_latency_started_at();
+        let visible_surface_result = capabilities
             .visible_capabilities(VisibleCapabilityRequest)
             .await
             .map_err(|error| RebornLoopDriverHostError::InvalidRequest {
                 reason: error.safe_summary,
-            })?;
+            });
+        let visible_surface = match visible_surface_result {
+            Ok(surface) => {
+                trace_host_factory_latency_ok(
+                    "visible_capabilities",
+                    &run_context,
+                    visible_surface_started_at,
+                );
+                surface
+            }
+            Err(error) => {
+                trace_host_factory_latency_error(
+                    "visible_capabilities",
+                    &run_context,
+                    visible_surface_started_at,
+                    &error,
+                );
+                return Err(error);
+            }
+        };
         // The rendered guidance names BOTH the lister and the setter; require both
         // capabilities to be visible before setting the flag, so we never prompt
         // the model to call a tool that is not actually in the surface.
@@ -1586,20 +1688,34 @@ where
         // Join the fetch started at loop entry and stamp the surface-derived
         // `delivery_tools_visible` flag. In the common case the fetch has already
         // resolved during the work above, so this adds no critical-path latency.
+        let communication_started_at = ironclaw_observability::live_latency_started_at();
         let communication = match communication_fetch {
             Some(fetch) => fetch.resolve(delivery_tools_visible).await,
             None => None,
         };
-        // Resolve the per-user profile once at loop start (a single bounded
-        // memory read). Performance: acceptable here — the existing
-        // `communication` slice already does backend fetches at loop start.
-        // If this becomes a critical-path concern a follow-up can move it
-        // onto the same concurrent fetch budget as `CommunicationContextProvider`.
-        let user_profile = self
-            .user_profile_source
-            .resolve_user_profile(&run_context)
-            .await;
+        trace_host_factory_latency_ok(
+            "communication_context",
+            &run_context,
+            communication_started_at,
+        );
+        // Resolve the per-user profile once at loop start. The fetch starts
+        // before capability-surface resolution above and is joined here, so the
+        // optional profile read does not stack on the hot path when the surface
+        // does backend work too.
+        let user_profile_started_at = ironclaw_observability::live_latency_started_at();
+        let user_profile = match user_profile_fetch.await {
+            Ok(profile) => profile,
+            Err(error) => {
+                tracing::debug!(
+                    error = %error,
+                    "user profile task failed; continuing without profile"
+                );
+                None
+            }
+        };
+        trace_host_factory_latency_ok("user_profile", &run_context, user_profile_started_at);
         let prompt_authority = LoopPromptBundleAuthority::shared();
+        let prompt_ports_started_at = ironclaw_observability::live_latency_started_at();
         let surface_state_for_prompt = Arc::clone(&surface_state);
         let prompt_port = HostManagedLoopPromptPort::new(
             run_context.clone(),
@@ -1640,6 +1756,7 @@ where
                 .with_bundle_authority(prompt_authority.clone(), run_context.clone()),
             );
         }
+        trace_host_factory_latency_ok("prompt_ports", &run_context, prompt_ports_started_at);
         if is_subagent_planned_run_profile(&run_context) {
             let Some(composer) = self.subagent_prompt_composer.clone() else {
                 return Err(RebornLoopDriverHostError::InvalidRequest {
@@ -1667,6 +1784,7 @@ where
         // `host_gateway` is the resolved `Arc<dyn _>` in the Some arm but the host's
         // own `Arc<G>` (G: ?Sized, not coercible to `Arc<dyn _>`) in the fallback —
         // see `build_compaction_ports` above. Each arm moves its owned fields.
+        let model_gateway_ports_started_at = ironclaw_observability::live_latency_started_at();
         let model_gateway: Arc<dyn LoopModelGateway> =
             if let Some(gw) = self.model_gateway.resolve_for_scope(&run_context.scope) {
                 Arc::new(ThreadResolvingLoopModelGateway {
@@ -1739,18 +1857,44 @@ where
                 run_context.scope.tenant_id.clone(),
             ));
         }
+        trace_host_factory_latency_ok(
+            "model_checkpoint_transcript_ports",
+            &run_context,
+            model_gateway_ports_started_at,
+        );
         let progress: Arc<dyn LoopProgressPort> = Arc::new(HostManagedLoopProgressPort::new(
             run_context.clone(),
             Arc::clone(&self.milestone_sink),
         ));
         let compaction = self.build_compaction_ports(&run_context);
-        let cancellation_handle = self
-            .cancellation_factory
-            .handle_for_run(&run_context.scope, run_context.run_id)
+        let cancellation_started_at = ironclaw_observability::live_latency_started_at();
+        let cancellation_handle_result = cancellation_handle_fetch
             .await
             .map_err(|error| RebornLoopDriverHostError::InvalidRequest {
+                reason: format!("cancellation handle task failed: {error}"),
+            })?
+            .map_err(|error| RebornLoopDriverHostError::InvalidRequest {
                 reason: error.safe_summary,
-            })?;
+            });
+        let cancellation_handle = match cancellation_handle_result {
+            Ok(handle) => {
+                trace_host_factory_latency_ok(
+                    "cancellation_handle",
+                    &run_context,
+                    cancellation_started_at,
+                );
+                handle
+            }
+            Err(error) => {
+                trace_host_factory_latency_error(
+                    "cancellation_handle",
+                    &run_context,
+                    cancellation_started_at,
+                    &error,
+                );
+                return Err(error);
+            }
+        };
         let cancellation: Arc<dyn LoopCancellationPort> =
             Arc::new(RunStateLoopCancellationPort::new(cancellation_handle));
 

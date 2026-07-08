@@ -1,17 +1,18 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
 use ironclaw_approvals::{
     AutoApproveSettingKey, AutoApproveSettingStore, PersistentApprovalAction,
-    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore, ToolPermissionOverride,
-    ToolPermissionOverrideKey, ToolPermissionOverrideStore,
+    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore, PersistentApprovalScope,
+    ToolPermissionOverride, ToolPermissionOverrideKey, ToolPermissionOverrideStore,
 };
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, InvocationId, Principal, ResourceScope,
+    CapabilityId, EffectKind, Principal, ResourceScope,
     runtime_policy::{ApprovalPolicy, EffectiveRuntimePolicy, RuntimeProfile},
 };
 
@@ -39,18 +40,22 @@ pub(crate) fn local_dev_authorizer(
 }
 
 const AUTO_APPROVE_INVOCATION_CACHE_MAX_ENTRIES: usize = 512;
+const APPROVAL_SETTINGS_CACHE_TTL: Duration = Duration::from_millis(500);
 
 /// Live [`ApprovalSettingsProvider`] backed by the durable per-user approval
-/// stores. Per-tool overrides are read at each eligible dispatch decision. The
-/// global auto-approve toggle is scoped to `(tenant, user)`, so repeated checks
-/// inside one invocation share a bounded cache entry; a later invocation reads
-/// the store again so WebUI changes take effect without a process restart
-/// (#4959).
+/// stores. Settings are operator-scoped, so repeated checks for the same
+/// `(tenant, user)` share short-lived bounded cache entries. The cache is
+/// deliberately small-TTL rather than process-permanent so WebUI changes take
+/// effect without a restart while prompt construction does not reread the same
+/// settings once per visible capability.
 pub(crate) struct StoreApprovalSettingsProvider {
     overrides: Arc<dyn ToolPermissionOverrideStore>,
     auto_approve: Arc<dyn AutoApproveSettingStore>,
     persistent_policies: Arc<dyn PersistentApprovalPolicyStore>,
-    auto_approve_cache: Mutex<AutoApproveInvocationCache>,
+    auto_approve_cache: Mutex<AutoApproveSettingsCache>,
+    override_cache:
+        Mutex<ApprovalSettingsScopeCache<HashMap<CapabilityId, ToolPermissionOverride>>>,
+    always_allow_cache: Mutex<ApprovalSettingsScopeCache<HashSet<AlwaysAllowPolicyCacheKey>>>,
 }
 
 impl StoreApprovalSettingsProvider {
@@ -63,34 +68,72 @@ impl StoreApprovalSettingsProvider {
             overrides,
             auto_approve,
             persistent_policies,
-            auto_approve_cache: Mutex::new(AutoApproveInvocationCache::default()),
+            auto_approve_cache: Mutex::new(AutoApproveSettingsCache::default()),
+            override_cache: Mutex::new(ApprovalSettingsScopeCache::default()),
+            always_allow_cache: Mutex::new(ApprovalSettingsScopeCache::default()),
+        }
+    }
+}
+
+fn trace_approval_settings_latency_ok(
+    operation: &'static str,
+    scope: &ResourceScope,
+    capability_id: Option<&CapabilityId>,
+    started_at: Option<std::time::Instant>,
+) {
+    ironclaw_observability::live_latency_trace_ok!(
+        "approval_settings_provider",
+        operation,
+        started_at,
+        tenant_id = %scope.tenant_id,
+        user_id = %scope.user_id,
+        invocation_id = %scope.invocation_id,
+        capability_id = capability_id.map(|id| id.as_str()).unwrap_or(""),
+        "approval settings lookup completed",
+    );
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct AutoApproveSettingsCacheKey {
+    setting: AutoApproveSettingKey,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct ApprovalSettingsScopeCacheKey {
+    scope: PersistentApprovalScope,
+}
+
+impl ApprovalSettingsScopeCacheKey {
+    fn from_scope(scope: &ResourceScope) -> Self {
+        Self {
+            scope: PersistentApprovalScope::from_resource_scope(scope),
         }
     }
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-struct AutoApproveInvocationCacheKey {
-    setting: AutoApproveSettingKey,
-    invocation_id: InvocationId,
+struct AlwaysAllowPolicyCacheKey {
+    capability_id: CapabilityId,
+    grantee: Principal,
 }
 
 #[derive(Default)]
-struct AutoApproveInvocationCache {
-    entries: HashMap<AutoApproveInvocationCacheKey, bool>,
-    recency: VecDeque<AutoApproveInvocationCacheKey>,
+struct AutoApproveSettingsCache {
+    entries: HashMap<AutoApproveSettingsCacheKey, TimedCacheEntry<bool>>,
+    recency: VecDeque<AutoApproveSettingsCacheKey>,
 }
 
-impl AutoApproveInvocationCache {
-    fn get(&mut self, key: &AutoApproveInvocationCacheKey) -> Option<bool> {
-        let value = self.entries.get(key).copied();
-        if value.is_some() {
-            self.touch(key);
-        }
-        value
+impl AutoApproveSettingsCache {
+    fn get(&mut self, key: &AutoApproveSettingsCacheKey) -> Option<bool> {
+        self.get_fresh(key).copied()
     }
 
-    fn insert(&mut self, key: AutoApproveInvocationCacheKey, value: bool) {
-        if self.entries.insert(key.clone(), value).is_some() {
+    fn insert(&mut self, key: AutoApproveSettingsCacheKey, value: bool) {
+        if self
+            .entries
+            .insert(key.clone(), TimedCacheEntry::new(value))
+            .is_some()
+        {
             self.touch(&key);
             return;
         }
@@ -103,7 +146,95 @@ impl AutoApproveInvocationCache {
         }
     }
 
-    fn touch(&mut self, key: &AutoApproveInvocationCacheKey) {
+    fn get_fresh(&mut self, key: &AutoApproveSettingsCacheKey) -> Option<&bool> {
+        let fresh = self
+            .entries
+            .get(key)
+            .is_some_and(|entry| !entry.is_expired());
+        if !fresh {
+            self.entries.remove(key);
+            self.recency.retain(|candidate| candidate != key);
+            return None;
+        }
+        self.touch(key);
+        self.entries.get(key).map(|entry| &entry.value)
+    }
+
+    fn touch(&mut self, key: &AutoApproveSettingsCacheKey) {
+        self.recency.retain(|candidate| candidate != key);
+        self.recency.push_back(key.clone());
+    }
+}
+
+struct TimedCacheEntry<T> {
+    value: T,
+    cached_at: Instant,
+}
+
+impl<T> TimedCacheEntry<T> {
+    fn new(value: T) -> Self {
+        Self {
+            value,
+            cached_at: Instant::now(),
+        }
+    }
+
+    fn is_expired(&self) -> bool {
+        self.cached_at.elapsed() >= APPROVAL_SETTINGS_CACHE_TTL
+    }
+}
+
+struct ApprovalSettingsScopeCache<T> {
+    entries: HashMap<ApprovalSettingsScopeCacheKey, TimedCacheEntry<T>>,
+    recency: VecDeque<ApprovalSettingsScopeCacheKey>,
+}
+
+impl<T> Default for ApprovalSettingsScopeCache<T> {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            recency: VecDeque::new(),
+        }
+    }
+}
+
+impl<T> ApprovalSettingsScopeCache<T>
+where
+    T: Clone,
+{
+    fn get(&mut self, key: &ApprovalSettingsScopeCacheKey) -> Option<T> {
+        let fresh = self
+            .entries
+            .get(key)
+            .is_some_and(|entry| !entry.is_expired());
+        if !fresh {
+            self.entries.remove(key);
+            self.recency.retain(|candidate| candidate != key);
+            return None;
+        }
+        self.touch(key);
+        self.entries.get(key).map(|entry| entry.value.clone())
+    }
+
+    fn insert(&mut self, key: ApprovalSettingsScopeCacheKey, value: T) {
+        if self
+            .entries
+            .insert(key.clone(), TimedCacheEntry::new(value))
+            .is_some()
+        {
+            self.touch(&key);
+            return;
+        }
+        self.recency.push_back(key);
+        while self.entries.len() > AUTO_APPROVE_INVOCATION_CACHE_MAX_ENTRIES {
+            let Some(evicted) = self.recency.pop_front() else {
+                break;
+            };
+            self.entries.remove(&evicted);
+        }
+    }
+
+    fn touch(&mut self, key: &ApprovalSettingsScopeCacheKey) {
         self.recency.retain(|candidate| candidate != key);
         self.recency.push_back(key.clone());
     }
@@ -119,24 +250,64 @@ impl ApprovalSettingsProvider for StoreApprovalSettingsProvider {
         // Fail safe: a store read error resolves to "ask each time" with
         // auto-approve off so the gate falls back to asking rather than
         // silently auto-approving or denying. The error is logged, not swallowed.
-        let key = ToolPermissionOverrideKey::new(
-            &operator_tool_permission_scope(scope),
-            capability_id.clone(),
-        );
-        match self.overrides.get(&key).await {
+        let operator_scope = operator_tool_permission_scope(scope);
+        if self.overrides.supports_scope_listing() {
+            let cache_key = ApprovalSettingsScopeCacheKey::from_scope(&operator_scope);
+            if let Some(overrides) = self
+                .override_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(&cache_key)
+            {
+                return overrides.get(capability_id).copied();
+            }
+
+            let started_at = ironclaw_observability::live_latency_started_at();
+            match self.overrides.list_for_scope(&operator_scope).await {
+                Ok(records) => {
+                    trace_approval_settings_latency_ok(
+                        "tool_override_scope",
+                        scope,
+                        None,
+                        started_at,
+                    );
+                    let overrides = records
+                        .into_iter()
+                        .map(|record| (record.key.capability_id, record.state))
+                        .collect::<HashMap<_, _>>();
+                    let result = overrides.get(capability_id).copied();
+                    self.override_cache
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .insert(cache_key, overrides);
+                    return result;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "tool permission override scope lookup failed; falling back to exact lookup"
+                    );
+                }
+            }
+        }
+
+        let key = ToolPermissionOverrideKey::new(&operator_scope, capability_id.clone());
+        let started_at = ironclaw_observability::live_latency_started_at();
+        let result = match self.overrides.get(&key).await {
             Ok(record) => record.map(|record| record.state),
             Err(error) => {
                 // silent-ok: fail-safe to "ask" on store read error; logged for observability.
                 tracing::warn!(%error, "tool permission override lookup failed; defaulting to ask");
                 Some(ToolPermissionOverride::AskEachTime)
             }
-        }
+        };
+        trace_approval_settings_latency_ok("tool_override", scope, Some(capability_id), started_at);
+        result
     }
 
     async fn global_auto_approve(&self, scope: &ResourceScope) -> bool {
-        let key = AutoApproveInvocationCacheKey {
+        let key = AutoApproveSettingsCacheKey {
             setting: AutoApproveSettingKey::from_resource_scope(scope),
-            invocation_id: scope.invocation_id,
         };
         if let Some(enabled) = self
             .auto_approve_cache
@@ -146,6 +317,7 @@ impl ApprovalSettingsProvider for StoreApprovalSettingsProvider {
         {
             return enabled;
         }
+        let started_at = ironclaw_observability::live_latency_started_at();
         let enabled = match self.auto_approve.is_enabled(scope).await {
             Ok(enabled) => enabled,
             Err(error) => {
@@ -154,6 +326,7 @@ impl ApprovalSettingsProvider for StoreApprovalSettingsProvider {
                 false
             }
         };
+        trace_approval_settings_latency_ok("global_auto_approve", scope, None, started_at);
         self.auto_approve_cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -167,13 +340,67 @@ impl ApprovalSettingsProvider for StoreApprovalSettingsProvider {
         capability_id: &CapabilityId,
         grantee: &Principal,
     ) -> bool {
+        let operator_scope = operator_tool_permission_scope(scope);
+        if self.persistent_policies.supports_scope_listing() {
+            let cache_key = ApprovalSettingsScopeCacheKey::from_scope(&operator_scope);
+            let policy_key = AlwaysAllowPolicyCacheKey {
+                capability_id: capability_id.clone(),
+                grantee: grantee.clone(),
+            };
+            if let Some(policies) = self
+                .always_allow_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(&cache_key)
+            {
+                return policies.contains(&policy_key);
+            }
+
+            let started_at = ironclaw_observability::live_latency_started_at();
+            match self
+                .persistent_policies
+                .list_for_scope_action(&operator_scope, PersistentApprovalAction::Dispatch)
+                .await
+            {
+                Ok(records) => {
+                    trace_approval_settings_latency_ok(
+                        "tool_always_allow_scope",
+                        scope,
+                        None,
+                        started_at,
+                    );
+                    let policies = records
+                        .into_iter()
+                        .filter(|policy| policy.active_grant().is_some())
+                        .map(|policy| AlwaysAllowPolicyCacheKey {
+                            capability_id: policy.key.capability_id,
+                            grantee: policy.key.grantee,
+                        })
+                        .collect::<HashSet<_>>();
+                    let result = policies.contains(&policy_key);
+                    self.always_allow_cache
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .insert(cache_key, policies);
+                    return result;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "persistent approval policy scope lookup failed; falling back to exact lookup"
+                    );
+                }
+            }
+        }
+
         let key = PersistentApprovalPolicyKey::new(
-            &operator_tool_permission_scope(scope),
+            &operator_scope,
             PersistentApprovalAction::Dispatch,
             capability_id.clone(),
             grantee.clone(),
         );
-        match self.persistent_policies.lookup(&key).await {
+        let started_at = ironclaw_observability::live_latency_started_at();
+        let result = match self.persistent_policies.lookup(&key).await {
             Ok(policy) => policy.and_then(|policy| policy.active_grant()).is_some(),
             Err(error) => {
                 // silent-ok: fail-safe to "ask" on store read error; logged for observability.
@@ -184,7 +411,14 @@ impl ApprovalSettingsProvider for StoreApprovalSettingsProvider {
                 );
                 false
             }
-        }
+        };
+        trace_approval_settings_latency_ok(
+            "tool_always_allow",
+            scope,
+            Some(capability_id),
+            started_at,
+        );
+        result
     }
 }
 
@@ -594,7 +828,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_authorizer_reads_approval_settings_store_on_each_dispatch() {
+    async fn local_dev_authorizer_refreshes_approval_settings_after_short_cache_ttl() {
         let user_id = UserId::new("test-user").expect("user id");
         let overrides = Arc::new(InMemoryToolPermissionOverrideStore::new());
         let auto_approve = Arc::new(InMemoryAutoApproveSettingStore::new());
@@ -644,15 +878,16 @@ mod tests {
             .await
             .expect("auto-approve setting update");
 
+        tokio::time::sleep(APPROVAL_SETTINGS_CACHE_TTL + Duration::from_millis(50)).await;
         let after = local_dev_shell_decision_with_authorizer(authorizer.as_ref(), &user_id).await;
         assert!(
             matches!(after, ironclaw_host_api::Decision::Allow { .. }),
-            "same authorizer should observe the store update on the next dispatch, got {after:?}"
+            "same authorizer should observe the store update after the short settings cache ttl, got {after:?}"
         );
     }
 
     #[tokio::test]
-    async fn local_dev_authorizer_caches_global_auto_approve_within_one_invocation() {
+    async fn local_dev_authorizer_caches_global_auto_approve_within_short_scope_ttl() {
         let user_id = UserId::new("test-user").expect("user id");
         let auto_approve = Arc::new(CountingAutoApproveSettingStore::enabled());
         let settings = Arc::new(StoreApprovalSettingsProvider::new(
@@ -682,7 +917,7 @@ mod tests {
         assert_eq!(
             auto_approve.get_count(),
             1,
-            "same invocation should reuse the global auto-approve lookup"
+            "same scope should reuse the global auto-approve lookup inside the short cache ttl"
         );
 
         let (next_descriptor, next_context, next_trust_decision) =
@@ -697,12 +932,33 @@ mod tests {
             .await;
         assert!(
             matches!(decision, ironclaw_host_api::Decision::Allow { .. }),
-            "later invocation should still resolve auto-approve from the store, got {decision:?}"
+            "later invocation inside the short cache ttl should still allow from cached auto-approve, got {decision:?}"
+        );
+        assert_eq!(
+            auto_approve.get_count(),
+            1,
+            "a later invocation inside the short cache ttl should not reread the store"
+        );
+
+        tokio::time::sleep(APPROVAL_SETTINGS_CACHE_TTL + Duration::from_millis(50)).await;
+        let (expired_descriptor, expired_context, expired_trust_decision) =
+            local_dev_shell_authorization_inputs(&user_id);
+        let decision = authorizer
+            .authorize_dispatch_with_trust(
+                &expired_context,
+                &expired_descriptor,
+                &ResourceEstimate::default(),
+                &expired_trust_decision,
+            )
+            .await;
+        assert!(
+            matches!(decision, ironclaw_host_api::Decision::Allow { .. }),
+            "later invocation after the short cache ttl should still allow from store, got {decision:?}"
         );
         assert_eq!(
             auto_approve.get_count(),
             2,
-            "a later invocation must read the store again so settings changes apply without restart"
+            "after the short cache ttl, the provider should reread so settings changes apply without restart"
         );
     }
 

@@ -17,9 +17,10 @@ use crate::{
     events::{EventCursor, lifecycle_owner_user_id},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
-        ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RecoverExpiredLeasesRequest,
-        RecoverExpiredLeasesResponse, RelinquishRunRequest, TurnRunTransitionPort,
+        ClaimRunRequest, ClaimRunsRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest,
+        HeartbeatRequest, RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest,
+        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, RelinquishRunRequest,
+        TurnRunTransitionPort,
     },
     store::SpawnTreeReservation,
 };
@@ -538,6 +539,13 @@ where
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
         self.inner.get_run_state(request).await
     }
+
+    async fn get_run_state_for_cancellation(
+        &self,
+        request: GetRunStateRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.inner.get_run_state_for_cancellation(request).await
+    }
 }
 
 #[async_trait]
@@ -631,6 +639,27 @@ where
             );
             self.publish_state_once_best_effort(claimed.state.clone(), event, "committed claim")
                 .await;
+        }
+        Ok(claimed)
+    }
+
+    async fn claim_next_runs(
+        &self,
+        request: ClaimRunsRequest,
+    ) -> Result<Vec<ClaimedTurnRun>, TurnError> {
+        let claimed = self.inner.claim_next_runs(request).await?;
+        for claimed_run in &claimed {
+            let event = TurnLifecycleEvent::from_run_state(
+                &claimed_run.state,
+                TurnEventKind::RunnerClaimed,
+                None,
+            );
+            self.publish_state_once_best_effort(
+                claimed_run.state.clone(),
+                event,
+                "committed claim",
+            )
+            .await;
         }
         Ok(claimed)
     }

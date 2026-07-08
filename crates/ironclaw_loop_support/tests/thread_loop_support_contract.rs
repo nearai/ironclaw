@@ -269,6 +269,60 @@ async fn prompt_and_model_ports_share_cached_context_window_for_one_request() {
 }
 
 #[tokio::test]
+async fn model_port_reuses_smaller_prompt_context_window_for_explicit_prompt_refs() {
+    let fixture = GatedThreadFixture::new().await;
+    let context_window_cache = Arc::new(ThreadContextWindowCache::default());
+    let context_port = Arc::new(
+        ThreadBackedLoopContextPort::new(
+            Arc::clone(&fixture.thread_service),
+            fixture.thread_scope.clone(),
+            fixture.run_context.clone(),
+            16,
+        )
+        .with_context_window_cache(Arc::clone(&context_window_cache)),
+    );
+    let prompt_port = HostManagedLoopPromptPort::new(
+        fixture.run_context.clone(),
+        context_port,
+        Arc::new(InMemoryLoopHostMilestoneSink::default()),
+    );
+    let prompt_bundle = prompt_port
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(16),
+            inline_messages: Vec::new(),
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+    let gateway = Arc::new(RecordingGateway::reply("model says hi"));
+    let model_port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway,
+        128,
+    )
+    .with_context_window_cache(context_window_cache);
+
+    model_port
+        .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
+            messages: prompt_bundle.messages,
+            surface_version: prompt_bundle.surface_version,
+            model_preference: None,
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(fixture.thread_service.context_window_loads(), 1);
+}
+
+#[tokio::test]
 async fn context_window_cache_does_not_cross_thread_scope_boundaries() {
     let fixture = ThreadFixture::new().await;
     let message_id = ThreadMessageId::new();

@@ -4554,6 +4554,7 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_host_runtime",
  "ironclaw_memory",
+ "ironclaw_observability",
  "ironclaw_process_sandbox",
  "ironclaw_resources",
  "ironclaw_safety",
