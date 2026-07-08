@@ -215,6 +215,7 @@ registerPack("pt-BR", {
 
   // Settings tabs
   "settings.inference": "Inferência",
+  "settings.appearance": "Aparência",
   "settings.agent": "Agente",
   "settings.channels": "Canais",
   "settings.networking": "Rede",
@@ -278,6 +279,9 @@ registerPack("pt-BR", {
   "settings.restartNow": "Reiniciar agora",
   "settings.restartStarting": "Reiniciando...",
   "settings.restartUnavailable": "Reiniciar pela interface web ainda não está disponível. Reinicie o processo do gateway manualmente para aplicar as alterações pendentes.",
+  "settings.field.showChatTerminalShortcut": "Mostrar atalho de terminal do chat",
+  "settings.field.showChatTerminalShortcutDesc":
+    "Exibe o ícone flutuante de terminal/logs dentro das conversas de chat.",
 
   // Restart dialog
   "restart.title": "Reiniciar IronClaw",

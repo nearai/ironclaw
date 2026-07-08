@@ -215,6 +215,7 @@ registerPack("uk", {
 
   // Settings tabs
   "settings.inference": "Інференс",
+  "settings.appearance": "Вигляд",
   "settings.agent": "Агент",
   "settings.channels": "Канали",
   "settings.networking": "Мережа",
@@ -278,6 +279,9 @@ registerPack("uk", {
   "settings.restartNow": "Перезапустити зараз",
   "settings.restartStarting": "Перезапустити...",
   "settings.restartUnavailable": "Перезапуск через вебінтерфейс ще недоступний. Перезапустіть процес шлюзу вручну, щоб застосувати незавершені зміни.",
+  "settings.field.showChatTerminalShortcut": "Показувати ярлик термінала в чаті",
+  "settings.field.showChatTerminalShortcutDesc":
+    "Показує плаваючу піктограму термінала/журналів у гілках чату.",
 
   // Restart dialog
   "restart.title": "Перезапустити IronClaw",

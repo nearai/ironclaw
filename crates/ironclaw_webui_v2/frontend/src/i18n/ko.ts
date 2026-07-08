@@ -215,6 +215,7 @@ registerPack("ko", {
 
   // Settings tabs
   "settings.inference": "추론",
+  "settings.appearance": "외관",
   "settings.agent": "에이전트",
   "settings.channels": "채널",
   "settings.networking": "네트워크",
@@ -278,6 +279,9 @@ registerPack("ko", {
   "settings.restartNow": "지금 다시 시작",
   "settings.restartStarting": "다시 시작 중...",
   "settings.restartUnavailable": "웹 UI에서의 다시 시작은 아직 지원되지 않습니다. 대기 중인 변경 사항을 적용하려면 게이트웨이 프로세스를 수동으로 다시 시작하세요.",
+  "settings.field.showChatTerminalShortcut": "채팅 터미널 바로가기 표시",
+  "settings.field.showChatTerminalShortcutDesc":
+    "채팅 스레드 안에 떠 있는 터미널/로그 아이콘을 표시합니다.",
 
   // Restart dialog
   "restart.title": "IronClaw 다시 시작",

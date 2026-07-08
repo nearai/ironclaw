@@ -215,6 +215,7 @@ registerPack("fr", {
 
   // Settings tabs
   "settings.inference": "Inférence",
+  "settings.appearance": "Apparence",
   "settings.agent": "Agent",
   "settings.channels": "Canaux",
   "settings.networking": "Réseau",
@@ -278,6 +279,9 @@ registerPack("fr", {
   "settings.restartNow": "Redémarrer maintenant",
   "settings.restartStarting": "Redémarrer...",
   "settings.restartUnavailable": "Le redémarrage depuis l'interface web n'est pas encore disponible. Redémarrez le processus de passerelle manuellement pour appliquer les modifications en attente.",
+  "settings.field.showChatTerminalShortcut": "Afficher le raccourci terminal du chat",
+  "settings.field.showChatTerminalShortcutDesc":
+    "Affiche l'icône flottante terminal/journaux dans les fils de discussion.",
 
   // Restart dialog
   "restart.title": "Redémarrer IronClaw",
