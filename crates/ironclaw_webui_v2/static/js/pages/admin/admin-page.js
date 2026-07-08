@@ -6,7 +6,10 @@ import { UserDetail } from "./components/user-detail.js";
 import { AdminUsersTab } from "./components/users-tab.js";
 
 export function AdminPage() {
-  const { tab = "dashboard" } = useParams();
+  // Users is the only shipped admin tab in this port; dashboard/usage
+  // (analytics) are out of scope, so both the default and the fallback land on
+  // Users rather than the empty dashboard.
+  const { tab = "users" } = useParams();
   const navigate = useNavigate();
   const [selectedUserId, setSelectedUserId] = React.useState(null);
 
@@ -37,7 +40,7 @@ export function AdminPage() {
   };
 
   if (!tabContent[tab]) {
-    return html`<${Navigate} to="/admin/dashboard" replace />`;
+    return html`<${Navigate} to="/admin/users" replace />`;
   }
 
   return html`

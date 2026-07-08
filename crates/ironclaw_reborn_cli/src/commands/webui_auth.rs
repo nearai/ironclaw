@@ -17,7 +17,10 @@ use ironclaw_reborn_composition::host_api::{AgentId, ProjectId, TenantId};
 use ironclaw_reborn_composition::{
     LocalTriggerAccessStore, PublicRouteMount, RebornIdentityResolver, WebuiAuthenticator,
 };
-use ironclaw_reborn_webui_ingress::{SignedSessionLoginConfig, build_signed_session_login};
+use ironclaw_reborn_webui_ingress::{
+    CompositeAuthenticator, SessionAuthenticator, SignedSessionLoginConfig,
+    build_signed_session_login, signed_session_store,
+};
 use secrecy::SecretString;
 
 use crate::commands::serve_sso::SsoStartupConfig;
@@ -70,11 +73,26 @@ pub(crate) async fn build_webui_auth_surface(
     local_trigger_access: Option<LocalTriggerAccessBootstrapConfig>,
 ) -> anyhow::Result<WebuiAuthSurface> {
     let Some(sso) = sso_startup else {
-        // No SSO providers: keep the env-bearer authenticator and mount no
-        // public routes. There are no SSO logins to seed local trigger
-        // access for, so any bootstrap config is unused on this path.
+        // No SSO providers: no public login routes, and no SSO logins to seed
+        // local trigger access for (bootstrap config is unused here). But the
+        // serve layer *always* wires the admin-API token minter, which mints
+        // signed **session** tokens (the user-create bearer). Those validate
+        // only through a `SessionAuthenticator` over the same signed store —
+        // absent it, an admin-created user's API token would 401 on every
+        // request (regression caught by `tests/e2e/scenarios/test_admin_api.py`).
+        // Compose the env-bearer (operator) authenticator with a session
+        // authenticator over that store so minted tokens work without SSO;
+        // operator capabilities still follow the env token only, so the session
+        // bearer stays non-operator.
+        let session_authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(
+            SessionAuthenticator::new(signed_session_store(&session_signing_secret, &tenant_id)),
+        );
+        let authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(CompositeAuthenticator::new(
+            session_authenticator,
+            env_authenticator,
+        ));
         return Ok(WebuiAuthSurface {
-            authenticator: env_authenticator,
+            authenticator,
             public_mount: None,
         });
     };
