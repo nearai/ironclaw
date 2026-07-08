@@ -32,6 +32,7 @@ mod missions;
 pub mod oauth;
 pub mod profile;
 pub mod relay;
+pub mod retrieval;
 mod routines;
 pub mod runtime;
 mod safety;
@@ -64,6 +65,7 @@ pub use self::llm::default_session_path;
 pub use self::missions::MissionsConfig;
 pub use self::oauth::OAuthConfig;
 pub use self::relay::RelayConfig;
+pub use self::retrieval::RetrievalConfig;
 pub use self::routines::RoutineConfig;
 pub use self::runtime::{RuntimeConfig, RuntimeConfigOverrides};
 pub use self::safety::SafetyConfig;
@@ -129,6 +131,7 @@ pub struct Config {
     pub claude_code: ClaudeCodeConfig,
     pub acp: AcpModeConfig,
     pub skills: SkillsConfig,
+    pub retrieval: RetrievalConfig,
     pub transcription: TranscriptionConfig,
     pub search: WorkspaceSearchConfig,
     pub missions: MissionsConfig,
@@ -264,6 +267,7 @@ impl Config {
                 installed_dir: installed_skills_dir,
                 ..SkillsConfig::default()
             },
+            retrieval: RetrievalConfig::default(),
             transcription: TranscriptionConfig::default(),
             search: WorkspaceSearchConfig::default(),
             missions: MissionsConfig::default(),
@@ -614,6 +618,7 @@ impl Config {
             claude_code: ClaudeCodeConfig::resolve(settings)?,
             acp: AcpModeConfig::resolve(settings)?,
             skills: SkillsConfig::resolve(settings)?,
+            retrieval: RetrievalConfig::resolve(settings)?,
             transcription: TranscriptionConfig::resolve(settings)?,
             search: WorkspaceSearchConfig::resolve(settings)?,
             missions: MissionsConfig::resolve(settings)?,
