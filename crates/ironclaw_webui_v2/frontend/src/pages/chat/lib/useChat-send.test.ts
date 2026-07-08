@@ -189,9 +189,6 @@ test("useChat.send: accepted ref reconciles pending message on timeline reload",
       throw new Error("thread should already exist");
     },
     globalThis: {},
-    listConnectableChannels: async () => {
-      throw new Error("ordinary prompts should not fetch connectable channels");
-    },
     queryClient: {
       fetchQuery: async () => {
         throw new Error("ordinary prompts should not fetch connectable channels");
@@ -284,9 +281,6 @@ function createSendCaptureContext() {
       throw new Error("thread should already exist");
     },
     globalThis: {},
-    listConnectableChannels: async () => {
-      throw new Error("attachment sends should not fetch connectable channels");
-    },
     queryClient: {
       fetchQuery: async () => {
         throw new Error("attachment sends should not fetch connectable channels");
@@ -450,9 +444,6 @@ test("useChat.send: target-thread send does not append into active thread", asyn
       throw new Error("target thread should already exist");
     },
     globalThis: {},
-    listConnectableChannels: async () => {
-      throw new Error("ordinary prompts should not fetch connectable channels");
-    },
     queryClient: {
       fetchQuery: async () => {
         throw new Error("ordinary prompts should not fetch connectable channels");
@@ -530,9 +521,6 @@ test("useChat.send: target-thread rejected_busy updates seeded cache", async () 
       throw new Error("target thread should already exist");
     },
     globalThis: {},
-    listConnectableChannels: async () => {
-      throw new Error("ordinary prompts should not fetch connectable channels");
-    },
     queryClient: {
       fetchQuery: async () => {
         throw new Error("ordinary prompts should not fetch connectable channels");
@@ -610,9 +598,6 @@ test("useChat.send: target-thread thrown errors update seeded cache", async () =
       throw new Error("target thread should already exist");
     },
     globalThis: {},
-    listConnectableChannels: async () => {
-      throw new Error("ordinary prompts should not fetch connectable channels");
-    },
     queryClient: {
       fetchQuery: async () => {
         throw new Error("ordinary prompts should not fetch connectable channels");
@@ -702,9 +687,6 @@ test("useChat.send: pending approval blocks before sendMessage", async () => {
       throw new Error("thread should already exist");
     },
     globalThis: {},
-    listConnectableChannels: async () => {
-      throw new Error("ordinary prompts should not fetch connectable channels");
-    },
     queryClient: {
       fetchQuery: async () => {
         throw new Error("ordinary prompts should not fetch connectable channels");
@@ -792,9 +774,6 @@ test("useChat.retryMessage: pre-admission rejection keeps failed bubble retryabl
       throw new Error("thread should already exist");
     },
     globalThis: {},
-    listConnectableChannels: async () => {
-      throw new Error("approval gate should block before channel discovery");
-    },
     queryClient: {
       fetchQuery: async () => {
         throw new Error("approval gate should block before channel discovery");
@@ -885,9 +864,6 @@ test("useChat.send: accepted send does not clear a gate received while in flight
       throw new Error("thread should already exist");
     },
     globalThis: {},
-    listConnectableChannels: async () => {
-      throw new Error("ordinary prompts should not fetch connectable channels");
-    },
     queryClient: {
       fetchQuery: async () => {
         throw new Error("ordinary prompts should not fetch connectable channels");
@@ -978,9 +954,6 @@ test("useChat.send: rejected busy attaches notice to a gate received while in fl
       throw new Error("thread should already exist");
     },
     globalThis: {},
-    listConnectableChannels: async () => {
-      throw new Error("ordinary prompts should not fetch connectable channels");
-    },
     queryClient: {
       fetchQuery: async () => {
         throw new Error("ordinary prompts should not fetch connectable channels");
@@ -1081,9 +1054,6 @@ test("useChat.send: rejected busy seeds notice when active thread changed in fli
       throw new Error("thread should already exist");
     },
     globalThis: {},
-    listConnectableChannels: async () => {
-      throw new Error("ordinary prompts should not fetch connectable channels");
-    },
     queryClient: {
       fetchQuery: async () => {
         throw new Error("ordinary prompts should not fetch connectable channels");
@@ -1179,9 +1149,6 @@ test("useChat.send: rejected busy appends system notice after gate resolves in f
       throw new Error("thread should already exist");
     },
     globalThis: {},
-    listConnectableChannels: async () => {
-      throw new Error("ordinary prompts should not fetch connectable channels");
-    },
     queryClient: {
       fetchQuery: async () => {
         throw new Error("ordinary prompts should not fetch connectable channels");
@@ -1276,9 +1243,6 @@ test("useChat.send: gate received after callback creation blocks before send", a
       throw new Error("thread should already exist");
     },
     globalThis: {},
-    listConnectableChannels: async () => {
-      throw new Error("ordinary prompts should not fetch connectable channels");
-    },
     queryClient: {
       fetchQuery: async () => {
         throw new Error("ordinary prompts should not fetch connectable channels");
@@ -1372,9 +1336,6 @@ test("useChat.send: repeated sends under the same pending gate stay blocked loca
       throw new Error("thread should already exist");
     },
     globalThis: {},
-    listConnectableChannels: async () => {
-      throw new Error("ordinary prompts should not fetch connectable channels");
-    },
     queryClient: {
       fetchQuery: async () => {
         throw new Error("ordinary prompts should not fetch connectable channels");
@@ -1460,9 +1421,6 @@ test("useChat.cancelRun clears local state before cancel request resolves", asyn
       throw new Error("createThread should not run");
     },
     globalThis: {},
-    listConnectableChannels: async () => ({
-      channels: [],
-    }),
     queryClient: {
       fetchQuery: async () => ({ channels: [] }),
       invalidateQueries: () => {},
@@ -1545,7 +1503,6 @@ test("useChat clears transient run and gate state during thread switch render", 
       throw new Error("createThread should not run");
     },
     globalThis: {},
-    listConnectableChannels: async () => ({ channels: [] }),
     queryClient: {
       fetchQuery: async () => ({ channels: [] }),
       invalidateQueries: () => {},
@@ -1635,7 +1592,6 @@ test("useChat.approve deny marks the current gated tool declined before resume",
     createToolActivityState,
     failGateToolActivity,
     globalThis: {},
-    listConnectableChannels: async () => ({ channels: [] }),
     queryClient: {
       fetchQuery: async () => ({ channels: [] }),
       invalidateQueries: () => {},
@@ -1727,7 +1683,6 @@ test("useChat.approve deny treats queued response without outcome as resumed", a
     createToolActivityState,
     failGateToolActivity,
     globalThis: {},
-    listConnectableChannels: async () => ({ channels: [] }),
     queryClient: {
       fetchQuery: async () => ({ channels: [] }),
       invalidateQueries: () => {},
@@ -1802,7 +1757,6 @@ test("useChat.approve treats already_terminal false as resumed", async () => {
     createToolActivityState,
     failGateToolActivity,
     globalThis: {},
-    listConnectableChannels: async () => ({ channels: [] }),
     queryClient: {
       fetchQuery: async () => ({ channels: [] }),
       invalidateQueries: () => {},
@@ -1887,7 +1841,6 @@ test("useChat.approve deny with already_terminal true does not synthesize failed
     createToolActivityState,
     failGateToolActivity,
     globalThis: {},
-    listConnectableChannels: async () => ({ channels: [] }),
     queryClient: {
       fetchQuery: async () => ({ channels: [] }),
       invalidateQueries: () => {},
@@ -1967,9 +1920,6 @@ test("useChat.cancelRun completion does not clear a newer run", async () => {
       throw new Error("createThread should not run");
     },
     globalThis: {},
-    listConnectableChannels: async () => {
-      throw new Error("ordinary prompts should not fetch connectable channels");
-    },
     queryClient: {
       fetchQuery: async () => {
         throw new Error("ordinary prompts should not fetch connectable channels");
@@ -2042,21 +1992,6 @@ test("useChat.send: connect-like prompts submit to the model", async () => {
       return { thread: { thread_id: "thread-created" } };
     },
     globalThis: {},
-    listConnectableChannels: async () => ({
-      channels: [
-        {
-          channel: "slack",
-          display_name: "Slack",
-          strategy: "oauth",
-          command_aliases: ["slack", "slack account"],
-          action: {
-            title: "Slack account connection",
-            instructions:
-              "Connect Slack with OAuth from the extension configuration, then message the Slack bot directly.",
-          },
-        },
-      ],
-    }),
     queryClient: {
       fetchQuery: async ({ queryFn }) => queryFn(),
       invalidateQueries: () => {},
@@ -2120,21 +2055,6 @@ test("useChat.send: routine setup prompts mentioning Slack submit to the model",
       return { thread: { thread_id: "thread-created" } };
     },
     globalThis: {},
-    listConnectableChannels: async () => ({
-      channels: [
-        {
-          channel: "slack",
-          display_name: "Slack",
-          strategy: "oauth",
-          command_aliases: ["slack", "slack account"],
-          action: {
-            title: "Slack account connection",
-            instructions:
-              "Connect Slack with OAuth from the extension configuration, then message the Slack bot directly.",
-          },
-        },
-      ],
-    }),
     queryClient: {
       fetchQuery: async ({ queryFn }) => queryFn(),
       invalidateQueries: () => {},
@@ -3422,7 +3342,6 @@ test("useChat: blank unconnected Slack chat does NOT auto-open a connection pane
   const threadId = "thread-blank-slack-connection";
   const stateUpdates = [];
   let extensionsFetched = false;
-  let connectableFetched = false;
   const context = {
     AbortController,
     Date,
@@ -3456,24 +3375,6 @@ test("useChat: blank unconnected Slack chat does NOT auto-open a connection pane
       };
     },
     globalThis: {},
-    listConnectableChannels: async () => {
-      connectableFetched = true;
-      return {
-        channels: [
-          {
-            channel: "slack",
-            display_name: "Slack",
-            strategy: "oauth",
-            action: {
-              title: "Slack account connection",
-              instructions: "Connect Slack with OAuth from the extension configuration, then message the Slack bot directly.",
-              input_placeholder: "",
-              submit_label: "Connect Slack",
-            },
-          },
-        ],
-      };
-    },
     queryClient: {
       fetchQuery: async ({ queryFn }) => queryFn(),
       getQueryData: () => ({
@@ -3516,11 +3417,6 @@ test("useChat: blank unconnected Slack chat does NOT auto-open a connection pane
     extensionsFetched,
     false,
     "no startup poll: the chat must not fetch the extensions list to decide on a panel",
-  );
-  assert.equal(
-    connectableFetched,
-    false,
-    "no startup poll: the chat must not fetch connectable channels to decide on a panel",
   );
 });
 
@@ -4518,9 +4414,6 @@ test("useChat.send: rejected_busy appends system notice, marks optimistic failed
       throw new Error("thread should already exist");
     },
     globalThis: {},
-    listConnectableChannels: async () => {
-      throw new Error("ordinary prompts should not fetch connectable channels");
-    },
     queryClient: {
       fetchQuery: async () => {
         throw new Error("ordinary prompts should not fetch connectable channels");
@@ -4596,9 +4489,6 @@ test("useChat.send: rejected_busy without notice still clears isProcessing", asy
       throw new Error("thread should already exist");
     },
     globalThis: {},
-    listConnectableChannels: async () => {
-      throw new Error("ordinary prompts should not fetch connectable channels");
-    },
     queryClient: {
       fetchQuery: async () => {
         throw new Error("ordinary prompts should not fetch connectable channels");
@@ -4670,9 +4560,6 @@ test("useChat.send: active run refuses duplicate submit before network call", as
       throw new Error("thread should already exist");
     },
     globalThis: {},
-    listConnectableChannels: async () => {
-      throw new Error("busy prompts should not fetch connectable channels");
-    },
     queryClient: {
       fetchQuery: async () => {
         throw new Error("busy prompts should not fetch connectable channels");
@@ -4735,9 +4622,6 @@ test("useChat.send: accepted run blocks another submit until settlement", async 
       throw new Error("thread should already exist");
     },
     globalThis: {},
-    listConnectableChannels: async () => {
-      throw new Error("ordinary prompts should not fetch connectable channels");
-    },
     queryClient: {
       fetchQuery: async () => {
         throw new Error("ordinary prompts should not fetch connectable channels");
@@ -4824,9 +4708,6 @@ test("useChat.send: created thread stays blocked until accepted run settles", as
       return { thread: { thread_id: createdThreadId } };
     },
     globalThis: {},
-    listConnectableChannels: async () => {
-      throw new Error("ordinary prompts should not fetch connectable channels");
-    },
     queryClient: {
       fetchQuery: async () => {
         throw new Error("ordinary prompts should not fetch connectable channels");
@@ -4923,9 +4804,6 @@ test("useChat.send: clears local busy when run settles before send response", as
       thread: { thread_id: createdThreadId },
     }),
     globalThis: {},
-    listConnectableChannels: async () => {
-      throw new Error("ordinary prompts should not fetch connectable channels");
-    },
     queryClient: {
       fetchQuery: async () => {
         throw new Error("ordinary prompts should not fetch connectable channels");
@@ -5017,9 +4895,6 @@ test("useChat.send: clears local admission when navigating away before settlemen
       throw new Error("threads already exist in this scenario");
     },
     globalThis: {},
-    listConnectableChannels: async () => {
-      throw new Error("ordinary prompts should not fetch connectable channels");
-    },
     queryClient: {
       fetchQuery: async () => {
         throw new Error("ordinary prompts should not fetch connectable channels");
@@ -5122,9 +4997,6 @@ test("useChat.send: a send to another thread is not blocked by an unsettled run 
       throw new Error("threads already exist in this scenario");
     },
     globalThis: {},
-    listConnectableChannels: async () => {
-      throw new Error("ordinary prompts should not fetch connectable channels");
-    },
     queryClient: {
       fetchQuery: async () => {
         throw new Error("ordinary prompts should not fetch connectable channels");
@@ -5228,7 +5100,6 @@ function createResolveGateContext({
       throw new Error("createThread should not run");
     },
     globalThis: {},
-    listConnectableChannels: async () => ({ channels: [] }),
     queryClient: {
       fetchQuery: async () => ({ channels: [] }),
       invalidateQueries: () => {},
@@ -5426,9 +5297,6 @@ function createParallelSendContext({
       return { thread: { thread_id: createdThreadId } };
     },
     globalThis: {},
-    listConnectableChannels: async () => {
-      throw new Error("ordinary prompts should not fetch connectable channels");
-    },
     queryClient: {
       fetchQuery: async () => {
         throw new Error("ordinary prompts should not fetch connectable channels");

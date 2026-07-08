@@ -135,7 +135,6 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
     onSuccess: () => {
       for (const queryKey of [
         ["extensions"],
-        ["connectable-channels"],
         ["pairing", channelId],
       ]) {
         queryClient.invalidateQueries({ queryKey });

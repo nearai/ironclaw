@@ -182,7 +182,6 @@ test("install/activate auth popups: noopener null is not an error; insecure URLs
     globalThis: {},
     installExtension: () => {},
     hasChannelSurface,
-    listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth: () => {},
     submitExtensionSetup: () => {},

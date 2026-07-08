@@ -557,7 +557,6 @@ test("ConfigureModal pairing redeems then activates, invalidates queries, and cl
   assert.deepEqual(result, { success: true });
   assert.deepEqual(JSON.parse(JSON.stringify(invalidations)), [
     ["extensions"],
-    ["connectable-channels"],
     ["pairing", "telegram"],
   ]);
   assert.equal(closed, true);
@@ -581,7 +580,6 @@ test("ConfigureModal pairing redeems by channel slug and activates package id", 
   ]);
   assert.deepEqual(JSON.parse(JSON.stringify(invalidations)), [
     ["extensions"],
-    ["connectable-channels"],
     ["pairing", "telegram"],
   ]);
 });
