@@ -293,7 +293,9 @@ pub use webui_serve::{
 /// facade-shaped handles only"; these four newtypes are the host-identity
 /// facade.
 pub mod host_api {
-    pub use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+    pub use ironclaw_host_api::{
+        AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
+    };
 }
 
 #[cfg(all(feature = "webui-v2-beta", feature = "postgres"))]

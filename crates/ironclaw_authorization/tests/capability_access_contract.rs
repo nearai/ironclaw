@@ -865,6 +865,7 @@ fn wasm_descriptor() -> CapabilityDescriptor {
         effects: vec![EffectKind::DispatchCapability],
         default_permission: PermissionMode::Allow,
         runtime_credentials: Vec::new(),
+        network_targets: Vec::new(),
         resource_profile: None,
     }
 }

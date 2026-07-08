@@ -72,7 +72,8 @@ use ironclaw_turns::{
     EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion, TurnRunId, TurnStatus,
 };
 use ironclaw_webui_v2::{
-    DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State, webui_v2_router,
+    DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2RouteOptions, WebUiV2State,
+    webui_v2_router, webui_v2_router_with_options,
 };
 use serde_json::Value;
 use tokio::sync::Notify;
@@ -289,6 +290,9 @@ struct StubServices {
     list_extensions_calls: Mutex<usize>,
     list_extension_registry_calls: Mutex<usize>,
     install_extension_calls: Mutex<Vec<String>>,
+    /// Raw zip bytes each `import_extension` call forwards, so the route test
+    /// can assert the uploaded body reaches the facade intact.
+    import_extension_calls: Mutex<Vec<Vec<u8>>>,
     activate_extension_calls: Mutex<Vec<String>>,
     remove_extension_calls: Mutex<Vec<String>>,
     get_llm_config_calls: Mutex<usize>,
@@ -1291,6 +1295,18 @@ impl RebornServicesApi for StubServices {
             .expect("lock")
             .push(package_ref.id.as_str().to_string());
         Ok(extension_action_response("installed"))
+    }
+
+    async fn import_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        bundle: Vec<u8>,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        self.import_extension_calls
+            .lock()
+            .expect("lock")
+            .push(bundle);
+        Ok(extension_action_response("discovered"))
     }
 
     async fn activate_extension(
@@ -4233,6 +4249,130 @@ async fn install_extension_rejects_non_extension_package_kind_with_400() {
             .expect("lock")
             .is_empty(),
         "invalid package kind must not reach the facade"
+    );
+}
+
+/// #5499 review finding #4: the admin-only import route must reject a caller
+/// whose bearer token lacks `operator_webui_config` BEFORE the facade is
+/// reached. Lower-level lifecycle tests cannot catch this route dropping its
+/// `require_operator_webui_config` gate.
+#[tokio::test]
+async fn import_extension_requires_operator_webui_config() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/import")
+                .header("content-type", "application/zip")
+                .body(Body::from(b"PK\x03\x04not-really-a-zip".to_vec()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "forbidden");
+    assert!(
+        services
+            .import_extension_calls
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "a non-operator caller must never reach the import facade"
+    );
+}
+
+/// #5499 review finding #4: an operator upload must forward the raw zip bytes
+/// to the facade unmodified — a route regression that drops or re-encodes the
+/// body would pass every lifecycle-tier test.
+#[tokio::test]
+async fn import_extension_forwards_zip_bytes_to_facade_call() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(
+        services.clone(),
+        WebUiV2Capabilities {
+            operator_webui_config: true,
+        },
+    );
+    // Deliberately non-UTF-8 so byte fidelity (not just string round-trip) is
+    // what the assertion proves.
+    let bundle: Vec<u8> = b"PK\x03\x04\x00\xff\xfe binary zip bytes".to_vec();
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/import")
+                .header("content-type", "application/zip")
+                .body(Body::from(bundle.clone()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        services
+            .import_extension_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        [bundle]
+    );
+}
+
+/// #5499 review finding #1: the import route is operator-only, so a router
+/// built `without_operator_routes()` (the shape composition serves to
+/// deployments with no operator surface) must not mount it at all — exactly
+/// like its operator siblings. Before the fix the route was mounted
+/// unconditionally and answered 403 here instead of 404.
+#[tokio::test]
+async fn import_extension_is_stripped_alongside_operator_routes() {
+    let services = Arc::new(StubServices::default());
+    let router = webui_v2_router_with_options(
+        WebUiV2State::new(services, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER),
+        WebUiV2RouteOptions::without_operator_routes(),
+    )
+    .layer(axum::Extension(caller()))
+    .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+    let import_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/import")
+                .header("content-type", "application/zip")
+                .body(Body::from(b"PK\x03\x04".to_vec()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    // Parity check: an undisputed operator sibling on the same stripped router.
+    let operator_status_response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/operator/status")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(
+        operator_status_response.status(),
+        StatusCode::NOT_FOUND,
+        "operator sibling is stripped from a without_operator_routes router"
+    );
+    assert_eq!(
+        import_response.status(),
+        StatusCode::NOT_FOUND,
+        "the admin-only import route must be stripped exactly like its operator siblings"
     );
 }
 

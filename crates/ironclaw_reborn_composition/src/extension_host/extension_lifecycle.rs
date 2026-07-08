@@ -17,9 +17,9 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, PermissionMode, ResourceScope,
-    RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement, RuntimeHttpEgress, VirtualPath,
-    sha256_digest_token,
+    CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, NetworkTargetPattern,
+    PermissionMode, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement,
+    RuntimeHttpEgress, VirtualPath, sha256_digest_token,
 };
 use ironclaw_product_adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
 use ironclaw_product_workflow::{
@@ -28,7 +28,7 @@ use ironclaw_product_workflow::{
     LifecycleProductPayload, LifecycleProductResponse, LifecycleSearchExtensionSummary,
     ProductWorkflowError, RebornChannelConnectStrategy, RebornServicesError,
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock, Semaphore};
 
 use crate::RebornProductAuthServices;
 
@@ -70,8 +70,8 @@ mod active_publication;
 mod hosted_mcp_test_support;
 
 use crate::extension_host::available_extensions::{
-    AvailableExtensionCatalog, AvailableExtensionPackage, is_internal_extension_package_ref,
-    materialize_available_extension, visible_capability_ids,
+    AvailableExtensionCatalog, AvailableExtensionPackage, imported_extension_package,
+    is_internal_extension_package_ref, materialize_available_extension, visible_capability_ids,
 };
 use crate::extension_host::extension_activation_credentials::{
     ExtensionActivationCredentialGate, RuntimeExtensionActivationCredentialGate,
@@ -98,7 +98,7 @@ const RETIRED_SLACK_USER_EXTENSION_ID: &str = "slack_user";
 // and registry ownership first; tracked in #4091.
 pub(crate) struct RebornLocalExtensionManagementPort {
     filesystem: Arc<dyn RootFilesystem>,
-    catalog: AvailableExtensionCatalog,
+    catalog: Arc<RwLock<AvailableExtensionCatalog>>,
     installation_store: Arc<dyn ExtensionInstallationStore>,
     lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
     active_extensions: ActiveExtensionPublisher,
@@ -107,7 +107,19 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     // product auth cannot have minted a reusable OAuth credential, so there is
     // nothing to revoke on removal.
     credential_cleanup: Option<Arc<dyn ExtensionCredentialCleanup>>,
+    /// Bounds concurrent zip decode/validation in `import_bundle`. Each decode
+    /// may expand up to [`MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES`] into
+    /// memory, so without a bound N concurrent operator uploads turn the
+    /// per-request cap into N x 64 MiB of pressure before any lifecycle lock
+    /// applies (#5499 review finding #3).
+    import_decode_semaphore: Arc<Semaphore>,
 }
+
+/// Concurrent `import_bundle` decodes allowed before further uploads wait.
+/// 2 x [`MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES`] caps worst-case decode
+/// memory at 128 MiB; imports are a rare admin-only operation, so waiting is
+/// the right trade against unbounded memory.
+const MAX_CONCURRENT_IMPORT_DECODES: usize = 2;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ActiveExtensionCapability {
@@ -116,6 +128,8 @@ pub(crate) struct ActiveExtensionCapability {
     pub(crate) effects: Vec<EffectKind>,
     pub(crate) default_permission: PermissionMode,
     pub(crate) runtime_credentials: Vec<RuntimeCredentialRequirement>,
+    /// Manifest-declared network egress allowlist, independent of credentials.
+    pub(crate) network_targets: Vec<NetworkTargetPattern>,
 }
 
 #[derive(Clone)]
@@ -135,6 +149,7 @@ impl ActiveExtensionCapability {
             effects: descriptor.effects.clone(),
             default_permission: descriptor.default_permission,
             runtime_credentials: descriptor.runtime_credentials.clone(),
+            network_targets: descriptor.network_targets.clone(),
         }
     }
 }
@@ -152,6 +167,84 @@ impl ExtensionActivationMode {
             None => Self::Static,
         }
     }
+}
+
+/// Zip-bomb guards for [`unzip_extension_bundle`]: the HTTP route caps only the
+/// COMPRESSED body (8 MiB), so these bound what an uploaded bundle may expand
+/// to in memory. Generous for real tool bundles (wasm + schemas + prompts),
+/// tight enough that a hostile upload cannot OOM the host.
+pub(crate) const MAX_EXTENSION_BUNDLE_FILES: usize = 512;
+pub(crate) const MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES: usize = 64 * 1024 * 1024;
+
+/// Extract an uploaded tool bundle (a zip) into `(path, bytes)` pairs, guarding
+/// against zip-slip: absolute paths, `..` traversal, and backslash separators
+/// are rejected rather than trusted.
+fn unzip_extension_bundle(bundle: &[u8]) -> Result<Vec<(String, Vec<u8>)>, ProductWorkflowError> {
+    use std::io::Read;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bundle)).map_err(|error| {
+        ProductWorkflowError::InvalidBindingRequest {
+            reason: format!("uploaded tool bundle is not a valid zip: {error}"),
+        }
+    })?;
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut seen_names = std::collections::HashSet::new();
+    let mut total_bytes = 0usize;
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index).map_err(|error| {
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("uploaded tool bundle has a corrupt entry: {error}"),
+            }
+        })?;
+        if !entry.is_file() {
+            continue;
+        }
+        if files.len() >= MAX_EXTENSION_BUNDLE_FILES {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "uploaded tool bundle contains too many files (limit {MAX_EXTENSION_BUNDLE_FILES})"
+                ),
+            });
+        }
+        let name = entry.name().to_string();
+        if name.is_empty()
+            || name.starts_with('/')
+            || name.contains('\\')
+            || name.split('/').any(|component| component == "..")
+        {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("uploaded tool bundle contains an unsafe path: {name}"),
+            });
+        }
+        // Zip archives may legally repeat an entry name. Validation reads the
+        // first occurrence while materialization writes every entry in order,
+        // so a later duplicate could swap the validated bytes on disk.
+        if !seen_names.insert(name.clone()) {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("uploaded tool bundle contains a duplicate entry: {name}"),
+            });
+        }
+        // `take(allowance + 1)` bounds what a hostile entry can buffer: the
+        // declared zip sizes are attacker-controlled lies, so the guard must sit
+        // on the actual decompressed stream, never on entry metadata.
+        let allowance = MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES - total_bytes;
+        let mut bytes = Vec::new();
+        entry
+            .take(allowance as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("failed to read `{name}` from the uploaded bundle: {error}"),
+            })?;
+        if bytes.len() > allowance {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "uploaded tool bundle expands past the {MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES}-byte decompressed limit"
+                ),
+            });
+        }
+        total_bytes += bytes.len();
+        files.push((name, bytes));
+    }
+    Ok(files)
 }
 
 pub(crate) async fn restore_extension_lifecycle_state(
@@ -250,12 +343,13 @@ impl RebornLocalExtensionManagementPort {
     ) -> Self {
         Self {
             filesystem,
-            catalog,
+            catalog: Arc::new(RwLock::new(catalog)),
             installation_store,
             lifecycle_service,
             active_extensions,
             operation_lock: Arc::new(Mutex::new(())),
             credential_cleanup,
+            import_decode_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORT_DECODES)),
         }
     }
 
@@ -288,11 +382,13 @@ impl RebornLocalExtensionManagementPort {
         query: &str,
         credential_gate: Option<&RuntimeExtensionActivationCredentialGate>,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        let extensions = self.catalog.search(query);
+        let catalog = self.catalog.read().await;
+        let extensions = catalog.search(query);
         let mut summaries = Vec::new();
         for extension in extensions {
             summaries.push(self.search_summary(extension, credential_gate).await?);
         }
+        drop(catalog);
         let count = summaries.len();
         let mut response = response_with_payload(
             None,
@@ -343,7 +439,7 @@ impl RebornLocalExtensionManagementPort {
             .map_err(map_extension_installation_error)?
             .map(|installation| phase_for_activation_state(installation.activation_state()))
             .unwrap_or(LifecyclePhase::Discovered);
-        let summary = self.catalog.resolve(&package_ref)?.summary();
+        let summary = self.catalog.read().await.resolve(&package_ref)?.summary();
         Ok(response_with_payload(
             Some(package_ref),
             phase,
@@ -411,7 +507,8 @@ impl RebornLocalExtensionManagementPort {
             if is_internal_extension_package_ref(&package_ref) {
                 continue;
             }
-            let Ok(available) = self.catalog.resolve(&package_ref) else {
+            let catalog = self.catalog.read().await;
+            let Ok(available) = catalog.resolve(&package_ref) else {
                 continue;
             };
             summaries.push(LifecycleInstalledExtensionSummary {
@@ -468,11 +565,91 @@ impl RebornLocalExtensionManagementPort {
         Ok(installation)
     }
 
+    /// Import a standalone extension from an uploaded bundle (zip bytes) — the
+    /// WebUI "Install Tool" path. Unzips (zip-slip guarded), validates the
+    /// `manifest.toml`, writes the assets under `/system/extensions/<id>/` so it
+    /// survives a restart (restart discovery reloads that root as
+    /// `InstalledLocal`, never the first-party `HostBundled` tier), and extends
+    /// the in-memory catalog so it shows in the Registry immediately. The
+    /// existing install/activate flow then operates on it like any other
+    /// available extension.
+    ///
+    /// Takes the catalog WRITE lock, then `operation_lock` — the same
+    /// catalog-before-operation order `install` uses, so the two cannot
+    /// deadlock. Both guards are held across the duplicate checks AND the
+    /// filesystem materialization: concurrent imports of the same id would
+    /// otherwise interleave file-by-file writes into the stable
+    /// `/system/extensions/<id>/` root, and an import over an already
+    /// installed id would swap the materialized files out from under the
+    /// live lifecycle state.
+    ///
+    /// The unzip + manifest validation phase runs in `spawn_blocking` (it is
+    /// CPU/blocking-IO work that must not stall the async runtime) behind a
+    /// [`MAX_CONCURRENT_IMPORT_DECODES`]-permit semaphore acquired BEFORE any
+    /// lifecycle lock, bounding decode memory instead of letting N concurrent
+    /// uploads each expand [`MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES`].
+    pub(crate) async fn import_bundle(
+        &self,
+        bundle: Vec<u8>,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        let package = {
+            let _decode_permit = self.import_decode_semaphore.acquire().await.map_err(|_| {
+                ProductWorkflowError::Transient {
+                    reason: "import decode limiter is closed".to_string(),
+                }
+            })?;
+            tokio::task::spawn_blocking(move || {
+                let files = unzip_extension_bundle(&bundle)?;
+                imported_extension_package(files)
+            })
+            .await
+            .map_err(|error| ProductWorkflowError::Transient {
+                reason: format!("import decode task failed: {error}"),
+            })??
+        };
+        let package_ref = package.package_ref.clone();
+        let summary = package.summary();
+        let mut catalog = self.catalog.write().await;
+        let _operation_guard = self.operation_lock.lock().await;
+        if catalog.resolve(&package_ref).is_ok() {
+            return Err(ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "extension {} already exists in the catalog; remove it before importing a replacement",
+                    package_ref.id.as_str()
+                ),
+            });
+        }
+        let installation_id = ExtensionInstallationId::new(package.package.id.as_str().to_string())
+            .map_err(map_extension_installation_error)?;
+        self.ensure_not_installed(&package.package.id, &installation_id)
+            .await?;
+        materialize_available_extension(self.filesystem.as_ref(), &package).await?;
+        catalog.extend(AvailableExtensionCatalog::from_packages(vec![package]));
+        drop(catalog);
+        Ok(response_with_payload(
+            Some(package_ref),
+            LifecyclePhase::Discovered,
+            LifecycleProductPayload::ExtensionSearch {
+                extensions: vec![LifecycleSearchExtensionSummary {
+                    summary,
+                    installation_phase: None,
+                }],
+                count: 1,
+            },
+        ))
+    }
+
     pub(crate) async fn install(
         &self,
         package_ref: LifecyclePackageRef,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
-        let available = self.catalog.resolve(&package_ref)?;
+        // Read guard is held for the whole method because `available` borrows
+        // from the catalog (used by install_available_locked/visible_caps
+        // below). Acquired BEFORE `operation_lock`; `import_bundle` takes the
+        // write guard before `operation_lock` too, so the lock order is
+        // consistent and the two cannot deadlock.
+        let catalog = self.catalog.read().await;
+        let available = catalog.resolve(&package_ref)?;
         let _operation_guard = self.operation_lock.lock().await;
         self.install_available_locked(available).await?;
 
@@ -1329,9 +1506,13 @@ fn prepare_install(
                 reason: format!("host API contract registry rejected extension install: {error}"),
             }
         })?;
+    // Re-validate with the SAME source the package entered the catalog with:
+    // stamping everything `HostBundled` here would launder an imported
+    // (`InstalledLocal`) bundle into the stored-manifest tier that is allowed
+    // first-party trust and the bundled hash-migration path below.
     let manifest_record = ExtensionManifestRecord::from_toml_with_contracts(
         &available.manifest_toml,
-        ManifestSource::HostBundled,
+        available.source,
         &host_ports,
         Some(manifest_hash.clone()),
         &contracts,
@@ -1373,9 +1554,13 @@ fn prepare_manifest_migration(
                 reason: format!("host API contract registry rejected manifest migration: {error}"),
             }
         })?;
+    // Same source-preservation rule as `prepare_install`; the caller
+    // (`migrate_host_bundled_manifest_hash`) additionally requires the STORED
+    // manifest to be `HostBundled` before migrating, so an imported extension
+    // whose on-disk manifest changed fails closed instead of migrating.
     let manifest_record = ExtensionManifestRecord::from_toml_with_contracts(
         &available.manifest_toml,
-        ManifestSource::HostBundled,
+        available.source,
         &host_ports,
         Some(manifest_hash.clone()),
         &contracts,
@@ -1801,6 +1986,136 @@ mod tests {
         );
     }
 
+    /// Build an in-memory zip from `(entry_name, bytes)` pairs for
+    /// [`unzip_extension_bundle`] boundary tests.
+    fn zip_bundle(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write;
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, bytes) in entries {
+            writer.start_file(*name, options).expect("start zip entry");
+            writer.write_all(bytes).expect("write zip entry");
+        }
+        writer.finish().expect("finish zip").into_inner()
+    }
+
+    /// The doc contract promises backslash separators are REJECTED; normalizing
+    /// them instead silently accepts a path shape the guard claims to refuse.
+    #[test]
+    fn unzip_extension_bundle_rejects_backslash_entry_names() {
+        let bundle = zip_bundle(&[("wasm\\module.wasm", b"x".as_slice())]);
+        let error = unzip_extension_bundle(&bundle)
+            .expect_err("backslash separators must be rejected, not normalized");
+        assert!(
+            format!("{error}").contains("unsafe path"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// A small compressed upload must not be allowed to expand past the
+    /// decompressed-bytes cap (zip bomb): the route body limit bounds only the
+    /// COMPRESSED size, so the cap here is the actual memory guard.
+    #[test]
+    fn unzip_extension_bundle_caps_total_decompressed_bytes() {
+        let oversized = vec![0u8; MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES + 1];
+        let bundle = zip_bundle(&[("payload.bin", oversized.as_slice())]);
+        assert!(
+            bundle.len() < MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES,
+            "test premise: the bomb must be small compressed"
+        );
+        let error = unzip_extension_bundle(&bundle)
+            .expect_err("expansion past the decompressed cap must be rejected");
+        assert!(
+            format!("{error}").contains("expands past"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// Zip archives may legally contain two entries with the same name (the
+    /// spec does not forbid it and hostile archives are handcrafted, not
+    /// written by well-behaved writers). If both entries surfaced,
+    /// `imported_extension_package` would validate the FIRST
+    /// `manifest.toml`/asset while `materialize_available_extension` writes
+    /// every entry in order — the bytes on disk would differ from the bytes
+    /// that were validated.
+    ///
+    /// The invariant this test pins: `unzip_extension_bundle` NEVER returns two
+    /// entries with the same name. zip 8.x's reader indexes entries by
+    /// filename (`IndexMap`), so duplicates collapse at parse time and exactly
+    /// one entry survives; the explicit `seen_names` guard in
+    /// `unzip_extension_bundle` is the backstop that turns any future reader
+    /// behavior change (surfacing both entries) into a hard error instead of a
+    /// silent validated-vs-materialized divergence. Both outcomes satisfy the
+    /// invariant; returning two same-name entries fails the test.
+    ///
+    /// `zip::ZipWriter` itself refuses duplicate names, so the fixture is
+    /// authored with a same-length placeholder name and byte-patched into a
+    /// duplicate — entry names are stored verbatim in the local file header and
+    /// central directory and are not covered by the entry CRC, so the patched
+    /// archive stays structurally valid.
+    #[test]
+    fn unzip_extension_bundle_never_returns_duplicate_entry_names() {
+        let placeholder = zip_bundle(&[
+            ("manifest.toml", b"validated".as_slice()),
+            ("manifest.tomX", b"materialized".as_slice()),
+        ]);
+        let needle = b"manifest.tomX";
+        let replacement = b"manifest.toml";
+        let mut bundle = placeholder;
+        let mut patched = 0;
+        let mut index = 0;
+        while index + needle.len() <= bundle.len() {
+            if &bundle[index..index + needle.len()] == needle {
+                bundle[index..index + needle.len()].copy_from_slice(replacement);
+                patched += 1;
+            }
+            index += 1;
+        }
+        assert!(
+            patched >= 2,
+            "test premise: the placeholder name must appear in the local file \
+             header and the central directory; patched {patched} occurrence(s)"
+        );
+        match unzip_extension_bundle(&bundle) {
+            // Reader surfaced both entries → the seen_names guard must fire.
+            Err(error) => {
+                assert!(
+                    format!("{error}").contains("duplicate"),
+                    "unexpected error: {error}"
+                );
+            }
+            // Reader collapsed the duplicate → exactly one consistent entry;
+            // what gets validated IS what gets materialized.
+            Ok(files) => {
+                let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
+                assert_eq!(
+                    names,
+                    vec!["manifest.toml"],
+                    "duplicate names must never coexist in the unzipped file list"
+                );
+            }
+        }
+    }
+
+    /// Entry-count flooding is the other zip-bomb axis: many tiny entries.
+    #[test]
+    fn unzip_extension_bundle_caps_entry_count() {
+        let names: Vec<String> = (0..=MAX_EXTENSION_BUNDLE_FILES)
+            .map(|index| format!("assets/file-{index}.txt"))
+            .collect();
+        let entries: Vec<(&str, &[u8])> = names
+            .iter()
+            .map(|name| (name.as_str(), b"x".as_slice()))
+            .collect();
+        let bundle = zip_bundle(&entries);
+        let error =
+            unzip_extension_bundle(&bundle).expect_err("entry-count flooding must be rejected");
+        assert!(
+            format!("{error}").contains("too many files"),
+            "unexpected error: {error}"
+        );
+    }
+
     #[tokio::test]
     async fn extension_lifecycle_installs_activates_and_removes_catalog_package() {
         let (_dir, storage_root, facade, active_registry, _installation_store) =
@@ -1908,6 +2223,242 @@ mod tests {
                 .join("system/extensions/fixture/wasm/fixture.wasm")
                 .exists()
         );
+    }
+
+    /// A complete uploaded WASM tool bundle zip in the `InstalledLocal`-legal
+    /// shape (trust `third_party`, capabilities via `capability_provider`
+    /// host_api), for driving `import_bundle` through the facade.
+    fn importable_tool_zip(id: &str) -> Vec<u8> {
+        let manifest = format!(
+            r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "{id}"
+name = "Imported Tool"
+version = "0.1.0"
+description = "Uploaded tool bundle fixture"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/tool.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "{id}.run"
+description = "Run the tool"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/run.input.json"
+output_schema_ref = "schemas/run.output.json"
+"#
+        );
+        zip_bundle(&[
+            ("manifest.toml", manifest.as_bytes()),
+            // Component header — the import path rejects core modules.
+            ("wasm/tool.wasm", b"\0asm\x0d\0\x01\0".as_slice()),
+            ("schemas/run.input.json", b"{}".as_slice()),
+            ("schemas/run.output.json", b"{}".as_slice()),
+        ])
+    }
+
+    /// Happy path for the WebUI "Install Tool" upload flow: an uploaded zip
+    /// imports into the catalog, then installs (assets materialized under
+    /// `/system/extensions/<id>/`) and activates (capability published) through
+    /// the SAME facade actions any catalog extension uses.
+    #[tokio::test]
+    async fn import_bundle_imports_installs_and_activates_uploaded_tool() {
+        let (_dir, storage_root, facade, active_registry, _installation_store) =
+            extension_lifecycle_fixture();
+
+        let import = facade
+            .import_extension_bundle(lifecycle_surface_context(), importable_tool_zip("uploaded"))
+            .await
+            .expect("import uploaded tool bundle");
+        assert_eq!(import.phase, LifecyclePhase::Discovered);
+        let Some(LifecycleProductPayload::ExtensionSearch { extensions, count }) =
+            import.payload.as_ref()
+        else {
+            panic!("expected extension search payload from import");
+        };
+        assert_eq!(*count, 1);
+        assert_eq!(extensions[0].summary.package_ref.id.as_str(), "uploaded");
+
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "uploaded")
+            .expect("valid ref");
+        let install = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("install imported extension");
+        assert_eq!(install.phase, LifecyclePhase::Installed);
+        assert!(
+            storage_root
+                .join("system/extensions/uploaded/manifest.toml")
+                .exists()
+        );
+        assert!(
+            storage_root
+                .join("system/extensions/uploaded/wasm/tool.wasm")
+                .exists()
+        );
+
+        let activate = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionActivate { package_ref },
+            )
+            .await
+            .expect("activate imported extension");
+        assert_eq!(activate.phase, LifecyclePhase::Active);
+        assert!(
+            active_registry
+                .snapshot()
+                .get_capability(&ironclaw_host_api::CapabilityId::new("uploaded.run").unwrap())
+                .is_some()
+        );
+    }
+
+    /// Intended lifecycle for imported extensions: remove returns the package
+    /// to "available" (the catalog keeps it, assets in memory) and installing
+    /// it again from the Registry must work without re-uploading. (Dropping an
+    /// imported package from the catalog entirely is a future endpoint.)
+    #[tokio::test]
+    async fn imported_extension_reinstalls_after_remove() {
+        let (_dir, storage_root, facade, _active_registry, _installation_store) =
+            extension_lifecycle_fixture();
+        facade
+            .import_extension_bundle(lifecycle_surface_context(), importable_tool_zip("uploaded"))
+            .await
+            .expect("import uploaded tool bundle");
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "uploaded")
+            .expect("valid ref");
+        facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("install imported extension");
+        facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionRemove {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("remove imported extension");
+        assert!(
+            !storage_root
+                .join("system/extensions/uploaded/manifest.toml")
+                .exists(),
+            "remove must delete the materialized files"
+        );
+        let reinstall = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionInstall { package_ref },
+            )
+            .await
+            .expect("reinstalling a removed imported extension from the catalog must succeed");
+        assert_eq!(reinstall.phase, LifecyclePhase::Installed);
+        assert!(
+            storage_root
+                .join("system/extensions/uploaded/wasm/tool.wasm")
+                .exists(),
+            "reinstall must re-materialize the in-memory assets"
+        );
+    }
+
+    /// `import_bundle` must reject ids that already exist — both a repeat of a
+    /// previous import and an id already present in the catalog (a bundled or
+    /// discovered package). Without this check the second import's
+    /// materialization would overwrite `/system/extensions/<id>/` while
+    /// catalog/lifecycle state still points at the original package.
+    #[tokio::test]
+    async fn import_bundle_rejects_duplicate_and_catalog_resident_ids() {
+        let (_dir, _storage_root, facade, _active_registry, _installation_store) =
+            extension_lifecycle_fixture();
+
+        facade
+            .import_extension_bundle(lifecycle_surface_context(), importable_tool_zip("uploaded"))
+            .await
+            .expect("first import succeeds");
+        let reimport_error = facade
+            .import_extension_bundle(lifecycle_surface_context(), importable_tool_zip("uploaded"))
+            .await
+            .expect_err("re-importing the same id must be rejected");
+        assert!(
+            format!("{reimport_error}").contains("already exists in the catalog"),
+            "unexpected error: {reimport_error}"
+        );
+
+        // "fixture" is already in the catalog (the fixture package); an upload
+        // claiming that id must not be able to shadow or overwrite it.
+        let shadow_error = facade
+            .import_extension_bundle(lifecycle_surface_context(), importable_tool_zip("fixture"))
+            .await
+            .expect_err("importing an id already in the catalog must be rejected");
+        assert!(
+            format!("{shadow_error}").contains("already exists in the catalog"),
+            "unexpected error: {shadow_error}"
+        );
+    }
+
+    /// #5499 review finding #3 guard: the unzip/validation phase runs in
+    /// `spawn_blocking` behind a bounded decode semaphore, acquired BEFORE the
+    /// catalog-write + operation locks. Concurrent imports of distinct ids must
+    /// interleave across semaphore -> catalog -> operation without deadlocking,
+    /// and every import must still land in the catalog.
+    #[tokio::test]
+    async fn concurrent_imports_of_distinct_ids_all_succeed() {
+        let (_dir, _storage_root, facade, _active_registry, _installation_store) =
+            extension_lifecycle_fixture();
+
+        // More concurrent imports than decode permits, so the test exercises
+        // both permit waiting and the lock handoff after decode.
+        let (a, b, c) = tokio::join!(
+            facade.import_extension_bundle(
+                lifecycle_surface_context(),
+                importable_tool_zip("uploaded-a")
+            ),
+            facade.import_extension_bundle(
+                lifecycle_surface_context(),
+                importable_tool_zip("uploaded-b")
+            ),
+            facade.import_extension_bundle(
+                lifecycle_surface_context(),
+                importable_tool_zip("uploaded-c")
+            ),
+        );
+        a.expect("concurrent import a succeeds");
+        b.expect("concurrent import b succeeds");
+        c.expect("concurrent import c succeeds");
+
+        for id in ["uploaded-a", "uploaded-b", "uploaded-c"] {
+            let package_ref =
+                LifecyclePackageRef::new(LifecyclePackageKind::Extension, id).expect("valid ref");
+            let install = facade
+                .execute(
+                    lifecycle_surface_context(),
+                    LifecycleProductAction::ExtensionInstall { package_ref },
+                )
+                .await
+                .unwrap_or_else(|error| panic!("imported {id} must be installable: {error}"));
+            assert_eq!(install.phase, LifecyclePhase::Installed);
+        }
     }
 
     #[tokio::test]
@@ -5430,6 +5981,7 @@ output_schema_ref = "schemas/search.output.json"
             package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, root_id)
                 .expect("fixture package ref"),
             manifest_toml: manifest_toml.to_string(),
+            source: ManifestSource::HostBundled,
             package,
             surface_kinds: Vec::new(),
             assets: vec![

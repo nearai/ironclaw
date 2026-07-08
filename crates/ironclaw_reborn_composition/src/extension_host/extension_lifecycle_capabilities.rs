@@ -119,6 +119,7 @@ fn lifecycle_manifest(
         prompt_doc_ref: None,
         required_host_ports: Vec::new(),
         runtime_credentials: Vec::new(),
+        network_targets: Vec::new(),
         resource_profile: Some(ResourceProfile {
             default_estimate: ResourceEstimate {
                 wall_clock_ms: Some(100),

@@ -73,6 +73,13 @@ export function fetchOauthFlowStatus(flowId, invocationId) {
   ).catch(() => null);
 }
 
+export function importExtension(file) {
+  return apiFetch("/api/webchat/v2/extensions/import", {
+    method: "POST",
+    headers: { "Content-Type": "application/octet-stream" },
+    body: file,
+  });
+}
 export function fetchPairingRequests() {
   return Promise.resolve({ requests: [] });
 }

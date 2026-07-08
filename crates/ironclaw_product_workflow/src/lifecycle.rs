@@ -523,6 +523,19 @@ pub trait LifecycleProductFacade: Send + Sync {
         context: LifecycleProductContext,
         package_ref: LifecyclePackageRef,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError>;
+
+    /// Import a standalone extension from an uploaded bundle (zip bytes) — the
+    /// WebUI "Install Tool" path. Default is unavailable; only the local runtime
+    /// facade implements it.
+    async fn import_extension_bundle(
+        &self,
+        _context: LifecycleProductContext,
+        _bundle: Vec<u8>,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        Err(ProductWorkflowError::InvalidBindingRequest {
+            reason: "extension import is not supported by this runtime".to_string(),
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
