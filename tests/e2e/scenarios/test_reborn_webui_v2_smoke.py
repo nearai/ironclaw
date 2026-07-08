@@ -523,7 +523,8 @@ async def test_reborn_v2_logs_deep_link_loads_scoped_conversation_on_first_open(
         await expect(
             page.locator(SEL_V2["logs_scope_chip"].format(key="run_id"))
         ).to_contain_text("run-direct")
-        await expect(page.locator(SEL_V2["logs_entry_message"])).to_contain_text(
+        entry = page.locator(SEL_V2["logs_entry"]).first
+        await expect(entry.locator(SEL_V2["logs_entry_message"])).to_contain_text(
             "direct scoped deep link log"
         )
     finally:
