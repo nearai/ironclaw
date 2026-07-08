@@ -1,5 +1,5 @@
-import { fetchAuthProviders } from "../../../lib/api.js";
-import { React } from "../../../lib/html.js";
+import { fetchAuthProviders } from "../../../lib/api";
+import React from "react";
 
 const OAUTH_PROVIDER_ORDER = ["google", "github", "apple"];
 

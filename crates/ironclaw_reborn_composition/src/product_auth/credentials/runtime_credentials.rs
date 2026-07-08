@@ -626,10 +626,9 @@ fn account_has_provider_scopes(
 fn credential_setup_requires_stored_scopes(setup: &RuntimeCredentialAccountSetup) -> bool {
     match setup {
         RuntimeCredentialAccountSetup::OAuth { .. } => true,
-        RuntimeCredentialAccountSetup::ManualToken => false,
-        // Channel pairing has no stored credential account or scopes; it is
-        // satisfied by the caller's channel identity binding, checked separately.
-        RuntimeCredentialAccountSetup::ChannelPairing { .. } => false,
+        RuntimeCredentialAccountSetup::ManualToken | RuntimeCredentialAccountSetup::Retired => {
+            false
+        }
     }
 }
 

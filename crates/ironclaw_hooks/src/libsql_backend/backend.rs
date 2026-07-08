@@ -148,10 +148,13 @@ impl LibSqlPredicateStateBackend {
         }
     }
 
-    /// Open a fresh connection with the project-standard busy timeout. Retries
-    /// connection creation with exponential backoff on transient open failures
-    /// (`SQLITE_CANTOPEN` during concurrent opens) so a brief race doesn't
-    /// fail-close predicate evaluation. Mirrors `LibSqlBackend::connect`.
+    /// Open a fresh connection with the project-standard busy timeout. Callers
+    /// hold the backend write lock before entering this method so a one-backend
+    /// writer flood cannot open an unbounded number of libSQL connections before
+    /// the transaction is serialised. Retries connection creation with
+    /// exponential backoff on transient open failures (`SQLITE_CANTOPEN` during
+    /// cross-instance concurrent opens) so a brief race doesn't fail-close
+    /// predicate evaluation. Mirrors `LibSqlBackend::connect`.
     async fn connect(&self) -> Result<Connection, PredicateBackendError> {
         let mut last_err = None;
         for attempt in 0..CONNECT_ATTEMPTS {
@@ -234,10 +237,10 @@ impl LibSqlPredicateStateBackend {
             read_result,
         } = spec;
 
-        // Serialise in-process writers before opening a write connection (see
-        // the concurrency contract on the struct). Held for the whole
-        // connection + transaction so unbounded hook fan-out cannot become
-        // unbounded libSQL connection fan-out.
+        // Serialise in-process writers before opening a connection or touching
+        // SQLite (see the concurrency contract on the struct). Holding the lock
+        // across connect bounds one-backend fan-out to one libSQL connection at
+        // a time, which is the condition the adversarial quota tests exercise.
         let _write_guard = self.write_lock.lock().await;
         let conn = self.connect().await?;
         conn.execute("BEGIN IMMEDIATE", ()).await.map_err(map_err)?;

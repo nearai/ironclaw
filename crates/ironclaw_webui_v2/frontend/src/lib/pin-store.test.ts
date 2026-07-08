@@ -9,14 +9,14 @@
 
 import assert from "node:assert/strict";
 import { beforeEach, test } from "vitest";
-import { setAuthScope } from "./auth-scope.ts";
+import { setAuthScope } from "./auth-scope";
 import {
   clearAllPins,
   getPinnedIds,
   isPinned,
   subscribePins,
   togglePin,
-} from "./pin-store.ts";
+} from "./pin-store";
 
 // Minimal localStorage stub. The store reads `window.localStorage` lazily, so
 // installing it on the global before the calls is enough.

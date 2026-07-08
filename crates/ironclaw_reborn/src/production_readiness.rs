@@ -104,9 +104,7 @@ pub enum RebornLoopProductionComponent {
     TurnStateStore,
     SubagentGoalStore,
     SubagentCompletionObserver,
-    SubagentResultTombstoneStore,
-    SubagentAutonomousContinuationBudget,
-    SubagentRestartReconciler,
+    SubagentAwaitEdgeStore,
     WakeNotifier,
     ProgressEvents,
 }
@@ -359,9 +357,13 @@ pub struct RebornLoopComponentGraphReadiness {
     pub turn_state_store: RebornComponentReadiness,
     pub subagent_goal_store: RebornComponentReadiness,
     pub subagent_completion_observer: RebornComponentReadiness,
-    pub subagent_result_tombstone_store: RebornComponentReadiness,
-    pub subagent_autonomous_continuation_budget: RebornComponentReadiness,
-    pub subagent_restart_reconciler: RebornComponentReadiness,
+    /// §3 replacement: the 3 dead-component readiness fields this used to
+    /// sit alongside (`subagent_result_tombstone_store` — unwired dead code;
+    /// `subagent_autonomous_continuation_budget`/`subagent_restart_reconciler`
+    /// — readiness metadata for components never built, §8.3/§4.3 subsume
+    /// their concerns) are deleted; this one field replaces them, covering
+    /// the new durable CAS'd await-edge store this PR actually ships.
+    pub subagent_await_edge_store: RebornComponentReadiness,
     pub wake_notifier: RebornComponentReadiness,
     pub progress_events: RebornComponentReadiness,
 }
@@ -381,13 +383,7 @@ impl RebornLoopComponentGraphReadiness {
             turn_state_store: RebornComponentReadiness::production_verified(required),
             subagent_goal_store: RebornComponentReadiness::production_verified(required),
             subagent_completion_observer: RebornComponentReadiness::production_verified(required),
-            subagent_result_tombstone_store: RebornComponentReadiness::production_verified(
-                required,
-            ),
-            subagent_autonomous_continuation_budget: RebornComponentReadiness::production_verified(
-                required,
-            ),
-            subagent_restart_reconciler: RebornComponentReadiness::production_verified(required),
+            subagent_await_edge_store: RebornComponentReadiness::production_verified(required),
             wake_notifier: RebornComponentReadiness::production_verified(required),
             progress_events: RebornComponentReadiness::production_verified(required),
         }
@@ -451,16 +447,8 @@ impl RebornLoopComponentGraphReadiness {
                 self.subagent_completion_observer,
             ),
             (
-                RebornLoopProductionComponent::SubagentResultTombstoneStore,
-                self.subagent_result_tombstone_store,
-            ),
-            (
-                RebornLoopProductionComponent::SubagentAutonomousContinuationBudget,
-                self.subagent_autonomous_continuation_budget,
-            ),
-            (
-                RebornLoopProductionComponent::SubagentRestartReconciler,
-                self.subagent_restart_reconciler,
+                RebornLoopProductionComponent::SubagentAwaitEdgeStore,
+                self.subagent_await_edge_store,
             ),
             (
                 RebornLoopProductionComponent::WakeNotifier,
@@ -757,13 +745,7 @@ fn component_subject(component: RebornLoopProductionComponent) -> &'static str {
         RebornLoopProductionComponent::TurnStateStore => "turn_state_store",
         RebornLoopProductionComponent::SubagentGoalStore => "subagent_goal_store",
         RebornLoopProductionComponent::SubagentCompletionObserver => "subagent_completion_observer",
-        RebornLoopProductionComponent::SubagentResultTombstoneStore => {
-            "subagent_result_tombstone_store"
-        }
-        RebornLoopProductionComponent::SubagentAutonomousContinuationBudget => {
-            "subagent_autonomous_continuation_budget"
-        }
-        RebornLoopProductionComponent::SubagentRestartReconciler => "subagent_restart_reconciler",
+        RebornLoopProductionComponent::SubagentAwaitEdgeStore => "subagent_await_edge_store",
         RebornLoopProductionComponent::WakeNotifier => "wake_notifier",
         RebornLoopProductionComponent::ProgressEvents => "progress_events",
     }

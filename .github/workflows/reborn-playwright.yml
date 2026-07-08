@@ -44,7 +44,7 @@ jobs:
             },
             {
               "group": "legacy-auth-inputs",
-              "files": "tests/e2e/scenarios/test_reborn_webui_v2_legacy_approval.py tests/e2e/scenarios/test_reborn_webui_v2_legacy_auth_flows.py tests/e2e/scenarios/test_reborn_webui_v2_legacy_channel_connect.py tests/e2e/scenarios/test_reborn_webui_v2_legacy_attachments.py"
+              "files": "tests/e2e/scenarios/test_reborn_webui_v2_legacy_approval.py tests/e2e/scenarios/test_reborn_webui_v2_legacy_auth_flows.py tests/e2e/scenarios/test_reborn_webui_v2_legacy_attachments.py"
             },
             {
               "group": "legacy-settings-extensions",

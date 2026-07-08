@@ -1,7 +1,14 @@
 // @ts-nocheck
-import { apiFetch } from "../../../lib/api.js";
-import { notifyChannelConnected } from "../../../lib/channel-connection-events.js";
+import { apiFetch } from "../../../lib/api";
+import { notifyChannelConnected } from "../../../lib/channel-connection-events";
 
+// SCAFFOLDING: no Reborn backend mounts this route today. The only mount was
+// the Slack-only pairing redeem removed by PR #5604 (Slack now connects via
+// OAuth), and no shipped non-Slack channel reaches the proof-code UI — the
+// backend cannot emit a `pairing`/`pairing_required` onboarding state and only
+// Slack declares an inbound product adapter. This generic proof-code path is
+// retained for the first non-Slack inbound channel, which must mount a generic
+// redeem route here when it lands; until then a POST 404s.
 export const PAIRING_REDEEM_PATH = "/api/webchat/v2/extensions/pairing/redeem";
 
 export function redeemPairingCode(channel, code, options = {}) {

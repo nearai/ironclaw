@@ -1,13 +1,13 @@
 // @ts-nocheck
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { React } from "../../../lib/html.js";
+import React from "react";
 import {
   fetchMissionDetail,
   fetchThreadDetail,
   fireMission as fireMissionRequest,
   pauseMission as pauseMissionRequest,
   resumeMission as resumeMissionRequest,
-} from "../lib/projects-api.js";
+} from "../lib/projects-api";
 
 export function useProjectInspector({ projectId, missionId, threadId }) {
   const queryClient = useQueryClient();

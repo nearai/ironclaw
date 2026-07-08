@@ -22,6 +22,7 @@ class CaseSpec:
         *,
         requires_slack: bool = False,
         requires_slack_target: bool = False,
+        requires_slack_personal_auth: bool = False,
         requires_google_product_auth: bool = False,
         requires_google_runtime_access: bool = False,
         requires_telegram: bool = False,
@@ -32,6 +33,7 @@ class CaseSpec:
         self.fn = fn
         self.requires_slack = requires_slack
         self.requires_slack_target = requires_slack_target
+        self.requires_slack_personal_auth = requires_slack_personal_auth
         self.requires_google_product_auth = requires_google_product_auth
         self.requires_google_runtime_access = requires_google_runtime_access
         self.requires_telegram = requires_telegram
@@ -100,7 +102,7 @@ QA_SHEET_CASES: dict[str, dict[str, object]] = {
     "qa_3a_slack_connect": {
         "rows": ["3A"],
         "feature": "Slack connection flow",
-        "gate": "requires live Slack OAuth or host-beta Slack bot/signing-secret env",
+        "gate": "requires live Slack bot setup and a seeded real Slack personal product-auth account",
     },
     "qa_3b_endpoint_status_live_chat": {
         "rows": ["3B"],
@@ -143,7 +145,7 @@ QA_SHEET_CASES: dict[str, dict[str, object]] = {
     "qa_5a_slack_connect": {
         "rows": ["5A"],
         "feature": "Slack connection flow for AMA",
-        "gate": "requires live Slack OAuth or host-beta Slack bot/signing-secret env",
+        "gate": "requires live Slack bot setup and a seeded real Slack personal product-auth account",
     },
     "qa_5b_drive_connect": {
         "rows": ["5B"],
@@ -222,7 +224,7 @@ QA_SHEET_CASES: dict[str, dict[str, object]] = {
     "qa_8a_slack_connect": {
         "rows": ["8A"],
         "feature": "Slack connection flow for HN monitor",
-        "gate": "requires live Slack OAuth or host-beta Slack bot/signing-secret env",
+        "gate": "requires live Slack bot setup and a seeded real Slack personal product-auth account",
     },
     "qa_8b_hn_keyword_live_chat": {
         "rows": ["8B"],

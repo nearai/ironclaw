@@ -1,5 +1,5 @@
-import { React } from "../../../lib/html.js";
-import { useLlmProviders } from "./useLlmProviders.js";
+import React from "react";
+import { useLlmProviders } from "./useLlmProviders";
 
 function matchesProvider(provider, query) {
   if (!query) return true;

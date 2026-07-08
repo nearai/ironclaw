@@ -6,9 +6,9 @@
 // thread switch (the timeline is the source of truth — the bytes stay
 // behind the project mount, the cards render from the refs).
 
-import { attachmentKindFromMime, formatBytes } from "./attachments.js";
-import { ATTACHMENTS_ONLY_CONTENT } from "./attachment-sentinel.js";
-import { attachmentUrl } from "../../../lib/api.js";
+import { attachmentKindFromMime, formatBytes } from "./attachments";
+import { ATTACHMENTS_ONLY_CONTENT } from "./attachment-sentinel";
+import { attachmentUrl } from "../../../lib/api";
 
 // Project a stored `AttachmentRef` (snake_case wire shape) into the
 // render shape `MessageBubble` consumes. The timeline never carries bytes,

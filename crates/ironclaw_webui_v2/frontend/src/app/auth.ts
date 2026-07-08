@@ -1,16 +1,16 @@
-import { React } from "../lib/html.js";
-import { queryClient } from "../lib/query-client.js";
+import React from "react";
+import { queryClient } from "../lib/query-client";
 import {
   exchangeLoginTicket,
   fetchSession,
   logout as logoutRequest,
   readStoredToken,
   storeToken,
-} from "../lib/api.js";
-import { ANON_SCOPE, authScope, setAuthScope } from "../lib/auth-scope.js";
-import { clearAllPins } from "../lib/pin-store.js";
-import { clearHistoryCache } from "../pages/chat/hooks/useHistory.js";
-import { clearAllDrafts } from "../pages/chat/lib/draft-store.js";
+} from "../lib/api";
+import { ANON_SCOPE, authScope, setAuthScope } from "../lib/auth-scope";
+import { clearAllPins } from "../lib/pin-store";
+import { clearHistoryCache } from "../pages/chat/hooks/useHistory";
+import { clearAllDrafts } from "../pages/chat/lib/draft-store";
 
 // The Reborn host validates bearer tokens via OIDC; the SPA simply
 // carries whatever token the user supplies (via `?token=` URL param,

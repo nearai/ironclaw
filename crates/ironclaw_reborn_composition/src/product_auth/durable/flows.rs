@@ -135,6 +135,7 @@ where
                 return Err(AuthProductError::ProviderDenied);
             }
             ProviderCallbackOutcome::Authorized { exchange } => {
+                let exchange = *exchange;
                 if exchange.provider != record.provider {
                     return Err(AuthProductError::TokenExchangeFailed);
                 }
@@ -467,7 +468,12 @@ where
                     scopes: exchange.scopes.clone(),
                 };
                 match self
-                    .create_account_with_id(account_id, request.clone(), CasExpectation::Absent)
+                    .create_account_with_id_and_provider_identity(
+                        account_id,
+                        request.clone(),
+                        exchange.provider_identity.clone(),
+                        CasExpectation::Absent,
+                    )
                     .await
                 {
                     Ok(account) => Ok(account.id),
@@ -488,6 +494,7 @@ where
                         let previous_access_secret = account.access_secret.clone();
                         let previous_refresh_secret = account.refresh_secret.clone();
                         update_account_from_request(&mut account, request.clone(), Utc::now())?;
+                        account.provider_identity = exchange.provider_identity.clone();
                         self.write_account(&account, CasExpectation::Version(version))
                             .await?;
                         if let Some(h) = &previous_access_secret

@@ -60,6 +60,8 @@ struct SlackSetupSaveRequest {
     shared_subject_user_id: Option<String>,
     bot_token: Option<String>,
     signing_secret: Option<String>,
+    oauth_client_id: Option<String>,
+    oauth_client_secret: Option<String>,
 }
 
 impl SlackSetupSaveRequest {
@@ -72,6 +74,8 @@ impl SlackSetupSaveRequest {
             shared_subject_user_id: self.shared_subject_user_id,
             bot_token: self.bot_token.map(SecretString::from),
             signing_secret: self.signing_secret.map(SecretString::from),
+            oauth_client_id: self.oauth_client_id,
+            oauth_client_secret: self.oauth_client_secret.map(SecretString::from),
         }
     }
 }
@@ -98,6 +102,9 @@ async fn save_handler(
     }
     if let Some(shared_subject_user_id) = request.shared_subject_user_id.as_deref() {
         scan_route_admin_field(&config, "shared_subject_user_id", shared_subject_user_id)?;
+    }
+    if let Some(oauth_client_id) = request.oauth_client_id.as_deref() {
+        scan_route_admin_field(&config, "oauth_client_id", oauth_client_id)?;
     }
     let setup_service = config.setup_service()?;
     let (previous_setup, saved_setup) = setup_service
