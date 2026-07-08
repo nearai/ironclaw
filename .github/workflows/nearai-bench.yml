@@ -57,6 +57,10 @@ jobs:
       framework: ${{ steps.parse.outputs.framework }}
       head_sha: ${{ steps.parse.outputs.head_sha }}
       authorized: ${{ steps.auth.outputs.authorized }}
+      # "true" only for same-repo PRs. Fork PRs run untrusted code at compile
+      # time (build scripts/proc macros), so we must NOT expose sccache creds to
+      # them — they'd be readable from ~/.config/sccache/config during cargo build.
+      trusted: ${{ steps.parse.outputs.trusted }}
     steps:
       - name: Check commenter has write permission
         id: auth
@@ -145,11 +149,20 @@ jobs:
             gh pr comment "$PR" --repo "$REPO" --body "Unknown suite \`${suite}\`. Available: ${available}"
             exit 0
           fi
-          sha=$(gh pr view "$PR" --repo "$REPO" --json headRefOid -q .headRefOid)
+          info=$(gh pr view "$PR" --repo "$REPO" --json headRefOid,isCrossRepository)
+          sha=$(printf '%s' "$info" | jq -r .headRefOid)
+          # Same-repo PR = trusted; fork PR (isCrossRepository) = untrusted, no
+          # sccache creds (see the `trusted` output rationale above).
+          if [ "$(printf '%s' "$info" | jq -r .isCrossRepository)" = "true" ]; then
+            trusted=false
+          else
+            trusted=true
+          fi
           echo "suite=$suite" >> "$GITHUB_OUTPUT"
           echo "model=$model" >> "$GITHUB_OUTPUT"
           echo "framework=$framework" >> "$GITHUB_OUTPUT"
           echo "head_sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "trusted=$trusted" >> "$GITHUB_OUTPUT"
 
       - name: Acknowledge with 🚀 reaction
         if: steps.auth.outputs.authorized == 'yes' && steps.parse.outputs.suite != ''

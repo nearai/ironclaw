@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 import pytest
 
-from helpers import REBORN_V2_AUTH_TOKEN, sse_stream, wait_for_ready
+from helpers import REBORN_V2_AUTH_TOKEN, wait_for_ready
 
 USER_ID = "reborn-responses-e2e-user"
 PROFILE = "local-dev"
@@ -389,28 +389,28 @@ async def test_reborn_chat_completions_idempotency_replay_and_conflict_served(
 async def test_reborn_chat_completions_streaming_raw_sse_served(
     reborn_responses_server,
 ):
-    async with sse_stream(
-        reborn_responses_server,
-        path="/v1/chat/completions",
-        method="POST",
-        token=REBORN_V2_AUTH_TOKEN,
-        headers={"Content-Type": "application/json"},
-        json={
-            "model": "mock-model",
-            "messages": [{"role": "user", "content": "Say hi"}],
-            "stream": True,
-        },
-    ) as response:
-        assert response.status == 200
-        raw = ""
-        while True:
-            line = (await response.content.readline()).decode(
-                "utf-8",
-                errors="replace",
-            ).rstrip("\r\n")
-            raw += line + "\n"
-            if line == "data: [DONE]":
-                break
+    async with httpx.AsyncClient(timeout=45) as client:
+        stream = client.stream(
+            "POST",
+            f"{reborn_responses_server}/v1/chat/completions",
+            headers={
+                "Accept": "text/event-stream",
+                "Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "mock-model",
+                "messages": [{"role": "user", "content": "Say hi"}],
+                "stream": True,
+            },
+        )
+        async with stream as response:
+            assert response.status_code == 200
+            raw = ""
+            async for line in response.aiter_lines():
+                raw += line + "\n"
+                if line == "data: [DONE]":
+                    break
 
     assert "chat.completion.chunk" in raw
     assert "data: [DONE]" in raw
@@ -431,7 +431,10 @@ async def test_reborn_chat_completions_auth_and_validation_served(
         )
     invalid = await reborn_responses_client.post(
         "/v1/chat/completions",
-        json={"model": "mock-model", "messages": []},
+        json={
+            "model": "mock-model",
+            "messages": [],
+        },
     )
 
     assert unauthenticated.status_code == 401

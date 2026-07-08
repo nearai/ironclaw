@@ -1109,14 +1109,50 @@ fn map_rig_error(model_name: &str, e: impl std::fmt::Display) -> LlmError {
     let msg = e.to_string();
     let lower = msg.to_ascii_lowercase();
 
+    // Context-length is checked first so a 413/context error is never
+    // misread as an auth failure.
     if crate::error::is_context_length_error_message(&lower) {
         let (used, limit) = crate::error::parse_context_token_counts(&lower);
         return LlmError::ContextLengthExceeded { used, limit };
     }
+
+    // Auth failures (bad/expired key, 401/403) must not be treated as
+    // transient: AuthFailed is neither retried nor trips the circuit breaker,
+    // whereas the RequestFailed fallback below is both.
+    if is_auth_error_message(&lower) {
+        return LlmError::AuthFailed {
+            provider: model_name.to_string(),
+        };
+    }
+
     LlmError::RequestFailed {
         provider: model_name.to_string(),
         reason: msg,
     }
+}
+
+/// Detect authentication/authorization failures in a lowercased provider
+/// error message.
+///
+/// Mirrors the shape of [`crate::error::is_context_length_error_message`].
+/// Deliberately conservative: matches robust indicators (HTTP 401/403,
+/// explicit "invalid api key"/"unauthorized"/"authentication" phrasing) and
+/// avoids unrelated substrings such as a bare `"key"`.
+fn is_auth_error_message(lower: &str) -> bool {
+    const AUTH_PATTERNS: &[&str] = &[
+        "401",
+        "403",
+        "unauthorized",
+        "invalid api key",
+        "incorrect api key",
+        "invalid_api_key",
+        "authentication",
+        "permission denied",
+        "missing api key",
+        "no api key",
+    ];
+
+    AUTH_PATTERNS.iter().any(|pattern| lower.contains(pattern))
 }
 
 /// Normalize a tool call name returned by an OpenAI-compatible provider.
@@ -1143,6 +1179,64 @@ mod tests {
     use super::*;
     use rig::completion::CompletionError;
     use rig::streaming::StreamingCompletionResponse;
+
+    #[test]
+    fn map_rig_error_auth_401_unauthorized() {
+        let err = map_rig_error("openai", "HTTP error 401 Unauthorized: invalid api key");
+        assert!(
+            matches!(err, LlmError::AuthFailed { provider } if provider == "openai"),
+            "401/invalid api key should map to AuthFailed, got a different variant",
+        );
+    }
+
+    #[test]
+    fn map_rig_error_auth_invalid_api_key() {
+        let err = map_rig_error("anthropic", "Incorrect API key provided");
+        assert!(
+            matches!(err, LlmError::AuthFailed { provider } if provider == "anthropic"),
+            "invalid/incorrect api key should map to AuthFailed",
+        );
+    }
+
+    #[test]
+    fn map_rig_error_context_length_still_wins_over_auth() {
+        // A context-length error must never be misread as auth.
+        let err = map_rig_error(
+            "openai",
+            "This model's maximum context length is 128000 tokens.",
+        );
+        assert!(
+            matches!(err, LlmError::ContextLengthExceeded { .. }),
+            "context-length error should map to ContextLengthExceeded",
+        );
+    }
+
+    #[test]
+    fn map_rig_error_unrelated_still_request_failed() {
+        let err = map_rig_error("openai", "connection reset by peer");
+        assert!(
+            matches!(err, LlmError::RequestFailed { provider, .. } if provider == "openai"),
+            "unrelated transient error should remain RequestFailed",
+        );
+    }
+
+    #[test]
+    fn is_auth_error_message_conservative() {
+        // Positive indicators
+        assert!(is_auth_error_message("401 unauthorized"));
+        assert!(is_auth_error_message("403 forbidden"));
+        assert!(is_auth_error_message("invalid api key"));
+        assert!(is_auth_error_message("incorrect api key"));
+        assert!(is_auth_error_message("error code: invalid_api_key"));
+        assert!(is_auth_error_message("authentication failed"));
+        assert!(is_auth_error_message("permission denied"));
+        assert!(is_auth_error_message("missing api key"));
+        assert!(is_auth_error_message("no api key was provided"));
+        // Conservative: a bare "key" or unrelated message must not match.
+        assert!(!is_auth_error_message("could not find the key in the map"));
+        assert!(!is_auth_error_message("connection reset by peer"));
+        assert!(!is_auth_error_message("rate limit exceeded"));
+    }
 
     #[test]
     fn parse_models_response_openai_extracts_ids() {

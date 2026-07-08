@@ -1,17 +1,17 @@
 ---
 name: ironclaw-reborn-testing
-description: Use when adding or reviewing tests for Reborn behavior — choosing a test tier, covering a bug fix, testing model/tool-choice behavior, touching tests/support/reborn or tests/fixtures/llm_traces, or when a test needs Postgres, Docker, or a live LLM.
+description: Use when adding or reviewing tests for Reborn behavior — choosing a test tier, covering a bug fix, testing model/tool-choice behavior, touching tests/integration or tests/fixtures/llm_traces, or when a test needs Postgres, Docker, or a live LLM.
 ---
 
 # Reborn Testing
 
-Pick the tier first; everything else follows. The repo's tier knowledge lives in `tests/support/reborn/CLAUDE.md` (396 lines — read it before writing harness tests); this skill is the decision layer plus the traps.
+Pick the tier first; everything else follows. The repo's tier knowledge lives in `tests/integration/CLAUDE.md` (read it before writing harness tests); this skill is the decision layer plus the traps.
 
 ## Tier decision tree
 
 1. **Pure logic, no gated side effect** → unit test in the crate (`mod tests` / crate `tests/`).
-2. **A helper gates a side effect (HTTP, DB write, egress body, approval, dispatch)** → you also need a caller-path test driving the real entry point (`*_handler`, facade method, adapter, coordinator). Helper-only is insufficient — `.claude/rules/testing.md` has the bug catalog. Gold standard: `tests/reborn_group_approvals/scenario_gate_then_approve.rs` asserts the approved write **exists on disk**.
-3. **Whole-turn Reborn behavior (submit → runner → loop → reply), deterministic** → the in-process scripted-model harness (`tests/support/reborn/`, run as `cargo test --test reborn_<name>`, zero setup, offline). **Mock only at the vendor-SDK seam** (`TraceLlm`): the real `ironclaw_llm` decorator chain (retry/failover/circuit-breaker) must execute. Mocking at the gateway seam skips it — that's the gateway-seam replay tier's job (`RebornBinaryE2EHarness` / `RebornTraceReplayModelGateway`), not yours by default.
+2. **A helper gates a side effect (HTTP, DB write, egress body, approval, dispatch)** → you also need a caller-path test driving the real entry point (`*_handler`, facade method, adapter, coordinator). Helper-only is insufficient — `.claude/rules/testing.md` has the bug catalog. Gold standard: `tests/integration/group_approvals/scenario_gate_then_approve.rs` asserts the approved write **exists on disk**.
+3. **Whole-turn Reborn behavior (submit → runner → loop → reply), deterministic** → the in-process scripted-model harness (`tests/integration/`, run as `cargo test --test reborn_integration_<name>`, zero setup, offline). **Mock only at the vendor-SDK seam** (`TraceLlm`): the real `ironclaw_llm` decorator chain (retry/failover/circuit-breaker) must execute. Mocking at the gateway seam skips it — that's the gateway-seam replay tier's job (`RebornBinaryE2EHarness` / `RebornTraceReplayModelGateway`), not yours by default.
 4. **Model tool-choice / request-shape is the behavior under test** → recorded QA fixtures (`tests/fixtures/llm_traces/reborn_qa/` + `tests/reborn_qa_recorded_behavior.rs`: ignored live recorder → hermetic contract assertions → hermetic replay). Fixtures must pass `scripts/ci/check-reborn-qa-fixtures.sh` (secret/PII scrub). Never commit unscrubbed traces.
 5. **Browser-visible** → `tests/e2e/` Playwright (`reborn_v2_*` fixtures for WebChat v2). **Live LLM** → `#[ignore]` canary tier; supplemental only, never the PR gate.
 

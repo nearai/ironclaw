@@ -1,13 +1,16 @@
 #[allow(dead_code)]
-#[path = "support/reborn/mod.rs"]
+#[path = "support/reborn_parity_qa/mod.rs"]
+mod parity_qa_support;
+#[allow(dead_code)]
+#[path = "integration/support/mod.rs"]
 mod reborn_support;
 mod support;
 
 use ironclaw_host_api::CapabilityId;
 use ironclaw_host_runtime::READ_FILE_CAPABILITY_ID;
 use ironclaw_turns::{TurnStatus, run_profile::LoopHostMilestoneKind};
-use reborn_support::{
-    harness::RebornBinaryE2EHarness,
+use parity_qa_support::{
+    binary_e2e::RebornBinaryE2EHarness,
     model_replay::{
         RebornModelReplayStep, RebornScriptedProviderToolCall, RebornTraceReplayModelGateway,
     },
@@ -106,9 +109,13 @@ async fn reborn_trace_unadvertised_capability_is_rejected() {
         .wait_for_status(submitted.run_id, TurnStatus::Failed)
         .await
         .expect("failed run");
+    // WS-3 upgraded the opaque `driver_unavailable` category to a
+    // stage-scoped `host_stage_unavailable_*` category so the failure is
+    // actionable and retryable. An unadvertised capability surfaces as a
+    // model-stage host-unavailable failure.
     assert_eq!(
         state.failure.expect("failure category").category(),
-        "driver_unavailable"
+        "host_stage_unavailable_model"
     );
 
     assert!(

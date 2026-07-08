@@ -49,6 +49,8 @@ pub(super) struct LiveSkillActivationObserver {
 pub(crate) struct LiveProjectionPublisher {
     update_source: Arc<InMemoryProjectionUpdateSource>,
     actor_user_id: UserId,
+    // Shared by publishers from the same projection services so live cursors
+    // stay monotonic across progress, skill, and other projection updates.
     next_sequence: Arc<AtomicU64>,
 }
 

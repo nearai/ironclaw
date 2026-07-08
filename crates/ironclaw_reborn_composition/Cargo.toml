@@ -44,6 +44,10 @@ root-llm-provider = [
 # test-support` (plus whatever feature surface the test crate also
 # requires, e.g. `webui-v2-beta`).
 test-support = ["ironclaw_host_runtime/test-support"]
+# Expose the narrow `extension_installation_store_for_migration` accessor for
+# the v1→Reborn migration tool (`ironclaw_reborn_migration`). Ships zero bytes in
+# a default production binary; mirrors the `test-support` substrate seams.
+migration-support = []
 # Compose the Reborn WebChat v2 HTTP gateway in this crate. Off by
 # default; turning this on pulls in the v2 route crate plus the axum /
 # tower-http middleware stack used by the `webui_serve` module. The
@@ -185,9 +189,14 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 async-trait = "0.1"
+chrono = "0.4"
 hmac = "0.13"
 http = "1"
 http-body-util = "0.1"
+# Admin-user-management e2e test drives the composed app with a real session
+# authenticator so a minted API token can be validated (login-with-token).
+ironclaw_reborn_webui_ingress = { path = "../ironclaw_reborn_webui_ingress" }
+secrecy = { version = "0.10", features = ["serde"] }
 ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime", features = ["test-support"] }

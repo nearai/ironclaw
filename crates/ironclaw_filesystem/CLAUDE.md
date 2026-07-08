@@ -27,8 +27,8 @@ codified in `docs/reborn/2026-05-14-universal-fs-dispatch.md` (the new ADR).
   (`src/types.rs`) — declared up front; mount-time validation refuses a
   backend that cannot serve what a consumer demands.
 - `StorageTxn` / `EventRecord` (`src/backend.rs`) — supporting handle types.
-- `CompositeRootFilesystem` / `MountDescriptor` / `FilesystemCatalog`
-  (`src/catalog.rs`) — the longest-prefix mount table.
+- `CompositeRootFilesystem` / `MountDescriptor` / `PathPlacement`
+  (`src/catalog.rs`) — the longest-prefix mount table and inherent catalog inspection.
 - `ScopedFilesystem` (`src/scoped.rs`) — the invocation-scoped view that
   higher-level stores accept in their constructor. Performs the permission
   check against `MountView` before any backend dispatch.

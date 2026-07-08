@@ -2093,9 +2093,9 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-epoch"
-version = "0.9.18"
+version = "0.9.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+checksum = "2d6914041f254d6e9176c01941b21115dcfb7089e55135a35411081bd106ef3f"
 dependencies = [
  "crossbeam-utils",
 ]
@@ -3926,6 +3926,7 @@ dependencies = [
  "ironclaw_common",
  "ironclaw_conversations",
  "ironclaw_embeddings",
+ "ironclaw_events",
  "ironclaw_extensions",
  "ironclaw_extractors",
  "ironclaw_filesystem",
@@ -3940,12 +3941,14 @@ dependencies = [
  "ironclaw_memory",
  "ironclaw_network",
  "ironclaw_oauth",
+ "ironclaw_outbound",
  "ironclaw_processes",
  "ironclaw_product_adapters",
  "ironclaw_product_workflow",
  "ironclaw_reborn",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",
+ "ironclaw_reborn_openai_compat",
  "ironclaw_reborn_traces",
  "ironclaw_resources",
  "ironclaw_run_state",
@@ -3953,12 +3956,14 @@ dependencies = [
  "ironclaw_safety",
  "ironclaw_secrets",
  "ironclaw_skills",
+ "ironclaw_slack_v2_adapter",
  "ironclaw_threads",
  "ironclaw_triggers",
  "ironclaw_trust",
  "ironclaw_tui",
  "ironclaw_turns",
  "ironclaw_wasm",
+ "ironclaw_webui_v2",
  "json5",
  "jsonschema",
  "jsonwebtoken",
@@ -4303,6 +4308,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "blake3",
+ "deadpool",
  "deadpool-postgres",
  "ironclaw_host_api",
  "ironclaw_observability",
@@ -4948,6 +4954,7 @@ dependencies = [
  "ironclaw_reborn_identity",
  "ironclaw_reborn_openai_compat",
  "ironclaw_reborn_traces",
+ "ironclaw_reborn_webui_ingress",
  "ironclaw_resources",
  "ironclaw_run_state",
  "ironclaw_runtime_policy",
@@ -5047,6 +5054,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_reborn_migration"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "clap",
+ "deadpool-postgres",
+ "ironclaw",
+ "ironclaw_common",
+ "ironclaw_extensions",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_host_runtime",
+ "ironclaw_memory",
+ "ironclaw_memory_native",
+ "ironclaw_reborn_composition",
+ "ironclaw_reborn_identity",
+ "ironclaw_secrets",
+ "ironclaw_threads",
+ "ironclaw_triggers",
+ "libsql",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+ "tracing-subscriber",
+ "ulid",
+ "uuid",
+]
+
+[[package]]
 name = "ironclaw_reborn_openai_compat"
 version = "0.1.0"
 dependencies = [
@@ -5088,6 +5131,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "ironclaw_common",
+ "ironclaw_host_api",
  "ironclaw_llm",
  "ironclaw_safety",
  "jsonwebtoken",
@@ -5150,11 +5194,9 @@ dependencies = [
  "async-trait",
  "chrono",
  "chrono-tz",
- "deadpool-postgres",
  "fs2",
  "ironclaw_filesystem",
  "ironclaw_host_api",
- "libsql",
  "rust_decimal",
  "rust_decimal_macros",
  "serde",
@@ -5162,7 +5204,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "tokio-postgres",
  "tracing",
  "uuid",
  "windows-sys 0.61.2",
@@ -5312,6 +5353,7 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_llm",
  "ironclaw_resources",
+ "ironclaw_secrets",
  "ironclaw_threads",
  "ironclaw_turns",
  "libc",
@@ -5427,6 +5469,7 @@ dependencies = [
  "blake3",
  "chrono",
  "chrono-tz",
+ "futures-util",
  "hex",
  "ironclaw_filesystem",
  "ironclaw_host_api",
@@ -5455,6 +5498,7 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_resources",
  "ironclaw_wasm_limiter",
+ "ironclaw_wasm_sandbox_core",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
