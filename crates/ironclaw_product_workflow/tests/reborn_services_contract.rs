@@ -5071,11 +5071,7 @@ async fn list_automation_dispatches_through_product_facade() {
     let listed = services
         .list_automations(
             caller(),
-            WebUiListAutomationsRequest {
-                limit: Some(10),
-                run_limit: None,
-                ..Default::default()
-            },
+            WebUiListAutomationsRequest::default().set_limit(10),
         )
         .await
         .expect("list automations");
@@ -5820,11 +5816,7 @@ async fn list_automations_rejects_missing_agent_id() {
     let err = services
         .list_automations(
             caller_without_agent(),
-            WebUiListAutomationsRequest {
-                limit: Some(10),
-                run_limit: None,
-                ..Default::default()
-            },
+            WebUiListAutomationsRequest::default().set_limit(10),
         )
         .await
         .expect_err("missing agent id should fail closed");
@@ -5846,11 +5838,7 @@ async fn list_automations_clamps_oversize_limit_before_product_facade() {
     services
         .list_automations(
             caller(),
-            WebUiListAutomationsRequest {
-                limit: Some(u32::MAX),
-                run_limit: None,
-                ..Default::default()
-            },
+            WebUiListAutomationsRequest::default().set_limit(u32::MAX),
         )
         .await
         .expect("list automations");
@@ -5876,11 +5864,7 @@ async fn list_automations_clamps_zero_limit_before_product_facade() {
     services
         .list_automations(
             caller(),
-            WebUiListAutomationsRequest {
-                limit: Some(0),
-                run_limit: None,
-                ..Default::default()
-            },
+            WebUiListAutomationsRequest::default().set_limit(0),
         )
         .await
         .expect("list automations");
@@ -5903,14 +5887,7 @@ async fn list_automations_uses_default_limit_when_omitted() {
     .with_automation_product_facade(automation_facade.clone());
 
     services
-        .list_automations(
-            caller(),
-            WebUiListAutomationsRequest {
-                limit: None,
-                run_limit: None,
-                ..Default::default()
-            },
-        )
+        .list_automations(caller(), WebUiListAutomationsRequest::default())
         .await
         .expect("list automations");
 
@@ -5935,11 +5912,7 @@ async fn list_automations_clamps_oversize_run_limit_before_product_facade() {
     services
         .list_automations(
             caller(),
-            WebUiListAutomationsRequest {
-                limit: None,
-                run_limit: Some(u32::MAX),
-                ..Default::default()
-            },
+            WebUiListAutomationsRequest::default().set_run_limit(u32::MAX),
         )
         .await
         .expect("list automations");
@@ -5965,11 +5938,7 @@ async fn list_automations_allows_zero_run_limit_before_product_facade() {
     services
         .list_automations(
             caller(),
-            WebUiListAutomationsRequest {
-                limit: None,
-                run_limit: Some(0),
-                ..Default::default()
-            },
+            WebUiListAutomationsRequest::default().set_run_limit(0),
         )
         .await
         .expect("list automations");
@@ -5994,10 +5963,7 @@ async fn list_automations_forwards_include_completed_true_to_product_facade() {
     services
         .list_automations(
             caller(),
-            WebUiListAutomationsRequest {
-                include_completed: true,
-                ..Default::default()
-            },
+            WebUiListAutomationsRequest::default().set_include_completed(true),
         )
         .await
         .expect("list automations");
@@ -6020,13 +5986,7 @@ async fn list_automations_forwards_include_completed_false_to_product_facade() {
     .with_automation_product_facade(automation_facade.clone());
 
     services
-        .list_automations(
-            caller(),
-            WebUiListAutomationsRequest {
-                include_completed: false,
-                ..Default::default()
-            },
-        )
+        .list_automations(caller(), WebUiListAutomationsRequest::default())
         .await
         .expect("list automations");
 
@@ -10220,10 +10180,7 @@ async fn list_threads_needs_approval_returns_only_automation_threads_with_pendin
     let response = services
         .list_threads(
             caller,
-            WebUiListThreadsRequest {
-                needs_approval: true,
-                ..WebUiListThreadsRequest::default()
-            },
+            WebUiListThreadsRequest::default().set_needs_approval(true),
         )
         .await
         .expect("list approval threads");
@@ -10267,10 +10224,7 @@ async fn list_threads_needs_approval_queries_pending_with_run_scope_shape() {
     let response = services
         .list_threads(
             caller,
-            WebUiListThreadsRequest {
-                needs_approval: true,
-                ..WebUiListThreadsRequest::default()
-            },
+            WebUiListThreadsRequest::default().set_needs_approval(true),
         )
         .await
         .expect("list approval threads");
@@ -10313,10 +10267,7 @@ async fn list_threads_needs_approval_uses_bounded_run_candidates() {
     let response = services
         .list_threads(
             caller,
-            WebUiListThreadsRequest {
-                needs_approval: true,
-                ..WebUiListThreadsRequest::default()
-            },
+            WebUiListThreadsRequest::default().set_needs_approval(true),
         )
         .await
         .expect("list approval threads");
@@ -10362,10 +10313,7 @@ async fn list_threads_needs_approval_finds_legacy_ownerless_automation_thread() 
     let response = services
         .list_threads(
             caller,
-            WebUiListThreadsRequest {
-                needs_approval: true,
-                ..WebUiListThreadsRequest::default()
-            },
+            WebUiListThreadsRequest::default().set_needs_approval(true),
         )
         .await
         .expect("list approval threads");
@@ -10421,10 +10369,7 @@ async fn list_threads_needs_approval_uses_automation_name_when_thread_title_miss
     let response = services
         .list_threads(
             caller,
-            WebUiListThreadsRequest {
-                needs_approval: true,
-                ..WebUiListThreadsRequest::default()
-            },
+            WebUiListThreadsRequest::default().set_needs_approval(true),
         )
         .await
         .expect("list approval threads");
@@ -10461,11 +10406,9 @@ async fn list_threads_needs_approval_checks_candidate_automation_thread() {
     let response = services
         .list_threads(
             caller,
-            WebUiListThreadsRequest {
-                needs_approval: true,
-                candidate_thread_id: Some(automation_pending_thread_id.as_str().to_string()),
-                ..WebUiListThreadsRequest::default()
-            },
+            WebUiListThreadsRequest::default()
+                .set_needs_approval(true)
+                .set_candidate_thread_id(automation_pending_thread_id.as_str()),
         )
         .await
         .expect("list approval threads");
@@ -10516,14 +10459,7 @@ async fn list_threads_breaks_out_when_cursor_does_not_advance_for_automation_thr
 
     let response = tokio::time::timeout(
         Duration::from_secs(1),
-        services.list_threads(
-            caller,
-            WebUiListThreadsRequest {
-                limit: Some(2),
-                cursor: None,
-                ..WebUiListThreadsRequest::default()
-            },
-        ),
+        services.list_threads(caller, WebUiListThreadsRequest::default().set_limit(2)),
     )
     .await
     .expect("list_threads should terminate when backend cursor stalls")
@@ -10577,14 +10513,7 @@ async fn list_threads_caps_filtered_pages_when_automation_threads_dominate() {
     );
 
     let response = services
-        .list_threads(
-            caller,
-            WebUiListThreadsRequest {
-                limit: Some(1),
-                cursor: None,
-                ..WebUiListThreadsRequest::default()
-            },
-        )
+        .list_threads(caller, WebUiListThreadsRequest::default().set_limit(1))
         .await
         .expect("list threads");
 
@@ -10668,11 +10597,7 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
     let first_page = services
         .list_threads(
             caller.clone(),
-            WebUiListThreadsRequest {
-                limit: Some(1),
-                cursor: None,
-                ..WebUiListThreadsRequest::default()
-            },
+            WebUiListThreadsRequest::default().set_limit(1),
         )
         .await
         .expect("list first visible page");
@@ -10689,11 +10614,9 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
     let second_page = services
         .list_threads(
             caller,
-            WebUiListThreadsRequest {
-                limit: Some(1),
-                cursor: first_page.next_cursor,
-                ..WebUiListThreadsRequest::default()
-            },
+            WebUiListThreadsRequest::default()
+                .set_limit(1)
+                .set_cursor(first_page.next_cursor.expect("first visible page cursor")),
         )
         .await
         .expect("list second visible page");
