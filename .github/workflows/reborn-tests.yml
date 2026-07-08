@@ -234,13 +234,27 @@ jobs:
           echo "needs_webui_node=${needs_webui_node}" >> "${GITHUB_OUTPUT}"
           echo "sccache_dist_enabled=${sccache_dist_enabled}" >> "${GITHUB_OUTPUT}"
 
+      - name: Enable pnpm for setup-node cache
+        if: ${{ steps.bucket-settings.outputs.needs_webui_node == 'true' }}
+        run: corepack enable pnpm
+
       - name: Install Node.js for WebUI bundle builds
         if: ${{ steps.bucket-settings.outputs.needs_webui_node == 'true' }}
         uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
         with:
           node-version: "22"
-          cache: "npm"
-          cache-dependency-path: crates/ironclaw_webui_v2/frontend/package-lock.json
+          cache: "pnpm"
+          cache-dependency-path: crates/ironclaw_webui_v2/frontend/pnpm-lock.yaml
+
+      - name: Enable pnpm
+        if: ${{ steps.bucket-settings.outputs.needs_webui_node == 'true' }}
+        run: corepack enable pnpm
+
+      - name: Install WebUI frontend dependencies
+        if: ${{ steps.bucket-settings.outputs.needs_webui_node == 'true' }}
+        run: |
+          cd crates/ironclaw_webui_v2/frontend
+          pnpm install --frozen-lockfile
 
       - name: Install mold and clang
         run: |
@@ -704,18 +718,14 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Run Reborn settings JS tests
+      - name: Enable pnpm
+        run: corepack enable pnpm
+
+      - name: Run Reborn WebUI frontend tests
         run: |
-          mapfile -t tests < <(
-            find crates/ironclaw_webui_v2/static/js/pages/settings \
-              -type f \( -name '*.test.mjs' -o -name '*.test.js' \) \
-              | sort
-          )
-          if [ "${#tests[@]}" -eq 0 ]; then
-            echo "No Reborn settings JS tests found"
-            exit 1
-          fi
-          node --test "${tests[@]}"
+          cd crates/ironclaw_webui_v2/frontend
+          pnpm install --frozen-lockfile
+          pnpm test
 
   qa-recorded-fixtures:
     name: Reborn QA recorded fixtures

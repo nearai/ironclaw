@@ -677,7 +677,9 @@ impl RebornProductAuthServices {
         let selector: Arc<dyn RuntimeCredentialAccountSelectionService> = Arc::new(
             ProductAuthRuntimeCredentialAccountSelector::new_with_visibility(
                 self.credential_account_record_source(),
-                Arc::new(crate::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy),
+                Arc::new(
+                    crate::extension_host::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy,
+                ),
             ),
         );
         let Some(host_scope) = self.host_managed_nearai_credential_scope.clone() else {

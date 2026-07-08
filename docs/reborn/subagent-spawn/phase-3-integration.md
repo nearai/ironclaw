@@ -9,11 +9,34 @@
 DB-backed store construction, root-provided projection sink wiring, and
 background task spawning.
 
-> **Current implementation note.** Background subagents are disabled pending the
-> durable completion delivery design in
-> [#4147](https://github.com/nearai/ironclaw/issues/4147). The active public
-> `spawn_subagent` surface is blocking-only; background integration and E2E
-> items below are deferred design context, not active behavior.
+> **Status: superseded (2026-07).** This phase's delivery/durability wiring —
+> `RestartReconciler`, the durable tombstone store, the DB-backed gate-
+> resolution store, and the `AutonomousContinuationBudget` (never built; its
+> readiness field is retired and its concern is subsumed by the System-wake
+> streak cap, `thread-harness-design.md` §8.3) — is superseded outright by
+> [`thread-harness-design.md`](./thread-harness-design.md) (canonical), whose
+> §7 staging table (PR1-6) is the current implementation plan for this layer.
+> Sections below that spell out those components (§1, the readiness-graph
+> additions, the reconciler task) are historical context, not tasks to build.
+>
+> **Code citations are point-in-time (2026-05) and have drifted.** The concrete
+> wiring shipped differently from the proposal below: no
+> `subagent_runtime.rs`/`SpawnCapableLoopCapabilityPort` seam was created
+> (assembly landed in `ironclaw_reborn/src/runtime.rs`); the driver/profile ids
+> shipped as `"reborn:planned-subagent"`/`"reborn-planned-subagent"`
+> (`planned_driver_factory.rs`); the capability id is
+> `builtin.spawn_subagent` (`ironclaw_host_runtime/src/first_party_tools/`
+> `spawn_subagent.rs`), not `ironclaw.spawn_subagent`; and the
+> `ProductLiveRuntimeReadinessComponent` subagent variants were never added.
+> Verify every symbol against the live code before implementing from this doc.
+
+> **Current implementation note.** Background subagents are disabled pending
+> the *implementation* of the durable completion delivery layer — the design
+> itself now exists ([`thread-harness-design.md`](./thread-harness-design.md),
+> canonical for [#4147](https://github.com/nearai/ironclaw/issues/4147)). The
+> active public `spawn_subagent` surface is blocking-only; background
+> integration and E2E items below are historical design context, not active
+> behavior.
 
 This is the wiring-and-verification phase. Phases 1 and 2 produce the
 *components* — contracts, the `subagent` `LoopFamily`, the `subagent`
@@ -90,7 +113,7 @@ divergence is logged in the PR description.
 | **P2.C** | `subagent_planned_driver()` building a `PlannedDriver` over the `subagent` family with its own descriptor + checkpoint schema | `planned_driver_factory.rs` |
 | **P2.A** | The spawn-capable capability port type (call it `SpawnCapableLoopCapabilityPort` / its factory) and its `spawn_subagent` capability-id constant | `subagent_runtime.rs` |
 | **P2.B** | prompt composition (direction system message + `## Task` user message) — internal to the capability port / context port; Phase 3 only asserts the *effect* (child sees the goal) |
-| **P1.C** | `SubagentFlavorTable` (built-in static table: `general`, `researcher`), direction `.md` files, the `SubagentGoalStore` trait, the in-process `BoundedSubagentGoalStore`, and the **durable, DB-backed** `DbBackedSubagentGoalStore` (piggybacks on the turn-state DB connection — README §6 "Goal durability (DB-backed)"). Also the `SubagentResultTombstoneStore` trait + DB-backed impl (`DbBackedSubagentResultTombstoneStore`) keyed by child `TurnRunId` (README §6, §7.5). | `subagent_runtime.rs` |
+| **P1.C** | `SubagentFlavorTable` (built-in static table: v1 proposal `general`, `researcher` — historical naming, shipped as `General`/`Explorer`/`Coder`/`Planner`, `thread-harness-design.md` §10 is canonical), direction `.md` files, the `SubagentGoalStore` trait, the in-process `BoundedSubagentGoalStore`, and the **durable, DB-backed** `DbBackedSubagentGoalStore` (piggybacks on the turn-state DB connection — README §6 "Goal durability (DB-backed)"). Also the `SubagentResultTombstoneStore` trait + DB-backed impl (`DbBackedSubagentResultTombstoneStore`) keyed by child `TurnRunId` (README §6, §7.5). | `subagent_runtime.rs` |
 | **P2.D** | `SubagentCompletionObserver` implementing `TurnEventSink`, constructed from `(coordinator, turn_state_store, thread_service, goal_store, tombstone_store, autonomous_continuation_budget, safety_layer)`. The observer (i) emits `AutonomousContinuationStopped` via the existing typed source-log event surface when the budget halts a tree, (ii) writes a `SubagentResultTombstone` via the tombstone store when a child completes terminal mid-cancel. | `subagent_runtime.rs` |
 | **P2.D** | `AutonomousContinuationBudget` type (per-tree wake-turn quota + per-rolling-window rate-limit). Constructed in `subagent_runtime.rs` from configuration; injected into the observer (README §7.4, §8). | `subagent_runtime.rs` |
 
@@ -330,6 +353,11 @@ from the README.
 
 ### 3.6 Product-live readiness for the new parts
 
+> **Superseded (2026-07):** the tombstone-store, restart-reconciler, and
+> autonomous-continuation-budget readiness entries below are for components the
+> canonical design deletes or never builds — `thread-harness-design.md` §3
+> retires them (readiness fields included). Historical context only.
+
 Extend `ProductLiveRuntimeReadinessComponent` for the concrete
 `build_product_live_subagent_runtime` path in
 `crates/ironclaw_reborn_composition`. Do not add root-store-specific fields to
@@ -438,7 +466,9 @@ pub struct SubagentRuntimeParts {
     /// product-live readiness check rejects it.
     pub goal_store_backend: SubagentGoalStoreBackend,
 
-    /// Built-in static flavor table (`general`, `researcher`).
+    /// Built-in static flavor table (v1 proposal: `general`, `researcher` —
+    /// historical naming, shipped as `General`/`Explorer`/`Coder`/`Planner`,
+    /// `thread-harness-design.md` §10 is canonical).
     pub flavor_table: Arc<SubagentFlavorTable>,
 
     /// Caps enforced before `submit_turn` (README §8.2).
@@ -635,7 +665,9 @@ The model-supplied input (resolved through `CapabilityInputRef` →
 ```rust
 #[derive(Debug, Clone, Deserialize)]
 pub struct SpawnSubagentInput {
-    /// Flavor selector — `general` | `researcher`. Resolved against the static
+    /// Flavor selector — v1 proposal: `general` | `researcher` (historical
+    /// naming; shipped set is `general`/`explorer`/`coder`/`planner`, see
+    /// `thread-harness-design.md` §10). Resolved against the static
     /// SubagentFlavorTable; an unknown value is a `Denied` outcome.
     pub agent_type: String,
     /// The child's task. Becomes the child's first USER message under
@@ -1316,6 +1348,11 @@ These are cheaper, non-runner tests that pin the wiring itself.
 ---
 
 ## 7. `production_readiness.rs` additions
+
+> **Superseded (2026-07):** of the five components below, only the goal store
+> and completion observer survive; the tombstone store, restart reconciler, and
+> autonomous-continuation budget (and their readiness fields) are retired by
+> `thread-harness-design.md` §3/§8.3. Historical context only.
 
 The subagent family adds five production-relevant components — the durable goal
 store, durable tombstone store, autonomous-continuation budget, completion

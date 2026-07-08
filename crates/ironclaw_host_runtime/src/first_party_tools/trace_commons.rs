@@ -1,12 +1,14 @@
-//! First-party Trace Commons capabilities: onboard, status, credits, profile token, and profile set.
+//! First-party Trace Commons capabilities: onboard, status, credits, profile token, profile set,
+//! and account login link.
 //!
 //! `trace_commons.onboard` drives the operator-invite enrollment flow.
 //! `trace_commons.status` is a read-only policy inspector.
 //! `trace_commons.credits` is a read-only credit balance reporter.
 //! `trace_commons.profile_token` mints a short-lived public-attribution token.
 //! `trace_commons.profile_set` updates the public community profile directly.
+//! `trace_commons.account_login_link` mints a one-time browser login URL.
 //!
-//! All five are model-visible.
+//! All six are model-visible.
 
 use std::{panic::AssertUnwindSafe, path::PathBuf, sync::Arc};
 
@@ -15,26 +17,37 @@ use futures_util::FutureExt as _;
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
     CapabilityId, EffectKind, NetworkMethod, NetworkPolicy, PermissionMode, ResourceEstimate,
-    ResourceProfile, ResourceScope, RuntimeDispatchErrorKind, RuntimeHttpEgress,
-    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeKind,
+    ResourceProfile, ResourceScope, RuntimeCredentialInjection, RuntimeCredentialSource,
+    RuntimeCredentialTarget, RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeHttpEgressError,
+    RuntimeHttpEgressRequest, RuntimeKind, SecretHandle,
 };
 use ironclaw_reborn_traces::contribution::{
-    COMMUNITY_PROFILE_BIO_MAX_BYTES, COMMUNITY_PROFILE_HANDLE_MAX_CHARS,
-    COMMUNITY_PROFILE_HANDLE_MIN_CHARS, ContributionHttpError, ContributionHttpMethod,
-    ContributionHttpRequest, ContributionHttpResponse, ContributionHttpSink,
+    AccountLoginLink, AccountLoginLinkError, COMMUNITY_PROFILE_BIO_MAX_BYTES,
+    COMMUNITY_PROFILE_HANDLE_MAX_CHARS, COMMUNITY_PROFILE_HANDLE_MIN_CHARS, CommunityProfileError,
+    ContributionHttpError, ContributionHttpMethod, ContributionHttpRequest,
+    ContributionHttpResponse, ContributionHttpSink, ProfileAttributionError,
     ProfileAttributionToken, StandingTraceContributionPolicy, TraceCreditReport,
-    TraceUploadAuthMode, mint_profile_attribution_token_for_scope_via_sink,
-    read_trace_policy_for_scope, set_community_profile_for_scope_via_sink,
-    trace_contribution_dir_for_scope, trace_scope_key,
+    TraceUploadAuthMode, mint_account_login_link_via_sink,
+    mint_profile_attribution_token_for_user_via_sink, resolve_trace_credentials,
+    set_community_profile_for_user_via_sink, trace_contribution_dir_for_scope, trace_scope_key,
 };
 use ironclaw_reborn_traces::onboarding::{
     OnboardConsents, OnboardError, OnboardHttpResponse, OnboardOutcome, OnboardingHttpSink,
     protocol::OnboardErrorCode,
 };
+use ironclaw_secrets::SecretMaterial;
 use serde_json::{Value, json};
 
 use crate::FirstPartyCapabilityError;
 use crate::FirstPartyCapabilityRequest;
+use crate::RuntimeSecretMaterialStager;
+
+/// Secret handle under which the host-minted Trace Commons bearer token is
+/// staged for one-shot credential injection into the outbound Authorization
+/// header. The token is delivered through the staged credential-injection path
+/// (stager + `apply_credential_injections`), never as a raw request header, so
+/// the egress sensitive-header guard still applies to model-supplied headers.
+const TRACE_COMMONS_BEARER_HANDLE: &str = "trace_commons_bearer";
 
 /// Maximum onboarding response body accepted (64 KiB), mirroring the cap the
 /// onboarding module enforces for its default sink.
@@ -53,6 +66,8 @@ pub const TRACE_COMMONS_STATUS_CAPABILITY_ID: &str = "builtin.trace_commons.stat
 pub const TRACE_COMMONS_CREDITS_CAPABILITY_ID: &str = "builtin.trace_commons.credits";
 pub const TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID: &str = "builtin.trace_commons.profile_token";
 pub const TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID: &str = "builtin.trace_commons.profile_set";
+pub const TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID: &str =
+    "builtin.trace_commons.account_login_link";
 
 // ── Manifest helpers ─────────────────────────────────────────────────────────
 
@@ -171,6 +186,29 @@ pub(super) fn profile_set_manifest() -> Result<CapabilityManifest, ExtensionErro
             },
             hard_ceiling: None,
         }),
+    )
+}
+
+pub(super) fn account_login_link_manifest() -> Result<CapabilityManifest, ExtensionError> {
+    first_party_capability_manifest(
+        TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
+        "Mint a one-time Trace Commons browser login link so the user can manage their \
+         contributor account/profile in the web UI. Consent-gated: only call with \
+         confirmed=true after the user explicitly asks. Routes through host network egress.",
+        // ReadFilesystem: the dispatch reads local enrollment/policy/device-key
+        // state before egress (mirrors profile_token's effect set).
+        // WriteFilesystem: the minted one-time URL is persisted to a local
+        // delivery file (never returned on the model-visible surface), so the
+        // manifest must declare that credential-file write for policy/approval
+        // surfaces.
+        vec![
+            EffectKind::ReadFilesystem,
+            EffectKind::WriteFilesystem,
+            EffectKind::Network,
+            EffectKind::ExternalWrite,
+        ],
+        PermissionMode::Ask,
+        resource_profile(),
     )
 }
 
@@ -351,6 +389,10 @@ struct HostEgressContributionSink {
     egress: Arc<dyn RuntimeHttpEgress>,
     scope: ResourceScope,
     capability_id: CapabilityId,
+    /// One-shot stager used to deliver the host-minted Trace Commons bearer
+    /// through the egress credential-injection path. `None` only on
+    /// non-network-egress invocations, where a bearer would never be present.
+    secret_stager: Option<RuntimeSecretMaterialStager>,
 }
 
 #[async_trait]
@@ -360,18 +402,70 @@ impl ContributionHttpSink for HostEgressContributionSink {
         req: ContributionHttpRequest,
     ) -> Result<ContributionHttpResponse, ContributionHttpError> {
         let method = match req.method {
+            ContributionHttpMethod::Get => NetworkMethod::Get,
             ContributionHttpMethod::Post => NetworkMethod::Post,
             ContributionHttpMethod::Put => NetworkMethod::Put,
             ContributionHttpMethod::Delete => NetworkMethod::Delete,
         };
-        let mut headers = vec![
+        let headers = vec![
             ("accept".to_string(), "application/json".to_string()),
             ("content-type".to_string(), "application/json".to_string()),
         ];
-        // Only attach the bearer header when a token is present; the raw token
-        // never appears in any error path below.
+        // The host-minted bearer is a credential: it MUST flow through the
+        // staged credential-injection path, never as a raw Authorization
+        // header. Writing it into `headers` here would (a) be denied by the
+        // egress sensitive-header guard and (b) bypass the leased-secret
+        // redaction the injection path provides. Stage the token one-shot,
+        // then declare a `StagedObligation` injection targeting the
+        // Authorization header; `apply_credential_injections` consumes it
+        // after the guard runs.
+        let mut credential_injections = Vec::new();
         if let Some(token) = req.bearer_token {
-            headers.push(("authorization".to_string(), format!("Bearer {token}")));
+            let Some(secret_stager) = self.secret_stager.as_ref() else {
+                return Err(ContributionHttpError::new(
+                    "trace bearer staging is unavailable",
+                ));
+            };
+            // Per-request unique handle: the injection store is a HashMap keyed
+            // by (scope, capability, handle) with overwrite-on-insert, so a
+            // constant handle would let two concurrent same-scope Trace Commons
+            // egresses race — one staging over the other's bearer before it is
+            // consumed. A uuid suffix makes every staged bearer key distinct.
+            let handle_name = format!("{TRACE_COMMONS_BEARER_HANDLE}-{}", uuid::Uuid::new_v4());
+            let handle = SecretHandle::new(&handle_name).map_err(|error| {
+                // Safe to log the cause: the handle name is composed from a
+                // compile-time constant plus a uuid, so this validation error
+                // carries no secret/path — it only fires if that scheme is wrong.
+                tracing::debug!(%error, "invalid trace bearer handle");
+                ContributionHttpError::new("invalid trace bearer handle")
+            })?;
+            secret_stager
+                .stage_secret_material_once(
+                    &self.scope,
+                    &self.capability_id,
+                    &handle,
+                    SecretMaterial::from(token),
+                )
+                .await
+                .map_err(|_error| {
+                    // This is the bearer-material path: the host-runtime logging
+                    // guideline forbids emitting backend/storage error detail
+                    // (`_error` may carry secret-store internals). Log only the
+                    // safe fact of failure; the wire message stays sanitized.
+                    tracing::debug!("trace bearer staging failed");
+                    ContributionHttpError::new("trace bearer could not be staged")
+                })?;
+            credential_injections.push(RuntimeCredentialInjection {
+                handle,
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: self.capability_id.clone(),
+                },
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: true,
+            });
         }
         let request = RuntimeHttpEgressRequest {
             runtime: RuntimeKind::FirstParty,
@@ -385,7 +479,7 @@ impl ContributionHttpSink for HostEgressContributionSink {
             // the grant obligation for this scope/capability; this request field
             // is the ignored fallback on that path (matches http::dispatch).
             network_policy: NetworkPolicy::default(),
-            credential_injections: Vec::new(),
+            credential_injections,
             response_body_limit: Some(req.response_body_limit),
             // The response is parsed inline, never persisted to a mount.
             save_body_to: None,
@@ -559,26 +653,37 @@ may be missing or malformed. Re-run onboarding with a fresh invite.",
 pub(super) async fn dispatch_status(
     request: &FirstPartyCapabilityRequest,
 ) -> Result<Value, FirstPartyCapabilityError> {
-    let scope = trace_scope_key(
-        request.scope.tenant_id.as_str(),
-        request.scope.user_id.as_str(),
-    );
-    // A MISSING policy is already softened to the not-enrolled default inside
-    // `read_trace_policy_for_scope`, so an `Err` here is a genuine read/parse
-    // failure (unreadable or corrupt policy file). Do NOT mask that as
-    // `enrolled: false` — a user who IS enrolled would be told they are not.
-    // Report the read failure honestly without asserting an enrollment state.
-    let policy = match read_trace_policy_for_scope(Some(scope.as_str())) {
-        Ok(p) => p,
+    // Resolve the caller's effective enrollment — personal-invite OR the
+    // admin-provisioned instance enrollment — so an instance-only contributor is
+    // reported as enrolled (with the instance policy) rather than not-enrolled.
+    // A MISSING policy is already softened to the not-enrolled default inside the
+    // resolver's policy reads, so an `Err` here is a genuine read/parse failure
+    // (unreadable or corrupt policy file). Do NOT mask that as `enrolled: false`
+    // — a user who IS enrolled would be told they are not. Report the read
+    // failure honestly without asserting an enrollment state.
+    let resolution = match resolve_trace_credentials(
+        &request.scope.tenant_id,
+        &request.scope.user_id,
+    ) {
+        Ok(resolution) => resolution,
         Err(error) => {
-            tracing::debug!(%error, "trace commons status: local policy read failed");
+            // The resolver error can embed the policy file's host path; the
+            // host_runtime guideline forbids raw paths in logs. Log only the
+            // safe fact, matching the sibling dispatchers.
+            let _ = error;
+            tracing::debug!("trace commons status: local policy read failed");
             return Ok(json!({
                 "error_code": "PolicyReadFailed",
                 "message": "Could not read local Trace Commons enrollment state; the policy file may be unreadable or corrupt."
             }));
         }
     };
-    Ok(format_status(&policy))
+    match resolution {
+        Some(resolution) => Ok(format_status(&resolution.policy)),
+        // Enrolled in neither personal nor instance: report the not-enrolled
+        // default (enrolled: false), matching the prior missing-policy behavior.
+        None => Ok(format_status(&StandingTraceContributionPolicy::default())),
+    }
 }
 
 fn format_status(policy: &StandingTraceContributionPolicy) -> Value {
@@ -687,15 +792,21 @@ pub(super) async fn dispatch_profile_token(
     // must get NotEnrolled guidance, not a NetworkDenied miswiring error. This
     // mirrors dispatch_profile_set's ordering (enrollment check precedes the
     // network call). Egress extraction below is the host-runtime miswiring
-    // guard for the confirmed+enrolled mint path.
-    match read_trace_policy_for_scope(Some(scope.as_str())) {
-        Ok(policy) if policy.enabled => {}
-        Ok(_) => {
+    // guard for the confirmed+enrolled mint path. Route through the shared
+    // resolver so instance-only contributors (personal policy absent, instance
+    // policy enabled) pass the gate instead of being falsely rejected.
+    match resolve_trace_credentials(&request.scope.tenant_id, &request.scope.user_id) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
             return Ok(profile_token_error_value(
-                "not enrolled in Trace Commons".to_string(),
+                &ProfileAttributionError::NotEnrolled,
             ));
         }
-        Err(error) => return Ok(profile_token_error_value(error.to_string())),
+        Err(error) => {
+            return Ok(profile_token_error_value(
+                &ProfileAttributionError::PolicyRead(error),
+            ));
+        }
     }
 
     // The agent profile_token path MUST route through host network egress — it
@@ -712,18 +823,27 @@ pub(super) async fn dispatch_profile_token(
         egress,
         scope: request.scope.clone(),
         capability_id: request.capability_id.clone(),
+        secret_stager: request.services.runtime_secret_material_stager.clone(),
     };
-    match mint_profile_attribution_token_for_scope_via_sink(Some(scope.as_str()), &sink).await {
+    match mint_profile_attribution_token_for_user_via_sink(
+        &request.scope.tenant_id,
+        &request.scope.user_id,
+        &sink,
+    )
+    .await
+    {
         Ok(token) => match persist_profile_token(&scope, &token) {
             Ok(_path) => Ok(format_profile_token(&token)),
             Err(error) => {
-                tracing::debug!(%error, "failed to persist Trace Commons profile token");
+                // Filesystem write error can carry host paths; log only the fact.
+                let _ = error;
+                tracing::debug!("failed to persist Trace Commons profile token");
                 Ok(profile_token_error_value(
-                    "could not write the profile token to local state".to_string(),
+                    &ProfileAttributionError::LocalStateWrite,
                 ))
             }
         },
-        Err(error) => Ok(profile_token_error_value(error.to_string())),
+        Err(error) => Ok(profile_token_error_value(&error)),
     }
 }
 
@@ -803,37 +923,29 @@ fn format_profile_token(token: &ProfileAttributionToken) -> Value {
     })
 }
 
-fn profile_token_error_value(error: String) -> Value {
-    let (error_code, message) = if error.contains("not enrolled in Trace Commons") {
-        (
+fn profile_token_error_value(error: &ProfileAttributionError) -> Value {
+    // Typed variants → public `error_code`; no substring matching on wording.
+    let (error_code, message) = match error {
+        ProfileAttributionError::NotEnrolled => (
             "NotEnrolled",
             "Trace Commons enrollment was not found for this user. Onboard with the operator invite link first.",
-        )
-    } else if error.contains("could not read policy") {
-        (
+        ),
+        ProfileAttributionError::PolicyRead(_) => (
             "PolicyReadFailed",
             "Could not read local Trace Commons enrollment state; the policy file may be unreadable or corrupt.",
-        )
-    } else if error.contains("issuer URL is not configured") {
-        (
-            "IssuerNotConfigured",
-            "Trace Commons enrollment is missing the upload-claim issuer URL. Re-run onboarding with a fresh invite.",
-        )
-    } else if error.contains("device key") {
-        (
-            "DeviceKeyUnavailable",
-            "Trace Commons device-key state is incomplete. Re-run onboarding with a fresh invite.",
-        )
-    } else if error.contains("refused") {
-        (
-            "IssuerRefused",
-            "The Trace Commons issuer refused to mint a profile token. Ask the operator to check invite/device-key status.",
-        )
-    } else {
-        (
+        ),
+        ProfileAttributionError::EnrollmentIncomplete(_) => (
+            "EnrollmentIncomplete",
+            "Trace Commons enrollment is incomplete (missing upload-claim issuer URL or device-key state). Re-run onboarding with a fresh invite.",
+        ),
+        ProfileAttributionError::Backend(_) => (
             "ProfileTokenMintFailed",
             "Could not mint a Trace Commons profile token. Check enrollment status and retry.",
-        )
+        ),
+        ProfileAttributionError::LocalStateWrite => (
+            "LocalStateWriteFailed",
+            "Could not write the profile token to local state.",
+        ),
     };
     json!({
         "minted": false,
@@ -864,18 +976,21 @@ pub(super) async fn dispatch_profile_set(
         }));
     }
 
-    let scope = trace_scope_key(
-        request.scope.tenant_id.as_str(),
-        request.scope.user_id.as_str(),
-    );
-    match read_trace_policy_for_scope(Some(scope.as_str())) {
-        Ok(policy) if policy.enabled => {}
-        Ok(_) => {
+    // Route the enrollment gate through the shared resolver so instance-only
+    // contributors (personal policy absent, instance policy enabled) pass
+    // instead of being falsely rejected as not enrolled.
+    match resolve_trace_credentials(&request.scope.tenant_id, &request.scope.user_id) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
             return Ok(profile_set_error_value(
-                "not enrolled in Trace Commons".to_string(),
+                &CommunityProfileError::Attribution(ProfileAttributionError::NotEnrolled),
             ));
         }
-        Err(error) => return Ok(profile_set_error_value(error.to_string())),
+        Err(error) => {
+            return Ok(profile_set_error_value(
+                &CommunityProfileError::Attribution(ProfileAttributionError::PolicyRead(error)),
+            ));
+        }
     }
 
     // The agent profile_set path MUST route through host network egress — it
@@ -894,9 +1009,11 @@ pub(super) async fn dispatch_profile_set(
         egress,
         scope: request.scope.clone(),
         capability_id: request.capability_id.clone(),
+        secret_stager: request.services.runtime_secret_material_stager.clone(),
     };
-    match set_community_profile_for_scope_via_sink(
-        Some(scope.as_str()),
+    match set_community_profile_for_user_via_sink(
+        &request.scope.tenant_id,
+        &request.scope.user_id,
         &input.display_handle,
         input.bio.as_deref(),
         &sink,
@@ -904,7 +1021,7 @@ pub(super) async fn dispatch_profile_set(
     .await
     {
         Ok(()) => Ok(profile_set_success_value(&input)),
-        Err(error) => Ok(profile_set_error_value(error.to_string())),
+        Err(error) => Ok(profile_set_error_value(&error)),
     }
 }
 
@@ -920,46 +1037,281 @@ fn profile_set_success_value(input: &ProfileSetToolInput) -> Value {
     })
 }
 
-fn profile_set_error_value(error: String) -> Value {
-    let (error_code, message) = if error.contains("not enrolled in Trace Commons") {
-        (
-            "NotEnrolled",
-            "Trace Commons enrollment was not found for this user. Onboard with the operator invite link first.",
-        )
-    } else if error.contains("could not read policy") {
-        (
-            "PolicyReadFailed",
-            "Could not read local Trace Commons enrollment state; the policy file may be unreadable or corrupt.",
-        )
-    } else if error.contains("community profile handle") || error.contains("community profile bio")
-    {
-        (
+fn profile_set_error_value(error: &CommunityProfileError) -> Value {
+    // Typed variants → public `error_code`; no substring matching on wording.
+    let (error_code, message) = match error {
+        CommunityProfileError::InvalidProfile(_) => (
             "InvalidProfile",
             "Choose a pseudonymous handle 3-32 characters long using ASCII letters, digits, '-' or '_'. Bio must be at most 280 bytes.",
-        )
-    } else if error.contains("issuer URL is not configured") {
-        (
-            "IssuerNotConfigured",
-            "Trace Commons enrollment is missing the upload-claim issuer URL. Re-run onboarding with a fresh invite.",
-        )
-    } else if error.contains("device key") {
-        (
-            "DeviceKeyUnavailable",
-            "Trace Commons device-key state is incomplete. Re-run onboarding with a fresh invite.",
-        )
-    } else if error.contains("refused") || error.contains("rejected") {
-        (
-            "IssuerRefused",
-            "Trace Commons refused the public profile update. Ask the operator to check invite/device-key status.",
-        )
-    } else {
-        (
+        ),
+        CommunityProfileError::Attribution(ProfileAttributionError::NotEnrolled) => (
+            "NotEnrolled",
+            "Trace Commons enrollment was not found for this user. Onboard with the operator invite link first.",
+        ),
+        CommunityProfileError::Attribution(ProfileAttributionError::PolicyRead(_)) => (
+            "PolicyReadFailed",
+            "Could not read local Trace Commons enrollment state; the policy file may be unreadable or corrupt.",
+        ),
+        CommunityProfileError::Attribution(ProfileAttributionError::EnrollmentIncomplete(_)) => (
+            "EnrollmentIncomplete",
+            "Trace Commons enrollment is incomplete (missing upload-claim issuer URL or device-key state). Re-run onboarding with a fresh invite.",
+        ),
+        // profile_set does not persist local state; `LocalStateWrite` cannot
+        // occur here, but the match stays exhaustive over the shared enum.
+        CommunityProfileError::Attribution(
+            ProfileAttributionError::Backend(_) | ProfileAttributionError::LocalStateWrite,
+        ) => (
             "ProfileSetFailed",
             "Could not update the Trace Commons public profile. Check enrollment status and retry.",
-        )
+        ),
     };
     json!({
         "updated": false,
+        "error_code": error_code,
+        "message": message,
+    })
+}
+
+// ── Account login link dispatch ───────────────────────────────────────────────
+
+pub(super) async fn dispatch_account_login_link(
+    request: &FirstPartyCapabilityRequest,
+) -> Result<Value, FirstPartyCapabilityError> {
+    // Consent gate: minting a one-time login link is an account-access action.
+    // The runtime approval gate (PermissionMode::Ask) can be auto-approved in
+    // local-yolo, so this in-band confirmed=true check is the hard fail-closed
+    // boundary — mirroring dispatch_profile_token / dispatch_onboard. Never
+    // mint a login link without explicit per-conversation confirmation.
+    let confirmed = request
+        .input
+        .get("confirmed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !confirmed {
+        return Ok(json!({
+            "minted": false,
+            "consent_required": true,
+            "message": "Minting a Trace Commons browser login link opens account access for \
+        the user. Confirm with the user that they explicitly want to log in to their Trace \
+        Commons account, then call again with confirmed=true."
+        }));
+    }
+
+    let scope = trace_scope_key(
+        request.scope.tenant_id.as_str(),
+        request.scope.user_id.as_str(),
+    );
+
+    // Enrollment pre-check BEFORE extracting host egress: a not-enrolled user
+    // must get NotEnrolled guidance, not a NetworkDenied miswiring error.
+    // Mirrors dispatch_profile_token's ordering. Route through the shared
+    // resolver so instance-only contributors pass the gate — matching
+    // `mint_account_login_link_via_sink`, which already resolves instance
+    // enrollment via `resolve_trace_credentials`.
+    match resolve_trace_credentials(&request.scope.tenant_id, &request.scope.user_id) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return Ok(account_login_link_error_value(
+                &AccountLoginLinkError::NotEnrolled,
+            ));
+        }
+        Err(error) => {
+            return Ok(account_login_link_error_value(
+                &AccountLoginLinkError::PolicyRead(error),
+            ));
+        }
+    }
+
+    // The agent account_login_link path MUST route through host network egress
+    // — it must never silently fall back to a direct client (mirrors
+    // dispatch_onboard / dispatch_profile_token).
+    let egress = match request.services.runtime_http_egress.as_ref() {
+        Some(egress) => egress.clone(),
+        None => {
+            return Err(FirstPartyCapabilityError::new(
+                RuntimeDispatchErrorKind::NetworkDenied,
+            ));
+        }
+    };
+    let sink = HostEgressContributionSink {
+        egress,
+        scope: request.scope.clone(),
+        capability_id: request.capability_id.clone(),
+        secret_stager: request.services.runtime_secret_material_stager.clone(),
+    };
+    match mint_account_login_link_via_sink(&request.scope.tenant_id, &request.scope.user_id, &sink)
+        .await
+    {
+        Ok(link) => {
+            // The persist path is blocking fs (mkdir/write/fsync/rename); keep it
+            // off the async worker via spawn_blocking so we never stall a Tokio
+            // thread on disk I/O.
+            let scope_owned = scope.clone();
+            let link_for_persist = link.clone();
+            let persisted = tokio::task::spawn_blocking(move || {
+                persist_account_login_link(&scope_owned, &link_for_persist)
+            })
+            .await;
+            match persisted {
+                Ok(Ok(_)) => Ok(format_account_login_link(&link)),
+                Ok(Err(error)) => {
+                    // Filesystem errors can carry raw host paths (mkdir/write/
+                    // fsync/rename); the host_runtime guideline forbids that in
+                    // logs. Log only the safe fact; message stays sanitized.
+                    let _ = error;
+                    tracing::debug!("failed to persist Trace Commons account login link");
+                    Ok(account_login_link_error_value(
+                        &AccountLoginLinkError::LocalStateWrite,
+                    ))
+                }
+                Err(join_error) => {
+                    let _ = join_error;
+                    tracing::debug!("account login link persist task failed");
+                    Ok(account_login_link_error_value(
+                        &AccountLoginLinkError::LocalStateWrite,
+                    ))
+                }
+            }
+        }
+        Err(error) => Ok(account_login_link_error_value(&error)),
+    }
+}
+
+/// Write the one-time login URL to a private local file in the scope's local
+/// state dir (created with mode `0600` on Unix; default inherited permissions
+/// elsewhere) and return its path. The URL is a code-bearing account-access
+/// credential: it must NOT be returned in the model-visible tool result (that
+/// copies it into the LLM transcript/history and any downstream persistence).
+/// Delivering it out-of-band via a private file keeps the secret off the model
+/// surface while the local browser-login flow can still read it. Mirrors
+/// `persist_profile_token`.
+fn persist_account_login_link(scope: &str, link: &AccountLoginLink) -> std::io::Result<PathBuf> {
+    use std::io::Write as _;
+
+    let dir = trace_contribution_dir_for_scope(Some(scope));
+    std::fs::create_dir_all(&dir)?;
+    // Each mint gets its own final file (uuid suffix): two concurrent same-scope
+    // mints both return minted=true, so a shared fixed path would let the later
+    // rename silently clobber the earlier caller's only copy of its one-time
+    // URL. Readers list `account_login_link.*.url` files rather than assuming a
+    // fixed name. Stale siblings are pruned best-effort below (the links
+    // themselves are one-time-use and expire server-side).
+    let mint_id = uuid::Uuid::new_v4();
+    let path = dir.join(format!("account_login_link.{mint_id}.url"));
+    prune_stale_account_login_links(&dir);
+
+    // Atomic write: a unique temp file (per-write uuid name so concurrent mints
+    // don't race on a fixed temp path; created 0600 on Unix), fsync, then rename
+    // onto the final path — the same temp+rename credential-write discipline as
+    // the profile token, so a reader only ever sees a complete URL.
+    let temp_path = dir.join(format!("account_login_link.{mint_id}.tmp"));
+    let write_temp = || -> std::io::Result<()> {
+        #[cfg(unix)]
+        let mut file = {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temp_path)?
+        };
+        #[cfg(not(unix))]
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)?;
+        file.write_all(link.url.as_bytes())?;
+        file.sync_all()
+    };
+    if let Err(error) = write_temp() {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error);
+    }
+    if let Err(error) = std::fs::rename(&temp_path, &path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error);
+    }
+    Ok(path)
+}
+
+/// Best-effort removal of expired login-link delivery files (and orphaned temp
+/// files) older than one hour. The minted links are one-time-use and expire
+/// server-side well within that window, so anything older is dead credential
+/// material that should not accumulate on disk. Errors are ignored: pruning
+/// must never fail a fresh mint.
+fn prune_stale_account_login_links(dir: &std::path::Path) {
+    const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let is_link_file = name.starts_with("account_login_link.")
+            && (name.ends_with(".url") || name.ends_with(".tmp"));
+        if !is_link_file {
+            continue;
+        }
+        let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        if now.duration_since(modified).is_ok_and(|age| age > MAX_AGE) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+fn format_account_login_link(link: &AccountLoginLink) -> Value {
+    json!({
+        "minted": true,
+        "account_id": link.account_id,
+        // The one-time login URL is deliberately NOT included here — it is a
+        // code-bearing account-access credential and must not enter the model
+        // transcript. It is persisted as a private local file (0600 on Unix) for
+        // out-of-band retrieval by the local Trace Commons UI/CLI; `link_delivery`
+        // is an opaque marker (never a host path, which is itself a host detail
+        // that must not cross the
+        // model/user-visible surface).
+        "link_delivery": "local_private_account_login_link_file",
+        "message": "A one-time Trace Commons browser login link was minted but is not shown here \
+    because it is an account-access credential and must not appear in the conversation. Use the \
+    local Trace Commons UI or CLI to open the private account-login-link file in your browser. \
+    It is one-time-use and expires shortly.",
+    })
+}
+
+fn account_login_link_error_value(error: &AccountLoginLinkError) -> Value {
+    // The public `error_code` contract is derived from typed variants, not from
+    // substring-matching upstream error wording.
+    let (error_code, message) = match error {
+        AccountLoginLinkError::NotEnrolled => (
+            "NotEnrolled",
+            "Trace Commons enrollment was not found for this user. Onboard with the operator invite link first.",
+        ),
+        AccountLoginLinkError::PolicyRead(_) => (
+            "PolicyReadFailed",
+            "Could not read local Trace Commons enrollment state; the policy file may be unreadable or corrupt.",
+        ),
+        AccountLoginLinkError::EnrollmentIncomplete(_) => (
+            "EnrollmentIncomplete",
+            "Trace Commons enrollment is incomplete (missing upload-claim issuer URL or device-key state). Re-run onboarding with a fresh invite.",
+        ),
+        AccountLoginLinkError::IssuerRefused { .. } => (
+            "IssuerRefused",
+            "The Trace Commons issuer refused to mint a login link. Ask the operator to check account/device-key status.",
+        ),
+        AccountLoginLinkError::Backend(_) => (
+            "AccountLoginLinkFailed",
+            "Could not mint a Trace Commons account login link. Check enrollment status and retry.",
+        ),
+        AccountLoginLinkError::LocalStateWrite => (
+            "LocalStateWriteFailed",
+            "Could not write the account login link to local state.",
+        ),
+    };
+    json!({
+        "minted": false,
         "error_code": error_code,
         "message": message,
     })
@@ -1011,6 +1363,7 @@ mod tests {
                 filesystem: Arc::new(LocalFilesystem::new()),
                 runtime_http_egress: None,
                 tool_call_http_egress: None,
+                runtime_secret_material_stager: None,
                 process: Arc::new(NoopProcessPort),
                 secret_store: None,
                 audit_sink: None,
@@ -1347,14 +1700,20 @@ mod tests {
 
     #[test]
     fn profile_token_error_maps_missing_enrollment_without_raw_error() {
-        let v =
-            profile_token_error_value("not enrolled in Trace Commons - onboard first".to_string());
+        assert_eq!(
+            profile_token_error_value(&ProfileAttributionError::NotEnrolled)["error_code"],
+            json!("NotEnrolled")
+        );
+        // The source cause is carried in the variant but the mapper emits only a
+        // static message — the raw error text never reaches the model surface.
+        let v = profile_token_error_value(&ProfileAttributionError::PolicyRead(
+            std::io::Error::other("secret path /home/x - onboard first").into(),
+        ));
         assert_eq!(v["minted"], json!(false));
-        assert_eq!(v["error_code"], json!("NotEnrolled"));
-        let serialized = serde_json::to_string(&v).unwrap();
+        assert_eq!(v["error_code"], json!("PolicyReadFailed"));
         assert!(
-            !serialized.contains("onboard first"),
-            "raw anyhow text should not be copied into model-visible output"
+            !serde_json::to_string(&v).unwrap().contains("onboard first"),
+            "raw cause text must not be copied into model-visible output"
         );
     }
 
@@ -1438,9 +1797,9 @@ mod tests {
 
     #[test]
     fn profile_set_error_maps_validation_without_raw_error() {
-        let v = profile_set_error_value(
+        let v = profile_set_error_value(&CommunityProfileError::InvalidProfile(
             "community profile handle must be at least 3 characters".to_string(),
-        );
+        ));
         assert_eq!(v["updated"], json!(false));
         assert_eq!(v["error_code"], json!("InvalidProfile"));
         let serialized = serde_json::to_string(&v).unwrap();

@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_host_api::VirtualPath;
@@ -10,6 +10,8 @@ use crate::db::{
     is_not_found, libsql_db_error, not_found, page_offset_to_i64, record_version_from_i64,
     record_version_to_i64, sql_index_name, system_time_from_unix_seconds, virtual_path_prefixes,
 };
+#[cfg(feature = "libsql")]
+use crate::libsql_pool::{LibSqlPool, PooledLibSqlConnection, build_libsql_pool};
 use crate::vector::{cosine_similarity, decode_embedding_blob};
 use crate::{
     BackendCapabilities, Capability, CasExpectation, ContentType, DirEntry, Entry, FileStat,
@@ -20,61 +22,15 @@ use crate::{
 #[cfg(feature = "libsql")]
 /// libSQL-backed [`RootFilesystem`] storing file contents by virtual path.
 pub struct LibSqlRootFilesystem {
-    db: Arc<libsql::Database>,
+    pool: LibSqlPool,
 }
-
-#[cfg(feature = "libsql")]
-const LIBSQL_CONNECT_ATTEMPTS: u32 = 3;
-#[cfg(feature = "libsql")]
-const LIBSQL_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(50);
-
-/// Per-connection PRAGMAs applied to every libSQL connection.
-///
-/// libSQL/SQLite is a single-writer engine: there is no true "parallel
-/// write" mode for a local file. Concurrent writers always serialise on
-/// the database write lock. The throughput lever is therefore making each
-/// write cheap and keeping readers from blocking the writer — which is
-/// exactly what these PRAGMAs do, alongside `journal_mode=WAL` (set once at
-/// migration time, see `run_migrations`).
-///
-/// - `busy_timeout=5000`: unchanged from the prior policy. A writer that
-///   finds the write lock held waits up to 5s rather than failing fast.
-/// - `synchronous=NORMAL`: in WAL mode this is crash-safe for the
-///   *application* (committed transactions survive a process crash); only an
-///   OS/power loss can roll back the most-recent commits, and the database
-///   stays consistent regardless. It removes one fsync per commit, which is
-///   the dominant cost of the serial-write path under load. This is the
-///   standard high-throughput SQLite setting. Use `FULL` only if per-commit
-///   power-loss durability is required (it is not for turn/loop state).
-/// - `temp_store=MEMORY`: keep transient indexes/sorters off disk.
-/// - `cache_size=-16000`: ~16 MiB page cache per connection (negative =
-///   KiB), so hot pages (the turn-state and resource-snapshot rows that are
-///   read-modify-written every turn) stay resident instead of being
-///   re-read from the OS page cache on each op.
-/// - `mmap_size`: memory-map up to 256 MiB for reads, cutting read syscall
-///   overhead on the many read-before-write checks (`exact_entry`,
-///   `has_child_entry`, snapshot loads) that surround each write.
-/// - `wal_autocheckpoint=1000`: bound WAL growth (checkpoint every ~1000
-///   pages / ~4 MiB) so the WAL does not grow without limit under a burst
-///   of writes.
-///
-/// `journal_mode` is deliberately NOT set here: it is a persistent,
-/// database-level property (stored in the file header) and changing it
-/// inside or alongside ordinary work is wasteful and cannot run inside a
-/// transaction. It is set exactly once in `run_migrations`.
-#[cfg(feature = "libsql")]
-const LIBSQL_CONNECTION_PRAGMAS: &str = "\
-    PRAGMA busy_timeout = 5000;\
-    PRAGMA synchronous = NORMAL;\
-    PRAGMA temp_store = MEMORY;\
-    PRAGMA cache_size = -16000;\
-    PRAGMA mmap_size = 268435456;\
-    PRAGMA wal_autocheckpoint = 1000;";
 
 #[cfg(feature = "libsql")]
 impl LibSqlRootFilesystem {
     pub fn new(db: Arc<libsql::Database>) -> Self {
-        Self { db }
+        Self {
+            pool: build_libsql_pool(db),
+        }
     }
 
     pub async fn run_migrations(&self) -> Result<(), FilesystemError> {
@@ -135,80 +91,24 @@ impl LibSqlRootFilesystem {
         }
     }
 
-    async fn connect(&self) -> Result<libsql::Connection, FilesystemError> {
-        connect_with_retry(|| self.db.connect()).await
-    }
-}
-
-#[cfg(feature = "libsql")]
-async fn connect_with_retry<F>(open: F) -> Result<libsql::Connection, FilesystemError>
-where
-    F: FnMut() -> Result<libsql::Connection, libsql::Error>,
-{
-    connect_with_retry_and_pragmas(open, |_| LIBSQL_CONNECTION_PRAGMAS).await
-}
-
-#[cfg(feature = "libsql")]
-async fn connect_with_retry_and_pragmas<F, P>(
-    mut open: F,
-    mut pragmas_for_attempt: P,
-) -> Result<libsql::Connection, FilesystemError>
-where
-    F: FnMut() -> Result<libsql::Connection, libsql::Error>,
-    P: FnMut(u32) -> &'static str,
-{
-    // Match the legacy libSQL backend's connection policy: every
-    // operation gets its own connection, concurrent writers wait on
-    // SQLite locks, and transient file-open/setup races get a short retry
-    // budget before surfacing as infrastructure errors.
-    let mut last_error = None;
-    for attempt in 0..LIBSQL_CONNECT_ATTEMPTS {
-        match open() {
-            Ok(conn) => {
-                // Apply the per-connection PRAGMAs in a single round-trip.
-                // `execute_batch` runs each statement and discards the rows
-                // PRAGMAs like `busy_timeout` return, which is exactly what
-                // we want — we only care about the side effect.
-                match conn.execute_batch(pragmas_for_attempt(attempt)).await {
-                    Ok(_) => return Ok(conn),
-                    Err(error) => {
-                        last_error = Some(error);
-                        if attempt + 1 < LIBSQL_CONNECT_ATTEMPTS {
-                            tokio::time::sleep(connect_backoff(attempt)).await;
-                        }
-                    }
-                }
+    /// Check out a pooled connection for exclusive use until the guard
+    /// drops. Callers must drop the guard before `.await`-ing any other
+    /// `self` method that also checks out — see the invariant note in
+    /// [`crate::libsql_pool`].
+    async fn connect(&self) -> Result<PooledLibSqlConnection, FilesystemError> {
+        self.pool.get().await.map_err(|error| match error {
+            deadpool::managed::PoolError::Backend(error) => {
+                let reason = error.to_string();
+                tracing::debug!(%reason, "libSQL root filesystem pool checkout failed");
+                error
             }
-            Err(error) => {
-                last_error = Some(error);
-                if attempt + 1 < LIBSQL_CONNECT_ATTEMPTS {
-                    tokio::time::sleep(connect_backoff(attempt)).await;
-                }
+            other => {
+                let reason = format!("libSQL connection pool checkout failed: {other}");
+                tracing::debug!(%reason, "libSQL root filesystem pool checkout failed");
+                crate::db::infrastructure_error(FilesystemOperation::Connect, reason)
             }
-        }
+        })
     }
-
-    let reason = match last_error {
-        Some(error) => {
-            format!(
-                "failed to create or initialize libSQL connection after {LIBSQL_CONNECT_ATTEMPTS} attempts: {error}"
-            )
-        }
-        None => {
-            format!(
-                "failed to create or initialize libSQL connection after {LIBSQL_CONNECT_ATTEMPTS} attempts"
-            )
-        }
-    };
-    Err(crate::db::infrastructure_error(
-        FilesystemOperation::Stat,
-        reason,
-    ))
-}
-
-#[cfg(feature = "libsql")]
-fn connect_backoff(attempt: u32) -> Duration {
-    LIBSQL_CONNECT_INITIAL_BACKOFF * 2u32.pow(attempt)
 }
 
 #[cfg(feature = "libsql")]
@@ -902,6 +802,52 @@ impl RootFilesystem for LibSqlRootFilesystem {
         Ok(())
     }
 
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        expected_version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        // Single-key CAS delete: unlike `delete`, no subtree/event/sequence
+        // sweep. `is_dir = 0` scopes it to the record plane, matching `put`'s
+        // Version arm and `current_version_libsql`.
+        //
+        // Review fix (PR #5749): the conditional DELETE and the zero-rows
+        // diagnosis read must be atomic w.r.t. a concurrent delete+recreate
+        // on the same path, or the diagnosis can observe a version written
+        // *after* our DELETE decided 0 rows matched, misclassifying the
+        // outcome. `BEGIN IMMEDIATE` takes the write lock up front (same
+        // idiom as `put`) so the DELETE and the follow-up SELECT run as one
+        // unit on one connection — this also keeps the call stack to a
+        // single checkout, matching the one-checkout-per-call-stack
+        // invariant the bounded pool (see `libsql_pool`, issue #5466) enforces
+        // (no nested `self.connect()`).
+        //
+        // Round-A review: validate `expected_version` before taking the
+        // pool checkout / write lock. An out-of-range version can never
+        // match a real row, so failing closed here avoids holding a
+        // contended connection (and SQLite's write lock) for a call
+        // destined to error — relevant under the concurrent CAS storms
+        // this pool exists to survive.
+        let expected_raw = record_version_to_i64(path, expected_version)?;
+        let conn = self.connect().await?;
+        conn.execute("BEGIN IMMEDIATE", ())
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
+        let result =
+            delete_if_version_libsql_inner(&conn, path, expected_version, expected_raw).await;
+        match result {
+            Ok(()) => conn
+                .execute("COMMIT", ())
+                .await
+                .map(|_| ())
+                .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error)),
+            Err(err) => {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(err)
+            }
+        }
+    }
+
     async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {
         let conn = self.connect().await?;
         // INTEGER PRIMARY KEY AUTOINCREMENT assigns a fresh monotonic id per
@@ -1412,6 +1358,43 @@ async fn current_version_libsql(
         .get(0)
         .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
     Ok(Some(record_version_from_i64(path, version)?))
+}
+
+/// Body of `delete_if_version` extracted so the outer caller can wrap the
+/// conditional DELETE and the zero-rows diagnosis SELECT in one
+/// BEGIN IMMEDIATE / COMMIT transaction, with a single ROLLBACK path.
+/// Running both statements on the same connection inside the same
+/// transaction is what makes the classification atomic: nothing else can
+/// delete-then-recreate the row between the DELETE and the diagnosis read.
+#[cfg(feature = "libsql")]
+async fn delete_if_version_libsql_inner(
+    conn: &libsql::Connection,
+    path: &VirtualPath,
+    expected_version: RecordVersion,
+    expected_raw: i64,
+) -> Result<(), FilesystemError> {
+    let deleted = conn
+        .execute(
+            "DELETE FROM root_filesystem_entries \
+             WHERE path = ?1 AND is_dir = 0 AND version = ?2",
+            libsql::params![path.as_str(), expected_raw],
+        )
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
+    if deleted > 0 {
+        return Ok(());
+    }
+    // 0 rows: absent row → NotFound (already gone, benign); row present
+    // at another version → VersionMismatch (gone stale). Distinct from
+    // put's diagnosis, which collapses absent into VersionMismatch.
+    if let Some(found) = current_version_libsql(conn, path).await? {
+        return Err(FilesystemError::VersionMismatch {
+            path: path.clone(),
+            expected: Some(expected_version),
+            found: Some(found),
+        });
+    }
+    Err(not_found(path.clone(), FilesystemOperation::Delete))
 }
 
 /// Body of `run_migrations` extracted so the outer caller can wrap the
@@ -2142,6 +2125,7 @@ mod tests {
     //! reach.
 
     use super::*;
+    use crate::libsql_pool::{LIBSQL_CONNECT_ATTEMPTS, connect_with_retry};
     use crate::{CasExpectation, Entry, RecordKind};
     use ironclaw_host_api::VirtualPath;
 
@@ -2267,39 +2251,6 @@ mod tests {
         assert_eq!(timeout, 5000);
     }
 
-    #[tokio::test]
-    async fn connect_retries_transient_pragma_failures_before_succeeding() {
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("connect-retry-pragma-test.db");
-        let db = libsql::Builder::new_local(db_path).build().await.unwrap();
-        let mut opens = 0;
-        let mut initializers = 0;
-
-        let conn = connect_with_retry_and_pragmas(
-            || {
-                opens += 1;
-                db.connect()
-            },
-            |_| {
-                initializers += 1;
-                if initializers == 1 {
-                    "THIS IS NOT SQL"
-                } else {
-                    LIBSQL_CONNECTION_PRAGMAS
-                }
-            },
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(opens, 2);
-        assert_eq!(initializers, 2);
-        let mut rows = conn.query("PRAGMA busy_timeout", ()).await.unwrap();
-        let row = rows.next().await.unwrap().unwrap();
-        let timeout: i64 = row.get(0).unwrap();
-        assert_eq!(timeout, 5000);
-    }
-
     /// `run_migrations` must switch the database into WAL journaling, which
     /// is the property that lets readers run concurrently with the single
     /// writer instead of serialising behind a whole-file EXCLUSIVE lock.
@@ -2342,5 +2293,111 @@ mod tests {
         let mut rows = conn.query("PRAGMA busy_timeout", ()).await.unwrap();
         let busy_timeout: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
         assert_eq!(busy_timeout, 5000, "busy_timeout must remain 5000");
+    }
+
+    /// A pool checkout that times out waiting for a free connection (every
+    /// slot held by another in-flight operation) must surface as a
+    /// `FilesystemOperation::Connect` infrastructure error through
+    /// `connect()`'s `other` match arm — not panic, hang past the
+    /// configured timeout, or lose the fact that this was a pool
+    /// exhaustion rather than some other backend failure. Uses the
+    /// `build_libsql_pool_with_config` test seam to build a deliberately
+    /// tiny (size-1), fast-timing-out pool so the test doesn't wait out
+    /// the real 10s production timeout.
+    #[tokio::test]
+    async fn connect_maps_pool_checkout_timeout_to_connect_infrastructure_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("checkout-timeout-test.db");
+        let db = std::sync::Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+        let fs = LibSqlRootFilesystem {
+            pool: crate::libsql_pool::build_libsql_pool_with_config(
+                db,
+                1,
+                std::time::Duration::from_millis(50),
+            ),
+        };
+        fs.run_migrations().await.unwrap();
+
+        // Hold the pool's only connection for the rest of the test.
+        let _held = fs.connect().await.unwrap();
+
+        // The pool has no free connection and none will be returned before
+        // the 50ms wait_timeout elapses, so this checkout must time out
+        // rather than hang or succeed.
+        let Err(err) = fs.connect().await else {
+            panic!("checkout must fail while the only connection is held");
+        };
+        match err {
+            FilesystemError::BackendInfrastructure { operation, reason } => {
+                assert_eq!(operation, FilesystemOperation::Connect);
+                assert!(
+                    !reason.is_empty(),
+                    "checkout-timeout reason must not be empty"
+                );
+            }
+            other => panic!("expected FilesystemError::BackendInfrastructure, got {other:?}"),
+        }
+    }
+
+    /// Deterministic, single-task regression pin for the atomicity fix
+    /// (commit 1792aebb2 / PR #5749 round 4): `delete_if_version`'s
+    /// zero-rows diagnosis must reuse the SAME connection the conditional
+    /// DELETE ran on, not check out a second one. Round-B review finding:
+    /// the concurrency storm test in `tests/concurrent_cas_storm.rs`
+    /// doesn't actually discriminate this — every racer shares one
+    /// pre-fetched version and nothing recreates the path mid-round, so
+    /// it passes with or without the fix. This test does discriminate it,
+    /// with no concurrency required: build a deliberately size-1 pool (via
+    /// `build_libsql_pool_with_config`), let `delete_if_version` check out
+    /// its only connection, and hit the stale-version (0-rows) branch. If
+    /// the diagnosis internally called `self.connect()` again — the
+    /// pre-fix pattern — that second checkout would deadlock against the
+    /// first (nothing else can return the only connection) and time out;
+    /// reusing the passed-in `conn` completes immediately.
+    #[tokio::test]
+    async fn delete_if_version_diagnosis_reuses_the_delete_connection_under_a_size_one_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("delete-single-conn-test.db");
+        let db = std::sync::Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+        let fs = LibSqlRootFilesystem {
+            pool: crate::libsql_pool::build_libsql_pool_with_config(
+                db,
+                1,
+                std::time::Duration::from_millis(200),
+            ),
+        };
+        fs.run_migrations().await.unwrap();
+
+        let path = VirtualPath::new("/secrets/single-conn").unwrap();
+        let v1 = fs
+            .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+            .await
+            .unwrap();
+
+        // Stale version drives the 0-rows branch, which must diagnose
+        // NotFound/VersionMismatch via `current_version_libsql(conn, ...)`
+        // on the connection already checked out above, not a second
+        // checkout — a second checkout would time out against the
+        // size-1 pool's only (self-held) connection.
+        let stale = RecordVersion::from_backend(v1.get() + 1);
+        let err = fs.delete_if_version(&path, stale).await.unwrap_err();
+        assert!(
+            matches!(err, FilesystemError::VersionMismatch { .. }),
+            "expected VersionMismatch (proves the diagnosis ran to \
+             completion without deadlocking on the size-1 pool), got: {err:?}"
+        );
+
+        // Round-C review: the assertion above only proves the diagnosis
+        // didn't deadlock: `ROLLBACK` itself could still fail to run (or
+        // fail and leave the connection mid-transaction) without failing
+        // that assertion. Prove the connection actually came back to the
+        // size-1 pool in a clean, reusable state by checking it out again
+        // for a real CAS delete — a still-open transaction from the
+        // VersionMismatch path would make this second call either hang
+        // against the size-1 pool or fail on a nested-transaction error.
+        fs.delete_if_version(&path, v1)
+            .await
+            .expect("connection must return to the size-1 pool clean after a VersionMismatch, not deadlock or error on a leftover transaction");
+        assert!(fs.get(&path).await.unwrap().is_none());
     }
 }
