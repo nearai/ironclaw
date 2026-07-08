@@ -250,6 +250,12 @@ registerPack("pt-BR", {
   "traceCommons.lastSyncDesc": "Visão local na última sincronização",
   "traceCommons.never": "nunca",
   "traceCommons.recentExplanations": "Explicações de crédito recentes",
+  "traceCommons.submittedTracesTitle": "Traces enviados",
+  "traceCommons.tracesLoadFailed": "Não foi possível carregar seus traces enviados.",
+  "traceCommons.traceStatus": "Status",
+  "traceCommons.tracePendingCredit": "Crédito pendente",
+  "traceCommons.traceFinalCredit": "Crédito final",
+  "traceCommons.traceReceivedAt": "Recebido",
   "traceCommons.note": "Visão local na última sincronização — o livro-razão de créditos oficial fica no servidor. O crédito final pode mudar após revisão de privacidade, replay/avaliação, verificações de duplicatas e pontuação de utilidade posterior.",
 
 

@@ -16,11 +16,12 @@ use ironclaw_host_runtime::{
     MEMORY_WRITE_CAPABILITY_ID, PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
     SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
     SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, TIME_CAPABILITY_ID,
-    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
-    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
-    TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
-    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
-    WRITE_FILE_CAPABILITY_ID, builtin_first_party_package,
+    TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID,
+    TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
+    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
+    builtin_first_party_package,
 };
 use ironclaw_loop_support::{HostManagedModelMessageRole, HostManagedModelResponse};
 use ironclaw_turns::{TurnStatus, run_profile::LoopHostMilestoneKind};
@@ -63,6 +64,7 @@ const REBORN_FIRST_PARTY_E2E_COVERED_CAPABILITIES: &[&str] = &[
     TRACE_COMMONS_CREDITS_CAPABILITY_ID,
     TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
     TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+    TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
 ];
 
 const SKILL_NAME: &str = "reborn-skill-e2e";
@@ -531,6 +533,8 @@ async fn reborn_trace_trace_commons_first_party_tools_parity() {
         CapabilityId::new(TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID).expect("capability id");
     let profile_set =
         CapabilityId::new(TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID).expect("capability id");
+    let account_login_link =
+        CapabilityId::new(TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID).expect("capability id");
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         // confirmed=false hits the consent gate before any egress wiring is
         // consulted, so the onboard step is deterministic with no network.
@@ -585,6 +589,18 @@ async fn reborn_trace_trace_commons_first_party_tools_parity() {
             )],
             expected_tool_results: Vec::new(),
         },
+        RebornModelReplayStep::ProviderToolCalls {
+            calls: vec![RebornScriptedProviderToolCall::new(
+                account_login_link.clone(),
+                "call_trace_commons_account_login_link",
+                // confirmed=true clears the hard account-access consent gate so
+                // the call reaches the enrollment check (NotEnrolled here,
+                // deterministic and with no network, since this scope never
+                // onboarded).
+                serde_json::json!({ "confirmed": true }),
+            )],
+            expected_tool_results: Vec::new(),
+        },
         RebornModelReplayStep::Response {
             response: HostManagedModelResponse::assistant_reply(
                 "trace commons tools trace complete",
@@ -617,15 +633,16 @@ async fn reborn_trace_trace_commons_first_party_tools_parity() {
         .expect("final reply");
 
     let invocations = harness.capability_invocations();
-    assert_eq!(invocations.len(), 5);
+    assert_eq!(invocations.len(), 6);
     assert_eq!(invocations[0].capability_id, onboard);
     assert_eq!(invocations[1].capability_id, status);
     assert_eq!(invocations[2].capability_id, credits);
     assert_eq!(invocations[3].capability_id, profile_token);
     assert_eq!(invocations[4].capability_id, profile_set);
+    assert_eq!(invocations[5].capability_id, account_login_link);
 
     let results = harness.capability_results();
-    assert_eq!(results.len(), 5);
+    assert_eq!(results.len(), 6);
     assert_eq!(results[0].capability_id, onboard);
     assert_eq!(results[0].output["enrolled"], serde_json::json!(false));
     assert_eq!(
@@ -655,14 +672,21 @@ async fn reborn_trace_trace_commons_first_party_tools_parity() {
         results[4].output["error_code"],
         serde_json::json!("NotEnrolled")
     );
+    assert_eq!(results[5].capability_id, account_login_link);
+    assert_eq!(results[5].output["minted"], serde_json::json!(false));
+    assert_eq!(
+        results[5].output["error_code"],
+        serde_json::json!("NotEnrolled")
+    );
 
     let requests = harness.model_requests();
-    assert_eq!(requests.len(), 6);
+    assert_eq!(requests.len(), 7);
     assert_eq!(tool_result_count(&requests[1]), 1);
     assert_eq!(tool_result_count(&requests[2]), 2);
     assert_eq!(tool_result_count(&requests[3]), 3);
     assert_eq!(tool_result_count(&requests[4]), 4);
     assert_eq!(tool_result_count(&requests[5]), 5);
+    assert_eq!(tool_result_count(&requests[6]), 6);
     assert_milestone_order(
         &harness.milestones(),
         |kind| matches!(kind, LoopHostMilestoneKind::CapabilityBatchCompleted { .. }),
@@ -682,9 +706,18 @@ async fn reborn_trace_trace_commons_pilot_tools_are_model_visible() {
         CapabilityId::new(TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID).expect("capability id");
     let profile_set =
         CapabilityId::new(TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID).expect("capability id");
+    let account_login_link =
+        CapabilityId::new(TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID).expect("capability id");
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::AssertProviderToolsThenResponse {
-            capability_ids: vec![onboard, status, credits, profile_token, profile_set],
+            capability_ids: vec![
+                onboard,
+                status,
+                credits,
+                profile_token,
+                profile_set,
+                account_login_link,
+            ],
             response: HostManagedModelResponse::assistant_reply(
                 "trace commons pilot tool surface complete",
             ),

@@ -22,8 +22,9 @@ use ironclaw_reborn_composition::{
     SlackPersonalBindingPairingService, SlackPersonalBindingPrincipal,
     slack_serve::SlackUserId,
     test_support::{
-        SlackHostStateTestParts, slack_host_state_for_test,
+        SlackHostStateTestParts, SlackPairingTestClock, slack_host_state_for_test,
         slack_host_state_for_test_with_pairing_ttl,
+        slack_host_state_for_test_with_pairing_ttl_and_clock,
     },
 };
 use ironclaw_slack_v2_adapter::{SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID};
@@ -81,6 +82,39 @@ async fn open_slack_pairing_store(
         }
         None => slack_host_state_for_test(scoped, tenant, user, agent, project),
     }
+}
+
+/// Same as [`open_slack_pairing_store`] but with a caller-controlled
+/// pairing-code TTL and clock, for deterministic expiry tests — see
+/// [`SlackPairingTestClock`] for why this replaces sleeping.
+async fn open_slack_pairing_store_with_clock(
+    db_path: &std::path::Path,
+    pairing_ttl: Duration,
+    clock: &SlackPairingTestClock,
+) -> SlackHostStateTestParts {
+    let db = Arc::new(
+        libsql::Builder::new_local(db_path)
+            .build()
+            .await
+            .expect("build libsql database"),
+    );
+    let root = Arc::new(LibSqlRootFilesystem::new(db));
+    root.run_migrations().await.expect("run libsql migrations");
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+        root,
+        tenant_shared_mount_view(),
+    ));
+    let tenant = tenant_id();
+    let (user, agent, project) = host_ids();
+    slack_host_state_for_test_with_pairing_ttl_and_clock(
+        scoped,
+        tenant,
+        user,
+        agent,
+        project,
+        pairing_ttl,
+        clock,
+    )
 }
 
 fn pairing_service(store: &SlackHostStateTestParts) -> SlackPersonalBindingPairingService {
@@ -192,18 +226,24 @@ async fn slack_pairing_redeem_rejects_unknown_code() {
     );
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn slack_pairing_redeem_rejects_expired_code() {
     let root = tempfile::tempdir().expect("tempdir");
     let db_path = root.path().join("slack-host-state.db");
-    let store = open_slack_pairing_store(&db_path, Some(Duration::from_millis(1))).await;
+    let clock = SlackPairingTestClock::new();
+    let store =
+        open_slack_pairing_store_with_clock(&db_path, Duration::from_millis(1), &clock).await;
     let service = pairing_service(&store);
 
     let issued = service
         .issue_challenge(installation_id(), slack_user_id())
         .await
         .expect("issue_challenge must succeed");
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    // Advance the injected clock past the TTL directly — deterministic,
+    // unlike racing a virtual `sleep` under `tokio::time::pause` against the
+    // real wall clock the store's TTL check reads (see
+    // `SlackPairingTestClock`).
+    clock.advance(Duration::from_millis(5));
 
     let result = service
         .redeem_challenge(

@@ -250,6 +250,12 @@ registerPack("ko", {
   "traceCommons.lastSyncDesc": "마지막 동기화 기준 로컬 보기",
   "traceCommons.never": "없음",
   "traceCommons.recentExplanations": "최근 크레딧 내역",
+  "traceCommons.submittedTracesTitle": "제출한 트레이스",
+  "traceCommons.tracesLoadFailed": "제출한 트레이스를 불러오지 못했습니다.",
+  "traceCommons.traceStatus": "상태",
+  "traceCommons.tracePendingCredit": "대기 중 크레딧",
+  "traceCommons.traceFinalCredit": "최종 크레딧",
+  "traceCommons.traceReceivedAt": "수신됨",
   "traceCommons.note": "마지막 동기화 기준 로컬 보기입니다 — 공식 크레딧 원장은 서버에 있습니다. 최종 크레딧은 개인정보 검토, 리플레이/평가, 중복 검사 및 후속 유용성 평가 후 변경될 수 있습니다.",
 
 

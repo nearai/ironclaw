@@ -250,6 +250,12 @@ registerPack("zh-CN", {
   "traceCommons.lastSyncDesc": "截至最近同步的本地视图",
   "traceCommons.never": "从未",
   "traceCommons.recentExplanations": "最近的积分说明",
+  "traceCommons.submittedTracesTitle": "已提交的跟踪记录",
+  "traceCommons.tracesLoadFailed": "无法加载您已提交的跟踪记录。",
+  "traceCommons.traceStatus": "状态",
+  "traceCommons.tracePendingCredit": "待定积分",
+  "traceCommons.traceFinalCredit": "最终积分",
+  "traceCommons.traceReceivedAt": "已接收",
   "traceCommons.note": "截至最近同步的本地视图 — 权威积分账本在服务器端。最终积分可能在隐私审核、重放/评估、去重检查和后续效用评分后发生变化。",
 
 

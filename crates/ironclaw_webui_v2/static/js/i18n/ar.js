@@ -250,6 +250,12 @@ registerPack("ar", {
   "traceCommons.lastSyncDesc": "عرض محلي حتى آخر مزامنة",
   "traceCommons.never": "أبدًا",
   "traceCommons.recentExplanations": "تفسيرات الرصيد الأخيرة",
+  "traceCommons.submittedTracesTitle": "الآثار المُرسَلة",
+  "traceCommons.tracesLoadFailed": "تعذّر تحميل آثارك المُرسَلة.",
+  "traceCommons.traceStatus": "الحالة",
+  "traceCommons.tracePendingCredit": "رصيد معلق",
+  "traceCommons.traceFinalCredit": "الرصيد النهائي",
+  "traceCommons.traceReceivedAt": "تم الاستلام",
   "traceCommons.note": "عرض محلي حتى آخر مزامنة — سجل الأرصدة المعتمد موجود على الخادم. قد يتغير الرصيد النهائي بعد مراجعة الخصوصية وإعادة التشغيل/التقييم وفحوصات التكرار وتقييم الفائدة اللاحق.",
 
 

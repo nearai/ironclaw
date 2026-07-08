@@ -19,8 +19,8 @@ use ironclaw_skills::{
     install_skill, list_skills, read_skill_content, remove_skill, search_skills, update_skill,
 };
 
-use crate::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
-use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
+use crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
+use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 use crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService;
 
 const SKILL_SEARCH_RESULT_LIMIT: usize = 50;
@@ -388,7 +388,7 @@ impl RebornLocalLifecycleFacade {
                     };
                     let scope = lifecycle_resource_scope(&context)?;
                     let mode =
-                        crate::extension_lifecycle::ExtensionActivationMode::HostedMcpDiscovery {
+                        crate::extension_host::extension_lifecycle::ExtensionActivationMode::HostedMcpDiscovery {
                             scope,
                             runtime_http_egress,
                         };
@@ -401,7 +401,8 @@ impl RebornLocalLifecycleFacade {
                         None => extension_management.activate(package_ref, mode).await,
                     };
                 }
-                let mode = crate::extension_lifecycle::ExtensionActivationMode::Static;
+                let mode =
+                    crate::extension_host::extension_lifecycle::ExtensionActivationMode::Static;
                 match credential_gate {
                     Some(credential_gate) => {
                         extension_management
