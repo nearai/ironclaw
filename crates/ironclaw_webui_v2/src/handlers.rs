@@ -18,7 +18,7 @@ use std::time::Duration;
 use axum::Json;
 use axum::body::Body;
 use axum::extract::{Extension, Path, Query, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures::SinkExt;
@@ -704,7 +704,7 @@ pub async fn stream_events(
     Path(thread_id): Path<String>,
     headers: HeaderMap,
     Query(query): Query<StreamEventsQuery>,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, WebUiV2HttpError> {
+) -> Result<Response, WebUiV2HttpError> {
     let slot = state
         .sse_capacity()
         .try_acquire(&caller.tenant_id, &caller.user_id)
@@ -719,7 +719,18 @@ pub async fn stream_events(
         .map(str::to_string)
         .or(query.after_cursor);
     let stream = build_sse_stream(services, caller, thread_id, initial_cursor, slot);
-    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(SSE_KEEPALIVE_INTERVAL)))
+    let mut response = Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(SSE_KEEPALIVE_INTERVAL))
+        .into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache, no-transform"),
+    );
+    response.headers_mut().insert(
+        HeaderName::from_static("x-accel-buffering"),
+        HeaderValue::from_static("no"),
+    );
+    Ok(response)
 }
 
 /// Build the 429 response for SSE openings that exceed the per-caller

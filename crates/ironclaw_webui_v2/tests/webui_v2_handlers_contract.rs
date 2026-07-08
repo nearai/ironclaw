@@ -14,7 +14,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use axum::Router;
 use axum::body::{Body, to_bytes};
-use axum::http::{Method, Request, StatusCode};
+use axum::http::{HeaderName, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use ironclaw_host_api::{
     AgentId, CapabilityId, ExtensionId, InvocationId, ProjectId, RuntimeKind, TenantId, ThreadId,
@@ -5122,6 +5122,48 @@ where
         }
     }
     buf
+}
+
+#[tokio::test]
+async fn stream_events_sets_unbuffered_sse_headers() {
+    let services = Arc::new(StubServices::default());
+    services.enable_stream_events_subscription(Vec::new());
+
+    let router = router_with(services);
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/events")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = response.headers();
+    assert_eq!(
+        headers
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-cache, no-transform"),
+        "SSE must opt out of intermediary transforms that can buffer chunks"
+    );
+    assert_eq!(
+        headers
+            .get(HeaderName::from_static("x-accel-buffering"))
+            .and_then(|value| value.to_str().ok()),
+        Some("no"),
+        "SSE must ask reverse proxies not to buffer stream chunks"
+    );
+    assert!(
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/event-stream")),
+        "SSE content type must remain event-stream"
+    );
 }
 
 #[tokio::test]
