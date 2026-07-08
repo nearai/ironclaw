@@ -53,7 +53,6 @@ const LEGACY_TEXT_ONLY_DRIVER_ID: &str = "lightweight_loop";
 const LEGACY_TEXT_ONLY_DRIVER_VERSION: u64 = 1;
 const LEGACY_TEXT_ONLY_CHECKPOINT_SCHEMA_ID: &str = "interactive_checkpoint_v1";
 const LEGACY_TEXT_ONLY_CHECKPOINT_SCHEMA_VERSION: u64 = 1;
-const USER_PROFILE_CONTEXT_BUDGET: Duration = Duration::from_millis(50);
 
 fn should_fetch_communication_context(context: &LoopRunContext) -> bool {
     !matches!(
@@ -1016,8 +1015,9 @@ where
     event_subscription: Option<EventTriggeredHookSubscription>,
     safety_context: InstructionSafetyContext,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
-    /// Per-run user agent-context profile source. Resolved once at loop start;
-    /// result is stamped into `LoopRuntimeContext.user_profile`. Defaults to
+    /// Per-run user agent-context profile source. Started once at loop start
+    /// and stamped into `LoopRuntimeContext.user_profile` only if it resolves
+    /// before prompt wiring reaches the profile handoff. Defaults to
     /// `EmptyUserProfileSource` (returns `None`) so callers that do not wire a
     /// profile source degrade gracefully rather than failing.
     user_profile_source: Arc<dyn HostUserProfileSource>,
@@ -1365,10 +1365,11 @@ where
         self
     }
 
-    /// Installs the per-user profile source. The source is resolved once at
-    /// loop start; its result is stamped into `LoopRuntimeContext.user_profile`
-    /// so the model sees the user's timezone/locale/location every turn.
-    /// When not called the factory defaults to `EmptyUserProfileSource`.
+    /// Installs the per-user profile source. Resolution starts once at loop
+    /// start, but chat prompt construction only consumes it if it is already
+    /// available by the prompt-port handoff; otherwise the advisory profile
+    /// read continues in the background and the turn proceeds without it. When
+    /// not called the factory defaults to `EmptyUserProfileSource`.
     pub fn with_user_profile_source(mut self, source: Arc<dyn HostUserProfileSource>) -> Self {
         self.user_profile_source = source;
         self
@@ -1699,30 +1700,23 @@ where
             &run_context,
             communication_started_at,
         );
-        // Resolve the per-user profile once at loop start. The fetch starts
-        // before capability-surface resolution above and is joined here, so the
-        // optional profile read usually does not stack on the hot path when the
-        // surface does backend work too. It is still advisory context, so a slow
-        // backend read must not delay chat reply prompt construction.
+        // Use the per-user profile only if the loop-start fetch has already
+        // finished. It is advisory context, so cold profile filesystem reads
+        // should warm the cache in the background instead of spending any
+        // prompt critical-path budget.
         let user_profile_started_at = ironclaw_observability::live_latency_started_at();
-        let user_profile = match tokio::time::timeout(
-            USER_PROFILE_CONTEXT_BUDGET,
-            user_profile_fetch,
-        )
-        .await
-        {
-            Ok(Ok(profile)) => profile,
-            Ok(Err(error)) => {
+        let user_profile = match user_profile_fetch.now_or_never() {
+            Some(Ok(profile)) => profile,
+            Some(Err(error)) => {
                 tracing::debug!(
                     error = %error,
                     "user profile task failed; continuing without profile"
                 );
                 None
             }
-            Err(_) => {
+            None => {
                 tracing::debug!(
-                    timeout_ms = USER_PROFILE_CONTEXT_BUDGET.as_millis(),
-                    "user profile resolution exceeded loop-start budget; continuing without profile"
+                    "user profile resolution was not ready at prompt handoff; continuing without profile"
                 );
                 None
             }
