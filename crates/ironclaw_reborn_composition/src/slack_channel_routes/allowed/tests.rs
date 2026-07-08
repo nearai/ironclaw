@@ -740,6 +740,8 @@ fn setup_record(user_id: &str, shared_subject_user_id: Option<&str>) -> SlackIns
         bot_token_handle: SecretHandle::new("slack_bot_token_test").expect("bot token handle"),
         signing_secret_handle: SecretHandle::new("slack_signing_secret_test")
             .expect("signing secret handle"),
+        oauth_client_id: None,
+        oauth_client_secret_handle: None,
         revision: 1,
         updated_at: chrono::Utc::now(),
     }

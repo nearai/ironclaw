@@ -11,11 +11,17 @@ import {
 } from "../hooks/useExtensions.js";
 import {
   extensionIsActive,
+  extensionLifecycleState,
   setupReadyForActivation,
 } from "../lib/extension-actions.js";
 import { isChannelExtensionKind } from "../lib/extensions-schema.js";
 import { redeemPairingCode } from "../lib/pairing-api.js";
 import { activateExtension } from "../lib/extensions-api.js";
+import { notifyChannelConnected } from "../../../lib/channel-connection-events.js";
+
+// Model B: the visible Slack extension is the user-tools package (id `slack`),
+// not the bot channel (which is hidden operator infrastructure).
+const SLACK_TOOLS_EXTENSION_ID = "slack";
 
 export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
   const t = useT();
@@ -24,7 +30,47 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
     useExtensionSetup(extension?.packageRef);
   const [values, setValues] = React.useState({});
   const [fieldValues, setFieldValues] = React.useState({});
-  const oauthMutation = useOauthSetup(extension?.packageRef);
+  const queryClient = useQueryClient();
+  const packageId =
+    typeof extension?.packageRef === "string"
+      ? extension.packageRef
+      : extension?.packageRef?.id || "";
+  const channelId = extension?.channel || packageId;
+  const lifecycleState = extensionLifecycleState(extension);
+  // This flag gates the tools extension's post-OAuth auto-activate.
+  const isSlackToolsExtension =
+    channelId.toLowerCase() === SLACK_TOOLS_EXTENSION_ID;
+  const handleOauthConfigured = React.useCallback(async () => {
+    onClose();
+    if (isSlackToolsExtension && packageId) {
+      try {
+        await activateExtension({ id: packageId });
+      } catch {
+        console.error("Slack activation after OAuth failed.");
+      }
+    }
+    // invalidateQueries refetches active queries and resolves when they
+    // settle (TanStack v5), so no follow-up refetchQueries pass is needed.
+    await Promise.all(
+      [["extensions"], ["extension-registry"], ["extension-setup", packageId]].map(
+        (queryKey) => queryClient.invalidateQueries({ queryKey }),
+      ),
+    );
+    // Broadcast channel-connected (same event pairing redemption sends) so an
+    // open chat card for this channel clears and its parked request resumes —
+    // connecting from the Extensions page must not strand the chat surface.
+    if (isChannelExtensionKind(extension?.kind) && channelId) {
+      try {
+        await notifyChannelConnected({ channel: channelId, source: "extensions-oauth" });
+      } catch {
+        console.error("channel connection broadcast after OAuth failed.");
+      }
+    }
+    if (onSaved) onSaved();
+  }, [channelId, extension?.kind, isSlackToolsExtension, onClose, onSaved, packageId, queryClient]);
+  const oauthMutation = useOauthSetup(extension?.packageRef, {
+    onConfigured: handleOauthConfigured,
+  });
 
   const submitMutation = useSetupSubmit(extension?.packageRef, (res) => {
     if (res.success !== false) {
@@ -41,44 +87,40 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
     }
     submitMutation.mutate({ secrets: secretPayload, fields: fieldValues });
   }, [values, fieldValues, submitMutation]);
+  const [popupBlockedError, setPopupBlockedError] = React.useState("");
   const handleOauth = React.useCallback(
     (secret) => {
       const popup = window.open("about:blank", "_blank", "width=600,height=600");
       if (popup) popup.opener = null;
+      // Unlike the later noopener open (which returns null even on success
+      // per spec), a null pre-open reliably means the browser blocked the
+      // popup — surface it and stop before burning the OAuth flow start,
+      // mirroring the in-chat startOnboardingOAuth guard.
+      if (!popup) {
+        setPopupBlockedError("Authorization popup was blocked.");
+        return;
+      }
+      setPopupBlockedError("");
       oauthMutation.mutate({ secret, popup });
     },
     [oauthMutation]
   );
 
-  // Channel extensions configure their per-user connection (e.g. Slack account
-  // pairing) here instead of credential/OAuth fields: redeem a proof code, then
-  // best-effort activate so the channel goes live.
-  const queryClient = useQueryClient();
-  const packageId =
-    typeof extension?.packageRef === "string"
-      ? extension.packageRef
-      : extension?.packageRef?.id || "";
-  const channelId = extension?.channel || packageId;
-  const isSlackChannel = channelId.toLowerCase() === "slack";
-  // Connectable channels (Slack, Telegram, …) are configured by pairing a user
-  // account here — never by operator credential/OAuth fields, and never "no
-  // configuration required". A freshly-installed channel is in `setup_required`
-  // but still needs the user to connect, so render the Connect panel for any
-  // channel kind: a connect step before pairing, and a re-pair affordance once
-  // connected. Only genuinely-no-config non-channel extensions may fall through
-  // to the "no configuration required" branch below.
-  const isChannelExtension = isChannelExtensionKind(extension?.kind);
-  const isConnectedChannel = isChannelExtension && Boolean(extension?.authenticated);
-  const isPairingChannel = isChannelExtension;
-  const channelPairingInstructions = isSlackChannel
-    ? t("pairing.slackInstructions")
-    : t("pairing.instructions");
-  const channelPairingPlaceholder = isSlackChannel
-    ? t("pairing.slackPlaceholder")
-    : t("pairing.placeholder");
-  const channelPairingError = isSlackChannel
-    ? t("pairing.slackError")
-    : t("pairing.error");
+  // Some channel extensions may still use proof-code setup: redeem a code,
+  // then best-effort activate so the channel goes live.
+  const oauthSecrets = secrets.filter(
+    (secret) => (secret.setup?.kind || "manual_token") === "oauth"
+  );
+  const manualSecrets = secrets.filter(
+    (secret) => (secret.setup?.kind || "manual_token") === "manual_token"
+  );
+  const isPairingChannel =
+    !isSlackToolsExtension &&
+    isChannelExtensionKind(extension?.kind) &&
+    (lifecycleState === "pairing" || lifecycleState === "pairing_required");
+  const channelPairingInstructions = t("pairing.instructions");
+  const channelPairingPlaceholder = t("pairing.placeholder");
+  const channelPairingError = t("pairing.error");
   const [pairingCode, setPairingCode] = React.useState("");
   const pairingMutation = useMutation({
     mutationFn: async (code) => {
@@ -108,12 +150,12 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
     pairingMutation.mutate(code);
   }, [pairingCode, pairingMutation]);
 
-  const manualSecrets = secrets.filter(
-    (secret) => (secret.setup?.kind || "manual_token") === "manual_token"
-  );
   const canSave = manualSecrets.length > 0 || fields.length > 0;
   const isActive = extensionIsActive(extension);
-  const canActivate = setupReadyForActivation({ extension, secrets, fields });
+  const canActivate =
+    !isChannelExtensionKind(extension?.kind) &&
+    setupReadyForActivation({ extension, secrets, fields });
+  const oauthBusy = oauthMutation.isPending || oauthMutation.isAuthorizing;
   const setupUrl = httpsUrl(onboarding?.setup_url);
 
   if (isPairingChannel) {
@@ -122,10 +164,6 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
         onClose=${onClose}
         title=${t("extensions.configureName").replace("{name}", extensionName)}
       >
-        ${isConnectedChannel &&
-        html`<p className="mb-2 text-xs leading-5 text-mint">
-          ${t("pairing.reconnectHint")}
-        </p>`}
         <p className="mb-4 text-sm leading-6 text-iron-300">
           ${channelPairingInstructions}
         </p>
@@ -142,7 +180,8 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
           <${Button}
             variant="primary"
             onClick=${submitPairing}
-            disabled=${pairingMutation.isPending || !pairingCode.trim()}
+            loading=${pairingMutation.isPending}
+            disabled=${!pairingCode.trim()}
           >
             ${pairingMutation.isPending ? t("common.saving") : t("pairing.connect")}
           <//>
@@ -244,9 +283,9 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
                       <${Button}
                         variant=${secret.provided ? "secondary" : "primary"}
                         onClick=${() => handleOauth(secret)}
-                        disabled=${oauthMutation.isPending}
+                        loading=${oauthBusy}
                       >
-                        ${oauthMutation.isPending
+                        ${oauthBusy
                           ? t("extensions.opening")
                           : secret.provided
                             ? t("extensions.reconnect")
@@ -341,6 +380,25 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
           ${oauthMutation.error.message}
         </div>
       `}
+      ${!oauthMutation.error &&
+      oauthMutation.authError &&
+      html`
+        <div
+          className="mt-4 rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200"
+        >
+          ${oauthMutation.authError}
+        </div>
+      `}
+      ${!oauthMutation.error &&
+      !oauthMutation.authError &&
+      popupBlockedError &&
+      html`
+        <div
+          className="mt-4 rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200"
+        >
+          ${popupBlockedError}
+        </div>
+      `}
 
       <div className="mt-6 flex items-center justify-end gap-3">
         <${Button} variant="ghost" onClick=${onClose}>${t("common.cancel")}<//>
@@ -358,7 +416,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
         <${Button}
           variant=${canActivate ? "secondary" : "primary"}
           onClick=${handleSubmit}
-          disabled=${submitMutation.isPending}
+          loading=${submitMutation.isPending}
         >
           ${submitMutation.isPending ? t("common.saving") : t("common.save")}
         <//>
