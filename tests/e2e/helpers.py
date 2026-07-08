@@ -208,7 +208,8 @@ SEL = {
     "missions_detail_title":    ".ms-detail-title",
 }
 
-TABS = ["chat", "memory", "jobs", "routines", "settings"]
+# The NUX sidebar folds the old jobs/missions tabs into the "tasks" surface.
+TABS = ["chat", "memory", "tasks", "routines", "settings"]
 
 # Auth token used across all tests
 AUTH_TOKEN = "e2e-test-token"
