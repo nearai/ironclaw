@@ -194,6 +194,23 @@ impl TriggerMutatorAttemptGateway {
         self.registration_outcomes.lock().await.clone()
     }
 
+    async fn wait_for_registration_outcomes(
+        &self,
+        expected_len: usize,
+        deadline: Duration,
+    ) -> BTreeMap<String, Result<(), String>> {
+        let stop = Instant::now() + deadline;
+        let mut last = BTreeMap::new();
+        while Instant::now() < stop {
+            last = self.registration_outcomes().await;
+            if last.len() >= expected_len {
+                return last;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        last
+    }
+
     /// One provider tool call per scheduled-trigger mutator capability id,
     /// paired with a payload shaped for that capability's real input schema
     /// (see `ironclaw_host_runtime::first_party_tools::trigger_management`'s
@@ -1460,17 +1477,21 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
     )
     .await;
 
+    let registration_outcomes = gateway
+        .wait_for_registration_outcomes(4, Duration::from_secs(15))
+        .await;
+
     runtime.shutdown().await.expect("runtime shutdown");
 
     let captured_contents = gateway.captured_message_contents().await;
-    let registration_outcomes = gateway.registration_outcomes().await;
 
     assert_eq!(
         registration_outcomes.len(),
         4,
         "the fired run must have attempted all 4 scheduled-trigger mutator \
          registrations (create/remove/pause/resume) — captured_messages: \
-         {captured_contents:?}, outcomes: {registration_outcomes:?}"
+         {captured_contents:?}, outcomes: {registration_outcomes:?}, \
+         settled_record: {settled:?}"
     );
 
     // Core assertion, mechanism-level: the surface must deny EVERY mutator
