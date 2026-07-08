@@ -136,10 +136,18 @@ where
             )
             .await
         {
-            Ok(_) => Ok(()),
-            Err(AwaitEdgeStoreError::VersionMismatch { .. }) => Ok(()),
-            Err(other) => Err(other),
+            Ok(_) => {}
+            Err(AwaitEdgeStoreError::VersionMismatch { .. }) => {}
+            Err(other) => return Err(other),
         }
+        // §4.0 round-5 self-heal: an unconditional, version-bumping re-put
+        // after the edge write succeeds, not just before it. Closes the
+        // boot-recovery race where boot reads the marker's version while the
+        // edge dir is momentarily empty, then this edge lands, then boot's
+        // stale-version delete would otherwise succeed and hide this scope
+        // from recovery forever (design doc §4.0 "Round-5 fix").
+        roster::touch_roster_marker(&self.fs, &roster_key).await?;
+        Ok(())
     }
 
     /// Rollback-only abandon (§2 mode-scoped case (b)): CAS current state to
@@ -488,7 +496,12 @@ where
     /// `Released` CAS's own returned version. `release_fn` performs the
     /// actual `TurnStateStore::release_tree_descendants` call — injected so
     /// `store.rs` stays independent of `ironclaw_turns::TurnStateStore`'s
-    /// concrete wiring (the resolver supplies it).
+    /// concrete wiring (the resolver supplies it). `crash_hook_before_prune`
+    /// and `crash_hook_before_delete` are test-only fault-injection points
+    /// for the two crash windows named in §5.5 round-7: (a) between the
+    /// `Released` CAS and the prune, (b) between the prune and
+    /// `delete_if_version`. Both are `None` in production.
+    #[allow(clippy::too_many_arguments)] // arch-exempt: two test-only crash hooks, one prod call site
     pub async fn close_with_release<Fut, PruneFut>(
         &self,
         scope: &TurnScope,
@@ -496,7 +509,8 @@ where
         child_run_id: TurnRunId,
         release_fn: impl FnOnce() -> Fut,
         prune_fn: impl FnOnce() -> PruneFut,
-        crash_hook: Option<&(dyn Fn() + Send + Sync)>,
+        crash_hook_before_prune: Option<&(dyn Fn() + Send + Sync)>,
+        crash_hook_before_delete: Option<&(dyn Fn() + Send + Sync)>,
     ) -> Result<(), AwaitEdgeStoreError>
     where
         Fut: std::future::Future<Output = Result<(), AwaitEdgeStoreError>>,
@@ -578,6 +592,15 @@ where
                 }
             }
         };
+        // Test-only fault injection point, scenario (a): a crash between the
+        // `Released` CAS above and the prune below leaves the edge at
+        // `Released` on disk with the dedup entry still present — recovery
+        // (re-running this same sequence) must complete the prune and delete
+        // without re-invoking `release_fn` (it only retries release from
+        // `Claimed`, never from `Released`). `None` in production.
+        if let Some(hook) = crash_hook_before_prune {
+            hook();
+        }
         // §5.5 round-7: prune the tree's `released_children` dedup entry for
         // this child strictly before the delete, never after — a crash here
         // just re-derives the same (idempotent) prune on the next recovery
@@ -589,7 +612,7 @@ where
             parent_run_id,
             child_run_id,
             released_version,
-            crash_hook,
+            crash_hook_before_delete,
         )
         .await?;
         self.prune_roster_if_parent_empty(scope, parent_run_id)
@@ -804,10 +827,243 @@ mod tests {
                 || async { Ok(()) },
                 || async { Ok(()) },
                 None,
+                None,
             )
             .await
             .unwrap();
 
+        assert!(store.peek(&scope, parent, child).await.unwrap().is_none());
+    }
+
+    // Required test (§4.0 round-5 self-heal): `open()` must re-touch
+    // (version-bump) the roster marker again after the edge write succeeds,
+    // not just before it. A fresh scope's marker is created at version 1 by
+    // the pre-edge touch; without the post-edge touch it would stay there.
+    #[tokio::test]
+    async fn open_bumps_roster_marker_version_again_after_edge_write() {
+        let fs = scoped_fs();
+        let store = FilesystemAwaitEdgeStore::new(Arc::clone(&fs));
+        let scope = turn_scope();
+        let parent = TurnRunId::new();
+        let child = TurnRunId::new();
+
+        store
+            .open(&scope, parent, child, test_edge("gate:solo"))
+            .await
+            .unwrap();
+
+        let roster_key = RosterKey::from_resource_scope(&scope.to_resource_scope());
+        let roster_path = roster::roster_path(&roster_key).unwrap();
+        let version_after_open = fs
+            .get(&ResourceScope::system(), &roster_path)
+            .await
+            .unwrap()
+            .unwrap()
+            .version;
+
+        assert!(
+            version_after_open.get() > 1,
+            "a fresh scope's roster marker would be stuck at version 1 (just the \
+             pre-edge create) if the post-edge self-heal touch were missing; got {version_after_open}"
+        );
+    }
+
+    // Required tests (§4.5 round-7 roster liveness): the close path's
+    // opportunistic roster prune. `prune_roster_if_parent_empty` must prune
+    // the marker once a scope's last edge is gone, and must leave it in
+    // place while a sibling edge under the same parent is still open.
+    #[tokio::test]
+    async fn close_with_release_prunes_roster_marker_once_scopes_last_edge_is_gone() {
+        let fs = scoped_fs();
+        let store = FilesystemAwaitEdgeStore::new(Arc::clone(&fs));
+        let scope = turn_scope();
+        let parent = TurnRunId::new();
+        let child = TurnRunId::new();
+
+        store
+            .open(&scope, parent, child, test_edge("gate:solo"))
+            .await
+            .unwrap();
+        let roster_key = RosterKey::from_resource_scope(&scope.to_resource_scope());
+        let roster_path = roster::roster_path(&roster_key).unwrap();
+        assert!(
+            fs.get(&ResourceScope::system(), &roster_path)
+                .await
+                .unwrap()
+                .is_some(),
+            "roster marker exists after open()"
+        );
+
+        store
+            .settle(&scope, parent, child, EdgeTerminalKind::Completed, None)
+            .await
+            .unwrap();
+        store
+            .close_with_release(
+                &scope,
+                parent,
+                child,
+                || async { Ok(()) },
+                || async { Ok(()) },
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            fs.get(&ResourceScope::system(), &roster_path)
+                .await
+                .unwrap()
+                .is_none(),
+            "closing a scope's last edge must opportunistically prune its now-stale roster marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_with_release_leaves_roster_marker_when_sibling_edge_still_open() {
+        let fs = scoped_fs();
+        let store = FilesystemAwaitEdgeStore::new(Arc::clone(&fs));
+        let scope = turn_scope();
+        let parent = TurnRunId::new();
+        let child_a = TurnRunId::new();
+        let child_b = TurnRunId::new();
+
+        store
+            .open(&scope, parent, child_a, test_edge("gate:a"))
+            .await
+            .unwrap();
+        store
+            .open(&scope, parent, child_b, test_edge("gate:b"))
+            .await
+            .unwrap();
+        let roster_key = RosterKey::from_resource_scope(&scope.to_resource_scope());
+        let roster_path = roster::roster_path(&roster_key).unwrap();
+
+        store
+            .settle(&scope, parent, child_a, EdgeTerminalKind::Completed, None)
+            .await
+            .unwrap();
+        store
+            .close_with_release(
+                &scope,
+                parent,
+                child_a,
+                || async { Ok(()) },
+                || async { Ok(()) },
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            fs.get(&ResourceScope::system(), &roster_path)
+                .await
+                .unwrap()
+                .is_some(),
+            "sibling edge child_b is still open under this parent -- the roster marker must survive"
+        );
+        assert!(store.peek(&scope, parent, child_b).await.unwrap().is_some());
+    }
+
+    // Required test (§5.5 round-7 scenario (a)): a crash between the
+    // `Released` CAS and the prune leaves the edge Released with the dedup
+    // entry still present -- recovery must complete the prune and delete
+    // without re-invoking `release_fn` (mirrors the scenario-(b) test below).
+    #[tokio::test]
+    async fn crash_before_prune_then_recovery_completes_prune_and_delete_without_double_release() {
+        let store = FilesystemAwaitEdgeStore::new(scoped_fs());
+        let scope = turn_scope();
+        let parent = TurnRunId::new();
+        let child = TurnRunId::new();
+        store
+            .open(&scope, parent, child, test_edge("gate:solo"))
+            .await
+            .unwrap();
+        store
+            .settle(&scope, parent, child, EdgeTerminalKind::Completed, None)
+            .await
+            .unwrap();
+
+        let release_calls = std::sync::atomic::AtomicUsize::new(0);
+        let prune_calls = std::sync::atomic::AtomicUsize::new(0);
+        let panicked = std::thread::scope(|scope_thread| {
+            scope_thread
+                .spawn(|| {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("build single-threaded runtime for crash-injection thread");
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        rt.block_on(store.close_with_release(
+                            &scope,
+                            parent,
+                            child,
+                            || {
+                                release_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                async { Ok(()) }
+                            },
+                            || {
+                                prune_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                async { Ok(()) }
+                            },
+                            Some(&|| panic!("simulated crash between Released CAS and prune")),
+                            None,
+                        ))
+                    }))
+                })
+                .join()
+                .expect("crash-injection thread itself must not panic")
+        });
+        assert!(
+            panicked.is_err(),
+            "expected the injected crash hook to unwind"
+        );
+        assert_eq!(release_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            prune_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "prune_fn must not have run yet -- the crash lands strictly before it"
+        );
+
+        // The edge is still on disk at Released (crash landed before prune).
+        let surviving = store.peek(&scope, parent, child).await.unwrap().unwrap();
+        assert_eq!(
+            surviving.reservation_release,
+            ReservationReleaseState::Released
+        );
+
+        // Recovery re-runs close_with_release: observes Released, does NOT
+        // call release_fn again, and completes the prune + delete.
+        store
+            .close_with_release(
+                &scope,
+                parent,
+                child,
+                || {
+                    release_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    async { Ok(()) }
+                },
+                || {
+                    prune_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    async { Ok(()) }
+                },
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            release_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "release_fn must not be re-invoked once the edge is already Released"
+        );
+        assert_eq!(
+            prune_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "recovery's pass must run prune_fn exactly once"
+        );
         assert!(store.peek(&scope, parent, child).await.unwrap().is_none());
     }
 
@@ -977,6 +1233,7 @@ mod tests {
                                 prune_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                                 async { Ok(()) }
                             },
+                            None,
                             Some(&|| panic!("simulated crash between prune and delete")),
                         ))
                     }))
@@ -1021,6 +1278,7 @@ mod tests {
                     prune_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     async { Ok(()) }
                 },
+                None,
                 None,
             )
             .await
@@ -1094,6 +1352,7 @@ mod tests {
                     }
                 },
                 || async { Ok(()) },
+                None,
                 None,
             )
             .await;

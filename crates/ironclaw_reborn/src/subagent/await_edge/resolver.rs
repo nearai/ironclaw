@@ -636,6 +636,14 @@ where
         // sibling under this gate_ref at-or-past Settled drives the batch
         // write+resume+close for the whole group. Group size 1 (solo spawn,
         // the common case) collapses to today's immediate settle-then-drain.
+        //
+        // TOCTOU, accepted: this list-then-check is a plain read, not CAS'd
+        // against the group as a whole, so a concurrent sibling settle can
+        // land between the read and the check below. Benign: every
+        // downstream effect here is idempotent (gate resume, per-member CAS
+        // overwrite, `mark_released`'s re-read-adopt) and groups are bounded
+        // (≤16 descendants, §5.1), so a racing settle just loses this
+        // round's driver election and drives the next one instead.
         let group = self
             .store
             .list_group(child_scope, parent_run_id, &edge.gate_ref)
@@ -718,6 +726,7 @@ where
                             })
                     }
                 },
+                None,
                 None,
             )
             .await

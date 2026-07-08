@@ -159,6 +159,123 @@ async fn stale_roster_marker_with_empty_edge_dir_is_pruned_by_boot_pass() {
     );
 }
 
+// Required test (§4.5 round-5, design doc line 179), integration-tier: the
+// 256-shard sequential walk must enumerate every scope regardless of which
+// shard it lands in, not just scopes that happen to be direct children of a
+// single `list_dir` call (the round-2 nested-marker miss this design
+// replaced). Seeds >=3 scopes differing across every axis (tenant, user,
+// agent, project) that are deterministically chosen to hash into >=3
+// distinct shard directories, then asserts the walk finds all of them.
+#[tokio::test]
+async fn roster_shard_walk_enumerates_scopes_across_distinct_shards() {
+    let root = Arc::new(InMemoryBackend::new());
+    let fs = wrap_scoped(Arc::clone(&root));
+
+    // Baseline scope plus one variant per axis (tenant/user/agent/project),
+    // each differing from the baseline in exactly one axis -- collectively
+    // exercising every axis the roster key carries. `salt` disambiguates
+    // ids across the search below without changing which axis each variant
+    // differs on.
+    fn axis_variant_keys(salt: usize) -> [RosterKey; 5] {
+        let tenant0 = TenantId::new(format!("tenant-shard-0-{salt}")).unwrap();
+        let tenant1 = TenantId::new(format!("tenant-shard-1-{salt}")).unwrap();
+        let user0 = UserId::new(format!("user-shard-0-{salt}")).unwrap();
+        let user1 = UserId::new(format!("user-shard-1-{salt}")).unwrap();
+        let agent0 = AgentId::new(format!("agent-shard-0-{salt}")).unwrap();
+        let agent1 = AgentId::new(format!("agent-shard-1-{salt}")).unwrap();
+        let project1 = ProjectId::new(format!("project-shard-1-{salt}")).unwrap();
+        [
+            // baseline
+            RosterKey {
+                tenant_id: tenant0.clone(),
+                user_id: user0.clone(),
+                agent_id: Some(agent0.clone()),
+                project_id: None,
+            },
+            // differs in tenant only
+            RosterKey {
+                tenant_id: tenant1,
+                user_id: user0.clone(),
+                agent_id: Some(agent0.clone()),
+                project_id: None,
+            },
+            // differs in user only (same tenant as baseline)
+            RosterKey {
+                tenant_id: tenant0.clone(),
+                user_id: user1,
+                agent_id: Some(agent0.clone()),
+                project_id: None,
+            },
+            // differs in agent only (same user as baseline)
+            RosterKey {
+                tenant_id: tenant0.clone(),
+                user_id: user0.clone(),
+                agent_id: Some(agent1),
+                project_id: None,
+            },
+            // differs in project only (same agent as baseline)
+            RosterKey {
+                tenant_id: tenant0,
+                user_id: user0,
+                agent_id: Some(agent0),
+                project_id: Some(project1),
+            },
+        ]
+    }
+
+    // Deterministic search (not true randomness): the first salt whose 5
+    // keys hash into >=3 distinct shard-prefix directories. With 256 shards
+    // this converges within a handful of iterations; asserted as an
+    // explicit precondition below rather than assumed.
+    let mut chosen: Option<[RosterKey; 5]> = None;
+    for salt in 0..2000usize {
+        let keys = axis_variant_keys(salt);
+        let shards: std::collections::HashSet<String> = keys
+            .iter()
+            .map(|key| roster::shard_prefix(&roster::encode_roster_filename(key)))
+            .collect();
+        if shards.len() >= 3 {
+            chosen = Some(keys);
+            break;
+        }
+    }
+    let keys = chosen.expect(
+        "failed to find a salt whose 5 axis-differing scopes hash into >=3 distinct shards \
+         out of 256 -- statistically implausible, investigate shard_prefix",
+    );
+
+    // Precondition, asserted rather than assumed: the chosen keys really do
+    // land in >=3 distinct shard directories.
+    let distinct_shards: std::collections::HashSet<String> = keys
+        .iter()
+        .map(|key| roster::shard_prefix(&roster::encode_roster_filename(key)))
+        .collect();
+    assert!(
+        distinct_shards.len() >= 3,
+        "precondition failed: expected >=3 distinct shards, got {distinct_shards:?}"
+    );
+
+    for key in &keys {
+        roster::touch_roster_marker(&fs, key)
+            .await
+            .expect("seed roster marker");
+    }
+
+    let walked = roster::walk_roster_shards(&fs).await;
+    for key in &keys {
+        assert!(
+            walked.contains(key),
+            "shard walk must enumerate every seeded scope, including scope in a \
+             non-default shard: missing {key:?}"
+        );
+    }
+    assert_eq!(
+        walked.len(),
+        keys.len(),
+        "shard walk must enumerate exactly the seeded scopes, no more, no fewer"
+    );
+}
+
 // Required test (§5.3, P1.9 extension), integration-tier: lazy-recovery
 // admission — a scope with unclosed edges is gated behind
 // `ScopeRecoveryInProgress` on first touch, then admitted once recovery
