@@ -1366,29 +1366,10 @@ fn unavailable_requested_capability_guard(
         .iter()
         .map(|definition| definition.capability_id.as_str())
         .collect::<HashSet<_>>();
-    // Namespaces that actually exist on this agent (a visible capability shares
-    // the prefix, e.g. "builtin"). A genuine "that capability is unavailable"
-    // request targets a real namespace whose specific id is gated off — not an
-    // arbitrary dotted token. Without this, incidental code references phrased
-    // after a request verb (e.g. "use `playwright.sync_api`", a Python module)
-    // are mistaken for a disabled-capability request, and the guard suppresses
-    // the model's legitimate tool calls (write_file, etc.), ending the turn with
-    // a spurious "capability is unavailable" refusal.
-    let visible_namespaces = visible_capability_ids
-        .iter()
-        .filter_map(|id| id.split('.').next())
-        .collect::<HashSet<_>>();
 
     extract_explicit_capability_request_ids(&latest_user.content)
         .into_iter()
-        .find(|capability_id| {
-            let id = capability_id.as_str();
-            !visible_capability_ids.contains(id)
-                && id
-                    .split('.')
-                    .next()
-                    .is_some_and(|namespace| visible_namespaces.contains(namespace))
-        })
+        .find(|capability_id| !visible_capability_ids.contains(capability_id.as_str()))
         .map(|capability_id| UnavailableCapabilityGuard { capability_id })
 }
 
@@ -1424,6 +1405,7 @@ fn push_explicit_capability_request_token(
 ) {
     let token = &content[start..end];
     if !is_likely_capability_reference(token)
+        || is_inside_inline_code(content, start)
         || !is_explicit_capability_request_token(content, start, end)
     {
         return;
@@ -1437,6 +1419,22 @@ fn push_explicit_capability_request_token(
 
 fn is_likely_capability_reference(token: &str) -> bool {
     token.starts_with("builtin.") || token.split('.').count() == 2
+}
+
+/// True when the token starting at `start` sits inside a Markdown inline-code
+/// span — i.e. an odd number of backticks precede it on its line. Task prompts
+/// wrap library/module references in backticks (e.g. "use `playwright.sync_api`",
+/// a Python module named after a request verb); those are code being referenced,
+/// not a capability the agent is being asked to invoke, so the guard must ignore
+/// them. A bare, un-backticked "use gmail.send" is still treated as a request.
+fn is_inside_inline_code(content: &str, start: usize) -> bool {
+    let line_start = content[..start].rfind('\n').map_or(0, |nl| nl + 1);
+    content[line_start..start]
+        .bytes()
+        .filter(|&b| b == b'`')
+        .count()
+        % 2
+        == 1
 }
 
 fn is_explicit_capability_request_token(content: &str, start: usize, end: usize) -> bool {
@@ -2075,8 +2073,8 @@ mod tests {
 
     #[test]
     fn guard_still_fires_on_real_disabled_capability() {
-        // A genuine request for a real builtin capability that's gated off must
-        // still fire: namespace `builtin` exists but `builtin.http` isn't visible.
+        // A genuine, un-backticked request for a capability that isn't visible must
+        // still fire (`builtin.http` is gated off here).
         let messages = vec![ChatMessage::user(
             "Fetch the page using the builtin.http capability.",
         )];
