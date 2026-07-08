@@ -3,7 +3,9 @@
 
 use super::*;
 #[cfg(feature = "slack-v2-host-beta")]
-use crate::available_extensions::{SLACK_EXTENSION_ID, slack_personal_oauth_setup_scopes};
+use crate::extension_host::available_extensions::{
+    SLACK_EXTENSION_ID, slack_personal_oauth_setup_scopes,
+};
 use crate::product_auth::api::auth::OAuthProviderIdentityCheck;
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::product_auth::api::auth::OAuthProviderIdentityCheckFuture;
@@ -1791,7 +1793,7 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
 
         assert!(!scopes.contains("admin"));
-        for expected in crate::available_extensions::slack_personal_oauth_setup_scopes() {
+        for expected in slack_personal_oauth_setup_scopes() {
             assert!(
                 scopes.contains(expected),
                 "server-authorized Slack scope `{expected}` should be requested"

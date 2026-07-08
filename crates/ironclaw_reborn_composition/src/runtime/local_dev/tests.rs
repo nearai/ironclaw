@@ -48,7 +48,7 @@ mod tests {
         },
     };
 
-    use crate::extension_lifecycle_capabilities::{
+    use crate::extension_host::extension_lifecycle_capabilities::{
         EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
         EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
     };
@@ -523,7 +523,7 @@ mod tests {
             .as_ref()
             .expect("extension management")
             .clone();
-        let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
+        let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
             local_runtime.skill_management.clone(),
         )
         .with_extension_management(extension_management)
@@ -3047,7 +3047,7 @@ mod tests {
                 .as_ref()
                 .expect("extension management")
                 .clone();
-            let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
+            let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
                 local_runtime.skill_management.clone(),
             )
             .with_extension_management(extension_management)
@@ -3151,7 +3151,7 @@ mod tests {
             .as_ref()
             .expect("extension management")
             .clone();
-        let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
+        let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
             local_runtime.skill_management.clone(),
         )
         .with_extension_management(extension_management)
@@ -3343,7 +3343,7 @@ mod tests {
             .as_ref()
             .expect("extension management")
             .clone();
-        let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
+        let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
             local_runtime.skill_management.clone(),
         )
         .with_extension_management(extension_management)

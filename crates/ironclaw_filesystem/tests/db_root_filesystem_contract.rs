@@ -447,6 +447,163 @@ async fn libsql_native_put_cas_version_on_missing_path_reports_no_found_version(
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
+async fn libsql_delete_if_version_deletes_current_and_rejects_stale_or_missing() {
+    let filesystem = libsql_root().await;
+    let path = VirtualPath::new("/secrets/leases/CAS-DEL").unwrap();
+
+    // Missing path → NotFound (already gone, benign), never VersionMismatch.
+    let err = filesystem
+        .delete_if_version(&path, ironclaw_filesystem::RecordVersion::from_backend(1))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        FilesystemError::NotFound {
+            operation: FilesystemOperation::Delete,
+            ..
+        }
+    ));
+
+    // Simulates the state a concurrent writer would leave behind (this is a
+    // sequential script, not a real race — see concurrent_cas_storm.rs for
+    // genuine parallel coverage): the v1 the deleter read is bumped to v2
+    // before the delete lands → the stale delete loses with the observed
+    // version and the entry survives at v2.
+    let v1 = filesystem
+        .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+        .await
+        .unwrap();
+    let log_seq = filesystem.append(&path, b"kept".to_vec()).await.unwrap();
+    let v2 = filesystem
+        .put(&path, Entry::bytes(vec![2]), CasExpectation::Version(v1))
+        .await
+        .unwrap();
+    let err = filesystem.delete_if_version(&path, v1).await.unwrap_err();
+    match err {
+        FilesystemError::VersionMismatch {
+            expected, found, ..
+        } => {
+            assert_eq!(expected, Some(v1));
+            assert_eq!(found, Some(v2));
+        }
+        other => panic!("expected VersionMismatch, got {other:?}"),
+    }
+    let got = filesystem.get(&path).await.unwrap().unwrap();
+    assert_eq!(got.version, v2);
+    assert_eq!(got.entry.body, vec![2]);
+
+    // Correct version deletes exactly the entry; single-key, so the event
+    // log at the same path survives (blind `delete` sweeps it).
+    filesystem.delete_if_version(&path, v2).await.unwrap();
+    assert!(filesystem.get(&path).await.unwrap().is_none());
+    let log = filesystem.tail(&path, SeqNo::ZERO).await.unwrap();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].seq, log_seq);
+}
+
+/// Review fix (PR #5749): an `expected_version` beyond `i64::MAX` must
+/// surface `CorruptRecordVersion` (audit finding F6's overflow guard) rather
+/// than being silently truncated into a bind parameter that could never
+/// match — and the guard must fire before any DELETE runs, so the entry
+/// survives untouched.
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_delete_if_version_rejects_out_of_range_expected_version() {
+    let filesystem = libsql_root().await;
+    let path = VirtualPath::new("/secrets/leases/CAS-DEL-OVERFLOW").unwrap();
+    let v1 = filesystem
+        .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+        .await
+        .unwrap();
+
+    let err = filesystem
+        .delete_if_version(
+            &path,
+            ironclaw_filesystem::RecordVersion::from_backend(u64::MAX),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, FilesystemError::CorruptRecordVersion { .. }),
+        "expected CorruptRecordVersion, got {err:?}"
+    );
+
+    let got = filesystem.get(&path).await.unwrap().unwrap();
+    assert_eq!(got.version, v1);
+    assert_eq!(got.entry.body, vec![1]);
+}
+
+/// Round-B review: the ABA hazard `delete_if_version`'s trait doc warns
+/// about (version tokens are not generation-stable) was previously pinned
+/// only for the in-memory backend. libSQL shares the same "version
+/// restarts at 1 after a full delete" precondition — pin it here too so a
+/// future change to libSQL's version-assignment (e.g. a sequence that
+/// doesn't reset) can't silently invalidate the trait doc's warning for
+/// this backend without a test noticing.
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_delete_if_version_is_vulnerable_to_aba_across_delete_recreate_cycles() {
+    let filesystem = libsql_root().await;
+    let path = VirtualPath::new("/secrets/leases/CAS-DEL-ABA").unwrap();
+
+    let v1_first = filesystem
+        .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+        .await
+        .unwrap();
+    filesystem.delete_if_version(&path, v1_first).await.unwrap();
+    assert!(filesystem.get(&path).await.unwrap().is_none());
+
+    let v1_second = filesystem
+        .put(&path, Entry::bytes(vec![2]), CasExpectation::Absent)
+        .await
+        .unwrap();
+    assert_eq!(
+        v1_first, v1_second,
+        "version must restart after a full delete, or this ABA hazard doesn't apply"
+    );
+
+    // The stale `v1_first` token wrongly authorizes deleting the second
+    // incarnation's live data — documented hazard, not a regression.
+    filesystem.delete_if_version(&path, v1_first).await.unwrap();
+    assert!(
+        filesystem.get(&path).await.unwrap().is_none(),
+        "stale version token wrongly matched and deleted the second incarnation"
+    );
+}
+
+/// Round-C review (PR #5749): no test drove `delete_if_version` against an
+/// explicit directory row (`is_dir = TRUE`, via `create_dir_all`) to confirm
+/// the `is_dir = 0` scoping — shared with `put`'s Version arm and
+/// `current_version_libsql` — actually excludes it, the way
+/// `libsql_put_rejects_existing_directory`-style tests already pin for
+/// `put`. A directory-only path must diagnose as `NotFound` (no file-plane
+/// row at that path), never match/delete the directory row.
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_delete_if_version_excludes_explicit_directory_row() {
+    let filesystem = libsql_root().await;
+    let dir = VirtualPath::new("/secrets/leases/CAS-DEL-DIR").unwrap();
+    filesystem.create_dir_all(&dir).await.unwrap();
+
+    let err = filesystem
+        .delete_if_version(&dir, ironclaw_filesystem::RecordVersion::from_backend(1))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            FilesystemError::NotFound {
+                operation: FilesystemOperation::Delete,
+                ..
+            }
+        ),
+        "delete_if_version must not match an explicit directory row \
+         (is_dir = TRUE), got: {err:?}"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
 async fn libsql_native_put_cas_any_increments_existing_version() {
     let filesystem = libsql_root().await;
     let path = VirtualPath::new("/secrets/leases/L4").unwrap();
@@ -1596,6 +1753,251 @@ mod postgres_tests {
             .await
             .unwrap_err();
         assert!(matches!(err, FilesystemError::VersionMismatch { .. }));
+    }
+
+    #[tokio::test]
+    async fn postgres_delete_if_version_deletes_current_and_rejects_stale_or_missing() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let path = vpath(&prefix, "cas_delete");
+
+        // Missing path → NotFound (already gone, benign), never VersionMismatch.
+        let err = fs
+            .delete_if_version(&path, ironclaw_filesystem::RecordVersion::from_backend(1))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FilesystemError::NotFound {
+                operation: FilesystemOperation::Delete,
+                ..
+            }
+        ));
+
+        // Simulates the state a concurrent writer would leave behind (this
+        // is a sequential script, not a real race — see
+        // concurrent_cas_storm.rs for genuine parallel coverage): the v1
+        // the deleter read is bumped to v2 before the delete lands → the
+        // stale delete loses with the observed version and the entry
+        // survives at v2.
+        let v1 = fs
+            .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+            .await
+            .unwrap();
+        let log_seq = fs.append(&path, b"kept".to_vec()).await.unwrap();
+        let v2 = fs
+            .put(&path, Entry::bytes(vec![2]), CasExpectation::Version(v1))
+            .await
+            .unwrap();
+        let err = fs.delete_if_version(&path, v1).await.unwrap_err();
+        match err {
+            FilesystemError::VersionMismatch {
+                expected, found, ..
+            } => {
+                assert_eq!(expected, Some(v1));
+                assert_eq!(found, Some(v2));
+            }
+            other => panic!("expected VersionMismatch, got {other:?}"),
+        }
+        let got = fs.get(&path).await.unwrap().unwrap();
+        assert_eq!(got.version, v2);
+        assert_eq!(got.entry.body, vec![2]);
+
+        // Correct version deletes exactly the entry; single-key, so the
+        // event log at the same path survives (blind `delete` sweeps it).
+        fs.delete_if_version(&path, v2).await.unwrap();
+        assert!(fs.get(&path).await.unwrap().is_none());
+        let log = fs.tail(&path, SeqNo::ZERO).await.unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].seq, log_seq);
+    }
+
+    /// Review fix (PR #5749): mirrors the libsql overflow guard. An
+    /// `expected_version` beyond `i64::MAX` must surface
+    /// `CorruptRecordVersion` before any DELETE runs, so the entry survives
+    /// untouched — never a silently-truncated bind parameter that could
+    /// never match.
+    #[tokio::test]
+    async fn postgres_delete_if_version_rejects_out_of_range_expected_version() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let path = vpath(&prefix, "cas_delete_overflow");
+        let v1 = fs
+            .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+            .await
+            .unwrap();
+
+        let err = fs
+            .delete_if_version(
+                &path,
+                ironclaw_filesystem::RecordVersion::from_backend(u64::MAX),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, FilesystemError::CorruptRecordVersion { .. }),
+            "expected CorruptRecordVersion, got {err:?}"
+        );
+
+        let got = fs.get(&path).await.unwrap().unwrap();
+        assert_eq!(got.version, v1);
+        assert_eq!(got.entry.body, vec![1]);
+    }
+
+    /// Round-B review: mirrors the libSQL/in-memory ABA-hazard pin. Postgres
+    /// shares the same "version restarts at 1 after a full delete"
+    /// precondition (see `put`'s Absent-insert path); pin it here too so a
+    /// future change to Postgres's version-assignment can't silently
+    /// invalidate the trait doc's ABA warning for this backend.
+    #[tokio::test]
+    async fn postgres_delete_if_version_is_vulnerable_to_aba_across_delete_recreate_cycles() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let path = vpath(&prefix, "cas_delete_aba");
+
+        let v1_first = fs
+            .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+            .await
+            .unwrap();
+        fs.delete_if_version(&path, v1_first).await.unwrap();
+        assert!(fs.get(&path).await.unwrap().is_none());
+
+        let v1_second = fs
+            .put(&path, Entry::bytes(vec![2]), CasExpectation::Absent)
+            .await
+            .unwrap();
+        assert_eq!(
+            v1_first, v1_second,
+            "version must restart after a full delete, or this ABA hazard doesn't apply"
+        );
+
+        // The stale `v1_first` token wrongly authorizes deleting the second
+        // incarnation's live data — documented hazard, not a regression.
+        fs.delete_if_version(&path, v1_first).await.unwrap();
+        assert!(
+            fs.get(&path).await.unwrap().is_none(),
+            "stale version token wrongly matched and deleted the second incarnation"
+        );
+    }
+
+    /// Round-C review (PR #5749): mirrors `postgres_put_rejects_existing_directory`
+    /// but for `delete_if_version` — no test drove it against an explicit
+    /// directory row to confirm the `is_dir = FALSE` scoping (shared with
+    /// `DELETE_IF_VERSION_ATOMIC_SQL`'s `locked`/`deleted` CTEs and
+    /// `postgres_current_version_with_client`) actually excludes it. A
+    /// directory-only path must diagnose as `NotFound`, never match/delete
+    /// the directory row.
+    #[tokio::test]
+    async fn postgres_delete_if_version_excludes_explicit_directory_row() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let dir = vpath(&prefix, "cas_delete_dir");
+        fs.create_dir_all(&dir).await.unwrap();
+
+        let err = fs
+            .delete_if_version(&dir, ironclaw_filesystem::RecordVersion::from_backend(1))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                FilesystemError::NotFound {
+                    operation: FilesystemOperation::Delete,
+                    ..
+                }
+            ),
+            "delete_if_version must not match an explicit directory row \
+             (is_dir = TRUE), got: {err:?}"
+        );
+    }
+
+    /// Round-C review (PR #5749): the deterministic
+    /// `delete_if_version_statements_are_single_round_trip_and_single_key`
+    /// test (postgres.rs) only inspects the SQL string's substrings/statement
+    /// count — it cannot distinguish a genuinely atomic query from a
+    /// similar-looking one that isn't (e.g. `FOR UPDATE SKIP LOCKED` still
+    /// contains the substring `FOR UPDATE`). This test drives the real race
+    /// the atomicity fix targets against a live Postgres session: a
+    /// concurrent transaction that deletes-then-recreates the same path
+    /// while `delete_if_version` is mid-flight (blocked on the `FOR UPDATE`
+    /// row lock the uncommitted DELETE holds), and asserts the only
+    /// semantically correct outcome — `NotFound`, because at the row-lock
+    /// serialization point the row was gone — rather than the misclassified
+    /// `VersionMismatch` a non-atomic (separate DELETE, then separate
+    /// diagnosis SELECT) implementation would produce against the racer's
+    /// freshly-recreated row.
+    #[tokio::test]
+    async fn postgres_delete_if_version_stays_notfound_under_concurrent_delete_recreate_race() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let Some(racer_pool) = postgres_pool().await else {
+            return;
+        };
+        let path = vpath(&prefix, "cas_delete_race");
+        let v1 = fs
+            .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+            .await
+            .unwrap();
+
+        let racer_client = racer_pool
+            .get()
+            .await
+            .expect("racer connection must be available on the same reachable Postgres");
+        let path_str = path.as_str().to_string();
+        let (deleted_tx, deleted_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let racer = tokio::spawn(async move {
+            racer_client.batch_execute("BEGIN").await.unwrap();
+            racer_client
+                .execute(
+                    "DELETE FROM root_filesystem_entries WHERE path = $1 AND is_dir = FALSE",
+                    &[&path_str],
+                )
+                .await
+                .unwrap();
+            // Our DELETE now holds a tuple lock on the row; a concurrent
+            // `delete_if_version`'s `FOR UPDATE` on this path will block on
+            // it until we commit. Signal so the test doesn't call
+            // `delete_if_version` before this DELETE has actually run.
+            let _ = deleted_tx.send(());
+            // Give `delete_if_version` time to reach `FOR UPDATE` and start
+            // waiting on our uncommitted DELETE's row lock before we
+            // recreate + commit.
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            racer_client
+                .execute(
+                    "INSERT INTO root_filesystem_entries (path, version) VALUES ($1, 999)",
+                    &[&path_str],
+                )
+                .await
+                .unwrap();
+            racer_client.batch_execute("COMMIT").await.unwrap();
+        });
+
+        deleted_rx
+            .await
+            .expect("racer must signal after its DELETE runs");
+        // Head start so `delete_if_version`'s `FOR UPDATE` actually reaches
+        // and blocks on the racer's uncommitted DELETE before it recreates.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let result = fs.delete_if_version(&path, v1).await;
+
+        racer.await.expect("racer task must not panic");
+
+        assert!(
+            matches!(result, Err(FilesystemError::NotFound { .. })),
+            "expected NotFound (delete_if_version's row-lock wait serializes \
+             it before the racer's recreate, so the correct diagnosis is \
+             'already gone', never a VersionMismatch against the racer's new \
+             row) — got: {result:?}. A non-atomic (separate DELETE + \
+             diagnosis SELECT) implementation would misclassify this as \
+             VersionMismatch{{found: Some(999)}}."
+        );
     }
 
     #[tokio::test]

@@ -23,7 +23,7 @@ fn resolver_with_accounts(
     ProductAuthRuntimeCredentialResolver::new(Arc::new(
         ProductAuthRuntimeCredentialAccountSelector::new_with_visibility(
             accounts,
-            Arc::new(crate::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy),
+            Arc::new(crate::extension_host::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy),
         ),
     ))
 }
@@ -39,7 +39,7 @@ fn resolver_with_host_managed_nearai_scope(
     let selector: Arc<dyn RuntimeCredentialAccountSelectionService> = Arc::new(
         ProductAuthRuntimeCredentialAccountSelector::new_with_visibility(
             accounts,
-            Arc::new(crate::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy),
+            Arc::new(crate::extension_host::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy),
         ),
     );
     let fallback = HostManagedCredentialFallbackRule::new(
@@ -59,7 +59,9 @@ fn resolver_with_refresh(
         Arc::new(
             ProductAuthRuntimeCredentialAccountSelector::new_with_visibility(
                 accounts.clone(),
-                Arc::new(crate::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy),
+                Arc::new(
+                    crate::extension_host::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy,
+                ),
             ),
         ),
         Arc::new(ProductAuthRuntimeCredentialAccountRefresher::new(
@@ -159,7 +161,7 @@ fn selector_for(
 ) -> ProductAuthRuntimeCredentialAccountSelector {
     ProductAuthRuntimeCredentialAccountSelector::new_with_visibility(
         accounts,
-        Arc::new(crate::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy),
+        Arc::new(crate::extension_host::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy),
     )
 }
 
@@ -1660,7 +1662,9 @@ fn resolver_with_refresh_and_store(
         Arc::new(
             ProductAuthRuntimeCredentialAccountSelector::new_with_visibility(
                 accounts.clone(),
-                Arc::new(crate::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy),
+                Arc::new(
+                    crate::extension_host::gsuite::GsuiteRuntimeCredentialAccountVisibilityPolicy,
+                ),
             ),
         ),
         Arc::new(ProductAuthRuntimeCredentialAccountRefresher::new(

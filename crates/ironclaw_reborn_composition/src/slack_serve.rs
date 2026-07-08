@@ -240,7 +240,7 @@ pub fn slack_events_route_descriptors() -> Vec<IngressRouteDescriptor> {
 /// surfaced at startup.
 static SLACK_INGRESS_DESCRIPTORS: LazyLock<SlackIngressDescriptors> = LazyLock::new(|| {
     let descriptors = crate::host_ingress::bundled_host_ingress_descriptors(
-        crate::available_extensions::slack_bot_manifest_toml(),
+        crate::extension_host::available_extensions::slack_bot_manifest_toml(),
     )
     .unwrap_or_else(|error| {
         panic!("bundled Slack manifest must project host-ingress routes: {error}")

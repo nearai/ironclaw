@@ -467,6 +467,20 @@ impl RootFilesystem for MountScopedRootFilesystem {
         self.root.delete(&path).await
     }
 
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        expected_version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        // Review fix (PR #5749, round 3): this mount-scoping wrapper advertises
+        // the inner backend's capabilities verbatim (see `capabilities` above),
+        // so a mount that declares CAS delete must actually serve
+        // `delete_if_version` after the same permission resolution as `delete`,
+        // rather than falling through to the trait default `Unsupported`.
+        let path = self.resolve(path, FilesystemOperation::Delete)?;
+        self.root.delete_if_version(&path, expected_version).await
+    }
+
     async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
         let path = self.resolve(path, FilesystemOperation::BeginTxn)?;
         self.root.begin(&path).await

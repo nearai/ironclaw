@@ -19,7 +19,7 @@ use ironclaw_product_workflow::{
 
 use crate::{
     RebornProductAuthServices, SlackHostBetaMounts,
-    available_extensions::SLACK_BOT_EXTENSION_ID,
+    extension_host::available_extensions::SLACK_BOT_EXTENSION_ID,
     slack_actor_identity::{RebornUserIdentityLookup, SLACK_IDENTITY_PROVIDER},
     slack_host_beta::{SlackPersonalConnectionScope, SlackPersonalConnectionScopeResolver},
     slack_outbound_targets::SlackPersonalDmTargetStore,
