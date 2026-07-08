@@ -355,6 +355,7 @@ function applyProjectionItems({
       }
     }
   }
+  const textBeforeActivityRunIds = projectionTextBeforeActivityRunIds(items);
   let activeRunId = latestRunIdRef?.current ?? null;
   for (const item of items) {
     if (item.run_status) {
@@ -510,6 +511,9 @@ function applyProjectionItems({
           textRunId &&
           prev.some((m) => isFinalAssistantForRun(m, textRunId))
         ) {
+          if (textBeforeActivityRunIds.has(textRunId)) {
+            return preserveFinalAssistantBeforeSameRunActivity(prev, textRunId);
+          }
           return prev;
         }
         const timelineMessageId = item.text.id ? `msg-${item.text.id}` : null;
@@ -730,10 +734,71 @@ function projectionTextRunId(id) {
   return id.startsWith(prefix) ? id.slice(prefix.length) || null : null;
 }
 
+function projectionTextBeforeActivityRunIds(items) {
+  const textSeen = new Set();
+  const textBeforeActivity = new Set();
+  for (const item of Array.isArray(items) ? items : []) {
+    const textRunId = item?.text ? projectionTextRunId(item.text.id) : null;
+    if (textRunId) textSeen.add(textRunId);
+
+    const activityRunId = projectionActivityRunId(item);
+    if (activityRunId && textSeen.has(activityRunId)) {
+      textBeforeActivity.add(activityRunId);
+    }
+  }
+  return textBeforeActivity;
+}
+
+function projectionActivityRunId(item) {
+  return item?.capability_activity?.turn_run_id || item?.thinking?.run_id || null;
+}
+
 function isFinalAssistantForRun(message, runId) {
   return (
     message?.role === "assistant" &&
     message?.isFinalReply === true &&
+    message?.turnRunId === runId
+  );
+}
+
+function preserveFinalAssistantBeforeSameRunActivity(messages, runId) {
+  const finalIndex = messages.findIndex((message) =>
+    isFinalAssistantForRun(message, runId),
+  );
+  if (finalIndex < 0) return messages;
+
+  const finalMessage = {
+    ...messages[finalIndex],
+    keepFollowingActivityAfter: true,
+  };
+  const firstActivityIndex = messages.findIndex((message) =>
+    isSameRunRuntimeActivity(message, runId),
+  );
+
+  if (firstActivityIndex < 0 || finalIndex < firstActivityIndex) {
+    if (messages[finalIndex]?.keepFollowingActivityAfter === true) {
+      return messages;
+    }
+    const copy = [...messages];
+    copy[finalIndex] = finalMessage;
+    return copy;
+  }
+
+  const withoutFinal = messages.filter((_, index) => index !== finalIndex);
+  const targetIndex = withoutFinal.findIndex((message) =>
+    isSameRunRuntimeActivity(message, runId),
+  );
+  if (targetIndex < 0) return withoutFinal;
+  return [
+    ...withoutFinal.slice(0, targetIndex),
+    finalMessage,
+    ...withoutFinal.slice(targetIndex),
+  ];
+}
+
+function isSameRunRuntimeActivity(message, runId) {
+  return (
+    (message?.role === "tool_activity" || message?.role === "thinking") &&
     message?.turnRunId === runId
   );
 }
