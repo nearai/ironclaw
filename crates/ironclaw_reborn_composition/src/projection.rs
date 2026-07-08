@@ -311,7 +311,7 @@ impl ProjectionStream for WebuiRuntimeProjectionStream {
             batch.push_turn(turn_cursor, payload);
         }
         if let Some(next_cursor) = turn_drain.next_cursor
-            && batch.cursor().turn.as_ref() != Some(&next_cursor)
+            && turn_cursor_advances(batch.cursor().turn.as_ref(), &next_cursor)
         {
             batch.push_turn(next_cursor, ProductOutboundPayload::KeepAlive);
         }
@@ -650,6 +650,13 @@ fn runtime_projection_scope(actor: &TurnActor, scope: &TurnScope) -> EventProjec
             process_id: None,
         },
     }
+}
+
+fn turn_cursor_advances(
+    current: Option<&TurnEventProjectionCursor>,
+    next: &TurnEventProjectionCursor,
+) -> bool {
+    current.is_none_or(|current| next.event > current.event)
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]

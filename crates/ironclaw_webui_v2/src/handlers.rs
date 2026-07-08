@@ -833,11 +833,15 @@ fn build_sse_stream(
                             }
                         }
                     }
-                    idle_polls = if had_events {
-                        0
-                    } else {
-                        idle_polls.saturating_add(1)
-                    };
+                    if had_events {
+                        // The production projection facade waits on its live
+                        // subscription when no new item is replayable. Re-enter
+                        // it immediately after delivering a batch so assistant
+                        // text deltas are not delayed by the idle poll cadence.
+                        idle_polls = 0;
+                        continue;
+                    }
+                    idle_polls = idle_polls.saturating_add(1);
                     // Bound the poll sleep too so we never oversleep past the
                     // lifetime budget; the top-of-loop check then fires.
                     let sleep_for = sse_poll_interval_for_idle_polls(idle_polls)
@@ -1930,7 +1934,7 @@ async fn ws_drain_loop(
     mut socket: axum::extract::ws::WebSocket,
 ) {
     // Mirror the SSE generator: own the slot guard, bound stream
-    // lifetime, drain stream_events on the same poll cadence, emit
+    // lifetime, drain stream_events with the same idle cadence, emit
     // each envelope as a JSON text frame.
     //
     // Two failure modes the loop must observe:
@@ -2021,11 +2025,14 @@ async fn ws_drain_loop(
                         }
                     }
                 }
-                idle_polls = if had_events {
-                    0
-                } else {
-                    idle_polls.saturating_add(1)
-                };
+                if had_events {
+                    // Match SSE semantics: do not sleep after a delivered
+                    // batch, because the production facade waits on the live
+                    // projection subscription for the next item.
+                    idle_polls = 0;
+                    continue;
+                }
+                idle_polls = idle_polls.saturating_add(1);
                 let sleep_for = sse_poll_interval_for_idle_polls(idle_polls)
                     .min(SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed()));
                 if sleep_for.is_zero() {

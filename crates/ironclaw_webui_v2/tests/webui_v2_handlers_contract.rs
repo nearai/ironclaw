@@ -5081,6 +5081,59 @@ where
     buf
 }
 
+#[tokio::test]
+async fn stream_events_continues_immediately_after_non_empty_batch() {
+    let services = Arc::new(StubServices::default());
+
+    let envelope_a = make_projection_update_envelope("cursor:live-a");
+    let envelope_b = make_projection_update_envelope("cursor:live-b");
+    services.enqueue_stream_events(Ok(RebornStreamEventsResponse {
+        events: vec![envelope_a],
+    }));
+    services.enqueue_stream_events(Ok(RebornStreamEventsResponse {
+        events: vec![envelope_b],
+    }));
+
+    let router = router_with(services.clone());
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/events")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut body = response.into_body();
+    let bytes = collect_sse_until(&mut body, Duration::from_millis(750), |buf| {
+        parse_sse_events(buf).len() >= 2
+    })
+    .await;
+    drop(body);
+
+    let events = parse_sse_events(&bytes);
+    assert!(
+        events.len() >= 2,
+        "second SSE event must not wait for the idle poll interval; got {events:?}; raw: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+
+    let calls = services.stream_events_calls.lock().expect("lock").clone();
+    assert!(
+        calls.len() >= 2,
+        "SSE handler must immediately re-enter stream_events after a non-empty batch"
+    );
+    let expected_cursor = ProjectionCursor::new("cursor:live-a").expect("cursor");
+    assert_eq!(
+        calls[1].after_cursor.as_ref(),
+        Some(&expected_cursor),
+        "follow-up call must still preserve cursor ordering"
+    );
+}
+
 // Pins the *wire* contract the browser sees, not just the handler being
 // called: each envelope must emit a typed WebChat v2 event with the
 // JSON-serialized projection cursor as the SSE `id` and the redacted
