@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -14,10 +14,11 @@ use ironclaw_auth::{
     CredentialRefreshReport, CredentialRefreshRequest, CredentialSetupService,
     InMemoryAuthProductServices, ManualTokenSetupRequest, NewAuthFlow, OAuthAuthorizationUrl,
     OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
-    OAuthProviderCallbackRequest, OAuthProviderExchangeContext, OpaqueStateHash, PkceVerifierHash,
-    ProviderBackedCredentialAccountService, ProviderCallbackOutcome, ProviderScope,
-    SecretCleanupReport, SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest,
-    SecretSubmitResult, Timestamp, TurnGateAuthFlowQuery, TurnRunRef, scope_matches,
+    OAuthProviderCallbackRequest, OAuthProviderExchangeContext, OAuthProviderIdentity,
+    OpaqueStateHash, PkceVerifierHash, ProviderBackedCredentialAccountService,
+    ProviderCallbackOutcome, ProviderScope, SecretCleanupReport, SecretCleanupRequest,
+    SecretCleanupService, SecretSubmitRequest, SecretSubmitResult, Timestamp,
+    TurnGateAuthFlowQuery, TurnRunRef, scope_matches,
 };
 use ironclaw_events::{SecurityAuditEvent, SecurityAuditSink, SecurityBoundary, SecurityDecision};
 use ironclaw_product_adapters::AuthPromptChallengeKind;
@@ -44,7 +45,7 @@ use crate::product_auth::oauth::oauth_dcr::{
     DcrGateChallengeRequest, DcrSetupFlowRequest, OAuthDcrProviderRegistry,
 };
 use crate::product_auth::oauth::oauth_gate::{
-    GoogleOAuthGateProviderRegistry, OAuthGateChallengeRequest,
+    OAuthGateChallengeRequest, OAuthGateProviderRegistry,
 };
 use crate::{AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller};
 
@@ -159,6 +160,8 @@ pub struct RebornOAuthCallbackResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_account_id: Option<CredentialAccountId>,
     pub continuation: AuthContinuationRef,
+    #[serde(skip)]
+    pub provider_identity: Option<OAuthProviderIdentity>,
 }
 
 /// Stable sanitized auth failure safe for route rendering.
@@ -180,6 +183,21 @@ impl From<AuthProductError> for RebornAuthProductError {
 
 /// Stable sanitized callback failure safe for route rendering.
 pub type RebornOAuthCallbackError = RebornAuthProductError;
+
+/// Compensating action returned by a provider-identity hook that committed
+/// durable state (e.g. the Slack identity binding) before the flow completes.
+/// Awaited only when `complete_oauth_callback` fails after the hook
+/// succeeded; dropped unpolled on the success path. Infallible by contract —
+/// implementations log their own failures.
+pub(crate) type OAuthProviderIdentityBindingRollback = Pin<Box<dyn Future<Output = ()> + Send>>;
+pub(crate) type OAuthProviderIdentityCheckFuture = Pin<
+    Box<
+        dyn Future<Output = Result<Option<OAuthProviderIdentityBindingRollback>, AuthProductError>>
+            + Send,
+    >,
+>;
+pub(crate) type OAuthProviderIdentityCheck =
+    Box<dyn FnOnce(Option<OAuthProviderIdentity>) -> OAuthProviderIdentityCheckFuture + Send>;
 
 /// Request to open a Reborn manual-token setup interaction.
 ///
@@ -478,7 +496,10 @@ pub struct RebornProductAuthServices {
     secret_store: Arc<dyn ironclaw_secrets::SecretStore>,
     host_managed_nearai_credential_scope: Option<AuthProductScope>,
     dcr_oauth_registry: Option<Arc<OAuthDcrProviderRegistry>>,
-    oauth_gate_registry: Option<Arc<GoogleOAuthGateProviderRegistry>>,
+    /// One generic blocked-gate OAuth provider registry covering every provider
+    /// (Google + Slack personal). Unified from the former parallel per-provider
+    /// registries via `OAuthGateProvider` + `OAuthGateFlowDriver`.
+    oauth_gate_registry: Option<Arc<OAuthGateProviderRegistry>>,
     /// Optional read projection for WebUI/local-dev auth interactions.
     ///
     /// `RebornProductAuthServices` may still support OAuth callbacks,
@@ -495,9 +516,8 @@ pub struct RebornProductAuthServices {
 
 impl std::fmt::Debug for RebornProductAuthServices {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("RebornProductAuthServices")
-            .field("flow_manager", &"Arc<dyn AuthFlowManager>")
+        let mut dbg = formatter.debug_struct("RebornProductAuthServices");
+        dbg.field("flow_manager", &"Arc<dyn AuthFlowManager>")
             .field("interaction_service", &"Arc<dyn AuthInteractionService>")
             .field(
                 "manual_token_flow_service",
@@ -529,8 +549,8 @@ impl std::fmt::Debug for RebornProductAuthServices {
             )
             .field("flow_record_source", &self.flow_record_source.is_some())
             .field("dcr_oauth_registry", &self.dcr_oauth_registry.is_some())
-            .field("oauth_gate_registry", &self.oauth_gate_registry.is_some())
-            .finish()
+            .field("oauth_gate_registry", &self.oauth_gate_registry.is_some());
+        dbg.finish()
     }
 }
 
@@ -748,7 +768,7 @@ impl RebornProductAuthServices {
 
     pub(crate) fn with_oauth_gate_registry(
         mut self,
-        registry: Arc<GoogleOAuthGateProviderRegistry>,
+        registry: Arc<OAuthGateProviderRegistry>,
     ) -> Self {
         self.oauth_gate_registry = Some(registry);
         self
@@ -955,6 +975,16 @@ impl RebornProductAuthServices {
         &self,
         request: RebornOAuthCallbackRequest,
     ) -> Result<RebornOAuthCallbackResponse, RebornOAuthCallbackError> {
+        self.handle_oauth_callback_with_optional_provider_identity_check(request, None)
+            .await
+    }
+
+    pub(crate) async fn handle_oauth_callback_with_optional_provider_identity_check(
+        &self,
+        request: RebornOAuthCallbackRequest,
+        mut provider_identity_check: Option<OAuthProviderIdentityCheck>,
+    ) -> Result<RebornOAuthCallbackResponse, RebornOAuthCallbackError> {
+        let mut provider_identity = None;
         let (mut completed, should_dispatch_continuation) = match request.outcome {
             RebornOAuthCallbackOutcome::Authorized { provider_request } => {
                 let claimed = self
@@ -1011,6 +1041,56 @@ impl RebornProductAuthServices {
                             return Err(error.into());
                         }
                     };
+                    let mut identity_binding_rollback: Option<
+                        OAuthProviderIdentityBindingRollback,
+                    > = None;
+                    if let Some(check) = provider_identity_check.take() {
+                        match check(exchange.provider_identity.clone()).await {
+                            Ok(rollback) => identity_binding_rollback = rollback,
+                            Err(error) => {
+                                let error_code = error.code();
+                                if let Err(cleanup_error) = self
+                                    .provider_client
+                                    .cleanup_exchange(
+                                        OAuthProviderExchangeContext {
+                                            scope: request.scope.clone(),
+                                            flow_id: request.flow_id,
+                                        },
+                                        &exchange,
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        flow_id = %request.flow_id,
+                                        check_error_code = ?error_code,
+                                        cleanup_error_code = ?cleanup_error.code(),
+                                        "reborn auth callback provider identity check failed and token cleanup failed"
+                                    );
+                                }
+                                if let Err(fail_error) = self
+                                    .flow_manager
+                                    .fail_oauth_callback(
+                                        &request.scope,
+                                        OAuthCallbackFailureInput {
+                                            flow_id: request.flow_id,
+                                            opaque_state_hash: request.opaque_state_hash.clone(),
+                                            error: error_code,
+                                        },
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        flow_id = %request.flow_id,
+                                        check_error_code = ?error_code,
+                                        fail_error_code = ?fail_error.code(),
+                                        "reborn auth callback provider identity check failed and flow failure update failed"
+                                    );
+                                }
+                                return Err(error.into());
+                            }
+                        }
+                    }
+                    provider_identity = exchange.provider_identity.clone();
                     let exchange_for_cleanup = exchange.clone();
                     let completed = match self
                         .flow_manager
@@ -1019,7 +1099,9 @@ impl RebornProductAuthServices {
                             OAuthCallbackInput {
                                 flow_id: request.flow_id,
                                 opaque_state_hash: request.opaque_state_hash.clone(),
-                                outcome: ProviderCallbackOutcome::Authorized { exchange },
+                                outcome: ProviderCallbackOutcome::Authorized {
+                                    exchange: Box::new(exchange),
+                                },
                             },
                         )
                         .await
@@ -1043,6 +1125,15 @@ impl RebornProductAuthServices {
                                     cleanup_error_code = ?cleanup_error.code(),
                                     "reborn auth callback completion failed and token cleanup failed"
                                 );
+                            }
+                            // The identity hook committed durable state (the
+                            // Slack binding is the user-visible "connected"
+                            // signal) before this completion failure, and the
+                            // completed-flow replay path never re-runs the
+                            // hook — undo it so a failed completion cannot
+                            // leave "connected with no usable credential".
+                            if let Some(rollback) = identity_binding_rollback.take() {
+                                rollback.await;
                             }
                             return Err(error.into());
                         }
@@ -1080,6 +1171,7 @@ impl RebornProductAuthServices {
             status: completed.status,
             credential_account_id: completed.credential_account_id,
             continuation: completed.continuation,
+            provider_identity,
         })
     }
 
@@ -1101,6 +1193,35 @@ impl RebornProductAuthServices {
             return Err(AuthProductError::UnknownOrExpiredFlow.into());
         }
         Ok(record.provider)
+    }
+
+    /// Read a scoped flow's durable lifecycle status for the origin-independent
+    /// OAuth flow-status poll.
+    ///
+    /// Ownership is enforced by `get_flow`'s full-scope match: a flow owned by a
+    /// different scope surfaces as `CrossScopeDenied`, which we deliberately
+    /// remap to the same not-found signal as an unknown flow so the read cannot
+    /// be used as a cross-user existence oracle. The returned value is the
+    /// status enum only — no tokens, PKCE verifiers, codes, or opaque state.
+    #[allow(
+        dead_code,
+        reason = "used by the webui-v2-beta OAuth flow-status poll route"
+    )]
+    pub(crate) async fn flow_status(
+        &self,
+        scope: &AuthProductScope,
+        flow_id: AuthFlowId,
+    ) -> Result<AuthFlowStatus, RebornOAuthCallbackError> {
+        match self.flow_manager.get_flow(scope, flow_id).await {
+            Ok(Some(record)) => Ok(record.status),
+            Ok(None) => Err(AuthProductError::UnknownOrExpiredFlow.into()),
+            // Never distinguish "owned by another scope" from "unknown": both
+            // return not-found so a caller cannot probe another owner's flows.
+            Err(AuthProductError::CrossScopeDenied) => {
+                Err(AuthProductError::UnknownOrExpiredFlow.into())
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     #[allow(
@@ -1331,6 +1452,7 @@ impl RebornProductAuthServices {
             flow_id: completed.id,
             scope: completed.scope.clone(),
             continuation: completed.continuation.clone(),
+            provider: completed.provider.clone(),
             credential_account_id: completed.credential_account_id,
             emitted_at,
         };

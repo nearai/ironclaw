@@ -1,5 +1,5 @@
-import { React } from "../../../lib/html.js";
-import { openEventStream } from "../../../lib/api.js";
+import React from "react";
+import { openEventStream } from "../../../lib/api";
 
 // v2 SSE emits `WebChatV2EventFrame` JSON, tagged with a typed
 // event name (`event: accepted`, `event: final_reply`, etc.) so

@@ -1,10 +1,7 @@
 use std::sync::Arc;
 
-use ironclaw_host_api::{AgentId, ApprovalRequestId, CapabilityId, TenantId, ThreadId, UserId};
-use ironclaw_loop_support::{
-    AwaitedChildSetRecord, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, SpawnSubagentMode,
-    SubagentGateResolutionStore, SubagentKindId,
-};
+use ironclaw_host_api::{AgentId, ApprovalRequestId, TenantId, ThreadId, UserId};
+use ironclaw_loop_support::SpawnSubagentMode;
 use ironclaw_threads::{
     AppendAssistantDraftRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
     MessageKind, MessageStatus, SessionThreadService, ThreadHistoryRequest, ThreadMessageId,
@@ -16,7 +13,6 @@ use ironclaw_turns::{
     LoopCompleted, LoopCompletionKind, LoopExit, LoopFailed, LoopFailureKind, LoopGateRef,
     LoopMessageRef, LoopResultRef, PutCheckpointStateRequest, PutLoopCheckpointRequest, TurnActor,
     TurnCheckpointId, TurnError, TurnId, TurnRunId, TurnScope, TurnStateStore, TurnStatus,
-    run_profile::LoopRunContext,
 };
 
 use super::{
@@ -1126,7 +1122,6 @@ async fn thread_checkpoint_evidence_verifies_awaited_child_blocked_checkpoint() 
         ironclaw_turns::LoopCheckpointStateRef::new("checkpoint:await-child-blocked-state")
             .expect("valid state ref");
     let child_run_id = TurnRunId::new();
-    let child_thread_id = ThreadId::new("child-thread").expect("child thread");
     let gate_ref =
         LoopGateRef::new(format!("gate:subagent-{child_run_id}")).expect("valid gate ref");
     let checkpoint = loop_checkpoint_record_with_gate(
@@ -1136,41 +1131,13 @@ async fn thread_checkpoint_evidence_verifies_awaited_child_blocked_checkpoint() 
         LoopCheckpointKind::BeforeBlock,
         Some(gate_ref.clone()),
     );
-    let gate_store =
-        Arc::new(crate::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new());
-    gate_store
-        .record_awaited_child(AwaitedChildSetRecord {
-            gate_ref: GateRef::new(gate_ref.as_str()).expect("gate ref"),
-            parent_run_context: LoopRunContext::new(
-                claimed.state.scope.clone(),
-                claimed.state.turn_id,
-                claimed.state.run_id,
-                claimed.resolved_run_profile.clone(),
-            ),
-            tree_root_run_id: claimed.state.run_id,
-            child_scope: TurnScope::new(
-                claimed.state.scope.tenant_id.clone(),
-                claimed.state.scope.agent_id.clone(),
-                claimed.state.scope.project_id.clone(),
-                child_thread_id.clone(),
-            ),
-            child_run_id,
-            child_thread_id,
-            source_binding_ref: ironclaw_turns::SourceBindingRef::new("subagent-source:evidence")
-                .expect("source binding"),
-            reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
-                "subagent-reply:evidence",
-            )
-            .expect("reply binding"),
-            subagent_kind: SubagentKindId::new("general").expect("subagent kind"),
-            spawn_capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
-                .expect("spawn capability"),
-            result_ref: LoopResultRef::new("result:subagent.evidence").expect("result ref"),
-            mode: SpawnSubagentMode::Blocking,
-        })
-        .await
-        .expect("awaited child recorded");
-    let await_evidence: Arc<dyn AwaitDependentRunEvidenceStore> = gate_store;
+    let await_evidence: Arc<dyn AwaitDependentRunEvidenceStore> =
+        Arc::new(support::RecordingAwaitDependentRunEvidence::new(
+            claimed.state.scope.clone(),
+            claimed.state.run_id,
+            GateRef::new(gate_ref.as_str()).expect("gate ref"),
+            SpawnSubagentMode::Blocking,
+        ));
     let evidence = ThreadCheckpointLoopExitEvidencePort::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(StaticTurnStateStore::new(claimed.state.clone())),
@@ -1221,7 +1188,6 @@ async fn thread_checkpoint_evidence_rejects_background_child_gate_for_await_depe
         ironclaw_turns::LoopCheckpointStateRef::new("checkpoint:await-child-background-state")
             .expect("valid state ref");
     let child_run_id = TurnRunId::new();
-    let child_thread_id = ThreadId::new("background-child-thread").expect("child thread");
     let gate_ref =
         LoopGateRef::new(format!("gate:subagent-{child_run_id}")).expect("valid gate ref");
     let checkpoint = loop_checkpoint_record_with_gate(
@@ -1231,44 +1197,13 @@ async fn thread_checkpoint_evidence_rejects_background_child_gate_for_await_depe
         LoopCheckpointKind::BeforeBlock,
         Some(gate_ref.clone()),
     );
-    let gate_store =
-        Arc::new(crate::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new());
-    gate_store
-        .record_awaited_child(AwaitedChildSetRecord {
-            gate_ref: GateRef::new(gate_ref.as_str()).expect("gate ref"),
-            parent_run_context: LoopRunContext::new(
-                claimed.state.scope.clone(),
-                claimed.state.turn_id,
-                claimed.state.run_id,
-                claimed.resolved_run_profile.clone(),
-            ),
-            tree_root_run_id: claimed.state.run_id,
-            child_scope: TurnScope::new(
-                claimed.state.scope.tenant_id.clone(),
-                claimed.state.scope.agent_id.clone(),
-                claimed.state.scope.project_id.clone(),
-                child_thread_id.clone(),
-            ),
-            child_run_id,
-            child_thread_id,
-            source_binding_ref: ironclaw_turns::SourceBindingRef::new(
-                "subagent-source:background-evidence",
-            )
-            .expect("source binding"),
-            reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
-                "subagent-reply:background-evidence",
-            )
-            .expect("reply binding"),
-            subagent_kind: SubagentKindId::new("general").expect("subagent kind"),
-            spawn_capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
-                .expect("spawn capability"),
-            result_ref: LoopResultRef::new("result:subagent.background-evidence")
-                .expect("result ref"),
-            mode: SpawnSubagentMode::Background,
-        })
-        .await
-        .expect("awaited child recorded");
-    let await_evidence: Arc<dyn AwaitDependentRunEvidenceStore> = gate_store;
+    let await_evidence: Arc<dyn AwaitDependentRunEvidenceStore> =
+        Arc::new(support::RecordingAwaitDependentRunEvidence::new(
+            claimed.state.scope.clone(),
+            claimed.state.run_id,
+            GateRef::new(gate_ref.as_str()).expect("gate ref"),
+            SpawnSubagentMode::Background,
+        ));
     let evidence = ThreadCheckpointLoopExitEvidencePort::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(StaticTurnStateStore::new(claimed.state.clone())),

@@ -84,7 +84,17 @@ def install_playwright(python: Path, mode: str) -> None:
     if resolved == "with-deps":
         cmd.append("--with-deps")
     cmd.append("chromium")
-    run(cmd, cwd=E2E_DIR)
+    try:
+        run(cmd, cwd=E2E_DIR)
+    except subprocess.CalledProcessError:
+        if resolved != "with-deps":
+            raise
+        print(
+            "[live-canary] playwright install --with-deps failed; "
+            "retrying browser-only install",
+            flush=True,
+        )
+        run([str(python), "-m", "playwright", "install", "chromium"], cwd=E2E_DIR)
 
 
 def cargo_build() -> None:

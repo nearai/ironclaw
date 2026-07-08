@@ -318,8 +318,8 @@ fn extension_info(
     let kind = extension_kind(&summary).to_string();
     let channel_unconnected = has_external_channel_surface
         && connections.get(summary.package_ref.id.as_str()) == Some(&false);
-    // A channel extension the calling user has not personally connected (e.g.
-    // Slack pairing) surfaces as `setup_required` so the WebUI shows the same
+    // A channel extension the calling user has not personally connected (for
+    // example, Slack OAuth) surfaces as `setup_required` so the WebUI shows the same
     // Configure affordance as a credential-gated extension. The per-user
     // connections map only contains channels with that concept; a connected
     // channel (value `true`) keeps its normal onboarding state, and this is
