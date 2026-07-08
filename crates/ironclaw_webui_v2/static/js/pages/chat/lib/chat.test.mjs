@@ -187,6 +187,105 @@ test("Chat leaves the composer editable while a run is processing", () => {
   assert.equal(props.sendDisabled, true);
 });
 
+test("Chat shows typing indicator before assistant text streams", () => {
+  const { tree, components } = renderChat({
+    hookState: {
+      messages: [{ id: "message-1", role: "user", content: "hello" }],
+      isProcessing: true,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: { runId: "run-1", threadId: "thread-1", status: "running" },
+      send: async () => ({}),
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  assert.ok(findComponent(tree, components.TypingIndicator));
+});
+
+test("Chat hides typing indicator once the active run streams assistant text", () => {
+  const { tree, components } = renderChat({
+    hookState: {
+      messages: [
+        { id: "message-1", role: "user", content: "hello" },
+        {
+          id: "text-text:run-1",
+          role: "assistant",
+          content: "H",
+          isFinalReply: false,
+          turnRunId: "run-1",
+        },
+      ],
+      isProcessing: true,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: { runId: "run-1", threadId: "thread-1", status: "running" },
+      send: async () => ({}),
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  assert.equal(findComponent(tree, components.TypingIndicator), null);
+});
+
+test("Chat keeps typing indicator when streamed text belongs to another run", () => {
+  const { tree, components } = renderChat({
+    hookState: {
+      messages: [
+        { id: "message-1", role: "user", content: "hello" },
+        {
+          id: "text-text:run-0",
+          role: "assistant",
+          content: "old text",
+          isFinalReply: false,
+          turnRunId: "run-0",
+        },
+      ],
+      isProcessing: true,
+      pendingGate: null,
+      suggestions: [],
+      sseStatus: "open",
+      historyLoading: false,
+      hasMore: false,
+      cooldownSeconds: 0,
+      recoveryNotice: null,
+      activeRun: { runId: "run-1", threadId: "thread-1", status: "running" },
+      send: async () => ({}),
+      cancelRun: async () => {},
+      retryMessage: () => {},
+      approve: () => {},
+      recoverHistory: () => {},
+      loadMore: () => {},
+      setSuggestions: () => {},
+      submitAuthToken: async () => {},
+    },
+  });
+
+  assert.ok(findComponent(tree, components.TypingIndicator));
+});
+
 test("Chat refuses composer sends while a run is processing", async () => {
   let sendCalls = 0;
   const { tree, components } = renderChat({

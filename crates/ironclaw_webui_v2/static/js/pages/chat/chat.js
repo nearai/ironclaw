@@ -60,6 +60,16 @@ function isChannelPairingGate(gate) {
   );
 }
 
+function hasVisibleStreamingAssistantText(messages, activeRunId) {
+  return (messages || []).some((message) =>
+    message?.role === "assistant" &&
+    message.isFinalReply === false &&
+    typeof message.content === "string" &&
+    message.content.length > 0 &&
+    (!activeRunId || message.turnRunId === activeRunId)
+  );
+}
+
 export function Chat({
   threads,
   activeThreadId,
@@ -107,6 +117,15 @@ export function Chat({
   const activeThreadHasPairingGate =
     activeThreadHasGate && isChannelPairingGate(pendingGate);
   const activeThreadIsProcessing = Boolean(activeThreadId) && isProcessing;
+  const activeRunId = activeRun?.runId || null;
+  const streamingAssistantTextVisible = hasVisibleStreamingAssistantText(
+    messages,
+    activeRunId
+  );
+  const showTypingIndicator =
+    activeThreadIsProcessing &&
+    !activeThreadHasGate &&
+    !streamingAssistantTextVisible;
   const hasMessages =
     messages.length > 0 || activeThreadIsProcessing || activeThreadHasGate;
   // Don't show the landing composer when history failed to load — show the
@@ -294,9 +313,7 @@ export function Chat({
                 onRecover=${recoverHistory}
               />
             `}
-            ${activeThreadIsProcessing &&
-            !activeThreadHasGate &&
-            html`<${TypingIndicator} />`}
+            ${showTypingIndicator && html`<${TypingIndicator} />`}
             ${pendingGate &&
             (pendingGate.kind === "auth_required"
               ? (pendingGate.challengeKind === "oauth_url"
