@@ -54,6 +54,8 @@ export function useChatEvents({
   // resumes a newer active run.
   const latestRunIdRef = React.useRef(null);
   const promptRunIdRef = React.useRef(null);
+  const textSeenRunIdsRef = React.useRef(new Set());
+  const activitySeenRunIdsRef = React.useRef(new Set());
 
   return React.useCallback(
     (envelope) => {
@@ -106,6 +108,12 @@ export function useChatEvents({
             toolCardFromActivity(activity),
             toolActivityStateRef,
           );
+          preserveFinalAssistantOrderForActivity({
+            setMessages,
+            runId: activity.turn_run_id || null,
+            textSeenRunIdsRef,
+          });
+          rememberActivitySeen(activitySeenRunIdsRef, activity.turn_run_id || null);
           return;
         }
 
@@ -118,6 +126,12 @@ export function useChatEvents({
           if (!preview || !preview.invocation_id) return;
           const card = toolCardFromPreview(preview);
           upsertToolActivityMessage(setMessages, card, toolActivityStateRef);
+          preserveFinalAssistantOrderForActivity({
+            setMessages,
+            runId: preview.turn_run_id || null,
+            textSeenRunIdsRef,
+          });
+          rememberActivitySeen(activitySeenRunIdsRef, preview.turn_run_id || null);
           return;
         }
 
@@ -207,6 +221,8 @@ export function useChatEvents({
             activeRunRef,
             locallyResolvedGatesRef,
             toolActivityStateRef,
+            textSeenRunIdsRef,
+            activitySeenRunIdsRef,
           });
           return;
         }
@@ -332,6 +348,8 @@ function applyProjectionItems({
   activeRunRef,
   locallyResolvedGatesRef,
   toolActivityStateRef,
+  textSeenRunIdsRef,
+  activitySeenRunIdsRef,
 }) {
   // Snapshot the most recent run id so stale terminal run_status frames can
   // be filtered while a locally resolved gate is resuming a newer run.
@@ -506,6 +524,13 @@ function applyProjectionItems({
       // truth for clearing pendingGate/processing.
       const messageId = `text-${item.text.id}`;
       const textRunId = projectionTextRunId(item.text.id);
+      if (
+        textRunId &&
+        hasVisibleProjectionText(item.text.body) &&
+        !activitySeenRunIdsRef?.current?.has(textRunId)
+      ) {
+        textSeenRunIdsRef?.current?.add(textRunId);
+      }
       setMessages((prev) => {
         if (
           textRunId &&
@@ -566,6 +591,12 @@ function applyProjectionItems({
           toolCardFromActivity(activity),
           toolActivityStateRef,
         );
+        preserveFinalAssistantOrderForActivity({
+          setMessages,
+          runId: activity.turn_run_id || null,
+          textSeenRunIdsRef,
+        });
+        rememberActivitySeen(activitySeenRunIdsRef, activity.turn_run_id || null);
       }
     }
 
@@ -734,6 +765,10 @@ function projectionTextRunId(id) {
   return id.startsWith(prefix) ? id.slice(prefix.length) || null : null;
 }
 
+function hasVisibleProjectionText(body) {
+  return typeof body === "string" && body.trim().length > 0;
+}
+
 function projectionTextBeforeActivityRunIds(items) {
   const textSeen = new Set();
   const textBeforeActivity = new Set();
@@ -759,6 +794,20 @@ function isFinalAssistantForRun(message, runId) {
     message?.isFinalReply === true &&
     message?.turnRunId === runId
   );
+}
+
+function preserveFinalAssistantOrderForActivity({
+  setMessages,
+  runId,
+  textSeenRunIdsRef,
+}) {
+  if (!runId || !textSeenRunIdsRef?.current?.has(runId)) return;
+  setMessages((prev) => preserveFinalAssistantBeforeSameRunActivity(prev, runId));
+}
+
+function rememberActivitySeen(activitySeenRunIdsRef, runId) {
+  if (!runId) return;
+  activitySeenRunIdsRef?.current?.add(runId);
 }
 
 function preserveFinalAssistantBeforeSameRunActivity(messages, runId) {

@@ -424,6 +424,132 @@ test("useChatEvents: replayed activity before text keeps finalized reply after a
   assert.equal(harness.messages[2].keepFollowingActivityAfter, undefined);
 });
 
+test("useChatEvents: text replay before a later activity frame preserves refresh order", () => {
+  const harness = createUseChatEventsHarness();
+  harness.replaceMessages([
+    {
+      id: "msg-user-1",
+      role: "user",
+      content: "search first",
+      turnRunId: "run-1",
+    },
+    {
+      id: "tool-invocation-1",
+      role: "tool_activity",
+      toolName: "web_search",
+      turnRunId: "run-1",
+    },
+    {
+      id: "msg-assistant-1",
+      role: "assistant",
+      content: "final answer",
+      isFinalReply: true,
+      turnRunId: "run-1",
+    },
+  ]);
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ text: { id: "text:run-1", body: "pre-tool text" } }],
+      },
+    },
+  });
+
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => message.id),
+    ["msg-user-1", "tool-invocation-1", "msg-assistant-1"],
+  );
+
+  harness.handleEvent({
+    type: "capability_activity",
+    frame: {
+      activity: {
+        invocation_id: "invocation-1",
+        turn_run_id: "run-1",
+        thread_id: "thread-1",
+        capability_id: "builtin.web_search",
+        status: "completed",
+        updated_at: "2026-07-08T13:00:00Z",
+      },
+    },
+  });
+
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => message.id),
+    ["msg-user-1", "msg-assistant-1", "tool-invocation-1"],
+  );
+  assert.equal(harness.messages[1].keepFollowingActivityAfter, true);
+});
+
+test("useChatEvents: text replay after activity does not move finalized reply on preview", () => {
+  const harness = createUseChatEventsHarness();
+  harness.replaceMessages([
+    {
+      id: "msg-user-1",
+      role: "user",
+      content: "search first",
+      turnRunId: "run-1",
+    },
+    {
+      id: "tool-invocation-1",
+      role: "tool_activity",
+      toolName: "web_search",
+      turnRunId: "run-1",
+    },
+    {
+      id: "msg-assistant-1",
+      role: "assistant",
+      content: "final answer",
+      isFinalReply: true,
+      turnRunId: "run-1",
+    },
+  ]);
+
+  harness.handleEvent({
+    type: "capability_activity",
+    frame: {
+      activity: {
+        invocation_id: "invocation-1",
+        turn_run_id: "run-1",
+        thread_id: "thread-1",
+        capability_id: "builtin.web_search",
+        status: "completed",
+        updated_at: "2026-07-08T13:00:00Z",
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ text: { id: "text:run-1", body: "post-tool text" } }],
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "capability_display_preview",
+    frame: {
+      preview: {
+        invocation_id: "invocation-1",
+        turn_run_id: "run-1",
+        thread_id: "thread-1",
+        capability_id: "builtin.web_search",
+        status: "completed",
+        title: "builtin.web_search",
+        updated_at: "2026-07-08T13:00:01Z",
+      },
+    },
+  });
+
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => message.id),
+    ["msg-user-1", "tool-invocation-1", "msg-assistant-1"],
+  );
+  assert.equal(harness.messages[2].keepFollowingActivityAfter, undefined);
+});
+
 test("useChatEvents: skill activation projection stays out of chat transcript", () => {
   const harness = createUseChatEventsHarness();
 
