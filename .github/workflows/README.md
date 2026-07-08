@@ -80,8 +80,8 @@ the configuration:
 ### Nightly alerting
 
 One path only: `nightly-watchdog.yml` (08:00 UTC) checks the latest scheduled
-run of each nightly — Nightly Deep CI, Nightly E2E, Reborn Playwright,
-IronClaw Stress. A run that is missing, stale (>26h: the cron didn't fire),
+run of each nightly — Nightly Deep CI, Reborn Playwright, IronClaw Stress. A
+run that is missing, stale (>26h: the cron didn't fire),
 or concluded anything but success posts a failure line (workflow, conclusion,
 failed job names, run link) to the Slack channel behind
 `secrets.SLACK_WEBHOOK_URL` — the same webhook the live-canary report uses —
@@ -103,11 +103,14 @@ own run on a startup_failure and can never see a cron that didn't fire.
   in `crates/ironclaw_safety` today.
 - **Replay Snapshot Gate** runs on push + via the nightly legacy suite; it
   covers the retiring v1 engine.
-- **Tests (Legacy)** (`test.yml`) is deliberately invoked nowhere — v1
-  (`src/`) is frozen pending removal, and this suite is the only place the
-  root `ironclaw` package's tests run. Until `src/` is deleted, a v1 bug fix
-  that must land should temporarily restore the `deterministic-deep-tests`
-  call in `nightly-deep-ci.yml`. Delete `test.yml` together with `src/`.
+- **The legacy v1 suites are deliberately invoked nowhere** — v1 (`src/`) is
+  frozen pending removal. `test.yml` (the only place the root `ironclaw`
+  package's tests run) is no longer called by nightly, and the former
+  `nightly-e2e.yml` scheduler for the v1 browser suite (`e2e.yml` full mode)
+  is deleted — it had zero successful runs in retained history. Until `src/`
+  is deleted, a v1 bug fix that must land should temporarily restore the
+  `deterministic-deep-tests` call in `nightly-deep-ci.yml` (and/or dispatch
+  `e2e.yml` manually). Delete `test.yml` and `e2e.yml` together with `src/`.
 - **Scope classifiers** (`scripts/ci/classify-test-scope.sh` and per-workflow
   `changes` jobs) are curated allowlists. Adding a new crate or test directory
   requires updating them, or the queue's scoped checks silently narrow. Keep
