@@ -50,6 +50,7 @@ pub mod resource;
 pub mod runtime;
 pub mod runtime_policy;
 pub mod scope;
+pub mod surface;
 pub mod trust;
 
 // Flat re-exports are intentional: downstream Reborn service crates consume
@@ -73,6 +74,7 @@ pub use resource::*;
 pub use runtime::*;
 pub use runtime_policy::*;
 pub use scope::*;
+pub use surface::*;
 pub use trust::*;
 
 /// Canonical timestamp type for host API wire contracts.

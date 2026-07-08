@@ -61,5 +61,10 @@ Owns ProductAdapter host-api projection contracts for IronClaw Reborn.
   ingress credential-coherence matrix (undeclared handle, auth-required route
   missing a credential, duplicate route id, happy projection) has focused
   unit coverage in `src/lib.rs` `mod tests`.
+- Capability-surface projection: the `ironclaw.product_adapter/v1` contract
+  projects a `channel` capability surface for `external_channel` sections
+  (host-native `web`/`cli`/`synchronous_api` sections project none); pinned
+  in `tests/manifest_ingestion.rs` through the real contract. The surface
+  vocabulary contract lives in `docs/reborn/contracts/extensions.md`.
 - `cargo test -p ironclaw_architecture reborn_crate_dependency_boundaries_hold`
   pins crate dependency boundary.
