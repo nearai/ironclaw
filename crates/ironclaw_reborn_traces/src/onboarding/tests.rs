@@ -833,3 +833,48 @@ async fn fake_sink_403_invite_not_valid_discards_pending() {
         "pending key must be discarded on InviteNotValid through the sink"
     );
 }
+
+/// Verify that the instance-level onboarding path writes the policy to the
+/// scope-None location (no `users/<hash>` segment) under an isolated base.
+///
+/// Uses `onboard_at_dir_with_sink` targeting `tempdir/trace_contributions/`
+/// — the equivalent of `trace_contribution_dir_for_scope(None)` under an
+/// arbitrary base — so the test never touches the real `~/.ironclaw/` tree.
+/// The tempdir drops automatically; no manual cleanup is required.
+#[tokio::test]
+async fn instance_onboard_writes_instance_level_policy() {
+    let base = tempfile::tempdir().expect("tempdir");
+    // scope=None → trace_contributions/ directly under the base (no users/<hash>)
+    let instance_dir = base.path().join("trace_contributions");
+
+    // Use a loopback-shaped invite URL so origin anchoring passes; no server is
+    // bound — the FakeSink returns a canned response without touching the network.
+    let invite_url = "http://127.0.0.1:7/onboard#INVINST01";
+    // Stage the pending key at the instance dir so canned_ok_body derives the
+    // correct device_key_id that the client will cross-check.
+    let body = canned_ok_body(&instance_dir, invite_url);
+    let sink = FakeSink {
+        status: 200,
+        body,
+        posted_url: Arc::new(Mutex::new(None)),
+    };
+
+    let outcome =
+        onboard_at_dir_with_sink(&instance_dir, invite_url, OnboardConsents::default(), &sink)
+            .await
+            .expect("instance onboard succeeds");
+
+    assert_eq!(outcome.tenant_id, "tenant-fake");
+
+    // The policy must land at the scope-None location (no users/<hash> segment).
+    let raw = std::fs::read_to_string(instance_dir.join("policy.json")).expect("policy written");
+    let policy: StandingTraceContributionPolicy =
+        serde_json::from_str(&raw).expect("policy parses");
+    assert!(policy.enabled);
+    assert_eq!(
+        policy.device_key_id.as_deref(),
+        Some(outcome.device_key_id.as_str()),
+        "policy device_key_id must match outcome"
+    );
+    // tempdir drops automatically — no manual cleanup needed
+}

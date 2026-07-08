@@ -188,7 +188,9 @@ fn auth_prompt_from_credential_requirement(
             // instructions — including Slack's "/pair" recovery — with no
             // per-channel frontend code.
             let requirement =
-                crate::extension_lifecycle::channel_connection_requirement(channel, channel);
+                crate::extension_host::extension_lifecycle::channel_connection_requirement(
+                    channel, channel,
+                );
             let strategy = serde_json::to_value(requirement.strategy)
                 .ok()
                 .and_then(|value| value.as_str().map(str::to_owned));

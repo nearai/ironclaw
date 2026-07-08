@@ -23,9 +23,10 @@ use ironclaw_triggers::TriggerRepository;
 use crate::{
     RebornAutomationProductFacade, RebornBuildError, RebornProductAuthServices, RebornReadiness,
     RebornReadinessDiagnostic, RebornReadinessDiagnosticStatus, RebornRuntime,
-    lifecycle::{
+    extension_host::lifecycle::{
         RebornLocalLifecycleFacade, RebornLocalSkillManagementError, RebornLocalSkillManagementPort,
     },
+    extension_host::webui_extension_credentials::ProductAuthExtensionCredentialSetup,
     observability::RebornLocalServiceLifecycle,
     outbound::{
         OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistry,
@@ -36,7 +37,6 @@ use crate::{
         MountScopedFilesystemReader, ProjectScopedAttachmentLander, ProjectScopedAttachmentReader,
         ProjectScopedFilesystemReader,
     },
-    webui_extension_credentials::ProductAuthExtensionCredentialSetup,
 };
 
 static SKILL_CONTENT_SAFETY: std::sync::LazyLock<ironclaw_safety::Sanitizer> =
@@ -138,6 +138,24 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     )
     .with_approval_interactions(runtime.webui_approval_interaction_service())
     .with_auth_interactions(runtime.webui_auth_interaction_service());
+    // Admin user-management surface: wired only when the identity directory,
+    // the admin secret provisioner, and a token minter are all available.
+    // Otherwise the fail-closed RejectingAdminUserService default stands and
+    // admin routes report the service unavailable.
+    #[cfg(feature = "webui-v2-beta")]
+    if let (Some(directory), Some(provisioner), Some(minter)) = (
+        runtime.reborn_user_directory(),
+        runtime.reborn_admin_secret_provisioner(),
+        runtime.reborn_admin_token_minter(),
+    ) {
+        api = api.with_admin_user_service(Arc::new(
+            crate::admin_user_directory::RebornAdminUserDirectory::new(
+                directory,
+                provisioner,
+                minter,
+            ),
+        ));
+    }
     if let Some(workspace_filesystem) = runtime.webui_workspace_filesystem() {
         api = api
             .with_inbound_attachments(Arc::new(ProjectScopedAttachmentLander::new(Arc::clone(

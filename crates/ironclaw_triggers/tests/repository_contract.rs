@@ -11,7 +11,13 @@ use ironclaw_turns::TurnRunId;
 
 #[cfg(feature = "libsql")]
 use {
-    ironclaw_triggers::LibSqlTriggerRepository, libsql::params, std::sync::Arc, tempfile::tempdir,
+    ironclaw_triggers::LibSqlTriggerRepository,
+    libsql::params,
+    std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    },
+    tempfile::tempdir,
 };
 
 #[cfg(feature = "postgres")]
@@ -1130,6 +1136,49 @@ async fn libsql_repository_run_migrations_is_idempotent() {
 
     repo.run_migrations().await.expect("first run migrations");
     repo.run_migrations().await.expect("second run migrations");
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn libsql_repository_busy_timeout_waits_for_write_lock() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("triggers.db");
+    let db = Arc::new(
+        libsql::Builder::new_local(db_path.display().to_string())
+            .build()
+            .await
+            .expect("build libsql db"),
+    );
+    let lock_holder = db.connect().expect("connect raw libsql");
+    lock_holder
+        .execute_batch("BEGIN IMMEDIATE;")
+        .await
+        .expect("hold write lock");
+
+    let repo = LibSqlTriggerRepository::new(db);
+    let started = Instant::now();
+    let migration = tokio::spawn(async move { repo.run_migrations().await });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !migration.is_finished(),
+        "repository migration should wait for the held write lock instead of failing immediately"
+    );
+
+    lock_holder
+        .execute_batch("COMMIT;")
+        .await
+        .expect("release write lock");
+
+    let result = tokio::time::timeout(Duration::from_secs(2), migration)
+        .await
+        .expect("migration should finish after lock release")
+        .expect("migration task should not panic");
+    result.expect("migration should succeed after waiting for the lock");
+    assert!(
+        started.elapsed() >= Duration::from_millis(100),
+        "migration should have been blocked by the held write lock"
+    );
 }
 
 #[cfg(feature = "libsql")]

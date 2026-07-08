@@ -58,7 +58,7 @@ def _route_keywords(path: str) -> tuple[str, ...]:
 
 
 def browser_routes(repo_root: Path) -> list[Surface]:
-    app_js = repo_root / "crates/ironclaw_webui_v2_static/static/js/app/app.js"
+    app_js = repo_root / "crates/ironclaw_webui_v2/frontend/src/app/app.ts"
     route_re = re.compile(r"<\$\{Route\}\s+path=\"([^\"]+)\"")
     surfaces: list[Surface] = []
     for route in route_re.findall(_read(app_js)):
