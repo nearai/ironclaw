@@ -53,9 +53,8 @@ mod router;
 mod schema;
 #[cfg(feature = "webui-v2-beta")]
 mod sse_capacity;
-// Browser SPA asset bundle folded in from the former `ironclaw_webui_v2_static`
-// crate: the JSON route surface and the static bytes it drives now ship from one
-// crate behind the single `webui-v2-beta` feature.
+// Browser SPA asset bundle: the JSON route surface and the static bytes it
+// drives now ship from one crate behind the single `webui-v2-beta` feature.
 #[cfg(feature = "webui-v2-beta")]
 pub mod static_assets;
 
@@ -65,6 +64,11 @@ pub use descriptors::is_webui_v2_llm_config_route_id;
 #[cfg(feature = "webui-v2-beta")]
 pub use descriptors::{
     WEBUI_V2_ROUTE_ACTIVATE_EXTENSION, WEBUI_V2_ROUTE_ADD_PROJECT_MEMBER,
+    WEBUI_V2_ROUTE_ADMIN_CREATE_USER, WEBUI_V2_ROUTE_ADMIN_DELETE_USER,
+    WEBUI_V2_ROUTE_ADMIN_DELETE_USER_SECRET, WEBUI_V2_ROUTE_ADMIN_GET_USER,
+    WEBUI_V2_ROUTE_ADMIN_LIST_USER_SECRETS, WEBUI_V2_ROUTE_ADMIN_LIST_USERS,
+    WEBUI_V2_ROUTE_ADMIN_PUT_USER_SECRET, WEBUI_V2_ROUTE_ADMIN_SET_USER_ROLE,
+    WEBUI_V2_ROUTE_ADMIN_SET_USER_STATUS, WEBUI_V2_ROUTE_ADMIN_UPDATE_USER,
     WEBUI_V2_ROUTE_BROWSE_FS_DIR, WEBUI_V2_ROUTE_CANCEL_RUN,
     WEBUI_V2_ROUTE_COMPLETE_NEARAI_WALLET_LOGIN, WEBUI_V2_ROUTE_CREATE_PROJECT,
     WEBUI_V2_ROUTE_CREATE_THREAD, WEBUI_V2_ROUTE_DELETE_AUTOMATION,
@@ -130,8 +134,7 @@ pub use router::{
 #[cfg(feature = "webui-v2-beta")]
 pub use schema::{WebChatV2Event, WebChatV2EventFrame};
 // Re-export the static-bundle router factory at the crate root so host
-// composition keeps calling `ironclaw_webui_v2::mount_at_prefix(...)` (formerly
-// `ironclaw_webui_v2_static::mount_at_prefix`).
+// composition keeps calling `ironclaw_webui_v2::mount_at_prefix(...)`.
 #[cfg(feature = "webui-v2-beta")]
 pub use sse_capacity::DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER;
 #[cfg(feature = "webui-v2-beta")]

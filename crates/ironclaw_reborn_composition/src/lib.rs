@@ -20,6 +20,11 @@
 
 use std::sync::Arc;
 
+#[cfg(feature = "webui-v2-beta")]
+mod admin_secrets;
+mod admin_token;
+#[cfg(feature = "webui-v2-beta")]
+mod admin_user_directory;
 #[cfg(test)]
 mod approval_test_support;
 mod automation;
@@ -109,6 +114,7 @@ mod webui_serve;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_ws_origin;
 
+pub use admin_token::AdminApiTokenMinter;
 pub use automation::RebornAutomationProductFacade;
 pub use error::RebornBuildError;
 pub use extension_host::extension_lifecycle_command::{
@@ -737,7 +743,22 @@ fn invocation_mount_view_for_segments(
     grants.push(MountGrant::new(
         MountAlias::new("/tenant-shared")?,
         VirtualPath::new(format!("/tenants/{tenant_id}/shared"))?,
+        // Broad tenant-shared storage gets read + write + list, but NOT delete:
+        // no tenant-shared consumer other than the identity store needs to
+        // remove records, so withholding delete here keeps the blast radius of
+        // a compromised writer from spanning every tenant-shared subtree.
         MountPermissions::read_write(),
+    ));
+    grants.push(MountGrant::new(
+        // Delete authority is scoped to the identity subtree specifically: the
+        // Reborn identity store's admin user-directory needs it for the delete
+        // cascade (removing a user's identity / verified-email records) that
+        // lives under `/tenant-shared/reborn-identity/…`. Longest-prefix mount
+        // matching routes identity paths here and everything else to the
+        // delete-less grant above.
+        MountAlias::new("/tenant-shared/reborn-identity")?,
+        VirtualPath::new(format!("/tenants/{tenant_id}/shared/reborn-identity"))?,
+        MountPermissions::read_write_list_delete(),
     ));
     #[cfg(feature = "slack-v2-host-beta")]
     grants.push(MountGrant::new(
