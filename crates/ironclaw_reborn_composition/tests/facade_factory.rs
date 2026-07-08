@@ -1494,6 +1494,10 @@ async fn hosted_single_tenant_trigger_access_store_persists_across_reopen() {
         "01234567890123456789012345678901",
     );
     let _pool_max_size = PostgresEnvVarGuard::set("IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE", "1");
+    let _resource_governor_singleton = PostgresEnvVarGuard::set(
+        "IRONCLAW_REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON",
+        "true",
+    );
     let _allow_cleartext =
         PostgresEnvVarGuard::set("IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT", "true");
     let _ssl_mode = PostgresEnvVarGuard::clear("DATABASE_SSLMODE");

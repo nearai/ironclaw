@@ -7,6 +7,14 @@ any runtime state (conversation binding, thread ownership) is touched. Identity
 provisioning lives here, not in WebUI ingress and not in `ironclaw_conversations`
 (which consumes an already-resolved `UserId`).
 
+This crate is **also the durable home of the minimal user profile** (email,
+display name, timestamps), not only an identity→`UserId` map. Resolving an
+identity persists a `StoredUser` record keyed by `UserId`, so "what do we know
+about this user, and where is it stored" is answered *here* — there is no
+separate users table elsewhere in the Reborn stack. Any future enumeration or
+admin surface extends this store; it does not stand up a new one. See
+[Persisted records](#persisted-records) for the exact shapes.
+
 ## Position in the stack
 
 Bottom-of-stack, downstream-facing. Among internal `ironclaw_*` crates it
@@ -30,6 +38,29 @@ into its own path segment, never flattened) so a delimiter-like id cannot collid
 with a key boundary. A `None` provider instance maps to the `_` sentinel — a
 value no base64 encoding produces.
 
+## Persisted records
+
+The store persists three JSON record shapes under the
+`/tenant-shared/reborn-identity` root. Shapes are defined in
+`src/filesystem_store/record.rs`; path construction is in
+`src/filesystem_store/paths.rs` (every opaque segment is base64url-encoded into
+its own path segment — `surface` renders via its stable `as_str()`, and an empty
+segment maps to the `_` sentinel).
+
+| Record | Path (opaque segments base64url-encoded) | Fields |
+|---|---|---|
+| `StoredUser` — the canonical **user profile** | `…/users/{user_id}.json` | `email`, `display_name`, `created_at`, `updated_at` |
+| `StoredExternalIdentity` — one bound external login | `…/external/{tenant}/{surface}/{provider}/{instance}/{subject}.json` | `user_id`, `email`, `email_verified`, `created_at` |
+| `StoredVerifiedEmailIndex` — cross-provider link | `…/verified-email/{tenant}/{lower_email}.json` | `user_id` |
+
+`StoredUser` is written by `resolve_or_create` on first contact (a returning
+login upserts the profile); this is why a user's email and display name are
+durably captured on SSO login without any separate directory. The record fields
+are `pub(super)` — the on-disk JSON is an implementation detail, and upstream
+consumers read through the resolver surface below rather than the raw records.
+(Known gap: `adopt_migrated_identity` does **not** write `StoredUser` today —
+tracked as #5616.)
+
 ## Resolver surface (`RebornIdentityResolver`)
 
 - `resolve_or_create` — mint-capable. Resolves the identity, links by verified
@@ -42,6 +73,41 @@ value no base64 encoding produces.
 - `adopt_migrated_identity` — seeds a pre-existing identity carried from a legacy
   store, preserving its `user_id` and (for a verified email) the verified-email
   index. Never mints. Idempotent — existing identity/index records win.
+
+## User directory surface (`RebornUserDirectory`)
+
+A **separate** trait from `RebornIdentityResolver`, implemented by the same
+`FilesystemRebornIdentityStore`, for the operator/admin surface that enumerates
+and manages the `StoredUser` records. It is kept apart from the resolver so admin
+CRUD cannot perturb the mint/link/create invariants above, and so the resolver's
+contract tests are not entangled with admin methods. Its only production
+consumer is `ironclaw_reborn_composition`, which adapts it up to the
+product-workflow admin service (the port stays defined at the bottom of the
+stack; the boundary tests still allow no new edge).
+
+- `list_users` / `get_user` — enumerate (via `list_dir` over the non-partitioned
+  `users/` directory) or fetch. `list_users` filters by the record's own
+  `tenant_id`; a record with **no** persisted tenant is treated as belonging to
+  the deployment's single configured tenant (only single-tenant deployments have
+  such pre-admin records).
+- `create_user` — admin-mint an active user with **no external identity**. Writes
+  only the `users/` record — no verified-email index — so it does not weaken
+  invariant 1's OAuth-surface index gate. (Consequence: a later OAuth login with
+  the same email mints a *separate* user; admin-created users are token/API
+  users, not pre-linked SSO accounts. Linking them is a future `link_email`
+  action via `adopt_migrated_identity`, deliberately out of scope here.)
+- `update_profile` / `update_status` / `update_role` — partial mutations through
+  the shared `ironclaw_filesystem::cas_update` helper (never a per-record mutex;
+  `ironclaw_filesystem/CLAUDE.md` invariant 2). Each bumps `updated_at`.
+- `record_last_login` — sets `last_login_at` only; deliberately does **not** bump
+  `updated_at`, which tracks profile edits rather than login activity.
+- `delete_user` — **cascades** (see invariant 5 below).
+- `count_active_admins` — supports last-admin protection in the facade.
+
+A malformed persisted `user_id` / `created_by` / `tenant_id` surfaces
+`InvalidUserId` / `Backend` on read-back (a backend inconsistency, never
+silently dropped); a mutation of an absent user surfaces `UserNotFound` so the
+facade can map it to a 404.
 
 ## Invariants (and where each is enforced)
 
@@ -68,6 +134,20 @@ value no base64 encoding produces.
    same-identity fast path; see the migration race note below).
 4. **Channel actors never mint** — enforced at the top of `resolve_or_create`;
    `bind`/`adopt_migrated_identity` take an explicit authenticated `user_id`.
+5. **`delete_user` cascades, and is the one sanctioned unwind of invariants 1/3.**
+   Deleting a user removes, in order: every external-identity record in the
+   tenant subtree bound to that `user_id` (walked iteratively over the
+   fixed-depth `external/{tenant}/…` tree), then the user's verified-email index
+   (keyed by the user's own stored email, deleted only if it points at them),
+   then the `users/` record. Removing the external identities is **load-bearing
+   for correctness**: leaving one would let a later re-login through that
+   identity resolve the tombstoned id back to life via the read-only fast path.
+   This is the only place the "a verified identity implies its index exists"
+   ordering (invariant 3) is deliberately torn down — identity and index are
+   removed together. Known limitation: only the index under the user's *stored*
+   email is swept; an index under a different email is not (no reverse
+   user→emails map). Acceptable for the current surface; revisit if multi-email
+   accounts land.
 
 ## Concurrency model
 

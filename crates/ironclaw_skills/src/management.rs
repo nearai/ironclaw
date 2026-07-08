@@ -11,8 +11,8 @@ use crate::{
 };
 use async_trait::async_trait;
 use ironclaw_filesystem::{
-    BackendCapabilities, DirEntry, FileStat, FileType, FilesystemError, RootFilesystem,
-    ScopedFilesystem,
+    BackendCapabilities, DirEntry, FileStat, FileType, FilesystemError, RecordVersion,
+    RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{HostApiError, MountView, ResourceScope, ScopedPath, VirtualPath};
 
@@ -143,6 +143,18 @@ impl RootFilesystem for SkillManagementRootFilesystem {
 
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         self.inner.delete(path).await
+    }
+
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        expected_version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        // Review fix (PR #5749, round 3): this wrapper forwards `capabilities()`
+        // to the inner backend verbatim, so if the inner backend declares CAS
+        // delete support, `delete_if_version` must delegate too instead of
+        // falling through to the trait default `Unsupported`.
+        self.inner.delete_if_version(path, expected_version).await
     }
 }
 
