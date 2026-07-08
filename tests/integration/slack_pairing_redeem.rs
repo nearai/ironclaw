@@ -192,7 +192,7 @@ async fn slack_pairing_redeem_rejects_unknown_code() {
     );
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn slack_pairing_redeem_rejects_expired_code() {
     let root = tempfile::tempdir().expect("tempdir");
     let db_path = root.path().join("slack-host-state.db");

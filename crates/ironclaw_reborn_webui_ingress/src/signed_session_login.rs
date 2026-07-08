@@ -630,7 +630,11 @@ mod tests {
         // evicted entry was resurrected; the denylist itself still works.
         let still_revoked = raw("filler-0", base + 3600);
         assert!(
-            store.lookup(&still_revoked).await.expect("lookup").is_none(),
+            store
+                .lookup(&still_revoked)
+                .await
+                .expect("lookup")
+                .is_none(),
             "a token still on the denylist stays revoked",
         );
     }
