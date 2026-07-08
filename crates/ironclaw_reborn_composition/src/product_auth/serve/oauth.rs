@@ -1345,7 +1345,7 @@ mod tests {
     #[cfg(feature = "slack-v2-host-beta")]
     async fn slack_personal_oauth_test_slot() -> SlackPersonalSetupServiceSlot {
         let redirect_uri = ironclaw_auth::OAuthRedirectUri::new(
-            "http://127.0.0.1:3000/api/reborn/product-auth/oauth/slack_personal/callback",
+            "http://127.0.0.1:3000/api/reborn/product-auth/oauth/slack/callback",
         )
         .expect("slack oauth redirect uri");
         let slot = SlackPersonalSetupServiceSlot::new(redirect_uri);

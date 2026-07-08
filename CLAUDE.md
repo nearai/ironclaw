@@ -90,6 +90,20 @@ Prefer generic/extensible architectures over hardcoding specific integrations. A
 
 ### Extension/Auth Invariants
 
+**Reborn (`crates/`): the unified extension model.** The top-level product
+object is always an *extension*; a channel is one capability surface an
+extension's manifest declares (`tool` / `channel` / `auth` —
+`ironclaw_host_api::CapabilitySurfaceKind`), and runtime (`wasm` / `mcp` /
+`first_party`) is implementation only, never taxonomy. `ExtensionId` is the
+product identity (`slack`, `github`, `gmail`); `ProviderId` is the credential
+authority namespace and may be shared across extensions (`google` backs
+gmail + drive + calendar + …). There is no separate channel registry, no
+`slack_bot`/`slack_personal` split, and no extension `kind` wire string —
+`crates/ironclaw_architecture/tests/reborn_retired_taxonomy.rs` pins the
+retired vocabulary at zero. Start from the `reborn-extension-surfaces` skill
+when adding an integration. The rules below govern the v1 monolith (`src/`)
+during its retirement:
+
 Extension and channel onboarding has two distinct identities that must not be conflated:
 
 - `credential_name`: backend secret identity used for storage, injection, and gate resume

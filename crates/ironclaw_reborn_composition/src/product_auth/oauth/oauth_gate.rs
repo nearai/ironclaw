@@ -641,7 +641,7 @@ mod tests {
             Arc::new(SlackPersonalOAuthGateProvider::new(
                 SlackPersonalSetupServiceSlot::new(
                     ironclaw_auth::OAuthRedirectUri::new(
-                        "https://host.example/api/reborn/product-auth/oauth/slack_personal/callback",
+                        "https://host.example/api/reborn/product-auth/oauth/slack/callback",
                     )
                     .unwrap(),
                 ),

@@ -87,7 +87,7 @@ pub(crate) const GOOGLE_OAUTH_CALLBACK_PATH: &str =
     "/api/reborn/product-auth/oauth/google/callback";
 #[cfg(feature = "slack-v2-host-beta")]
 pub(crate) const SLACK_PERSONAL_OAUTH_CALLBACK_PATH: &str =
-    "/api/reborn/product-auth/oauth/slack_personal/callback";
+    "/api/reborn/product-auth/oauth/slack/callback";
 pub(crate) const EXTENSION_OAUTH_START_PATH: &str =
     "/api/webchat/v2/extensions/{package_id}/setup/oauth/start";
 pub(crate) const MANUAL_TOKEN_SUBMIT_PATH: &str = "/api/reborn/product-auth/manual-token/submit";
