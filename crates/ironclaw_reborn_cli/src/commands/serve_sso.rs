@@ -23,10 +23,12 @@ use std::time::Duration;
 use anyhow::{Context, anyhow};
 use ironclaw_reborn_webui_ingress::{
     GitHubOAuthConfig, GitHubProvider, GoogleOAuthConfig, GoogleProvider, OAuthProvider,
+    SessionEpoch,
 };
 use secrecy::SecretString;
 
 const WEBUI_BASE_URL_ENV: &str = "IRONCLAW_REBORN_WEBUI_BASE_URL";
+const WEBUI_SESSION_EPOCH_ENV: &str = "IRONCLAW_REBORN_WEBUI_SESSION_EPOCH";
 
 #[cfg(test)]
 pub(crate) static WEBUI_BASE_URL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -44,6 +46,10 @@ pub(crate) struct SsoStartupConfig {
     /// startup fails when providers are configured but this is empty, so
     /// it is never empty here in practice.
     pub(crate) allowed_email_domains: Vec<String>,
+    /// Optional deployment epoch for signed WebUI sessions. Changing this
+    /// value invalidates previously minted browser tokens without rotating the
+    /// operator secret.
+    pub(crate) session_epoch: Option<SessionEpoch>,
 }
 
 /// Resolve the SSO startup config from environment, applying all
@@ -76,7 +82,15 @@ pub(crate) fn sso_startup_config_from_env(
         providers,
         base_url,
         allowed_email_domains,
+        session_epoch: session_epoch_from_env()?,
     }))
+}
+
+fn session_epoch_from_env() -> anyhow::Result<Option<SessionEpoch>> {
+    non_empty_env(WEBUI_SESSION_EPOCH_ENV)
+        .map(SessionEpoch::new)
+        .transpose()
+        .with_context(|| format!("invalid {WEBUI_SESSION_EPOCH_ENV}"))
 }
 
 /// Resolve the externally visible WebUI base URL used for OAuth redirects.
@@ -441,6 +455,7 @@ mod tests {
         "IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_ID",
         "IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_SECRET",
         WEBUI_BASE_URL_ENV,
+        WEBUI_SESSION_EPOCH_ENV,
         "IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS",
     ];
 
@@ -597,6 +612,7 @@ mod tests {
             );
             std::env::set_var("IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS", "example.com");
             std::env::set_var(WEBUI_BASE_URL_ENV, " https://configured.example/ ");
+            std::env::set_var(WEBUI_SESSION_EPOCH_ENV, " deploy-2026-07-02 ");
         }
 
         let resolved = sso_startup_config_from_env(addr("0.0.0.0:8080"))
@@ -606,6 +622,38 @@ mod tests {
         assert_eq!(
             resolved.base_url, "https://configured.example",
             "explicit WebUI base URL must become the SSO callback base URL"
+        );
+        assert_eq!(
+            resolved.session_epoch.as_ref().map(SessionEpoch::as_str),
+            Some("deploy-2026-07-02"),
+            "configured session epoch should be trimmed and carried into signed-session wiring",
+        );
+
+        clear_sso_env();
+    }
+
+    #[test]
+    fn sso_startup_config_rejects_invalid_session_epoch() {
+        let _guard = WEBUI_BASE_URL_ENV_LOCK.lock().expect("env lock");
+        clear_sso_env();
+        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleaned up before the guard drops.
+        unsafe {
+            std::env::set_var("IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID", "client-id");
+            std::env::set_var(
+                "IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET",
+                "client-secret",
+            );
+            std::env::set_var("IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS", "example.com");
+            std::env::set_var(WEBUI_SESSION_EPOCH_ENV, "deploy\n2026");
+        }
+
+        let error = match sso_startup_config_from_env(addr("127.0.0.1:3000")) {
+            Ok(_) => panic!("invalid session epoch must fail startup"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains(WEBUI_SESSION_EPOCH_ENV),
+            "startup error must name the invalid session epoch env var, got: {error}",
         );
 
         clear_sso_env();

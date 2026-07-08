@@ -43,7 +43,8 @@ use ironclaw_reborn_composition::{
 };
 use ironclaw_reborn_webui_ingress::{
     EnvBearerAuthenticator, OAuthProvider, OAuthProviderName, OAuthUserProfile,
-    SignedSessionLoginConfig, UserDirectory, UserDirectoryError, build_signed_session_login,
+    SessionUserAccessError, SessionUserAccessValidator, SignedSessionLoginConfig, UserDirectory,
+    UserDirectoryError, build_signed_session_login,
 };
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use parking_lot::Mutex as PlMutex;
@@ -293,6 +294,19 @@ impl UserDirectory for DistinctUserDirectory {
     }
 }
 
+struct AllowAllAccessValidator;
+
+#[async_trait]
+impl SessionUserAccessValidator for AllowAllAccessValidator {
+    async fn has_session_access(
+        &self,
+        _tenant_id: &TenantId,
+        _user_id: &UserId,
+    ) -> Result<bool, SessionUserAccessError> {
+        Ok(true)
+    }
+}
+
 // ─── OAuth provider that yields a queue of profiles ──────────────────────
 
 struct QueueProvider {
@@ -363,6 +377,8 @@ fn build_app(profiles: Vec<OAuthUserProfile>) -> (axum::Router, Arc<RecordingSer
         tenant_id: TenantId::new(TENANT).expect("tenant"),
         user_directory: Arc::new(DistinctUserDirectory),
         operator_secret: SecretString::from("operator-secret".to_string()),
+        session_epoch: None,
+        session_user_access_validator: Arc::new(AllowAllAccessValidator),
         base_url: "https://gateway.example".to_string(),
         providers: vec![QueueProvider::new(profiles) as Arc<dyn OAuthProvider>],
         env_authenticator,

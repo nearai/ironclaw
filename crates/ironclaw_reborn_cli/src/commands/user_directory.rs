@@ -27,7 +27,8 @@ use ironclaw_reborn_composition::{
     SurfaceKind,
 };
 use ironclaw_reborn_webui_ingress::{
-    OAuthProviderName, OAuthUserProfile, UserDirectory, UserDirectoryError,
+    OAuthProviderName, OAuthUserProfile, SessionUserAccessError, SessionUserAccessValidator,
+    UserDirectory, UserDirectoryError,
 };
 
 /// Admission + persistence adapter implementing the ingress
@@ -138,6 +139,51 @@ impl LocalTriggerAccessBootstrap {
     }
 }
 
+pub(crate) struct LocalTriggerSessionAccessValidator {
+    store: Arc<dyn LocalTriggerAccessStore>,
+    tenant_id: TenantId,
+    agent_id: AgentId,
+    project_id: Option<ProjectId>,
+}
+
+impl LocalTriggerSessionAccessValidator {
+    pub(crate) fn new(
+        store: Arc<dyn LocalTriggerAccessStore>,
+        tenant_id: TenantId,
+        agent_id: AgentId,
+        project_id: Option<ProjectId>,
+    ) -> Self {
+        Self {
+            store,
+            tenant_id,
+            agent_id,
+            project_id,
+        }
+    }
+}
+
+#[async_trait]
+impl SessionUserAccessValidator for LocalTriggerSessionAccessValidator {
+    async fn has_session_access(
+        &self,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+    ) -> Result<bool, SessionUserAccessError> {
+        if tenant_id.as_str() != self.tenant_id.as_str() {
+            return Ok(false);
+        }
+        self.store
+            .has_active_local_access(
+                tenant_id,
+                user_id,
+                Some(&self.agent_id),
+                self.project_id.as_ref(),
+            )
+            .await
+            .map_err(|err| SessionUserAccessError::Backend(err.to_string()))
+    }
+}
+
 #[async_trait]
 impl UserDirectory for WebuiUserDirectory {
     async fn resolve(
@@ -204,6 +250,7 @@ impl UserDirectory for WebuiUserDirectory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_reborn_composition::LocalTriggerAccessReconciliation;
 
     // Build a standalone resolver against a throwaway temp DB via the
     // composition `test-support` seam, so the CLI test needs no direct
@@ -370,6 +417,64 @@ mod tests {
             .await
             .expect_err("no verified email on the allowlist must be rejected");
         assert!(matches!(err, UserDirectoryError::Unknown));
+    }
+
+    #[tokio::test]
+    async fn local_trigger_session_validator_tracks_active_access() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = ironclaw_reborn_composition::open_local_trigger_access_store(
+            &tmp.path().join("reborn-local-dev.db"),
+        )
+        .await
+        .expect("open access store");
+        let tenant_id = TenantId::new("validator-tenant").expect("tenant");
+        let user_id = UserId::new("validator-user").expect("user");
+        let agent_id = AgentId::new("validator-agent").expect("agent");
+        let project_id = ProjectId::new("validator-project").expect("project");
+
+        store
+            .seed_local_access(LocalTriggerAccessSeed {
+                tenant_id: &tenant_id,
+                user_id: &user_id,
+                agent_id: Some(&agent_id),
+                project_id: Some(&project_id),
+                role: LocalTriggerAccessRole::Owner,
+                source: LocalTriggerAccessSource::LocalDevSsoBootstrap,
+            })
+            .await
+            .expect("seed access");
+        let validator = LocalTriggerSessionAccessValidator::new(
+            store.clone(),
+            tenant_id.clone(),
+            agent_id.clone(),
+            Some(project_id.clone()),
+        );
+        assert!(
+            validator
+                .has_session_access(&tenant_id, &user_id)
+                .await
+                .expect("check active access"),
+            "seeded active access should allow the signed session",
+        );
+
+        store
+            .reconcile_local_access(LocalTriggerAccessReconciliation {
+                tenant_id: &tenant_id,
+                user_ids: &[],
+                agent_id: Some(&agent_id),
+                project_id: Some(&project_id),
+                role: LocalTriggerAccessRole::Owner,
+                source: LocalTriggerAccessSource::LocalDevSsoBootstrap,
+            })
+            .await
+            .expect("reconcile access");
+        assert!(
+            !validator
+                .has_session_access(&tenant_id, &user_id)
+                .await
+                .expect("check inactive access"),
+            "reconciled-out access should reject the same signed session user",
+        );
     }
 
     #[tokio::test]

@@ -42,6 +42,7 @@ pub use session::{SessionAuthenticator, SessionRecord, SessionStore, SessionStor
 // the standalone `serve` binary supplies env config and calls the
 // builder; the auth/session model lives here, not in the command crate.
 pub use signed_session_login::{
+    SessionEpoch, SessionEpochError, SessionUserAccessError, SessionUserAccessValidator,
     SignedSessionLoginConfig, SignedSessionLoginWiring, build_signed_session_login,
 };
 // `InMemorySessionStore` is gated behind `dev-in-memory-session` so a

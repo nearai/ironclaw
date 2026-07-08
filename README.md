@@ -286,6 +286,7 @@ Optional WebUI OAuth env vars:
 | `IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_ID` | Enables GitHub SSO when set. |
 | `IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_SECRET` | Required when GitHub SSO is enabled. |
 | `IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS` | Required when any SSO provider is enabled. Comma-separated verified email domains. |
+| `IRONCLAW_REBORN_WEBUI_SESSION_EPOCH` | Optional signed-session epoch. Changing it forces browsers through SSO again without rotating `IRONCLAW_REBORN_WEBUI_TOKEN`. |
 | `IRONCLAW_REBORN_WEBUI_OAUTH_HTTP_TIMEOUT_SECS` | Optional OAuth HTTP timeout override. |
 
 For Google SSO, create a Google OAuth web client and register the Reborn WebUI
