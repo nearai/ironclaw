@@ -272,6 +272,41 @@ async def test_reborn_legacy_empty_landing_hidden_when_message_pending(
         await harness["context"].close()
 
 
+async def test_reborn_legacy_send_failure_renders_inline_error_not_toast(
+    reborn_v2_server, reborn_v2_browser
+):
+    async def handle_failed_send(route, _payload, _fulfill_json):
+        await route.fulfill(
+            status=503,
+            content_type="text/plain",
+            body="AI provider account is out of credits",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    harness = await _open_mocked_pending_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        send_handler=handle_failed_send,
+    )
+    try:
+        page = harness["page"]
+        composer = page.locator(SEL_V2["chat_composer"])
+        await composer.fill("trigger provider failure")
+        await composer.press("Enter")
+
+        await expect(page.locator(SEL_V2["msg_user"]).last).to_contain_text(
+            "trigger provider failure", timeout=5000
+        )
+        await expect(page.locator(SEL_V2["msg_error"]).last).to_contain_text(
+            "AI provider account is out of credits", timeout=5000
+        )
+        await expect(page.locator("div.fixed.bottom-4.right-4")).to_have_count(
+            0, timeout=1000
+        )
+    finally:
+        await harness["context"].close()
+
+
 async def test_reborn_legacy_pending_message_reconciles_with_confirmed_timeline(
     reborn_v2_server, reborn_v2_browser
 ):
