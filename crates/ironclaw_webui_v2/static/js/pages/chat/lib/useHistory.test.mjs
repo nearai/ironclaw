@@ -611,7 +611,7 @@ test("mergeFullRefresh carries live assistant timestamps onto confirmed replies"
   assert.equal(merged[0].timestamp, "2026-06-25T07:18:00.000Z");
 });
 
-test("mergeFullRefresh preserves live assistant text before same-run activity", () => {
+test("mergeFullRefresh keeps same-run activity before confirmed assistant replies", () => {
   const context = { globalThis: {}, React: createReactStub() };
   vm.runInNewContext(useHistorySourceForTest(), context);
   const { mergeFullRefresh } = context.globalThis.__testExports;
@@ -661,9 +661,9 @@ test("mergeFullRefresh preserves live assistant text before same-run activity", 
 
   assert.equal(
     merged.map((message) => message.id).join(","),
-    "msg-user-1,msg-assistant-1,tool-web-search",
+    "msg-user-1,tool-web-search,msg-assistant-1",
   );
-  assert.equal(merged[1].keepFollowingActivityAfter, true);
+  assert.equal(merged[2].keepFollowingActivityAfter, undefined);
 });
 
 test("mergeFullRefresh uses run-settled time for confirmed assistant replies", () => {

@@ -42,7 +42,6 @@ function createUseChatEventsHarness({
   gateFromEvent = () => null,
   failureMessageForRunStatus = () => "run failed",
   locallyResolvedGatesRef = { current: new Map() },
-  rememberTextBeforeActivity = () => {},
 } = {}) {
   let messages = [];
   let pendingGate = null;
@@ -65,7 +64,6 @@ function createUseChatEventsHarness({
     globalThis: {},
     ensureGateToolActivity,
     isTerminalToolStatus,
-    rememberTextBeforeActivity,
     toolCardFromActivity,
     toolCardFromPreview,
     upsertToolActivityMessage,
@@ -236,55 +234,6 @@ test("useChatEvents: projection text streams into one assistant bubble without e
   assert.deepEqual(harness.settledRuns, [{ runId: "run-1", success: true }]);
 });
 
-test("useChatEvents: remembers streamed text before same-run activity for refresh", () => {
-  const remembered = [];
-  const harness = createUseChatEventsHarness({
-    rememberTextBeforeActivity: (threadId, runId) =>
-      remembered.push([threadId, runId]),
-  });
-
-  harness.handleEvent({
-    type: "projection_update",
-    frame: {
-      state: {
-        items: [
-          { run_status: { run_id: "run-1", status: "running" } },
-          { text: { id: "text:run-1", body: "pre-tool text" } },
-        ],
-      },
-    },
-  });
-
-  assert.deepEqual(remembered, [["thread-1", "run-1"]]);
-
-  harness.handleEvent({
-    type: "capability_activity",
-    frame: {
-      activity: {
-        invocation_id: "invocation-1",
-        turn_run_id: "run-1",
-        thread_id: "thread-1",
-        capability_id: "builtin.web_search",
-        status: "started",
-      },
-    },
-  });
-  harness.handleEvent({
-    type: "projection_update",
-    frame: {
-      state: {
-        items: [{ text: { id: "text:run-1", body: "post-tool text" } }],
-      },
-    },
-  });
-
-  assert.deepEqual(
-    remembered,
-    [["thread-1", "run-1"]],
-    "text updates after same-run activity do not create a refresh-order hint",
-  );
-});
-
 test("useChatEvents: final_reply replaces matching streamed projection bubble", () => {
   const harness = createUseChatEventsHarness();
 
@@ -367,7 +316,7 @@ test("useChatEvents: stale projection text does not duplicate finalized same-run
   assert.equal(harness.messages[2].isFinalReply, true);
 });
 
-test("useChatEvents: replayed text before activity preserves finalized reply order", () => {
+test("useChatEvents: replayed text before activity keeps finalized reply after activity", () => {
   const harness = createUseChatEventsHarness();
   harness.replaceMessages([
     {
@@ -414,11 +363,11 @@ test("useChatEvents: replayed text before activity preserves finalized reply ord
 
   assert.deepEqual(
     Array.from(harness.messages, (message) => message.id),
-    ["msg-user-1", "msg-assistant-1", "tool-invocation-1"],
+    ["msg-user-1", "tool-invocation-1", "msg-assistant-1"],
   );
-  assert.equal(harness.messages[1].content, "final answer");
-  assert.equal(harness.messages[1].isFinalReply, true);
-  assert.equal(harness.messages[1].keepFollowingActivityAfter, true);
+  assert.equal(harness.messages[2].content, "final answer");
+  assert.equal(harness.messages[2].isFinalReply, true);
+  assert.equal(harness.messages[2].keepFollowingActivityAfter, undefined);
 });
 
 test("useChatEvents: replayed activity before text keeps finalized reply after activity", () => {
@@ -475,7 +424,7 @@ test("useChatEvents: replayed activity before text keeps finalized reply after a
   assert.equal(harness.messages[2].keepFollowingActivityAfter, undefined);
 });
 
-test("useChatEvents: text replay before a later activity frame preserves refresh order", () => {
+test("useChatEvents: text replay before a later activity frame keeps tools before final reply", () => {
   const harness = createUseChatEventsHarness();
   harness.replaceMessages([
     {
@@ -529,9 +478,9 @@ test("useChatEvents: text replay before a later activity frame preserves refresh
 
   assert.deepEqual(
     Array.from(harness.messages, (message) => message.id),
-    ["msg-user-1", "msg-assistant-1", "tool-invocation-1"],
+    ["msg-user-1", "tool-invocation-1", "msg-assistant-1"],
   );
-  assert.equal(harness.messages[1].keepFollowingActivityAfter, true);
+  assert.equal(harness.messages[2].keepFollowingActivityAfter, undefined);
 });
 
 test("useChatEvents: text replay after activity does not move finalized reply on preview", () => {

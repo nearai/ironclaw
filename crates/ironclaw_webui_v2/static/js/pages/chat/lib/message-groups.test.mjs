@@ -243,7 +243,7 @@ test("groupMessages: same-run activity does not jump above streaming assistant t
   );
 });
 
-test("groupMessages: final reply can preserve live position before following activity", () => {
+test("groupMessages: final reply boundary keeps same-run activity before answer", () => {
   const grouped = groupMessages([
     { id: "u1", role: "user", content: "what is GPT-5.6?", turnRunId: "run-1" },
     {
@@ -265,10 +265,10 @@ test("groupMessages: final reply can preserve live position before following act
   assert.equal(grouped.length, 3);
   assert.deepEqual(
     grouped.map((item) => item.type === "activity-run" ? item.id : item.message.id),
-    ["u1", "msg-final", "activity-run-tool-web-search"],
+    ["u1", "activity-run-tool-web-search", "msg-final"],
   );
   assert.deepEqual(
-    grouped[2].activity.map((item) => item.id),
+    grouped[1].activity.map((item) => item.id),
     ["tool-web-search"],
   );
 });

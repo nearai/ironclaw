@@ -9,7 +9,6 @@ import {
   ensureGateToolActivity,
   upsertToolActivityMessage,
 } from "./tool-activity-state.js";
-import { rememberTextBeforeActivity } from "./stream-order-memory.js";
 
 // Handler factory for v2 `WebChatV2EventFrame` events.
 //
@@ -55,8 +54,6 @@ export function useChatEvents({
   // resumes a newer active run.
   const latestRunIdRef = React.useRef(null);
   const promptRunIdRef = React.useRef(null);
-  const textSeenRunIdsRef = React.useRef(new Set());
-  const activitySeenRunIdsRef = React.useRef(new Set());
 
   return React.useCallback(
     (envelope) => {
@@ -109,12 +106,6 @@ export function useChatEvents({
             toolCardFromActivity(activity),
             toolActivityStateRef,
           );
-          preserveFinalAssistantOrderForActivity({
-            setMessages,
-            runId: activity.turn_run_id || null,
-            textSeenRunIdsRef,
-          });
-          rememberActivitySeen(activitySeenRunIdsRef, activity.turn_run_id || null);
           return;
         }
 
@@ -127,12 +118,6 @@ export function useChatEvents({
           if (!preview || !preview.invocation_id) return;
           const card = toolCardFromPreview(preview);
           upsertToolActivityMessage(setMessages, card, toolActivityStateRef);
-          preserveFinalAssistantOrderForActivity({
-            setMessages,
-            runId: preview.turn_run_id || null,
-            textSeenRunIdsRef,
-          });
-          rememberActivitySeen(activitySeenRunIdsRef, preview.turn_run_id || null);
           return;
         }
 
@@ -222,8 +207,6 @@ export function useChatEvents({
             activeRunRef,
             locallyResolvedGatesRef,
             toolActivityStateRef,
-            textSeenRunIdsRef,
-            activitySeenRunIdsRef,
           });
           return;
         }
@@ -349,8 +332,6 @@ function applyProjectionItems({
   activeRunRef,
   locallyResolvedGatesRef,
   toolActivityStateRef,
-  textSeenRunIdsRef,
-  activitySeenRunIdsRef,
 }) {
   // Snapshot the most recent run id so stale terminal run_status frames can
   // be filtered while a locally resolved gate is resuming a newer run.
@@ -374,7 +355,6 @@ function applyProjectionItems({
       }
     }
   }
-  const textBeforeActivityRunIds = projectionTextBeforeActivityRunIds(items);
   let activeRunId = latestRunIdRef?.current ?? null;
   for (const item of items) {
     if (item.run_status) {
@@ -525,22 +505,11 @@ function applyProjectionItems({
       // truth for clearing pendingGate/processing.
       const messageId = `text-${item.text.id}`;
       const textRunId = projectionTextRunId(item.text.id);
-      if (
-        textRunId &&
-        hasVisibleProjectionText(item.text.body) &&
-        !activitySeenRunIdsRef?.current?.has(textRunId)
-      ) {
-        textSeenRunIdsRef?.current?.add(textRunId);
-        rememberTextBeforeActivity(threadId, textRunId);
-      }
       setMessages((prev) => {
         if (
           textRunId &&
           prev.some((m) => isFinalAssistantForRun(m, textRunId))
         ) {
-          if (textBeforeActivityRunIds.has(textRunId)) {
-            return preserveFinalAssistantBeforeSameRunActivity(prev, textRunId);
-          }
           return prev;
         }
         const timelineMessageId = item.text.id ? `msg-${item.text.id}` : null;
@@ -593,12 +562,6 @@ function applyProjectionItems({
           toolCardFromActivity(activity),
           toolActivityStateRef,
         );
-        preserveFinalAssistantOrderForActivity({
-          setMessages,
-          runId: activity.turn_run_id || null,
-          textSeenRunIdsRef,
-        });
-        rememberActivitySeen(activitySeenRunIdsRef, activity.turn_run_id || null);
       }
     }
 
@@ -767,89 +730,10 @@ function projectionTextRunId(id) {
   return id.startsWith(prefix) ? id.slice(prefix.length) || null : null;
 }
 
-function hasVisibleProjectionText(body) {
-  return typeof body === "string" && body.trim().length > 0;
-}
-
-function projectionTextBeforeActivityRunIds(items) {
-  const textSeen = new Set();
-  const textBeforeActivity = new Set();
-  for (const item of Array.isArray(items) ? items : []) {
-    const textRunId = item?.text ? projectionTextRunId(item.text.id) : null;
-    if (textRunId) textSeen.add(textRunId);
-
-    const activityRunId = projectionActivityRunId(item);
-    if (activityRunId && textSeen.has(activityRunId)) {
-      textBeforeActivity.add(activityRunId);
-    }
-  }
-  return textBeforeActivity;
-}
-
-function projectionActivityRunId(item) {
-  return item?.capability_activity?.turn_run_id || item?.thinking?.run_id || null;
-}
-
 function isFinalAssistantForRun(message, runId) {
   return (
     message?.role === "assistant" &&
     message?.isFinalReply === true &&
-    message?.turnRunId === runId
-  );
-}
-
-function preserveFinalAssistantOrderForActivity({
-  setMessages,
-  runId,
-  textSeenRunIdsRef,
-}) {
-  if (!runId || !textSeenRunIdsRef?.current?.has(runId)) return;
-  setMessages((prev) => preserveFinalAssistantBeforeSameRunActivity(prev, runId));
-}
-
-function rememberActivitySeen(activitySeenRunIdsRef, runId) {
-  if (!runId) return;
-  activitySeenRunIdsRef?.current?.add(runId);
-}
-
-function preserveFinalAssistantBeforeSameRunActivity(messages, runId) {
-  const finalIndex = messages.findIndex((message) =>
-    isFinalAssistantForRun(message, runId),
-  );
-  if (finalIndex < 0) return messages;
-
-  const finalMessage = {
-    ...messages[finalIndex],
-    keepFollowingActivityAfter: true,
-  };
-  const firstActivityIndex = messages.findIndex((message) =>
-    isSameRunRuntimeActivity(message, runId),
-  );
-
-  if (firstActivityIndex < 0 || finalIndex < firstActivityIndex) {
-    if (messages[finalIndex]?.keepFollowingActivityAfter === true) {
-      return messages;
-    }
-    const copy = [...messages];
-    copy[finalIndex] = finalMessage;
-    return copy;
-  }
-
-  const withoutFinal = messages.filter((_, index) => index !== finalIndex);
-  const targetIndex = withoutFinal.findIndex((message) =>
-    isSameRunRuntimeActivity(message, runId),
-  );
-  if (targetIndex < 0) return withoutFinal;
-  return [
-    ...withoutFinal.slice(0, targetIndex),
-    finalMessage,
-    ...withoutFinal.slice(targetIndex),
-  ];
-}
-
-function isSameRunRuntimeActivity(message, runId) {
-  return (
-    (message?.role === "tool_activity" || message?.role === "thinking") &&
     message?.turnRunId === runId
   );
 }

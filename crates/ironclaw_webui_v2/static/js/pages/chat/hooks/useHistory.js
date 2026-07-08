@@ -267,8 +267,7 @@ function mergeFullRefresh(fresh, current, options = {}) {
   const hydratedFresh = hydrateFreshMessages(fresh, current, {
     finalReplyTimestampByRun,
   });
-  const orderedFresh = preserveLiveAssistantOrder(hydratedFresh, current);
-  const ids = new Set(orderedFresh.map((m) => m?.id).filter(Boolean));
+  const ids = new Set(hydratedFresh.map((m) => m?.id).filter(Boolean));
   const preserved = current.filter((message) => {
     if (!message || typeof message.id !== "string" || ids.has(message.id)) {
       return false;
@@ -284,8 +283,8 @@ function mergeFullRefresh(fresh, current, options = {}) {
     return preserveClientOnly && message.id.startsWith("err-");
   });
   return preserved.length > 0
-    ? insertPreservedAtOriginalPositions(orderedFresh, preserved, current)
-    : orderedFresh;
+    ? insertPreservedAtOriginalPositions(hydratedFresh, preserved, current)
+    : hydratedFresh;
 }
 
 function isSeededOptimisticMessage(message) {
@@ -348,66 +347,6 @@ function isFinalAssistantMessage(message) {
 
 function isRuntimeActivityMessage(message) {
   return message?.role === "tool_activity" || message?.role === "thinking";
-}
-
-function preserveLiveAssistantOrder(fresh, current) {
-  const runsWithTextBeforeActivity = new Set();
-  for (let index = 0; index < current.length; index += 1) {
-    const message = current[index];
-    if (!isStreamingAssistantMessage(message)) continue;
-    const runId = message.turnRunId;
-    if (!runId) continue;
-    const laterActivity = current
-      .slice(index + 1)
-      .some(
-        (candidate) =>
-          isRuntimeActivityMessage(candidate) && candidate.turnRunId === runId,
-      );
-    if (laterActivity) runsWithTextBeforeActivity.add(runId);
-  }
-  if (runsWithTextBeforeActivity.size === 0) return fresh;
-
-  let reordered = fresh;
-  for (const runId of runsWithTextBeforeActivity) {
-    const finalIndex = reordered.findIndex(
-      (message) => isFinalAssistantMessage(message) && message.turnRunId === runId,
-    );
-    const firstActivityIndex = reordered.findIndex(
-      (message) => isRuntimeActivityMessage(message) && message.turnRunId === runId,
-    );
-    if (
-      finalIndex < 0 ||
-      firstActivityIndex < 0 ||
-      finalIndex < firstActivityIndex
-    ) {
-      continue;
-    }
-
-    const finalMessage = {
-      ...reordered[finalIndex],
-      keepFollowingActivityAfter: true,
-    };
-    const withoutFinal = reordered.filter((_, index) => index !== finalIndex);
-    const targetIndex = withoutFinal.findIndex(
-      (message) => isRuntimeActivityMessage(message) && message.turnRunId === runId,
-    );
-    reordered = [
-      ...withoutFinal.slice(0, targetIndex),
-      finalMessage,
-      ...withoutFinal.slice(targetIndex),
-    ];
-  }
-  return reordered;
-}
-
-function isStreamingAssistantMessage(message) {
-  return (
-    message?.role === "assistant" &&
-    message?.isFinalReply === false &&
-    typeof message.id === "string" &&
-    message.id.startsWith("text-") &&
-    typeof message.turnRunId === "string"
-  );
 }
 
 function insertPreservedAtOriginalPositions(fresh, preserved, current) {

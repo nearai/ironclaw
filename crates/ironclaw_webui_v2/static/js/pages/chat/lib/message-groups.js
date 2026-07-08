@@ -11,7 +11,7 @@ export function groupMessages(messages) {
   for (let index = 0; index < orderedMessages.length; index += 1) {
     const msg = orderedMessages[index];
 
-    if (isFinalAssistantReply(msg) && !msg.keepFollowingActivityAfter) {
+    if (isFinalAssistantReply(msg)) {
       const activity = followingActivity(orderedMessages, index + 1);
       const boundary = orderedMessages[index + 1 + activity.length];
       if (activity.length > 0 && (!boundary || boundary.role === "user")) {
@@ -115,7 +115,7 @@ function isFinalAssistantReply(msg) {
 }
 
 function isAssistantReplyBoundary(msg) {
-  return isFinalAssistantReply(msg) && !msg.keepFollowingActivityAfter;
+  return isFinalAssistantReply(msg);
 }
 
 function isActivity(msg) {

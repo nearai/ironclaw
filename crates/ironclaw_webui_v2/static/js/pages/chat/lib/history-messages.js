@@ -9,7 +9,6 @@
 import { attachmentKindFromMime, formatBytes } from "./attachments.js";
 import { ATTACHMENTS_ONLY_CONTENT } from "./attachment-sentinel.js";
 import { attachmentUrl } from "../../../lib/api.js";
-import { hasRememberedTextBeforeActivity } from "./stream-order-memory.js";
 
 // Project a stored `AttachmentRef` (snake_case wire shape) into the
 // render shape `MessageBubble` consumes. The timeline never carries bytes,
@@ -124,7 +123,7 @@ export function messagesFromTimeline(records, pendingMessages = [], threadId = n
     messages.push(message);
   }
 
-  return applyRememberedTextBeforeActivity(messages, threadId);
+  return messages;
 }
 
 function pendingMessageForRender(pending) {
@@ -139,72 +138,6 @@ function isFinalAssistantRecord(record) {
   return (
     (record.kind === "assistant" || record.kind === "assistant_message") &&
     record.status === "finalized"
-  );
-}
-
-function applyRememberedTextBeforeActivity(messages, threadId) {
-  if (!threadId || messages.length < 2) return messages;
-  const runIds = new Set();
-  for (const message of messages) {
-    if (
-      isFinalAssistantMessage(message) &&
-      message.turnRunId &&
-      hasRememberedTextBeforeActivity(threadId, message.turnRunId)
-    ) {
-      runIds.add(message.turnRunId);
-    }
-  }
-  let next = messages;
-  for (const runId of runIds) {
-    next = preserveFinalAssistantBeforeSameRunActivity(next, runId);
-  }
-  return next;
-}
-
-function isFinalAssistantMessage(message) {
-  return message?.role === "assistant" && message?.isFinalReply === true;
-}
-
-function preserveFinalAssistantBeforeSameRunActivity(messages, runId) {
-  const finalIndex = messages.findIndex(
-    (message) =>
-      isFinalAssistantMessage(message) && message.turnRunId === runId,
-  );
-  if (finalIndex < 0) return messages;
-
-  const finalMessage = {
-    ...messages[finalIndex],
-    keepFollowingActivityAfter: true,
-  };
-  const firstActivityIndex = messages.findIndex((message) =>
-    isSameRunTimelineActivity(message, runId),
-  );
-
-  if (firstActivityIndex < 0 || finalIndex < firstActivityIndex) {
-    if (messages[finalIndex]?.keepFollowingActivityAfter === true) {
-      return messages;
-    }
-    const copy = [...messages];
-    copy[finalIndex] = finalMessage;
-    return copy;
-  }
-
-  const withoutFinal = messages.filter((_, index) => index !== finalIndex);
-  const targetIndex = withoutFinal.findIndex((message) =>
-    isSameRunTimelineActivity(message, runId),
-  );
-  if (targetIndex < 0) return withoutFinal;
-  return [
-    ...withoutFinal.slice(0, targetIndex),
-    finalMessage,
-    ...withoutFinal.slice(targetIndex),
-  ];
-}
-
-function isSameRunTimelineActivity(message, runId) {
-  return (
-    (message?.role === "tool_activity" || message?.role === "thinking") &&
-    message?.turnRunId === runId
   );
 }
 
