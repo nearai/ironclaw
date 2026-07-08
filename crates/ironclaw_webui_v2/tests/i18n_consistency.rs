@@ -1,6 +1,6 @@
 //! Regression guard for the webui_v2 i18n locale dictionaries.
 //!
-//! Parses every `static/js/i18n/*.js` pack and asserts cross-locale
+//! Parses every `frontend/src/i18n/*.ts` pack and asserts cross-locale
 //! consistency against the English source: identical key sets, no empty
 //! values, and matching `{placeholder}` tokens. These invariants caught real
 //! bugs during the i18n completion work — keys present in only some locales
@@ -15,7 +15,7 @@ use std::fs;
 use std::path::PathBuf;
 
 fn i18n_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static/js/i18n")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("frontend/src/i18n")
 }
 
 /// Skip whitespace and `//` line comments starting at `i`.
@@ -144,7 +144,7 @@ fn load_all() -> BTreeMap<String, BTreeMap<String, String>> {
     let mut packs = BTreeMap::new();
     for entry in fs::read_dir(&dir).expect("read i18n dir") {
         let path = entry.expect("dir entry").path();
-        if path.extension().and_then(|e| e.to_str()) != Some("js") {
+        if path.extension().and_then(|e| e.to_str()) != Some("ts") {
             continue;
         }
         let lang = path
@@ -159,7 +159,7 @@ fn load_all() -> BTreeMap<String, BTreeMap<String, String>> {
 }
 
 fn en_pack(packs: &BTreeMap<String, BTreeMap<String, String>>) -> &BTreeMap<String, String> {
-    packs.get("en").expect("en.js locale present")
+    packs.get("en").expect("en.ts locale present")
 }
 
 #[test]
@@ -169,7 +169,7 @@ fn en_pack_parses_and_is_substantial() {
     // Sanity check on the parser: en carries the full key set.
     assert!(
         en.len() > 700,
-        "parsed only {} keys from en.js — parser likely broke",
+        "parsed only {} keys from en.ts — parser likely broke",
         en.len()
     );
     assert!(

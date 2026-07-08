@@ -5353,6 +5353,7 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_llm",
  "ironclaw_resources",
+ "ironclaw_secrets",
  "ironclaw_threads",
  "ironclaw_turns",
  "libc",

@@ -168,12 +168,6 @@ pub(super) fn capability_error_class(kind: &CapabilityFailureKind) -> Capability
         CapabilityFailureKind::Cancelled | CapabilityFailureKind::Permanent => {
             CapabilityErrorClass::Permanent
         }
-        // CapabilityFailureKind is #[non_exhaustive]. Treat unrecognised future
-        // variants as recoverable (OperationFailed) to match the host_runtime
-        // disposition layer's recoverable default: by design no capability
-        // failure should abort the run, so an unknown kind becomes a
-        // model-visible tool error rather than killing the run.
-        &_ => CapabilityErrorClass::OperationFailed,
     }
 }
 
@@ -183,7 +177,25 @@ pub(super) fn capability_failure_kind(kind: &CapabilityFailureKind) -> LoopFailu
         CapabilityFailureKind::Authorization
         | CapabilityFailureKind::GateDeclined
         | CapabilityFailureKind::PolicyDenied => LoopFailureKind::PolicyDenied,
-        _ => LoopFailureKind::CapabilityProtocolError,
+        // Every remaining kind maps to the protocol-error failure. Enumerated
+        // explicitly (no wildcard) so a new `CapabilityFailureKind` variant must
+        // be classified here deliberately rather than silently inheriting this
+        // terminal fate — `CapabilityFailureKind` is no longer `#[non_exhaustive]`.
+        CapabilityFailureKind::Backend
+        | CapabilityFailureKind::Cancelled
+        | CapabilityFailureKind::Dispatcher
+        | CapabilityFailureKind::InvalidOutput
+        | CapabilityFailureKind::MissingRuntime
+        | CapabilityFailureKind::Network
+        | CapabilityFailureKind::OperationFailed
+        | CapabilityFailureKind::OutputTooLarge
+        | CapabilityFailureKind::Process
+        | CapabilityFailureKind::Resource
+        | CapabilityFailureKind::Transient
+        | CapabilityFailureKind::Unavailable
+        | CapabilityFailureKind::Internal
+        | CapabilityFailureKind::Permanent
+        | CapabilityFailureKind::Unknown(_) => LoopFailureKind::CapabilityProtocolError,
     }
 }
 
@@ -269,28 +281,66 @@ mod tests {
         );
     }
 
+    /// Classification lock for `capability_error_class`: every
+    /// `CapabilityFailureKind` variant maps to a deliberate recovery class.
+    ///
+    /// This complements the compile-time guarantee (the match is exhaustive with
+    /// no `_ =>` wildcard, since `CapabilityFailureKind` is no longer
+    /// `#[non_exhaustive]`, so a *new* variant fails to compile until classified)
+    /// by also catching a silent *re-bucketing* of an *existing* variant — e.g.
+    /// moving a recoverable kind into the run-aborting `Permanent` class, or vice
+    /// versa. Only the genuinely-terminal kinds (`Cancelled` and `Permanent`)
+    /// may map to `Permanent`; runtime-dispositioned tool failures such as
+    /// `Dispatcher`, `InvalidOutput`, and the open-set `Unknown` stay
+    /// model-visible. See
+    /// `docs/plans/2026-06-28-reborn-error-recoverability-audit.md` §6.1.
     #[test]
-    fn model_recoverable_capability_failures_are_operation_failed_not_permanent() {
-        // The host_runtime disposition layer treats Dispatcher, InvalidOutput,
-        // and Unknown as model-visible (run-continuing) errors. The recovery
-        // class mapping must agree: these become OperationFailed (a
-        // model-visible tool error) rather than Permanent (which aborts the
-        // run). E.g. the model calling a nonexistent tool becomes a recoverable
-        // tool error, not a run-ending protocol failure.
-        assert_eq!(
-            capability_error_class(&CapabilityFailureKind::Dispatcher),
-            CapabilityErrorClass::OperationFailed
-        );
-        assert_eq!(
-            capability_error_class(&CapabilityFailureKind::InvalidOutput),
-            CapabilityErrorClass::OperationFailed
-        );
-        let unknown = CapabilityFailureKind::unknown("some_future_kind".to_string())
-            .expect("valid unknown kind");
-        assert_eq!(
-            capability_error_class(&unknown),
-            CapabilityErrorClass::OperationFailed
-        );
+    fn every_capability_failure_kind_has_a_deliberate_recovery_class() {
+        use CapabilityErrorClass as C;
+        use CapabilityFailureKind as K;
+
+        let unknown = K::unknown("some_future_kind").expect("valid unknown kind");
+        let cases: &[(K, C)] = &[
+            (K::Network, C::Transient),
+            (K::Transient, C::Transient),
+            (K::Backend, C::Unavailable),
+            (K::Unavailable, C::Unavailable),
+            (K::InvalidInput, C::InputInvalid),
+            (K::MissingRuntime, C::OperationFailed),
+            (K::OperationFailed, C::OperationFailed),
+            (K::OutputTooLarge, C::OperationFailed),
+            (K::Process, C::OperationFailed),
+            (K::Resource, C::OperationFailed),
+            (K::Authorization, C::PolicyDenied),
+            (K::GateDeclined, C::PolicyDenied),
+            (K::PolicyDenied, C::PolicyDenied),
+            (K::Internal, C::Internal),
+            (K::Dispatcher, C::OperationFailed),
+            (K::Cancelled, C::Permanent),
+            (K::InvalidOutput, C::OperationFailed),
+            (K::Permanent, C::Permanent),
+            (unknown.clone(), C::OperationFailed),
+        ];
+
+        for (kind, expected) in cases {
+            assert_eq!(
+                capability_error_class(kind),
+                *expected,
+                "recovery class for {kind:?} changed — re-confirm it is deliberate \
+                 and does not silently abort a recoverable failure"
+            );
+        }
+
+        // Only these kinds may abort the run.
+        for (kind, class) in cases {
+            if *class == C::Permanent {
+                assert!(
+                    matches!(kind, K::Cancelled | K::Permanent),
+                    "{kind:?} maps to the run-aborting Permanent class but is not a \
+                     recognized terminal kind — a recoverable failure must not abort"
+                );
+            }
+        }
     }
 
     #[test]
