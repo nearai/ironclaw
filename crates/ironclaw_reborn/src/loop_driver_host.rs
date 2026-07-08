@@ -53,6 +53,7 @@ const LEGACY_TEXT_ONLY_DRIVER_ID: &str = "lightweight_loop";
 const LEGACY_TEXT_ONLY_DRIVER_VERSION: u64 = 1;
 const LEGACY_TEXT_ONLY_CHECKPOINT_SCHEMA_ID: &str = "interactive_checkpoint_v1";
 const LEGACY_TEXT_ONLY_CHECKPOINT_SCHEMA_VERSION: u64 = 1;
+const USER_PROFILE_CONTEXT_BUDGET: Duration = Duration::from_millis(50);
 
 fn should_fetch_communication_context(context: &LoopRunContext) -> bool {
     !matches!(
@@ -1700,15 +1701,28 @@ where
         );
         // Resolve the per-user profile once at loop start. The fetch starts
         // before capability-surface resolution above and is joined here, so the
-        // optional profile read does not stack on the hot path when the surface
-        // does backend work too.
+        // optional profile read usually does not stack on the hot path when the
+        // surface does backend work too. It is still advisory context, so a slow
+        // backend read must not delay chat reply prompt construction.
         let user_profile_started_at = ironclaw_observability::live_latency_started_at();
-        let user_profile = match user_profile_fetch.await {
-            Ok(profile) => profile,
-            Err(error) => {
+        let user_profile = match tokio::time::timeout(
+            USER_PROFILE_CONTEXT_BUDGET,
+            user_profile_fetch,
+        )
+        .await
+        {
+            Ok(Ok(profile)) => profile,
+            Ok(Err(error)) => {
                 tracing::debug!(
                     error = %error,
                     "user profile task failed; continuing without profile"
+                );
+                None
+            }
+            Err(_) => {
+                tracing::debug!(
+                    timeout_ms = USER_PROFILE_CONTEXT_BUDGET.as_millis(),
+                    "user profile resolution exceeded loop-start budget; continuing without profile"
                 );
                 None
             }

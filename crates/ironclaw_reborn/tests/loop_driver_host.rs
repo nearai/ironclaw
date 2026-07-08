@@ -5045,6 +5045,18 @@ impl HostUserProfileSource for FixedUserProfileSource {
     }
 }
 
+struct NeverUserProfileSource;
+
+#[async_trait::async_trait]
+impl HostUserProfileSource for NeverUserProfileSource {
+    async fn resolve_user_profile(
+        &self,
+        _run_context: &LoopRunContext,
+    ) -> Option<UserProfileContext> {
+        std::future::pending().await
+    }
+}
+
 #[tokio::test]
 async fn text_only_host_factory_threads_user_profile_source_to_runtime_context() {
     // Prove that `with_user_profile_source` stores the source and that the
@@ -5136,6 +5148,60 @@ async fn text_only_host_factory_threads_user_profile_source_to_runtime_context()
         runtime_ctx_message.content.contains("locale=ja-JP"),
         "host factory must thread FixedUserProfileSource locale into runtime context: {:?}",
         runtime_ctx_message.content
+    );
+}
+
+#[tokio::test]
+async fn text_only_host_factory_does_not_block_on_slow_optional_user_profile_source() {
+    let fixture = HostFixture::new("thread-host-user-profile-timeout", "hello reborn").await;
+    let source = Arc::new(NeverUserProfileSource);
+    let host = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        fixture
+            .factory()
+            .with_user_profile_source(source)
+            .build_text_only_host(RebornLoopDriverHostRequest {
+                claimed_run: fixture.claimed.clone(),
+                loop_run_context: fixture.context.clone(),
+            }),
+    )
+    .await
+    .expect("optional user profile source must not block host construction")
+    .unwrap();
+
+    let host_dyn: &(dyn AgentLoopDriverHost + Send + Sync) = &host;
+    let bundle = host_dyn
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+            inline_messages: Vec::new(),
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+
+    host_dyn
+        .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
+            messages: bundle.messages,
+            surface_version: None,
+            model_preference: None,
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+
+    let requests = fixture.gateway.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .all(|message| !message.content.contains("User profile:")),
+        "slow optional profile source must degrade to no-profile context"
     );
 }
 
