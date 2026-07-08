@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { isChannelExtensionKind } from "./extensions-schema";
+import { hasChannelSurface } from "./extensions-schema";
 
 export function primaryExtensionAction(ext) {
   const state = extensionLifecycleState(ext);
@@ -15,7 +15,7 @@ export function primaryExtensionAction(ext) {
   // Channel-surface extensions are configured through their setup surfaces.
   // A generic Activate button bypasses that guidance and can hit the wrong
   // lifecycle endpoint.
-  if (isChannelExtensionKind(ext?.kind)) {
+  if (hasChannelSurface(ext)) {
     return null;
   }
 

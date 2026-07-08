@@ -4,6 +4,17 @@ import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
 
+import {
+  RUNTIME_LABELS,
+  STATE_LABELS,
+  STATE_TONES,
+  hasChannelSurface,
+} from "../lib/extensions-schema";
+import { extensionLifecycleState, primaryExtensionAction } from "../lib/extension-actions";
+
+const channelSurfaces = [{ kind: "channel", inbound: true, outbound: true }];
+const toolSurfaces = [{ kind: "tool" }];
+
 // ---------------------------------------------------------------------------
 // Source munging — strip ES module imports, rewrite exports, inject test shim
 // ---------------------------------------------------------------------------
@@ -58,8 +69,10 @@ function extensionCardSourceForTest() {
  *   - React (useState, useRef, useEffect)
  *   - useT i18n stub
  *   - Badge, Button, Icon design-system stubs
- *   - KIND_LABELS, STATE_TONES, STATE_LABELS, isChannelExtensionKind from extensions-schema
- *   - primaryExtensionAction from extension-actions
+ *   - RUNTIME_LABELS, STATE_TONES, STATE_LABELS, hasChannelSurface — the REAL
+ *     exports of extensions-schema (imported above), so the card is exercised
+ *     against the production surface/runtime model with no drift risk
+ *   - primaryExtensionAction — the REAL export of extension-actions
  */
 function makeContext() {
   // Minimal React stub — useState returns [initial, noop]; refs and effects are ignored.
@@ -81,68 +94,6 @@ function makeContext() {
   function Button() {}
   function Icon() {}
 
-  // Inline isChannelExtensionKind from extensions-schema.js (exact copy).
-  function isChannelExtensionKind(kind) {
-    return kind === "wasm_channel" || kind === "channel";
-  }
-
-  const KIND_LABELS = {
-    wasm_tool: "WASM Tool",
-    wasm_channel: "Channel",
-    channel: "Channel",
-    mcp_server: "MCP Server",
-    first_party: "First-party",
-    system: "System",
-    channel_relay: "Relay",
-  };
-
-  const STATE_TONES = {
-    active: "success",
-    ready: "success",
-    pairing_required: "warning",
-    pairing: "warning",
-    auth_required: "warning",
-    setup_required: "muted",
-    failed: "danger",
-    installed: "muted",
-  };
-
-  const STATE_LABELS = {
-    active: "active",
-    ready: "ready",
-    pairing_required: "pairing",
-    pairing: "pairing",
-    auth_required: "auth needed",
-    setup_required: "setup needed",
-    failed: "failed",
-    installed: "installed",
-  };
-
-  // Inline primaryExtensionAction from extension-actions.js (exact copy).
-  function extensionLifecycleState(ext) {
-    const onboardingState = ext?.onboarding_state || ext?.onboardingState;
-    if (onboardingState) {
-      return onboardingState;
-    }
-    if (ext?.needs_setup === true && ext?.authenticated === false) {
-      return ext?.has_auth ? "auth_required" : "setup_required";
-    }
-    return ext?.activation_status || ext?.activationStatus || (ext?.active ? "active" : "installed");
-  }
-
-  function primaryExtensionAction(ext) {
-    const state = extensionLifecycleState(ext);
-    if (!ext?.package_ref || state === "active" || state === "ready") {
-      return null;
-    }
-
-    if (state === "auth_required" || state === "setup_required") {
-      return "configure";
-    }
-
-    return isChannelExtensionKind(ext?.kind) ? null : "activate";
-  }
-
   return {
     globalThis: {},
     React,
@@ -150,8 +101,8 @@ function makeContext() {
     Badge,
     Button,
     Icon,
-    isChannelExtensionKind,
-    KIND_LABELS,
+    hasChannelSurface,
+    RUNTIME_LABELS,
     STATE_TONES,
     STATE_LABELS,
     extensionLifecycleState,
@@ -267,7 +218,8 @@ function renderExtensionCardWithInternals(ext) {
 test("card class keeps grid siblings at natural height", () => {
   const rendered = renderExtensionCard({
     package_ref: { id: "telegram" },
-    kind: "channel",
+    runtime: "wasm",
+    surfaces: channelSurfaces,
     display_name: "Telegram",
   });
   const cardClass = rendered.values[0];
@@ -282,7 +234,8 @@ test("card class keeps grid siblings at natural height", () => {
 test("installed channel card omits generic Activate while installed MCP card keeps it", () => {
   const channel = renderExtensionCard({
     package_ref: { id: "slack" },
-    kind: "channel",
+    runtime: "first_party",
+    surfaces: channelSurfaces,
     activation_status: "installed",
     display_name: "Slack",
   });
@@ -294,7 +247,8 @@ test("installed channel card omits generic Activate while installed MCP card kee
 
   const mcp = renderExtensionCard({
     package_ref: { id: "github" },
-    kind: "mcp_server",
+    runtime: "mcp",
+    surfaces: toolSurfaces,
     activation_status: "installed",
     display_name: "GitHub",
   });
@@ -307,10 +261,12 @@ test("installed channel card omits generic Activate while installed MCP card kee
 
 test("setup-required primary action reads Connect for a channel and Configure for a credential extension", () => {
   // A freshly-installed channel connects (pairs); a credential extension like
-  // GitHub configures a token. The primary action label must diverge by kind.
+  // GitHub configures a token. The primary action label must diverge by the
+  // extension's declared surfaces.
   const channel = renderExtensionCard({
     package_ref: { id: "slack" },
-    kind: "channel",
+    runtime: "first_party",
+    surfaces: channelSurfaces,
     onboarding_state: "setup_required",
     display_name: "Slack",
   });
@@ -323,7 +279,8 @@ test("setup-required primary action reads Connect for a channel and Configure fo
 
   const credential = renderExtensionCard({
     package_ref: { id: "github" },
-    kind: "mcp_server",
+    runtime: "mcp",
+    surfaces: toolSurfaces,
     onboarding_state: "setup_required",
     display_name: "GitHub",
   });
@@ -363,13 +320,14 @@ test("active package with missing auth renders auth needed setup state", () => {
 test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async () => {
   const runCase = (_name, assertion) => assertion();
 
-  // --- Setup state: kind=channel, state=setup_required ---
+  // --- Setup state: first_party runtime + channel surface, state=setup_required ---
   await runCase(
-    "kind=channel in setup_required state does not duplicate primary Configure as Setup overflow",
+    "first_party channel surface in setup_required state does not duplicate primary Configure as Setup overflow",
     () => {
       const ext = {
         package_ref: { id: "telegram" },
-        kind: "channel",
+        runtime: "first_party",
+        surfaces: channelSurfaces,
         onboarding_state: "setup_required",
         display_name: "Telegram",
       };
@@ -381,13 +339,14 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
     },
   );
 
-  // --- Setup state: kind=channel, state=failed ---
+  // --- Setup state: first_party runtime + channel surface, state=failed ---
   await runCase(
-    "kind=channel in failed state includes Setup overflow action",
+    "first_party channel surface in failed state includes Setup overflow action",
     () => {
       const ext = {
         package_ref: { id: "telegram" },
-        kind: "channel",
+        runtime: "first_party",
+        surfaces: channelSurfaces,
         onboarding_state: "failed",
         display_name: "Telegram",
       };
@@ -399,13 +358,14 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
     },
   );
 
-  // --- Setup state: kind=wasm_channel, state=setup_required ---
+  // --- Setup state: wasm runtime + channel surface, state=setup_required ---
   await runCase(
-    "kind=wasm_channel in setup_required state does not duplicate primary Configure as Setup overflow",
+    "wasm channel surface in setup_required state does not duplicate primary Configure as Setup overflow",
     () => {
       const ext = {
         package_ref: { id: "some-wasm-channel" },
-        kind: "wasm_channel",
+        runtime: "wasm",
+        surfaces: channelSurfaces,
         onboarding_state: "setup_required",
         display_name: "My WASM Channel",
       };
@@ -417,13 +377,14 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
     },
   );
 
-  // --- Setup state: kind=wasm_channel, state=failed ---
+  // --- Setup state: wasm runtime + channel surface, state=failed ---
   await runCase(
-    "kind=wasm_channel in failed state includes Setup overflow action",
+    "wasm channel surface in failed state includes Setup overflow action",
     () => {
       const ext = {
         package_ref: { id: "some-wasm-channel" },
-        kind: "wasm_channel",
+        runtime: "wasm",
+        surfaces: channelSurfaces,
         onboarding_state: "failed",
         display_name: "My WASM Channel",
       };
@@ -435,13 +396,14 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
     },
   );
 
-  // --- Active state: kind=channel, state=active ---
+  // --- Active state: first_party runtime + channel surface, state=active ---
   await runCase(
-    "kind=channel in active state includes Reconfigure overflow action",
+    "first_party channel surface in active state includes Reconfigure overflow action",
     () => {
       const ext = {
         package_ref: { id: "telegram" },
-        kind: "channel",
+        runtime: "first_party",
+        surfaces: channelSurfaces,
         activation_status: "active",
         display_name: "Telegram",
       };
@@ -453,13 +415,14 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
     },
   );
 
-  // --- Active state: kind=wasm_channel, state=active ---
+  // --- Active state: wasm runtime + channel surface, state=active ---
   await runCase(
-    "kind=wasm_channel in active state includes Reconfigure overflow action",
+    "wasm channel surface in active state includes Reconfigure overflow action",
     () => {
       const ext = {
         package_ref: { id: "some-wasm-channel" },
-        kind: "wasm_channel",
+        runtime: "wasm",
+        surfaces: channelSurfaces,
         activation_status: "active",
         display_name: "My WASM Channel",
       };
@@ -471,13 +434,14 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
     },
   );
 
-  // --- Active state: kind=channel, state=ready ---
+  // --- Active state: channel surface, state=ready ---
   await runCase(
-    "kind=channel in ready state includes Reconfigure overflow action",
+    "channel surface in ready state includes Reconfigure overflow action",
     () => {
       const ext = {
         package_ref: { id: "telegram" },
-        kind: "channel",
+        runtime: "first_party",
+        surfaces: channelSurfaces,
         activation_status: "ready",
         display_name: "Telegram",
       };
@@ -489,13 +453,14 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
     },
   );
 
-  // --- Active state: kind=channel, state=pairing_required ---
+  // --- Active state: channel surface, state=pairing_required ---
   await runCase(
-    "kind=channel in pairing_required state includes Reconfigure overflow action",
+    "channel surface in pairing_required state includes Reconfigure overflow action",
     () => {
       const ext = {
         package_ref: { id: "telegram" },
-        kind: "channel",
+        runtime: "first_party",
+        surfaces: channelSurfaces,
         activation_status: "pairing_required",
         display_name: "Telegram",
       };
@@ -507,13 +472,14 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
     },
   );
 
-  // --- Non-channel kind does NOT get Setup or Reconfigure ---
+  // --- No channel surface does NOT get Setup or Reconfigure ---
   await runCase(
-    "non-channel kinds do not get Setup or Reconfigure overflow actions",
+    "extensions without a channel surface do not get Setup or Reconfigure overflow actions",
     () => {
       const ext = {
         package_ref: { id: "notion" },
-        kind: "mcp_server",
+        runtime: "mcp",
+        surfaces: toolSurfaces,
         onboarding_state: "setup_required",
         display_name: "Notion",
         needs_setup: true,
@@ -523,8 +489,8 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
       // May have a configure or remove action, but not setup/reconfigure
       if (actions !== null) {
         const ids = actions.map((a) => a.id);
-        assert.ok(!ids.includes("setup"), `Expected no 'setup' action for mcp_server, got: ${JSON.stringify(ids)}`);
-        assert.ok(!ids.includes("reconfigure"), `Expected no 'reconfigure' action for mcp_server, got: ${JSON.stringify(ids)}`);
+        assert.ok(!ids.includes("setup"), `Expected no 'setup' action for a tool-surface MCP extension, got: ${JSON.stringify(ids)}`);
+        assert.ok(!ids.includes("reconfigure"), `Expected no 'reconfigure' action for a tool-surface MCP extension, got: ${JSON.stringify(ids)}`);
       }
     },
   );
@@ -540,7 +506,8 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
 
       const ext = {
         package_ref: { id: "telegram" },
-        kind: "channel",
+        runtime: "first_party",
+        surfaces: channelSurfaces,
         onboarding_state: "failed",
         display_name: "Telegram",
       };
@@ -561,6 +528,9 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
       assert.deepEqual(configurePayload.packageRef, { id: "telegram" });
       assert.equal(configurePayload.displayName, "Telegram");
       assert.equal(configurePayload.onboardingState, "failed");
+      // The payload must carry the surfaces so the configure modal can route a
+      // channel-surface extension to the Connect/pairing panel.
+      assert.deepEqual(configurePayload.surfaces, channelSurfaces);
     },
   );
 
@@ -575,7 +545,8 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
 
       const ext = {
         package_ref: { id: "telegram" },
-        kind: "channel",
+        runtime: "first_party",
+        surfaces: channelSurfaces,
         activation_status: "active",
         authenticated: true,
         display_name: "Telegram",

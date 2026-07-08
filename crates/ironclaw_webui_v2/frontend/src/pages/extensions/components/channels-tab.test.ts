@@ -319,7 +319,7 @@ test("ChannelConnectSections renders inbound-proof-code surfaces as pairing with
 test("ChannelsTab renders Slack admin management under the installed Slack card", () => {
   const slackItem = {
     package_ref: { id: "slack" },
-    kind: "channel",
+    runtime: "first_party",
     activation_status: "installed",
     surfaces: [
       { kind: "tool" },
@@ -366,7 +366,14 @@ test("ChannelsTab renders Slack admin management under the installed Slack card"
 test("ChannelsTab renders no builtin Slack row when Slack is not installed", () => {
   const view = channelsTabForTest({
     ...TAB_PROPS,
-    channelRegistry: [{ package_ref: { id: "slack" }, kind: "channel", installed: false }],
+    channelRegistry: [
+      {
+        package_ref: { id: "slack" },
+        runtime: "first_party",
+        surfaces: [{ kind: "channel", inbound: true, outbound: true }],
+        installed: false,
+      },
+    ],
   });
 
   assert.equal(
@@ -400,7 +407,7 @@ test("ChannelsTab renders generic connect controls under installed non-Slack cha
   };
   const telegramItem = {
     package_ref: { id: "telegram" },
-    kind: "channel",
+    runtime: "wasm",
     activation_status: "installed",
     surfaces: [
       { kind: "channel", inbound: true, outbound: true, connected: false, connection },
@@ -428,7 +435,7 @@ test("ChannelsTab renders generic connect controls under installed non-Slack cha
 test("ChannelsTab does not render duplicate fallback pairing when the channel surface owns pairing", () => {
   const surfaceOwned = {
     package_ref: { id: "telegram" },
-    kind: "channel",
+    runtime: "wasm",
     activation_status: "installed",
     onboarding_state: "pairing_required",
     surfaces: [
@@ -458,7 +465,7 @@ test("ChannelsTab does not render duplicate fallback pairing when the channel su
 test("ChannelsTab falls back to pairing only when the surface connection did not handle it", () => {
   const bareItem = {
     package_ref: { id: "telegram" },
-    kind: "channel",
+    runtime: "wasm",
     activation_status: "installed",
     onboarding_state: "pairing_required",
     surfaces: [{ kind: "channel", inbound: true, outbound: true }],

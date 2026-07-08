@@ -1762,7 +1762,7 @@ mod tests {
                 summary: LifecycleExtensionSummary {
                     package_ref: LifecyclePackageRef::new(
                         LifecyclePackageKind::Extension,
-                        "slack_bot",
+                        "acme-channel",
                     )
                     .expect("valid package ref"),
                     name: "Slack".to_string(),

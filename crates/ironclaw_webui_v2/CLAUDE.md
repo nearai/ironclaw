@@ -68,7 +68,6 @@ browser-reachable.
 | `webui.v2.resume_automation` | POST | `/api/webchat/v2/automations/{automation_id}/resume` | None | `ProductWorkflow` |
 | `webui.v2.rename_automation` | POST | `/api/webchat/v2/automations/{automation_id}` | None | `ProductWorkflow` |
 | `webui.v2.delete_automation` | DELETE | `/api/webchat/v2/automations/{automation_id}` | None | `ProductWorkflow` |
-| `webui.v2.list_connectable_channels` | GET | `/api/webchat/v2/channels/connectable` | None | `ProjectionOnly` |
 | `webui.v2.list_extensions` | GET | `/api/webchat/v2/extensions` | None | `ProjectionOnly` |
 | `webui.v2.list_extension_registry` | GET | `/api/webchat/v2/extensions/registry` | None | `ProjectionOnly` |
 | `webui.v2.install_extension` | POST | `/api/webchat/v2/extensions/install` | None | `ProductWorkflow` |

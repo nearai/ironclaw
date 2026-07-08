@@ -720,7 +720,7 @@ pub fn build_slack_host_beta_mounts(
         ProvisioningSlackPersonalUserBinder::new(Arc::clone(&binding_service), dm_provisioner),
     );
     let actor_user_resolver = Arc::new(SlackHostBetaActorUserResolver::new(Arc::new(
-        crate::slack_host_beta::runtime_setup::slack_provider_identity_actor_resolver(
+        crate::slack::slack_host_beta::runtime_setup::slack_provider_identity_actor_resolver(
             state.clone(),
         ),
     )));
@@ -2191,8 +2191,8 @@ mod tests {
             .expect("Slack tools extension is listed");
 
         assert_eq!(
-            slack.kind, "channel",
-            "the unified Slack extension declares the channel surface"
+            slack.runtime, "wasm",
+            "runtime label is the honest implementation name"
         );
         let channel_surface = slack
             .surfaces

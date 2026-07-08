@@ -197,7 +197,7 @@ const BUNDLED_EXTENSION_MANIFEST_ASSET_DIRS: &[&str] = &[
 /// Real capability ids declared by every non-github bundled first-party
 /// extension's production `manifest.toml` asset — parsed the same way
 /// `github::capability_ids()` parses github's
-/// (`ExtensionManifest::parse_with_host_api_contracts` over the actual
+/// (`ExtensionManifest::parse` over the actual
 /// shipped asset file), so this is production truth, not a second
 /// hand-transcribed test-only id list like `BUNDLED_EXTENSION_CAPABILITY_IDS`
 /// above.

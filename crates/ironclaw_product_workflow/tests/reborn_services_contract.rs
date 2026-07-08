@@ -5215,7 +5215,7 @@ async fn list_extensions_projects_channel_surface_with_directions_and_connection
     // whose summary declares an inbound+outbound channel surface projects a
     // typed `channel` surface with its connect affordance — there is no
     // separate connectable-channel registry or route.
-    let mut summary = extension_summary("slack_bot", Vec::new(), None);
+    let mut summary = extension_summary("slack", Vec::new(), None);
     summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
     summary.channel_directions = Some(LifecycleChannelDirections {
         inbound: true,
@@ -5248,7 +5248,7 @@ async fn list_extensions_projects_channel_surface_with_directions_and_connection
     let info = response
         .extensions
         .iter()
-        .find(|extension| extension.package_ref.id.as_str() == "slack_bot")
+        .find(|extension| extension.package_ref.id.as_str() == "slack")
         .expect("channel extension listed");
     let channel = info
         .surfaces

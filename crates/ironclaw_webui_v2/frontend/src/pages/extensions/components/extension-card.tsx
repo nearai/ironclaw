@@ -4,10 +4,10 @@ import { Badge } from "../../../design-system/badge";
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
 import {
-  KIND_LABELS,
+  RUNTIME_LABELS,
   STATE_TONES,
   STATE_LABELS,
-  isChannelExtensionKind,
+  hasChannelSurface,
 } from "../lib/extensions-schema";
 import { extensionLifecycleState, primaryExtensionAction } from "../lib/extension-actions";
 
@@ -113,7 +113,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   const state = extensionLifecycleState(ext);
   const tone = STATE_TONES[state] || "muted";
   const label = translatedKnownLabel(t, "extensions.state", state, STATE_LABELS);
-  const kindLabel = translatedKnownLabel(t, "extensions.kind", ext.kind, KIND_LABELS);
+  const kindLabel = translatedKnownLabel(t, "extensions.runtime", ext.runtime, RUNTIME_LABELS);
   const displayName = ext.display_name || packageId(ext);
   const canManage = Boolean(ext.package_ref);
   const tools = ext.tools || [];
@@ -129,7 +129,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   const configurePayload = {
     packageRef: ext.package_ref,
     displayName,
-    kind: ext.kind,
+    surfaces: ext.surfaces,
     active: ext.active,
     authenticated: ext.authenticated,
     needs_setup: ext.needs_setup,
@@ -139,7 +139,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
 
   // Connectable channels are configured by pairing (Connect/Reconnect), not by
   // an operator credential form (Configure/Reconfigure). Pick the label by kind.
-  const configureLabel = isChannelExtensionKind(ext.kind)
+  const configureLabel = hasChannelSurface(ext)
     ? ext.authenticated
       ? t("extensions.reconnect")
       : t("extensions.connect")
@@ -178,7 +178,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   if (
     canManage &&
     primaryAction !== "configure" &&
-    isChannelExtensionKind(ext.kind) &&
+    hasChannelSurface(ext) &&
     (state === "setup_required" || state === "failed")
   ) {
     overflowActions.push({
@@ -190,7 +190,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   }
   if (
     canManage &&
-    isChannelExtensionKind(ext.kind) &&
+    hasChannelSurface(ext) &&
     !hasOverflowConfigureAction &&
     (state === "active" || state === "ready" || state === "pairing_required" || state === "pairing")
   ) {
@@ -281,11 +281,11 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
 
 export function RegistryCard({ entry, onInstall = null, isBusy, statusLabel = undefined }) {
   const t = useT();
-  const kindLabel = translatedKnownLabel(t, "extensions.kind", entry.kind, KIND_LABELS);
+  const kindLabel = translatedKnownLabel(t, "extensions.runtime", entry.runtime, RUNTIME_LABELS);
   const displayName = entry.display_name || packageId(entry);
   const canInstall = Boolean(entry.package_ref && onInstall);
   const configureAfterInstall = Boolean(
-    entry.needs_setup || entry.has_auth || isChannelExtensionKind(entry.kind)
+    entry.needs_setup || entry.has_auth || hasChannelSurface(entry)
   );
   const keywords = entry.keywords || [];
   const [kwOpen, setKwOpen] = React.useState(false);
@@ -338,7 +338,7 @@ export function RegistryCard({ entry, onInstall = null, isBusy, statusLabel = un
               onInstall({
                 packageRef: entry.package_ref,
                 displayName,
-                kind: entry.kind,
+                surfaces: entry.surfaces,
                 configureAfterInstall,
               })}
             disabled={isBusy}

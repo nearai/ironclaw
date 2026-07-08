@@ -449,12 +449,15 @@ pub enum LifecycleExtensionRuntimeKind {
 }
 
 impl LifecycleExtensionRuntimeKind {
-    pub fn wire_kind(self) -> &'static str {
+    /// Honest runtime name for the wire: implementation detail, clearly
+    /// labeled — never product taxonomy (surfaces carry that).
+    pub fn runtime_wire_name(self) -> &'static str {
         match self {
-            Self::McpServer => "mcp_server",
+            Self::McpServer => "mcp",
             Self::FirstParty => "first_party",
             Self::System => "system",
-            Self::WasmTool | Self::Script => "wasm_tool",
+            Self::WasmTool => "wasm",
+            Self::Script => "script",
         }
     }
 }

@@ -11,7 +11,7 @@ import {
   subscribeProductAuthOAuthCompletion,
 } from "../../../lib/product-auth-oauth-events";
 import { useT } from "../../../lib/i18n";
-import { isChannelExtensionKind } from "../lib/extensions-schema";
+import { hasChannelSurface } from "../lib/extensions-schema";
 import {
   fetchExtensions,
   fetchExtensionRegistry,
@@ -123,11 +123,11 @@ export function useExtensions() {
 
   const installMutation = useMutation({
     mutationFn: ({ packageRef }) => installExtension(packageRef),
-    onSuccess: (res, { displayName, kind, configureAfterInstall, onNeedsSetup, packageRef }) => {
+    onSuccess: (res, { displayName, surfaces, configureAfterInstall, onNeedsSetup, packageRef }) => {
       if (res.success) {
-        const message = isChannelExtensionKind(kind)
+        const message = hasChannelSurface({ surfaces })
           ? t("extensions.channelInstalledSetup", {
-              name: displayName || t("extensions.kind.channel"),
+              name: displayName || t("extensions.defaultName"),
             })
           : res.message ||
             res.instructions ||
@@ -155,10 +155,11 @@ export function useExtensions() {
           onNeedsSetup({
             packageRef,
             displayName,
-            // Carry `kind` so the modal can route a connectable channel to the
-            // Connect (pairing) panel — without it the modal can't tell this is
-            // a channel and falls through to "No configuration required".
-            kind,
+            // Carry `surfaces` so the modal can route a channel-surface
+            // extension to the Connect panel — without it the modal can't
+            // tell this is a channel and falls through to "No configuration
+            // required".
+            surfaces,
             // Freshly installed: the caller has not connected/paired yet.
             authenticated: false,
             active: false,
@@ -274,17 +275,18 @@ export function useExtensions() {
       })),
   ].sort(catalogSort);
 
-  const isChannel = (entry) => isChannelExtensionKind(entry.kind);
-  const channels = extensions.filter(isChannel);
-  const mcpServers = extensions.filter((e) => e.kind === "mcp_server");
-  const tools = extensions.filter((e) => !isChannel(e) && e.kind !== "mcp_server");
+  // Views over surfaces (product taxonomy) — the MCP grouping alone keys on
+  // the honest runtime label, because it is an operator-facing runtime view.
+  const channels = extensions.filter(hasChannelSurface);
+  const mcpServers = extensions.filter((e) => e.runtime === "mcp");
+  const tools = extensions.filter((e) => !hasChannelSurface(e) && e.runtime !== "mcp");
 
-  const channelRegistry = registry.filter((e) => isChannel(e) && !e.installed);
-  const mcpRegistry = registry.filter((e) => e.kind === "mcp_server" && !e.installed);
+  const channelRegistry = registry.filter((e) => hasChannelSurface(e) && !e.installed);
+  const mcpRegistry = registry.filter((e) => e.runtime === "mcp" && !e.installed);
   const toolRegistry = registry.filter(
     (e) =>
-      e.kind !== "mcp_server" &&
-      !isChannel(e) &&
+      e.runtime !== "mcp" &&
+      !hasChannelSurface(e) &&
       !e.installed
   );
 

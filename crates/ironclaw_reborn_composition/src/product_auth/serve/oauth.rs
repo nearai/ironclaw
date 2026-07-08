@@ -2150,7 +2150,7 @@ mod tests {
             )),
             Path("slack".to_string()),
             Json(ExtensionOAuthStartRequest {
-                provider: SLACK_PERSONAL_PROVIDER_ID.to_string(),
+                provider: SLACK_PROVIDER_ID.to_string(),
                 account_label: "personal slack".to_string(),
                 scopes: vec!["users:read".to_string()],
                 expires_at: Utc::now() + ChronoDuration::minutes(5),

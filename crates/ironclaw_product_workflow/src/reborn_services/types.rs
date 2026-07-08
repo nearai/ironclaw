@@ -1124,13 +1124,18 @@ pub struct RebornExtensionRegistryResponse {
 pub struct RebornExtensionRegistryEntry {
     pub package_ref: LifecyclePackageRef,
     pub display_name: String,
-    pub kind: String,
+    /// Runtime implementation name (`wasm` / `mcp` / `first_party` / ...).
+    /// Implementation detail — product taxonomy lives in `surfaces`.
+    pub runtime: String,
     pub description: String,
     pub installed: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keywords: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// Declared product surfaces (tool / auth / channel-with-direction).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub surfaces: Vec<RebornExtensionSurface>,
 }
 
 /// One product-facing surface an installed extension declares, as rendered on
@@ -1157,7 +1162,9 @@ pub enum RebornExtensionSurface {
 pub struct RebornExtensionInfo {
     pub package_ref: LifecyclePackageRef,
     pub display_name: String,
-    pub kind: String,
+    /// Runtime implementation name (`wasm` / `mcp` / `first_party` / ...).
+    /// Implementation detail — product taxonomy lives in `surfaces`.
+    pub runtime: String,
     pub description: String,
     pub authenticated: bool,
     pub active: bool,
