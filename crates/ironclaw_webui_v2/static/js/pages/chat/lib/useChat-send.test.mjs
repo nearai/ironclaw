@@ -63,6 +63,12 @@ function runUseChatSource(context) {
   if (!context.subscribeChannelConnected) {
     context.subscribeChannelConnected = subscribeChannelConnected;
   }
+  if (!("failureMessageForRequestError" in context)) {
+    context.failureMessageForRequestError = (error) =>
+      typeof error?.message === "string" && error.message.trim()
+        ? error.message.trim()
+        : "request failed";
+  }
   if (!("touchThreadInCache" in context)) context.touchThreadInCache = () => {};
   if (!("upsertThreadInCache" in context)) context.upsertThreadInCache = () => {};
   vm.runInNewContext(useChatSourceForTest(), context);
@@ -624,11 +630,13 @@ test("useChat.send: target-thread thrown errors update seeded cache", async () =
 
   assert.deepEqual(currentMessages, []);
   const targetMessages = seededByThread.get(targetThreadId);
-  assert.equal(targetMessages.length, 1);
+  assert.equal(targetMessages.length, 2);
   assert.equal(targetMessages[0].role, "user");
   assert.equal(targetMessages[0].isOptimistic, false);
   assert.equal(targetMessages[0].status, "error");
   assert.equal(targetMessages[0].error, "network unavailable");
+  assert.equal(targetMessages[1].role, "error");
+  assert.equal(targetMessages[1].content, "network unavailable");
   assert.deepEqual(stateUpdates.filter((update) => update.index === 2), []);
   assert.deepEqual(stateUpdates.filter((update) => update.index === 3), []);
 });
@@ -715,6 +723,151 @@ test("useChat.send: pending approval blocks before sendMessage", async () => {
   assert.deepEqual(stateUpdates, []);
   assert.equal(renderedMessages.length, 0);
   assert.equal(sendCalls, 0);
+});
+
+test("useChat.send: request failure appends inline error in the active thread", async () => {
+  const threadId = "thread-1";
+  let renderedMessages = [];
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub(),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("thread should already exist");
+    },
+    failureMessageForRequestError: (error) =>
+      `inline:${error?.message || "unknown"}`,
+    globalThis: {},
+    listConnectableChannels: async () => {
+      throw new Error("ordinary prompts should not fetch connectable channels");
+    },
+    queryClient: {
+      fetchQuery: async () => {
+        throw new Error("ordinary prompts should not fetch connectable channels");
+      },
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    timelineMessageIdFromAcceptedRef,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => {
+      throw new Error("AI provider account is out of credits");
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      seedThreadMessages: () => {},
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  await assert.rejects(chat.send("please answer"), /out of credits/);
+
+  assert.equal(renderedMessages.length, 2);
+  assert.equal(renderedMessages[0].role, "user");
+  assert.equal(renderedMessages[0].status, "error");
+  assert.equal(renderedMessages[1].role, "error");
+  assert.equal(
+    renderedMessages[1].content,
+    "inline:AI provider account is out of credits",
+  );
+});
+
+test("useChat.send: create-thread failure appends inline error on new chat", async () => {
+  let renderedMessages = [];
+  let createThreadCalls = 0;
+  let sendCalls = 0;
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub(),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      createThreadCalls += 1;
+      throw new Error("Thread service unavailable");
+    },
+    globalThis: {},
+    listConnectableChannels: async () => {
+      throw new Error("ordinary prompts should not fetch connectable channels");
+    },
+    queryClient: {
+      fetchQuery: async () => {
+        throw new Error("ordinary prompts should not fetch connectable channels");
+      },
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    timelineMessageIdFromAcceptedRef,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => {
+      sendCalls += 1;
+      throw new Error("sendMessage should not run");
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      seedThreadMessages: () => {},
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(null);
+  await assert.rejects(
+    chat.send("start a new chat"),
+    /Thread service unavailable/,
+  );
+
+  assert.equal(createThreadCalls, 1);
+  assert.equal(sendCalls, 0);
+  assert.equal(renderedMessages.length, 1);
+  assert.equal(renderedMessages[0].role, "error");
+  assert.equal(renderedMessages[0].content, "Thread service unavailable");
 });
 
 test("useChat.retryMessage: pre-admission rejection keeps failed bubble retryable", async () => {
@@ -813,6 +966,98 @@ test("useChat.retryMessage: pre-admission rejection keeps failed bubble retryabl
   assert.equal(seededMessages[0].content, failedMessage.content);
   assert.equal(seededMessages[0].retryContent, failedMessage.retryContent);
   assert.equal(seededMessages[0].status, failedMessage.status);
+});
+
+test("useChat.retryMessage: retry removes the prior request error bubble", async () => {
+  const threadId = "thread-1";
+  const failedMessage = {
+    id: "failed-1",
+    role: "user",
+    content: "retry me",
+    retryContent: "retry me",
+    status: "error",
+  };
+  const failedRequestError = {
+    id: "err-request-failed-1",
+    role: "error",
+    content: "Network unavailable",
+  };
+  let renderedMessages = [failedMessage, failedRequestError];
+  let sendCalls = 0;
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub(),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("thread should already exist");
+    },
+    globalThis: {},
+    listConnectableChannels: async () => {
+      throw new Error("ordinary prompts should not fetch connectable channels");
+    },
+    queryClient: {
+      fetchQuery: async () => {
+        throw new Error("ordinary prompts should not fetch connectable channels");
+      },
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    timelineMessageIdFromAcceptedRef,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => {
+      sendCalls += 1;
+      return {
+        accepted_message_ref: "msg:retry-success",
+        run_id: "run-retry-success",
+        status: "queued",
+        thread_id: threadId,
+      };
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      seedThreadMessages: () => {},
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  await chat.retryMessage(failedMessage);
+
+  assert.equal(sendCalls, 1);
+  assert.equal(
+    renderedMessages.some((message) => message.id === failedMessage.id),
+    false,
+  );
+  assert.equal(
+    renderedMessages.some((message) => message.id === failedRequestError.id),
+    false,
+  );
+  assert.equal(renderedMessages.at(-1)?.role, "user");
+  assert.equal(renderedMessages.at(-1)?.content, "retry me");
 });
 
 test("useChat.send: accepted send does not clear a gate received while in flight", async () => {

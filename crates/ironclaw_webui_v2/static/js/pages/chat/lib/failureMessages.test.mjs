@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { failureMessageForRunStatus } from "./failureMessages.js";
+import {
+  failureMessageForRequestError,
+  failureMessageForRunStatus,
+  failureMessageForStreamError,
+} from "./failureMessages.js";
 
 test("failureMessageForRunStatus prefers trimmed failureSummary", () => {
   assert.equal(
@@ -44,5 +48,32 @@ test("failureMessageForRunStatus handles whitespace-only summary", () => {
       failureSummary: "   ",
     }),
     "The run failed: lease expired.",
+  );
+});
+
+test("failureMessageForRequestError prefers the throwable message", () => {
+  assert.equal(
+    failureMessageForRequestError(
+      new Error("  AI provider account is out of credits.  "),
+    ),
+    "AI provider account is out of credits.",
+  );
+});
+
+test("failureMessageForRequestError has a stable fallback", () => {
+  assert.equal(
+    failureMessageForRequestError({ message: "   " }),
+    "The request failed before it could be sent.",
+  );
+});
+
+test("failureMessageForStreamError humanizes redacted stream tokens", () => {
+  assert.equal(
+    failureMessageForStreamError({
+      error: "unavailable",
+      kind: "service_unavailable",
+      retryable: true,
+    }),
+    "The chat stream hit a retryable error: Service unavailable.",
   );
 });

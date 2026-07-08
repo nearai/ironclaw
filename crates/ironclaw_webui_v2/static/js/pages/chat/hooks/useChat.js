@@ -24,6 +24,7 @@ import {
   resetToolActivityState,
 } from "../lib/tool-activity-state.js";
 import { toRenderAttachment, toWireAttachment } from "../lib/attachments.js";
+import { failureMessageForRequestError } from "../lib/failureMessages.js";
 import { useHistory } from "./useHistory.js";
 import { useSSE } from "./useSSE.js";
 
@@ -443,11 +444,19 @@ export function useChat(threadId) {
       let sendThreadId = targetThreadId || threadId;
 
       if (!sendThreadId) {
-        const created = await createThreadRequest();
-        queryClient.invalidateQueries({ queryKey: ["threads"] });
-        sendThreadId = created?.thread?.thread_id;
-        if (!sendThreadId) {
-          throw new Error("createThread returned no thread_id");
+        try {
+          const created = await createThreadRequest();
+          queryClient.invalidateQueries({ queryKey: ["threads"] });
+          sendThreadId = created?.thread?.thread_id;
+          if (!sendThreadId) {
+            throw new Error("createThread returned no thread_id");
+          }
+        } catch (err) {
+          appendRequestFailureMessage(setMessages, {
+            id: requestFailureIdForMessage(`create-${pendingSeqRef.current++}`),
+            error: err,
+          });
+          throw err;
         }
       }
 
@@ -654,6 +663,12 @@ export function useChat(threadId) {
           );
         updateCurrentThread(markFailed);
         updateSeededTarget(markFailed);
+        const appendFailure = (prev) => [
+          ...prev,
+          requestFailureMessageForError(optimisticId, err),
+        ];
+        updateCurrentThread(appendFailure);
+        updateSeededTarget(appendFailure);
         updateCurrentRunState(() => setIsProcessing(false));
         submitBusyRef.current = false;
         throw err;
@@ -931,7 +946,11 @@ export function useChat(threadId) {
         : [];
       if (!content && attachments.length === 0) return;
 
-      const removeFailed = (prev) => prev.filter((item) => item.id !== message.id);
+      const failedRequestErrorId = requestFailureIdForMessage(message.id);
+      const removeFailed = (prev) =>
+        prev.filter(
+          (item) => item.id !== message.id && item.id !== failedRequestErrorId,
+        );
       const restoreFailedIfNoReplacement = (prev) => {
         const hasReplacement = prev.some(
           (item) =>
@@ -1011,4 +1030,30 @@ function retryAfterMs(err) {
   const seconds = Number(raw);
   if (Number.isFinite(seconds) && seconds > 0) return seconds * 1000;
   return 2000;
+}
+
+function requestFailureIdForMessage(messageId) {
+  const safeId = String(messageId || "unknown").replace(/[^a-z0-9_-]+/gi, "-");
+  return `err-request-${safeId}`;
+}
+
+function requestFailureMessageForError(messageId, error) {
+  return {
+    id: requestFailureIdForMessage(messageId),
+    role: "error",
+    content: failureMessageForRequestError(error),
+    timestamp: new Date().toISOString(),
+  };
+}
+
+function appendRequestFailureMessage(setMessages, { id, error }) {
+  setMessages((prev) => [
+    ...prev,
+    {
+      id,
+      role: "error",
+      content: failureMessageForRequestError(error),
+      timestamp: new Date().toISOString(),
+    },
+  ]);
 }

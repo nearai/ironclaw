@@ -4,7 +4,10 @@ import {
   toolCardFromActivity,
   toolCardFromPreview,
 } from "./history-messages.js";
-import { failureMessageForRunStatus } from "./failureMessages.js";
+import {
+  failureMessageForRunStatus,
+  failureMessageForStreamError,
+} from "./failureMessages.js";
 import {
   ensureGateToolActivity,
   upsertToolActivityMessage,
@@ -178,6 +181,18 @@ export function useChatEvents({
             failureSummary: null,
           });
           settleRun(settledRunsRef, onRunSettled, runId, false);
+          return;
+        }
+
+        case "error": {
+          setPendingGate(null);
+          setIsProcessing(false);
+          setActiveRun?.(null);
+          appendStreamFailureMessage(setMessages, {
+            error: frame.error,
+            kind: frame.kind,
+            retryable: frame.retryable === true,
+          });
           return;
         }
 
@@ -671,6 +686,29 @@ function appendRunFailureMessage(
       },
     ];
   });
+}
+
+function appendStreamFailureMessage(setMessages, { error, kind, retryable }) {
+  const messageId = streamFailureMessageId({ error, kind, retryable });
+  setMessages((prev) => {
+    if (prev.some((m) => m.id === messageId)) return prev;
+    return [
+      ...prev,
+      {
+        id: messageId,
+        role: "error",
+        content: failureMessageForStreamError({ error, kind, retryable }),
+        timestamp: new Date().toISOString(),
+      },
+    ];
+  });
+}
+
+function streamFailureMessageId({ error, kind, retryable }) {
+  const token = `${error || "unknown"}-${kind || "unknown"}-${
+    retryable ? "retryable" : "terminal"
+  }`;
+  return `err-stream-${token.replace(/[^a-z0-9_-]+/gi, "-").slice(0, 96)}`;
 }
 
 function locallyResolvedStateForRun(locallyResolvedGatesRef, runId) {

@@ -41,6 +41,8 @@ function useChatEventsSourceForTest() {
 function createUseChatEventsHarness({
   gateFromEvent = () => null,
   failureMessageForRunStatus = () => "run failed",
+  failureMessageForStreamError = ({ error, kind, retryable }) =>
+    `stream:${error}:${kind}:${retryable}`,
   locallyResolvedGatesRef = { current: new Map() },
 } = {}) {
   let messages = [];
@@ -59,6 +61,7 @@ function createUseChatEventsHarness({
       useRef: (value) => ({ current: value }),
     },
     failureMessageForRunStatus,
+    failureMessageForStreamError,
     gateFromEvent,
     gateFromProjectionGate,
     globalThis: {},
@@ -1578,5 +1581,51 @@ test("useChatEvents: typed failed event settles the run as not successful", () =
 
   assert.deepEqual(harness.settledRuns, [
     { runId: "run-typed-failed-1", success: false },
+  ]);
+});
+
+test("useChatEvents: stream error event appends inline error and clears active state", () => {
+  const seenStreamErrors = [];
+  const harness = createUseChatEventsHarness({
+    failureMessageForStreamError: (input) => {
+      seenStreamErrors.push(input);
+      return "The chat stream failed inline.";
+    },
+  });
+  harness.setCurrentActiveRun({
+    runId: "run-stream-error",
+    threadId: "thread-1",
+    status: "running",
+  });
+
+  harness.handleEvent({
+    type: "error",
+    frame: {
+      error: "unavailable",
+      kind: "service_unavailable",
+      retryable: true,
+    },
+  });
+  harness.handleEvent({
+    type: "error",
+    frame: {
+      error: "unavailable",
+      kind: "service_unavailable",
+      retryable: true,
+    },
+  });
+
+  assert.equal(harness.isProcessing, false);
+  assert.equal(harness.pendingGate, null);
+  assert.equal(harness.activeRun, null);
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].role, "error");
+  assert.equal(harness.messages[0].content, "The chat stream failed inline.");
+  assert.deepEqual(plain(seenStreamErrors), [
+    {
+      error: "unavailable",
+      kind: "service_unavailable",
+      retryable: true,
+    },
   ]);
 });
