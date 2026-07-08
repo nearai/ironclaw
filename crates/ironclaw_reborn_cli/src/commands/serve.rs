@@ -911,10 +911,7 @@ mod tests {
     #[test]
     fn webui_default_agent_uses_config_override() {
         let runtime_identity = RebornRuntimeIdentity::reborn_cli();
-        let identity = IdentitySection {
-            default_agent: Some("configured-agent".to_string()),
-            ..IdentitySection::default()
-        };
+        let identity = IdentitySection::default().set_default_agent("configured-agent");
 
         assert_eq!(
             resolve_webui_default_agent(Some(&identity), &runtime_identity),
@@ -935,10 +932,7 @@ mod tests {
 
     #[test]
     fn webui_runtime_owner_accepts_matching_config_owner() {
-        let identity = IdentitySection {
-            default_owner: Some("local-user".to_string()),
-            ..IdentitySection::default()
-        };
+        let identity = IdentitySection::default().set_default_owner("local-user");
 
         assert_eq!(
             resolve_webui_runtime_owner(Some(&identity), "local-user").unwrap(),
@@ -952,10 +946,7 @@ mod tests {
         // the bug class that silently made every thread invisible: the facade
         // writes under `owners/local-user` while the loop host reads under
         // `owners/reborn-cli`. Fail loud at startup instead.
-        let identity = IdentitySection {
-            default_owner: Some("reborn-cli".to_string()),
-            ..IdentitySection::default()
-        };
+        let identity = IdentitySection::default().set_default_owner("reborn-cli");
 
         let error = resolve_webui_runtime_owner(Some(&identity), "local-user")
             .expect_err("divergent owner must be rejected");
