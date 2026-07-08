@@ -3992,7 +3992,10 @@ fn is_zero_u32(value: &u32) -> bool {
     *value == 0
 }
 
-fn trace_contribution_dir_for_scope_at(base: &std::path::Path, scope: Option<&str>) -> PathBuf {
+pub(crate) fn trace_contribution_dir_for_scope_at(
+    base: &std::path::Path,
+    scope: Option<&str>,
+) -> PathBuf {
     let contributions = base.join("trace_contributions");
     match scope {
         Some(scope) if !scope.trim().is_empty() => {
@@ -5551,6 +5554,85 @@ impl std::fmt::Display for ContributionHttpError {
 
 impl std::error::Error for ContributionHttpError {}
 
+/// Direct-transport [`ContributionHttpSink`] for trusted non-agent surfaces
+/// (WebUI facades, CLI). Applies the same hardening as the other direct
+/// clients in this module: per-request pinned DNS resolution with
+/// private/internal-IP rejection (`resolve_trace_upload_claim_issuer_host`),
+/// no redirects, the request's own timeout, and a body read bounded DURING
+/// streaming by the request's `response_body_limit`. Agent-path callers must
+/// keep using the host-egress sink instead.
+pub struct DirectPinnedContributionSink;
+
+#[async_trait]
+impl ContributionHttpSink for DirectPinnedContributionSink {
+    async fn execute(
+        &self,
+        request: ContributionHttpRequest,
+    ) -> Result<ContributionHttpResponse, ContributionHttpError> {
+        let url = reqwest::Url::parse(&request.url)
+            .map_err(|e| ContributionHttpError::new(format!("invalid request URL: {e}")))?;
+        let host = url
+            .host_str()
+            .ok_or_else(|| ContributionHttpError::new("request URL requires a host"))?
+            .to_ascii_lowercase();
+        let port = url
+            .port_or_known_default()
+            .ok_or_else(|| ContributionHttpError::new("request URL requires a known port"))?;
+        let resolved_addrs = resolve_trace_upload_claim_issuer_host(&host, port)
+            .await
+            .map_err(|e| ContributionHttpError::new(format!("host resolution rejected: {e}")))?;
+        let timeout = Duration::from_millis(u64::from(request.timeout_ms));
+        let client = reqwest::Client::builder()
+            .timeout(timeout)
+            .connect_timeout(timeout.min(Duration::from_secs(3)))
+            .redirect(reqwest::redirect::Policy::none())
+            .user_agent("ironclaw-trace-commons-client")
+            .resolve_to_addrs(&host, &resolved_addrs)
+            .build()
+            .map_err(|e| ContributionHttpError::new(format!("failed to build client: {e}")))?;
+
+        let method = match request.method {
+            ContributionHttpMethod::Get => reqwest::Method::GET,
+            ContributionHttpMethod::Post => reqwest::Method::POST,
+            ContributionHttpMethod::Put => reqwest::Method::PUT,
+            ContributionHttpMethod::Delete => reqwest::Method::DELETE,
+        };
+        let mut builder = client
+            .request(method, url)
+            .header(reqwest::header::ACCEPT, "application/json");
+        if let Some(token) = request.bearer_token {
+            builder = builder.bearer_auth(token);
+        }
+        if let Some(body) = request.json_body {
+            builder = builder
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body);
+        }
+        let mut response = builder
+            .send()
+            .await
+            .map_err(|e| ContributionHttpError::new(format!("request failed: {e}")))?;
+        let status = response.status().as_u16();
+        // Enforce the cap DURING the chunked read so a hostile server cannot
+        // force a large allocation by streaming an oversized body.
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| ContributionHttpError::new(format!("response read failed: {e}")))?
+        {
+            if body.len() as u64 + chunk.len() as u64 > request.response_body_limit {
+                return Err(ContributionHttpError::new(format!(
+                    "response body exceeds the {} byte limit",
+                    request.response_body_limit
+                )));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(ContributionHttpResponse { status, body })
+    }
+}
+
 /// Decode a host-egress response body into a bounded UTF-8 string, capping at
 /// `TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES` (the host egress already enforced the
 /// limit, but truncating defensively keeps a hostile body bounded). Lossy
@@ -6636,6 +6718,40 @@ pub async fn mint_account_login_link_via_sink(
         sink,
     )
     .await
+}
+
+/// Direct (non-agent) counterpart to [`mint_account_login_link_via_sink`]
+/// for WebUI facades and other trusted product surfaces: mints the one-time
+/// login link through the [`DirectPinnedContributionSink`] (pinned DNS,
+/// private-IP filtering) instead of a host-egress sink.
+///
+/// Delivery contract: the link is returned ONLY in the result — it is never
+/// persisted to a local delivery file. Hosted multi-tenant users cannot read
+/// host files; the caller (an authenticated WebUI response) is the delivery
+/// channel. The URL must never be logged or placed on any model-visible
+/// surface.
+pub async fn mint_account_login_link(
+    tenant_id: &TenantId,
+    user_id: &UserId,
+) -> Result<AccountLoginLink, AccountLoginLinkError> {
+    // Typed at the public boundary so callers can't transpose tenant/user;
+    // stringify only when handing off to the dir-parameterised core.
+    mint_account_login_link_direct(
+        ironclaw_common::paths::ironclaw_base_dir().as_path(),
+        tenant_id.as_str(),
+        user_id.as_str(),
+    )
+    .await
+}
+
+/// Dir-parameterised core for [`mint_account_login_link`] (direct path).
+/// Accepts an explicit `base_dir` so tests can supply an isolated tempdir.
+async fn mint_account_login_link_direct(
+    base_dir: &std::path::Path,
+    tenant_id: &str,
+    user_id: &str,
+) -> Result<AccountLoginLink, AccountLoginLinkError> {
+    mint_account_login_link_inner(base_dir, tenant_id, user_id, &DirectPinnedContributionSink).await
 }
 
 /// Dir-parameterised core for [`mint_account_login_link_via_sink`].
@@ -16324,17 +16440,58 @@ mod tests {
             );
         }
 
-        let bodies = captured.lock().unwrap();
-        assert_eq!(bodies.len(), 1, "exactly one POST to login-links");
-        let expected_subject = salted_pseudonymous_contributor_id_at(
-            base.path(),
-            &trace_scope_key("tenant-dev", "alice"),
-        )
-        .unwrap();
+        {
+            let bodies = captured.lock().unwrap();
+            assert_eq!(bodies.len(), 1, "exactly one POST to login-links");
+            let expected_subject = salted_pseudonymous_contributor_id_at(
+                base.path(),
+                &trace_scope_key("tenant-dev", "alice"),
+            )
+            .unwrap();
+            assert_eq!(
+                bodies[0]["subject"],
+                serde_json::Value::String(expected_subject),
+                "posted subject must be per-user pseudonymous id for instance enrollment"
+            );
+        }
+
+        // ── direct (WebUI facade) variant ────────────────────────────────────
+        // Same enrollment, no sink: the hosted-WebUI path mints through the
+        // pinned direct client. The link is delivered ONLY in the return value
+        // (the authenticated HTTP response) — it must never be persisted to a
+        // local delivery file, which hosted users cannot read.
+        let direct = mint_account_login_link_direct(base.path(), "tenant-dev", "alice")
+            .await
+            .expect("direct login-link mint succeeds");
+        assert_eq!(direct.url, "/account/login?code=abc");
+        assert_eq!(direct.account_id, "11111111-1111-1111-1111-111111111111");
+        let mut delivery_files = Vec::new();
+        let mut stack = vec![base.path().to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("account_login_link."))
+                {
+                    delivery_files.push(path);
+                }
+            }
+        }
+        assert!(
+            delivery_files.is_empty(),
+            "direct mint must not write a local delivery file; found {delivery_files:?}"
+        );
         assert_eq!(
-            bodies[0]["subject"],
-            serde_json::Value::String(expected_subject),
-            "posted subject must be per-user pseudonymous id for instance enrollment"
+            captured.lock().unwrap().len(),
+            2,
+            "direct mint must POST to login-links too"
         );
     }
 
