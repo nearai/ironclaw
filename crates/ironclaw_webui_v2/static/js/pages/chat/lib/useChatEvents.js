@@ -500,9 +500,9 @@ function applyProjectionItems({
       // assistant-visible reply text accumulated through projection.
       // Dedup by item id and by the matching durable timeline message id so a
       // late projection cannot duplicate a reply already rendered from
-      // history. Text can stream while the run is still active or arrive in
-      // the same projection snapshot as a still-blocked gate, so run_status
-      // remains the source of truth for clearing pendingGate/processing.
+      // history. Text can stream while the run is still active or arrive in the same
+      // projection snapshot as a still-blocked gate; run_status remains the source of
+      // truth for clearing pendingGate/processing.
       const messageId = `text-${item.text.id}`;
       const textRunId = projectionTextRunId(item.text.id);
       setMessages((prev) => {

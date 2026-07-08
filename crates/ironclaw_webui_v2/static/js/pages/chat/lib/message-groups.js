@@ -1,9 +1,9 @@
 /* Collapse ordered reasoning/tool events into one activity run. If delayed
-   activity arrives immediately after a finalized assistant answer, render that
+   same-run activity arrives after an assistant answer boundary, render that
    activity before the answer so the answer still closes its turn, including
    when a later user follow-up has already been appended. */
 export function groupMessages(messages) {
-  const orderedMessages = moveDelayedActivityBeforeFinalReply(messages);
+  const orderedMessages = moveDelayedActivityBeforeAssistantReply(messages);
   const items = [];
 
   for (let index = 0; index < orderedMessages.length; index += 1) {
@@ -33,29 +33,29 @@ export function groupMessages(messages) {
   return items;
 }
 
-function moveDelayedActivityBeforeFinalReply(messages) {
-  const finalReplyByRun = new Map();
+function moveDelayedActivityBeforeAssistantReply(messages) {
+  const replyBoundaryByRun = new Map();
   for (let index = 0; index < messages.length; index += 1) {
     const msg = messages[index];
     const runId = turnRunIdForMessage(msg);
-    if (runId && isFinalAssistantReply(msg)) {
-      finalReplyByRun.set(runId, index);
+    if (runId && isAssistantReplyBoundary(msg)) {
+      replyBoundaryByRun.set(runId, index);
     }
   }
-  if (finalReplyByRun.size === 0) return messages;
+  if (replyBoundaryByRun.size === 0) return messages;
 
-  const delayedByFinalIndex = new Map();
+  const delayedByBoundaryIndex = new Map();
   const delayedIndexes = new Set();
   for (let index = 0; index < messages.length; index += 1) {
     const msg = messages[index];
     if (!isActivity(msg)) continue;
     const runId = turnRunIdForMessage(msg);
-    const finalIndex = runId ? finalReplyByRun.get(runId) : undefined;
-    if (finalIndex === undefined || finalIndex >= index) continue;
+    const boundaryIndex = runId ? replyBoundaryByRun.get(runId) : undefined;
+    if (boundaryIndex === undefined || boundaryIndex >= index) continue;
 
-    const delayed = delayedByFinalIndex.get(finalIndex) || [];
+    const delayed = delayedByBoundaryIndex.get(boundaryIndex) || [];
     delayed.push(msg);
-    delayedByFinalIndex.set(finalIndex, delayed);
+    delayedByBoundaryIndex.set(boundaryIndex, delayed);
     delayedIndexes.add(index);
   }
   if (delayedIndexes.size === 0) return messages;
@@ -63,7 +63,7 @@ function moveDelayedActivityBeforeFinalReply(messages) {
   const ordered = [];
   for (let index = 0; index < messages.length; index += 1) {
     if (delayedIndexes.has(index)) continue;
-    const delayed = delayedByFinalIndex.get(index);
+    const delayed = delayedByBoundaryIndex.get(index);
     if (delayed) ordered.push(...delayed);
     ordered.push(messages[index]);
   }
@@ -109,6 +109,20 @@ function isFinalAssistantReply(msg) {
     (msg.isFinalReply === true ||
       ((msg.kind === "assistant" || msg.kind === "assistant_message") &&
         msg.status === "finalized"))
+  );
+}
+
+function isAssistantReplyBoundary(msg) {
+  return isFinalAssistantReply(msg) || isStreamingAssistantReply(msg);
+}
+
+function isStreamingAssistantReply(msg) {
+  return (
+    msg.role === "assistant" &&
+    !hasToolCalls(msg) &&
+    msg.isFinalReply === false &&
+    typeof msg.id === "string" &&
+    msg.id.startsWith("text-text:")
   );
 }
 
