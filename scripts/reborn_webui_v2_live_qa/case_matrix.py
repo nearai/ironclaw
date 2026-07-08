@@ -27,7 +27,9 @@ class CaseSpec:
         requires_google_runtime_access: bool = False,
         requires_telegram: bool = False,
         requires_github_auth: bool = False,
+        requires_openai_compat: bool = False,
         default_enabled: bool = True,
+        ci_enabled: bool = True,
         implemented: bool = True,
     ) -> None:
         self.fn = fn
@@ -38,7 +40,9 @@ class CaseSpec:
         self.requires_google_runtime_access = requires_google_runtime_access
         self.requires_telegram = requires_telegram
         self.requires_github_auth = requires_github_auth
+        self.requires_openai_compat = requires_openai_compat
         self.default_enabled = default_enabled
+        self.ci_enabled = ci_enabled
         self.implemented = implemented
 
 
@@ -239,5 +243,60 @@ QA_SHEET_CASES: dict[str, dict[str, object]] = {
         "rows": ["8D"],
         "feature": "Hacker News keyword monitor Slack delivery",
         "gate": "requires live Slack message delivery verification",
+    },
+    "qa_10a_telegram_connect_for_custom_tool": {
+        "rows": ["10A"],
+        "feature": "Telegram connection flow for custom tool workflow",
+        "gate": "requires live Telegram bot/user credentials and BotFather/pairing automation",
+    },
+    "qa_10b_webui_custom_tool_upload": {
+        "rows": ["10B"],
+        "feature": "WebUI v2 custom tool upload",
+        "gate": "manual TDD target; WebUI v2 custom tool upload surface is not promoted to CI",
+    },
+    "qa_10c_webui_custom_tool_btc_analysis": {
+        "rows": ["10C"],
+        "feature": "WebUI v2 custom BTC technical-analysis tool use",
+        "gate": "manual TDD target; requires a live uploaded custom BTC analysis tool",
+    },
+    "qa_10d_telegram_custom_tool_btc_routine": {
+        "rows": ["10D"],
+        "feature": "Telegram custom BTC technical-analysis routine creation",
+        "gate": "requires live Telegram connection, custom tool setup, and routine verification",
+    },
+    "qa_10e_telegram_custom_tool_btc_delivery": {
+        "rows": ["10E"],
+        "feature": "Telegram delivery from custom BTC technical-analysis routine",
+        "gate": "requires live Telegram delivery verification and a custom tool routine",
+    },
+    "qa_11a_response_api_custom_tool_upload": {
+        "rows": ["11A"],
+        "feature": "WebUI v2 custom tool upload for Response API workflow",
+        "gate": "manual TDD target; WebUI v2 custom tool upload surface is not promoted to CI",
+    },
+    "qa_11b_response_api_telegram_connect": {
+        "rows": ["11B"],
+        "feature": "Telegram connection flow for Response API workflow",
+        "gate": "requires live Telegram bot/user credentials and BotFather/pairing automation",
+    },
+    "qa_11c_response_api_btc_news_summary": {
+        "rows": ["11C"],
+        "feature": "Response API BTC news summary",
+        "gate": "manual TDD target; requires openai-compat-beta and live LLM/web-search runtime",
+    },
+    "qa_11d_response_api_custom_tool_btc_analysis": {
+        "rows": ["11D"],
+        "feature": "Response API custom BTC technical-analysis tool call",
+        "gate": "manual TDD target; requires openai-compat-beta external tool support",
+    },
+    "qa_11e_response_api_telegram_btc_routine": {
+        "rows": ["11E"],
+        "feature": "Response API routine creation for Telegram BTC technical analysis",
+        "gate": "requires openai-compat-beta, live Telegram, custom tool setup, and routine verification",
+    },
+    "qa_11f_response_api_telegram_btc_delivery": {
+        "rows": ["11F"],
+        "feature": "Response API Telegram delivery from BTC technical-analysis routine",
+        "gate": "requires openai-compat-beta, live Telegram delivery verification, and a custom tool routine",
     },
 }

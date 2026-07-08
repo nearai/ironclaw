@@ -186,6 +186,26 @@ Expected result: Slack is connected""",
 Expected result: IronClaw reports any matching HN posts""",
     "qa_8c_hn_keyword_slack_routine": """In WebUI, ask IronClaw, "Every hour, check Hacker News for new posts mentioning 'IronClaw' or 'NEAR AI' and send a summary to Slack DM."
 Expected result: Routine created""",
+    "qa_10a_telegram_connect_for_custom_tool": """In WebUI, ask IronClaw "connect to Telegram." Go through the flow w/ BotFather.
+Expected result: Telegram is connected""",
+    "qa_10b_webui_custom_tool_upload": """In WebUI, upload a custom tool to IronClaw.
+Expected result: tool available for use""",
+    "qa_10c_webui_custom_tool_btc_analysis": """In WebUI, ask IronClaw "give me a quick technical analysis on BTC."
+Expected result: the custom tool is called providing an analysis, e.g. a chart""",
+    "qa_10d_telegram_custom_tool_btc_routine": """In Telegram, ask IronClaw, "Every 5 minutes, send me an update tech analysis on BTC to Telegram."
+Expected results: Routine created""",
+    "qa_10e_telegram_custom_tool_btc_delivery": """Expected result: Routine send a Telegram message with the results from the custom tool""",
+    "qa_11a_response_api_custom_tool_upload": """In WebUI, upload a custom tool to IronClaw.
+Expected result: tool available for use""",
+    "qa_11b_response_api_telegram_connect": """In WebUI, ask IronClaw "connect to Telegram." Go through the flow w/ BotFather.
+Expected result: Telegram is connected""",
+    "qa_11c_response_api_btc_news_summary": """Using Response API, ask IronClaw "summarize the latest BTC news."
+Expected result: API response with a message summarizing results""",
+    "qa_11d_response_api_custom_tool_btc_analysis": """Using Response API, ask IronClaw "give me a quick technical analysis on BTC."
+Expected result: API reponse with the custom tool is called providing an analysis, e.g. a chart""",
+    "qa_11e_response_api_telegram_btc_routine": """Using Response API, ask IronClaw, "Every 5 minutes, send me an update tech analysis on BTC to Telegram."
+Expected results: Routine created""",
+    "qa_11f_response_api_telegram_btc_delivery": """Expected result: Routine send a Telegram message with the results from the custom tool""",
 }
 
 
@@ -206,6 +226,8 @@ HN_KEYWORD_SEARCH_URL = (
     "https://hn.algolia.com/api/v1/search_by_date"
     "?query=NEAR%20AI&tags=story&hitsPerPage=1"
 )
+BTC_ANALYSIS_CUSTOM_TOOL_NAME = "btc_technical_analysis"
+BTC_ANALYSIS_ROUTINE_NAME = "reborn-qa-btc-technical-analysis-telegram"
 EXTENSION_SEARCH_CAPABILITY_ID = "builtin.extension_search"
 EXTENSION_INSTALL_CAPABILITY_ID = "builtin.extension_install"
 EXTENSION_ACTIVATE_CAPABILITY_ID = "builtin.extension_activate"
@@ -358,11 +380,20 @@ def _reborn_binary() -> Path:
     return _cargo_target_dir() / "debug" / "ironclaw-reborn"
 
 
-def build_reborn_binary() -> Path:
-    features = os.environ.get(
-        "REBORN_WEBUI_V2_LIVE_QA_FEATURES",
-        "webui-v2-beta,slack-v2-host-beta",
-    )
+def _cargo_features_for_selected_cases(selected_cases: list[str] | None = None) -> str:
+    configured = os.environ.get("REBORN_WEBUI_V2_LIVE_QA_FEATURES", "").strip()
+    features = configured or "webui-v2-beta,slack-v2-host-beta"
+    feature_parts = [part.strip() for part in features.split(",") if part.strip()]
+    if selected_cases and any(
+        CASES[name].requires_openai_compat for name in selected_cases
+    ):
+        if "openai-compat-beta" not in feature_parts:
+            feature_parts.append("openai-compat-beta")
+    return ",".join(feature_parts)
+
+
+def build_reborn_binary(selected_cases: list[str] | None = None) -> Path:
+    features = _cargo_features_for_selected_cases(selected_cases)
     build_env = os.environ.copy()
     build_env.setdefault("CARGO_PROFILE_DEV_DEBUG", "0")
     build_env.setdefault("CARGO_INCREMENTAL", "0")
@@ -1546,6 +1577,378 @@ async def _live_http_status(url: str) -> int:
     async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
         response = await client.get(url)
     return response.status_code
+
+
+def _btc_analysis_custom_tool_manifest() -> dict[str, object]:
+    return {
+        "name": BTC_ANALYSIS_CUSTOM_TOOL_NAME,
+        "description": (
+            "Return a concise BTC technical analysis with trend, support, "
+            "resistance, risk, and a chart URL."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Ticker symbol, for example BTC",
+                },
+                "timeframe": {
+                    "type": "string",
+                    "description": "Analysis timeframe, for example 1h or 4h",
+                },
+            },
+            "required": ["symbol"],
+            "additionalProperties": False,
+        },
+        "example_output": {
+            "symbol": "BTC",
+            "trend": "range-bound",
+            "support": "live-market-derived support",
+            "resistance": "live-market-derived resistance",
+            "chart_url": "https://www.tradingview.com/symbols/BTCUSD/",
+        },
+    }
+
+
+def _btc_analysis_custom_tool_fixture_path(ctx: LiveQaContext) -> Path:
+    fixture_dir = ctx.output_dir / "fixtures" / "custom-tools"
+    fixture_dir.mkdir(parents=True, exist_ok=True)
+    path = fixture_dir / f"{BTC_ANALYSIS_CUSTOM_TOOL_NAME}.json"
+    path.write_text(
+        json.dumps(_btc_analysis_custom_tool_manifest(), indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _custom_tool_candidate_capability_ids(tool_name: str) -> list[str]:
+    return [
+        tool_name,
+        f"custom_tool.{tool_name}",
+        f"external_tool.{tool_name}",
+        f"wasm_tool.{tool_name}",
+    ]
+
+
+async def _upload_btc_analysis_custom_tool_via_webui(
+    ctx: LiveQaContext,
+    *,
+    case_name: str,
+    observed: dict[str, object],
+) -> None:
+    from playwright.async_api import expect
+
+    fixture_path = _btc_analysis_custom_tool_fixture_path(ctx)
+    observed["custom_tool_name"] = BTC_ANALYSIS_CUSTOM_TOOL_NAME
+    observed["custom_tool_fixture_path"] = str(fixture_path)
+
+    async def action(page: object) -> None:
+        await page.goto(
+            f"{ctx.base_url}/v2/extensions/registry?token={AUTH_TOKEN}",
+            wait_until="domcontentloaded",
+        )  # type: ignore[attr-defined]
+        body = page.locator("body")  # type: ignore[attr-defined]
+        await expect(body).to_contain_text("Extensions", timeout=15000)
+        body_text = await body.inner_text(timeout=1000)
+        observed["custom_tool_surface_excerpt"] = body_text[-2000:]
+        observed["custom_tool_surface_present"] = bool(
+            re.search(
+                r"\b(custom\s+tool|upload\s+(?:a\s+)?tool|import\s+(?:a\s+)?tool)\b",
+                body_text,
+                re.IGNORECASE,
+            )
+        )
+        file_inputs = page.locator(  # type: ignore[attr-defined]
+            "[data-testid='custom-tool-upload-input'], "
+            "[data-testid='custom-tool-import-input'], "
+            "input[type='file']"
+        )
+        input_count = await file_inputs.count()
+        observed["custom_tool_file_input_count"] = input_count
+        if input_count <= 0:
+            raise AssertionError(
+                "WebUI v2 does not expose a custom tool upload/import file input yet"
+            )
+        await file_inputs.first.set_input_files(str(fixture_path))
+
+        upload_button = page.get_by_role(  # type: ignore[attr-defined]
+            "button",
+            name=re.compile(
+                r"(upload|import|add).*(tool|custom)|(tool|custom).*(upload|import|add)",
+                re.IGNORECASE,
+            ),
+        ).first
+        try:
+            if await upload_button.is_visible(timeout=1000):
+                await upload_button.click()
+        except Exception:
+            observed["custom_tool_upload_button_visible"] = False
+        else:
+            observed["custom_tool_upload_button_visible"] = True
+
+        await asyncio.sleep(1.0)
+        tools_body = await _webui_json(page, "GET", "/api/webchat/v2/settings/tools")
+        tools = tools_body.get("tools")
+        if not isinstance(tools, list):
+            raise AssertionError(f"settings tools response did not include a tools list: {tools_body!r}")
+        matching_tools = [
+            tool
+            for tool in tools
+            if isinstance(tool, dict)
+            and BTC_ANALYSIS_CUSTOM_TOOL_NAME
+            in str(tool.get("name") or tool.get("capability_id") or "")
+        ]
+        observed["settings_tool_count"] = len(tools)
+        observed["custom_tool_settings_matches"] = matching_tools
+        observed["custom_tool_capability_ids"] = [
+            str(tool.get("name") or tool.get("capability_id") or "")
+            for tool in matching_tools
+            if str(tool.get("name") or tool.get("capability_id") or "").strip()
+        ]
+        if not matching_tools:
+            raise AssertionError(
+                f"uploaded custom tool {BTC_ANALYSIS_CUSTOM_TOOL_NAME!r} was not listed "
+                "in WebUI settings/tools"
+            )
+
+    await _with_page(ctx.output_dir, f"{case_name}_custom_tool_upload", action)
+
+
+def _response_api_model(ctx: LiveQaContext) -> str:
+    for name in (
+        "REBORN_WEBUI_V2_LIVE_QA_LLM_MODEL",
+        "LIVE_OPENAI_COMPATIBLE_MODEL",
+    ):
+        value = ctx.env.get(name) or os.environ.get(name)
+        if value and value.strip():
+            return value.strip()
+    return "deepseek-ai/DeepSeek-V4-Flash"
+
+
+def _response_api_output_text(payload: dict[str, object]) -> str:
+    def content_to_text(value: object) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            return "\n".join(filter(None, (content_to_text(item) for item in value)))
+        if isinstance(value, dict):
+            for key in ("text", "output_text", "content", "summary"):
+                if key in value:
+                    text = content_to_text(value.get(key))
+                    if text:
+                        return text
+            return json.dumps(value, sort_keys=True)
+        return str(value)
+
+    output = payload.get("output")
+    if not isinstance(output, list):
+        return ""
+    chunks: list[str] = []
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "message":
+            text = content_to_text(item.get("content"))
+            if text:
+                chunks.append(text)
+        elif item.get("type") == "function_call":
+            chunks.append(
+                f"function_call {item.get('name') or ''} {item.get('arguments') or ''}".strip()
+            )
+    return "\n".join(chunks)
+
+
+def _response_api_function_call_names(payload: dict[str, object]) -> list[str]:
+    output = payload.get("output")
+    if not isinstance(output, list):
+        return []
+    names: list[str] = []
+    for item in output:
+        if isinstance(item, dict) and item.get("type") == "function_call":
+            name = str(item.get("name") or "").strip()
+            if name:
+                names.append(name)
+    return names
+
+
+def _btc_analysis_response_api_tool_spec() -> dict[str, object]:
+    manifest = _btc_analysis_custom_tool_manifest()
+    return {
+        "type": "function",
+        "name": BTC_ANALYSIS_CUSTOM_TOOL_NAME,
+        "description": manifest["description"],
+        "parameters": manifest["parameters"],
+    }
+
+
+async def _post_response_api_create(
+    ctx: LiveQaContext,
+    *,
+    case_name: str,
+    prompt: str,
+    tools: list[dict[str, object]] | None = None,
+    instructions: str | None = None,
+) -> dict[str, object]:
+    import httpx
+
+    body: dict[str, object] = {
+        "model": _response_api_model(ctx),
+        "input": prompt,
+        "metadata": {"reborn_webui_v2_live_qa_case": case_name},
+    }
+    if tools:
+        body["tools"] = tools
+    if instructions:
+        body["instructions"] = instructions
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        response = await client.post(
+            f"{ctx.base_url}/v1/responses",
+            headers={
+                "Authorization": f"Bearer {AUTH_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            json=body,
+        )
+    try:
+        payload = response.json()
+    except json.JSONDecodeError:
+        payload = {"raw_text": response.text}
+    if response.status_code < 200 or response.status_code >= 300:
+        raise AssertionError(
+            f"Response API create returned HTTP {response.status_code}: {payload!r}"
+        )
+    if not isinstance(payload, dict):
+        raise AssertionError(f"Response API create returned non-object JSON: {payload!r}")
+    return payload
+
+
+async def _get_response_api_response(
+    ctx: LiveQaContext,
+    response_id: str,
+) -> dict[str, object]:
+    import httpx
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(
+            f"{ctx.base_url}/v1/responses/{urllib.parse.quote(response_id, safe='')}",
+            headers={"Authorization": f"Bearer {AUTH_TOKEN}"},
+        )
+    try:
+        payload = response.json()
+    except json.JSONDecodeError:
+        payload = {"raw_text": response.text}
+    if response.status_code < 200 or response.status_code >= 300:
+        raise AssertionError(
+            f"Response API retrieve returned HTTP {response.status_code}: {payload!r}"
+        )
+    if not isinstance(payload, dict):
+        raise AssertionError(f"Response API retrieve returned non-object JSON: {payload!r}")
+    return payload
+
+
+async def _wait_for_response_api_observation(
+    ctx: LiveQaContext,
+    payload: dict[str, object],
+    *,
+    required_function_call: str | None = None,
+    timeout: float = 300.0,
+) -> dict[str, object]:
+    deadline = time.monotonic() + timeout
+    current = payload
+    while True:
+        if required_function_call in _response_api_function_call_names(current):
+            return current
+        status = str(current.get("status") or "").lower()
+        if not required_function_call and status == "completed":
+            return current
+        if status in {"completed", "failed", "cancelled", "incomplete"}:
+            return current
+        response_id = str(current.get("id") or "").strip()
+        if not response_id or time.monotonic() >= deadline:
+            return current
+        await asyncio.sleep(1.0)
+        current = await _get_response_api_response(ctx, response_id)
+
+
+async def _response_api_case(
+    ctx: LiveQaContext,
+    *,
+    case_name: str,
+    prompt: str,
+    required_text: list[str] | None = None,
+    tools: list[dict[str, object]] | None = None,
+    required_function_call: str | None = None,
+    require_completed: bool = True,
+    routine_name: str | None = None,
+    instructions: str | None = None,
+) -> ProbeResult:
+    started = time.monotonic()
+    before_count = _trigger_record_count(ctx.reborn_home, routine_name) if routine_name else None
+    observed: dict[str, object] = {
+        "prompt": prompt,
+        "required_text": required_text or [],
+        "required_function_call": required_function_call,
+        "tools": [tool.get("name") for tool in tools or []],
+        "response_api_path": "/v1/responses",
+    }
+    if routine_name:
+        observed["routine_name"] = routine_name
+        observed["trigger_records_before"] = before_count
+    try:
+        initial = await _post_response_api_create(
+            ctx,
+            case_name=case_name,
+            prompt=prompt,
+            tools=tools,
+            instructions=instructions,
+        )
+        final = await _wait_for_response_api_observation(
+            ctx,
+            initial,
+            required_function_call=required_function_call,
+        )
+        output_text = _response_api_output_text(final)
+        function_calls = _response_api_function_call_names(final)
+        observed.update(
+            {
+                "response_id": final.get("id"),
+                "response_status": final.get("status"),
+                "function_calls": function_calls,
+                "text_excerpt": output_text[-2000:],
+                "usage": final.get("usage"),
+            }
+        )
+        status = str(final.get("status") or "").lower()
+        if require_completed and status != "completed":
+            raise AssertionError(f"Response API status was {status!r}, not 'completed'")
+        if required_function_call and required_function_call not in function_calls:
+            raise AssertionError(
+                f"Response API output did not include required function call "
+                f"{required_function_call!r}; observed={function_calls!r}"
+            )
+        if required_text and not required_text_matches(output_text.lower(), required_text):
+            raise AssertionError(
+                "Response API output did not contain required text. "
+                f"required_text={required_text!r} output_excerpt={output_text[-1000:]!r}"
+            )
+        if routine_name:
+            after_count = _trigger_record_count(ctx.reborn_home, routine_name)
+            observed["trigger_records_after"] = after_count
+            if after_count <= int(before_count or 0):
+                raise AssertionError(
+                    f"Response API routine request did not add trigger_record {routine_name!r}"
+                )
+        return _result(case_name, True, started, observed)
+    except Exception as exc:
+        if routine_name:
+            observed["trigger_records_after"] = _trigger_record_count(
+                ctx.reborn_home,
+                routine_name,
+            )
+        return _result(case_name, False, started, {"error": str(exc), **observed})
 
 
 async def _live_github_latest_release(owner: str, repo: str) -> dict[str, str]:
@@ -3948,6 +4351,236 @@ async def case_qa_8d_hn_keyword_slack_delivery(ctx: LiveQaContext) -> ProbeResul
     )
 
 
+async def _manual_tdd_blocked_case(
+    ctx: LiveQaContext,
+    *,
+    case_name: str,
+    reason: str,
+) -> ProbeResult:
+    started = time.monotonic()
+    details = QA_SHEET_CASES.get(case_name, {})
+    return _result(
+        case_name,
+        False,
+        started,
+        {
+            "blocked": True,
+            "manual_tdd_target": True,
+            "gate": details.get("gate"),
+            "reason": reason,
+            "message": (
+                "This QA row is represented as a targeted Reborn WebUI v2 live "
+                "QA case, but the live verifier is not promoted to CI and the "
+                "required product/test fixture is not available yet."
+            ),
+        },
+    )
+
+
+async def case_qa_10a_telegram_connect_for_custom_tool(ctx: LiveQaContext) -> ProbeResult:
+    return await _manual_tdd_blocked_case(
+        ctx,
+        case_name="qa_10a_telegram_connect_for_custom_tool",
+        reason="BotFather-backed Telegram pairing automation is not available in this live QA harness yet",
+    )
+
+
+async def case_qa_10b_webui_custom_tool_upload(ctx: LiveQaContext) -> ProbeResult:
+    started = time.monotonic()
+    observed: dict[str, object] = {}
+    try:
+        await _upload_btc_analysis_custom_tool_via_webui(
+            ctx,
+            case_name="qa_10b_webui_custom_tool_upload",
+            observed=observed,
+        )
+        return _result(
+            "qa_10b_webui_custom_tool_upload",
+            True,
+            started,
+            observed,
+        )
+    except Exception as exc:
+        return _result(
+            "qa_10b_webui_custom_tool_upload",
+            False,
+            started,
+            {"error": str(exc), **observed},
+        )
+
+
+async def case_qa_10c_webui_custom_tool_btc_analysis(ctx: LiveQaContext) -> ProbeResult:
+    started = time.monotonic()
+    upload_observed: dict[str, object] = {}
+    try:
+        await _upload_btc_analysis_custom_tool_via_webui(
+            ctx,
+            case_name="qa_10c_webui_custom_tool_btc_analysis",
+            observed=upload_observed,
+        )
+    except Exception as exc:
+        return _result(
+            "qa_10c_webui_custom_tool_btc_analysis",
+            False,
+            started,
+            {
+                "error": str(exc),
+                "custom_tool_upload": upload_observed,
+            },
+        )
+    capability_ids = [
+        str(value)
+        for value in upload_observed.get("custom_tool_capability_ids", [])
+        if str(value).strip()
+    ] or _custom_tool_candidate_capability_ids(BTC_ANALYSIS_CUSTOM_TOOL_NAME)
+    result = await _live_chat_case(
+        ctx,
+        case_name="qa_10c_webui_custom_tool_btc_analysis",
+        prompt=(
+            f"{_qa_sheet_prompt('qa_10c_webui_custom_tool_btc_analysis')}\n\n"
+            f"Use the uploaded custom tool named {BTC_ANALYSIS_CUSTOM_TOOL_NAME}. "
+            "If that tool is unavailable, say it is unavailable instead of "
+            "answering from general model knowledge."
+        ),
+        marker=None,
+        required_text=["BTC|Bitcoin", "analysis|technical|chart"],
+        timeout=240.0,
+        extra_details={
+            "custom_tool_upload": upload_observed,
+            "expected_custom_tool_capability_ids": capability_ids,
+        },
+        forbidden_text=[
+            "tool is unavailable",
+            "custom tool is unavailable",
+            "not available",
+        ],
+    )
+    statuses = _capability_run_statuses(ctx.reborn_home, capability_ids)
+    result.details["custom_tool_capability_statuses"] = statuses
+    result.latency_ms = int((time.monotonic() - started) * 1000)
+    if result.success and not any("completed" in status for status in statuses.values()):
+        result.success = False
+        result.details["error"] = (
+            "assistant returned a BTC analysis, but no uploaded custom tool "
+            f"capability completed; observed statuses={statuses!r}"
+        )
+    return result
+
+
+async def case_qa_10d_telegram_custom_tool_btc_routine(ctx: LiveQaContext) -> ProbeResult:
+    return await _manual_tdd_blocked_case(
+        ctx,
+        case_name="qa_10d_telegram_custom_tool_btc_routine",
+        reason="Telegram inbound message injection for this custom-tool routine user story is not implemented yet",
+    )
+
+
+async def case_qa_10e_telegram_custom_tool_btc_delivery(ctx: LiveQaContext) -> ProbeResult:
+    return await _manual_tdd_blocked_case(
+        ctx,
+        case_name="qa_10e_telegram_custom_tool_btc_delivery",
+        reason="live Telegram delivery verification for custom-tool routine output is not implemented yet",
+    )
+
+
+async def case_qa_11a_response_api_custom_tool_upload(ctx: LiveQaContext) -> ProbeResult:
+    started = time.monotonic()
+    observed: dict[str, object] = {
+        "response_api_followup": True,
+    }
+    try:
+        await _upload_btc_analysis_custom_tool_via_webui(
+            ctx,
+            case_name="qa_11a_response_api_custom_tool_upload",
+            observed=observed,
+        )
+        return _result(
+            "qa_11a_response_api_custom_tool_upload",
+            True,
+            started,
+            observed,
+        )
+    except Exception as exc:
+        return _result(
+            "qa_11a_response_api_custom_tool_upload",
+            False,
+            started,
+            {"error": str(exc), **observed},
+        )
+
+
+async def case_qa_11b_response_api_telegram_connect(ctx: LiveQaContext) -> ProbeResult:
+    return await _manual_tdd_blocked_case(
+        ctx,
+        case_name="qa_11b_response_api_telegram_connect",
+        reason="BotFather-backed Telegram pairing automation is not available in this live QA harness yet",
+    )
+
+
+async def case_qa_11c_response_api_btc_news_summary(ctx: LiveQaContext) -> ProbeResult:
+    return await _response_api_case(
+        ctx,
+        case_name="qa_11c_response_api_btc_news_summary",
+        prompt=_qa_sheet_prompt("qa_11c_response_api_btc_news_summary"),
+        required_text=["BTC|Bitcoin", "news|latest|headline|market"],
+        require_completed=True,
+        instructions=(
+            "Use live web/search-capable context if available. Return a concise "
+            "summary and mention BTC or Bitcoin explicitly."
+        ),
+    )
+
+
+async def case_qa_11d_response_api_custom_tool_btc_analysis(ctx: LiveQaContext) -> ProbeResult:
+    return await _response_api_case(
+        ctx,
+        case_name="qa_11d_response_api_custom_tool_btc_analysis",
+        prompt=(
+            f"{_qa_sheet_prompt('qa_11d_response_api_custom_tool_btc_analysis')}\n\n"
+            f"You must call the provided custom tool `{BTC_ANALYSIS_CUSTOM_TOOL_NAME}` "
+            "with symbol BTC. Do not answer from model knowledge before calling it."
+        ),
+        tools=[_btc_analysis_response_api_tool_spec()],
+        required_function_call=BTC_ANALYSIS_CUSTOM_TOOL_NAME,
+        require_completed=False,
+        instructions=(
+            "When a matching function tool is available, call it for BTC technical "
+            "analysis instead of producing a direct textual answer."
+        ),
+    )
+
+
+async def case_qa_11e_response_api_telegram_btc_routine(ctx: LiveQaContext) -> ProbeResult:
+    routine_name = BTC_ANALYSIS_ROUTINE_NAME
+    return await _response_api_case(
+        ctx,
+        case_name="qa_11e_response_api_telegram_btc_routine",
+        prompt=(
+            f"{_qa_sheet_prompt('qa_11e_response_api_telegram_btc_routine')}\n\n"
+            f"Create the routine with the exact name `{routine_name}`. Use "
+            "Europe/London time if a timezone is required. The routine must "
+            f"use the custom tool `{BTC_ANALYSIS_CUSTOM_TOOL_NAME}` for BTC "
+            "technical analysis and send the result to Telegram."
+        ),
+        required_text=["routine|trigger|automation|cron|schedule|created"],
+        tools=[_btc_analysis_response_api_tool_spec()],
+        routine_name=routine_name,
+        require_completed=True,
+        instructions=(
+            "Create the requested routine directly. If confirmation or timezone "
+            "would normally be needed, use Europe/London time and proceed."
+        ),
+    )
+
+
+async def case_qa_11f_response_api_telegram_btc_delivery(ctx: LiveQaContext) -> ProbeResult:
+    return await _manual_tdd_blocked_case(
+        ctx,
+        case_name="qa_11f_response_api_telegram_btc_delivery",
+        reason="live Telegram delivery verification for Response API custom-tool routine output is not implemented yet",
+    )
+
+
 async def _gated_qa_case(ctx: LiveQaContext, case_name: str) -> ProbeResult:
     started = time.monotonic()
     details = QA_SHEET_CASES.get(case_name, {})
@@ -4149,6 +4782,71 @@ CASES: dict[str, CaseSpec] = {
         requires_slack=True,
         requires_slack_target=True,
     ),
+    "qa_10a_telegram_connect_for_custom_tool": CaseSpec(
+        case_qa_10a_telegram_connect_for_custom_tool,
+        requires_telegram=True,
+        default_enabled=False,
+        ci_enabled=False,
+    ),
+    "qa_10b_webui_custom_tool_upload": CaseSpec(
+        case_qa_10b_webui_custom_tool_upload,
+        default_enabled=False,
+        ci_enabled=False,
+    ),
+    "qa_10c_webui_custom_tool_btc_analysis": CaseSpec(
+        case_qa_10c_webui_custom_tool_btc_analysis,
+        default_enabled=False,
+        ci_enabled=False,
+    ),
+    "qa_10d_telegram_custom_tool_btc_routine": CaseSpec(
+        case_qa_10d_telegram_custom_tool_btc_routine,
+        requires_telegram=True,
+        default_enabled=False,
+        ci_enabled=False,
+    ),
+    "qa_10e_telegram_custom_tool_btc_delivery": CaseSpec(
+        case_qa_10e_telegram_custom_tool_btc_delivery,
+        requires_telegram=True,
+        default_enabled=False,
+        ci_enabled=False,
+    ),
+    "qa_11a_response_api_custom_tool_upload": CaseSpec(
+        case_qa_11a_response_api_custom_tool_upload,
+        default_enabled=False,
+        ci_enabled=False,
+    ),
+    "qa_11b_response_api_telegram_connect": CaseSpec(
+        case_qa_11b_response_api_telegram_connect,
+        requires_telegram=True,
+        default_enabled=False,
+        ci_enabled=False,
+    ),
+    "qa_11c_response_api_btc_news_summary": CaseSpec(
+        case_qa_11c_response_api_btc_news_summary,
+        requires_openai_compat=True,
+        default_enabled=False,
+        ci_enabled=False,
+    ),
+    "qa_11d_response_api_custom_tool_btc_analysis": CaseSpec(
+        case_qa_11d_response_api_custom_tool_btc_analysis,
+        requires_openai_compat=True,
+        default_enabled=False,
+        ci_enabled=False,
+    ),
+    "qa_11e_response_api_telegram_btc_routine": CaseSpec(
+        case_qa_11e_response_api_telegram_btc_routine,
+        requires_telegram=True,
+        requires_openai_compat=True,
+        default_enabled=False,
+        ci_enabled=False,
+    ),
+    "qa_11f_response_api_telegram_btc_delivery": CaseSpec(
+        case_qa_11f_response_api_telegram_btc_delivery,
+        requires_telegram=True,
+        requires_openai_compat=True,
+        default_enabled=False,
+        ci_enabled=False,
+    ),
 }
 
 
@@ -4190,10 +4888,14 @@ def write_case_manifest(output_dir: Path, selected_cases: list[str]) -> Path:
                 "requires_google_runtime_access": spec.requires_google_runtime_access,
                 "requires_telegram": spec.requires_telegram,
                 "requires_github_auth": spec.requires_github_auth,
+                "requires_openai_compat": spec.requires_openai_compat,
                 "implemented": spec.implemented,
+                "ci_enabled": spec.ci_enabled,
                 "status": (
                     "default"
                     if spec.default_enabled
+                    else "targeted:not_in_ci"
+                    if not spec.ci_enabled
                     else "gated:requires_live_telegram"
                     if spec.requires_telegram
                     else "gated:placeholder_needs_live_side_effect_verifier"
@@ -4327,7 +5029,12 @@ def _non_telegram_qa_case_names() -> list[str]:
     return [
         name
         for name, spec in CASES.items()
-        if name in QA_SHEET_CASES and spec.implemented and not spec.requires_telegram
+        if (
+            name in QA_SHEET_CASES
+            and spec.implemented
+            and spec.ci_enabled
+            and not spec.requires_telegram
+        )
     ]
 
 
@@ -4346,7 +5053,7 @@ async def run_cases(args: argparse.Namespace) -> int:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = write_case_manifest(args.output_dir, selected_cases)
     print(f"[reborn-webui-v2-live-qa] case_manifest={manifest_path}", flush=True)
-    binary = _reborn_binary() if args.skip_build else build_reborn_binary()
+    binary = _reborn_binary() if args.skip_build else build_reborn_binary(selected_cases)
     if not binary.exists():
         raise LiveQaError(
             f"ironclaw-reborn binary missing at {binary}; rerun without --skip-build"

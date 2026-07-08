@@ -3352,6 +3352,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertNotIn("qa_1a_telegram_connect", selected_cases)
         self.assertNotIn("qa_1b_telegram_near_news_chat", selected_cases)
         self.assertNotIn("qa_1c_telegram_near_news_routine", selected_cases)
+        self.assertNotIn("qa_10b_webui_custom_tool_upload", selected_cases)
+        self.assertNotIn("qa_11c_response_api_btc_news_summary", selected_cases)
         for case_name in (
             "qa_2d_calendar_prep_live_chat",
             "qa_2f_calendar_prep_email_delivery",
@@ -3489,6 +3491,149 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             cases["qa_1a_telegram_connect"]["status"],
             "gated:requires_live_telegram",
         )
+        for case_name in (
+            "qa_10a_telegram_connect_for_custom_tool",
+            "qa_10b_webui_custom_tool_upload",
+            "qa_10c_webui_custom_tool_btc_analysis",
+            "qa_10d_telegram_custom_tool_btc_routine",
+            "qa_10e_telegram_custom_tool_btc_delivery",
+            "qa_11a_response_api_custom_tool_upload",
+            "qa_11b_response_api_telegram_connect",
+            "qa_11c_response_api_btc_news_summary",
+            "qa_11d_response_api_custom_tool_btc_analysis",
+            "qa_11e_response_api_telegram_btc_routine",
+            "qa_11f_response_api_telegram_btc_delivery",
+        ):
+            self.assertTrue(cases[case_name]["implemented"])
+            self.assertFalse(cases[case_name]["default_enabled"])
+            self.assertFalse(cases[case_name]["ci_enabled"])
+            self.assertEqual(cases[case_name]["status"], "targeted:not_in_ci")
+        self.assertTrue(cases["qa_11c_response_api_btc_news_summary"]["requires_openai_compat"])
+        self.assertTrue(
+            cases["qa_11d_response_api_custom_tool_btc_analysis"]["requires_openai_compat"]
+        )
+
+    def test_qa_10_11_cases_are_targetable_without_entering_ci_suite(self):
+        tdd_cases = [
+            case_name
+            for case_name, case in run_live_qa.QA_SHEET_CASES.items()
+            if any(str(row).startswith(("10", "11")) for row in case.get("rows", []))
+        ]
+
+        self.assertEqual(
+            tdd_cases,
+            [
+                "qa_10a_telegram_connect_for_custom_tool",
+                "qa_10b_webui_custom_tool_upload",
+                "qa_10c_webui_custom_tool_btc_analysis",
+                "qa_10d_telegram_custom_tool_btc_routine",
+                "qa_10e_telegram_custom_tool_btc_delivery",
+                "qa_11a_response_api_custom_tool_upload",
+                "qa_11b_response_api_telegram_connect",
+                "qa_11c_response_api_btc_news_summary",
+                "qa_11d_response_api_custom_tool_btc_analysis",
+                "qa_11e_response_api_telegram_btc_routine",
+                "qa_11f_response_api_telegram_btc_delivery",
+            ],
+        )
+        selected = run_live_qa._selected_case_names(
+            argparse.Namespace(all_cases=False, non_telegram_qa_cases=True, case=[])
+        )
+        for case_name in tdd_cases:
+            self.assertIn(case_name, run_live_qa.CASES)
+            self.assertFalse(run_live_qa.CASES[case_name].default_enabled)
+            self.assertFalse(run_live_qa.CASES[case_name].ci_enabled)
+            self.assertNotIn(case_name, selected)
+
+    def test_response_api_cases_add_openai_compat_feature_only_when_selected(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                run_live_qa._cargo_features_for_selected_cases(
+                    ["qa_3b_endpoint_status_live_chat"]
+                ),
+                "webui-v2-beta,slack-v2-host-beta",
+            )
+            self.assertEqual(
+                run_live_qa._cargo_features_for_selected_cases(
+                    ["qa_11c_response_api_btc_news_summary"]
+                ),
+                "webui-v2-beta,slack-v2-host-beta,openai-compat-beta",
+            )
+
+        with patch.dict(
+            os.environ,
+            {"REBORN_WEBUI_V2_LIVE_QA_FEATURES": "webui-v2-beta"},
+            clear=True,
+        ):
+            self.assertEqual(
+                run_live_qa._cargo_features_for_selected_cases(
+                    ["qa_11d_response_api_custom_tool_btc_analysis"]
+                ),
+                "webui-v2-beta,openai-compat-beta",
+            )
+
+    def test_response_api_helpers_extract_text_and_function_calls(self):
+        payload = {
+            "id": "resp_123",
+            "status": "in_progress",
+            "output": [
+                {
+                    "type": "message",
+                    "content": [
+                        {"type": "output_text", "text": "Latest BTC news summary"},
+                    ],
+                },
+                {
+                    "type": "function_call",
+                    "name": "btc_technical_analysis",
+                    "arguments": "{\"symbol\":\"BTC\"}",
+                },
+            ],
+        }
+
+        self.assertIn("Latest BTC news", run_live_qa._response_api_output_text(payload))
+        self.assertIn(
+            "function_call btc_technical_analysis",
+            run_live_qa._response_api_output_text(payload),
+        )
+        self.assertEqual(
+            run_live_qa._response_api_function_call_names(payload),
+            ["btc_technical_analysis"],
+        )
+
+    def test_response_api_custom_tool_case_requires_function_call(self):
+        captured: dict[str, object] = {}
+
+        async def fake_response_api_case(_ctx, **kwargs):
+            captured.update(kwargs)
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode=f"live:{kwargs['case_name']}",
+                success=True,
+                latency_ms=1,
+                details={"function_calls": [kwargs["required_function_call"]]},
+            )
+
+        with patch.object(
+            run_live_qa,
+            "_response_api_case",
+            side_effect=fake_response_api_case,
+        ):
+            result = asyncio.run(
+                run_live_qa.case_qa_11d_response_api_custom_tool_btc_analysis(
+                    self._dummy_ctx()
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(
+            captured["required_function_call"],
+            run_live_qa.BTC_ANALYSIS_CUSTOM_TOOL_NAME,
+        )
+        self.assertFalse(captured["require_completed"])
+        tools = captured["tools"]
+        self.assertEqual(tools[0]["type"], "function")
+        self.assertEqual(tools[0]["name"], run_live_qa.BTC_ANALYSIS_CUSTOM_TOOL_NAME)
 
     def test_gmail_delivery_target_prefers_explicit_env(self):
         target = asyncio.run(
