@@ -25,6 +25,16 @@ const V2_EVENT_NAMES = [
   "keep_alive",
   "error",
 ];
+
+const EVENT_SOURCE_CLOSED = 2;
+
+function isEventSourceClosed(source) {
+  const closedState = typeof EventSource === "function"
+    ? EventSource.CLOSED
+    : EVENT_SOURCE_CLOSED;
+  return source?.readyState === closedState;
+}
+
 export function useSSE({ threadId, onEvent, enabled }) {
   const [status, setStatus] = React.useState("idle");
   const onEventRef = React.useRef(onEvent);
@@ -70,7 +80,13 @@ export function useSSE({ threadId, onEvent, enabled }) {
       };
 
       es.onerror = () => {
-        if (es) es.close();
+        if (!es) return;
+        if (!isEventSourceClosed(es)) {
+          setStatus("reconnecting");
+          return;
+        }
+        es.close();
+        es = null;
         setStatus("disconnected");
         reconnectAttempts++;
         const delay = Math.min(1000 * 2 ** reconnectAttempts, maxReconnectDelay);
