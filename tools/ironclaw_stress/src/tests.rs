@@ -1216,6 +1216,8 @@ fn test_args() -> Args {
         api_base_url: None,
         api_users_jsonl: None,
         api_bearer_token: None,
+        api_admin_bearer_token: None,
+        api_admin_provisioners: 1,
         api_read_qps_per_user: 0.0,
         api_read_workers: 0,
         api_read_mix: crate::api_capacity::default_read_mix(),

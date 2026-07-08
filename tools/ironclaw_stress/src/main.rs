@@ -197,6 +197,14 @@ pub(crate) struct Args {
     #[arg(long)]
     pub(crate) api_bearer_token: Option<String>,
 
+    /// Operator/admin bearer token used to provision API test users via WebUI admin CRUD.
+    #[arg(long)]
+    pub(crate) api_admin_bearer_token: Option<String>,
+
+    /// Admin principals used to fan out API test-user provisioning. 1 uses the supplied admin token directly.
+    #[arg(long, default_value_t = 1)]
+    pub(crate) api_admin_provisioners: usize,
+
     /// Aggregate read pressure per virtual user for api-user-capacity.
     #[arg(long, default_value_t = 0.0)]
     pub(crate) api_read_qps_per_user: f64,
@@ -1087,6 +1095,10 @@ fn validate_args(args: &Args) -> Result<(), String> {
         if args.processes > 1 {
             return Err("--scenario api-user-capacity requires --processes 1".to_string());
         }
+    } else if args.api_admin_bearer_token.is_some() {
+        return Err(
+            "--api-admin-bearer-token is only valid for --scenario api-user-capacity".to_string(),
+        );
     }
     if args.api_read_qps_per_user < 0.0 {
         return Err("--api-read-qps-per-user must be greater than or equal to 0".to_string());
@@ -1105,6 +1117,9 @@ fn validate_args(args: &Args) -> Result<(), String> {
     }
     if args.api_setup_concurrency == 0 {
         return Err("--api-setup-concurrency must be greater than 0".to_string());
+    }
+    if args.api_admin_provisioners == 0 {
+        return Err("--api-admin-provisioners must be greater than 0".to_string());
     }
     api_capacity::validate_read_mix(&args.api_read_mix)?;
     if !(0.0..=1.0).contains(&args.mock_llm_failure_rate) {

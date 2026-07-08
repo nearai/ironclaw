@@ -3,7 +3,7 @@ use std::{
     net::SocketAddr,
     path::Path,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -29,6 +29,7 @@ const DEFAULT_READ_MIX: &str = "list_threads=50,timeline=45,session=5";
 const MAX_ERROR_BODY_CHARS: usize = 512;
 const MAX_MOCK_LLM_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 const MAX_READ_WORKER_SLEEP: Duration = Duration::from_secs(3600);
+const MOCK_COMPLETION_CREATED_AT: u64 = 1_700_000_000;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct ApiCapacitySummary {
@@ -47,7 +48,7 @@ pub(crate) struct ApiCapacitySummary {
     pub(crate) endpoints: BTreeMap<String, ApiEndpointSummary>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct MockLlmSummary {
     pub(crate) base_url: String,
     pub(crate) model: String,
@@ -55,6 +56,16 @@ pub(crate) struct MockLlmSummary {
     pub(crate) jitter_ms: u64,
     pub(crate) output_bytes: usize,
     pub(crate) failure_rate: f64,
+    pub(crate) requests: u64,
+    pub(crate) max_in_flight: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) request_latency: Option<LatencySummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) first_request_offset_ms: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) last_request_offset_ms: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) request_start_spread_ms: Option<u128>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -101,6 +112,24 @@ struct ApiIdentity {
     bearer_token: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct ApiAdminCreateUserRequest {
+    email: String,
+    display_name: String,
+    role: &'static str,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiAdminCreateUserResponse {
+    user: ApiAdminCreatedUserRecord,
+    api_token: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiAdminCreatedUserRecord {
+    user_id: String,
+}
+
 #[derive(Clone)]
 struct ApiHarness {
     client: Client,
@@ -144,8 +173,15 @@ struct ReadMix {
 
 #[derive(Debug)]
 struct MockLlmHandle {
-    summary: MockLlmSummary,
+    base_url: String,
+    state: Arc<MockLlmState>,
     stop_sender: Option<oneshot::Sender<()>>,
+}
+
+impl MockLlmHandle {
+    fn summary(&self) -> MockLlmSummary {
+        self.state.summary(self.base_url.clone())
+    }
 }
 
 impl Drop for MockLlmHandle {
@@ -166,6 +202,7 @@ struct MockLlmConfig {
     failure_rate: f64,
 }
 
+#[derive(Debug)]
 struct MockLlmState {
     model: String,
     latency_ms: u64,
@@ -173,6 +210,107 @@ struct MockLlmState {
     output_bytes: usize,
     failure_rate: f64,
     counter: AtomicU64,
+    in_flight: AtomicU64,
+    max_in_flight: AtomicU64,
+    started_at: Instant,
+    request_latencies: Mutex<Vec<Duration>>,
+    request_start_offsets: Mutex<Vec<Duration>>,
+}
+
+impl MockLlmState {
+    fn summary(&self, base_url: String) -> MockLlmSummary {
+        let request_latencies = self
+            .request_latencies
+            .lock()
+            .map(|latencies| latencies.clone())
+            .unwrap_or_default();
+        let mut request_latency_us = request_latencies
+            .iter()
+            .map(Duration::as_micros)
+            .collect::<Vec<_>>();
+        request_latency_us.sort_unstable();
+        let request_start_offsets = self
+            .request_start_offsets
+            .lock()
+            .map(|offsets| offsets.clone())
+            .unwrap_or_default();
+        let first_request_offset = request_start_offsets.iter().min().copied();
+        let last_request_offset = request_start_offsets.iter().max().copied();
+        MockLlmSummary {
+            base_url,
+            model: self.model.clone(),
+            latency_ms: self.latency_ms,
+            jitter_ms: self.jitter_ms,
+            output_bytes: self.output_bytes,
+            failure_rate: self.failure_rate,
+            requests: self.counter.load(Ordering::Relaxed),
+            max_in_flight: self.max_in_flight.load(Ordering::Relaxed),
+            request_latency: if request_latency_us.is_empty() {
+                None
+            } else {
+                Some(latency_summary(&request_latency_us))
+            },
+            first_request_offset_ms: first_request_offset.map(|duration| duration.as_millis()),
+            last_request_offset_ms: last_request_offset.map(|duration| duration.as_millis()),
+            request_start_spread_ms: first_request_offset
+                .zip(last_request_offset)
+                .map(|(first, last)| last.saturating_sub(first).as_millis()),
+        }
+    }
+
+    fn record_request_start(&self, offset: Duration) {
+        if let Ok(mut offsets) = self.request_start_offsets.lock() {
+            offsets.push(offset);
+        }
+    }
+
+    fn record_request_latency(&self, latency: Duration) {
+        if let Ok(mut latencies) = self.request_latencies.lock() {
+            latencies.push(latency);
+        }
+    }
+
+    fn enter_request(&self) {
+        let in_flight = self.in_flight.fetch_add(1, Ordering::Relaxed) + 1;
+        raise_atomic_max(&self.max_in_flight, in_flight);
+    }
+
+    fn exit_request(&self) {
+        self.in_flight.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+struct MockRequestGuard {
+    state: Arc<MockLlmState>,
+    started_at: Instant,
+}
+
+impl MockRequestGuard {
+    fn new(state: &Arc<MockLlmState>) -> Self {
+        state.record_request_start(state.started_at.elapsed());
+        state.enter_request();
+        Self {
+            state: Arc::clone(state),
+            started_at: Instant::now(),
+        }
+    }
+}
+
+impl Drop for MockRequestGuard {
+    fn drop(&mut self) {
+        self.state.record_request_latency(self.started_at.elapsed());
+        self.state.exit_request();
+    }
+}
+
+fn raise_atomic_max(target: &AtomicU64, value: u64) {
+    let mut current = target.load(Ordering::Relaxed);
+    while value > current {
+        match target.compare_exchange_weak(current, value, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(next) => current = next,
+        }
+    }
 }
 
 pub(crate) fn default_read_mix() -> String {
@@ -191,6 +329,7 @@ pub(crate) async fn run(
     let _mock_llm = start_mock_llm(args).await?;
     let harness = ApiHarness::new(args)?;
     let identities = load_identities(args).await?;
+    let identities = provision_missing_identities(args, run_id, &harness, identities).await?;
     let users = setup_users(args, run_id, &harness, identities).await?;
     let read_mix = ReadMix::parse(&args.api_read_mix)?;
     let read_workers = read_worker_count(args);
@@ -228,7 +367,7 @@ pub(crate) async fn run(
     )
     .await?;
     let elapsed = started.elapsed();
-    let mock_summary = _mock_llm.as_ref().map(|handle| handle.summary.clone());
+    let mock_summary = _mock_llm.as_ref().map(MockLlmHandle::summary);
     let mut endpoints = summarize_api_samples(&window.api_samples, elapsed);
     endpoints.insert(
         "full_flow".to_string(),
@@ -361,6 +500,7 @@ async fn run_virtual_user(
     let target = args.operation_target();
     let started = Instant::now();
     let mut operation_index = 0;
+    let mut expected_finalized_assistant_count = 0usize;
     let mut flow_samples = Vec::with_capacity(args.initial_worker_sample_capacity());
     let mut api_samples = Vec::new();
 
@@ -369,8 +509,16 @@ async fn run_virtual_user(
             "{operation_namespace}:{}:{}:{}",
             user.label, user.index, operation_index
         );
-        let (flow, mut operation_api_samples) =
-            run_full_flow(args, &harness, &user, operation_index, &operation_ref).await;
+        let (flow, mut operation_api_samples, updated_finalized_assistant_count) = run_full_flow(
+            args,
+            &harness,
+            &user,
+            operation_index,
+            &operation_ref,
+            expected_finalized_assistant_count,
+        )
+        .await;
+        expected_finalized_assistant_count = updated_finalized_assistant_count;
         progress.record(flow.error.is_some(), flow.latency);
         api_samples.append(&mut operation_api_samples);
         flow_samples.push(flow);
@@ -395,7 +543,8 @@ async fn run_full_flow(
     user: &ApiUser,
     operation_index: usize,
     operation_ref: &str,
-) -> (Sample, Vec<ApiRequestSample>) {
+    expected_finalized_assistant_count: usize,
+) -> (Sample, Vec<ApiRequestSample>, usize) {
     let started = Instant::now();
     let mut api_samples = Vec::new();
     let body = json!({
@@ -418,10 +567,64 @@ async fn run_full_flow(
     api_samples.push(send.sample);
     let failure = match send_value {
         Ok(value) => {
+            let target_finalized_count = expected_finalized_assistant_count + 1;
             if args.api_wait_for_assistant {
-                wait_for_assistant(args, harness, user, operation_index, &mut api_samples).await
+                let wait_started = Instant::now();
+                let wait = wait_for_assistant(
+                    args,
+                    harness,
+                    user,
+                    operation_index,
+                    target_finalized_count,
+                    &mut api_samples,
+                )
+                .await;
+                api_samples.push(ApiRequestSample {
+                    name: "wait_for_assistant",
+                    latency: wait_started.elapsed(),
+                    failure: wait.as_ref().err().cloned(),
+                });
+                match wait {
+                    Ok(finalized_count) => {
+                        let latency = started.elapsed();
+                        return (
+                            Sample {
+                                latency,
+                                error: None,
+                                failure: None,
+                                stages: None,
+                            },
+                            api_samples,
+                            finalized_count.max(target_finalized_count),
+                        );
+                    }
+                    Err(failure) => {
+                        let latency = started.elapsed();
+                        let error = Some(failure.bucket.clone());
+                        return (
+                            Sample {
+                                latency,
+                                error,
+                                failure: Some(failure),
+                                stages: None,
+                            },
+                            api_samples,
+                            target_finalized_count,
+                        );
+                    }
+                }
             } else if submitted_or_already_submitted(&value) {
-                None
+                let latency = started.elapsed();
+                return (
+                    Sample {
+                        latency,
+                        error: None,
+                        failure: None,
+                        stages: None,
+                    },
+                    api_samples,
+                    target_finalized_count,
+                );
             } else {
                 Some(FailureCause::new(
                     "api_submit_not_accepted",
@@ -443,6 +646,7 @@ async fn run_full_flow(
             stages: None,
         },
         api_samples,
+        expected_finalized_assistant_count,
     )
 }
 
@@ -451,8 +655,9 @@ async fn wait_for_assistant(
     harness: &ApiHarness,
     user: &ApiUser,
     operation_index: usize,
+    target_finalized_count: usize,
     api_samples: &mut Vec<ApiRequestSample>,
-) -> Option<FailureCause> {
+) -> Result<usize, FailureCause> {
     let deadline = Instant::now() + Duration::from_millis(args.api_terminal_timeout_ms);
     loop {
         let timeline = harness.timeline(user).await;
@@ -460,14 +665,15 @@ async fn wait_for_assistant(
         api_samples.push(timeline.sample);
         match value {
             Ok(value) => {
-                if timeline_has_finalized_assistant(&value) {
-                    return None;
+                let finalized_count = timeline_finalized_assistant_count(&value);
+                if finalized_count >= target_finalized_count {
+                    return Ok(finalized_count);
                 }
             }
-            Err(failure) => return Some(failure),
+            Err(failure) => return Err(failure),
         }
         if Instant::now() >= deadline {
-            return Some(FailureCause::new(
+            return Err(FailureCause::new(
                 "api_full_flow_timeout",
                 "timeline",
                 format!(
@@ -573,6 +779,44 @@ impl ApiHarness {
         .await
     }
 
+    async fn create_admin_user(
+        &self,
+        admin_bearer_token: &str,
+        email: String,
+        display_name: String,
+        role: &'static str,
+    ) -> ApiCallResult {
+        let request = ApiAdminCreateUserRequest {
+            email,
+            display_name,
+            role,
+        };
+        let body = match serde_json::to_value(request) {
+            Ok(value) => value,
+            Err(error) => {
+                let detail = error.to_string();
+                let failure =
+                    FailureCause::new("api_json_encode", "admin_create_user", detail.clone());
+                return ApiCallResult {
+                    sample: ApiRequestSample {
+                        name: "admin_create_user",
+                        latency: Duration::ZERO,
+                        failure: Some(failure.clone()),
+                    },
+                    value: Err(failure),
+                };
+            }
+        };
+        self.request_json_with_bearer(
+            Some(admin_bearer_token),
+            "admin_create_user",
+            Method::POST,
+            "/api/webchat/v2/admin/users",
+            Some(body),
+        )
+        .await
+    }
+
     async fn list_threads(&self, user: &ApiUser) -> ApiCallResult {
         self.request_json(
             user,
@@ -617,10 +861,22 @@ impl ApiHarness {
         path: &str,
         body: Option<Value>,
     ) -> ApiCallResult {
+        self.request_json_with_bearer(user.bearer_token.as_deref(), name, method, path, body)
+            .await
+    }
+
+    async fn request_json_with_bearer(
+        &self,
+        bearer_token: Option<&str>,
+        name: &'static str,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> ApiCallResult {
         let url = format!("{}{}", self.base_url, path);
         let started = Instant::now();
         let mut request = self.client.request(method, &url);
-        if let Some(token) = &user.bearer_token {
+        if let Some(token) = bearer_token {
             request = request.bearer_auth(token);
         }
         if let Some(body) = body {
@@ -723,16 +979,235 @@ async fn setup_users(
     Ok(users)
 }
 
+async fn provision_missing_identities(
+    args: &Args,
+    run_id: &str,
+    harness: &ApiHarness,
+    identities: Vec<ApiIdentity>,
+) -> Result<Vec<ApiIdentity>, String> {
+    let Some(admin_bearer_token) = args.api_admin_bearer_token.as_deref() else {
+        return Ok(identities);
+    };
+    if admin_bearer_token.trim().is_empty() {
+        return Err("--api-admin-bearer-token must not be empty".to_string());
+    }
+    let missing_tokens = identities
+        .iter()
+        .filter(|identity| identity.bearer_token.is_none())
+        .count();
+    if missing_tokens == 0 {
+        return Ok(identities);
+    }
+
+    eprintln!(
+        "{} provisioning {missing_tokens} API users through admin CRUD",
+        crate::log_prefix(args)
+    );
+    let provisioner_tokens =
+        prepare_admin_provisioners(args, run_id, harness, admin_bearer_token).await?;
+
+    let setup_concurrency = args.api_setup_concurrency.max(1);
+    let mut results = vec![None; identities.len()];
+    let mut next_index = 0;
+    let mut join_set = JoinSet::new();
+
+    while next_index < identities.len() || !join_set.is_empty() {
+        while next_index < identities.len() && join_set.len() < setup_concurrency {
+            let identity = identities[next_index].clone();
+            let identity_index = next_index;
+            next_index += 1;
+
+            if identity.bearer_token.is_some() {
+                results[identity_index] = Some(identity);
+                continue;
+            }
+
+            let harness = harness.clone();
+            let provisioner_token =
+                provisioner_tokens[identity_index % provisioner_tokens.len()].clone();
+            let email = admin_user_email(run_id, identity_index);
+            let display_name = format!("IronClaw Stress {}", identity.label);
+            join_set.spawn(async move {
+                let create = harness
+                    .create_admin_user(&provisioner_token, email, display_name, "member")
+                    .await;
+                match create.value {
+                    Ok(value) => {
+                        let created: ApiAdminCreateUserResponse =
+                            serde_json::from_value(value).map_err(|error| {
+                                format!("parse admin create response for api identity {identity_index}: {error}")
+                            })?;
+                        if created.api_token.is_empty() {
+                            return Err(format!(
+                                "admin create response for api identity {identity_index} returned an empty api_token"
+                            ));
+                        }
+                        Ok((
+                            identity_index,
+                            ApiIdentity {
+                                label: created.user.user_id,
+                                bearer_token: Some(created.api_token),
+                            },
+                        ))
+                    }
+                    Err(failure) => Err(format!(
+                        "admin create user for api identity {identity_index}: {}: {}",
+                        failure.bucket, failure.detail
+                    )),
+                }
+            });
+        }
+
+        if join_set.is_empty() {
+            continue;
+        }
+
+        let (identity_index, identity) = join_set
+            .join_next()
+            .await
+            .ok_or_else(|| "admin provisioning join set ended unexpectedly".to_string())?
+            .map_err(|error| format!("admin provisioning task join failed: {error}"))??;
+        results[identity_index] = Some(identity);
+    }
+
+    results
+        .into_iter()
+        .enumerate()
+        .map(|(index, identity)| {
+            identity.ok_or_else(|| format!("api identity {index} was not initialized"))
+        })
+        .collect()
+}
+
+async fn prepare_admin_provisioners(
+    args: &Args,
+    run_id: &str,
+    harness: &ApiHarness,
+    admin_bearer_token: &str,
+) -> Result<Vec<String>, String> {
+    if args.api_admin_provisioners <= 1 {
+        return Ok(vec![admin_bearer_token.to_string()]);
+    }
+
+    eprintln!(
+        "{} creating {} admin provisioning principals",
+        crate::log_prefix(args),
+        args.api_admin_provisioners
+    );
+
+    let setup_concurrency = args.api_setup_concurrency.max(1);
+    let mut next_index = 0;
+    let mut join_set = JoinSet::new();
+    let mut tokens = vec![None; args.api_admin_provisioners];
+
+    while next_index < args.api_admin_provisioners || !join_set.is_empty() {
+        while next_index < args.api_admin_provisioners && join_set.len() < setup_concurrency {
+            let provisioner_index = next_index;
+            next_index += 1;
+
+            let harness = harness.clone();
+            let admin_bearer_token = admin_bearer_token.to_string();
+            let provisioner_run_id = format!("{run_id}-admin-provisioner");
+            let email = admin_user_email(&provisioner_run_id, provisioner_index);
+            let display_name = format!("IronClaw Stress Provisioner {provisioner_index}");
+            join_set.spawn(async move {
+                let create = harness
+                    .create_admin_user(&admin_bearer_token, email, display_name, "admin")
+                    .await;
+                match create.value {
+                    Ok(value) => {
+                        let created: ApiAdminCreateUserResponse =
+                            serde_json::from_value(value).map_err(|error| {
+                                format!(
+                                    "parse admin provisioner response {provisioner_index}: {error}"
+                                )
+                            })?;
+                        if created.api_token.is_empty() {
+                            return Err(format!(
+                                "admin provisioner response {provisioner_index} returned an empty api_token"
+                            ));
+                        }
+                        Ok((provisioner_index, created.api_token))
+                    }
+                    Err(failure) => Err(format!(
+                        "create admin provisioner {provisioner_index}: {}: {}",
+                        failure.bucket, failure.detail
+                    )),
+                }
+            });
+        }
+
+        let (provisioner_index, token) = join_set
+            .join_next()
+            .await
+            .ok_or_else(|| "admin provisioner join set ended unexpectedly".to_string())?
+            .map_err(|error| format!("admin provisioner task join failed: {error}"))??;
+        tokens[provisioner_index] = Some(token);
+    }
+
+    tokens
+        .into_iter()
+        .enumerate()
+        .map(|(index, token)| {
+            token.ok_or_else(|| format!("admin provisioner {index} was not initialized"))
+        })
+        .collect()
+}
+
 async fn load_identities(args: &Args) -> Result<Vec<ApiIdentity>, String> {
     if let Some(path) = &args.api_users_jsonl {
         return load_identity_file(path).await;
     }
+    let bearer_token = generated_identity_bearer_token(args);
     Ok((0..args.users)
         .map(|index| ApiIdentity {
             label: format!("user-{index}"),
-            bearer_token: args.api_bearer_token.clone(),
+            bearer_token: bearer_token.clone(),
         })
         .collect())
+}
+
+fn generated_identity_bearer_token(args: &Args) -> Option<String> {
+    if args.api_admin_bearer_token.is_some() {
+        None
+    } else {
+        args.api_bearer_token.clone()
+    }
+}
+
+fn admin_user_email(run_id: &str, index: usize) -> String {
+    let run_slug = sanitize_email_local_part(run_id);
+    let mut local = if run_slug.is_empty() {
+        format!("stress-{index}")
+    } else {
+        format!("stress-{index}-{run_slug}")
+    };
+    local.truncate(64);
+    while local.ends_with('-') {
+        local.pop();
+    }
+    if local.is_empty() {
+        local.push_str("stress");
+    }
+    format!("{local}@ironclaw-stress.local")
+}
+
+fn sanitize_email_local_part(value: &str) -> String {
+    let mut sanitized = String::with_capacity(value.len().min(64));
+    let mut previous_dash = false;
+    for ch in value.chars() {
+        let next = if ch.is_ascii_alphanumeric() {
+            previous_dash = false;
+            ch.to_ascii_lowercase()
+        } else if previous_dash {
+            continue;
+        } else {
+            previous_dash = true;
+            '-'
+        };
+        sanitized.push(next);
+    }
+    sanitized.trim_matches('-').to_string()
 }
 
 async fn load_identity_file(path: &Path) -> Result<Vec<ApiIdentity>, String> {
@@ -957,17 +1432,18 @@ fn submitted_or_already_submitted(value: &Value) -> bool {
     )
 }
 
-fn timeline_has_finalized_assistant(value: &Value) -> bool {
+fn timeline_finalized_assistant_count(value: &Value) -> usize {
     value
         .get("messages")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .any(|message| {
+        .filter(|message| {
             let kind = message.get("kind").and_then(Value::as_str);
             let status = message.get("status").and_then(Value::as_str);
-            kind == Some("assistant") && matches!(status, Some("finalized" | "submitted"))
+            kind == Some("assistant") && status == Some("finalized")
         })
+        .count()
 }
 
 fn stress_payload(prefix: String, minimum_bytes: usize) -> String {
@@ -1023,8 +1499,14 @@ async fn start_mock_llm(args: &Args) -> Result<Option<MockLlmHandle>, String> {
         output_bytes: config.output_bytes,
         failure_rate: config.failure_rate,
         counter: AtomicU64::new(0),
+        in_flight: AtomicU64::new(0),
+        max_in_flight: AtomicU64::new(0),
+        started_at: Instant::now(),
+        request_latencies: Mutex::new(Vec::new()),
+        request_start_offsets: Mutex::new(Vec::new()),
     });
     let (stop_sender, mut stop_receiver) = oneshot::channel();
+    let accept_state = Arc::clone(&state);
     tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -1032,7 +1514,7 @@ async fn start_mock_llm(args: &Args) -> Result<Option<MockLlmHandle>, String> {
                 accepted = listener.accept() => {
                     match accepted {
                         Ok((stream, _)) => {
-                            let state = Arc::clone(&state);
+                            let state = Arc::clone(&accept_state);
                             tokio::spawn(async move {
                                 let _ = handle_mock_llm_connection(stream, state).await;
                             });
@@ -1053,14 +1535,8 @@ async fn start_mock_llm(args: &Args) -> Result<Option<MockLlmHandle>, String> {
         config.model
     );
     Ok(Some(MockLlmHandle {
-        summary: MockLlmSummary {
-            base_url,
-            model: config.model,
-            latency_ms: config.latency_ms,
-            jitter_ms: config.jitter_ms,
-            output_bytes: config.output_bytes,
-            failure_rate: config.failure_rate,
-        },
+        base_url,
+        state,
         stop_sender: Some(stop_sender),
     }))
 }
@@ -1137,6 +1613,7 @@ async fn handle_mock_completion(
     body: &[u8],
     state: Arc<MockLlmState>,
 ) -> Result<(), String> {
+    let _request_guard = MockRequestGuard::new(&state);
     let request_index = state.counter.fetch_add(1, Ordering::Relaxed) + 1;
     if should_fail_mock_request(state.failure_rate, request_index) {
         write_mock_response(
@@ -1164,35 +1641,76 @@ async fn handle_mock_completion(
         .unwrap_or(false);
     let content = stress_payload("mock assistant response".to_string(), state.output_bytes);
     if stream_response {
-        let chunk = json!({
-            "id": format!("chatcmpl-stress-{request_index}"),
-            "object": "chat.completion.chunk",
-            "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": null}]
-        });
-        let done = json!({
-            "id": format!("chatcmpl-stress-{request_index}"),
-            "object": "chat.completion.chunk",
-            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
-        });
+        let (chunk, done) = mock_streaming_completion_chunks(&state.model, request_index, content);
         let payload = format!("data: {chunk}\n\ndata: {done}\n\ndata: [DONE]\n\n");
         write_mock_response(stream, 200, "text/event-stream", payload.as_bytes()).await
     } else {
-        let response = json!({
-            "id": format!("chatcmpl-stress-{request_index}"),
-            "object": "chat.completion",
-            "choices": [{
-                "index": 0,
-                "message": {"role": "assistant", "content": content},
-                "finish_reason": "stop"
-            }],
-            "usage": {
-                "prompt_tokens": 16,
-                "completion_tokens": 16,
-                "total_tokens": 32
-            }
-        });
+        let response = mock_completion_response(&state.model, request_index, content);
         write_json_response(stream, 200, &response).await
     }
+}
+
+fn mock_completion_response(model: &str, request_index: u64, content: String) -> Value {
+    json!({
+        "id": format!("chatcmpl-stress-{request_index}"),
+        "object": "chat.completion",
+        "created": MOCK_COMPLETION_CREATED_AT,
+        "model": model,
+        "system_fingerprint": null,
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": content,
+                "tool_calls": null,
+                "refusal": null
+            },
+            "logprobs": null,
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 16,
+            "completion_tokens": 16,
+            "total_tokens": 32,
+            "prompt_tokens_details": null
+        }
+    })
+}
+
+fn mock_streaming_completion_chunks(
+    model: &str,
+    request_index: u64,
+    content: String,
+) -> (Value, Value) {
+    let base = json!({
+        "id": format!("chatcmpl-stress-{request_index}"),
+        "object": "chat.completion.chunk",
+        "created": MOCK_COMPLETION_CREATED_AT,
+        "model": model,
+        "system_fingerprint": null,
+    });
+    let mut chunk = base.clone();
+    chunk["choices"] = json!([{
+        "index": 0,
+        "delta": {"content": content},
+        "logprobs": null,
+        "finish_reason": null
+    }]);
+
+    let mut done = base;
+    done["choices"] = json!([{
+        "index": 0,
+        "delta": {},
+        "logprobs": null,
+        "finish_reason": "stop"
+    }]);
+    done["usage"] = json!({
+        "prompt_tokens": 16,
+        "completion_tokens": 16,
+        "total_tokens": 32,
+        "prompt_tokens_details": null
+    });
+    (chunk, done)
 }
 
 fn should_fail_mock_request(failure_rate: f64, request_index: u64) -> bool {
@@ -1283,6 +1801,27 @@ mod tests {
     }
 
     #[test]
+    fn admin_user_email_is_stable_ascii_and_bounded() {
+        let email = admin_user_email("Run 01 / With Symbols", 42);
+        assert_eq!(email, "stress-42-run-01-with-symbols@ironclaw-stress.local");
+        let long = admin_user_email(&"x".repeat(200), 7);
+        let local = long.split_once('@').unwrap().0;
+        assert!(local.len() <= 64);
+        assert!(long.ends_with("@ironclaw-stress.local"));
+    }
+
+    #[test]
+    fn parses_admin_create_user_token_response() {
+        let created: ApiAdminCreateUserResponse = serde_json::from_value(json!({
+            "user": {"user_id": "stress-user"},
+            "api_token": "session-token"
+        }))
+        .expect("admin create response parses");
+        assert_eq!(created.user.user_id, "stress-user");
+        assert_eq!(created.api_token, "session-token");
+    }
+
+    #[test]
     fn detects_finalized_assistant_in_timeline() {
         let value = json!({
             "messages": [
@@ -1290,13 +1829,44 @@ mod tests {
                 {"kind": "assistant", "status": "finalized"}
             ]
         });
-        assert!(timeline_has_finalized_assistant(&value));
+        assert_eq!(timeline_finalized_assistant_count(&value), 1);
+    }
+
+    #[test]
+    fn counts_only_finalized_assistant_messages_in_timeline() {
+        let value = json!({
+            "messages": [
+                {"kind": "assistant", "status": "submitted"},
+                {"kind": "assistant", "status": "finalized"},
+                {"kind": "user", "status": "finalized"},
+                {"kind": "assistant", "status": "finalized"}
+            ]
+        });
+        assert_eq!(timeline_finalized_assistant_count(&value), 2);
+    }
+
+    #[test]
+    fn submitted_assistant_is_not_finalized_for_full_flow() {
+        let value = json!({
+            "messages": [
+                {"kind": "assistant", "status": "submitted"}
+            ]
+        });
+        assert_eq!(timeline_finalized_assistant_count(&value), 0);
     }
 
     #[test]
     fn deterministic_jitter_handles_max_ceiling() {
         let expected = 42_u64.wrapping_mul(1_103_515_245).wrapping_add(12_345) % u64::MAX;
         assert_eq!(deterministic_jitter_ms(42, u64::MAX), expected);
+    }
+
+    #[test]
+    fn mock_completion_response_matches_rig_openai_shape() {
+        let response = mock_completion_response("stress-mock", 7, "ok".to_string());
+
+        serde_json::from_value::<rig::providers::openai::completion::CompletionResponse>(response)
+            .expect("stress mock should deserialize as rig-core OpenAI completion response");
     }
 
     #[test]

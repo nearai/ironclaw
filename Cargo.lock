@@ -5361,6 +5361,7 @@ dependencies = [
  "libc",
  "libsql",
  "reqwest 0.12.28",
+ "rig-core",
  "rust_decimal",
  "rust_decimal_macros",
  "serde",
