@@ -1489,7 +1489,8 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
         4,
         "the fired run must have attempted all 4 scheduled-trigger mutator \
          registrations (create/remove/pause/resume) — captured_messages: \
-         {captured_contents:?}, outcomes: {registration_outcomes:?}"
+         {captured_contents:?}, outcomes: {registration_outcomes:?}, \
+         settled_record: {settled:?}"
     );
 
     // Core assertion, mechanism-level: the surface must deny EVERY mutator
