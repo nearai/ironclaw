@@ -313,6 +313,7 @@ async fn cleanup_credentials_for_lifecycle_uses_facade_and_quarantine_report() {
         .cleanup_credentials_for_lifecycle(SecretCleanupRequest {
             scope: owner.clone(),
             extension_id: extension.clone(),
+            provider: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await

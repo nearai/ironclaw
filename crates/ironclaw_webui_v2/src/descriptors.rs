@@ -35,8 +35,10 @@ pub const WEBUI_V2_ROUTE_STREAM_EVENTS_WS: &str = "webui.v2.stream_events_ws";
 pub const WEBUI_V2_ROUTE_LIST_AUTOMATIONS: &str = "webui.v2.list_automations";
 pub const WEBUI_V2_ROUTE_PAUSE_AUTOMATION: &str = "webui.v2.pause_automation";
 pub const WEBUI_V2_ROUTE_RESUME_AUTOMATION: &str = "webui.v2.resume_automation";
+pub const WEBUI_V2_ROUTE_RENAME_AUTOMATION: &str = "webui.v2.rename_automation";
 pub const WEBUI_V2_ROUTE_DELETE_AUTOMATION: &str = "webui.v2.delete_automation";
 pub const WEBUI_V2_ROUTE_TRACE_CREDITS: &str = "webui.v2.trace_credits";
+pub const WEBUI_V2_ROUTE_TRACE_ACCOUNT_TRACES: &str = "webui.v2.trace_account_traces";
 pub const WEBUI_V2_ROUTE_TRACE_HOLD_AUTHORIZE: &str = "webui.v2.authorize_trace_hold";
 pub const WEBUI_V2_ROUTE_GET_OUTBOUND_PREFERENCES: &str = "webui.v2.get_outbound_preferences";
 pub const WEBUI_V2_ROUTE_SET_OUTBOUND_PREFERENCES: &str = "webui.v2.set_outbound_preferences";
@@ -100,6 +102,16 @@ pub const WEBUI_V2_ROUTE_LIST_PROJECT_MEMBERS: &str = "webui.v2.list_project_mem
 pub const WEBUI_V2_ROUTE_ADD_PROJECT_MEMBER: &str = "webui.v2.add_project_member";
 pub const WEBUI_V2_ROUTE_UPDATE_PROJECT_MEMBER: &str = "webui.v2.update_project_member";
 pub const WEBUI_V2_ROUTE_REMOVE_PROJECT_MEMBER: &str = "webui.v2.remove_project_member";
+pub const WEBUI_V2_ROUTE_ADMIN_LIST_USERS: &str = "webui.v2.admin.list_users";
+pub const WEBUI_V2_ROUTE_ADMIN_CREATE_USER: &str = "webui.v2.admin.create_user";
+pub const WEBUI_V2_ROUTE_ADMIN_GET_USER: &str = "webui.v2.admin.get_user";
+pub const WEBUI_V2_ROUTE_ADMIN_UPDATE_USER: &str = "webui.v2.admin.update_user";
+pub const WEBUI_V2_ROUTE_ADMIN_DELETE_USER: &str = "webui.v2.admin.delete_user";
+pub const WEBUI_V2_ROUTE_ADMIN_SET_USER_STATUS: &str = "webui.v2.admin.set_user_status";
+pub const WEBUI_V2_ROUTE_ADMIN_SET_USER_ROLE: &str = "webui.v2.admin.set_user_role";
+pub const WEBUI_V2_ROUTE_ADMIN_LIST_USER_SECRETS: &str = "webui.v2.admin.list_user_secrets";
+pub const WEBUI_V2_ROUTE_ADMIN_PUT_USER_SECRET: &str = "webui.v2.admin.put_user_secret";
+pub const WEBUI_V2_ROUTE_ADMIN_DELETE_USER_SECRET: &str = "webui.v2.admin.delete_user_secret";
 
 pub const WEBUI_V2_PATTERN_CREATE_THREAD: &str = "/api/webchat/v2/threads";
 pub const WEBUI_V2_PATTERN_LIST_THREADS: &str = "/api/webchat/v2/threads";
@@ -117,12 +129,23 @@ pub const WEBUI_V2_PATTERN_PAUSE_AUTOMATION: &str =
     "/api/webchat/v2/automations/{automation_id}/pause";
 pub const WEBUI_V2_PATTERN_RESUME_AUTOMATION: &str =
     "/api/webchat/v2/automations/{automation_id}/resume";
-pub const WEBUI_V2_PATTERN_DELETE_AUTOMATION: &str = "/api/webchat/v2/automations/{automation_id}";
+// Intentional dual-method resource path: POST renames an automation and DELETE
+// removes it. Keep the route ids separate so host policy/audit stays action-specific.
+pub const WEBUI_V2_PATTERN_AUTOMATION_DETAIL: &str = "/api/webchat/v2/automations/{automation_id}";
 pub const WEBUI_V2_PATTERN_TRACE_CREDITS: &str = "/api/webchat/v2/traces/credit";
+pub const WEBUI_V2_PATTERN_TRACE_ACCOUNT_TRACES: &str = "/api/webchat/v2/traces/account";
 pub const WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE: &str =
     "/api/webchat/v2/traces/holds/{submission_id}/authorize";
 pub const WEBUI_V2_PATTERN_OUTBOUND_PREFERENCES: &str = "/api/webchat/v2/outbound/preferences";
 pub const WEBUI_V2_PATTERN_OUTBOUND_DELIVERY_TARGETS: &str = "/api/webchat/v2/outbound/targets";
+pub const WEBUI_V2_PATTERN_ADMIN_USERS: &str = "/api/webchat/v2/admin/users";
+pub const WEBUI_V2_PATTERN_ADMIN_USER: &str = "/api/webchat/v2/admin/users/{user_id}";
+pub const WEBUI_V2_PATTERN_ADMIN_USER_STATUS: &str = "/api/webchat/v2/admin/users/{user_id}/status";
+pub const WEBUI_V2_PATTERN_ADMIN_USER_ROLE: &str = "/api/webchat/v2/admin/users/{user_id}/role";
+pub const WEBUI_V2_PATTERN_ADMIN_USER_SECRETS: &str =
+    "/api/webchat/v2/admin/users/{user_id}/secrets";
+pub const WEBUI_V2_PATTERN_ADMIN_USER_SECRET: &str =
+    "/api/webchat/v2/admin/users/{user_id}/secrets/{handle}";
 pub const WEBUI_V2_PATTERN_LIST_CONNECTABLE_CHANNELS: &str = "/api/webchat/v2/channels/connectable";
 pub const WEBUI_V2_PATTERN_LIST_EXTENSIONS: &str = "/api/webchat/v2/extensions";
 pub const WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY: &str = "/api/webchat/v2/extensions/registry";
@@ -202,8 +225,10 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         list_automations_descriptor(),
         pause_automation_descriptor(),
         resume_automation_descriptor(),
+        rename_automation_descriptor(),
         delete_automation_descriptor(),
         trace_credits_descriptor(),
+        trace_account_traces_descriptor(),
         authorize_trace_hold_descriptor(),
         get_outbound_preferences_descriptor(),
         set_outbound_preferences_descriptor(),
@@ -262,6 +287,16 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         add_project_member_descriptor(),
         update_project_member_descriptor(),
         remove_project_member_descriptor(),
+        admin_list_users_descriptor(),
+        admin_create_user_descriptor(),
+        admin_get_user_descriptor(),
+        admin_update_user_descriptor(),
+        admin_delete_user_descriptor(),
+        admin_set_user_status_descriptor(),
+        admin_set_user_role_descriptor(),
+        admin_list_user_secrets_descriptor(),
+        admin_put_user_secret_descriptor(),
+        admin_delete_user_secret_descriptor(),
     ]
 }
 
@@ -348,6 +383,146 @@ fn send_message_descriptor() -> IngressRouteDescriptor {
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
             AllowedEffectPath::TurnCoordinator,
+        ),
+    )
+}
+
+fn admin_list_users_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_ADMIN_LIST_USERS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_ADMIN_USERS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn admin_create_user_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_ADMIN_CREATE_USER,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_ADMIN_USERS,
+        mutation_policy(
+            body_limit_kib(16),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn admin_get_user_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_ADMIN_GET_USER,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_ADMIN_USER,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn admin_update_user_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_ADMIN_UPDATE_USER,
+        NetworkMethod::Patch,
+        WEBUI_V2_PATTERN_ADMIN_USER,
+        mutation_policy(
+            body_limit_kib(16),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn admin_delete_user_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_ADMIN_DELETE_USER,
+        NetworkMethod::Delete,
+        WEBUI_V2_PATTERN_ADMIN_USER,
+        mutation_policy(
+            BodyLimitPolicy::NoBody,
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn admin_set_user_status_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_ADMIN_SET_USER_STATUS,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_ADMIN_USER_STATUS,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn admin_set_user_role_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_ADMIN_SET_USER_ROLE,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_ADMIN_USER_ROLE,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn admin_list_user_secrets_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_ADMIN_LIST_USER_SECRETS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_ADMIN_USER_SECRETS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn admin_put_user_secret_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_ADMIN_PUT_USER_SECRET,
+        NetworkMethod::Put,
+        WEBUI_V2_PATTERN_ADMIN_USER_SECRET,
+        mutation_policy(
+            body_limit_kib(16),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn admin_delete_user_secret_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_ADMIN_DELETE_USER_SECRET,
+        NetworkMethod::Delete,
+        WEBUI_V2_PATTERN_ADMIN_USER_SECRET,
+        mutation_policy(
+            BodyLimitPolicy::NoBody,
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
         ),
     )
 }
@@ -704,11 +879,25 @@ fn resume_automation_descriptor() -> IngressRouteDescriptor {
     )
 }
 
+fn rename_automation_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_RENAME_AUTOMATION,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_AUTOMATION_DETAIL,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
 fn delete_automation_descriptor() -> IngressRouteDescriptor {
     descriptor(
         WEBUI_V2_ROUTE_DELETE_AUTOMATION,
         NetworkMethod::Delete,
-        WEBUI_V2_PATTERN_DELETE_AUTOMATION,
+        WEBUI_V2_PATTERN_AUTOMATION_DETAIL,
         mutation_policy(
             BodyLimitPolicy::NoBody,
             mutation_rate_limit(),
@@ -723,6 +912,20 @@ fn trace_credits_descriptor() -> IngressRouteDescriptor {
         WEBUI_V2_ROUTE_TRACE_CREDITS,
         NetworkMethod::Get,
         WEBUI_V2_PATTERN_TRACE_CREDITS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn trace_account_traces_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_TRACE_ACCOUNT_TRACES,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_TRACE_ACCOUNT_TRACES,
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,

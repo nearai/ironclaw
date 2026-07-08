@@ -6,7 +6,10 @@
 //! durable substrate.
 
 use super::*;
-use crate::{ExternalSubjectId, ProviderInstanceId, ProviderKind, SurfaceKind};
+use crate::{
+    ExternalSubjectId, ProviderInstanceId, ProviderKind, RebornUserDirectory,
+    RebornUserProfileUpdate, RebornUserRole, RebornUserStatus, SurfaceKind,
+};
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 
@@ -787,4 +790,451 @@ async fn corrupt_json_body_surfaces_backend_error() {
         matches!(result, Err(RebornIdentityError::Backend(_))),
         "a corrupt JSON body must surface a Backend error, got {result:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// RebornUserDirectory (admin surface)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn legacy_stored_user_json_deserializes_with_defaults() {
+    // A record written before the admin fields existed carries only the
+    // original four fields. It must load as an Active Member with no tenant —
+    // the serde defaults — not fail to deserialize.
+    let store = store();
+    let legacy = br#"{"email":"a@x.com","display_name":"Ada","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}"#;
+    store
+        .filesystem
+        .put(
+            &store.scope,
+            &user_path("legacy-user").unwrap(),
+            Entry::bytes(legacy.to_vec()).with_content_type(ContentType::json()),
+            CasExpectation::Absent,
+        )
+        .await
+        .expect("seed legacy record");
+
+    let user = store
+        .get_user(&UserId::new("legacy-user").unwrap())
+        .await
+        .expect("get")
+        .expect("present");
+    assert_eq!(user.status, RebornUserStatus::Active);
+    assert_eq!(user.role, RebornUserRole::Member);
+    assert_eq!(user.email.as_deref(), Some("a@x.com"));
+    assert!(user.tenant_id.is_none(), "legacy record has no tenant");
+    // A legacy record (no tenant) is enumerated for the single configured
+    // tenant.
+    let listed = store
+        .list_users(&tenant("t"), None, None, 10_000)
+        .await
+        .expect("list");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].user_id.as_str(), "legacy-user");
+}
+
+#[tokio::test]
+async fn create_then_list_and_get_roundtrip() {
+    let store = store();
+    let t = tenant("acme");
+    let admin = UserId::new("root-admin").unwrap();
+    let created = store
+        .create_user(
+            &t,
+            Some("new@acme.com".to_string()),
+            Some("New User".to_string()),
+            RebornUserRole::Member,
+            &admin,
+        )
+        .await
+        .expect("create");
+    assert_eq!(created.status, RebornUserStatus::Active);
+    assert_eq!(created.role, RebornUserRole::Member);
+    assert_eq!(
+        created.created_by.as_ref().map(UserId::as_str),
+        Some("root-admin")
+    );
+    assert_eq!(
+        created.tenant_id.as_ref().map(TenantId::as_str),
+        Some("acme")
+    );
+
+    let fetched = store
+        .get_user(&created.user_id)
+        .await
+        .expect("get")
+        .expect("present");
+    assert_eq!(fetched, created);
+
+    let listed = store
+        .list_users(&t, None, None, 10_000)
+        .await
+        .expect("list");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].user_id, created.user_id);
+
+    // A different tenant does not see this user.
+    let other = store
+        .list_users(&tenant("other"), None, None, 10_000)
+        .await
+        .expect("list other");
+    assert!(other.is_empty(), "users are tenant-scoped in enumeration");
+}
+
+#[tokio::test]
+async fn list_users_paginates_by_user_id_cursor() {
+    // Regression: the admin listing must return bounded pages and page through
+    // the whole tenant via the cursor without gaps or duplicates, instead of
+    // scanning and allocating every user in one unbounded response.
+    let store = store();
+    let t = tenant("acme");
+    let by = UserId::new("bootstrap").unwrap();
+    for _ in 0..5 {
+        store
+            .create_user(&t, None, None, RebornUserRole::Member, &by)
+            .await
+            .expect("create");
+    }
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut cursor: Option<UserId> = None;
+    loop {
+        let page = store
+            .list_users(&t, None, cursor.as_ref(), 2)
+            .await
+            .expect("page");
+        assert!(
+            page.len() <= 2,
+            "a page must never exceed the requested limit"
+        );
+        for window in page.windows(2) {
+            assert!(
+                window[0].user_id.as_str() < window[1].user_id.as_str(),
+                "records within a page are user_id ascending"
+            );
+        }
+        for user in &page {
+            let id = user.user_id.as_str().to_string();
+            assert!(!seen.contains(&id), "no user appears on two pages");
+            seen.push(id);
+        }
+        if page.len() < 2 {
+            break;
+        }
+        cursor = Some(page.last().expect("non-empty page").user_id.clone());
+    }
+
+    assert_eq!(seen.len(), 5, "pagination visits every user exactly once");
+    let mut globally_sorted = seen.clone();
+    globally_sorted.sort();
+    assert_eq!(
+        seen, globally_sorted,
+        "the concatenation of pages is globally user_id ascending"
+    );
+}
+
+#[tokio::test]
+async fn update_status_role_and_profile() {
+    let store = store();
+    let t = tenant("acme");
+    let admin = UserId::new("root-admin").unwrap();
+    let user = store
+        .create_user(
+            &t,
+            None,
+            Some("Before".to_string()),
+            RebornUserRole::Member,
+            &admin,
+        )
+        .await
+        .expect("create");
+
+    let suspended = store
+        .update_status(&user.user_id, RebornUserStatus::Suspended)
+        .await
+        .expect("suspend");
+    assert_eq!(suspended.status, RebornUserStatus::Suspended);
+    assert!(
+        suspended.updated_at >= user.updated_at,
+        "a mutation bumps updated_at"
+    );
+
+    let promoted = store
+        .update_role(&user.user_id, RebornUserRole::Admin)
+        .await
+        .expect("promote");
+    assert_eq!(promoted.role, RebornUserRole::Admin);
+
+    let mut metadata = std::collections::BTreeMap::new();
+    metadata.insert("team".to_string(), "platform".to_string());
+    let profiled = store
+        .update_profile(
+            &user.user_id,
+            RebornUserProfileUpdate {
+                display_name: Some("After".to_string()),
+                metadata: Some(metadata.clone()),
+            },
+        )
+        .await
+        .expect("profile");
+    assert_eq!(profiled.display_name.as_deref(), Some("After"));
+    assert_eq!(profiled.metadata, metadata);
+    // Status and role set earlier survive an unrelated profile PATCH.
+    assert_eq!(profiled.status, RebornUserStatus::Suspended);
+    assert_eq!(profiled.role, RebornUserRole::Admin);
+}
+
+#[tokio::test]
+async fn update_missing_user_surfaces_user_not_found() {
+    let store = store();
+    let result = store
+        .update_status(&UserId::new("ghost").unwrap(), RebornUserStatus::Suspended)
+        .await;
+    assert!(
+        matches!(result, Err(RebornIdentityError::UserNotFound(_))),
+        "updating an absent user must surface UserNotFound, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn count_active_admins_tracks_role_and_status() {
+    let store = store();
+    let t = tenant("acme");
+    let by = UserId::new("bootstrap").unwrap();
+    let admin_a = store
+        .create_user(&t, None, None, RebornUserRole::Admin, &by)
+        .await
+        .expect("admin a");
+    store
+        .create_user(&t, None, None, RebornUserRole::Owner, &by)
+        .await
+        .expect("owner");
+    store
+        .create_user(&t, None, None, RebornUserRole::Member, &by)
+        .await
+        .expect("member");
+    assert_eq!(
+        store.count_active_admins(&t).await.expect("count"),
+        2,
+        "an owner and an admin both count as admins; a member does not"
+    );
+
+    // Suspending an admin drops the active-admin count.
+    store
+        .update_status(&admin_a.user_id, RebornUserStatus::Suspended)
+        .await
+        .expect("suspend");
+    assert_eq!(
+        store.count_active_admins(&t).await.expect("count"),
+        1,
+        "a suspended admin is not an active admin"
+    );
+}
+
+#[tokio::test]
+async fn resolve_or_create_refuses_a_suspended_account_a_fresh_session() {
+    // Regression: suspending a user must lock them out of the product, not only
+    // the admin routes. A fresh SSO login (resolve_or_create) for a suspended
+    // account fails closed so the host adapter can map it to a 403 instead of
+    // minting a new session.
+    let store = store();
+    let t = tenant("acme");
+    let email = Some("alice@example.com");
+
+    let user = store
+        .resolve_or_create(oauth(&t, "google", "sub-1", email, true))
+        .await
+        .expect("first login mints an active user");
+
+    store
+        .update_status(&user, RebornUserStatus::Suspended)
+        .await
+        .expect("an admin suspends the account");
+
+    let err = store
+        .resolve_or_create(oauth(&t, "google", "sub-1", email, true))
+        .await
+        .expect_err("a suspended account must not resolve a fresh session");
+    assert!(
+        matches!(err, RebornIdentityError::UserSuspended(_)),
+        "suspended re-login must fail closed with UserSuspended, got {err:?}"
+    );
+
+    // Reactivation restores login and converges on the SAME canonical user.
+    store
+        .update_status(&user, RebornUserStatus::Active)
+        .await
+        .expect("reactivate");
+    let reactivated = store
+        .resolve_or_create(oauth(&t, "google", "sub-1", email, true))
+        .await
+        .expect("a reactivated account logs in again");
+    assert_eq!(reactivated, user, "reactivation resolves the same user");
+}
+
+#[tokio::test]
+async fn resolve_or_create_backfills_tenant_onto_a_legacy_tenantless_record() {
+    // Regression: records written before the admin surface existed carry
+    // `tenant_id: None` and would otherwise be visible to every tenant's admin
+    // listing. The owning user's next login backfills the resolving tenant so
+    // the record stops being globally visible.
+    let store = store();
+    let t = tenant("acme");
+    let email = Some("legacy@example.com");
+
+    let user = store
+        .resolve_or_create(oauth(&t, "google", "sub-legacy", email, true))
+        .await
+        .expect("mint");
+
+    // Rewrite the user record as a pre-admin, tenantless legacy row.
+    let path = user_path(user.as_str()).expect("user path");
+    let mut stored = store
+        .read_record::<StoredUser>(&path)
+        .await
+        .expect("read record")
+        .expect("record exists");
+    stored.tenant_id = None;
+    store
+        .write_record(&path, &stored, CasExpectation::Any)
+        .await
+        .expect("rewrite as tenantless");
+
+    // The next login for the same identity resolves the user and backfills.
+    let resolved = store
+        .resolve_or_create(oauth(&t, "google", "sub-legacy", email, true))
+        .await
+        .expect("re-login");
+    assert_eq!(resolved, user);
+
+    let after = store
+        .read_record::<StoredUser>(&path)
+        .await
+        .expect("read record")
+        .expect("record")
+        .tenant_id;
+    assert_eq!(
+        after.as_deref(),
+        Some("acme"),
+        "login must backfill the resolving tenant onto a legacy tenantless record"
+    );
+}
+
+#[tokio::test]
+async fn record_last_login_sets_field_without_bumping_updated_at() {
+    let store = store();
+    let t = tenant("acme");
+    let user = store
+        .create_user(
+            &t,
+            None,
+            None,
+            RebornUserRole::Member,
+            &UserId::new("by").unwrap(),
+        )
+        .await
+        .expect("create");
+    assert!(user.last_login_at.is_none());
+
+    store
+        .record_last_login(&user.user_id, "2026-07-07T10:00:00Z".to_string())
+        .await
+        .expect("record login");
+    let after = store
+        .get_user(&user.user_id)
+        .await
+        .expect("get")
+        .expect("present");
+    assert_eq!(after.last_login_at.as_deref(), Some("2026-07-07T10:00:00Z"));
+    assert_eq!(
+        after.updated_at, user.updated_at,
+        "a login must not bump updated_at (that tracks profile edits)"
+    );
+}
+
+#[tokio::test]
+async fn delete_user_cascades_external_identity_and_verified_email_index() {
+    // An SSO login mints a user + its external-identity record + its
+    // verified-email index. Deleting the user must remove all three, so a later
+    // login through the same identity mints a FRESH user instead of resolving
+    // the tombstoned id back to life.
+    let store = store();
+    let t = tenant("t");
+    let original = store
+        .resolve_or_create(oauth(&t, "google", "g-1", Some("gone@x.com"), true))
+        .await
+        .expect("resolve");
+
+    store.delete_user(&t, &original).await.expect("delete");
+
+    // User record gone.
+    assert!(
+        store.get_user(&original).await.expect("get").is_none(),
+        "the user record must be deleted"
+    );
+    // Verified-email index gone.
+    let index = store
+        .read_record::<StoredVerifiedEmailIndex>(&verified_email_path("t", "gone@x.com").unwrap())
+        .await
+        .expect("read index");
+    assert!(index.is_none(), "the verified-email index must be cascaded");
+    // External identity gone: a re-login mints a new, different user.
+    let after = store
+        .resolve_or_create(oauth(&t, "google", "g-1", Some("gone@x.com"), true))
+        .await
+        .expect("re-resolve");
+    assert_ne!(
+        after.as_str(),
+        original.as_str(),
+        "the external identity must be cascaded so a re-login does not revive the deleted user"
+    );
+}
+
+#[tokio::test]
+async fn resolve_or_create_refuses_to_relink_a_user_mid_delete() {
+    // Regression for the delete-vs-relink race: a delete cascade removes the
+    // external identity before the verified-email index, so during that window
+    // a concurrent login (here via a DIFFERENT provider for the SAME verified
+    // email) reaches the email-link branch and would otherwise re-link a fresh
+    // identity onto the id being deleted — reviving a ghost. The in-flight
+    // tombstone makes the resolver fail closed with a retryable error instead.
+    let store = store();
+    let t = tenant("acme");
+    let user = store
+        .resolve_or_create(oauth(&t, "google", "g-1", Some("shared@x.com"), true))
+        .await
+        .expect("first login mints the user + verified-email index");
+
+    // Simulate the mid-cascade state: the delete has written the tombstone but
+    // not yet removed the verified-email index.
+    store
+        .write_record(
+            &user_tombstone_path(user.as_str()).unwrap(),
+            &StoredUserTombstone {
+                deleted_at: "2026-07-07T00:00:00Z".to_string(),
+            },
+            CasExpectation::Any,
+        )
+        .await
+        .expect("write tombstone");
+
+    let err = store
+        .resolve_or_create(oauth(&t, "github", "gh-9", Some("shared@x.com"), true))
+        .await
+        .expect_err("a login racing a delete must not re-link the tombstoned user");
+    assert!(
+        matches!(err, RebornIdentityError::Backend(_)),
+        "the relink must fail closed with a retryable error, got {err:?}"
+    );
+
+    // Once the tombstone clears (cascade finished), logins mint fresh again.
+    store
+        .filesystem
+        .delete(&store.scope, &user_tombstone_path(user.as_str()).unwrap())
+        .await
+        .expect("clear tombstone");
+    store
+        .resolve_or_create(oauth(&t, "github", "gh-9", Some("shared@x.com"), true))
+        .await
+        .expect("after the tombstone clears, the email-link path resolves again");
 }

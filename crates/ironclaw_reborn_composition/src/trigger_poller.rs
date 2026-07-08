@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::runtime_input::TriggerPollerSettings;
 #[cfg(feature = "slack-v2-host-beta")]
-use crate::slack_delivery::PostSubmitDeliveryHook;
+use crate::slack::slack_delivery::PostSubmitDeliveryHook;
 pub(crate) use crate::trigger_poller_trusted_submit::AccessCheckerTriggerFireAuthorizer;
 pub(crate) use crate::trigger_poller_trusted_submit::ConversationContentRefMaterializer;
 #[cfg(any(test, feature = "test-support"))]
@@ -351,7 +351,7 @@ mod tests {
         use tokio_util::sync::CancellationToken;
 
         use super::super::{POST_SUBMIT_HOOK_PENDING_CAPACITY, PostSubmitHookObserver};
-        use crate::slack_delivery::PostSubmitDeliveryHook;
+        use crate::slack::slack_delivery::PostSubmitDeliveryHook;
 
         #[derive(Default)]
         struct RecordingHook {
