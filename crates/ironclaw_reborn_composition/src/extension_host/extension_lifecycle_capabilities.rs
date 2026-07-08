@@ -9,8 +9,8 @@ use ironclaw_extensions::{
 };
 use ironclaw_host_api::{
     CapabilityDisplayOutputPreview, CapabilityId, CapabilityProfileSchemaRef, CredentialStageError,
-    EffectKind, HostApiError, PermissionMode, ResourceEstimate, ResourceProfile, ResourceUsage,
-    RuntimeDispatchErrorKind,
+    EffectKind, HostApiError, PermissionMode, ResourceEstimate, ResourceProfile, ResourceScope,
+    ResourceUsage, RuntimeDispatchErrorKind,
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
@@ -18,7 +18,8 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_product_workflow::{
     ChannelConnectionFacade, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload,
-    LifecycleProductResponse, ProductWorkflowError,
+    LifecycleProductResponse, ProductWorkflowError, RebornServicesError, RemovableChannelCleanup,
+    WebUiAuthenticatedCaller, removable_channel_cleanup_for_summary,
 };
 use serde::Deserialize;
 
@@ -51,11 +52,12 @@ pub(crate) fn insert_handlers(
     registry: &mut FirstPartyCapabilityRegistry,
     extension_management: Arc<RebornLocalExtensionManagementPort>,
     credential_accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
-    _channel_connection: Arc<OnceLock<Arc<dyn ChannelConnectionFacade>>>,
+    channel_connection: Arc<OnceLock<Arc<dyn ChannelConnectionFacade>>>,
 ) -> Result<(), HostApiError> {
     let handler = Arc::new(ExtensionLifecycleToolHandler {
         extension_management,
         credential_accounts,
+        channel_connection,
     });
     for capability_id in EXTENSION_LIFECYCLE_CAPABILITY_IDS {
         registry.insert_handler(CapabilityId::new(capability_id)?, handler.clone());
@@ -133,6 +135,7 @@ fn lifecycle_manifest(
 struct ExtensionLifecycleToolHandler {
     extension_management: Arc<RebornLocalExtensionManagementPort>,
     credential_accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
+    channel_connection: Arc<OnceLock<Arc<dyn ChannelConnectionFacade>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -144,6 +147,91 @@ struct SearchInput {
 #[derive(Debug, Deserialize)]
 struct ExtensionIdInput {
     extension_id: String,
+}
+
+impl ExtensionLifecycleToolHandler {
+    async fn remove_extension(
+        &self,
+        package_ref: LifecyclePackageRef,
+        scope: &ResourceScope,
+    ) -> Result<LifecycleProductResponse, FirstPartyCapabilityError> {
+        if let Some(cleanup) = self.removable_channel_cleanup(&package_ref).await? {
+            self.disconnect_channel_for_remove(scope, cleanup).await?;
+        }
+        self.extension_management
+            .remove(package_ref, scope)
+            .await
+            .map_err(lifecycle_error)
+    }
+
+    async fn removable_channel_cleanup(
+        &self,
+        package_ref: &LifecyclePackageRef,
+    ) -> Result<Option<RemovableChannelCleanup>, FirstPartyCapabilityError> {
+        if package_ref.kind != LifecyclePackageKind::Extension {
+            return Ok(None);
+        }
+        let installed = self
+            .extension_management
+            .list_installed()
+            .await
+            .map_err(lifecycle_error)?;
+        let Some(LifecycleProductPayload::ExtensionList { extensions, .. }) = installed.payload
+        else {
+            return Ok(None);
+        };
+        Ok(extensions
+            .into_iter()
+            .filter(|installed| installed.summary.package_ref == *package_ref)
+            .find_map(|installed| removable_channel_cleanup_for_summary(&installed.summary)))
+    }
+
+    async fn disconnect_channel_for_remove(
+        &self,
+        scope: &ResourceScope,
+        cleanup: RemovableChannelCleanup,
+    ) -> Result<(), FirstPartyCapabilityError> {
+        let (channel, requires_connection_facade_support) = cleanup.into_parts();
+        let Some(channel_connection) = self.channel_connection.get().cloned() else {
+            if requires_connection_facade_support {
+                return Ok(());
+            }
+            tracing::debug!(
+                target: "ironclaw::reborn::extension_lifecycle",
+                channel,
+                "extension removal requires channel cleanup but no channel connection facade is installed"
+            );
+            return Err(FirstPartyCapabilityError::new(
+                RuntimeDispatchErrorKind::OperationFailed,
+            ));
+        };
+        let caller = caller_from_scope(scope);
+        let should_disconnect = if requires_connection_facade_support {
+            channel_connection
+                .caller_channel_connections(caller.clone())
+                .await
+                .map_err(channel_connection_error)?
+                .contains_key(&channel)
+        } else {
+            true
+        };
+        if should_disconnect {
+            channel_connection
+                .disconnect_channel_for_caller(caller, &channel)
+                .await
+                .map_err(channel_connection_error)?;
+        }
+        Ok(())
+    }
+}
+
+fn caller_from_scope(scope: &ResourceScope) -> WebUiAuthenticatedCaller {
+    WebUiAuthenticatedCaller::new(
+        scope.tenant_id.clone(),
+        scope.user_id.clone(),
+        scope.agent_id.clone(),
+        scope.project_id.clone(),
+    )
 }
 
 #[async_trait]
@@ -163,12 +251,14 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                 self.extension_management
                     .search(&input.query, Some(&credential_gate))
                     .await
+                    .map_err(lifecycle_error)
             }
             EXTENSION_INSTALL_CAPABILITY_ID => {
                 let input: ExtensionIdInput = parse_input(request.input)?;
                 self.extension_management
                     .install(extension_package_ref(input.extension_id)?)
                     .await
+                    .map_err(lifecycle_error)
             }
             EXTENSION_ACTIVATE_CAPABILITY_ID => {
                 let input: ExtensionIdInput = parse_input(request.input)?;
@@ -199,14 +289,11 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                 self.extension_management
                     .activate_with_credential_gate(package_ref, mode, credential_gate)
                     .await
+                    .map_err(lifecycle_error)
             }
             EXTENSION_REMOVE_CAPABILITY_ID => {
                 let input: ExtensionIdInput = parse_input(request.input)?;
-                // Credential revocation lives on the port's `remove` (the single
-                // convergence point shared with the WebUI facade), so the scope
-                // is threaded through rather than cleaned up here.
-                self.extension_management
-                    .remove(extension_package_ref(input.extension_id)?, &request.scope)
+                self.remove_extension(extension_package_ref(input.extension_id)?, &request.scope)
                     .await
             }
             _ => {
@@ -214,8 +301,7 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     RuntimeDispatchErrorKind::UndeclaredCapability,
                 ));
             }
-        }
-        .map_err(lifecycle_error)?;
+        }?;
 
         // An inbound-channel activation carries a structured connection
         // requirement; surface it as a display preview so WebChat opens the
@@ -342,9 +428,20 @@ fn lifecycle_error(error: ProductWorkflowError) -> FirstPartyCapabilityError {
     FirstPartyCapabilityError::new(kind)
 }
 
+fn channel_connection_error(error: RebornServicesError) -> FirstPartyCapabilityError {
+    tracing::debug!(
+        target: "ironclaw::reborn::extension_lifecycle",
+        ?error,
+        "extension channel cleanup failed"
+    );
+    FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
+    #[cfg(feature = "slack-v2-host-beta")]
+    use std::{collections::HashMap, sync::Mutex};
 
     use ironclaw_auth::{
         AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
@@ -366,6 +463,8 @@ mod tests {
     use ironclaw_product_workflow::{
         ChannelConnectionRequirement, LifecyclePhase, RebornChannelConnectStrategy,
     };
+    #[cfg(feature = "slack-v2-host-beta")]
+    use ironclaw_product_workflow::{RebornServicesError, WebUiAuthenticatedCaller};
 
     fn slack_activation_response() -> LifecycleProductResponse {
         let requirement = ChannelConnectionRequirement {
@@ -644,6 +743,103 @@ mod tests {
         let after_remove = active_extension_capability_ids(&extension_management).await;
         assert!(!after_remove.iter().any(|id| id == "web-access.search"));
         assert!(!storage_root.join("system/extensions/web-access").exists());
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[derive(Debug, Default)]
+    struct RecordingChannelConnectionFacade {
+        connections: Mutex<HashMap<String, bool>>,
+        disconnects: Mutex<Vec<(UserId, String)>>,
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    impl RecordingChannelConnectionFacade {
+        fn with_connection(channel: &str, connected: bool) -> Self {
+            Self {
+                connections: Mutex::new(HashMap::from([(channel.to_string(), connected)])),
+                disconnects: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn disconnects(&self) -> Vec<(UserId, String)> {
+            self.disconnects.lock().expect("disconnects lock").clone()
+        }
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[async_trait]
+    impl ChannelConnectionFacade for RecordingChannelConnectionFacade {
+        async fn caller_channel_connections(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+        ) -> Result<HashMap<String, bool>, RebornServicesError> {
+            Ok(self.connections.lock().expect("connections lock").clone())
+        }
+
+        async fn disconnect_channel_for_caller(
+            &self,
+            caller: WebUiAuthenticatedCaller,
+            channel: &str,
+        ) -> Result<(), RebornServicesError> {
+            self.disconnects
+                .lock()
+                .expect("disconnects lock")
+                .push((caller.user_id, channel.to_string()));
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[tokio::test]
+    async fn local_dev_extension_remove_tool_disconnects_slack_channel_binding() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "extension-tools-remove-slack-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        let channel_connection = Arc::new(RecordingChannelConnectionFacade::with_connection(
+            "slack", true,
+        ));
+        let local_runtime = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate");
+        let channel_connection_trait: Arc<dyn ChannelConnectionFacade> = channel_connection.clone();
+        assert!(
+            local_runtime
+                .channel_connection_facade_slot
+                .set(channel_connection_trait)
+                .is_ok(),
+            "channel connection facade slot should be unset in the test runtime"
+        );
+
+        invoke_json(
+            &services,
+            EXTENSION_INSTALL_CAPABILITY_ID,
+            serde_json::json!({"extension_id": "slack"}),
+        )
+        .await
+        .expect("install succeeds");
+
+        let remove = invoke_json(
+            &services,
+            EXTENSION_REMOVE_CAPABILITY_ID,
+            serde_json::json!({"extension_id": "slack"}),
+        )
+        .await
+        .expect("remove succeeds");
+        assert_eq!(remove["payload"]["removed"], true);
+
+        assert_eq!(
+            channel_connection.disconnects(),
+            vec![(
+                UserId::new("extension-tool-test-user").expect("valid user id"),
+                "slack".to_string()
+            )],
+            "model-visible extension removal should clean up the same Slack channel binding as WebUI removal"
+        );
     }
 
     #[tokio::test]

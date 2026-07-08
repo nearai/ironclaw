@@ -46,7 +46,8 @@ use uuid::Uuid;
 
 use crate::{
     ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionRejectionKind, AuthInteractionService, LifecyclePackageRef,
+    AuthInteractionRejectionKind, AuthInteractionService, LifecycleExtensionSummary,
+    LifecycleExtensionSurfaceKind, LifecyclePackageKind, LifecyclePackageRef,
     LifecycleProductFacade, ListPendingApprovalsRequest, ProductWorkflowError,
     ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
@@ -169,6 +170,9 @@ type SkillActivationClearer =
 
 const AUTO_APPROVE_CONFIG_KEY: &str = "agent.auto_approve_tools";
 const TOOL_CONFIG_PREFIX: &str = "tool.";
+const SLACK_EXTENSION_ID: &str = "slack";
+const SLACK_PERSONAL_PROVIDER_ID: &str = "slack_personal";
+const SLACK_CHANNEL_ID: &str = "slack";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebornOperatorToolInfo {
@@ -263,6 +267,46 @@ pub trait ChannelConnectionFacade: Send + Sync {
     ) -> Result<(), RebornServicesError> {
         Err(RebornServicesError::service_unavailable(false))
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemovableChannelCleanup {
+    Required(String),
+    IfConnectionFacadeSupportsChannel(String),
+}
+
+impl RemovableChannelCleanup {
+    pub fn into_parts(self) -> (String, bool) {
+        match self {
+            Self::Required(channel) => (channel, false),
+            Self::IfConnectionFacadeSupportsChannel(channel) => (channel, true),
+        }
+    }
+}
+
+pub fn removable_channel_cleanup_for_summary(
+    summary: &LifecycleExtensionSummary,
+) -> Option<RemovableChannelCleanup> {
+    if summary
+        .surface_kinds
+        .contains(&LifecycleExtensionSurfaceKind::ExternalChannel)
+    {
+        return Some(RemovableChannelCleanup::Required(
+            summary.package_ref.id.as_str().to_string(),
+        ));
+    }
+    if summary.package_ref.kind == LifecyclePackageKind::Extension
+        && summary.package_ref.id.as_str() == SLACK_EXTENSION_ID
+        && summary
+            .credential_requirements
+            .iter()
+            .any(|requirement| requirement.provider == SLACK_PERSONAL_PROVIDER_ID)
+    {
+        return Some(RemovableChannelCleanup::IfConnectionFacadeSupportsChannel(
+            SLACK_CHANNEL_ID.to_string(),
+        ));
+    }
+    None
 }
 
 #[derive(Debug, Clone, Default)]

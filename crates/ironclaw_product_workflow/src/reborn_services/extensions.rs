@@ -13,7 +13,8 @@ use crate::{
     LifecycleProductPayload, LifecycleProductResponse, LifecycleProductSurfaceContext,
     RebornExtensionActionResponse, RebornExtensionInfo, RebornExtensionListResponse,
     RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
-    RebornServicesError, WebUiAuthenticatedCaller,
+    RebornServicesError, RemovableChannelCleanup, WebUiAuthenticatedCaller,
+    removable_channel_cleanup_for_summary,
 };
 
 use super::{
@@ -26,9 +27,6 @@ use super::{
 };
 
 const EXTENSION_READINESS_CONCURRENCY: usize = 8;
-const SLACK_EXTENSION_ID: &str = "slack";
-const SLACK_PERSONAL_PROVIDER_ID: &str = "slack_personal";
-const SLACK_CHANNEL_ID: &str = "slack";
 
 pub(super) async fn list_extensions(
     facade: Arc<dyn LifecycleProductFacade>,
@@ -184,20 +182,6 @@ async fn removable_channel_cleanup(
         .into_iter()
         .filter(|installed| installed.summary.package_ref == *package_ref)
         .find_map(|installed| removable_channel_cleanup_for_summary(&installed.summary)))
-}
-
-enum RemovableChannelCleanup {
-    Required(String),
-    IfConnectionFacadeSupportsChannel(String),
-}
-
-impl RemovableChannelCleanup {
-    fn into_parts(self) -> (String, bool) {
-        match self {
-            Self::Required(channel) => (channel, false),
-            Self::IfConnectionFacadeSupportsChannel(channel) => (channel, true),
-        }
-    }
 }
 
 async fn execute_lifecycle(
@@ -391,28 +375,6 @@ fn has_external_channel_surface(summary: &LifecycleExtensionSummary) -> bool {
     summary
         .surface_kinds
         .contains(&LifecycleExtensionSurfaceKind::ExternalChannel)
-}
-
-fn removable_channel_cleanup_for_summary(
-    summary: &LifecycleExtensionSummary,
-) -> Option<RemovableChannelCleanup> {
-    if has_external_channel_surface(summary) {
-        return Some(RemovableChannelCleanup::Required(
-            summary.package_ref.id.as_str().to_string(),
-        ));
-    }
-    if summary.package_ref.kind == LifecyclePackageKind::Extension
-        && summary.package_ref.id.as_str() == SLACK_EXTENSION_ID
-        && summary
-            .credential_requirements
-            .iter()
-            .any(|requirement| requirement.provider == SLACK_PERSONAL_PROVIDER_ID)
-    {
-        return Some(RemovableChannelCleanup::IfConnectionFacadeSupportsChannel(
-            SLACK_CHANNEL_ID.to_string(),
-        ));
-    }
-    None
 }
 
 fn phase_status(phase: LifecyclePhase) -> &'static str {
@@ -637,10 +599,7 @@ mod tests {
     async fn remove_action_disconnects_slack_when_removing_visible_slack_extension() {
         let facade = RemoveFacade::slack_tools_extension();
         let caller = caller();
-        let connections = Arc::new(TestConnections::with_connections(&[(
-            SLACK_CHANNEL_ID,
-            false,
-        )]));
+        let connections = Arc::new(TestConnections::with_connections(&[("slack", false)]));
         let channel_connections: Arc<dyn ChannelConnectionFacade> = connections.clone();
 
         let response = remove_extension(

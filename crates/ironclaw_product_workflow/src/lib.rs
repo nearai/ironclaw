@@ -218,12 +218,13 @@ pub use reborn_services::{
     RebornSkillTrustLevel, RebornStreamEventsRequest, RebornStreamEventsResponse,
     RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
     RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest,
-    RebornUpdateProjectRequest, SetActiveLlmRequest, SettingsToolPermissionState,
-    SkillsProductFacade, StaticConnectableChannelsProductFacade, StaticOperatorStatusService,
-    TriggerRunThreadScope, UnsupportedAutomationProductFacade, UnsupportedOperatorLogsService,
-    UnsupportedOperatorServiceLifecycleService, UnsupportedOperatorStatusService,
-    UnsupportedOutboundPreferencesProductFacade, UpsertLlmProviderRequest,
-    normalize_operator_log_context_value,
+    RebornUpdateProjectRequest, RemovableChannelCleanup, SetActiveLlmRequest,
+    SettingsToolPermissionState, SkillsProductFacade, StaticConnectableChannelsProductFacade,
+    StaticOperatorStatusService, TriggerRunThreadScope, UnsupportedAutomationProductFacade,
+    UnsupportedOperatorLogsService, UnsupportedOperatorServiceLifecycleService,
+    UnsupportedOperatorStatusService, UnsupportedOutboundPreferencesProductFacade,
+    UpsertLlmProviderRequest, normalize_operator_log_context_value,
+    removable_channel_cleanup_for_summary,
 };
 
 pub use webui_inbound::{
