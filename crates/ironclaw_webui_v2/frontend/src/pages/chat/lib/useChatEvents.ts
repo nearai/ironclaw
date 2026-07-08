@@ -691,9 +691,11 @@ function appendRunFailureMessage(
 }
 
 function appendStreamFailureMessage(setMessages, { error, kind, retryable }) {
-  const messageId = streamFailureMessageId({ error, kind, retryable });
+  const baseMessageId = streamFailureMessageId({ error, kind, retryable });
   setMessages((prev) => {
-    if (prev.some((m) => m.id === messageId)) return prev;
+    const lastMessage = prev[prev.length - 1];
+    if (isSameStreamFailureMessage(lastMessage, baseMessageId)) return prev;
+    const messageId = uniqueStreamFailureMessageId(baseMessageId, prev);
     return [
       ...prev,
       {
@@ -704,6 +706,24 @@ function appendStreamFailureMessage(setMessages, { error, kind, retryable }) {
       },
     ];
   });
+}
+
+function isSameStreamFailureMessage(message, baseMessageId) {
+  const id = typeof message?.id === "string" ? message.id : "";
+  return id === baseMessageId || id.startsWith(`${baseMessageId}-`);
+}
+
+function uniqueStreamFailureMessageId(baseMessageId, messages) {
+  const timestamp = Date.now();
+  let messageId = `${baseMessageId}-${timestamp}`;
+  for (
+    let suffix = 1;
+    messages.some((message) => message.id === messageId);
+    suffix += 1
+  ) {
+    messageId = `${baseMessageId}-${timestamp}-${suffix}`;
+  }
+  return messageId;
 }
 
 function streamFailureMessageId({ error, kind, retryable }) {

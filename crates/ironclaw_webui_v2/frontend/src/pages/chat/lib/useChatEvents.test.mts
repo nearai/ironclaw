@@ -1630,3 +1630,47 @@ test("useChatEvents: stream error event appends inline error and clears active s
     },
   ]);
 });
+
+test("useChatEvents: stream error dedupe only suppresses adjacent repeats", () => {
+  const seenStreamErrors = [];
+  const harness = createUseChatEventsHarness({
+    failureMessageForStreamError: (input) => {
+      seenStreamErrors.push(input);
+      return `stream:${input.kind}`;
+    },
+  });
+  const streamErrorFrame = {
+    error: "unavailable",
+    kind: "service_unavailable",
+    retryable: true,
+  };
+
+  harness.handleEvent({ type: "error", frame: streamErrorFrame });
+  harness.handleEvent({ type: "error", frame: streamErrorFrame });
+
+  assert.equal(harness.messages.length, 1);
+  const firstError = harness.messages[0];
+  assert.equal(firstError.role, "error");
+  assert.match(
+    firstError.id,
+    /^err-stream-unavailable-service_unavailable-retryable-/,
+  );
+
+  harness.replaceMessages([
+    ...harness.messages,
+    { id: "assistant-between-errors", role: "assistant", content: "between" },
+  ]);
+  harness.handleEvent({ type: "error", frame: streamErrorFrame });
+  harness.handleEvent({ type: "error", frame: streamErrorFrame });
+
+  assert.equal(harness.messages.length, 3);
+  const secondError = harness.messages[2];
+  assert.equal(secondError.role, "error");
+  assert.match(
+    secondError.id,
+    /^err-stream-unavailable-service_unavailable-retryable-/,
+  );
+  assert.notEqual(secondError.id, firstError.id);
+  assert.equal(secondError.content, "stream:service_unavailable");
+  assert.equal(seenStreamErrors.length, 2);
+});
