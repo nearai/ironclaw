@@ -83,7 +83,10 @@ pub fn build_local_dev_secret_store_for_test<F>(
 where
     F: ironclaw_filesystem::RootFilesystem + 'static,
 {
-    crate::factory::build_local_dev_secret_store(root, scoped, None)
+    // `build_local_dev_secret_store` also returns the crypto (for the admin
+    // secret provisioner); this test helper only needs the store.
+    let (store, _crypto) = crate::factory::build_local_dev_secret_store(root, scoped, None)?;
+    Ok(store)
 }
 
 /// Mirrors the production approval-gate evidence wiring done by

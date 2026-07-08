@@ -17,7 +17,9 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::RebornRuntime;
-use crate::extension_lifecycle::{ExtensionActivationMode, RebornLocalExtensionManagementPort};
+use crate::extension_host::extension_lifecycle::{
+    ExtensionActivationMode, RebornLocalExtensionManagementPort,
+};
 use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
 use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
 use crate::slack_actor_identity::{
