@@ -28,34 +28,21 @@ mod admin_user_directory;
 #[cfg(test)]
 mod approval_test_support;
 mod automation;
-mod available_extensions;
-mod bundled_skills;
 #[cfg(feature = "slack-v2-host-beta")]
 mod channel_connection_resume;
 mod communication_context;
 mod default_system_prompt;
 mod error;
-mod extension_activation_credentials;
-mod extension_credential_requirements;
-mod extension_installation_store;
-mod extension_lifecycle;
-mod extension_lifecycle_capabilities;
-#[cfg(test)]
-mod extension_lifecycle_capabilities_auth_tests;
-mod extension_lifecycle_command;
+mod extension_host;
 mod factory;
 mod failure_lane;
 mod failure_summary;
-mod gsuite;
 mod input;
-mod lifecycle;
 mod llm_admin;
 mod local_dev_authorization;
 mod local_dev_capability_policy;
 mod local_dev_mounts;
 mod local_runtime_profile;
-mod mcp;
-mod mcp_discovery;
 mod observability;
 mod outbound;
 mod product_auth;
@@ -77,8 +64,6 @@ mod retry_disposition;
 mod runtime;
 mod runtime_input;
 mod runtime_profile_approval_policy;
-mod skill_learning;
-mod skill_listing;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_actor_identity;
 #[cfg(feature = "slack-v2-host-beta")]
@@ -124,7 +109,6 @@ mod web_access;
 mod webui;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_body_limit;
-mod webui_extension_credentials;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_operator_auth;
 #[cfg(feature = "webui-v2-beta")]
@@ -139,10 +123,14 @@ mod webui_ws_origin;
 pub use admin_token::AdminApiTokenMinter;
 pub use automation::RebornAutomationProductFacade;
 pub use error::RebornBuildError;
-pub use extension_lifecycle_command::{
+pub use extension_host::extension_lifecycle_command::{
     RebornExtensionLifecycleCommand, RebornExtensionLifecycleCommandError,
     execute_reborn_extension_lifecycle_command, render_reborn_extension_lifecycle_response,
 };
+pub use extension_host::gsuite::{
+    bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers,
+};
+pub use extension_host::skill_listing::{RebornSkillListError, list_reborn_local_skills};
 #[cfg(feature = "test-support")]
 pub use factory::AttachmentTestSupport;
 #[cfg(feature = "test-support")]
@@ -152,7 +140,6 @@ pub use factory::extension_installation_store_for_migration;
 pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
 pub use failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
 pub use failure_summary::reborn_failure_summary_for_category;
-pub use gsuite::{bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers};
 pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
 #[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_auth::GoogleOAuthRouteConfig;
@@ -251,7 +238,6 @@ pub use runtime_input::{
 };
 #[cfg(feature = "root-llm-provider")]
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
-pub use skill_listing::{RebornSkillListError, list_reborn_local_skills};
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_actor_identity::{
     RebornUserIdentityLookup, RebornUserIdentityLookupError, SlackUserIdentityActorResolver,
@@ -657,9 +643,9 @@ use ironclaw_processes::{FilesystemProcessResultStore, FilesystemProcessStore};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn_event_store::RebornEventStoreConfig;
 use ironclaw_reborn_event_store::RebornEventStoreError;
-use ironclaw_resources::ResourceError;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_resources::{FilesystemResourceGovernorStore, PersistentResourceGovernor};
+use ironclaw_resources::FilesystemResourceGovernor;
+use ironclaw_resources::ResourceError;
 use ironclaw_run_state::RunStateError;
 use ironclaw_secrets::SecretError;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -674,7 +660,7 @@ use thiserror::Error;
 #[cfg(feature = "libsql")]
 pub type LibSqlProductionHostRuntimeServices = HostRuntimeServices<
     LibSqlRootFilesystem,
-    PersistentResourceGovernor<FilesystemResourceGovernorStore<LibSqlRootFilesystem>>,
+    FilesystemResourceGovernor<LibSqlRootFilesystem>,
     FilesystemProcessStore<LibSqlRootFilesystem>,
     FilesystemProcessResultStore<LibSqlRootFilesystem>,
 >;
@@ -682,7 +668,7 @@ pub type LibSqlProductionHostRuntimeServices = HostRuntimeServices<
 #[cfg(feature = "postgres")]
 pub type PostgresProductionHostRuntimeServices = HostRuntimeServices<
     PostgresRootFilesystem,
-    PersistentResourceGovernor<FilesystemResourceGovernorStore<PostgresRootFilesystem>>,
+    FilesystemResourceGovernor<PostgresRootFilesystem>,
     FilesystemProcessStore<PostgresRootFilesystem>,
     FilesystemProcessResultStore<PostgresRootFilesystem>,
 >;
@@ -852,6 +838,10 @@ where
 {
     pub database: Arc<libsql::Database>,
     pub event_store: RebornEventStoreConfig,
+    /// Set this only when deployment guarantees exactly one runtime process, or
+    /// one elected runtime owner, is allowed to enforce resource quotas for this
+    /// database. The filesystem governor keeps in-process tallies as authority.
+    pub process_local_resource_governor_singleton: bool,
     pub secret_master_key: Option<SecretMaterial>,
     pub trust_policy: Arc<TPolicy>,
     pub runtime_policy: RebornProductionRuntimePolicy,
@@ -868,6 +858,10 @@ where
 {
     pub pool: deadpool_postgres::Pool,
     pub event_store: RebornEventStoreConfig,
+    /// Set this only when deployment guarantees exactly one runtime process, or
+    /// one elected runtime owner, is allowed to enforce resource quotas for this
+    /// database. The filesystem governor keeps in-process tallies as authority.
+    pub process_local_resource_governor_singleton: bool,
     pub secret_master_key: Option<SecretMaterial>,
     pub trust_policy: Arc<TPolicy>,
     pub runtime_policy: RebornProductionRuntimePolicy,

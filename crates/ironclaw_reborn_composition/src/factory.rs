@@ -1,6 +1,4 @@
 // arch-exempt: large_file, needs Reborn composition helper extraction, plan #4469
-#[cfg(test)]
-use std::cell::RefCell;
 use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
@@ -94,13 +92,11 @@ use ironclaw_product_workflow::{
     ProjectService,
 };
 use ironclaw_projects::ProjectRepository;
+use ironclaw_resources::InMemoryResourceGovernor;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_resources::{
     BroadcastBudgetEventSink, BudgetGateStore, FilesystemBudgetGateStore,
-    FilesystemResourceGovernorStore, ResourceGovernor,
-};
-use ironclaw_resources::{
-    InMemoryResourceGovernor, PersistentResourceGovernor, ResourceGovernorStore,
+    FilesystemResourceGovernor, ResourceGovernor,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_run_state::{FilesystemApprovalRequestStore, FilesystemRunStateStore};
@@ -126,8 +122,7 @@ use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPoli
     any(feature = "libsql", feature = "postgres")
 ))]
 use ironclaw_turns::FilesystemTurnStateBlockPersistence;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_turns::FilesystemTurnStateStore;
+use ironclaw_turns::FilesystemTurnStateStoreKind;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::InMemoryRunProfileResolver;
 #[cfg(any(
@@ -143,28 +138,14 @@ use ironclaw_turns::{
 use ironclaw_turns::{InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore};
 
 use crate::RebornProductAuthServicePorts;
-#[cfg(feature = "slack-v2-host-beta")]
-use crate::available_extensions::slack_manifest_digest;
 use crate::default_system_prompt::seed_default_system_prompt;
-use crate::input::{RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput};
-use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
-use crate::local_dev_authorization::{StoreApprovalSettingsProvider, local_dev_authorizer};
-use crate::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
-use crate::local_dev_mounts::{
-    ambient_workspace_mount_view, memory_mount_view, scoped_skill_context_mount_view,
-    skill_management_mount_view, system_extensions_lifecycle_mount_view, workspace_mount_view,
+#[cfg(feature = "slack-v2-host-beta")]
+use crate::extension_host::available_extensions::slack_manifest_digest;
+use crate::extension_host::lifecycle::{
+    RebornLocalSkillManagementPort, build_local_skill_management_port,
 };
-use crate::mcp::hosted_http_mcp_runtime;
-use crate::product_auth::credentials::product_auth_providers::{
-    OAuthProviderComposition, compose_provider_client,
-};
-use crate::product_auth::credentials::runtime_credentials::ProductAuthRuntimeCredentialResolver;
-use crate::runtime_input::RebornRuntimeIdentity;
-use crate::{
-    RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
-    RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornWorkerReadiness,
-};
-use crate::{
+use crate::extension_host::mcp::hosted_http_mcp_runtime;
+use crate::extension_host::{
     available_extensions::{
         AvailableExtensionCatalog, gmail_manifest_digest, google_calendar_manifest_digest,
         google_docs_manifest_digest, google_drive_manifest_digest, google_sheets_manifest_digest,
@@ -181,7 +162,23 @@ use crate::{
     gsuite::{
         ProductAuthRuntimeGsuiteCredentialStager, register_bundled_gsuite_first_party_handlers,
     },
-    web_access::register_bundled_web_access_first_party_handlers,
+};
+use crate::input::{RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput};
+use crate::local_dev_authorization::{StoreApprovalSettingsProvider, local_dev_authorizer};
+use crate::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
+use crate::local_dev_mounts::{
+    ambient_workspace_mount_view, memory_mount_view, scoped_skill_context_mount_view,
+    skill_management_mount_view, system_extensions_lifecycle_mount_view, workspace_mount_view,
+};
+use crate::product_auth::credentials::product_auth_providers::{
+    OAuthProviderComposition, compose_provider_client,
+};
+use crate::product_auth::credentials::runtime_credentials::ProductAuthRuntimeCredentialResolver;
+use crate::runtime_input::RebornRuntimeIdentity;
+use crate::web_access::register_bundled_web_access_first_party_handlers;
+use crate::{
+    RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
+    RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornWorkerReadiness,
 };
 
 pub(crate) type LocalDevRootFilesystem = CompositeRootFilesystem;
@@ -244,12 +241,12 @@ impl ironclaw_network::NetworkHttpEgress for TestNetworkHttpEgress {
 
 // The in-memory turn-state authority wins whenever `inmemory-turn-state` is on
 // (the runtime-wedge fix), and is also the only option in pure-memory builds.
-// Otherwise the durable per-user filesystem CAS store is used.
+// Otherwise the durable per-user filesystem row store is used.
 #[cfg(all(
     not(feature = "inmemory-turn-state"),
     any(feature = "libsql", feature = "postgres")
 ))]
-pub(crate) type LocalDevTurnStateStore = FilesystemTurnStateStore<LocalDevRootFilesystem>;
+pub(crate) type LocalDevTurnStateStore = FilesystemTurnStateStoreKind<LocalDevRootFilesystem>;
 #[cfg(any(
     feature = "inmemory-turn-state",
     not(any(feature = "libsql", feature = "postgres"))
@@ -257,20 +254,9 @@ pub(crate) type LocalDevTurnStateStore = FilesystemTurnStateStore<LocalDevRootFi
 pub(crate) type LocalDevTurnStateStore = InMemoryTurnStateStore;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-type LocalDevResourceGovernor =
-    PersistentResourceGovernor<FilesystemResourceGovernorStore<LocalDevRootFilesystem>>;
+type LocalDevResourceGovernor = FilesystemResourceGovernor<LocalDevRootFilesystem>;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 type LocalDevResourceGovernor = InMemoryResourceGovernor;
-
-#[cfg(test)]
-thread_local! {
-    static RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV_OVERRIDE: RefCell<Option<String>> =
-        const { RefCell::new(None) };
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres", test))]
-const RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV: &str =
-    "IRONCLAW_RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH";
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 type LocalDevRunStateStore = FilesystemRunStateStore<LocalDevRootFilesystem>;
@@ -942,7 +928,7 @@ where
     /// Registry used by the production host runtime for extension descriptors.
     #[allow(dead_code)]
     pub(crate) extension_registry: Arc<ExtensionRegistry>,
-    pub(crate) turn_state: Arc<FilesystemTurnStateStore<F>>,
+    pub(crate) turn_state: Arc<FilesystemTurnStateStoreKind<F>>,
     pub(crate) checkpoint_state_store: Arc<dyn CheckpointStateStore>,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) trigger_repository: Arc<dyn TriggerRepository>,
@@ -1009,6 +995,8 @@ struct RebornLocalDevStoreGraphInput {
     project_repository: Arc<dyn ProjectRepository>,
     /// Concurrency limits for the in-memory (or filesystem-backed) turn-state store.
     turn_state_store_limits: ironclaw_turns::InMemoryTurnStateStoreLimits,
+    #[cfg(feature = "postgres")]
+    postgres_resource_governor_singleton: Option<bool>,
     /// Raw libSQL substrate handle, carried so the canonical Reborn identity
     /// store rides the same `reborn-local-dev.db` instead of opening a second
     /// handle (see `RebornRuntime::open_reborn_identity_resolver`).
@@ -1150,57 +1138,68 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         ..
     } = input;
     let local_runtime_identity_for_nearai_mcp = local_runtime_identity.clone();
-    let (root, workspace_root, host_home_root, storage_backend_input, secret_master_key) =
-        match storage {
-            RebornStorageInput::LocalDev { .. }
-                if profile == RebornCompositionProfile::HostedSingleTenant =>
-            {
-                return Err(RebornBuildError::InvalidConfig {
+    let (
+        root,
+        workspace_root,
+        host_home_root,
+        storage_backend_input,
+        secret_master_key,
+        postgres_resource_governor_singleton,
+    ) = match storage {
+        RebornStorageInput::LocalDev { .. }
+            if profile == RebornCompositionProfile::HostedSingleTenant =>
+        {
+            return Err(RebornBuildError::InvalidConfig {
                     reason: "profile=hosted-single-tenant requires hosted single-tenant Postgres storage input"
                         .to_string(),
                 });
-            }
-            RebornStorageInput::LocalDev {
-                root,
-                workspace_root,
-                host_home_root,
-            } => (
-                root,
-                workspace_root,
-                host_home_root,
-                LocalDevStorageBackendInput::LocalDefault,
-                None::<ironclaw_secrets::SecretMaterial>,
-            ),
-            #[cfg(feature = "postgres")]
-            RebornStorageInput::HostedSingleTenantPostgres { .. }
-                if profile != RebornCompositionProfile::HostedSingleTenant =>
-            {
-                return Err(RebornBuildError::InvalidConfig {
-                    reason: format!("{profile} profile requires local-runtime storage input"),
-                });
-            }
-            #[cfg(feature = "postgres")]
-            RebornStorageInput::HostedSingleTenantPostgres {
-                root,
-                workspace_root,
-                host_home_root,
-                pool,
-                secret_master_key,
-            } => (
-                root,
-                workspace_root,
-                host_home_root,
-                LocalDevStorageBackendInput::Postgres(pool),
-                Some(secret_master_key),
-            ),
-            _ => {
-                return Err(RebornBuildError::InvalidConfig {
-                    reason: format!("{profile} profile requires local-runtime storage input"),
-                });
-            }
-        };
+        }
+        RebornStorageInput::LocalDev {
+            root,
+            workspace_root,
+            host_home_root,
+        } => (
+            root,
+            workspace_root,
+            host_home_root,
+            LocalDevStorageBackendInput::LocalDefault,
+            None::<ironclaw_secrets::SecretMaterial>,
+            None::<bool>,
+        ),
+        #[cfg(feature = "postgres")]
+        RebornStorageInput::HostedSingleTenantPostgres { .. }
+            if profile != RebornCompositionProfile::HostedSingleTenant =>
+        {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!("{profile} profile requires local-runtime storage input"),
+            });
+        }
+        #[cfg(feature = "postgres")]
+        RebornStorageInput::HostedSingleTenantPostgres {
+            root,
+            workspace_root,
+            host_home_root,
+            pool,
+            secret_master_key,
+            process_local_resource_governor_singleton,
+        } => (
+            root,
+            workspace_root,
+            host_home_root,
+            LocalDevStorageBackendInput::Postgres(pool),
+            Some(secret_master_key),
+            Some(process_local_resource_governor_singleton),
+        ),
+        _ => {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!("{profile} profile requires local-runtime storage input"),
+            });
+        }
+    };
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     let _ = secret_master_key;
+    #[cfg(not(feature = "postgres"))]
+    let _ = postgres_resource_governor_singleton;
     std::fs::create_dir_all(&root).map_err(|_| RebornBuildError::InvalidConfig {
         reason: "local-dev storage root could not be initialized".to_string(),
     })?;
@@ -1257,7 +1256,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             reason: error.to_string(),
         }
     })?;
-    crate::bundled_skills::ensure_bundled_reborn_skills_installed(&root).await?;
+    crate::extension_host::bundled_skills::ensure_bundled_reborn_skills_installed(&root).await?;
     let filesystem_bundle = build_local_dev_root_filesystem(
         &root,
         &workspace_root,
@@ -1355,6 +1354,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         trigger_repository,
         project_repository,
         turn_state_store_limits,
+        #[cfg(feature = "postgres")]
+        postgres_resource_governor_singleton,
         #[cfg(feature = "libsql")]
         identity_substrate_db,
     })
@@ -1963,6 +1964,17 @@ where
     )))
 }
 
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn production_turn_state_store<F>(
+    filesystem: Arc<ScopedFilesystem<F>>,
+    limits: ironclaw_turns::InMemoryTurnStateStoreLimits,
+) -> FilesystemTurnStateStoreKind<F>
+where
+    F: RootFilesystem + 'static,
+{
+    FilesystemTurnStateStoreKind::row(filesystem).with_limits(limits)
+}
+
 fn local_dev_extension_installation_state_path(
     profile: RebornCompositionProfile,
     local_runtime_identity: Option<&RebornLocalRuntimeIdentity>,
@@ -1994,86 +2006,6 @@ fn local_dev_extension_installation_state_path(
     })
 }
 
-#[cfg_attr(not(any(feature = "libsql", feature = "postgres")), allow(dead_code))]
-fn apply_resource_governor_unlimited_fast_path<S>(
-    governor: PersistentResourceGovernor<S>,
-) -> Result<PersistentResourceGovernor<S>, String>
-where
-    S: ResourceGovernorStore,
-{
-    if resource_governor_unlimited_fast_path_enabled_from_env()? {
-        Ok(governor.with_unlimited_fast_path())
-    } else {
-        Ok(governor)
-    }
-}
-
-#[cfg_attr(not(any(feature = "libsql", feature = "postgres")), allow(dead_code))]
-fn resource_governor_unlimited_fast_path_enabled_from_env() -> Result<bool, String> {
-    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-    {
-        return Ok(false);
-    }
-
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
-    match resource_governor_unlimited_fast_path_env_value() {
-        Ok(Some(value)) => parse_bool_env_value(&value).ok_or_else(|| {
-            format!(
-                "{RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV} must be one of true, false, 1, 0, yes, no, on, or off"
-            )
-        }),
-        Ok(None) => Ok(false),
-        Err(reason) => Err(reason),
-    }
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-fn resource_governor_unlimited_fast_path_env_value() -> Result<Option<String>, String> {
-    #[cfg(test)]
-    if let Some(value) =
-        RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV_OVERRIDE.with(|value| value.borrow().clone())
-    {
-        return Ok(Some(value));
-    }
-
-    match std::env::var(RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV) {
-        Ok(value) => Ok(Some(value)),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(std::env::VarError::NotUnicode(_)) => Err(format!(
-            "{RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV} must be valid UTF-8"
-        )),
-    }
-}
-
-#[cfg(test)]
-fn set_resource_governor_unlimited_fast_path_env_override_for_test(
-    value: impl Into<String>,
-) -> Result<ResourceGovernorFastPathEnvOverrideGuard, String> {
-    RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV_OVERRIDE
-        .with(|override_value| *override_value.borrow_mut() = Some(value.into()));
-    Ok(ResourceGovernorFastPathEnvOverrideGuard)
-}
-
-#[cfg(test)]
-struct ResourceGovernorFastPathEnvOverrideGuard;
-
-#[cfg(test)]
-impl Drop for ResourceGovernorFastPathEnvOverrideGuard {
-    fn drop(&mut self) {
-        RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV_OVERRIDE
-            .with(|override_value| *override_value.borrow_mut() = None);
-    }
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-fn parse_bool_env_value(value: &str) -> Option<bool> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "" | "0" | "false" | "no" | "off" => Some(false),
-        "1" | "true" | "yes" | "on" => Some(true),
-        _ => None,
-    }
-}
-
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 async fn build_local_dev_store_graph(
     input: RebornLocalDevStoreGraphInput,
@@ -2091,6 +2023,8 @@ async fn build_local_dev_store_graph(
         trigger_repository,
         project_repository,
         turn_state_store_limits,
+        #[cfg(feature = "postgres")]
+        postgres_resource_governor_singleton,
         #[cfg(feature = "libsql")]
         identity_substrate_db,
     } = input;
@@ -2119,7 +2053,7 @@ async fn build_local_dev_store_graph(
     // Runtime-wedge fix: with `inmemory-turn-state`, the whole local-dev/hosted
     // runtime family (incl. hosted-single-tenant-volume) coordinates turn state
     // in one in-process authority — no per-user `state.json` CAS livelock.
-    // Otherwise the durable filesystem store is used. `LocalDevTurnStateStore`
+    // Otherwise the durable filesystem row store is used. `LocalDevTurnStateStore`
     // resolves to the matching concrete type via the same feature cfg, so both
     // arms satisfy every downstream consumer (coordinator, `LoopCheckpointStore`,
     // `RuntimeTurnStateStore`) with no trait-object plumbing.
@@ -2146,10 +2080,10 @@ async fn build_local_dev_store_graph(
         Arc::new(store.with_block_persistence(block_persistence))
     };
     #[cfg(not(feature = "inmemory-turn-state"))]
-    let turn_state = Arc::new(
-        FilesystemTurnStateStore::new(Arc::clone(&turn_state_filesystem))
-            .with_limits(turn_state_store_limits),
-    );
+    let turn_state = Arc::new(production_turn_state_store(
+        Arc::clone(&turn_state_filesystem),
+        turn_state_store_limits,
+    ));
     let checkpoint_state_store: Arc<dyn CheckpointStateStore> = Arc::new(
         FilesystemCheckpointStateStore::new(Arc::clone(&scoped_filesystem)),
     );
@@ -2165,11 +2099,11 @@ async fn build_local_dev_store_graph(
     let budget_gate_store: Arc<dyn BudgetGateStore> = Arc::new(FilesystemBudgetGateStore::new(
         Arc::clone(&scoped_filesystem),
     ));
-    let resource_governor =
-        apply_resource_governor_unlimited_fast_path(PersistentResourceGovernor::new(
-            FilesystemResourceGovernorStore::new(Arc::clone(&scoped_filesystem)),
-        ))
-        .map_err(|reason| RebornBuildError::InvalidConfig { reason })?
+    #[cfg(feature = "postgres")]
+    if let Some(singleton) = postgres_resource_governor_singleton {
+        ensure_postgres_resource_governor_authority_for_build(singleton)?;
+    }
+    let resource_governor = FilesystemResourceGovernor::new(Arc::clone(&scoped_filesystem))
         .with_event_sink(Arc::clone(&budget_event_sink));
     let resource_governor: Arc<LocalDevResourceGovernor> = Arc::new(resource_governor);
     let skill_mounts =
@@ -3861,6 +3795,7 @@ async fn build_production_shaped(
             path_or_url,
             auth_token,
             secret_master_key,
+            process_local_resource_governor_singleton,
         } => {
             // Mint the scheduler wake wiring here, before building the coordinator, so:
             // 1. The notifier can satisfy `HostRuntimeServices.with_turn_run_wake_notifier_dyn`
@@ -3889,7 +3824,15 @@ async fn build_production_shaped(
                 turn_state_store_limits,
                 scheduler_wake_wiring,
             };
-            build_libsql_production(context, db, path_or_url, auth_token, secret_master_key).await
+            build_libsql_production(
+                context,
+                db,
+                path_or_url,
+                auth_token,
+                secret_master_key,
+                process_local_resource_governor_singleton,
+            )
+            .await
         }
         #[cfg(feature = "postgres")]
         RebornStorageInput::Postgres {
@@ -3897,6 +3840,7 @@ async fn build_production_shaped(
             url,
             tls_options,
             secret_master_key,
+            process_local_resource_governor_singleton,
         } => {
             // Mint the scheduler wake wiring here, before building the coordinator, so:
             // 1. The notifier can satisfy `HostRuntimeServices.with_turn_run_wake_notifier_dyn`
@@ -3925,7 +3869,15 @@ async fn build_production_shaped(
                 turn_state_store_limits,
                 scheduler_wake_wiring,
             };
-            build_postgres_production(context, pool, url, tls_options, secret_master_key).await
+            build_postgres_production(
+                context,
+                pool,
+                url,
+                tls_options,
+                secret_master_key,
+                process_local_resource_governor_singleton,
+            )
+            .await
         }
     }
 }
@@ -4013,7 +3965,7 @@ fn planned_run_profile_resolver() -> Result<Arc<InMemoryRunProfileResolver>, Reb
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 type FilesystemProductionHostRuntimeServices<F> = HostRuntimeServices<
     F,
-    PersistentResourceGovernor<FilesystemResourceGovernorStore<F>>,
+    FilesystemResourceGovernor<F>,
     ironclaw_processes::FilesystemProcessStore<F>,
     ironclaw_processes::FilesystemProcessResultStore<F>,
 >;
@@ -4034,12 +3986,75 @@ where
     TPolicy: ironclaw_trust::TrustPolicy + 'static,
     TWake: ironclaw_turns::TurnRunWakeNotifier + 'static,
 {
+    ensure_libsql_resource_governor_authority(config.process_local_resource_governor_singleton)?;
     let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&config.database)));
     filesystem.run_migrations().await?;
+    let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
+    let resource_governor = FilesystemResourceGovernor::new(scoped_filesystem);
     build_filesystem_production_host_runtime_services(
         FilesystemProductionHostRuntimeServicesInput {
             filesystem,
-            event_store: config.event_store,
+            resource_governor,
+            event_store: FilesystemProductionEventStoresInput::Config(config.event_store),
+            secret_master_key: config.secret_master_key,
+            trust_policy: config.trust_policy,
+            runtime_policy: config.runtime_policy,
+            turn_run_wake_notifier: config.turn_run_wake_notifier,
+            surface_version: config.surface_version,
+        },
+    )
+    .await
+}
+
+#[cfg(feature = "libsql")]
+fn ensure_libsql_resource_governor_authority(
+    process_local_singleton: bool,
+) -> Result<(), crate::RebornCompositionError> {
+    if process_local_singleton {
+        return Ok(());
+    }
+    Err(crate::RebornCompositionError::InvalidConfig {
+        reason: "libSQL production FilesystemResourceGovernor uses process-local tallies; configure a singleton or elected resource-governor owner before sharing one database across runtime processes".to_string(),
+    })
+}
+
+#[cfg(feature = "libsql")]
+fn ensure_libsql_resource_governor_authority_for_build(
+    process_local_singleton: bool,
+) -> Result<(), RebornBuildError> {
+    if process_local_singleton {
+        return Ok(());
+    }
+    Err(RebornBuildError::InvalidConfig {
+        reason: "libSQL FilesystemResourceGovernor uses process-local tallies; configure a singleton or elected resource-governor owner before sharing one database across runtime processes".to_string(),
+    })
+}
+
+#[cfg(feature = "postgres")]
+pub(crate) async fn build_postgres_production_host_runtime_services<TPolicy, TWake>(
+    config: crate::PostgresProductionSubstrateConfig<TPolicy, TWake>,
+) -> Result<crate::PostgresProductionHostRuntimeServices, crate::RebornCompositionError>
+where
+    TPolicy: ironclaw_trust::TrustPolicy + 'static,
+    TWake: ironclaw_turns::TurnRunWakeNotifier + 'static,
+{
+    let pool = config.pool;
+    ensure_postgres_resource_governor_authority(config.process_local_resource_governor_singleton)?;
+    let filesystem = Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(
+        pool.clone(),
+    ));
+    ensure_postgres_event_store_config(&config.event_store)?;
+    filesystem.run_migrations().await?;
+    let resource_governor =
+        FilesystemResourceGovernor::new(crate::wrap_scoped(Arc::clone(&filesystem)));
+    let event_store = ironclaw_reborn_event_store::build_reborn_event_stores_from_root_filesystem(
+        Arc::clone(&filesystem),
+    )?;
+    build_filesystem_production_host_runtime_services(
+        FilesystemProductionHostRuntimeServicesInput {
+            filesystem,
+            resource_governor,
+            event_store: FilesystemProductionEventStoresInput::Prebuilt(event_store),
             secret_master_key: config.secret_master_key,
             trust_policy: config.trust_policy,
             runtime_policy: config.runtime_policy,
@@ -4051,40 +4066,63 @@ where
 }
 
 #[cfg(feature = "postgres")]
-pub(crate) async fn build_postgres_production_host_runtime_services<TPolicy, TWake>(
-    config: crate::PostgresProductionSubstrateConfig<TPolicy, TWake>,
-) -> Result<crate::PostgresProductionHostRuntimeServices, crate::RebornCompositionError>
-where
-    TPolicy: ironclaw_trust::TrustPolicy + 'static,
-    TWake: ironclaw_turns::TurnRunWakeNotifier + 'static,
-{
-    let filesystem = Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(
-        config.pool,
-    ));
-    filesystem.run_migrations().await?;
-    build_filesystem_production_host_runtime_services(
-        FilesystemProductionHostRuntimeServicesInput {
-            filesystem,
-            event_store: config.event_store,
-            secret_master_key: config.secret_master_key,
-            trust_policy: config.trust_policy,
-            runtime_policy: config.runtime_policy,
-            turn_run_wake_notifier: config.turn_run_wake_notifier,
-            surface_version: config.surface_version,
-        },
-    )
-    .await
+fn ensure_postgres_resource_governor_authority(
+    process_local_singleton: bool,
+) -> Result<(), crate::RebornCompositionError> {
+    if process_local_singleton {
+        return Ok(());
+    }
+    Err(crate::RebornCompositionError::InvalidConfig {
+        reason: "Postgres production FilesystemResourceGovernor uses process-local tallies; configure a singleton or elected resource-governor owner before sharing one database across runtime processes".to_string(),
+    })
+}
+
+#[cfg(feature = "postgres")]
+fn ensure_postgres_resource_governor_authority_for_build(
+    process_local_singleton: bool,
+) -> Result<(), RebornBuildError> {
+    if process_local_singleton {
+        return Ok(());
+    }
+    Err(RebornBuildError::InvalidConfig {
+        reason: "Postgres FilesystemResourceGovernor uses process-local tallies; configure a singleton or elected resource-governor owner before sharing one database across runtime processes".to_string(),
+    })
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-struct FilesystemProductionHostRuntimeServicesInput<F, TPolicy, TWake> {
+struct FilesystemProductionHostRuntimeServicesInput<F, TPolicy, TWake>
+where
+    F: RootFilesystem + 'static,
+{
     filesystem: Arc<F>,
-    event_store: ironclaw_reborn_event_store::RebornEventStoreConfig,
+    resource_governor: FilesystemResourceGovernor<F>,
+    event_store: FilesystemProductionEventStoresInput,
     secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
     trust_policy: Arc<TPolicy>,
     runtime_policy: crate::RebornProductionRuntimePolicy,
     turn_run_wake_notifier: Arc<TWake>,
     surface_version: CapabilitySurfaceVersion,
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+enum FilesystemProductionEventStoresInput {
+    #[cfg(feature = "libsql")]
+    Config(ironclaw_reborn_event_store::RebornEventStoreConfig),
+    Prebuilt(ironclaw_reborn_event_store::RebornEventStores),
+}
+
+#[cfg(feature = "postgres")]
+fn ensure_postgres_event_store_config(
+    config: &ironclaw_reborn_event_store::RebornEventStoreConfig,
+) -> Result<(), crate::RebornCompositionError> {
+    match config {
+        ironclaw_reborn_event_store::RebornEventStoreConfig::Postgres { .. } => Ok(()),
+        #[cfg(feature = "postgres")]
+        ironclaw_reborn_event_store::RebornEventStoreConfig::PostgresPool { .. } => Ok(()),
+        _ => Err(crate::RebornCompositionError::InvalidConfig {
+            reason: "PostgreSQL production substrate requires a PostgreSQL event store".to_string(),
+        }),
+    }
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -4098,6 +4136,7 @@ where
 {
     let FilesystemProductionHostRuntimeServicesInput {
         filesystem,
+        resource_governor,
         event_store,
         secret_master_key,
         trust_policy,
@@ -4111,18 +4150,17 @@ where
         default_runtime_owner_scope(owner_user_id).map_err(crate::RebornCompositionError::Mount)?;
     let turn_state_filesystem = owner_turn_state_filesystem(Arc::clone(&filesystem), &owner_scope)
         .map_err(crate::RebornCompositionError::Mount)?;
+    let turn_state = Arc::new(production_turn_state_store(
+        Arc::clone(&turn_state_filesystem),
+        ironclaw_turns::InMemoryTurnStateStoreLimits::default(),
+    ));
     let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
     let secret_credentials = build_filesystem_secret_credential_stores(
         Arc::clone(&scoped_filesystem),
         secret_master_key,
     )
     .await?;
-    let resource_store = FilesystemResourceGovernorStore::new(Arc::clone(&scoped_filesystem));
-    let governor = apply_resource_governor_unlimited_fast_path(PersistentResourceGovernor::new(
-        resource_store,
-    ))
-    .map_err(|reason| crate::RebornCompositionError::InvalidConfig { reason })?;
-    let governor = Arc::new(governor);
+    let governor = Arc::new(resource_governor);
     let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
         &scoped_filesystem,
     )));
@@ -4148,15 +4186,24 @@ where
     .with_credential_broker(secret_credentials.credential_broker)
     .with_turn_run_wake_notifier(turn_run_wake_notifier)
     .with_filesystem_run_state(Arc::clone(&scoped_filesystem))
-    .with_filesystem_turn_state_store(Arc::clone(&turn_state_filesystem))
+    .with_turn_state_and_transition_port(turn_state)
     .with_run_profile_resolver(Arc::new(
         ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver()?,
-    ))
-    .with_reborn_event_store_config(
-        ironclaw_reborn_event_store::RebornProfile::Production,
-        event_store,
-    )
-    .await?;
+    ));
+    let services = match event_store {
+        #[cfg(feature = "libsql")]
+        FilesystemProductionEventStoresInput::Config(config) => {
+            services
+                .with_reborn_event_store_config(
+                    ironclaw_reborn_event_store::RebornProfile::Production,
+                    config,
+                )
+                .await?
+        }
+        FilesystemProductionEventStoresInput::Prebuilt(stores) => {
+            services.with_production_reborn_event_stores(stores)
+        }
+    };
     let services = apply_production_runtime_process_binding(services, process_binding);
 
     let services = services
@@ -4253,6 +4300,7 @@ where
 {
     filesystem: Arc<F>,
     scoped_filesystem: Arc<ScopedFilesystem<F>>,
+    resource_governor: FilesystemResourceGovernor<F>,
     leases: Arc<FilesystemCapabilityLeaseStore<F>>,
     persistent_approval_policies: Arc<FilesystemPersistentApprovalPolicyStore<F>>,
     secret_credentials: FilesystemSecretCredentialStores<F>,
@@ -4266,6 +4314,7 @@ where
 {
     fn new(
         filesystem: Arc<F>,
+        resource_governor: FilesystemResourceGovernor<F>,
         secret_master_key: ironclaw_secrets::SecretMaterial,
         event_store: ironclaw_reborn_event_store::RebornEventStoreConfig,
     ) -> Result<Self, RebornBuildError> {
@@ -4284,6 +4333,7 @@ where
         Ok(Self {
             filesystem,
             scoped_filesystem,
+            resource_governor,
             leases,
             persistent_approval_policies,
             secret_credentials,
@@ -4372,23 +4422,21 @@ where
         broadcast_budget_event_sink,
         ..
     } = build_budget_sinks();
-    let turn_state = Arc::new(
-        FilesystemTurnStateStore::new(Arc::clone(&turn_state_filesystem))
-            .with_limits(turn_state_store_limits),
-    );
+    let turn_state = Arc::new(production_turn_state_store(
+        Arc::clone(&turn_state_filesystem),
+        turn_state_store_limits,
+    ));
     let checkpoint_state_store: Arc<dyn CheckpointStateStore> = Arc::new(
         FilesystemCheckpointStateStore::new(Arc::clone(&stores.scoped_filesystem)),
     );
     let thread_service: Arc<dyn SessionThreadService> = Arc::new(
         FilesystemSessionThreadService::new(Arc::clone(&stores.scoped_filesystem)),
     );
-    let resource_governor =
-        apply_resource_governor_unlimited_fast_path(PersistentResourceGovernor::new(
-            FilesystemResourceGovernorStore::new(Arc::clone(&stores.scoped_filesystem)),
-        ))
-        .map_err(|reason| RebornBuildError::InvalidConfig { reason })?
-        .with_event_sink(Arc::clone(&budget_event_sink));
-    let resource_governor = Arc::new(resource_governor);
+    let resource_governor = Arc::new(
+        stores
+            .resource_governor
+            .with_event_sink(Arc::clone(&budget_event_sink)),
+    );
     let production_resource_governor: Arc<dyn ResourceGovernor> = resource_governor.clone();
     let budget_gate_store: Arc<dyn BudgetGateStore> = Arc::new(FilesystemBudgetGateStore::new(
         Arc::clone(&stores.scoped_filesystem),
@@ -4576,9 +4624,11 @@ async fn build_libsql_production(
     path_or_url: String,
     auth_token: Option<ironclaw_secrets::SecretMaterial>,
     secret_master_key: ironclaw_secrets::SecretMaterial,
+    process_local_resource_governor_singleton: bool,
 ) -> Result<RebornServices, RebornBuildError> {
     use ironclaw_filesystem::LibSqlRootFilesystem;
 
+    ensure_libsql_resource_governor_authority_for_build(process_local_resource_governor_singleton)?;
     let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)));
     filesystem.run_migrations().await?;
     let trigger_repository = Arc::new(ironclaw_triggers::LibSqlTriggerRepository::new(db));
@@ -4588,8 +4638,11 @@ async fn build_libsql_production(
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("libSQL trigger repository migrations failed: {error}"),
         })?;
+    let resource_governor =
+        FilesystemResourceGovernor::new(crate::wrap_scoped(Arc::clone(&filesystem)));
     let stores = ProductionStoreBundle::new(
         filesystem,
+        resource_governor,
         secret_master_key,
         ironclaw_reborn_event_store::RebornEventStoreConfig::Libsql {
             path_or_url,
@@ -4623,9 +4676,13 @@ async fn build_postgres_production(
     _url: ironclaw_secrets::SecretMaterial,
     _tls_options: ironclaw_reborn_event_store::PostgresPoolTlsOptions,
     secret_master_key: ironclaw_secrets::SecretMaterial,
+    process_local_resource_governor_singleton: bool,
 ) -> Result<RebornServices, RebornBuildError> {
     use ironclaw_filesystem::PostgresRootFilesystem;
 
+    ensure_postgres_resource_governor_authority_for_build(
+        process_local_resource_governor_singleton,
+    )?;
     // A4: Clone the pool before it is moved into PostgresTriggerRepository so we
     // can thread it to the credential keepalive worker as a leader-lock for
     // sweep serialization.
@@ -4642,8 +4699,11 @@ async fn build_postgres_production(
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("PostgreSQL trigger repository migrations failed: {error}"),
         })?;
+    let resource_governor =
+        FilesystemResourceGovernor::new(crate::wrap_scoped(Arc::clone(&filesystem)));
     let stores = ProductionStoreBundle::new(
         filesystem,
+        resource_governor,
         secret_master_key,
         ironclaw_reborn_event_store::RebornEventStoreConfig::PostgresPool { pool },
     )?;
@@ -4728,59 +4788,50 @@ mod tests {
     #[cfg(feature = "libsql")]
     use secrecy::ExposeSecret;
 
+    use crate::extension_host::extension_lifecycle::ExtensionActivationMode;
+    use crate::local_dev_capability_policy::{
+        LocalDevApprovalPolicyAction, LocalDevCapabilityPolicyError,
+    };
     use crate::{
-        RebornReadinessDiagnostic, RebornReadinessState,
-        extension_lifecycle::ExtensionActivationMode,
-        local_dev_capability_policy::{
-            LocalDevApprovalPolicyAction, LocalDevCapabilityPolicyError,
-        },
-        runtime::SKILL_ACTIVATE_CAPABILITY_ID,
+        RebornReadinessDiagnostic, RebornReadinessState, runtime::SKILL_ACTIVATE_CAPABILITY_ID,
     };
 
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    #[cfg(feature = "libsql")]
     #[test]
-    fn resource_governor_fast_path_env_parser_accepts_documented_values() {
-        for value in ["true", "TRUE", "1", "yes", "on", "  true  "] {
-            assert_eq!(parse_bool_env_value(value), Some(true), "value={value}");
-        }
-        for value in ["", "false", "FALSE", "0", "no", "off", "  off  "] {
-            assert_eq!(parse_bool_env_value(value), Some(false), "value={value}");
-        }
+    fn libsql_build_resource_governor_guard_requires_singleton_authority() {
+        assert!(ensure_libsql_resource_governor_authority_for_build(true).is_ok());
+        assert!(matches!(
+            ensure_libsql_resource_governor_authority_for_build(false),
+            Err(RebornBuildError::InvalidConfig { reason })
+                if reason.contains("libSQL FilesystemResourceGovernor uses process-local tallies")
+        ));
+    }
+
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    #[tokio::test]
+    async fn production_turn_state_store_uses_row_layout() {
+        let view = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/turns").expect("turns mount alias"),
+            VirtualPath::new("/turns").expect("turns virtual path"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("mount view");
+        let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::new(ironclaw_filesystem::InMemoryBackend::new()),
+            view,
+        ));
+
+        let store = production_turn_state_store(
+            filesystem,
+            ironclaw_turns::InMemoryTurnStateStoreLimits::default(),
+        );
+
+        assert!(matches!(store, FilesystemTurnStateStoreKind::Row(_)));
     }
 
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     #[test]
-    fn resource_governor_fast_path_env_parser_rejects_unknown_values() {
-        assert_eq!(parse_bool_env_value("maybe"), None);
-    }
-
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
-    #[test]
-    fn build_reborn_services_rejects_invalid_resource_governor_fast_path_env() {
-        let _override = set_resource_governor_unlimited_fast_path_env_override_for_test("maybe")
-            .expect("resource governor env override");
-        let dir = tempfile::tempdir().expect("tempdir");
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("tokio runtime");
-
-        let result = runtime.block_on(build_reborn_services(RebornBuildInput::local_dev(
-            "resource-governor-invalid-env-owner",
-            dir.path().join("local-dev"),
-        )));
-
-        let Err(RebornBuildError::InvalidConfig { reason }) = result else {
-            panic!("expected invalid config for resource governor fast-path env");
-        };
-        assert!(reason.contains(RESOURCE_GOVERNOR_UNLIMITED_FAST_PATH_ENV));
-    }
-
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
-    #[test]
-    fn build_reborn_services_applies_resource_governor_fast_path_env() {
-        let _override = set_resource_governor_unlimited_fast_path_env_override_for_test("true")
-            .expect("resource governor env override");
+    fn build_reborn_services_uses_filesystem_resource_governor() {
         let dir = tempfile::tempdir().expect("tempdir");
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -6012,25 +6063,29 @@ mod tests {
         .await
         .expect("submit through production turn-state store");
 
-        let configured_path =
-            VirtualPath::new("/tenants/configured-tenant/users/configured-owner/turns/state.json")
-                .expect("configured turn-state path");
-        let system_path = VirtualPath::new("/tenants/__system__/users/__system__/turns/state.json")
-            .expect("system turn-state path");
+        let configured_path = VirtualPath::new(
+            "/tenants/configured-tenant/users/configured-owner/turns/rows/v1/deltas/log",
+        )
+        .expect("configured turn-state row delta log path");
+        let system_path =
+            VirtualPath::new("/tenants/__system__/users/__system__/turns/rows/v1/deltas/log")
+                .expect("system turn-state row delta log path");
 
         assert!(
-            assertion_filesystem
-                .get(&configured_path)
-                .await
-                .expect("configured turn-state read")
-                .is_some()
+            append_log_has_entries(
+                &assertion_filesystem,
+                &configured_path,
+                "configured turn-state row delta log read"
+            )
+            .await
         );
         assert!(
-            assertion_filesystem
-                .get(&system_path)
-                .await
-                .expect("system turn-state read")
-                .is_none()
+            !append_log_has_entries(
+                &assertion_filesystem,
+                &system_path,
+                "system turn-state row delta log read"
+            )
+            .await
         );
     }
 
@@ -6087,10 +6142,11 @@ mod tests {
             }
         };
         let default_path =
-            VirtualPath::new("/tenants/reborn-cli/users/default-owner/turns/state.json")
-                .expect("default turn-state path");
-        let system_path = VirtualPath::new("/tenants/__system__/users/__system__/turns/state.json")
-            .expect("system turn-state path");
+            VirtualPath::new("/tenants/reborn-cli/users/default-owner/turns/rows/v1/deltas/log")
+                .expect("default turn-state row delta log path");
+        let system_path =
+            VirtualPath::new("/tenants/__system__/users/__system__/turns/rows/v1/deltas/log")
+                .expect("system turn-state row delta log path");
         let default_identity = RebornRuntimeIdentity::reborn_cli();
         let default_tenant = TenantId::new(default_identity.tenant_id).expect("default tenant");
         let scope = ironclaw_turns::TurnScope::new_with_owner(
@@ -6131,19 +6187,36 @@ mod tests {
         .expect("submit through production turn-state store");
 
         assert!(
-            assertion_filesystem
-                .get(&default_path)
-                .await
-                .expect("default turn-state read")
-                .is_some()
+            append_log_has_entries(
+                &assertion_filesystem,
+                &default_path,
+                "default turn-state row delta log read"
+            )
+            .await
         );
         assert!(
-            assertion_filesystem
-                .get(&system_path)
-                .await
-                .expect("system turn-state read")
-                .is_none()
+            !append_log_has_entries(
+                &assertion_filesystem,
+                &system_path,
+                "system turn-state row delta log read"
+            )
+            .await
         );
+    }
+
+    #[cfg(feature = "libsql")]
+    async fn append_log_has_entries<F>(filesystem: &F, path: &VirtualPath, label: &str) -> bool
+    where
+        F: RootFilesystem,
+    {
+        match filesystem
+            .tail(path, ironclaw_filesystem::SeqNo::ZERO)
+            .await
+        {
+            Ok(entries) => !entries.is_empty(),
+            Err(ironclaw_filesystem::FilesystemError::NotFound { .. }) => false,
+            Err(error) => panic!("{label}: {error}"),
+        }
     }
 
     #[cfg(feature = "libsql")]

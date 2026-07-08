@@ -23,9 +23,10 @@ use ironclaw_triggers::TriggerRepository;
 use crate::{
     RebornAutomationProductFacade, RebornBuildError, RebornProductAuthServices, RebornReadiness,
     RebornReadinessDiagnostic, RebornReadinessDiagnosticStatus, RebornRuntime,
-    lifecycle::{
+    extension_host::lifecycle::{
         RebornLocalLifecycleFacade, RebornLocalSkillManagementError, RebornLocalSkillManagementPort,
     },
+    extension_host::webui_extension_credentials::ProductAuthExtensionCredentialSetup,
     observability::RebornLocalServiceLifecycle,
     outbound::{
         OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistry,
@@ -36,7 +37,6 @@ use crate::{
         MountScopedFilesystemReader, ProjectScopedAttachmentLander, ProjectScopedAttachmentReader,
         ProjectScopedFilesystemReader,
     },
-    webui_extension_credentials::ProductAuthExtensionCredentialSetup,
 };
 
 static SKILL_CONTENT_SAFETY: std::sync::LazyLock<ironclaw_safety::Sanitizer> =

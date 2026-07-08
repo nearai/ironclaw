@@ -9,11 +9,10 @@ use super::PostgresRootFilesystem;
 use super::{
     ApprovalRequestStore, AuditSink, CapabilityLeaseStore, CoalescingEventSink, DurableAuditLog,
     DurableAuditSink, DurableEventLog, DurableEventSink, EffectiveRuntimePolicy, EventBatchConfig,
-    EventSink, FilesystemApprovalRequestStore, FilesystemResourceGovernorStore,
-    FilesystemRunStateStore, FilesystemTurnStateStore, FirstPartyCapabilityRegistry,
-    HostRuntimeServices, McpExecutor, NetworkHttpEgress, PersistentResourceGovernor,
-    ProcessBackendKind, ProcessExecutor, ProcessObligationLifecycleStore, ProcessResultStore,
-    ProcessStore, ProductionComponentType, ProductionImplementationReadiness,
+    EventSink, FilesystemApprovalRequestStore, FilesystemResourceGovernor, FilesystemRunStateStore,
+    FilesystemTurnStateStore, FirstPartyCapabilityRegistry, HostRuntimeServices, McpExecutor,
+    NetworkHttpEgress, ProcessBackendKind, ProcessExecutor, ProcessObligationLifecycleStore,
+    ProcessResultStore, ProcessStore, ProductionComponentType, ProductionImplementationReadiness,
     ProductionWiringComponent, ProductionWiringIssueKind, ProductionWiringReport,
     RebornEventStoreConfig, RebornEventStoreError, RebornEventStores, RebornProfile,
     ResourceGovernor, RootFilesystem, RunProfileResolver, RunStateApprovalStore, RunStateStore,
@@ -251,26 +250,19 @@ where
         }
     }
 
-    /// Replace the in-memory governor with a filesystem-backed
-    /// [`PersistentResourceGovernor`] over the supplied
-    /// [`ScopedFilesystem`]. Backend choice (libSQL, Postgres, in-memory,
-    /// local disk) is a property of the underlying
-    /// [`RootFilesystem`](ironclaw_filesystem::RootFilesystem); see
-    /// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+    /// Replace the in-memory governor with the journaled filesystem-backed
+    /// [`FilesystemResourceGovernor`] over the supplied [`ScopedFilesystem`].
+    /// Backend choice (libSQL, Postgres, in-memory, local disk) is a property
+    /// of the underlying [`RootFilesystem`](ironclaw_filesystem::RootFilesystem);
+    /// see `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
     pub fn with_filesystem_resource_governor<FsBackend>(
         self,
         scoped_filesystem: Arc<ScopedFilesystem<FsBackend>>,
-    ) -> HostRuntimeServices<
-        F,
-        PersistentResourceGovernor<FilesystemResourceGovernorStore<FsBackend>>,
-        S,
-        R,
-    >
+    ) -> HostRuntimeServices<F, FilesystemResourceGovernor<FsBackend>, S, R>
     where
         FsBackend: RootFilesystem + 'static,
     {
-        let store = FilesystemResourceGovernorStore::new(scoped_filesystem);
-        self.with_resource_governor(Arc::new(PersistentResourceGovernor::new(store)))
+        self.with_resource_governor(Arc::new(FilesystemResourceGovernor::new(scoped_filesystem)))
     }
 
     pub fn resource_governor(&self) -> Arc<G> {

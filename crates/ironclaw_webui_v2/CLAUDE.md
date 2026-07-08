@@ -108,6 +108,9 @@ are enforced server-side in `ironclaw_product_workflow::AdminUserService`, and a
 non-admin caller receives `403`. `webui.v2.admin.create_user` returns the new
 user's one-time API bearer exactly once in `api_token`; there is no re-issue
 endpoint for existing users.
+| `webui.v2.trace_credits` | GET | `/api/webchat/v2/traces/credit` | None | `ProductWorkflow` |
+| `webui.v2.trace_account_traces` | GET | `/api/webchat/v2/traces/account` (optional `?limit=N`) | None | `ProductWorkflow` |
+| `webui.v2.authorize_trace_hold` | POST | `/api/webchat/v2/traces/holds/{submission_id}/authorize` | None | `ProductWorkflow` |
 
 `webui.v2.logs` accepts bounded `limit`, `cursor`, `level`, and `target`
 query parameters, mutually exclusive boolean `tail` and `follow` flags from
