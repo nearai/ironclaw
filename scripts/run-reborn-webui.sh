@@ -52,6 +52,24 @@ fi
 REPO_ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
+FRONTEND_DIR="$REPO_ROOT/crates/ironclaw_webui_v2/frontend"
+if ! command -v pnpm >/dev/null 2>&1; then
+  if command -v corepack >/dev/null 2>&1; then
+    corepack enable pnpm
+  fi
+fi
+if ! command -v pnpm >/dev/null 2>&1; then
+  echo "error: pnpm is required to build WebUI v2 assets." >&2
+  echo "       Install Node 22 from .nvmrc and enable pnpm with: corepack enable pnpm" >&2
+  exit 1
+fi
+echo "==> Building WebUI v2 frontend assets"
+(
+  cd "$FRONTEND_DIR"
+  pnpm install --frozen-lockfile
+  pnpm build
+)
+
 export IRONCLAW_REBORN_HOME="${IRONCLAW_REBORN_HOME:-$HOME/.ironclaw-reborn-demo}"
 
 # Reject a home inside the repo, which would trip the workspace/skill-root

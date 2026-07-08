@@ -19,7 +19,7 @@ use ironclaw_reborn_composition::{
 };
 use ironclaw_reborn_webui_ingress::{
     CompositeAuthenticator, SessionAuthenticator, SignedSessionLoginConfig,
-    build_signed_session_login, signed_session_store,
+    build_signed_session_login, empty_webui_v2_auth_providers_mount, signed_session_store,
 };
 use secrecy::SecretString;
 
@@ -50,7 +50,9 @@ pub(crate) struct LocalTriggerAccessBootstrapConfig {
 /// Build the auth surface from resolved startup config.
 ///
 /// With no SSO provider configured (`sso_startup` is `None`), the listener
-/// keeps its plain env-bearer authenticator and mounts no public routes.
+/// keeps its env-bearer authenticator, also validates signed session tokens
+/// minted by the admin API, and mounts only the inert auth surface so
+/// `/auth/providers` can return an empty provider list.
 /// With providers configured, this layers the fail-closed email-domain
 /// admission adapter on top of the runtime-owned canonical Reborn identity
 /// resolver and hands the result to the ingress signed-session builder.
@@ -91,9 +93,10 @@ pub(crate) async fn build_webui_auth_surface(
             session_authenticator,
             env_authenticator,
         ));
+        let public_mount = empty_webui_v2_auth_providers_mount();
         return Ok(WebuiAuthSurface {
             authenticator,
-            public_mount: None,
+            public_mount: Some(public_mount),
         });
     };
 
@@ -231,10 +234,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_sso_keeps_env_authenticator_and_mounts_no_public_routes() {
-        // With no SSO configured the surface is the plain env-bearer
-        // authenticator and no public login routes — the absent-resolver
-        // check must not fire on this path, and a bootstrap config is unused.
+    async fn no_sso_composes_env_and_session_auth_and_mounts_empty_provider_route() {
+        // With no SSO configured the surface still needs env-bearer access
+        // plus signed-session bearer access for admin-created users. It also
+        // mounts an inert public auth surface for provider discovery. The
+        // absent-resolver check must not fire on this path, and a bootstrap
+        // config is unused.
         let result = build_webui_auth_surface(
             None,
             None,
@@ -247,8 +252,11 @@ mod tests {
 
         match result {
             Ok(surface) => assert!(
-                surface.public_mount.is_none(),
-                "no SSO must mount no public login routes"
+                surface.public_mount.as_ref().is_some_and(|mount| {
+                    mount.descriptors.len() == 1
+                        && mount.descriptors[0].route_pattern().as_str() == "/auth/providers"
+                }),
+                "no SSO must mount only /auth/providers with an empty list"
             ),
             Err(error) => panic!("no SSO is a valid configuration, got error: {error}"),
         }

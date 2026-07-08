@@ -2,6 +2,15 @@
 use std::{collections::HashMap, sync::Arc};
 
 #[cfg(feature = "libsql")]
+use crate::{
+    ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire,
+    ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
+    FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerError, TriggerId, TriggerRecord,
+    TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus,
+    TriggerSchedule, TriggerState, reject_failed_result_after_active_run,
+    reject_non_future_next_run_at, reject_run_ref_rewrite, trigger_run_history_status_text,
+};
+#[cfg(feature = "libsql")]
 use async_trait::async_trait;
 #[cfg(feature = "libsql")]
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -11,16 +20,6 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserI
 use ironclaw_turns::TurnRunId;
 #[cfg(feature = "libsql")]
 use libsql::params;
-
-#[cfg(feature = "libsql")]
-use crate::{
-    ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire,
-    ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
-    FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerError, TriggerId, TriggerRecord,
-    TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus,
-    TriggerSchedule, TriggerState, reject_failed_result_after_active_run,
-    reject_non_future_next_run_at, reject_run_ref_rewrite, trigger_run_history_status_text,
-};
 
 #[cfg(feature = "libsql")]
 const TRIGGER_TABLE: &str = "trigger_records";
@@ -376,7 +375,7 @@ impl LibSqlTriggerRepository {
             .db
             .connect()
             .map_err(|error| backend_error("connect trigger repository", error))?;
-        conn.query("PRAGMA busy_timeout = 5000", ())
+        conn.execute_batch("PRAGMA busy_timeout = 5000;")
             .await
             .map_err(|error| backend_error("set trigger repository busy_timeout", error))?;
         Ok(conn)
