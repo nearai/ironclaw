@@ -255,6 +255,7 @@ impl AuthFlowManager for InMemoryAuthProductServices {
                 return Err(AuthProductError::ProviderDenied);
             }
             ProviderCallbackOutcome::Authorized { exchange } => {
+                let exchange = *exchange;
                 if exchange.provider != record.provider {
                     return Err(AuthProductError::TokenExchangeFailed);
                 }
@@ -286,6 +287,7 @@ impl AuthFlowManager for InMemoryAuthProductServices {
             flow_id: completed.id,
             scope: completed.scope.clone(),
             continuation: completed.continuation.clone(),
+            provider: completed.provider.clone(),
             credential_account_id: completed.credential_account_id,
             emitted_at: now,
         });
@@ -338,6 +340,7 @@ impl AuthFlowManager for InMemoryAuthProductServices {
             flow_id: completed.id,
             scope: completed.scope.clone(),
             continuation: completed.continuation.clone(),
+            provider: completed.provider.clone(),
             credential_account_id: completed.credential_account_id,
             emitted_at: now,
         });
@@ -406,6 +409,7 @@ impl AuthFlowManager for InMemoryAuthProductServices {
             flow_id: completed.id,
             scope: completed.scope.clone(),
             continuation: completed.continuation.clone(),
+            provider: completed.provider.clone(),
             credential_account_id: completed.credential_account_id,
             emitted_at: now,
         });
@@ -955,6 +959,7 @@ impl AuthProviderClient for InMemoryAuthProductServices {
             refresh_secret: Some(generated_secret_handle("oauth-refresh")?),
             scopes: request.scopes,
             account_id: None,
+            provider_identity: None,
         })
     }
 
@@ -1005,8 +1010,12 @@ impl SecretCleanupService for InMemoryAuthProductServices {
         let mut state = self.lock_state();
         let quarantines = state.quarantines.clone();
         let mut report = SecretCleanupReport::default();
+        // Credential-owner granularity, not full scope equality: cleanup
+        // callers mint a fresh invocation (and often a different thread), so
+        // exact matching could never find the account the flow stored.
+        let owner = CredentialAccountOwnerScope::from_scope(&request.scope.to_credential_owner());
         for account in state.accounts.values_mut() {
-            if !scope_matches(&request.scope, &account.scope) {
+            if !owner.matches(account) {
                 continue;
             }
             let owns_extension_account = account.owner_extension.as_ref()
@@ -1016,7 +1025,8 @@ impl SecretCleanupService for InMemoryAuthProductServices {
                 .granted_extensions
                 .iter()
                 .any(|extension| extension == &request.extension_id);
-            if !(owns_extension_account || had_grant) {
+            let provider_selected = request.provider.as_ref() == Some(&account.provider);
+            if !(owns_extension_account || had_grant || provider_selected) {
                 continue;
             }
             if let Some(reason) = quarantines.get(&account.id).copied() {
@@ -1033,7 +1043,7 @@ impl SecretCleanupService for InMemoryAuthProductServices {
                 report.removed_grants.push(account.id);
             }
 
-            if owns_extension_account {
+            if owns_extension_account || provider_selected {
                 match request.action {
                     Deactivate => {
                         account.status = CredentialAccountStatus::Inactive;
@@ -1043,6 +1053,8 @@ impl SecretCleanupService for InMemoryAuthProductServices {
                     SecretCleanupAction::Uninstall => {
                         if account.status != CredentialAccountStatus::Revoked {
                             account.status = CredentialAccountStatus::Revoked;
+                            account.access_secret = None;
+                            account.refresh_secret = None;
                             account.updated_at = Utc::now();
                             report.revoked_accounts.push(account.id);
                         }
@@ -1074,6 +1086,7 @@ fn create_account_in_state(
         access_secret: request.access_secret,
         refresh_secret: request.refresh_secret,
         scopes: request.scopes,
+        provider_identity: None,
         created_at: now,
         updated_at: now,
     };
@@ -1144,7 +1157,7 @@ fn create_callback_account(
     if callback.update_binding.is_some() {
         return Err(AuthProductError::CrossScopeDenied);
     }
-    Ok(create_account_in_state(
+    let account_id = create_account_in_state(
         state,
         NewCredentialAccount {
             scope: callback.scope,
@@ -1159,7 +1172,11 @@ fn create_callback_account(
             scopes: exchange.scopes.clone(),
         },
     )?
-    .id)
+    .id;
+    if let Some(account) = state.accounts.get_mut(&account_id) {
+        account.provider_identity = exchange.provider_identity.clone();
+    }
+    Ok(account_id)
 }
 
 fn create_or_update_manual_token_account(

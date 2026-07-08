@@ -89,7 +89,7 @@ where
     N: NetworkHttpEgress + Send + Sync,
     S: SecretStore + Send + Sync,
 {
-    execute_inner(service, request, false).await
+    execute_inner(service, request, false, false).await
 }
 
 pub(super) async fn execute_for_model_visible_output<N, S>(
@@ -100,13 +100,41 @@ where
     N: NetworkHttpEgress + Send + Sync,
     S: SecretStore + Send + Sync,
 {
-    execute_inner(service, request, true).await
+    execute_inner(service, request, true, false).await
+}
+
+/// Transport for an internal credential exchange (OAuth token endpoint).
+/// Identical to [`execute`] except response leak-sanitization is skipped, so
+/// the credential in the response body reaches the host auth caller intact.
+/// Request-side leak validation and credential injection still apply.
+pub(super) async fn execute_credential_exchange<N, S>(
+    service: &HostHttpEgressService<N, S>,
+    request: RuntimeHttpEgressRequest,
+) -> Result<RuntimeHttpEgressResponse, PipelineError>
+where
+    N: NetworkHttpEgress + Send + Sync,
+    S: SecretStore + Send + Sync,
+{
+    // Skipping response sanitization is only safe because exchange requests
+    // carry no injected credentials for the sanitizer to redact. Enforce that
+    // precondition instead of trusting callers to uphold it.
+    if !request.credential_injections.is_empty() {
+        return Err(PipelineError::pre_transport(
+            RuntimeHttpEgressError::Request {
+                reason: "credential_exchange_injections_unsupported".to_string(),
+                request_bytes: 0,
+                response_bytes: 0,
+            },
+        ));
+    }
+    execute_inner(service, request, false, true).await
 }
 
 async fn execute_inner<N, S>(
     service: &HostHttpEgressService<N, S>,
     mut request: RuntimeHttpEgressRequest,
     allow_partial_response_body: bool,
+    skip_response_sanitization: bool,
 ) -> Result<RuntimeHttpEgressResponse, PipelineError>
 where
     N: NetworkHttpEgress + Send + Sync,
@@ -255,29 +283,46 @@ where
 
     let credentials_injected = !redaction_values.is_empty();
     let sanitize_response_started_at = latency_started_at();
-    let (response, response_redacted) = match super::sanitize::sanitize_runtime_response(
-        response,
-        &redaction_values,
-        service.leak_detector(),
-    ) {
-        Ok(result) => {
-            trace_http_egress_latency_ok(
-                "sanitize_response",
-                latency_fields.as_ref(),
-                sanitize_response_started_at,
-                0,
-                result.0.body.len() as u64,
-            );
-            result
-        }
-        Err(error) => {
-            trace_http_egress_latency_error(
-                "sanitize_response",
-                latency_fields.as_ref(),
-                sanitize_response_started_at,
-                error.stable_runtime_reason(),
-            );
-            return Err(PipelineError::post_transport(error));
+    let (response, response_redacted) = if skip_response_sanitization {
+        // Credential-exchange responses (OAuth token endpoints) are consumed by
+        // the host auth system and never surfaced to the model, so the response
+        // sanitizer is bypassed; it would otherwise redact or hard-block the
+        // token this call exists to fetch. Safe here because such requests
+        // carry no injected credentials to redact — enforced fail-closed at
+        // `execute_credential_exchange` before credential staging runs.
+        trace_http_egress_latency_ok(
+            "sanitize_response",
+            latency_fields.as_ref(),
+            sanitize_response_started_at,
+            0,
+            response.body.len() as u64,
+        );
+        (response, false)
+    } else {
+        match super::sanitize::sanitize_runtime_response(
+            response,
+            &redaction_values,
+            service.leak_detector(),
+        ) {
+            Ok(result) => {
+                trace_http_egress_latency_ok(
+                    "sanitize_response",
+                    latency_fields.as_ref(),
+                    sanitize_response_started_at,
+                    0,
+                    result.0.body.len() as u64,
+                );
+                result
+            }
+            Err(error) => {
+                trace_http_egress_latency_error(
+                    "sanitize_response",
+                    latency_fields.as_ref(),
+                    sanitize_response_started_at,
+                    error.stable_runtime_reason(),
+                );
+                return Err(PipelineError::post_transport(error));
+            }
         }
     };
 

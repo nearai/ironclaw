@@ -289,7 +289,7 @@ test("installed channel card omits generic Activate while installed MCP card kee
   assert.equal(
     renderedContainsValue(channel, "Activate"),
     false,
-    "Slack-style channels should use setup/pairing panels instead of generic activation",
+    "Slack-style channels should use configure/setup instead of generic activation",
   );
 
   const mcp = renderExtensionCard({

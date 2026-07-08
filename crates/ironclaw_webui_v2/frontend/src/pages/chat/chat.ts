@@ -20,6 +20,7 @@ import { RecoveryNotice } from "./components/recovery-notice.js";
 import { SuggestionChips } from "./components/suggestion-chips.js";
 import { TypingIndicator } from "./components/typing-indicator.js";
 import { useChat } from "./hooks/useChat.js";
+import { channelConnectionDisplayName } from "../../lib/channel-connection-events.js";
 import { NEW_DRAFT_KEY } from "./lib/draft-store.js";
 import { buildRuntimeContext } from "./lib/runtime-context.js";
 import { buildScopedLogsPath } from "../logs/lib/logs-data.js";
@@ -37,28 +38,10 @@ import { buildScopedLogsPath } from "../logs/lib/logs-data.js";
  * telemetry) if slow links make the re-flicker noticeable. */
 const THREAD_STATE_CLEAR_GRACE_MS = 1500;
 
-// A channel-pairing gate rides the auth rail as a `manual_token` challenge that
-// also carries a `connection` requirement. The pairing card reads an
-// `onboarding`-shaped object, so map the gate's connection context onto it.
-function onboardingFromGate(gate) {
-  const connection = gate?.connection;
-  if (!connection) return null;
-  return {
-    extensionName: connection.channel,
-    strategy: connection.strategy || null,
-    instructions: connection.instructions || null,
-    inputPlaceholder: connection.inputPlaceholder || null,
-    submitLabel: connection.submitLabel || null,
-    errorMessage: connection.errorMessage || null,
-  };
-}
-
-function isChannelPairingGate(gate) {
-  return (
-    gate?.kind === "auth_required" &&
-    gate?.challengeKind === "manual_token" &&
-    Boolean(gate?.connection)
-  );
+function pendingOnboardingLabel(onboarding) {
+  // Single source of channel display names (lib/channel-connection-events.js) so
+  // the composer notice and the pairing-card title can't drift in casing.
+  return channelConnectionDisplayName(onboarding?.extensionName);
 }
 
 export function Chat({
@@ -76,6 +59,7 @@ export function Chat({
     messages,
     isProcessing,
     pendingGate,
+    pendingOnboarding,
     busyGateNotice,
     suggestions,
     sseStatus,
@@ -93,7 +77,10 @@ export function Chat({
     loadMore,
     setSuggestions,
     submitAuthToken,
+    submitOnboardingPairing,
     submitChannelConnectionPairing,
+    startOnboardingOAuth,
+    dismissOnboardingPairing,
   } = useChat(activeThreadId);
 
   const activeThread = React.useMemo(
@@ -105,23 +92,59 @@ export function Chat({
     [gatewayStatus, activeThread]
   );
   const activeThreadHasGate = Boolean(activeThreadId) && Boolean(pendingGate);
-  const activeThreadHasPairingGate =
-    activeThreadHasGate && isChannelPairingGate(pendingGate);
+  // A channel-pairing gate is a `manual_token` auth gate that also carries a
+  // `connection` requirement (gates.ts normalizes it onto `pendingGate.connection`).
+  // Render the pairing card off the live gate — wired to a redeem submit and a
+  // run-cancel dismiss — instead of the plain token card. This is the generic,
+  // non-Slack channel-connect path; the durable-timeline `pendingOnboarding` panel
+  // is the separate, no-active-gate entry point below.
+  const channelConnectionGate =
+    pendingGate?.kind === "auth_required" &&
+    pendingGate?.challengeKind === "manual_token" &&
+    pendingGate?.connection
+      ? pendingGate.connection
+      : null;
+  // Normalize the gate's connection context onto the onboarding-shaped prop the
+  // pairing card renders from, so one card component serves both entry points.
+  const gateConnectionOnboarding = channelConnectionGate
+    ? {
+        extensionName: channelConnectionGate.channel,
+        strategy: channelConnectionGate.strategy,
+        instructions: channelConnectionGate.instructions,
+        inputPlaceholder: channelConnectionGate.inputPlaceholder,
+        submitLabel: channelConnectionGate.submitLabel,
+        errorMessage: channelConnectionGate.errorMessage,
+      }
+    : null;
+  const activeThreadHasChannelConnectionGate =
+    activeThreadHasGate && Boolean(channelConnectionGate);
+  const activeThreadHasOnboarding =
+    Boolean(activeThreadId) && Boolean(pendingOnboarding);
   const activeThreadIsProcessing = Boolean(activeThreadId) && isProcessing;
   const hasMessages =
-    messages.length > 0 || activeThreadIsProcessing || activeThreadHasGate;
+    messages.length > 0 ||
+    activeThreadIsProcessing ||
+    activeThreadHasGate ||
+    activeThreadHasOnboarding;
   // Don't show the landing composer when history failed to load — show the
   // error banner instead so the user is not misled into thinking the thread
   // is empty.
   const showLanding = !historyLoading && !hasMessages && !historyLoadError;
-  const approvalSubmitWarning = activeThreadHasPairingGate
+  const approvalSubmitWarning = activeThreadHasChannelConnectionGate
     ? t("chat.finishPairingBeforeSend")
     : activeThreadHasGate
       ? t("chat.resolveApprovalBeforeSend")
-      : "";
+      : activeThreadHasOnboarding
+        ? t("chat.finishPairingBeforeSend", {
+            name: pendingOnboardingLabel(pendingOnboarding),
+          })
+        : "";
   const composerSendDisabled =
     activeThreadHasGate ||
-    (activeThreadIsProcessing && !activeThreadHasGate) ||
+    activeThreadHasOnboarding ||
+    (activeThreadIsProcessing &&
+      !activeThreadHasGate &&
+      !activeThreadHasOnboarding) ||
     cooldownSeconds > 0;
   const composerSendBlockedRef = React.useRef(composerSendDisabled);
   composerSendBlockedRef.current = composerSendDisabled;
@@ -137,7 +160,8 @@ export function Chat({
       activeRun?.runId &&
       activeRun.threadId === activeThreadId &&
       activeThreadIsProcessing &&
-      !activeThreadHasGate
+      !activeThreadHasGate &&
+      !activeThreadHasOnboarding
   );
   const handleSend = React.useCallback(
     async (content, { images = [], attachments = [], displayContent } = {}) => {
@@ -184,12 +208,13 @@ export function Chat({
   /* Mirror the active thread's lifecycle into the per-thread state store
    * so the sidebar row reflects what's happening on the open thread:
    *
-   *   pendingGate (approval, auth, or channel pairing) → NEEDS_ATTENTION (amber)
-   *   isProcessing without a gate                       → RUNNING (green)
-   *   neither                                         → clear (idle)
+   *   pendingGate / pendingOnboarding → NEEDS_ATTENTION (amber)
+   *   isProcessing without either     → RUNNING (green)
+   *   neither                       → clear (idle)
    *
-   * Priority is user-action-first because a gate logically subsumes processing
-   * — the run is paused waiting on the user, not actively working.
+   * Priority is user-action-first because a gate or pairing panel logically
+   * subsumes processing — the run is paused waiting on the user, not actively
+   * working.
    *
    * Invariant: useChat resets pendingGate (and isProcessing reaches a
    * fresh value) on threadId change via the thread-reset effect in
@@ -212,7 +237,7 @@ export function Chat({
    * window. Setting NEEDS_ATTENTION / RUNNING stays immediate. */
   React.useEffect(() => {
     if (!activeThreadId) return undefined;
-    if (pendingGate) {
+    if (pendingGate || pendingOnboarding) {
       setThreadState(activeThreadId, THREAD_STATE.NEEDS_ATTENTION);
       return undefined;
     }
@@ -225,7 +250,7 @@ export function Chat({
       THREAD_STATE_CLEAR_GRACE_MS
     );
     return () => clearTimeout(timer);
-  }, [activeThreadId, pendingGate, isProcessing]);
+  }, [activeThreadId, pendingGate, pendingOnboarding, isProcessing]);
 
   const [shortcutsOpen, setShortcutsOpen] = React.useState(false);
   React.useEffect(() => {
@@ -297,7 +322,17 @@ export function Chat({
             `}
             ${activeThreadIsProcessing &&
             !activeThreadHasGate &&
+            !activeThreadHasOnboarding &&
             html`<${TypingIndicator} />`}
+            ${activeThreadHasOnboarding &&
+            html`
+              <${OnboardingPairingCard}
+                onboarding=${pendingOnboarding}
+                onSubmit=${submitOnboardingPairing}
+                onConfigure=${startOnboardingOAuth}
+                onCancel=${dismissOnboardingPairing}
+              />
+            `}
             ${pendingGate &&
             (pendingGate.kind === "auth_required"
               ? (pendingGate.challengeKind === "oauth_url"
@@ -309,10 +344,10 @@ export function Chat({
                   />
                 `
                 : pendingGate.challengeKind === "manual_token"
-                  ? (isChannelPairingGate(pendingGate)
+                  ? (channelConnectionGate
                     ? html`
                   <${OnboardingPairingCard}
-                    onboarding=${onboardingFromGate(pendingGate)}
+                    onboarding=${gateConnectionOnboarding}
                     onSubmit=${submitChannelConnectionPairing}
                     onCancel=${handleCancelRun}
                   />

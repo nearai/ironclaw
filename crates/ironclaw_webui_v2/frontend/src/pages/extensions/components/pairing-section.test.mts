@@ -83,29 +83,29 @@ test("PairingSection custom redeem trims code and invalidates configured queries
   vm.runInNewContext(pairingSectionSourceForTest(), context);
 
   let rendered = renderPairingSection(context, {
-    channel: "slack",
+    channel: "telegram",
     redeemFn: (channel, code) => {
       redeemCalls.push({ channel, code });
       return { success: true };
     },
-    queryKeys: [["extensions"], ["pairing", "slack"]],
+    queryKeys: [["extensions"], ["pairing", "telegram"]],
     showPendingRequests: false,
   });
   valueAfter(rendered, "onChange=")({ target: { value: "  A1B2C3  " } });
 
   rendered = renderPairingSection(context, {
-    channel: "slack",
+    channel: "telegram",
     redeemFn: (channel, code) => {
       redeemCalls.push({ channel, code });
       return { success: true };
     },
-    queryKeys: [["extensions"], ["pairing", "slack"]],
+    queryKeys: [["extensions"], ["pairing", "telegram"]],
     showPendingRequests: false,
   });
   valueAfter(rendered, "onClick=")();
 
-  assert.deepEqual(redeemCalls, [{ channel: "slack", code: "A1B2C3" }]);
-  assert.deepEqual(invalidations, [["extensions"], ["pairing", "slack"]]);
+  assert.deepEqual(redeemCalls, [{ channel: "telegram", code: "A1B2C3" }]);
+  assert.deepEqual(invalidations, [["extensions"], ["pairing", "telegram"]]);
   assert.equal(state.manualCode, "");
 });
 
@@ -141,7 +141,7 @@ test("PairingSection custom redeem is a no-op for blank manual input", () => {
   vm.runInNewContext(pairingSectionSourceForTest(), context);
 
   const rendered = renderPairingSection(context, {
-    channel: "slack",
+    channel: "telegram",
     redeemFn: () => ({ success: true }),
     showPendingRequests: false,
   });

@@ -24,6 +24,7 @@ pub use failure_summary::reborn_failure_summary_for_category;
 pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
 #[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_auth::GoogleOAuthRouteConfig;
+pub use ironclaw_auth::OAuthRedirectUri;
 pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleSearchExtensionSummary,
@@ -89,6 +90,8 @@ pub use product_auth::api::auth::{
     RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
     RebornProductAuthServicePorts, RebornProductAuthServices,
 };
+#[cfg(feature = "slack-v2-host-beta")]
+pub use product_auth::serve::SlackPersonalOAuthBindingConfig;
 pub use product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
     ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
@@ -163,19 +166,6 @@ pub use slack_personal_binding::{
     SlackPersonalUserBindingRequest, SlackPersonalUserBindingService,
 };
 #[cfg(feature = "slack-v2-host-beta")]
-pub use slack_personal_binding_pairing::{
-    IssuedSlackPersonalBindingPairingChallenge, SlackPairingActorResolver,
-    SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingChallengeStore,
-    SlackPersonalBindingPairingCode, SlackPersonalBindingPairingError,
-    SlackPersonalBindingPairingNotification, SlackPersonalBindingPairingNotifier,
-    SlackPersonalBindingPairingService,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack_personal_binding_pairing_serve::{
-    SlackPersonalBindingPairingRedeemResponse, SlackPersonalBindingPairingRouteConfig,
-    WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH,
-};
-#[cfg(feature = "slack-v2-host-beta")]
 pub use slack_personal_binding_serve::{
     SLACK_PERSONAL_BINDING_OAUTH_CALLBACK_PATH, SLACK_PERSONAL_BINDING_OAUTH_START_PATH,
     SlackPersonalBindingAuthorizationUrl, SlackPersonalBindingOAuthClient,
@@ -189,6 +179,8 @@ pub use slack_serve::{
     SlackInstallationSelector, SlackTeamId, slack_events_route_descriptors,
     slack_events_route_mount,
 };
+#[cfg(feature = "slack-v2-host-beta")]
+pub use slack_setup::SlackPersonalSetupServiceSlot;
 pub use web_access::register_bundled_web_access_first_party_handlers;
 pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]

@@ -34,6 +34,9 @@ test("renderMarkdown routes parsed HTML through DOMPurify.sanitize, stripping ha
         },
       },
       DOMPurify: {
+        // renderMarkdown registers a one-time `afterSanitizeAttributes` hook
+        // (ensureLinkTargetHook) before sanitizing; stub it as a no-op so the
+        // sanitize-strips-handlers assertion below is what's actually exercised.
         addHook: () => {},
         sanitize: (raw) => {
           calls.sanitize.push(raw);

@@ -4,8 +4,8 @@ use ironclaw_filesystem::{CasExpectation, RootFilesystem};
 
 use super::FilesystemAuthProductServices;
 use ironclaw_auth::{
-    AuthProductError, CredentialAccountStatus, CredentialOwnership, SecretCleanupAction,
-    SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
+    AuthProductError, CredentialAccountOwnerScope, CredentialAccountStatus, CredentialOwnership,
+    SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
 };
 
 #[async_trait]
@@ -18,7 +18,14 @@ where
         request: SecretCleanupRequest,
     ) -> Result<SecretCleanupReport, AuthProductError> {
         let mut report = SecretCleanupReport::default();
-        for account in self.accounts_for_scope(&request.scope).await? {
+        // Credential-owner granularity, not full scope equality: lifecycle and
+        // disconnect callers mint a fresh `invocation_id` (and often arrive
+        // from a different thread), so an exact-scope lookup could never find
+        // the account the OAuth/manual flow stored. Per-account operations
+        // below use the ACCOUNT's stored scope, which is where its record and
+        // secret material actually live.
+        let owner = CredentialAccountOwnerScope::from_scope(&request.scope.to_credential_owner());
+        for account in self.account_records_for_owner(&owner).await? {
             let owns_extension_account = account.owner_extension.as_ref()
                 == Some(&request.extension_id)
                 && account.ownership == CredentialOwnership::ExtensionOwned;
@@ -26,13 +33,14 @@ where
                 .granted_extensions
                 .iter()
                 .any(|extension| extension == &request.extension_id);
-            if !(owns_extension_account || had_grant) {
+            let provider_selected = request.provider.as_ref() == Some(&account.provider);
+            if !(owns_extension_account || had_grant || provider_selected) {
                 continue;
             }
             let lock = self.lock_for(format!("account:{}", account.id));
             let _guard = lock.lock().await;
             let (mut current, version) = self
-                .read_account(&request.scope, account.id)
+                .read_account(&account.scope, account.id)
                 .await?
                 .ok_or(AuthProductError::CredentialMissing)?;
             current
@@ -43,7 +51,7 @@ where
             }
             // Capture handles to purge before mutating the record so we can
             // delete from SecretStore after the account write.
-            let (purge_access, purge_refresh) = if owns_extension_account {
+            let (purge_access, purge_refresh) = if owns_extension_account || provider_selected {
                 match request.action {
                     SecretCleanupAction::Deactivate => {
                         current.status = CredentialAccountStatus::Inactive;
@@ -74,10 +82,10 @@ where
             // these handles so any leftover material becomes unreachable even if
             // the delete call fails (e.g. transient backend outage).
             if let Some(h) = &purge_access {
-                let _ = self.secret_store.delete(&request.scope.resource, h).await;
+                let _ = self.secret_store.delete(&current.scope.resource, h).await;
             }
             if let Some(h) = &purge_refresh {
-                let _ = self.secret_store.delete(&request.scope.resource, h).await;
+                let _ = self.secret_store.delete(&current.scope.resource, h).await;
             }
         }
         Ok(report)

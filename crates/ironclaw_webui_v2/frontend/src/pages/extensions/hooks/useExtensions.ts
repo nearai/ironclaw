@@ -3,6 +3,14 @@ import { React } from "../../../lib/html.js";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { gatewayStatus } from "../../../lib/api.js";
 import { listConnectableChannels } from "../../../lib/channel-connect.js";
+import {
+  completionMatchesFlow,
+  failureMatchesFlow,
+  isHttpsAuthUrl,
+  openAuthPopup,
+  readLatestProductAuthOAuthCompletion,
+  subscribeProductAuthOAuthCompletion,
+} from "../../../lib/product-auth-oauth-events.js";
 import { useT } from "../../../lib/i18n.js";
 import { isChannelExtensionKind } from "../lib/extensions-schema.js";
 import {
@@ -14,6 +22,7 @@ import {
   fetchExtensionSetup,
   submitExtensionSetup,
   startExtensionOauth,
+  fetchOauthFlowStatus,
   fetchPairingRequests,
   approvePairingCode,
 } from "../lib/extensions-api.js";
@@ -21,24 +30,45 @@ import {
 const OAUTH_SETUP_REFRESH_MS = 2000;
 const OAUTH_SETUP_TIMEOUT_MS = 10 * 60 * 1000;
 
-function isHttpsAuthUrl(url) {
-  try {
-    return new URL(url).protocol === "https:";
-  } catch (_) {
-    return false;
-  }
+// OAuth callback constants, HTTPS-auth-URL/popup helpers, and completion
+// parsing/matching are the shared product-auth OAuth event contract — see
+// `lib/product-auth-oauth-events.js`. This hook keeps only its setup-watcher
+// state machine below.
+
+function authPopupFailureMessage(reason) {
+  return reason === "popup_blocked"
+    ? "Authorization popup was blocked."
+    : "Authorization URL must use HTTPS.";
 }
 
-function openAuthUrl(url, popup = null) {
-  if (!isHttpsAuthUrl(url)) return { ok: false, popup: null };
-  if (popup && !popup.closed) {
-    popup.location.href = url;
-    return { ok: true, popup };
+function oauthResponseFlowId(response) {
+  return response?.flow_id || response?.flowId || null;
+}
+
+// The invocation id the start response minted, carried on the callback-scope
+// hint. The origin-independent flow-status poll sends it back so the
+// caller-scoped backend can re-derive the exact scope its `get_flow` matched
+// on when the flow was created.
+function oauthResponseInvocationId(response) {
+  const scope = response?.callback_scope || response?.callbackScope || null;
+  return scope?.invocation_id || scope?.invocationId || null;
+}
+
+function extensionListItemIsConfigured(extension) {
+  if (!extension) return false;
+  if (extension.needs_setup === false && (extension.authenticated || extension.active)) {
+    return true;
   }
-  return {
-    ok: true,
-    popup: window.open(url, "_blank", "noopener,noreferrer"),
-  };
+  // Same snake/camel fallback chain as `extensionLifecycleState`
+  // (lib/extension-actions.js) so a camelCase snapshot cannot read as
+  // "not configured" here while the rest of the page treats it as active.
+  const state =
+    extension.onboarding_state ||
+    extension.onboardingState ||
+    extension.activation_status ||
+    extension.activationStatus ||
+    (extension.active ? "active" : null);
+  return (state === "active" || state === "ready") && extension.needs_setup !== true;
 }
 
 function packageId(item) {
@@ -116,10 +146,14 @@ export function useExtensions() {
           type: "success",
           message,
         });
-        if (res.auth_url && !openAuthUrl(res.auth_url).ok) {
+        let installAuthPopup = null;
+        if (res.auth_url) {
+          installAuthPopup = openAuthPopup(res.auth_url);
+        }
+        if (installAuthPopup && !installAuthPopup.ok) {
           setActionResult({
             type: "error",
-            message: t("extensions.authUrlHttpsRequired"),
+            message: authPopupFailureMessage(installAuthPopup.reason),
           });
         } else if (
           !res.auth_url &&
@@ -164,19 +198,23 @@ export function useExtensions() {
               name: displayName || t("extensions.defaultName"),
             }),
         });
-        if (res.auth_url && !openAuthUrl(res.auth_url).ok) {
-          setActionResult({
-            type: "error",
-            message: t("extensions.authUrlHttpsRequired"),
-          });
+        if (res.auth_url) {
+          const opened = openAuthPopup(res.auth_url);
+          if (!opened.ok) {
+            setActionResult({
+              type: "error",
+              message: authPopupFailureMessage(opened.reason),
+            });
+          }
         }
       } else if (res.auth_url) {
-        if (openAuthUrl(res.auth_url).ok) {
+        const opened = openAuthPopup(res.auth_url);
+        if (opened.ok) {
           setActionResult({ type: "info", message: t("extensions.openingAuth") });
         } else {
           setActionResult({
             type: "error",
-            message: t("extensions.authUrlHttpsRequired"),
+            message: authPopupFailureMessage(opened.reason),
           });
         }
       } else if (res.awaiting_token) {
@@ -329,15 +367,31 @@ export function useSetupSubmit(packageRef, onSuccess) {
   });
 }
 
-export function useOauthSetup(packageRef) {
+export function useOauthSetup(packageRef, { onConfigured } = {}) {
   const queryClient = useQueryClient();
   const packageKey = packageRef?.id || packageRef;
   const watcherRef = React.useRef(null);
+  const configuredRef = React.useRef(false);
+  const [isAuthorizing, setIsAuthorizing] = React.useState(false);
+  // Retryable error surfaced when the callback popup reports a flow-matched
+  // FAILURE (provider denial, exchange failure). Ref-guarded setter so the
+  // reset at watcher start is a no-op unless an error was actually showing.
+  const [authError, setAuthErrorState] = React.useState(null);
+  const authErrorRef = React.useRef(null);
+  const setAuthError = React.useCallback((value) => {
+    if (Object.is(authErrorRef.current, value)) return;
+    authErrorRef.current = value;
+    setAuthErrorState(value);
+  }, []);
 
   const clearWatcher = React.useCallback(() => {
-    if (watcherRef.current) {
-      window.clearInterval(watcherRef.current);
-      watcherRef.current = null;
+    const cleanup = watcherRef.current;
+    watcherRef.current = null;
+    if (typeof cleanup === "function") {
+      cleanup();
+    } else if (cleanup) {
+      window.clearInterval(cleanup);
+      setIsAuthorizing(false);
     }
   }, []);
 
@@ -347,42 +401,143 @@ export function useOauthSetup(packageRef) {
     queryClient.invalidateQueries({ queryKey: ["extension-setup", packageKey] });
   }, [packageKey, queryClient]);
 
-  const setupIsConfigured = React.useCallback(() => {
+  const setupIsConfigured = React.useCallback(({ allowProvidedSecrets = true } = {}) => {
     const setup = queryClient.getQueryData(["extension-setup", packageKey]);
-    if (setup?.secrets?.length > 0 && setup.secrets.every((secret) => secret.provided)) {
+    if (
+      allowProvidedSecrets &&
+      setup?.secrets?.length > 0 &&
+      setup.secrets.every((secret) => secret.provided)
+    ) {
       return true;
     }
     const extensions = queryClient.getQueryData(["extensions"])?.extensions || [];
     const extension = extensions.find((item) => item.package_ref?.id === packageKey);
-    const state =
-      extension?.onboarding_state ||
-      extension?.activation_status ||
-      (extension?.active ? "active" : null);
-    return state === "active" || state === "ready";
+    return extensionListItemIsConfigured(extension);
   }, [packageKey, queryClient]);
 
   const watchOauthProgress = React.useCallback(
-    (popup) => {
+    (popup, { flowId = null, invocationId = null, requireCallbackCompletion = false } = {}) => {
       clearWatcher();
+      configuredRef.current = false;
+      const browserWindow =
+        typeof window !== "undefined" ? window : globalThis?.window || null;
+      if (!browserWindow) return;
+      setIsAuthorizing(true);
+      setAuthError(null);
       const startedAt = Date.now();
-      watcherRef.current = window.setInterval(() => {
+      // A reconnect starts from an already-configured server snapshot, so
+      // "configured" alone cannot prove THIS flow finished: only a
+      // not-configured → configured transition observed by the poll (or the
+      // flow-id-matched callback signal) may complete the watcher.
+      const configuredBeforeFlow = setupIsConfigured({
+        allowProvidedSecrets: !requireCallbackCompletion,
+      });
+      let stopped = false;
+      let timer = null;
+      let unsubscribe = () => {};
+      // Guard against overlapping in-flight status polls so a slow request
+      // cannot stack fetches across interval ticks.
+      let flowStatusPending = false;
+
+      function cleanup() {
+        if (stopped) return;
+        stopped = true;
+        if (timer) browserWindow.clearInterval(timer);
+        unsubscribe();
+        setIsAuthorizing(false);
+      }
+
+      function stopWatcher() {
+        if (watcherRef.current === cleanup) watcherRef.current = null;
+        cleanup();
+      }
+
+      function complete() {
+        if (stopped) return;
+        if (!configuredRef.current) {
+          configuredRef.current = true;
+          Promise.resolve(onConfigured?.()).catch(() => {});
+        }
+        stopWatcher();
         refreshSetupState();
-        if (
-          setupIsConfigured() ||
-          (popup && popup.closed) ||
-          Date.now() - startedAt > OAUTH_SETUP_TIMEOUT_MS
-        ) {
-          clearWatcher();
+      }
+
+      function handleCompletion(payload) {
+        if (failureMatchesFlow(payload, flowId)) {
+          setAuthError("Authorization failed. Try connecting again.");
+          stopWatcher();
+          refreshSetupState();
+          return true;
+        }
+        if (!completionMatchesFlow(payload, flowId)) return false;
+        complete();
+        return true;
+      }
+
+      // Origin-independent backstop: the callback page's completion signal is
+      // same-origin (localStorage/BroadcastChannel), so a cross-origin callback
+      // (local ngrok callback vs 127.0.0.1 opener, or split app/callback domains
+      // in prod) never reaches this tab. Poll the durable flow status by id so
+      // the watcher can still resolve. Fire-and-forget with a pending guard so
+      // the interval never blocks or stacks requests; the browser signal above
+      // stays the fast path.
+      function pollFlowStatus() {
+        if (stopped || !flowId || flowStatusPending) return;
+        flowStatusPending = true;
+        Promise.resolve(fetchOauthFlowStatus(flowId, invocationId))
+          .then((result) => {
+            if (stopped) return;
+            const status = result?.status;
+            if (status === "completed") {
+              complete();
+            } else if (status === "failed") {
+              setAuthError("Authorization failed. Try connecting again.");
+              stopWatcher();
+              refreshSetupState();
+            }
+          })
+          .catch(() => {})
+          .finally(() => {
+            flowStatusPending = false;
+          });
+      }
+
+      unsubscribe = subscribeProductAuthOAuthCompletion(browserWindow, handleCompletion);
+
+      timer = browserWindow.setInterval(() => {
+        refreshSetupState();
+        if (handleCompletion(readLatestProductAuthOAuthCompletion(browserWindow))) {
+          return;
+        }
+        pollFlowStatus();
+        const configured = setupIsConfigured({
+          allowProvidedSecrets: !requireCallbackCompletion,
+        });
+        if (configured && !configuredBeforeFlow) {
+          complete();
+          return;
+        }
+        const timedOut = Date.now() - startedAt > OAUTH_SETUP_TIMEOUT_MS;
+        const popupClosedBeforeCallback = popup && popup.closed && !requireCallbackCompletion;
+        if (popupClosedBeforeCallback || timedOut) {
+          if (timedOut) {
+            // An abandoned reconnect otherwise ends after 10 minutes with no
+            // signal at all — the button was disabled the whole time.
+            setAuthError("Authorization timed out. Try connecting again.");
+          }
+          stopWatcher();
           refreshSetupState();
         }
       }, OAUTH_SETUP_REFRESH_MS);
+      watcherRef.current = cleanup;
+      handleCompletion(readLatestProductAuthOAuthCompletion(browserWindow));
     },
-    [clearWatcher, refreshSetupState, setupIsConfigured]
+    [clearWatcher, onConfigured, refreshSetupState, setAuthError, setupIsConfigured]
   );
 
   React.useEffect(() => clearWatcher, [clearWatcher]);
 
-  return useMutation({
+  const mutation = useMutation({
     mutationFn: ({ secret, popup }) =>
       startExtensionOauth(packageRef, secret).then((res) => {
         if (res.success === false) {
@@ -393,15 +548,26 @@ export function useOauthSetup(packageRef) {
         }
         return { res, popup };
       }),
-    onSuccess: ({ res, popup }) => {
+    onSuccess: ({ res, popup }, variables) => {
       let authPopup = popup;
       if (res.authorization_url) {
-        authPopup = openAuthUrl(res.authorization_url, popup).popup;
+        const opened = openAuthPopup(res.authorization_url, popup);
+        authPopup = opened.popup;
+        if (!opened.ok) {
+          throw new Error(authPopupFailureMessage(opened.reason));
+        }
       } else if (popup && !popup.closed) {
         popup.close();
       }
       refreshSetupState();
-      if (authPopup) watchOauthProgress(authPopup);
+      if (authPopup) {
+        const flowId = oauthResponseFlowId(res);
+        watchOauthProgress(authPopup, {
+          flowId,
+          invocationId: oauthResponseInvocationId(res),
+          requireCallbackCompletion: Boolean(flowId && variables?.secret?.provided),
+        });
+      }
     },
     onError: (_err, variables) => {
       clearWatcher();
@@ -409,6 +575,7 @@ export function useOauthSetup(packageRef) {
       if (popup && !popup.closed) popup.close();
     },
   });
+  return { ...mutation, isAuthorizing, authError };
 }
 
 export function usePairing(channel, options = {}) {

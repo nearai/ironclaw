@@ -6,11 +6,17 @@ import {
   sendMessage,
   submitManualToken,
 } from "../../../lib/api.js";
-import { redeemSlackPairingCode } from "../../../lib/slack-pairing-api.js";
-import { subscribeChannelConnected } from "../../../lib/channel-connection-events.js";
+import {
+  completionMatchesGate,
+  readLatestProductAuthOAuthCompletion,
+  subscribeProductAuthOAuthCompletion,
+} from "../../../lib/product-auth-oauth-events.js";
 import { queryClient } from "../../../lib/query-client.js";
 import { React } from "../../../lib/html.js";
-import { redeemPairingCode } from "../../extensions/lib/pairing-api.js";
+import {
+  onboardingBelongsToThread,
+  useChannelOnboarding,
+} from "./useChannelOnboarding.js";
 import { useChatEvents } from "../lib/useChatEvents.js";
 import { touchThreadInCache } from "../lib/thread-cache.js";
 import {
@@ -32,9 +38,6 @@ const AUTH_TOKEN_FLOW_TIMEOUT_MS = 30000;
 const AUTH_GATE_CREDENTIAL_STORED_ERROR =
   "credential_stored_gate_resolution_failed";
 const APPROVAL_GATE_PENDING_SEND_ERROR = "approval_gate_pending_send_blocked";
-const OAUTH_CALLBACK_CHANNEL = "ironclaw-product-auth";
-const OAUTH_CALLBACK_STORAGE_KEY = "ironclaw:product-auth:oauth-complete";
-const OAUTH_CALLBACK_MESSAGE_TYPE = "ironclaw:product-auth:oauth-complete";
 
 async function withAuthTokenTimeout(task) {
   const controller = new AbortController();
@@ -93,30 +96,6 @@ function isPendingOAuthGate(gate) {
   return gate?.kind === "auth_required" && gate?.challengeKind === "oauth_url";
 }
 
-function isOAuthCallbackCompletion(payload) {
-  return payload?.type === OAUTH_CALLBACK_MESSAGE_TYPE && payload?.status === "completed";
-}
-
-function oauthCompletionMatchesGate(payload, gate, listeningSince) {
-  if (!isOAuthCallbackCompletion(payload)) return false;
-  const continuation = payload?.continuation;
-  if (!continuation || continuation.type !== "turn_gate_resume") {
-    return Number(payload?.completedAt || 0) >= listeningSince;
-  }
-  if (continuation.turn_run_ref && continuation.turn_run_ref !== gate?.runId) return false;
-  if (continuation.gate_ref && continuation.gate_ref !== gate?.gateRef) return false;
-  return true;
-}
-
-function parseOAuthCallbackStoragePayload(value) {
-  if (!value) return null;
-  try {
-    return JSON.parse(value);
-  } catch {
-    return null;
-  }
-}
-
 // v2 chat hook. Differences from the fork's v1 hook:
 // - No image / attachment plumbing — v2 SendMessage carries `content` only.
 // - No /api/chat/approval — approvals fold into gate/resolve in v2.
@@ -163,6 +142,7 @@ export function useChat(threadId) {
 
   const {
     messages,
+    messagesThreadId,
     hasMore,
     nextCursor,
     isLoading: historyLoading,
@@ -182,7 +162,6 @@ export function useChat(threadId) {
   }, []);
   const [pendingGate, setPendingGateState] = React.useState(null);
   const pendingGateRef = React.useRef(pendingGate);
-  const [busyGateNotice, setBusyGateNotice] = React.useState(null);
   const setPendingGate = React.useCallback((next) => {
     const current = pendingGateRef.current;
     const value =
@@ -191,6 +170,34 @@ export function useChat(threadId) {
     pendingGateRef.current = value;
     setPendingGateState(value);
   }, []);
+  // `send` is defined further down; mirror it into this ref so the onboarding
+  // hook's resume paths can invoke the latest send without a render-order cycle.
+  const sendRef = React.useRef(null);
+  // The in-chat channel-connection ("pairing") onboarding state machine. It
+  // owns `pendingOnboarding` — declared here so it stays the sixth `useState`,
+  // the slot the vm test harness seeds/reads — plus its dismissal/flow refs and
+  // the derive/OAuth/resume effects. `useChat` keeps the gate + send state and
+  // threads the handles they share in; the returned values are re-exposed
+  // verbatim from `useChat` for `chat.js`.
+  const channelOnboarding = useChannelOnboarding(threadId, {
+    messages,
+    messagesThreadId,
+    pendingGate,
+    pendingGateRef,
+    setPendingGate,
+    setIsProcessing,
+    sendRef,
+  });
+  const {
+    pendingOnboarding,
+    pendingOnboardingRef,
+    setPendingOnboardingState,
+    submitOnboardingPairing,
+    submitChannelConnectionPairing,
+    startOnboardingOAuth,
+    dismissOnboardingPairing,
+  } = channelOnboarding;
+  const [busyGateNotice, setBusyGateNotice] = React.useState(null);
   const [stateThreadId, setStateThreadId] = React.useState(threadId);
   const toolActivityStateRef = React.useRef(createToolActivityState());
   const locallyResolvedGatesRef = React.useRef(new Map());
@@ -233,6 +240,7 @@ export function useChat(threadId) {
     setStateThreadId(threadId);
     setIsProcessingState(false);
     setPendingGateState(null);
+    setPendingOnboardingState(null);
     setBusyGateNotice(null);
     setActiveRunState(null);
   }
@@ -269,6 +277,12 @@ export function useChat(threadId) {
   }, [threadId]);
 
   const cooldownSeconds = Math.max(0, Math.ceil((cooldownUntil - now) / 1000));
+  const visiblePendingOnboarding = onboardingBelongsToThread(
+    pendingOnboarding,
+    threadId,
+  )
+    ? pendingOnboarding
+    : null;
   const pendingAuthGateKey =
     pendingGate?.runId && pendingGate?.gateRef
       ? `${pendingGate.runId}\n${pendingGate.gateRef}`
@@ -292,42 +306,25 @@ export function useChat(threadId) {
 
   React.useEffect(() => {
     if (!isPendingOAuthGate(pendingGate)) return;
+    const browserWindow =
+      typeof window !== "undefined" ? window : globalThis?.window || null;
+    if (!browserWindow) return;
     const listeningSince = Date.now();
 
     const handleCompletion = (payload) => {
-      if (!oauthCompletionMatchesGate(payload, pendingGate, listeningSince)) return;
+      if (!completionMatchesGate(payload, pendingGate, listeningSince)) return;
       setPendingGate((current) => (isPendingOAuthGate(current) ? null : current));
       setIsProcessing(true);
     };
 
-    let channel = null;
-    if (typeof window.BroadcastChannel === "function") {
-      channel = new window.BroadcastChannel(OAUTH_CALLBACK_CHANNEL);
-      channel.onmessage = (event) => handleCompletion(event.data);
-    }
-
-    const onStorage = (event) => {
-      if (event.key !== OAUTH_CALLBACK_STORAGE_KEY) return;
-      handleCompletion(parseOAuthCallbackStoragePayload(event.newValue));
-    };
-
-    window.addEventListener("storage", onStorage);
-    handleCompletion(
-      parseOAuthCallbackStoragePayload(
-        window.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY),
-      ),
-    );
-    const timer = window.setInterval(() => {
-      handleCompletion(
-        parseOAuthCallbackStoragePayload(
-          window.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY),
-        ),
-      );
+    const unsubscribe = subscribeProductAuthOAuthCompletion(browserWindow, handleCompletion);
+    handleCompletion(readLatestProductAuthOAuthCompletion(browserWindow));
+    const timer = browserWindow.setInterval(() => {
+      handleCompletion(readLatestProductAuthOAuthCompletion(browserWindow));
     }, 500);
     return () => {
-      window.clearInterval(timer);
-      if (channel) channel.close();
-      window.removeEventListener("storage", onStorage);
+      browserWindow.clearInterval(timer);
+      unsubscribe();
     };
   }, [pendingGate]);
 
@@ -399,6 +396,7 @@ export function useChat(threadId) {
       const {
         threadId: targetThreadId,
         attachments: stagedAttachments = [],
+        bypassPendingOnboarding = false,
         displayContent,
       } = opts;
       const wireAttachments = stagedAttachments.map(toWireAttachment);
@@ -406,7 +404,16 @@ export function useChat(threadId) {
       const renderContent =
         typeof displayContent === "string" ? displayContent : content;
 
-      if (pendingGate || pendingGateRef.current) {
+      if (
+        pendingGate ||
+        pendingGateRef.current ||
+        (!bypassPendingOnboarding &&
+          (onboardingBelongsToThread(pendingOnboarding, targetThreadId || threadId) ||
+            onboardingBelongsToThread(
+              pendingOnboardingRef.current,
+              targetThreadId || threadId,
+            )))
+      ) {
         throw approvalGatePendingSendError();
       }
       // Admission: block a send only when the *destination* thread is the one
@@ -683,6 +690,7 @@ export function useChat(threadId) {
     [
       threadId,
       pendingGate,
+      pendingOnboarding,
       setMessages,
       seedThreadMessages,
       setIsProcessing,
@@ -690,18 +698,7 @@ export function useChat(threadId) {
       setActiveRun,
     ],
   );
-
-  React.useEffect(() => {
-    return subscribeChannelConnected(() => {
-      // A channel connected — here, in another tab, or on the extensions page.
-      // The parked turn is resumed backend-side on redeem, and its projection
-      // clears the pairing gate. This subscription only refreshes the per-user
-      // connection snapshot so the extensions / connectable-channels UI on any
-      // open surface sees "connected" instead of the stale "needs setup" cache.
-      queryClient.invalidateQueries?.({ queryKey: ["extensions"] });
-      queryClient.invalidateQueries?.({ queryKey: ["connectable-channels"] });
-    });
-  }, []);
+  sendRef.current = send;
 
   // v2 resolveGate signature: `(resolution, { always?, credentialRef? })`.
   // run_id and gate_ref come from the live `pendingGate` (set by the
@@ -828,56 +825,17 @@ export function useChat(threadId) {
     [pendingGate, threadId],
   );
 
-  // Channel-pairing gate submit. A `manual_token` gate that carries a
-  // `connection` is a per-user authorization to act on a connectable channel
-  // (Slack, Telegram, …). Redeeming the pair code binds the identity and — as
-  // of V2 — RESUMES the parked turn backend-side, so unlike `submitAuthToken`
-  // this deliberately does NOT call `resolveGate`: the run resumes on its own
-  // and the projection update clears the gate. Modeled on `submitAuthToken`
-  // minus the resolve step.
-  const submitChannelConnectionPairing = React.useCallback(
-    async (code) => {
-      const gate = pendingGateRef.current || pendingGate;
-      const channel = String(gate?.connection?.channel || "").trim();
-      if (!gate || !channel) {
-        throw new Error("channel connection gate is no longer pending");
-      }
-      const trimmed = String(code || "").trim();
-      if (!trimmed) {
-        throw new Error("pairing code is required");
-      }
-      const options = { threadId };
-      // Every channel redeems through the same mounted v2 endpoint. The legacy
-      // /api/pairing/* approve route is not mounted in the reborn binary (404), so
-      // the in-chat and Settings paths must not diverge onto it.
-      const response = isSlackPersonalPairing(channel)
-        ? await redeemSlackPairingCode(trimmed, options)
-        : await redeemPairingCode(channel, trimmed, options);
-      if (response?.success === false) {
-        throw new Error(response.message || "Pairing failed");
-      }
-      if (response?.resumeError) {
-        // The connection succeeded (binding is durable), but the backend
-        // couldn't continue this parked chat. The gate only clears when the
-        // turn actually resumes, so it will stay pending — surface a distinct,
-        // recoverable error instead of leaving the card spinning forever.
-        const error = new Error("channel connection resume did not complete");
-        error.resumeFailed = true;
-        throw error;
-      }
-      // No resolveGate on success: the backend resumes the parked turn and the
-      // projection clears this gate (a pairing gate has no AuthFlowRecord, so
-      // routing a resolve through resolve_auth_gate would fail anyway).
-      return response;
-    },
-    [pendingGate, threadId],
-  );
-
   const cancelRun = React.useCallback(
     async (reason) => {
       const runId = activeRun?.runId;
       if (!runId || !threadId) return;
       setPendingGate(null);
+      // Cancelling abandons any pairing panel for this thread: forget its waiter
+      // and remember the dismissal so a later channel connect can't blast a
+      // "Continue the previous request" into a chat the user explicitly cancelled,
+      // and the durable activation card can't re-derive the panel. This is the
+      // same teardown the panel's own dismiss performs.
+      dismissOnboardingPairing();
       setIsProcessing(false);
       setActiveRun(null);
       submitBusyRef.current = false;
@@ -890,7 +848,7 @@ export function useChat(threadId) {
       }
       await cancelRunRequest({ threadId, runId, reason });
     },
-    [activeRun, threadId],
+    [activeRun, threadId, dismissOnboardingPairing],
   );
 
   const loadMore = React.useCallback(() => {
@@ -976,6 +934,7 @@ export function useChat(threadId) {
     messages,
     isProcessing,
     pendingGate,
+    pendingOnboarding: visiblePendingOnboarding,
     busyGateNotice,
     activeRun,
     sseStatus,
@@ -986,7 +945,10 @@ export function useChat(threadId) {
     send,
     resolveGate,
     submitAuthToken,
+    submitOnboardingPairing,
     submitChannelConnectionPairing,
+    startOnboardingOAuth,
+    dismissOnboardingPairing,
     cancelRun,
     loadMore,
     // fork-shape compatibility — see comments above
@@ -997,10 +959,6 @@ export function useChat(threadId) {
     recoverHistory: noop,
     recoveryNotice: null,
   };
-}
-
-function isSlackPersonalPairing(extensionName) {
-  return String(extensionName || "").trim().toLowerCase() === "slack";
 }
 
 function isDeclinedGateResolution(resolution) {

@@ -25,19 +25,14 @@ use ironclaw_wasm_product_adapters::{
 };
 use serde::Serialize;
 
-use crate::slack_actor_identity::{
-    RebornUserIdentityLookup, SLACK_IDENTITY_PROVIDER, slack_user_identity_provider_user_id,
-};
-use crate::slack_personal_binding_pairing::SlackPersonalBindingPairingService;
 use crate::webui_serve::{PublicRouteDrain, PublicRouteMount};
 
 mod installation;
 pub use installation::{
-    ResolvedSlackCommand, ResolvedSlackIngress, ResolvedSlackInstallation, SlackApiAppId,
-    SlackChannelId, SlackEnterpriseId, SlackEnvelopeMetadata, SlackIngressError,
-    SlackInstallationRateLimitConfig, SlackInstallationRateLimiter, SlackInstallationRecord,
-    SlackInstallationResolver, SlackInstallationSelector, SlackTeamId, SlackUserId,
-    StaticSlackInstallationResolver,
+    ResolvedSlackIngress, ResolvedSlackInstallation, SlackApiAppId, SlackChannelId,
+    SlackEnterpriseId, SlackEnvelopeMetadata, SlackIngressError, SlackInstallationRateLimitConfig,
+    SlackInstallationRateLimiter, SlackInstallationRecord, SlackInstallationResolver,
+    SlackInstallationSelector, SlackTeamId, SlackUserId, StaticSlackInstallationResolver,
 };
 
 #[cfg(test)]
@@ -47,9 +42,6 @@ mod handler_tests;
 
 pub const SLACK_EVENTS_PATH: &str = "/webhooks/slack/events";
 const SLACK_EVENTS_ROUTE_ID: &str = "slack.events";
-
-pub const SLACK_COMMANDS_PATH: &str = "/webhooks/slack/commands";
-const SLACK_COMMANDS_ROUTE_ID: &str = "slack.commands";
 
 pub trait SlackEventsWebhookDispatcher: Send + Sync {
     fn verify_webhook_auth(
@@ -149,24 +141,6 @@ impl SlackIngressService {
         }
     }
 
-    /// Resolve and verify a Slack slash-command request, then apply the same
-    /// per-installation post-verification rate limit the events path uses.
-    /// Encapsulates the private rate limiter so the commands route never
-    /// reaches past this service into installation internals.
-    async fn resolve_command(
-        &self,
-        headers: HeaderMap,
-        body: Bytes,
-    ) -> Result<ResolvedSlackCommand, SlackIngressError> {
-        let command = self
-            .resolver
-            .resolve_command_ingress(&headers, body.as_ref())
-            .await?;
-        self.installation_rate_limiter
-            .check(command.installation())?;
-        Ok(command)
-    }
-
     pub async fn drain_installations(&self) {
         self.resolver.drain_installations().await;
     }
@@ -247,13 +221,13 @@ pub fn slack_events_route_descriptors() -> Vec<IngressRouteDescriptor> {
     vec![SLACK_INGRESS_DESCRIPTORS.events.clone()]
 }
 
-/// Both Slack host-ingress route descriptors, projected from the bundled Slack
-/// extension manifest in a single parse on first use (the manifest is a
+/// The Slack host-ingress route descriptor, projected from the bundled Slack
+/// **bot** channel manifest in a single parse on first use (the manifest is a
 /// compile-time constant, so the projection is deterministic and cached for
 /// the process lifetime).
 ///
-/// The routes' path/method/policy are declared as data in
-/// `assets/slack/manifest.toml` (`[[product_adapter.inbound.host_ingress]]`)
+/// The route's path/method/policy are declared as data in
+/// `assets/slack_bot/manifest.toml` (`[[product_adapter.inbound.host_ingress]]`)
 /// and validated by `ironclaw_host_api` (incl. the fail-closed floor that a
 /// `public_webhook` listener must require `webhook_signature`) plus
 /// `ironclaw_product_adapter_registry` (ingress credential coherence). Only the
@@ -261,25 +235,23 @@ pub fn slack_events_route_descriptors() -> Vec<IngressRouteDescriptor> {
 /// HMAC verifier stay in this module, and the mount functions build their
 /// routes from these descriptors so what axum mounts cannot drift from what
 /// the manifest declares. Panics if the bundled manifest does not declare a
-/// route or declares it with a non-POST method: `SLACK_MANIFEST` is a
+/// route or declares it with a non-POST method: `SLACK_BOT_MANIFEST` is a
 /// compile-time constant, so either is a build-time invariant violation,
 /// surfaced at startup.
 static SLACK_INGRESS_DESCRIPTORS: LazyLock<SlackIngressDescriptors> = LazyLock::new(|| {
     let descriptors = crate::host_ingress::bundled_host_ingress_descriptors(
-        crate::extension_host::available_extensions::slack_manifest_toml(),
+        crate::extension_host::available_extensions::slack_bot_manifest_toml(),
     )
     .unwrap_or_else(|error| {
         panic!("bundled Slack manifest must project host-ingress routes: {error}")
     });
     SlackIngressDescriptors {
         events: bundled_slack_post_descriptor(&descriptors, SLACK_EVENTS_ROUTE_ID),
-        commands: bundled_slack_post_descriptor(&descriptors, SLACK_COMMANDS_ROUTE_ID),
     }
 });
 
 struct SlackIngressDescriptors {
     events: IngressRouteDescriptor,
-    commands: IngressRouteDescriptor,
 }
 
 fn bundled_slack_post_descriptor(
@@ -364,6 +336,19 @@ fn ingress_error_response(error: SlackIngressError) -> Response {
                 SlackWebhookErrorCategory::Capacity,
             )
         }
+        SlackIngressError::ConversationStoreUnavailable { reason } => {
+            tracing::error!(
+                target = "ironclaw::reborn::slack_events",
+                reason = %reason,
+                "Slack Events API durable conversation store unavailable"
+            );
+            // Storage/infra outage, not an auth failure: 503 so Slack retries
+            // delivery instead of treating the installation as unauthorized.
+            error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                SlackWebhookErrorCategory::TemporarilyUnavailable,
+            )
+        }
     }
 }
 
@@ -416,170 +401,6 @@ struct SlackWebhookErrorBody {
 
 fn error_response(status: StatusCode, category: SlackWebhookErrorCategory) -> Response {
     (status, Json(SlackWebhookErrorBody { error: category })).into_response()
-}
-
-/// Ephemeral copy shown when the Slack user is already linked to Ironclaw.
-/// Carries no code — an already-paired user has nothing to redeem.
-const SLACK_PAIR_ALREADY_LINKED_MESSAGE: &str = "You're already connected.";
-
-/// Ephemeral fallback when pairing cannot be completed right now. Carries no
-/// code and no internal detail; the cause is logged at `debug` only.
-const SLACK_PAIR_UNAVAILABLE_MESSAGE: &str =
-    "Pairing is temporarily unavailable — please try again in a moment.";
-
-/// The only slash command this endpoint serves. Slack delivers a command here
-/// only if its Request URL points here, but guard anyway so a misconfigured
-/// second command can't mint a pairing code.
-const SLACK_PAIR_COMMAND: &str = "/pair";
-
-/// Ephemeral reply when a command other than `/pair` reaches this endpoint.
-const SLACK_PAIR_UNKNOWN_COMMAND_MESSAGE: &str =
-    "Unknown command. Run /pair to get a fresh Ironclaw pairing code.";
-
-/// Route state for the `/pair` slash command. Holds the shared ingress service
-/// (verification + per-installation rate limit), the force-mint pairing
-/// service, and the identity lookup used to short-circuit already-linked
-/// users before a code is minted.
-#[derive(Clone)]
-pub struct SlackCommandsRouteState {
-    ingress: SlackIngressService,
-    pairing: SlackPersonalBindingPairingService,
-    lookup: Arc<dyn RebornUserIdentityLookup>,
-}
-
-impl SlackCommandsRouteState {
-    pub fn new(
-        ingress: SlackIngressService,
-        pairing: SlackPersonalBindingPairingService,
-        lookup: Arc<dyn RebornUserIdentityLookup>,
-    ) -> Self {
-        Self {
-            ingress,
-            pairing,
-            lookup,
-        }
-    }
-
-    async fn handle_pair_command(&self, headers: HeaderMap, body: Bytes) -> Response {
-        let command = match self.ingress.resolve_command(headers, body).await {
-            Ok(command) => command,
-            // Pre-auth failures never mint a code; reuse the shared webhook
-            // error surface (401/400/429) rather than an ephemeral reply.
-            Err(error) => return ingress_error_response(error),
-        };
-
-        // This endpoint is dedicated to `/pair`; never mint a code for some
-        // other command pointed here by a misconfigured app.
-        if command.command() != SLACK_PAIR_COMMAND {
-            return slack_slash_ephemeral(SLACK_PAIR_UNKNOWN_COMMAND_MESSAGE);
-        }
-
-        // Already-linked users get a confirmation, never a fresh code. Bindings
-        // are keyed by the installation-scoped identity (matching the events
-        // path), not the bare Slack user id.
-        let provider_user_id = slack_user_identity_provider_user_id(
-            command.installation().adapter_installation_id(),
-            command.slack_user_id().as_str(),
-        );
-        match self
-            .lookup
-            .resolve_user_identity(SLACK_IDENTITY_PROVIDER, &provider_user_id)
-            .await
-        {
-            Ok(Some(_)) => return slack_slash_ephemeral(SLACK_PAIR_ALREADY_LINKED_MESSAGE),
-            Ok(None) => {}
-            Err(error) => {
-                tracing::debug!(
-                    target = "ironclaw::reborn::slack_commands",
-                    error = %error,
-                    "Slack /pair identity lookup failed"
-                );
-                return slack_slash_ephemeral(SLACK_PAIR_UNAVAILABLE_MESSAGE);
-            }
-        }
-
-        // Force-mint a brand-new code, invalidating any prior one. The code is
-        // returned in the ephemeral reply only — never logged, never DM'd.
-        match self
-            .pairing
-            .reissue_challenge(
-                command.installation().adapter_installation_id().clone(),
-                command.slack_user_id().clone(),
-            )
-            .await
-        {
-            Ok(issued) => slack_slash_ephemeral(format!(
-                "Here's your fresh Ironclaw pairing code: {}\n\
-                 Paste it into Ironclaw to finish connecting. It expires in 10 minutes.",
-                issued.code.as_str()
-            )),
-            Err(error) => {
-                tracing::debug!(
-                    target = "ironclaw::reborn::slack_commands",
-                    error = %error,
-                    "Slack /pair challenge reissue failed"
-                );
-                slack_slash_ephemeral(SLACK_PAIR_UNAVAILABLE_MESSAGE)
-            }
-        }
-    }
-}
-
-impl std::fmt::Debug for SlackCommandsRouteState {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("SlackCommandsRouteState")
-            .field("ingress", &self.ingress)
-            .field("pairing", &"SlackPersonalBindingPairingService")
-            .field("lookup", &"Arc<dyn RebornUserIdentityLookup>")
-            .finish()
-    }
-}
-
-pub fn slack_commands_route_mount(state: SlackCommandsRouteState) -> PublicRouteMount {
-    let descriptor = SLACK_INGRESS_DESCRIPTORS.commands.clone();
-    PublicRouteMount::new(
-        Router::new()
-            .route(
-                descriptor.route_pattern().as_str(),
-                post(slack_commands_handler),
-            )
-            .with_state(state),
-        vec![descriptor],
-    )
-}
-
-pub fn slack_commands_route_descriptors() -> Vec<IngressRouteDescriptor> {
-    vec![SLACK_INGRESS_DESCRIPTORS.commands.clone()]
-}
-
-async fn slack_commands_handler(
-    State(state): State<SlackCommandsRouteState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    state.handle_pair_command(headers, body).await
-}
-
-/// Slack slash-command response delivered in-place to the invoking user only.
-/// `response_type: "ephemeral"` keeps the reply private to that user in the
-/// channel where they ran the command, so the pairing code never lands in
-/// shared history.
-#[derive(Debug, Serialize)]
-struct SlackSlashResponse {
-    response_type: &'static str,
-    text: String,
-}
-
-fn slack_slash_ephemeral(text: impl Into<String>) -> Response {
-    (
-        StatusCode::OK,
-        Json(SlackSlashResponse {
-            response_type: "ephemeral",
-            text: text.into(),
-        }),
-    )
-        .into_response()
 }
 
 #[cfg(test)]
@@ -771,39 +592,6 @@ mod tests {
                         Some(SlackChannelId::new("D123")),
                     ),
                 })
-            })
-        }
-
-        fn resolve_command_ingress<'a>(
-            &'a self,
-            headers: &'a HeaderMap,
-            body: &'a [u8],
-        ) -> Pin<
-            Box<dyn Future<Output = Result<ResolvedSlackCommand, SlackIngressError>> + Send + 'a>,
-        > {
-            Box::pin(async move {
-                let evidence = self.dispatcher.verify_webhook_auth(headers, body)?;
-                let installation = ResolvedSlackInstallation::new(
-                    tenant_id("tenant-alpha"),
-                    installation_id("install-alpha"),
-                    evidence,
-                    Arc::clone(&self.dispatcher),
-                    None,
-                );
-                let mut command = None;
-                let mut user_id = None;
-                for (key, value) in url::form_urlencoded::parse(body) {
-                    match key.as_ref() {
-                        "command" => command = Some(value.into_owned()),
-                        "user_id" => user_id = Some(value.into_owned()),
-                        _ => {}
-                    }
-                }
-                Ok(ResolvedSlackCommand::new(
-                    installation,
-                    command.unwrap_or_else(|| "/pair".to_string()),
-                    SlackUserId::new(user_id.unwrap_or_else(|| "U123".to_string())),
-                ))
             })
         }
 
@@ -1138,6 +926,19 @@ mod tests {
     }
 
     #[test]
+    fn ingress_error_response_maps_conversation_store_unavailable_to_503() {
+        // Regression: a durable conversation-binding-store outage is an infra
+        // fault, not an authentication failure. It must surface as 503 (so
+        // Slack retries delivery), never the 401 that InstallationNotFound
+        // would have produced.
+        let response = ingress_error_response(SlackIngressError::ConversationStoreUnavailable {
+            reason: "host state filesystem offline".to_string(),
+        });
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
     fn slack_events_route_descriptor_matches_manifest_projection() {
         // Behavior-preserving migration guard: the Slack events descriptor
         // projected from the bundled manifest's `[[host_ingress]]` declaration
@@ -1153,239 +954,5 @@ mod tests {
                 NonZeroU32::new(12_000).expect("nonzero"),
             )]
         );
-    }
-
-    #[test]
-    fn slack_commands_route_descriptor_matches_manifest_projection() {
-        // Same guard for the slash-commands route (16 KiB body, 6k req / 60s).
-        assert_eq!(
-            slack_commands_route_descriptors(),
-            vec![expected_slack_descriptor(
-                SLACK_COMMANDS_ROUTE_ID,
-                SLACK_COMMANDS_PATH,
-                NonZeroU64::new(16 * 1024).expect("nonzero"),
-                NonZeroU32::new(6_000).expect("nonzero"),
-            )]
-        );
-    }
-
-    /// Caller-level coverage for the `/pair` slash command handler: signature
-    /// verification runs (via the ingress), an already-linked caller gets a
-    /// confirmation instead of a code, an unlinked caller gets a fresh code, and
-    /// a challenge-store fault degrades to an ephemeral reply — never a 5xx that
-    /// Slack renders as "the app did not respond".
-    mod pair_command_tests {
-        use super::*;
-        use crate::slack_actor_identity::{
-            RebornUserIdentityLookup, RebornUserIdentityLookupError,
-        };
-        use crate::slack_personal_binding::{
-            RebornUserIdentityBinding, SlackPersonalBindingPrincipal, SlackPersonalUserBindingError,
-        };
-        use crate::slack_personal_binding_pairing::{
-            IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingChallenge,
-            SlackPersonalBindingPairingChallengeStore, SlackPersonalBindingPairingCode,
-            SlackPersonalBindingPairingError, SlackPersonalBindingPairingNotification,
-            SlackPersonalBindingPairingNotifier, SlackPersonalUserBinder,
-        };
-        use ironclaw_host_api::UserId;
-
-        struct StubChallengeStore {
-            reissue_ok: bool,
-        }
-
-        #[async_trait]
-        impl SlackPersonalBindingPairingChallengeStore for StubChallengeStore {
-            async fn issue_challenge(
-                &self,
-                _challenge: SlackPersonalBindingPairingChallenge,
-            ) -> Result<IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
-            {
-                unreachable!("/pair reissues; it never issues a first-time challenge")
-            }
-
-            async fn get_challenge(
-                &self,
-                _code: &SlackPersonalBindingPairingCode,
-            ) -> Result<SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
-            {
-                Err(SlackPersonalBindingPairingError::ChallengeNotFound)
-            }
-
-            async fn consume_challenge(
-                &self,
-                _code: &SlackPersonalBindingPairingCode,
-            ) -> Result<SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
-            {
-                Err(SlackPersonalBindingPairingError::ChallengeNotFound)
-            }
-
-            async fn reissue_challenge(
-                &self,
-                challenge: SlackPersonalBindingPairingChallenge,
-            ) -> Result<IssuedSlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingError>
-            {
-                if !self.reissue_ok {
-                    return Err(SlackPersonalBindingPairingError::Backend(
-                        "challenge store unavailable".to_string(),
-                    ));
-                }
-                Ok(IssuedSlackPersonalBindingPairingChallenge {
-                    code: SlackPersonalBindingPairingCode::new("PAIR1234").expect("code"),
-                    challenge,
-                })
-            }
-        }
-
-        #[derive(Debug)]
-        struct NoopBinder;
-
-        #[async_trait]
-        impl SlackPersonalUserBinder for NoopBinder {
-            async fn validate_installation_actor(
-                &self,
-                _principal: &SlackPersonalBindingPrincipal,
-                _installation_id: &AdapterInstallationId,
-                _slack_user_id: &SlackUserId,
-            ) -> Result<(), SlackPersonalUserBindingError> {
-                Ok(())
-            }
-
-            async fn bind_installation_actor(
-                &self,
-                _principal: SlackPersonalBindingPrincipal,
-                _installation_id: AdapterInstallationId,
-                _slack_user_id: SlackUserId,
-            ) -> Result<RebornUserIdentityBinding, SlackPersonalUserBindingError> {
-                unreachable!("/pair reissues a code; it never binds an actor")
-            }
-        }
-
-        struct NoopNotifier;
-
-        #[async_trait]
-        impl SlackPersonalBindingPairingNotifier for NoopNotifier {
-            async fn send_pairing_challenge(
-                &self,
-                _notification: SlackPersonalBindingPairingNotification,
-            ) -> Result<(), SlackPersonalBindingPairingError> {
-                Ok(())
-            }
-        }
-
-        struct StubLookup {
-            linked: bool,
-        }
-
-        #[async_trait]
-        impl RebornUserIdentityLookup for StubLookup {
-            async fn resolve_user_identity(
-                &self,
-                _provider: &str,
-                _provider_user_id: &str,
-            ) -> Result<Option<UserId>, RebornUserIdentityLookupError> {
-                Ok(self
-                    .linked
-                    .then(|| UserId::new("user:already-linked").expect("user")))
-            }
-
-            async fn user_has_provider_binding(
-                &self,
-                _provider: &str,
-                _user_id: &UserId,
-            ) -> Result<bool, RebornUserIdentityLookupError> {
-                Ok(false)
-            }
-
-            async fn user_has_provider_binding_with_provider_user_id_prefix(
-                &self,
-                _provider: &str,
-                _user_id: &UserId,
-                _prefix: Option<&str>,
-            ) -> Result<bool, RebornUserIdentityLookupError> {
-                Ok(false)
-            }
-        }
-
-        fn pair_state(linked: bool, reissue_ok: bool) -> SlackCommandsRouteState {
-            let ingress = SlackIngressService::new(Arc::new(FakeSlackResolver::new(Arc::new(
-                FakeSlackDispatcher::verified(),
-            ))));
-            let pairing = SlackPersonalBindingPairingService::new_with_binder(
-                Arc::new(NoopBinder),
-                Arc::new(StubChallengeStore { reissue_ok }),
-                Arc::new(NoopNotifier),
-            );
-            SlackCommandsRouteState::new(ingress, pairing, Arc::new(StubLookup { linked }))
-        }
-
-        async fn post_pair(state: SlackCommandsRouteState) -> Response {
-            let mount = slack_commands_route_mount(state);
-            let request = Request::builder()
-                .method("POST")
-                .uri(SLACK_COMMANDS_PATH)
-                .header("content-type", "application/x-www-form-urlencoded")
-                .header("X-Slack-Signature", "v0=stub")
-                .header("X-Slack-Request-Timestamp", "1700000000")
-                .body(Body::from("command=%2Fpair&user_id=U123"))
-                .expect("request should build");
-            mount
-                .router
-                .clone()
-                .oneshot(request)
-                .await
-                .expect("router should respond")
-        }
-
-        async fn ephemeral_text(response: Response) -> String {
-            let bytes = response
-                .into_body()
-                .collect()
-                .await
-                .expect("body should collect")
-                .to_bytes();
-            let body: serde_json::Value =
-                serde_json::from_slice(&bytes).expect("ephemeral json body");
-            body["text"].as_str().unwrap_or_default().to_string()
-        }
-
-        #[tokio::test]
-        async fn pair_command_mints_a_fresh_code_for_an_unlinked_caller() {
-            let response = post_pair(pair_state(false, true)).await;
-            assert_eq!(response.status(), StatusCode::OK);
-            let text = ephemeral_text(response).await;
-            assert!(
-                text.contains("PAIR1234"),
-                "the ephemeral reply must carry the fresh pairing code, got: {text}"
-            );
-        }
-
-        #[tokio::test]
-        async fn pair_command_tells_an_already_linked_caller_they_are_connected() {
-            let response = post_pair(pair_state(true, true)).await;
-            assert_eq!(response.status(), StatusCode::OK);
-            let text = ephemeral_text(response).await;
-            assert!(
-                text.contains("already connected"),
-                "an already-linked caller gets a confirmation, got: {text}"
-            );
-            assert!(
-                !text.contains("PAIR1234"),
-                "an already-linked caller must never be minted a code"
-            );
-        }
-
-        #[tokio::test]
-        async fn pair_command_degrades_to_ephemeral_reply_when_reissue_faults() {
-            // A challenge-store fault must not become a 5xx (Slack renders that as
-            // "the app did not respond"); it surfaces as an ephemeral message.
-            let response = post_pair(pair_state(false, false)).await;
-            assert_eq!(response.status(), StatusCode::OK);
-            let text = ephemeral_text(response).await;
-            assert!(
-                !text.contains("PAIR1234"),
-                "no code is minted on fault: {text}"
-            );
-        }
     }
 }

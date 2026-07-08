@@ -128,6 +128,33 @@ impl<N, S> HostHttpEgressService<N, S> {
         }
     }
 
+    /// Shared post-pipeline tail for every egress entry point.
+    ///
+    /// On failure, discards any staged network policy / secret injections that
+    /// the failed stage marked as not-surviving, then unwraps to the
+    /// runtime-visible error. Keeping this in one place means `execute`,
+    /// `execute_credential_exchange`, and `execute_for_model_visible_output`
+    /// cannot drift in their staged-secret/policy cleanup on error.
+    fn finalize_pipeline_result(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        result: Result<RuntimeHttpEgressResponse, PipelineError>,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        match result {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                if error.should_discard_staged_policy() {
+                    self.discard_staged_policy(scope, capability_id);
+                }
+                if error.should_discard_staged_secret_injections() {
+                    self.discard_staged_secret_injections(scope, capability_id);
+                }
+                Err(error.into_inner())
+            }
+        }
+    }
+
     pub(super) fn validate_credential_sources_for_request(
         &self,
         request: &RuntimeHttpEgressRequest,
@@ -173,18 +200,17 @@ where
         let scope = request.scope.clone();
         let capability_id = request.capability_id.clone();
         let result = pipeline::execute(self, request).await;
-        match result {
-            Ok(response) => Ok(response),
-            Err(error) => {
-                if error.should_discard_staged_policy() {
-                    self.discard_staged_policy(&scope, &capability_id);
-                }
-                if error.should_discard_staged_secret_injections() {
-                    self.discard_staged_secret_injections(&scope, &capability_id);
-                }
-                Err(error.into_inner())
-            }
-        }
+        self.finalize_pipeline_result(&scope, &capability_id, result)
+    }
+
+    async fn execute_credential_exchange(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        let scope = request.scope.clone();
+        let capability_id = request.capability_id.clone();
+        let result = pipeline::execute_credential_exchange(self, request).await;
+        self.finalize_pipeline_result(&scope, &capability_id, result)
     }
 }
 
@@ -201,18 +227,7 @@ where
         let scope = request.scope.clone();
         let capability_id = request.capability_id.clone();
         let result = pipeline::execute_for_model_visible_output(self, request).await;
-        match result {
-            Ok(response) => Ok(response),
-            Err(error) => {
-                if error.should_discard_staged_policy() {
-                    self.discard_staged_policy(&scope, &capability_id);
-                }
-                if error.should_discard_staged_secret_injections() {
-                    self.discard_staged_secret_injections(&scope, &capability_id);
-                }
-                Err(error.into_inner())
-            }
-        }
+        self.finalize_pipeline_result(&scope, &capability_id, result)
     }
 }
 
