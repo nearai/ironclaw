@@ -23,8 +23,8 @@ pub enum SlackOperatorRouteVisibility {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SlackConnectableChannelVisibility {
     Hidden,
-    PersonalPairing,
-    PersonalPairingAndAdminChannelManagement,
+    PersonalOAuth,
+    PersonalOAuthAndAdminChannelManagement,
 }
 
 pub fn build_webui_services_with_slack_host_beta_mounts(
@@ -36,10 +36,10 @@ pub fn build_webui_services_with_slack_host_beta_mounts(
     let visibility = match (slack_mounts.is_some(), operator_route_visibility) {
         (false, _) => SlackConnectableChannelVisibility::Hidden,
         (true, SlackOperatorRouteVisibility::Hidden) => {
-            SlackConnectableChannelVisibility::PersonalPairing
+            SlackConnectableChannelVisibility::PersonalOAuth
         }
         (true, SlackOperatorRouteVisibility::Visible) => {
-            SlackConnectableChannelVisibility::PersonalPairingAndAdminChannelManagement
+            SlackConnectableChannelVisibility::PersonalOAuthAndAdminChannelManagement
         }
     };
     let outbound_delivery_target_providers = slack_mounts
@@ -58,7 +58,11 @@ pub fn build_webui_services_with_slack_host_beta_mounts(
             reason: "outbound delivery target providers require local runtime services".to_string(),
         });
     }
-    let channel_connection = slack_mounts.map(slack_channel_connection_facade);
+    let personal_credential_cleanup = runtime.services().product_auth.clone().map(|services| {
+        services as Arc<dyn crate::slack_channel_connection::SlackPersonalCredentialCleanup>
+    });
+    let channel_connection = slack_mounts
+        .map(|mounts| slack_channel_connection_facade(mounts, personal_credential_cleanup));
     // Fill the extension-lifecycle handler's late-binding facade slot so an
     // inbound-channel activation can gate on the caller's channel connection.
     // Idempotent; shares the same facade the WebUI connectable-channel surface
@@ -121,9 +125,9 @@ impl ConnectableChannelsProductFacade for SlackConnectableChannelsProductFacade 
         &self,
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornConnectableChannelListResponse, RebornServicesError> {
-        let mut channels = vec![slack_inbound_proof_code_connectable_channel()];
+        let mut channels = vec![slack_oauth_connectable_channel()];
         if self.visibility
-            == SlackConnectableChannelVisibility::PersonalPairingAndAdminChannelManagement
+            == SlackConnectableChannelVisibility::PersonalOAuthAndAdminChannelManagement
             && caller.operator_webui_config
             && caller.tenant_id == self.tenant_id
             && caller.user_id == self.operator_user_id
@@ -134,28 +138,20 @@ impl ConnectableChannelsProductFacade for SlackConnectableChannelsProductFacade 
     }
 }
 
-fn slack_inbound_proof_code_connectable_channel() -> RebornConnectableChannelInfo {
+fn slack_oauth_connectable_channel() -> RebornConnectableChannelInfo {
     RebornConnectableChannelInfo {
         channel: "slack".to_string(),
         display_name: "Slack".to_string(),
-        strategy: RebornChannelConnectStrategy::InboundProofCode,
+        strategy: RebornChannelConnectStrategy::OAuth,
         action: RebornChannelConnectAction {
             title: "Slack account connection".to_string(),
-            instructions:
-                "Message the IronClaw Reborn app in Slack to get a pairing code, then paste it here. Codes expire in 10 minutes. If a code is invalid or expired, run /pair in Slack for a fresh one."
-                    .to_string(),
-            input_placeholder: "Enter Slack pairing code...".to_string(),
-            submit_label: "Connect".to_string(),
+            instructions: "Connect Slack with OAuth from the extension configuration, then message the Slack bot directly.".to_string(),
+            input_placeholder: String::new(),
+            submit_label: "Connect Slack".to_string(),
             success_message: "Slack account connected.".to_string(),
-            error_message:
-                "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one."
-                    .to_string(),
+            error_message: "Slack OAuth connection failed. Try configuring Slack again.".to_string(),
         },
-        command_aliases: vec![
-            "slack".to_string(),
-            "slack account".to_string(),
-            "slack pairing".to_string(),
-        ],
+        command_aliases: vec!["slack".to_string(), "slack account".to_string()],
     }
 }
 
@@ -216,10 +212,11 @@ mod tests {
         // The in-chat connect requirement (built in extension_lifecycle) and the
         // Settings connectable-channels descriptor must read identically for Slack.
         // Enforce that invariant here so the two copies can never silently drift.
-        let descriptor = slack_inbound_proof_code_connectable_channel();
+        let descriptor = slack_oauth_connectable_channel();
         let requirement =
             crate::extension_host::extension_lifecycle::channel_connection_requirement(
-                "slack", "Slack",
+                "slack_bot",
+                "Slack",
             );
 
         assert_eq!(requirement.channel, descriptor.channel);
@@ -237,37 +234,27 @@ mod tests {
             .and_then(|value| value.as_str().map(str::to_owned))
             .expect("strategy serializes to a string");
         assert_eq!(requirement.strategy, descriptor.strategy);
-        assert_eq!(strategy_wire, "inbound_proof_code");
+        assert_eq!(strategy_wire, "oauth");
     }
 
     #[test]
-    fn slack_inbound_proof_code_connectable_channel_matches_pairing_copy() {
-        let channel = slack_inbound_proof_code_connectable_channel();
+    fn slack_oauth_connectable_channel_matches_oauth_copy() {
+        let channel = slack_oauth_connectable_channel();
 
         assert_eq!(channel.channel, "slack");
-        assert_eq!(
-            channel.strategy,
-            RebornChannelConnectStrategy::InboundProofCode
-        );
-        assert_eq!(
-            channel.action.input_placeholder,
-            "Enter Slack pairing code..."
-        );
+        assert_eq!(channel.strategy, RebornChannelConnectStrategy::OAuth);
+        assert_eq!(channel.action.input_placeholder, "");
         assert_eq!(
             channel.action.instructions,
-            "Message the IronClaw Reborn app in Slack to get a pairing code, then paste it here. Codes expire in 10 minutes. If a code is invalid or expired, run /pair in Slack for a fresh one."
+            "Connect Slack with OAuth from the extension configuration, then message the Slack bot directly."
         );
         assert_eq!(
             channel.action.error_message,
-            "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one."
+            "Slack OAuth connection failed. Try configuring Slack again."
         );
         assert_eq!(
             channel.command_aliases,
-            vec![
-                "slack".to_string(),
-                "slack account".to_string(),
-                "slack pairing".to_string()
-            ]
+            vec!["slack".to_string(), "slack account".to_string()]
         );
     }
 
@@ -292,7 +279,7 @@ mod tests {
         let bundle = build_webui_services_with_slack_connectable_channel(
             &runtime,
             None,
-            SlackConnectableChannelVisibility::PersonalPairingAndAdminChannelManagement,
+            SlackConnectableChannelVisibility::PersonalOAuthAndAdminChannelManagement,
         )
         .expect("webui bundle");
         let caller = WebUiAuthenticatedCaller::new(
@@ -312,10 +299,7 @@ mod tests {
         assert_eq!(response.channels.len(), 2);
         let personal = &response.channels[0];
         assert_eq!(personal.channel, "slack");
-        assert_eq!(
-            personal.strategy,
-            RebornChannelConnectStrategy::InboundProofCode
-        );
+        assert_eq!(personal.strategy, RebornChannelConnectStrategy::OAuth);
         let channel_admin = &response.channels[1];
         assert_eq!(channel_admin.channel, "slack");
         assert_eq!(
@@ -348,7 +332,7 @@ mod tests {
         let bundle = build_webui_services_with_slack_connectable_channel(
             &runtime,
             None,
-            SlackConnectableChannelVisibility::PersonalPairingAndAdminChannelManagement,
+            SlackConnectableChannelVisibility::PersonalOAuthAndAdminChannelManagement,
         )
         .expect("webui bundle");
         let caller = WebUiAuthenticatedCaller::new(
@@ -367,7 +351,7 @@ mod tests {
         assert_eq!(response.channels.len(), 1);
         assert_eq!(
             response.channels[0].strategy,
-            RebornChannelConnectStrategy::InboundProofCode
+            RebornChannelConnectStrategy::OAuth
         );
 
         runtime.shutdown().await.expect("runtime shutdown");
@@ -394,7 +378,7 @@ mod tests {
         let bundle = build_webui_services_with_slack_connectable_channel(
             &runtime,
             None,
-            SlackConnectableChannelVisibility::PersonalPairingAndAdminChannelManagement,
+            SlackConnectableChannelVisibility::PersonalOAuthAndAdminChannelManagement,
         )
         .expect("webui bundle");
         let caller = WebUiAuthenticatedCaller::new(
@@ -414,7 +398,7 @@ mod tests {
         assert_eq!(response.channels.len(), 1);
         assert_eq!(
             response.channels[0].strategy,
-            RebornChannelConnectStrategy::InboundProofCode
+            RebornChannelConnectStrategy::OAuth
         );
 
         runtime.shutdown().await.expect("runtime shutdown");
@@ -441,7 +425,7 @@ mod tests {
         let bundle = build_webui_services_with_slack_connectable_channel(
             &runtime,
             None,
-            SlackConnectableChannelVisibility::PersonalPairingAndAdminChannelManagement,
+            SlackConnectableChannelVisibility::PersonalOAuthAndAdminChannelManagement,
         )
         .expect("webui bundle");
         let caller = WebUiAuthenticatedCaller::new(
@@ -461,14 +445,14 @@ mod tests {
         assert_eq!(response.channels.len(), 1);
         assert_eq!(
             response.channels[0].strategy,
-            RebornChannelConnectStrategy::InboundProofCode
+            RebornChannelConnectStrategy::OAuth
         );
 
         runtime.shutdown().await.expect("runtime shutdown");
     }
 
     #[tokio::test]
-    async fn slack_mounts_without_operator_action_advertise_personal_pairing_only() {
+    async fn slack_mounts_without_operator_action_advertise_personal_oauth_only() {
         let root = tempfile::tempdir().expect("tempdir");
         let runtime = build_reborn_runtime(
             RebornRuntimeInput::from_services(
@@ -488,7 +472,7 @@ mod tests {
         let bundle = build_webui_services_with_slack_connectable_channel(
             &runtime,
             None,
-            SlackConnectableChannelVisibility::PersonalPairing,
+            SlackConnectableChannelVisibility::PersonalOAuth,
         )
         .expect("webui bundle");
         let caller = WebUiAuthenticatedCaller::new(
@@ -508,7 +492,7 @@ mod tests {
         assert_eq!(response.channels.len(), 1);
         assert_eq!(
             response.channels[0].strategy,
-            RebornChannelConnectStrategy::InboundProofCode
+            RebornChannelConnectStrategy::OAuth
         );
 
         runtime.shutdown().await.expect("runtime shutdown");

@@ -21,6 +21,7 @@ import sys
 import time
 import urllib.parse
 import uuid
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -102,20 +103,29 @@ from scripts.reborn_webui_v2_live_qa.semantic_judge import (  # noqa: E402
     _semantic_judge_passed,
 )
 from scripts.reborn_webui_v2_live_qa.slack_helpers import (  # noqa: E402
-    _configure_slack_legacy_actor_if_needed,
+    SLACK_BOT_TOKEN_ENV,
+    SLACK_OAUTH_CLIENT_ID_ENV,
+    SLACK_OAUTH_CLIENT_SECRET_ENV,
+    SLACK_PERSONAL_ACCESS_TOKEN_ENV,
+    SLACK_SIGNING_SECRET_ENV,
     _disable_slack_in_config,
     _discover_slack_dm_route_channel,
     _has_live_slack_env,
     _has_slack_delivery_target,
     _materialize_slack_env_from_reborn_home,
     _persisted_slack_personal_dm_channel_id,
+    _remove_legacy_slack_setup_fields,
     _remove_dm_slack_channel_routes,
+    _seed_generated_slack_product_auth_if_configured,
     _seed_slack_personal_dm_target,
     _set_slack_section_key,
+    _slack_inbound_user_id_for_cases,
+    _slack_personal_auth_preflight,
+    _slack_setup_payload,
+    _slack_setup_preflight,
     _slack_auth_test,
     _slack_config_value,
     _slack_enabled,
-    _slack_team_id_from_bot_token_env,
 )
 from scripts.reborn_webui_v2_live_qa.text_match import (  # noqa: E402
     required_text_matches,
@@ -201,6 +211,31 @@ EXTENSION_INSTALL_CAPABILITY_ID = "builtin.extension_install"
 EXTENSION_ACTIVATE_CAPABILITY_ID = "builtin.extension_activate"
 OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID = "builtin.outbound_delivery_targets_list"
 QA_7C_BUG_LOGGING_SHEET_TITLE = "bug logging Google Sheet"
+
+
+def _qa_7c_bug_logger_prompt(
+    *,
+    sheet_fixture: dict[str, object],
+    routine_name: str,
+) -> str:
+    title = str(
+        sheet_fixture.get("title") or QA_7C_BUG_LOGGING_SHEET_TITLE
+    ).strip()
+    spreadsheet_url = str(sheet_fixture.get("spreadsheet_url") or "").strip()
+    spreadsheet_id = str(sheet_fixture.get("spreadsheet_id") or "").strip()
+    sheet_name = str(sheet_fixture.get("sheet_name") or "Sheet1").strip()
+    header_columns = "Summary, Reporter, Slack Timestamp, Status, QA Marker"
+    return (
+        f"{_qa_sheet_prompt('qa_7c_slack_bug_logger_routine')}\n\n"
+        "Use this exact Google Sheet for \"my bug logging Google Sheet\":\n"
+        f"- Title: {title}\n"
+        f"- Spreadsheet URL: {spreadsheet_url}\n"
+        f"- Spreadsheet ID: {spreadsheet_id}\n"
+        f"- Sheet/tab name: {sheet_name}\n"
+        f"- Header columns: {header_columns}\n\n"
+        f"Create the routine/trigger named `{routine_name}`. Do not ask for "
+        "spreadsheet details; use the sheet information above."
+    )
 
 
 class LiveQaContext:
@@ -397,34 +432,9 @@ def _write_minimal_reborn_config(path: Path, *, include_slack: bool) -> None:
         llm_default_lines.append(f'base_url = "{base_url}"')
     slack_lines: list[str] = []
     if include_slack:
-        slack_installation_id = _non_empty_env(
-            "REBORN_WEBUI_V2_LIVE_QA_SLACK_INSTALLATION_ID",
-            "local-dev-installation",
-        )
-        slack_signing_secret_env = _non_empty_env(
-            "REBORN_WEBUI_V2_LIVE_QA_SLACK_SIGNING_SECRET_ENV",
-            "IRONCLAW_REBORN_SLACK_SIGNING_SECRET",
-        )
-        slack_bot_token_env = _non_empty_env(
-            "REBORN_WEBUI_V2_LIVE_QA_SLACK_BOT_TOKEN_ENV",
-            "IRONCLAW_REBORN_SLACK_BOT_TOKEN",
-        )
-        slack_team_id = _non_empty_env(
-            "REBORN_WEBUI_V2_LIVE_QA_SLACK_TEAM_ID",
-            _slack_team_id_from_bot_token_env(slack_bot_token_env) or "local-dev-team",
-        )
-        slack_api_app_id = _non_empty_env(
-            "REBORN_WEBUI_V2_LIVE_QA_SLACK_API_APP_ID",
-            "local-dev-app-id",
-        )
         slack_lines = [
             "[slack]",
             "enabled = true",
-            f'installation_id = "{slack_installation_id}"',
-            f'team_id = "{slack_team_id}"',
-            f'api_app_id = "{slack_api_app_id}"',
-            f'signing_secret_env = "{slack_signing_secret_env}"',
-            f'bot_token_env = "{slack_bot_token_env}"',
             "",
         ]
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -461,7 +471,7 @@ def _persisted_google_user_id(reborn_home: Path) -> str | None:
     db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
     if not db_path.exists():
         return None
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db:
         row = db.execute(
             "SELECT contents FROM root_filesystem_entries "
             "WHERE path LIKE '/tenants/reborn-cli/shared/reborn-identity/external/%/oauth/Z29vZ2xl/%' "
@@ -486,6 +496,9 @@ def prepare_reborn_home(
     args.output_dir.mkdir(parents=True, exist_ok=True)
     needs_slack = any(CASES[name].requires_slack for name in selected_cases)
     needs_slack_target = any(CASES[name].requires_slack_target for name in selected_cases)
+    needs_slack_personal_auth = any(
+        CASES[name].requires_slack_personal_auth for name in selected_cases
+    )
     needs_google_product_auth = any(
         CASES[name].requires_google_product_auth for name in selected_cases
     )
@@ -513,10 +526,10 @@ def prepare_reborn_home(
     config_path = prepared_home / "config.toml"
     if not config_path.exists() and (prepared_home / "local-dev" / "reborn-local-dev.db").exists():
         _write_minimal_reborn_config(config_path, include_slack=needs_slack)
+    legacy_setup_cleanup = _remove_legacy_slack_setup_fields(config_path)
     stale_dm_route_cleanup = _remove_dm_slack_channel_routes(config_path)
     route_configured_from_env = False
-    legacy_actor_configured, legacy_actor_user_id = _configure_slack_legacy_actor_if_needed(
-        config_path,
+    inbound_user_id = _slack_inbound_user_id_for_cases(
         selected_cases,
     )
     config = _config_text(config_path)
@@ -527,17 +540,11 @@ def prepare_reborn_home(
     )
     telegram_env, telegram_env_preflight = _materialize_telegram_env_for_reborn()
 
-    if _slack_enabled(config) and not _has_live_slack_env(config):
+    if _slack_enabled(config) and not _has_live_slack_env():
         secret_env, secret_preflight = _materialize_slack_env_from_reborn_home(
             prepared_home,
             config,
         )
-        if secret_preflight.get("materialized"):
-            for key in ("installation_id", "team_id", "api_app_id"):
-                value = str(secret_preflight.get(key) or "").strip()
-                if value:
-                    _set_slack_section_key(config_path, key, value)
-            config = _config_text(config_path)
     process_env = {**secret_env, **google_env, **telegram_env}
     path_secret_env: dict[str, str] = {}
     for name in _referenced_env_names(config):
@@ -549,10 +556,10 @@ def prepare_reborn_home(
     if (
         needs_slack_target
         and _slack_enabled(config)
-        and _has_live_slack_env(config, process_env)
+        and _has_live_slack_env(process_env)
         and not _has_slack_delivery_target(config, prepared_home, auth_user_id)
     ):
-        slack_route_discovery = _discover_slack_dm_route_channel(config, process_env)
+        slack_route_discovery = _discover_slack_dm_route_channel(process_env)
         channel_id = (
             str(slack_route_discovery.get("channel_id") or "").strip()
             if slack_route_discovery.get("ok")
@@ -577,10 +584,15 @@ def prepare_reborn_home(
         )
 
     slack_enabled = _slack_enabled(config)
+    slack_setup = (
+        _slack_setup_preflight(prepared_home, config, process_env)
+        if slack_enabled
+        else {"configured": False}
+    )
     slack_target_present = _has_slack_delivery_target(config, prepared_home, auth_user_id)
     slack_auth = (
         _slack_auth_test(config, process_env)
-        if slack_enabled and _has_live_slack_env(config, process_env)
+        if slack_enabled and _has_live_slack_env(process_env)
         else {"checked": False, "ok": False, "error": "Slack env unavailable"}
     )
     if args.require_slack_live and needs_slack and not slack_enabled:
@@ -588,7 +600,7 @@ def prepare_reborn_home(
             "selected cases require live Slack, but [slack].enabled is not true "
             "in the prepared Reborn config."
         )
-    if slack_enabled and not _has_live_slack_env(config, process_env):
+    if slack_enabled and not _has_live_slack_env(process_env):
         if args.require_slack_live:
             raise LiveQaError(
                 "Reborn config enables Slack, but live Slack env vars are missing "
@@ -631,25 +643,29 @@ def prepare_reborn_home(
         process_env,
         requires_github_auth=needs_github_auth,
     )
+    slack_personal_auth_preflight = _slack_personal_auth_preflight(
+        prepared_home,
+        auth_user_id,
+        process_env,
+        requires_slack_personal_auth=needs_slack_personal_auth,
+    )
     return PreparedRebornHome(
         path=prepared_home,
         env=process_env,
         preflight={
             "slack": {
                 "enabled_in_config": slack_enabled,
-                "env_present": _has_live_slack_env(config, process_env),
+                "env_present": _has_live_slack_env(process_env),
                 "requires_slack": needs_slack,
                 "requires_delivery_target": needs_slack_target,
                 "delivery_target_present": slack_target_present,
                 "route_configured_from_env": route_configured_from_env,
                 "route_discovery": slack_route_discovery,
                 "stale_dm_route_cleanup": stale_dm_route_cleanup,
-                "legacy_actor_configured": legacy_actor_configured,
-                "legacy_actor_user_id": legacy_actor_user_id,
+                "legacy_setup_cleanup": legacy_setup_cleanup,
+                "inbound_user_id": inbound_user_id,
                 "auth_user_id": auth_user_id,
-                "config_installation_id": _slack_config_value(config, "installation_id"),
-                "config_team_id": _slack_config_value(config, "team_id"),
-                "config_api_app_id": _slack_config_value(config, "api_app_id"),
+                "setup": slack_setup,
                 "auth_test": slack_auth,
                 "secret_source": secret_preflight,
                 "path_secret_env_names": sorted(path_secret_env),
@@ -657,6 +673,7 @@ def prepare_reborn_home(
             "google_product_auth": google_preflight,
             "telegram": telegram_preflight,
             "github_auth": github_preflight,
+            "slack_personal_auth": slack_personal_auth_preflight,
         },
     )
 
@@ -674,6 +691,11 @@ def create_generated_reborn_home(path: Path, *, include_slack: bool = False) -> 
     _write_minimal_reborn_config(path / "config.toml", include_slack=include_slack)
     google_seed = _seed_generated_google_product_auth_if_configured(path, _auth_user_id())
     github_seed = _seed_generated_github_product_auth_if_configured(path, _auth_user_id())
+    slack_seed = (
+        _seed_generated_slack_product_auth_if_configured(path, _auth_user_id())
+        if include_slack
+        else {"seeded": False}
+    )
     api_key_env = os.environ.get(
         "REBORN_WEBUI_V2_LIVE_QA_LLM_API_KEY_ENV",
         "NEARAI_API_KEY" if os.environ.get("NEARAI_API_KEY") else "LIVE_OPENAI_COMPATIBLE_API_KEY",
@@ -693,6 +715,12 @@ def create_generated_reborn_home(path: Path, *, include_slack: bool = False) -> 
         print(
             "[reborn-webui-v2-live-qa] Seeded generated Reborn home with "
             "GitHub product-auth credentials for GitHub live cases.",
+            flush=True,
+        )
+    if slack_seed.get("seeded"):
+        print(
+            "[reborn-webui-v2-live-qa] Seeded generated Reborn home with "
+            "Slack personal product-auth credentials for Slack live cases.",
             flush=True,
         )
     return path
@@ -745,6 +773,32 @@ async def start_reborn_server(
         process_extra_env["IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI"] = (
             f"{base_url}/api/reborn/product-auth/oauth/google/callback"
         )
+    slack_oauth_client_configured = _env_present(
+        SLACK_OAUTH_CLIENT_ID_ENV,
+        process_extra_env,
+    )
+    config_path = reborn_home / "config.toml"
+    if not slack_oauth_client_configured and config_path.exists():
+        config_text = _config_text(config_path)
+        if _slack_enabled(config_text):
+            slack_oauth_client_configured = bool(
+                _slack_setup_preflight(
+                    reborn_home,
+                    config_text,
+                    process_extra_env,
+                ).get("oauth_client_id_configured")
+            )
+    if (
+        slack_oauth_client_configured
+        and _env_present(SLACK_OAUTH_CLIENT_SECRET_ENV, process_extra_env)
+        and not _env_present(
+            "IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI",
+            process_extra_env,
+        )
+    ):
+        process_extra_env["IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI"] = (
+            f"{base_url}/api/reborn/product-auth/oauth/slack_personal/callback"
+        )
     stdout_path = output_dir / "ironclaw-reborn-serve.stdout.log"
     stderr_path = output_dir / "ironclaw-reborn-serve.stderr.log"
     workspace_dir = output_dir / "workspace"
@@ -783,6 +837,72 @@ async def start_reborn_server(
             f"ironclaw-reborn serve did not become healthy at {base_url}: {exc}\n{tail}"
         ) from exc
     return proc, base_url
+
+
+async def _apply_slack_setup_api_after_start(
+    *,
+    base_url: str,
+    prepared_home: PreparedRebornHome,
+) -> dict[str, object]:
+    config_text = _config_text(prepared_home.path / "config.toml")
+    if not _slack_enabled(config_text):
+        return {"applied": False, "reason": "slack_disabled"}
+    payload, preflight = _slack_setup_payload(
+        prepared_home.path,
+        config_text,
+        prepared_home.env,
+    )
+    if payload is None:
+        return {"applied": False, "reason": "setup_payload_missing", **preflight}
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.put(
+                f"{base_url}/api/webchat/v2/channels/slack/setup",
+                headers={"Authorization": f"Bearer {AUTH_TOKEN}"},
+                json=payload,
+            )
+            if response.status_code < 200 or response.status_code >= 300:
+                raise LiveQaError(
+                    "Slack setup API returned HTTP "
+                    f"{response.status_code}; response body omitted because "
+                    "this endpoint handles Slack secrets"
+                )
+            status = response.json()
+    except LiveQaError:
+        raise
+    except Exception as exc:
+        raise LiveQaError(f"Slack setup API call failed: {type(exc).__name__}: {exc}") from exc
+    if not isinstance(status, dict):
+        raise LiveQaError(f"Slack setup API returned non-object JSON: {status!r}")
+    required_flags = ["configured", "bot_token_configured", "signing_secret_configured"]
+    if payload.get("oauth_client_id") or payload.get("oauth_client_secret"):
+        required_flags.extend(["oauth_client_id_configured", "oauth_client_secret_configured"])
+    missing_flags = [flag for flag in required_flags if status.get(flag) is not True]
+    mismatched_identity = [
+        key
+        for key in ("installation_id", "team_id", "api_app_id")
+        if str(status.get(key) or "") != str(payload.get(key) or "")
+    ]
+    if missing_flags or mismatched_identity:
+        raise LiveQaError(
+            "Slack setup API returned incomplete setup status: "
+            f"missing_flags={missing_flags!r} "
+            f"mismatched_identity={mismatched_identity!r}"
+        )
+    return {
+        "applied": True,
+        "status_code": response.status_code,
+        "request": {
+            "installation_id": payload.get("installation_id"),
+            "team_id": payload.get("team_id"),
+            "api_app_id": payload.get("api_app_id"),
+            "oauth_client_id_configured": bool(payload.get("oauth_client_id")),
+            "oauth_client_secret_configured": bool(payload.get("oauth_client_secret")),
+        },
+        "status": status,
+    }
 
 
 _BROWSER_EVENT_LIMIT = 1_000
@@ -1528,7 +1648,7 @@ def _trigger_record_count(reborn_home: Path, routine_name: str | None = None) ->
     db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
     if not db_path.exists():
         return 0
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db:
         if routine_name:
             cursor = db.execute(
                 "SELECT COUNT(*) FROM trigger_records WHERE name = ?",
@@ -1544,7 +1664,7 @@ def _trigger_run_rows(reborn_home: Path, routine_name: str) -> list[dict[str, ob
     db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
     if not db_path.exists():
         return []
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db:
         db.row_factory = sqlite3.Row
         rows = db.execute(
             """
@@ -1566,7 +1686,7 @@ def _triggered_delivery_outcome(reborn_home: Path, run_id: str) -> dict[str, obj
     db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
     if not db_path.exists():
         return None
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db:
         row = db.execute(
             """
             SELECT path, contents FROM root_filesystem_entries
@@ -1592,7 +1712,7 @@ def _delivered_gate_routes_for_run(reborn_home: Path, run_id: str) -> list[dict[
     db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
     if not db_path.exists() or not run_id:
         return []
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db:
         rows = db.execute(
             """
             SELECT path, contents FROM root_filesystem_entries
@@ -1633,7 +1753,7 @@ def _slack_event_run_id_for_event(reborn_home: Path, event_id: str) -> str | Non
     db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
     if not db_path.exists() or not event_id:
         return None
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db:
         row = db.execute(
             """
             SELECT contents FROM root_filesystem_entries
@@ -1773,13 +1893,8 @@ async def _resolve_webui_approval_gate(
     return result
 
 
-def _slack_bot_token(config_text: str, extra_env: dict[str, str]) -> str | None:
-    bot_env = _section_env_name(
-        config_text,
-        "bot_token_env",
-        "IRONCLAW_REBORN_SLACK_BOT_TOKEN",
-    )
-    return _env_value(bot_env, extra_env)
+def _slack_bot_token(extra_env: dict[str, str]) -> str | None:
+    return _env_value(SLACK_BOT_TOKEN_ENV, extra_env)
 
 
 def _slack_delivery_channel_id(ctx: LiveQaContext) -> str | None:
@@ -1803,7 +1918,7 @@ def _slack_delivery_channel_id(ctx: LiveQaContext) -> str | None:
     db_path = ctx.reborn_home / "local-dev" / "reborn-local-dev.db"
     if not db_path.exists():
         return None
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db:
         row = db.execute(
             """
             SELECT contents FROM root_filesystem_entries
@@ -1837,7 +1952,7 @@ async def _slack_history_contains_marker(
 ) -> dict[str, object]:
     import httpx
 
-    token = _slack_bot_token(_config_text(ctx.reborn_home / "config.toml"), ctx.env)
+    token = _slack_bot_token(ctx.env)
     if not token:
         return {"checked": False, "found": False, "error": "bot token unavailable"}
     params = {
@@ -1980,9 +2095,72 @@ def _slack_preflight(ctx: LiveQaContext) -> dict[str, object]:
     return slack
 
 
+def _slack_personal_auth_check(ctx: LiveQaContext) -> dict[str, object]:
+    preflight_path = ctx.output_dir / "preflight.json"
+    if not preflight_path.exists():
+        raise AssertionError(f"preflight file missing: {preflight_path}")
+    preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
+    checks = preflight.get("checks") if isinstance(preflight, dict) else None
+    personal_auth = (
+        checks.get("slack_personal_auth")
+        if isinstance(checks, dict)
+        else None
+    )
+    if not isinstance(personal_auth, dict):
+        raise AssertionError(
+            f"preflight Slack personal-auth check missing in {preflight_path}"
+        )
+    return personal_auth
+
+
 def _slack_connect_instructions_look_valid(instructions: str) -> bool:
     text = instructions.lower()
-    return "message the slack app" in text or ("slack" in text and "pairing code" in text)
+    return "connect slack with oauth" in text or ("slack" in text and "oauth" in text)
+
+
+def _slack_oauth_start_expires_at() -> str:
+    expires = datetime.fromtimestamp(time.time() + 600, timezone.utc)
+    return expires.isoformat().replace("+00:00", "Z")
+
+
+def _slack_personal_auth_ready_account(personal_auth: dict[str, object]) -> dict[str, object]:
+    accounts = personal_auth.get("accounts")
+    if not isinstance(accounts, list):
+        return {}
+    for account in accounts:
+        if isinstance(account, dict) and account.get("ready"):
+            return account
+    return {}
+
+
+def _slack_workspace_mismatch_error(
+    slack: dict[str, object],
+    personal_auth: dict[str, object] | None = None,
+    *,
+    include_personal_auth: bool,
+) -> str | None:
+    team_ids: list[tuple[str, str]] = []
+    setup = slack.get("setup")
+    if isinstance(setup, dict):
+        team_id = str(setup.get("team_id") or "").strip()
+        if team_id:
+            team_ids.append(("setup", team_id))
+    auth_test = slack.get("auth_test")
+    if isinstance(auth_test, dict) and auth_test.get("ok"):
+        team_id = str(auth_test.get("team_id") or "").strip()
+        if team_id:
+            team_ids.append(("bot_token", team_id))
+    if include_personal_auth and isinstance(personal_auth, dict) and personal_auth.get("ready"):
+        personal_auth_test = personal_auth.get("auth_test")
+        if isinstance(personal_auth_test, dict) and personal_auth_test.get("ok"):
+            team_id = str(personal_auth_test.get("team_id") or "").strip()
+            if team_id:
+                team_ids.append(("personal_oauth", team_id))
+    unique_team_ids = {team_id for _, team_id in team_ids}
+    if len(unique_team_ids) <= 1:
+        return None
+    details = ", ".join(f"{source} team_id={team_id}" for source, team_id in team_ids)
+    return f"Slack credentials target different workspaces: {details}"
 
 
 async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeResult:
@@ -2021,12 +2199,12 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
                 channel
                 for channel in slack_channels
                 if isinstance(channel, dict)
-                and channel.get("strategy") == "inbound_proof_code"
+                and channel.get("strategy") == "oauth"
             ),
             None,
         )
         if not isinstance(personal, dict):
-            raise AssertionError(f"Slack inbound_proof_code connect strategy missing: {channels!r}")
+            raise AssertionError(f"Slack oauth connect strategy missing: {channels!r}")
         action_body = personal.get("action")
         if not isinstance(action_body, dict):
             raise AssertionError(f"Slack connect action missing: {personal!r}")
@@ -2036,21 +2214,113 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
         instructions = str(action_body.get("instructions") or "")
         if not _slack_connect_instructions_look_valid(instructions):
             raise AssertionError(f"unexpected Slack connect instructions: {instructions!r}")
-        await expect(page.locator("body")).to_contain_text(title, timeout=15000)  # type: ignore[attr-defined]
-        await expect(page.locator("body")).to_contain_text("pairing code", timeout=15000)  # type: ignore[attr-defined]
+        account_scope = _slack_personal_auth_ready_account(personal_auth)
+        invocation_id = str(account_scope.get("invocation_id") or "").strip()
+        thread_id = str(account_scope.get("thread_id") or "").strip()
+        if not invocation_id:
+            raise AssertionError(
+                "Slack personal product-auth preflight did not include an invocation_id"
+            )
+        accounts_request: dict[str, object] = {
+            "provider": "slack_personal",
+            "requester_extension": "slack",
+            "invocation_id": invocation_id,
+            "limit": 10,
+        }
+        if thread_id:
+            accounts_request["thread_id"] = thread_id
+        accounts_list = await _webui_json(
+            page,
+            "POST",
+            "/api/reborn/product-auth/accounts/list",
+            accounts_request,
+        )
+        accounts = accounts_list.get("accounts")
+        if not isinstance(accounts, list):
+            raise AssertionError(f"Slack product-auth accounts response missing list: {accounts_list!r}")
+        configured_accounts = [
+            account
+            for account in accounts
+            if isinstance(account, dict)
+            and account.get("provider") == "slack_personal"
+            and account.get("status") == "configured"
+        ]
+        if not configured_accounts:
+            raise AssertionError(
+                f"Slack product-auth accounts list did not include a configured account: {accounts_list!r}"
+            )
+        oauth_start = await _webui_json(
+            page,
+            "POST",
+            "/api/webchat/v2/extensions/slack/setup/oauth/start",
+            {
+                "provider": "slack_personal",
+                "account_label": "Slack personal OAuth",
+                "scopes": [],
+                "expires_at": _slack_oauth_start_expires_at(),
+                "invocation_id": str(uuid.uuid4()),
+            },
+        )
+        if oauth_start.get("provider") != "slack_personal":
+            raise AssertionError(f"Slack OAuth start returned unexpected provider: {oauth_start!r}")
+        authorization_url = str(oauth_start.get("authorization_url") or "")
+        if not authorization_url.startswith("https://slack.com/oauth/"):
+            raise AssertionError(f"Slack OAuth start returned unexpected URL: {oauth_start!r}")
+        if "admin_managed_channels" in observed["slack_strategies"]:
+            await expect(page.locator("body")).to_contain_text("Slack workspace setup", timeout=15000)  # type: ignore[attr-defined]
+        else:
+            await expect(page.locator("body")).to_contain_text(title, timeout=15000)  # type: ignore[attr-defined]
+            await expect(page.locator("body")).to_contain_text("Connect Slack with OAuth", timeout=15000)  # type: ignore[attr-defined]
         observed["slack_display_name"] = personal.get("display_name")
         observed["slack_connect_title"] = title
         observed["slack_connect_instructions"] = instructions
+        observed["slack_product_auth_account_count"] = len(accounts)
+        observed["slack_product_auth_configured_account_count"] = len(configured_accounts)
+        observed["slack_product_auth_account_ids"] = [
+            account.get("id") for account in configured_accounts
+        ]
+        observed["slack_oauth_start_provider"] = oauth_start.get("provider")
+        observed["slack_oauth_start_status"] = oauth_start.get("status")
+        observed["slack_oauth_start_url"] = authorization_url
 
     try:
         slack = _slack_preflight(ctx)
         auth_test = slack.get("auth_test")
+        setup = slack.get("setup")
         if not slack.get("enabled_in_config") or not slack.get("env_present"):
             raise AssertionError(f"Slack was not enabled with env in preflight: {slack!r}")
+        if not isinstance(setup, dict) or not setup.get("personal_oauth_ready"):
+            raise AssertionError(f"Slack personal OAuth is not ready in preflight: {setup!r}")
         if not isinstance(auth_test, dict) or not auth_test.get("ok"):
             raise AssertionError(f"Slack auth.test did not pass in preflight: {auth_test!r}")
+        observed["slack_personal_oauth_ready"] = setup.get("personal_oauth_ready")
+        observed["slack_oauth_client_id_configured"] = setup.get("oauth_client_id_configured")
+        observed["slack_oauth_client_secret_configured"] = setup.get(
+            "oauth_client_secret_configured"
+        )
         observed["slack_auth_team_id"] = auth_test.get("team_id")
         observed["slack_auth_user_id"] = auth_test.get("user_id")
+        personal_auth = _slack_personal_auth_check(ctx)
+        if not personal_auth.get("ready"):
+            raise AssertionError(
+                "Slack personal product-auth account is not ready in preflight: "
+                f"{personal_auth.get('reason') or personal_auth!r}"
+            )
+        personal_auth_test = personal_auth.get("auth_test")
+        observed["slack_personal_auth_ready"] = personal_auth.get("ready")
+        observed["slack_personal_auth_account_count"] = personal_auth.get(
+            "configured_account_count"
+        )
+        if isinstance(personal_auth_test, dict):
+            observed["slack_personal_auth_team_id"] = personal_auth_test.get("team_id")
+            observed["slack_personal_auth_user_id"] = personal_auth_test.get("user_id")
+        mismatch = _slack_workspace_mismatch_error(
+            slack,
+            personal_auth,
+            include_personal_auth=True,
+        )
+        if mismatch:
+            raise AssertionError(mismatch)
         await _with_page(ctx.output_dir, case_name, action)
         return _result(case_name, True, started, observed)
     except Exception as exc:
@@ -2111,7 +2381,7 @@ def _capability_run_statuses(
     if not db_path.exists():
         return statuses
     try:
-        with sqlite3.connect(db_path) as db:
+        with closing(sqlite3.connect(db_path)) as db:
             rows = db.execute(
                 """
                 SELECT contents
@@ -2745,7 +3015,7 @@ async def case_qa_5d_slack_strategy_doc_answer(ctx: LiveQaContext) -> ProbeResul
         channel_id = _slack_delivery_channel_id(ctx)
         if not channel_id:
             raise AssertionError("Slack inbound test could not resolve a DM/channel id")
-        slack_user_id = str(slack.get("legacy_actor_user_id") or "U0REBORNQA")
+        slack_user_id = str(slack.get("inbound_user_id") or "U0REBORNQA")
         post_result = await _post_signed_slack_dm_event(
             ctx,
             channel_id=channel_id,
@@ -3279,13 +3549,8 @@ async def case_qa_5a_slack_connect(ctx: LiveQaContext) -> ProbeResult:
     return await _slack_connect_case(ctx, case_name="qa_5a_slack_connect")
 
 
-def _slack_signing_secret(config_text: str, extra_env: dict[str, str]) -> str | None:
-    signing_env = _section_env_name(
-        config_text,
-        "signing_secret_env",
-        "IRONCLAW_REBORN_SLACK_SIGNING_SECRET",
-    )
-    return _env_value(signing_env, extra_env)
+def _slack_signing_secret(extra_env: dict[str, str]) -> str | None:
+    return _env_value(SLACK_SIGNING_SECRET_ENV, extra_env)
 
 
 def _slack_event_headers(body: bytes, signing_secret: str) -> dict[str, str]:
@@ -3313,8 +3578,7 @@ async def _post_signed_slack_dm_event(
 ) -> dict[str, object]:
     import httpx
 
-    config_text = _config_text(ctx.reborn_home / "config.toml")
-    signing_secret = _slack_signing_secret(config_text, ctx.env)
+    signing_secret = _slack_signing_secret(ctx.env)
     if not signing_secret:
         raise AssertionError("Slack signing secret is unavailable for signed webhook injection")
     slack = _slack_preflight(ctx)
@@ -3323,13 +3587,19 @@ async def _post_signed_slack_dm_event(
     if isinstance(auth_test, dict):
         team_id = auth_test.get("team_id")
     if not team_id:
-        team_id = slack.get("team_id") or slack.get("secret_source", {}).get("team_id")
+        setup = slack.get("setup")
+        if isinstance(setup, dict):
+            team_id = setup.get("team_id")
+    if not team_id:
+        team_id = slack.get("secret_source", {}).get("team_id")
     secret_source = slack.get("secret_source")
     api_app_id = None
     if isinstance(secret_source, dict):
         api_app_id = secret_source.get("api_app_id")
     if not api_app_id:
-        api_app_id = slack.get("config_api_app_id")
+        setup = slack.get("setup")
+        if isinstance(setup, dict):
+            api_app_id = setup.get("api_app_id")
     payload = {
         "token": "live-qa-local-signed-event",
         "team_id": str(team_id or ""),
@@ -3378,8 +3648,7 @@ async def case_qa_7d_slack_bug_message_trigger(ctx: LiveQaContext) -> ProbeResul
         slack = _slack_preflight(ctx)
         observed.update(
             {
-                "legacy_actor_configured": slack.get("legacy_actor_configured"),
-                "legacy_actor_user_id": slack.get("legacy_actor_user_id"),
+                "inbound_user_id": slack.get("inbound_user_id"),
                 "delivery_target_present": slack.get("delivery_target_present"),
             }
         )
@@ -3391,7 +3660,7 @@ async def case_qa_7d_slack_bug_message_trigger(ctx: LiveQaContext) -> ProbeResul
                 "Slack bug-message trigger test must inject into a DM target; "
                 f"got channel_id={channel_id!r}"
             )
-        slack_user_id = str(slack.get("legacy_actor_user_id") or "U0REBORNQA")
+        slack_user_id = str(slack.get("inbound_user_id") or "U0REBORNQA")
         qa_sheet_prompt = _qa_sheet_prompt(case_name)
         text = f"bug: reborn QA bug logger smoke {suffix}"
         observed["qa_sheet_prompt"] = qa_sheet_prompt
@@ -3490,7 +3759,7 @@ async def case_qa_7e_slack_bug_sheet_delivery(ctx: LiveQaContext) -> ProbeResult
         channel_id = _slack_delivery_channel_id(ctx)
         if not channel_id:
             raise AssertionError("Slack inbound test could not resolve a DM/channel id")
-        slack_user_id = str(slack.get("legacy_actor_user_id") or "U0REBORNQA")
+        slack_user_id = str(slack.get("inbound_user_id") or "U0REBORNQA")
         event_id = f"EvREBORNQA7E{suffix}"
         post_result = await _post_signed_slack_dm_event(
             ctx,
@@ -3560,7 +3829,10 @@ async def case_qa_7c_slack_bug_logger_routine(ctx: LiveQaContext) -> ProbeResult
             routine_name=routine_name,
             marker=None,
             required_text=["trigger|routine|automation|cron|schedule|fires|watches", "bug"],
-            prompt=_qa_sheet_prompt("qa_7c_slack_bug_logger_routine"),
+            prompt=_qa_7c_bug_logger_prompt(
+                sheet_fixture=sheet_fixture,
+                routine_name=routine_name,
+            ),
             extensions=[
                 {
                     "package_id": "google-drive",
@@ -3753,6 +4025,7 @@ CASES: dict[str, CaseSpec] = {
     "qa_3a_slack_connect": CaseSpec(
         case_qa_3a_slack_connect,
         requires_slack=True,
+        requires_slack_personal_auth=True,
     ),
     "qa_3b_endpoint_status_live_chat": CaseSpec(case_qa_3b_endpoint_status_live_chat),
     "qa_3c_endpoint_status_slack_routine": CaseSpec(
@@ -3788,6 +4061,7 @@ CASES: dict[str, CaseSpec] = {
     "qa_5a_slack_connect": CaseSpec(
         case_qa_5a_slack_connect,
         requires_slack=True,
+        requires_slack_personal_auth=True,
     ),
     "qa_5b_drive_connect": CaseSpec(
         case_qa_5b_drive_connect,
@@ -3862,6 +4136,7 @@ CASES: dict[str, CaseSpec] = {
     "qa_8a_slack_connect": CaseSpec(
         case_qa_8a_slack_connect,
         requires_slack=True,
+        requires_slack_personal_auth=True,
     ),
     "qa_8b_hn_keyword_live_chat": CaseSpec(case_qa_8b_hn_keyword_live_chat),
     "qa_8c_hn_keyword_slack_routine": CaseSpec(
@@ -3910,6 +4185,7 @@ def write_case_manifest(output_dir: Path, selected_cases: list[str]) -> Path:
                 "default_enabled": spec.default_enabled,
                 "requires_slack": spec.requires_slack,
                 "requires_slack_target": spec.requires_slack_target,
+                "requires_slack_personal_auth": spec.requires_slack_personal_auth,
                 "requires_google_product_auth": spec.requires_google_product_auth,
                 "requires_google_runtime_access": spec.requires_google_runtime_access,
                 "requires_telegram": spec.requires_telegram,
@@ -3926,6 +4202,8 @@ def write_case_manifest(output_dir: Path, selected_cases: list[str]) -> Path:
                     if spec.requires_github_auth
                     else "gated:requires_live_google_product_auth"
                     if spec.requires_google_product_auth
+                    else "gated:requires_live_slack_personal_auth"
+                    if spec.requires_slack_personal_auth
                     else "gated:requires_live_slack_delivery_target"
                     if spec.requires_slack_target
                     else "gated:requires_live_credentials_or_side_effect_verifier"
@@ -3988,7 +4266,7 @@ def export_case_trace(output_dir: Path, case_name: str, reborn_home: Path) -> di
     where = " OR ".join("path LIKE ?" for _ in TRACE_EXPORT_PATH_MARKERS)
     params = [f"%{marker}%" for marker in TRACE_EXPORT_PATH_MARKERS]
     try:
-        with sqlite3.connect(db_path) as db:
+        with closing(sqlite3.connect(db_path)) as db:
             rows = db.execute(
                 f"""
                 SELECT path, contents, content_type, kind, updated_at, version
@@ -4088,6 +4366,10 @@ async def run_cases(args: argparse.Namespace) -> int:
             flush=True,
         )
         slack_preflight = prepared_home.preflight.get("slack", {})
+        slack_personal_auth_preflight = prepared_home.preflight.get(
+            "slack_personal_auth",
+            {},
+        )
         google_preflight = prepared_home.preflight.get("google_product_auth", {})
         telegram_preflight = prepared_home.preflight.get("telegram", {})
         github_preflight = prepared_home.preflight.get("github_auth", {})
@@ -4239,6 +4521,71 @@ async def run_cases(args: argparse.Namespace) -> int:
                     flush=True,
                 )
                 continue
+            mismatch = _slack_workspace_mismatch_error(
+                slack_preflight,
+                slack_personal_auth_preflight
+                if isinstance(slack_personal_auth_preflight, dict)
+                else None,
+                include_personal_auth=case_spec.requires_slack_personal_auth,
+            )
+            if mismatch:
+                started = time.monotonic()
+                result = _result(
+                    name,
+                    False,
+                    started,
+                    {
+                        "blocked": True,
+                        "error": mismatch,
+                        "required_env": [
+                            "REBORN_WEBUI_V2_LIVE_QA_SLACK_TEAM_ID",
+                            "IRONCLAW_REBORN_SLACK_BOT_TOKEN",
+                            SLACK_PERSONAL_ACCESS_TOKEN_ENV,
+                        ],
+                        "preflight": {
+                            "slack": slack_preflight,
+                            "slack_personal_auth": slack_personal_auth_preflight,
+                        },
+                    },
+                )
+                results.append(result)
+                print(
+                    f"[reborn-webui-v2-live-qa] case={name} success={result.success} "
+                    f"latency_ms={result.latency_ms} blocked=slack_workspace_mismatch",
+                    flush=True,
+                )
+                continue
+        if (
+            case_spec.requires_slack_personal_auth
+            and isinstance(slack_personal_auth_preflight, dict)
+            and not slack_personal_auth_preflight.get("ready")
+        ):
+            started = time.monotonic()
+            result = _result(
+                name,
+                False,
+                started,
+                {
+                    "blocked": True,
+                    "error": (
+                        slack_personal_auth_preflight.get("reason")
+                        or "live Slack personal product-auth account is not configured"
+                    ),
+                    "required_env": [
+                        SLACK_PERSONAL_ACCESS_TOKEN_ENV,
+                        "REBORN_WEBUI_V2_LIVE_QA_SLACK_INSTALLATION_ID",
+                        "REBORN_WEBUI_V2_LIVE_QA_SLACK_API_APP_ID",
+                    ],
+                    "preflight": slack_personal_auth_preflight,
+                },
+            )
+            results.append(result)
+            print(
+                f"[reborn-webui-v2-live-qa] case={name} success={result.success} "
+                f"latency_ms={result.latency_ms} blocked=missing_slack_personal_auth",
+                flush=True,
+            )
+            continue
         if (
             CASES[name].requires_slack_target
             and isinstance(slack_preflight, dict)
@@ -4284,6 +4631,40 @@ async def run_cases(args: argparse.Namespace) -> int:
                 reborn_home=prepared_home.path,
                 env=prepared_home.env,
             )
+            if case_spec.requires_slack and isinstance(slack_preflight, dict):
+                setup_started = time.monotonic()
+                setup_api = await _apply_slack_setup_api_after_start(
+                    base_url=base_url,
+                    prepared_home=prepared_home,
+                )
+                if not setup_api.get("applied"):
+                    blocked_preflight = {**slack_preflight, "setup_api": setup_api}
+                    result = _result(
+                        name,
+                        False,
+                        setup_started,
+                        {
+                            "blocked": True,
+                            "error": (
+                                "Slack setup API was not applied: "
+                                f"{setup_api.get('reason') or 'unknown'}"
+                            ),
+                            "preflight": blocked_preflight,
+                        },
+                    )
+                    results.append(result)
+                    print(
+                        f"[reborn-webui-v2-live-qa] case={name} success={result.success} "
+                        f"latency_ms={result.latency_ms} blocked=slack_setup_not_applied",
+                        flush=True,
+                    )
+                    continue
+                slack_preflight["setup_api"] = setup_api
+                setup_status = setup_api.get("status") if isinstance(setup_api, dict) else None
+                if isinstance(setup_status, dict):
+                    slack_preflight["setup"] = setup_status
+                write_preflight(args.output_dir, prepared_home)
+                shutil.copyfile(preflight_path, case_preflight_path)
             print(f"[reborn-webui-v2-live-qa] running case={name}", flush=True)
             result = await CASES[name].fn(ctx)
             result = _attach_browser_diagnostics(args.output_dir, result)

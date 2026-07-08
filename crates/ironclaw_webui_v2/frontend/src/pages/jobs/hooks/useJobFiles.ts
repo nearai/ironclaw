@@ -1,6 +1,6 @@
-import { React } from "../../../lib/html.js";
+import React from "react";
 import { useQuery } from "@tanstack/react-query";
-import { fetchJobFiles, readJobFile } from "../lib/jobs-api.js";
+import { fetchJobFiles, readJobFile } from "../lib/jobs-api";
 
 function mapEntries(entries = []) {
   return entries.map((entry) => ({

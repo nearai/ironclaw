@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { React } from "../../../lib/html.js";
-import { useT } from "../../../lib/i18n.js";
-import { listWorkspace, readWorkspaceFile } from "../lib/workspace-api.js";
+import React from "react";
+import { useT } from "../../../lib/i18n";
+import { listWorkspace, readWorkspaceFile } from "../lib/workspace-api";
 
 // Read-only browser state for the agent filesystem viewer. The tree is rooted
 // at the mount list (empty path); selecting a file loads a preview, selecting a

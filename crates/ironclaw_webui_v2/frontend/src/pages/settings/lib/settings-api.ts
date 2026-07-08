@@ -1,4 +1,4 @@
-import { apiFetch } from "../../../lib/api.js";
+import { apiFetch } from "../../../lib/api";
 
 const OPERATOR_CONFIG_BASE = "/api/webchat/v2/operator/config";
 const SETTINGS_TOOLS_BASE = "/api/webchat/v2/settings/tools";

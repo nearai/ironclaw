@@ -2,12 +2,13 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthFlowId, AuthFlowKind, AuthFlowManager,
     AuthFlowOwnerScope, AuthFlowRecord, AuthFlowRecordSource, AuthGateRef, AuthProductError,
-    AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
-    GoogleOAuthCallbackState, NewAuthFlow, PkceVerifierSecret, ProviderScope,
+    AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel, NewAuthFlow,
+    OAuthCallbackState, OAuthCallbackStateKind, PkceVerifierSecret, ProviderScope,
     TurnGateAuthFlowQuery, TurnRunRef, build_google_authorization_url, opaque_state_hash,
     pkce_s256_challenge, pkce_verifier_hash,
 };
@@ -25,19 +26,57 @@ use crate::input::OAuthClientConfig;
 
 const GATE_FLOW_TTL_SECONDS: i64 = 600;
 
-#[derive(Clone)]
-pub(crate) struct GoogleOAuthGateProviderRegistry {
-    providers: BTreeMap<String, Arc<GoogleOAuthGateProvider>>,
+/// Provider-specific pieces of a blocked-turn OAuth gate flow.
+///
+/// Everything else about the gate — challenge/turn-gate reuse, PKCE store &
+/// cleanup, expiry replacement, conflict recovery, and challenge projection —
+/// is provider-agnostic and lives in [`OAuthGateFlowDriver`]. Two production
+/// implementors (Google, Slack personal) share that driver through this trait.
+#[async_trait]
+pub(crate) trait OAuthGateProvider: Send + Sync + fmt::Debug {
+    /// Stable Reborn provider id (`google`, `slack_personal`, ...).
+    fn provider_id(&self) -> &'static str;
+
+    /// Prefix for the per-flow PKCE verifier secret handle. The driver appends
+    /// `-{flow_id}` to build the full handle.
+    fn pkce_secret_handle_label(&self) -> &'static str;
+
+    /// Build the authorization URL + hashed state/PKCE material for a new flow.
+    ///
+    /// The only provider-specific step: Google emits `scope=` + offline-consent
+    /// extras from static client config; Slack resolves client credentials from
+    /// its setup slot and emits `user_scope=`.
+    async fn prepare_flow(
+        &self,
+        scope: &AuthProductScope,
+        flow_id: AuthFlowId,
+        scopes: Vec<ProviderScope>,
+    ) -> Result<PreparedOAuthGateFlow, AuthProductError>;
 }
 
-impl GoogleOAuthGateProviderRegistry {
-    pub(crate) fn new(providers: Vec<Arc<GoogleOAuthGateProvider>>) -> Self {
-        Self {
-            providers: providers
-                .into_iter()
-                .map(|provider| (provider.provider_id().to_string(), provider))
-                .collect(),
+/// One generic registry over every OAuth gate provider (Google, Slack personal).
+///
+/// Replaces the former parallel per-provider registries: a single
+/// `Option<Arc<OAuthGateProviderRegistry>>` slot on the product-auth bundle and
+/// one dispatch arm route every provider's blocked-gate challenge and PKCE
+/// lookup through the shared [`OAuthGateFlowDriver`].
+#[derive(Clone)]
+pub(crate) struct OAuthGateProviderRegistry {
+    drivers: BTreeMap<String, Arc<OAuthGateFlowDriver>>,
+}
+
+impl OAuthGateProviderRegistry {
+    pub(crate) fn new(drivers: Vec<Arc<OAuthGateFlowDriver>>) -> Self {
+        let mut map: BTreeMap<String, Arc<OAuthGateFlowDriver>> = BTreeMap::new();
+        for driver in drivers {
+            if let Some(previous) = map.insert(driver.provider_id().to_string(), driver) {
+                tracing::warn!(
+                    provider = previous.provider_id(),
+                    "duplicate OAuth gate provider registered; last registration wins"
+                );
+            }
         }
+        Self { drivers: map }
     }
 
     pub(crate) async fn challenge_for_blocked_gate(
@@ -45,13 +84,29 @@ impl GoogleOAuthGateProviderRegistry {
         request: OAuthGateChallengeRequest<'_>,
     ) -> Result<Option<AuthChallengeView>, AuthProductError> {
         for requirement in request.requirements {
-            let Some(provider) = self.providers.get(requirement.provider.as_str()) else {
+            let Some(driver) = self.drivers.get(requirement.provider.as_str()) else {
                 continue;
             };
-            return provider
+            match driver
                 .challenge_for_blocked_gate(request, requirement)
                 .await
-                .map(Some);
+            {
+                Ok(challenge) => return Ok(Some(challenge)),
+                // A registered-but-unconfigured provider (e.g. the Slack
+                // personal slot before the operator saves OAuth client
+                // credentials) must not swallow the whole gate: fall through to
+                // the next requirement / the generic requirement-derived
+                // prompt, matching the pre-registry behavior where an
+                // un-serviceable requirement was simply skipped.
+                Err(AuthProductError::BackendUnavailable) => {
+                    tracing::warn!(
+                        provider = requirement.provider.as_str(),
+                        "OAuth gate provider unavailable; falling through to next requirement"
+                    );
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
         }
         Ok(None)
     }
@@ -62,22 +117,23 @@ impl GoogleOAuthGateProviderRegistry {
         provider: &AuthProviderId,
         flow_id: AuthFlowId,
     ) -> Result<Option<SecretString>, AuthProductError> {
-        let Some(provider) = self.providers.get(provider.as_str()) else {
+        let Some(driver) = self.drivers.get(provider.as_str()) else {
             return Ok(None);
         };
-        provider.pkce_verifier_for_flow(scope, flow_id).await
+        driver.pkce_verifier_for_flow(scope, flow_id).await
     }
 }
 
-impl fmt::Debug for GoogleOAuthGateProviderRegistry {
+impl fmt::Debug for OAuthGateProviderRegistry {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("GoogleOAuthGateProviderRegistry")
-            .field("providers", &self.providers.keys().collect::<Vec<_>>())
+            .debug_struct("OAuthGateProviderRegistry")
+            .field("providers", &self.drivers.keys().collect::<Vec<_>>())
             .finish()
     }
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct OAuthGateChallengeRequest<'a> {
     pub(crate) flow_manager: &'a Arc<dyn AuthFlowManager>,
     pub(crate) flow_source: &'a Arc<dyn AuthFlowRecordSource>,
@@ -88,24 +144,48 @@ pub(crate) struct OAuthGateChallengeRequest<'a> {
     pub(crate) gate_ref: &'a AuthGateRef,
 }
 
+/// Provider-agnostic blocked-turn OAuth gate driver.
+///
+/// Holds the shared challenge/turn-gate-reuse/PKCE-store/cleanup/expiry logic
+/// that was previously duplicated between the Google and Slack gate providers.
+/// Delegates only the per-provider flow preparation to an [`OAuthGateProvider`].
 #[derive(Clone)]
-pub(crate) struct GoogleOAuthGateProvider {
-    client: OAuthClientConfig,
+pub(crate) struct OAuthGateFlowDriver {
+    provider: Arc<dyn OAuthGateProvider>,
     secret_store: Arc<dyn SecretStore>,
     setup_lock: Arc<AsyncMutex<()>>,
 }
 
-impl GoogleOAuthGateProvider {
-    pub(crate) fn new(client: OAuthClientConfig, secret_store: Arc<dyn SecretStore>) -> Self {
+impl OAuthGateFlowDriver {
+    pub(crate) fn new(
+        provider: Arc<dyn OAuthGateProvider>,
+        secret_store: Arc<dyn SecretStore>,
+    ) -> Self {
         Self {
-            client,
+            provider,
             secret_store,
             setup_lock: Arc::new(AsyncMutex::new(())),
         }
     }
 
     fn provider_id(&self) -> &'static str {
-        ironclaw_auth::GOOGLE_PROVIDER_ID
+        self.provider.provider_id()
+    }
+
+    fn pkce_secret_handle(&self, flow_id: AuthFlowId) -> Result<SecretHandle, AuthProductError> {
+        SecretHandle::new(format!(
+            "{}-{flow_id}",
+            self.provider.pkce_secret_handle_label()
+        ))
+        .map_err(|error| {
+            tracing::warn!(
+                provider = self.provider_id(),
+                flow_id = %flow_id,
+                error = %error,
+                "failed to build OAuth gate PKCE secret handle"
+            );
+            AuthProductError::BackendUnavailable
+        })
     }
 
     async fn challenge_for_blocked_gate(
@@ -127,7 +207,10 @@ impl GoogleOAuthGateProvider {
 
         let flow_id = AuthFlowId::new();
         let scopes = provider_scopes(&requirement.provider_scopes)?;
-        let prepared = self.prepare_flow(&auth_scope, flow_id, scopes).await?;
+        let prepared = self
+            .provider
+            .prepare_flow(&auth_scope, flow_id, scopes)
+            .await?;
         let expires_at = Utc::now() + ChronoDuration::seconds(GATE_FLOW_TTL_SECONDS);
         self.store_pkce_verifier(
             &auth_scope.resource,
@@ -187,10 +270,122 @@ impl GoogleOAuthGateProvider {
         if existing.expires_at > Utc::now() {
             return Ok(Some(existing));
         }
+        // The flow being replaced is expired and about to be canceled; drop its
+        // now-defunct PKCE verifier so it does not linger in the secret store.
+        self.cleanup_pkce_verifier(&existing.scope.resource, existing.id)
+            .await;
         flow_manager
             .cancel_flow(&existing.scope, existing.id)
             .await
             .map(|_| None)
+    }
+
+    async fn store_pkce_verifier(
+        &self,
+        scope: &ResourceScope,
+        flow_id: AuthFlowId,
+        material: SecretMaterial,
+    ) -> Result<(), AuthProductError> {
+        self.secret_store
+            .put(
+                scope.clone(),
+                self.pkce_secret_handle(flow_id)?,
+                material,
+                None,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                tracing::warn!(
+                    provider = self.provider_id(),
+                    flow_id = %flow_id,
+                    error = %error,
+                    "failed to store OAuth gate PKCE verifier"
+                );
+                AuthProductError::BackendUnavailable
+            })
+    }
+
+    async fn cleanup_pkce_verifier(&self, scope: &ResourceScope, flow_id: AuthFlowId) {
+        let Ok(handle) = self.pkce_secret_handle(flow_id) else {
+            return;
+        };
+        if self.secret_store.delete(scope, &handle).await.is_err() {
+            tracing::warn!(
+                provider = self.provider_id(),
+                flow_id = %flow_id,
+                "failed to clean up OAuth gate PKCE verifier after flow creation failure"
+            );
+        }
+    }
+
+    async fn pkce_verifier_for_flow(
+        &self,
+        scope: &AuthProductScope,
+        flow_id: AuthFlowId,
+    ) -> Result<Option<SecretString>, AuthProductError> {
+        let handle = self.pkce_secret_handle(flow_id)?;
+        let lease = match self.secret_store.lease_once(&scope.resource, &handle).await {
+            Ok(lease) => lease,
+            Err(error) if error.is_unknown_secret() => return Ok(None),
+            Err(error) => {
+                tracing::warn!(
+                    provider = self.provider_id(),
+                    flow_id = %flow_id,
+                    error = %error,
+                    "failed to lease OAuth gate PKCE verifier"
+                );
+                return Err(AuthProductError::BackendUnavailable);
+            }
+        };
+        self.secret_store
+            .consume(&scope.resource, lease.id)
+            .await
+            .map(Some)
+            .map_err(|error| {
+                tracing::warn!(
+                    provider = self.provider_id(),
+                    flow_id = %flow_id,
+                    error = %error,
+                    "failed to consume OAuth gate PKCE verifier"
+                );
+                AuthProductError::BackendUnavailable
+            })
+    }
+}
+
+impl fmt::Debug for OAuthGateFlowDriver {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OAuthGateFlowDriver")
+            .field("provider", &self.provider)
+            .finish()
+    }
+}
+
+/// Google product-auth blocked-turn OAuth gate provider.
+///
+/// Holds static Google OAuth client config; the shared [`OAuthGateFlowDriver`]
+/// owns everything else.
+#[derive(Clone)]
+pub(crate) struct GoogleOAuthGateProvider {
+    client: OAuthClientConfig,
+}
+
+impl GoogleOAuthGateProvider {
+    pub(crate) fn new(client: OAuthClientConfig) -> Self {
+        Self { client }
+    }
+}
+
+#[async_trait]
+impl OAuthGateProvider for GoogleOAuthGateProvider {
+    fn provider_id(&self) -> &'static str {
+        ironclaw_auth::GOOGLE_PROVIDER_ID
+    }
+
+    fn pkce_secret_handle_label(&self) -> &'static str {
+        "google-oauth-gate-flow-pkce"
     }
 
     async fn prepare_flow(
@@ -200,9 +395,14 @@ impl GoogleOAuthGateProvider {
         scopes: Vec<ProviderScope>,
     ) -> Result<PreparedOAuthGateFlow, AuthProductError> {
         let account_label = CredentialAccountLabel::new("google")?;
-        let state =
-            GoogleOAuthCallbackState::new(flow_id, scope.clone(), account_label, scopes.clone())?
-                .encode()?;
+        let state = OAuthCallbackState::new(
+            OAuthCallbackStateKind::GOOGLE,
+            flow_id,
+            scope.clone(),
+            account_label,
+            scopes.clone(),
+        )?
+        .encode()?;
         let opaque_state_hash = opaque_state_hash(state.as_str())?;
         let pkce_verifier = SecretString::from(ironclaw_common::pkce::generate_code_verifier());
         let pkce_secret = PkceVerifierSecret::new(pkce_verifier.clone())?;
@@ -223,50 +423,6 @@ impl GoogleOAuthGateProvider {
             pkce_verifier,
         })
     }
-
-    async fn store_pkce_verifier(
-        &self,
-        scope: &ResourceScope,
-        flow_id: AuthFlowId,
-        material: SecretMaterial,
-    ) -> Result<(), AuthProductError> {
-        self.secret_store
-            .put(scope.clone(), pkce_secret_handle(flow_id)?, material, None)
-            .await
-            .map(|_| ())
-            .map_err(|_| AuthProductError::BackendUnavailable)
-    }
-
-    async fn cleanup_pkce_verifier(&self, scope: &ResourceScope, flow_id: AuthFlowId) {
-        let Ok(handle) = pkce_secret_handle(flow_id) else {
-            return;
-        };
-        if self.secret_store.delete(scope, &handle).await.is_err() {
-            tracing::warn!(
-                provider = self.provider_id(),
-                flow_id = %flow_id,
-                "failed to clean up OAuth gate PKCE verifier after flow creation failure"
-            );
-        }
-    }
-
-    async fn pkce_verifier_for_flow(
-        &self,
-        scope: &AuthProductScope,
-        flow_id: AuthFlowId,
-    ) -> Result<Option<SecretString>, AuthProductError> {
-        let handle = pkce_secret_handle(flow_id)?;
-        let lease = match self.secret_store.lease_once(&scope.resource, &handle).await {
-            Ok(lease) => lease,
-            Err(error) if error.is_unknown_secret() => return Ok(None),
-            Err(_) => return Err(AuthProductError::BackendUnavailable),
-        };
-        self.secret_store
-            .consume(&scope.resource, lease.id)
-            .await
-            .map(Some)
-            .map_err(|_| AuthProductError::BackendUnavailable)
-    }
 }
 
 impl fmt::Debug for GoogleOAuthGateProvider {
@@ -279,15 +435,17 @@ impl fmt::Debug for GoogleOAuthGateProvider {
     }
 }
 
+/// Authorization URL + hashed state/PKCE material for a new gate flow, produced
+/// by [`OAuthGateProvider::prepare_flow`] and consumed by the shared driver.
 #[derive(Debug)]
-struct PreparedOAuthGateFlow {
-    authorization_url: ironclaw_auth::OAuthAuthorizationUrl,
-    opaque_state_hash: ironclaw_auth::OpaqueStateHash,
-    pkce_verifier_hash: ironclaw_auth::PkceVerifierHash,
-    pkce_verifier: SecretString,
+pub(crate) struct PreparedOAuthGateFlow {
+    pub(crate) authorization_url: ironclaw_auth::OAuthAuthorizationUrl,
+    pub(crate) opaque_state_hash: ironclaw_auth::OpaqueStateHash,
+    pub(crate) pkce_verifier_hash: ironclaw_auth::PkceVerifierHash,
+    pub(crate) pkce_verifier: SecretString,
 }
 
-fn auth_scope_for_blocked_turn(
+pub(crate) fn auth_scope_for_blocked_turn(
     scope: &TurnScope,
     owner_user_id: &ironclaw_host_api::UserId,
 ) -> AuthProductScope {
@@ -305,7 +463,7 @@ fn auth_scope_for_blocked_turn(
     )
 }
 
-fn turn_gate_query(
+pub(crate) fn turn_gate_query(
     auth_scope: &AuthProductScope,
     turn_scope: &TurnScope,
     turn_run_ref: &TurnRunRef,
@@ -325,14 +483,18 @@ fn turn_gate_query(
     }
 }
 
-fn provider_scopes(raw_scopes: &[String]) -> Result<Vec<ProviderScope>, AuthProductError> {
+pub(crate) fn provider_scopes(
+    raw_scopes: &[String],
+) -> Result<Vec<ProviderScope>, AuthProductError> {
     raw_scopes
         .iter()
         .map(|scope| ProviderScope::new(scope.clone()))
         .collect()
 }
 
-fn challenge_view_from_flow(flow: &AuthFlowRecord) -> Result<AuthChallengeView, AuthProductError> {
+pub(crate) fn challenge_view_from_flow(
+    flow: &AuthFlowRecord,
+) -> Result<AuthChallengeView, AuthProductError> {
     match flow.challenge.as_ref() {
         Some(AuthChallenge::OAuthUrl {
             authorization_url,
@@ -346,11 +508,6 @@ fn challenge_view_from_flow(flow: &AuthFlowRecord) -> Result<AuthChallengeView, 
         }),
         Some(_) | None => Err(AuthProductError::BackendUnavailable),
     }
-}
-
-fn pkce_secret_handle(flow_id: AuthFlowId) -> Result<SecretHandle, AuthProductError> {
-    SecretHandle::new(format!("google-oauth-gate-flow-pkce-{flow_id}"))
-        .map_err(|_| AuthProductError::BackendUnavailable)
 }
 
 #[cfg(test)]
@@ -442,8 +599,7 @@ mod tests {
     #[tokio::test]
     async fn google_oauth_gate_registry_uses_registered_requirement_when_multiple_present() {
         let fixture = GateFixture::new(None);
-        let registry =
-            GoogleOAuthGateProviderRegistry::new(vec![Arc::new(fixture.provider.clone())]);
+        let registry = OAuthGateProviderRegistry::new(vec![Arc::new(fixture.driver.clone())]);
         let unsupported_requirement = RuntimeCredentialAuthRequirement {
             provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
             setup: Default::default(),
@@ -470,11 +626,63 @@ mod tests {
         assert_eq!(fixture.active_gate_flows().await.len(), 1);
     }
 
+    /// A registered-but-unconfigured provider (Slack before the operator saves
+    /// OAuth client credentials) must not swallow the whole gate: pre-fix, a
+    /// requirements list with `slack_personal` first errored `challenge_for_gate`
+    /// entirely and the user got no auth prompt at all.
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[tokio::test]
+    async fn gate_registry_falls_through_unavailable_provider_to_next_requirement() {
+        use crate::slack_personal_oauth::SlackPersonalOAuthGateProvider;
+        use crate::slack_setup::SlackPersonalSetupServiceSlot;
+
+        let fixture = GateFixture::new(None);
+        let slack_driver = Arc::new(OAuthGateFlowDriver::new(
+            Arc::new(SlackPersonalOAuthGateProvider::new(
+                SlackPersonalSetupServiceSlot::new(
+                    ironclaw_auth::OAuthRedirectUri::new(
+                        "https://host.example/api/reborn/product-auth/oauth/slack_personal/callback",
+                    )
+                    .unwrap(),
+                ),
+            )),
+            Arc::new(InMemorySecretStore::new()),
+        ));
+        let registry =
+            OAuthGateProviderRegistry::new(vec![slack_driver, Arc::new(fixture.driver.clone())]);
+        let slack_requirement = RuntimeCredentialAuthRequirement {
+            provider: RuntimeCredentialAccountProviderId::new("slack_personal").unwrap(),
+            setup: Default::default(),
+            requester_extension: ExtensionId::new("slack").unwrap(),
+            provider_scopes: Vec::new(),
+        };
+        let requirements = vec![slack_requirement, fixture.requirement.clone()];
+
+        let challenge = registry
+            .challenge_for_blocked_gate(OAuthGateChallengeRequest {
+                flow_manager: &fixture.flow_manager,
+                flow_source: &fixture.flow_source,
+                requirements: &requirements,
+                scope: &fixture.scope,
+                owner_user_id: &fixture.owner_user_id,
+                run_id: fixture.run_id,
+                gate_ref: &fixture.gate_ref,
+            })
+            .await
+            .unwrap()
+            .expect("the google requirement must still produce a challenge");
+
+        assert_eq!(
+            challenge.provider.as_str(),
+            ironclaw_auth::GOOGLE_PROVIDER_ID
+        );
+    }
+
     struct GateFixture {
         shared: Arc<InMemoryAuthProductServices>,
         flow_manager: Arc<dyn AuthFlowManager>,
         flow_source: Arc<dyn AuthFlowRecordSource>,
-        provider: GoogleOAuthGateProvider,
+        driver: OAuthGateFlowDriver,
         scope: TurnScope,
         owner_user_id: UserId,
         run_id: TurnRunId,
@@ -500,8 +708,8 @@ mod tests {
                 shared,
                 flow_manager,
                 flow_source,
-                provider: GoogleOAuthGateProvider::new(
-                    client,
+                driver: OAuthGateFlowDriver::new(
+                    Arc::new(GoogleOAuthGateProvider::new(client)),
                     Arc::new(InMemorySecretStore::new()),
                 ),
                 scope: TurnScope::new(
@@ -525,7 +733,7 @@ mod tests {
         }
 
         async fn challenge(&self) -> AuthChallengeView {
-            self.provider
+            self.driver
                 .challenge_for_blocked_gate(
                     OAuthGateChallengeRequest {
                         flow_manager: &self.flow_manager,

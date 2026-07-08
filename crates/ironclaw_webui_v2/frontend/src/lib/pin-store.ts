@@ -12,7 +12,7 @@
  * the same browser, matching the draft and history caches.
  */
 
-import { authScope } from "./auth-scope.js";
+import { authScope } from "./auth-scope";
 
 const STORAGE_PREFIX = "ironclaw:v2-thread-pins:";
 

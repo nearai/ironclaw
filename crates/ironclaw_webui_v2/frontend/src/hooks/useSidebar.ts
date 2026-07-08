@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { React } from "../lib/html.js";
+import React from "react";
 import { useNavigate } from "react-router";
 import {
   currentSidebarOpen,
@@ -7,7 +7,7 @@ import {
   readDesktopSidebarOpen,
   toggleSidebarState,
   writeDesktopSidebarOpen,
-} from "../lib/sidebar-state.js";
+} from "../lib/sidebar-state";
 
 export function useSidebar({ onNewChat } = {}) {
   const navigate = useNavigate();

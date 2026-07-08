@@ -416,7 +416,11 @@ impl RebornLocalLifecycleFacade {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(Some(package_ref));
                 };
-                extension_management.remove(package_ref).await
+                // Thread the caller scope so the port can revoke the removed
+                // extension's exclusive credential (the convergence point shared
+                // with the agent capability path).
+                let scope = lifecycle_resource_scope(&context)?;
+                extension_management.remove(package_ref, &scope).await
             }
             LifecycleProductAction::ExtensionAuth { package_ref }
             | LifecycleProductAction::ExtensionConfigure { package_ref, .. } => {
