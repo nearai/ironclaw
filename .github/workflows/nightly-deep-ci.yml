@@ -112,4 +112,5 @@ jobs:
           ALERT_WORKFLOW_NAME: Nightly Deep CI
           ALERT_ISSUE_TITLE: Nightly Deep CI failed
           ALERT_RESULT: ${{ (needs.deterministic-deep-tests.result == 'success' && needs.platform-and-compat.result == 'success' && needs.reborn-tests.result == 'success' && needs.reborn-e2e.result == 'success') && 'success' || 'failure' }}
+          ALERT_SLACK_WEBHOOK_URL: ${{ secrets.SLACK_CI_ALERTS_WEBHOOK_URL }}
         run: .github/scripts/nightly-alert-issue.sh

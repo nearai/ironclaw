@@ -73,6 +73,12 @@ jobs:
 
       - name: Run nightly libsql bottleneck suite
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        # The suite-wide p95 ceiling must clear the model-tail case, which
+        # injects a synthetic 2.0s model wait by design — the previous 1500ms
+        # ceiling was structurally unsatisfiable and failed every nightly scan
+        # (the PR variant of this suite already runs with 3000ms). Per-case
+        # ceilings in ironclaw_stress would be the proper fix if the coarse
+        # global cap keeps biting.
         run: |
           mkdir -p target/ironclaw-stress
           cargo run -p ironclaw_stress --release -- \
@@ -86,7 +92,7 @@ jobs:
             --bottleneck-report \
             --output-jsonl target/ironclaw-stress/nightly-suite.jsonl \
             --max-failure-rate 0.02 \
-            --max-p95-ms 1500 \
+            --max-p95-ms 2500 \
             --max-rss-mb 1024 \
             > target/ironclaw-stress/nightly-suite-summary.json \
             2> target/ironclaw-stress/nightly-suite-report.txt
@@ -151,3 +157,26 @@ jobs:
             target/ironclaw-stress/concurrency-ramp-summary.json
             target/ironclaw-stress/concurrency-ramp-report.txt
           if-no-files-found: ignore
+
+  nightly-alert:
+    name: IronClaw Stress Nightly Alert
+    runs-on: ubuntu-latest
+    if: always() && github.event_name == 'schedule'
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    needs: [libsql-bottleneck-suite, libsql-concurrency-ramp]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Report nightly stress result
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ALERT_WORKFLOW_NAME: IronClaw Stress
+          ALERT_ISSUE_TITLE: IronClaw Stress nightly failed
+          ALERT_RESULT: ${{ (needs.libsql-bottleneck-suite.result == 'success' && needs.libsql-concurrency-ramp.result == 'success') && 'success' || 'failure' }}
+          ALERT_SLACK_WEBHOOK_URL: ${{ secrets.SLACK_CI_ALERTS_WEBHOOK_URL }}
+        run: .github/scripts/nightly-alert-issue.sh

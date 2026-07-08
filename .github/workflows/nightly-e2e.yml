@@ -43,4 +43,5 @@ jobs:
           ALERT_WORKFLOW_NAME: Nightly E2E
           ALERT_ISSUE_TITLE: Nightly E2E failed
           ALERT_RESULT: ${{ needs.e2e.result }}
+          ALERT_SLACK_WEBHOOK_URL: ${{ secrets.SLACK_CI_ALERTS_WEBHOOK_URL }}
         run: .github/scripts/nightly-alert-issue.sh

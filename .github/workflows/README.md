@@ -72,9 +72,23 @@ configuration:
   Deep CI had zero successful runs from its creation (2026-05-06) through
   2026-07-08 — 65 of its 74 retained runs are startup_failures — precisely
   because this failure mode is invisible from inside the run.
-  `nightly-watchdog.yml` (08:00 UTC) exists for exactly that: it checks the
-  latest scheduled nightly run from outside and raises/updates the "Nightly
-  Deep CI failed" issue even when the nightly run itself never started.
+  `nightly-watchdog.yml` (08:00 UTC) exists for exactly that: it checks each
+  nightly's latest scheduled run from outside and raises/updates the
+  per-workflow alert issue even when the run itself never started.
+
+### Nightly alerting
+
+All four nightlies (Nightly Deep CI, Nightly E2E, Reborn Playwright, IronClaw
+Stress) carry an in-run alert job driving
+`.github/scripts/nightly-alert-issue.sh` — one issue per workflow, updated in
+place on repeated failures, auto-closed on recovery — and the watchdog covers
+the same four from outside (startup failures, cron-never-fired). Setting the
+`SLACK_CI_ALERTS_WEBHOOK_URL` repository secret (a Slack incoming-webhook URL
+for the CI alerts channel) mirrors every alert and recovery to Slack; when
+the secret is absent the mirror is a silent no-op. Caveat: in-run alerts
+cannot attach their own run's failed-job logs (the run is still "in progress"
+from the API's perspective while the alert job executes); the watchdog's
+08:00 pass refreshes the issue with full logs.
 
 ## Known accepted gaps (deliberate, revisit as needed)
 

@@ -1,21 +1,21 @@
 name: Nightly Watchdog
 
-# Dead-man's switch for Nightly Deep CI. The in-run nightly-alert job cannot
+# Dead-man's switch for the scheduled nightlies. An in-run alert job cannot
 # report a startup_failure — a run that fails workflow validation executes
-# zero jobs, alert included — which is how the deep tier stayed dark from its
-# creation (2026-05-06) through 2026-07-08 without a single successful run:
-# nightly startup_failures with zero jobs, invisible from inside. This
-# watchdog inspects the latest scheduled Nightly Deep CI run from OUTSIDE
-# that run and drives the same alert issue via
-# .github/scripts/nightly-alert-issue.sh.
+# zero jobs, alert included — which is how Nightly Deep CI stayed dark from
+# its creation (2026-05-06) through 2026-07-08 without a single successful
+# run. This watchdog inspects each nightly's latest scheduled run from
+# OUTSIDE it and drives the same per-workflow alert issue (plus the optional
+# Slack mirror) via .github/scripts/nightly-alert-issue.sh.
 #
-# It alarms when the latest scheduled run is missing, older than 26 hours
-# (cron never fired), or concluded anything other than success. On success it
-# lets the script close any open alert issue, same as the in-run alert.
+# Each matrix entry alarms when that workflow's latest scheduled run is
+# missing, older than 26 hours (cron never fired), or concluded anything
+# other than success. On success it lets the script close any open alert
+# issue, same as the in-run alerts.
 
 on:
   schedule:
-    - cron: "0 8 * * *" # 4h after nightly-deep-ci's 04:00 UTC trigger
+    - cron: "0 8 * * *" # after the 03:00-04:00 UTC nightly batch settles
   workflow_dispatch:
 
 permissions:
@@ -25,19 +25,31 @@ permissions:
 
 jobs:
   check-nightly:
-    name: Check Nightly Deep CI ran and passed
+    name: Check ${{ matrix.workflow }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - workflow: Nightly Deep CI
+            issue_title: Nightly Deep CI failed
+          - workflow: Nightly E2E
+            issue_title: Nightly E2E failed
+          - workflow: Reborn Playwright
+            issue_title: Reborn Playwright nightly failed
+          - workflow: IronClaw Stress
+            issue_title: IronClaw Stress nightly failed
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
-      - name: Evaluate latest scheduled Nightly Deep CI run
+      - name: Evaluate latest scheduled run
         id: evaluate
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          WATCHED_WORKFLOW: Nightly Deep CI
+          WATCHED_WORKFLOW: ${{ matrix.workflow }}
           MAX_AGE_SECONDS: "93600" # 26h — one cron period plus slack
         run: |
           run_json="$(gh run list \
@@ -60,7 +72,7 @@ jobs:
             if [ "$age_seconds" -lt "$MAX_AGE_SECONDS" ]; then
               result=success
             else
-              echo "Latest successful run is ${age_seconds}s old (> ${MAX_AGE_SECONDS}s) — nightly did not fire since."
+              echo "Latest successful run is ${age_seconds}s old (> ${MAX_AGE_SECONDS}s) — the cron did not fire since."
             fi
           else
             echo "Latest scheduled run conclusion: ${conclusion:-<none>}"
@@ -76,10 +88,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          ALERT_WORKFLOW_NAME: Nightly Deep CI
-          ALERT_ISSUE_TITLE: Nightly Deep CI failed
+          ALERT_WORKFLOW_NAME: ${{ matrix.workflow }}
+          ALERT_ISSUE_TITLE: ${{ matrix.issue_title }}
           ALERT_RESULT: ${{ steps.evaluate.outputs.result }}
           ALERT_RUN_ID: ${{ steps.evaluate.outputs.run_id }}
           ALERT_RUN_URL: ${{ steps.evaluate.outputs.run_url }}
           ALERT_SHA: ${{ steps.evaluate.outputs.head_sha }}
+          ALERT_SLACK_WEBHOOK_URL: ${{ secrets.SLACK_CI_ALERTS_WEBHOOK_URL }}
         run: .github/scripts/nightly-alert-issue.sh

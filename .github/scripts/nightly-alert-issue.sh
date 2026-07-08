@@ -93,6 +93,23 @@ extract_failure_excerpt() {
   rm -f "$cleaned_log" "$raw_excerpt" "$line_limited_excerpt"
 }
 
+# Optional Slack mirror: post a one-line notification when
+# ALERT_SLACK_WEBHOOK_URL is set (a Slack incoming-webhook URL for the CI
+# alerts channel). Absent secret → silently skipped. Delivery is best-effort
+# and never fails the alert job — the GitHub issue remains the durable record.
+post_slack() {
+  local text="$1"
+  if [[ -z "${ALERT_SLACK_WEBHOOK_URL:-}" ]]; then
+    return 0
+  fi
+  local payload
+  payload="$(jq -n --arg text "$text" '{text: $text}')"
+  if ! curl -fsS -X POST -H 'Content-type: application/json' \
+      --data "$payload" "$ALERT_SLACK_WEBHOOK_URL" > /dev/null; then
+    echo "Warning: Slack alert delivery failed (non-fatal)" >&2
+  fi
+}
+
 find_open_issue() {
   local title="$1"
   gh issue list \
@@ -278,6 +295,7 @@ main() {
       write_recovery_body "$recovery_body"
       gh issue close "$issue_number" --repo "$REPO" --comment "$(cat "$recovery_body")"
       rm -f "$recovery_body"
+      post_slack "✅ *${ALERT_WORKFLOW_NAME}* recovered on the latest scheduled run — <${ALERT_RUN_URL}|run>"
     else
       echo "${ALERT_WORKFLOW_NAME} succeeded and no open alert issue exists."
     fi
@@ -308,12 +326,16 @@ main() {
   truncate_file_chars "$body" "${body}.bounded" "${MAX_ISSUE_BODY_CHARS:-60000}" "issue body"
   mv "${body}.bounded" "$body"
 
+  local issue_url=""
   if [[ -n "$issue_number" ]]; then
     gh issue edit "$issue_number" --repo "$REPO" --body-file "$body"
+    issue_url="https://github.com/${REPO}/issues/${issue_number}"
     echo "Updated existing nightly alert issue #${issue_number}."
   else
-    gh issue create --repo "$REPO" --title "$ALERT_ISSUE_TITLE" --body-file "$body"
+    issue_url="$(gh issue create --repo "$REPO" --title "$ALERT_ISSUE_TITLE" --body-file "$body")"
   fi
+
+  post_slack "❌ *${ALERT_WORKFLOW_NAME}* nightly failed — <${ALERT_RUN_URL}|run>${issue_url:+ • <${issue_url}|issue>}"
 
   rm -rf "$tmp_dir"
 }
