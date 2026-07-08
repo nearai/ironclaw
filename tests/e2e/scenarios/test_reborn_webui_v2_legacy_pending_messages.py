@@ -300,6 +300,26 @@ async def test_reborn_legacy_send_failure_renders_inline_error_not_toast(
         await expect(page.locator(SEL_V2["msg_error"]).last).to_contain_text(
             "AI provider account is out of credits", timeout=5000
         )
+        error_layout = await page.locator(SEL_V2["msg_error"]).last.evaluate(
+            """node => {
+                const frame = node.firstElementChild;
+                const bubble = frame?.firstElementChild;
+                const nodeBox = node.getBoundingClientRect();
+                const frameBox = frame?.getBoundingClientRect();
+                const bubbleBox = bubble?.getBoundingClientRect();
+                const style = bubble ? getComputedStyle(bubble) : null;
+                return {
+                    textAlign: style?.textAlign || "",
+                    nodeLeft: nodeBox.left,
+                    frameLeft: frameBox?.left || 0,
+                    bubbleWidth: bubbleBox?.width || 0,
+                    nodeWidth: nodeBox.width,
+                };
+            }"""
+        )
+        assert error_layout["textAlign"] == "left"
+        assert error_layout["frameLeft"] - error_layout["nodeLeft"] < 8
+        assert error_layout["bubbleWidth"] < error_layout["nodeWidth"] * 0.9
         await expect(page.locator("div.fixed.bottom-4.right-4")).to_have_count(
             0, timeout=1000
         )
