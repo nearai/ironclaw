@@ -20,11 +20,15 @@
 
 use std::sync::Arc;
 
+#[cfg(feature = "webui-v2-beta")]
+mod admin_secrets;
+mod admin_token;
+#[cfg(feature = "webui-v2-beta")]
+mod admin_user_directory;
 #[cfg(test)]
 mod approval_test_support;
 mod automation;
-#[cfg(feature = "slack-v2-host-beta")]
-mod channel_connection_resume;
+mod blocked_auth_resume;
 mod communication_context;
 mod default_system_prompt;
 mod error;
@@ -47,6 +51,8 @@ mod production_runtime_policy;
 mod profile;
 mod profile_approval_authorization;
 mod projection;
+#[cfg(feature = "slack-v2-host-beta")]
+mod slack_personal_oauth;
 pub use product_auth::api::auth_prompt::{
     AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller,
 };
@@ -61,7 +67,6 @@ mod runtime_input;
 mod runtime_profile_approval_policy;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_actor_identity;
-#[cfg(feature = "slack-v2-host-beta")]
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_channel_connection;
 #[cfg(feature = "slack-v2-host-beta")]
@@ -81,13 +86,7 @@ mod slack_host_state;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_outbound_targets;
 #[cfg(feature = "slack-v2-host-beta")]
-mod slack_pairing_notifier;
-#[cfg(feature = "slack-v2-host-beta")]
 mod slack_personal_binding;
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_personal_binding_pairing;
-#[cfg(feature = "slack-v2-host-beta")]
-mod slack_personal_binding_pairing_serve;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_personal_binding_serve;
 #[cfg(feature = "slack-v2-host-beta")]
@@ -115,6 +114,7 @@ mod webui_serve;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_ws_origin;
 
+pub use admin_token::AdminApiTokenMinter;
 pub use automation::RebornAutomationProductFacade;
 pub use error::RebornBuildError;
 pub use extension_host::extension_lifecycle_command::{
@@ -137,6 +137,16 @@ pub use failure_summary::reborn_failure_summary_for_category;
 pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
 #[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_auth::GoogleOAuthRouteConfig;
+/// OAuth redirect-URI newtype re-exported so the `ironclaw_reborn_cli` binary
+/// can name it without a direct `ironclaw_auth` dependency. Its
+/// `runtime/mod.rs` parses `IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI`
+/// and the Google OAuth redirect URI from env into `OAuthRedirectUri` when
+/// building the runtime input / OAuth client config. The
+/// `reborn_cli_binary_crate_stays_separate_from_v1_root` boundary test (in
+/// `ironclaw_architecture`) pins the CLI's workspace dependencies to exactly
+/// the composition-facade set, so adding `ironclaw_auth` there would fail that
+/// test — the type must travel through this facade instead.
+pub use ironclaw_auth::OAuthRedirectUri;
 pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleSearchExtensionSummary,
@@ -202,6 +212,8 @@ pub use product_auth::api::auth::{
     RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
     RebornProductAuthServicePorts, RebornProductAuthServices,
 };
+#[cfg(feature = "slack-v2-host-beta")]
+pub use product_auth::serve::SlackPersonalOAuthBindingConfig;
 pub use product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
     ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
@@ -276,19 +288,6 @@ pub use slack_personal_binding::{
     SlackPersonalUserBindingRequest, SlackPersonalUserBindingService,
 };
 #[cfg(feature = "slack-v2-host-beta")]
-pub use slack_personal_binding_pairing::{
-    IssuedSlackPersonalBindingPairingChallenge, SlackPairingActorResolver,
-    SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingChallengeStore,
-    SlackPersonalBindingPairingCode, SlackPersonalBindingPairingError,
-    SlackPersonalBindingPairingNotification, SlackPersonalBindingPairingNotifier,
-    SlackPersonalBindingPairingService,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack_personal_binding_pairing_serve::{
-    SlackPersonalBindingPairingRedeemResponse, SlackPersonalBindingPairingRouteConfig,
-    WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH,
-};
-#[cfg(feature = "slack-v2-host-beta")]
 pub use slack_personal_binding_serve::{
     SLACK_PERSONAL_BINDING_OAUTH_CALLBACK_PATH, SLACK_PERSONAL_BINDING_OAUTH_START_PATH,
     SlackPersonalBindingAuthorizationUrl, SlackPersonalBindingOAuthClient,
@@ -302,6 +301,8 @@ pub use slack_serve::{
     SlackInstallationSelector, SlackTeamId, slack_events_route_descriptors,
     slack_events_route_mount,
 };
+#[cfg(feature = "slack-v2-host-beta")]
+pub use slack_setup::SlackPersonalSetupServiceSlot;
 pub use web_access::register_bundled_web_access_first_party_handlers;
 pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
@@ -742,7 +743,22 @@ fn invocation_mount_view_for_segments(
     grants.push(MountGrant::new(
         MountAlias::new("/tenant-shared")?,
         VirtualPath::new(format!("/tenants/{tenant_id}/shared"))?,
+        // Broad tenant-shared storage gets read + write + list, but NOT delete:
+        // no tenant-shared consumer other than the identity store needs to
+        // remove records, so withholding delete here keeps the blast radius of
+        // a compromised writer from spanning every tenant-shared subtree.
         MountPermissions::read_write(),
+    ));
+    grants.push(MountGrant::new(
+        // Delete authority is scoped to the identity subtree specifically: the
+        // Reborn identity store's admin user-directory needs it for the delete
+        // cascade (removing a user's identity / verified-email records) that
+        // lives under `/tenant-shared/reborn-identity/…`. Longest-prefix mount
+        // matching routes identity paths here and everything else to the
+        // delete-less grant above.
+        MountAlias::new("/tenant-shared/reborn-identity")?,
+        VirtualPath::new(format!("/tenants/{tenant_id}/shared/reborn-identity"))?,
+        MountPermissions::read_write_list_delete(),
     ));
     #[cfg(feature = "slack-v2-host-beta")]
     grants.push(MountGrant::new(
@@ -791,6 +807,15 @@ pub(crate) fn slack_host_state_mount_view(
             VirtualPath::new(format!(
                 "/tenants/{tenant_id}/shared/slack-product-workflow/idempotency"
             ))?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        // Durable Slack conversation-binding store: RebornFilesystemConversationServices
+        // persists `/conversations/state.json`. Without this alias the ScopedFilesystem
+        // cannot resolve that path, the conversation store fails to open, and every
+        // inbound Slack event (e.g. a DM to the bot) is dropped with a 503.
+        MountGrant::new(
+            MountAlias::new("/conversations")?,
+            VirtualPath::new(format!("/tenants/{tenant_id}/shared/slack-conversations"))?,
             MountPermissions::read_write_list_delete(),
         ),
     ])
@@ -1059,6 +1084,14 @@ mod mount_view_tests {
                 "/engine/product_workflow/idempotency",
                 "/engine/product_workflow/idempotency/actions/action.json",
                 "slack-product-workflow/idempotency/actions/action.json",
+            ),
+            // Regression: the durable conversation-binding store persists
+            // `/conversations/state.json`; without this alias every inbound Slack
+            // event (e.g. a DM to the bot) fails to open the store and is dropped.
+            (
+                "/conversations",
+                "/conversations/state.json",
+                "slack-conversations/state.json",
             ),
         ] {
             let (resolved, grant) = view

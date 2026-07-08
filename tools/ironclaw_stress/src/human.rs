@@ -40,6 +40,18 @@ pub(crate) fn render_run_summary(summary: &RunSummary) -> String {
             ),
             ("users", summary.users.to_string()),
             (
+                "turn_state_max_terminal_records",
+                format_optional(summary.turn_state_max_terminal_records),
+            ),
+            (
+                "turn_state_max_events",
+                format_optional(summary.turn_state_max_events),
+            ),
+            (
+                "turn_state_max_idempotency_records",
+                format_optional(summary.turn_state_max_idempotency_records),
+            ),
+            (
                 "active_thread_count",
                 format_active_thread_count(summary.active_thread_count, summary.users),
             ),
@@ -90,6 +102,14 @@ pub(crate) fn render_run_summary(summary: &RunSummary) -> String {
             (
                 "context_max_messages",
                 summary.context_max_messages.to_string(),
+            ),
+            (
+                "thread_list_threads",
+                summary.thread_list_threads.to_string(),
+            ),
+            (
+                "thread_list_page_size",
+                summary.thread_list_page_size.to_string(),
             ),
             (
                 "context_growth_turns_per_op",
@@ -170,6 +190,18 @@ pub(crate) fn render_parent_summary(args: &Args, run_id: &str, summaries: &[RunS
                 "turn_state_backend",
                 args.turn_state_backend.as_str().to_string(),
             ),
+            (
+                "turn_state_max_terminal_records",
+                format_optional(args.turn_state_max_terminal_records),
+            ),
+            (
+                "turn_state_max_events",
+                format_optional(args.turn_state_max_events),
+            ),
+            (
+                "turn_state_max_idempotency_records",
+                format_optional(args.turn_state_max_idempotency_records),
+            ),
             ("preset", format_preset(args.preset)),
             ("scenario", args.scenario.as_str().to_string()),
             ("run_id", run_id.to_string()),
@@ -230,6 +262,11 @@ pub(crate) fn render_parent_summary(args: &Args, run_id: &str, summaries: &[RunS
             (
                 "context_max_messages",
                 args.context_max_messages.to_string(),
+            ),
+            ("thread_list_threads", args.thread_list_threads.to_string()),
+            (
+                "thread_list_page_size",
+                args.thread_list_page_size.to_string(),
             ),
             (
                 "context_growth_turns_per_op",
@@ -293,7 +330,12 @@ fn push_stage_latency_table(output: &mut String, stages: &UserTurnStageLatencySu
         ("submit_turn", &stages.submit_turn),
         ("mark_submitted", &stages.mark_submitted),
         ("mark_rejected_busy", &stages.mark_rejected_busy),
+        ("list_threads_cold", &stages.list_threads_cold),
+        ("list_threads_warm", &stages.list_threads_warm),
         ("claim_run", &stages.claim_run),
+        ("block_run", &stages.block_run),
+        ("resume_turn", &stages.resume_turn),
+        ("reclaim_run", &stages.reclaim_run),
         ("append_assistant", &stages.append_assistant),
         ("finalize_assistant", &stages.finalize_assistant),
         ("complete_run", &stages.complete_run),

@@ -1,5 +1,14 @@
+// arch-exempt: large_file, channel-connect requirement + extension lifecycle and
+// its test module; includes restore-time compatibility cleanup for the retired
+// slack_user companion from the model-B remodel
+// (docs/plans/2026-07-05-slack-bot-tools-remodel.md), plan #5604
 use std::{collections::BTreeSet, sync::Arc};
 
+use async_trait::async_trait;
+use ironclaw_auth::{
+    AuthProductScope, AuthProviderId, AuthSurface, SecretCleanupAction, SecretCleanupReport,
+    SecretCleanupRequest,
+};
 use ironclaw_extensions::{
     CapabilityVisibility, ExtensionActivationState, ExtensionError, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
@@ -17,17 +26,52 @@ use ironclaw_product_workflow::{
     ChannelConnectionRequirement, LifecycleExtensionSummary, LifecycleExtensionSurfaceKind,
     LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
     LifecycleProductPayload, LifecycleProductResponse, LifecycleSearchExtensionSummary,
-    ProductWorkflowError, RebornChannelConnectStrategy,
+    ProductWorkflowError, RebornChannelConnectStrategy, RebornServicesError,
 };
 use tokio::sync::Mutex;
+
+use crate::RebornProductAuthServices;
+
+/// Narrow lifecycle-cleanup port over product-auth so extension removal can
+/// revoke the removed extension's exclusively-owned reusable credential without
+/// depending on the whole product-auth bundle (and so tests can record the
+/// issued cleanup). Production forwards to the guardrail-sanctioned
+/// [`RebornProductAuthServices::cleanup_credentials_for_lifecycle`]. This is the
+/// single convergence point for both removal entrypoints (the WebUI facade and
+/// the `builtin.extension_remove` agent capability), so revocation cannot be
+/// bypassed through one door.
+#[async_trait]
+pub(crate) trait ExtensionCredentialCleanup: Send + Sync {
+    async fn cleanup_for_lifecycle(
+        &self,
+        request: SecretCleanupRequest,
+    ) -> Result<SecretCleanupReport, RebornServicesError>;
+}
+
+#[async_trait]
+impl ExtensionCredentialCleanup for RebornProductAuthServices {
+    async fn cleanup_for_lifecycle(
+        &self,
+        request: SecretCleanupRequest,
+    ) -> Result<SecretCleanupReport, RebornServicesError> {
+        RebornProductAuthServices::cleanup_credentials_for_lifecycle(self, request)
+            .await
+            .map_err(|error| {
+                RebornServicesError::internal_from(format!(
+                    "extension credential cleanup failed: {:?}",
+                    error.code
+                ))
+            })
+    }
+}
 
 mod active_publication;
 #[cfg(test)]
 mod hosted_mcp_test_support;
 
 use crate::extension_host::available_extensions::{
-    AvailableExtensionCatalog, AvailableExtensionPackage, materialize_available_extension,
-    visible_capability_ids,
+    AvailableExtensionCatalog, AvailableExtensionPackage, is_internal_extension_package_ref,
+    materialize_available_extension, visible_capability_ids,
 };
 use crate::extension_host::extension_activation_credentials::{
     ExtensionActivationCredentialGate, RuntimeExtensionActivationCredentialGate,
@@ -43,6 +87,8 @@ pub(crate) use active_publication::ActiveExtensionPublisher;
 #[cfg(test)]
 use active_publication::extension_trust_policy_input;
 
+const RETIRED_SLACK_USER_EXTENSION_ID: &str = "slack_user";
+
 // This port is deliberately scoped to LocalSingleUser composition. The
 // lifecycle service models the installed extension set, while active_registry
 // is the model-visible capability surface read by host runtime dispatch.
@@ -57,6 +103,10 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
     active_extensions: ActiveExtensionPublisher,
     operation_lock: Arc<Mutex<()>>,
+    // Genuinely optional (not an `optional_arc` smell): a composition without
+    // product auth cannot have minted a reusable OAuth credential, so there is
+    // nothing to revoke on removal.
+    credential_cleanup: Option<Arc<dyn ExtensionCredentialCleanup>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -116,6 +166,9 @@ pub(crate) async fn restore_extension_lifecycle_state(
         .await
         .map_err(map_extension_installation_error)?
     {
+        if remove_retired_internal_installation(installation_store, &installation).await? {
+            continue;
+        }
         let package_ref = LifecyclePackageRef::new(
             LifecyclePackageKind::Extension,
             installation.extension_id().as_str(),
@@ -159,6 +212,33 @@ pub(crate) async fn restore_extension_lifecycle_state(
     Ok(())
 }
 
+async fn remove_retired_internal_installation(
+    installation_store: &Arc<dyn ExtensionInstallationStore>,
+    installation: &ExtensionInstallation,
+) -> Result<bool, ProductWorkflowError> {
+    if installation.extension_id().as_str() != RETIRED_SLACK_USER_EXTENSION_ID {
+        return Ok(false);
+    }
+
+    tracing::info!(
+        extension_id = installation.extension_id().as_str(),
+        installation_id = installation.installation_id().as_str(),
+        "removing retired internal extension installation during lifecycle restore"
+    );
+    installation_store
+        .delete_installation(installation.installation_id())
+        .await
+        .map_err(map_extension_installation_error)?;
+    match installation_store
+        .delete_manifest(installation.extension_id())
+        .await
+    {
+        Ok(()) | Err(ExtensionInstallationError::ManifestNotFound { .. }) => {}
+        Err(error) => return Err(map_extension_installation_error(error)),
+    }
+    Ok(true)
+}
+
 impl RebornLocalExtensionManagementPort {
     pub(crate) fn new(
         filesystem: Arc<dyn RootFilesystem>,
@@ -166,6 +246,7 @@ impl RebornLocalExtensionManagementPort {
         installation_store: Arc<dyn ExtensionInstallationStore>,
         lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
         active_extensions: ActiveExtensionPublisher,
+        credential_cleanup: Option<Arc<dyn ExtensionCredentialCleanup>>,
     ) -> Self {
         Self {
             filesystem,
@@ -174,6 +255,7 @@ impl RebornLocalExtensionManagementPort {
             lifecycle_service,
             active_extensions,
             operation_lock: Arc::new(Mutex::new(())),
+            credential_cleanup,
         }
     }
 
@@ -222,7 +304,7 @@ impl RebornLocalExtensionManagementPort {
         );
         if extension_search_has_installed_external_channel_result(response.payload.as_ref()) {
             response.message = Some(
-                "Search found installed external channel results. Search cannot prove the calling user's channel account is personally connected. For an explicit connect, pair, authenticate, or account-access request, call builtin.extension_activate for the matching extension id so channel-specific pairing/setup instructions can be surfaced. For routine, trigger, or notification delivery, prefer the configured outbound delivery target when one is available; do not activate the channel just to send to an already configured delivery target."
+                "Search found installed external channel results. Search cannot prove the calling user's channel account is personally connected. For an explicit connect, pair, authenticate, or account-access request, call builtin.extension_activate for the matching extension id so channel-specific connection/setup instructions can be surfaced. For routine, trigger, or notification delivery, prefer the configured outbound delivery target when one is available; do not activate the channel just to send to an already configured delivery target."
                     .to_string(),
             );
         } else if extension_search_has_ready_result(response.payload.as_ref()) {
@@ -306,7 +388,8 @@ impl RebornLocalExtensionManagementPort {
         self.load_installation(&extension_id, &installation_id)
             .await?;
         let package = self.lifecycle_package(&extension_id).await?;
-        Ok(package_runtime_credential_auth_requirements(&package))
+        let requirements = package_runtime_credential_auth_requirements(&package);
+        Ok(requirements)
     }
 
     async fn installed_summaries(
@@ -325,6 +408,9 @@ impl RebornLocalExtensionManagementPort {
             ) else {
                 continue;
             };
+            if is_internal_extension_package_ref(&package_ref) {
+                continue;
+            }
             let Ok(available) = self.catalog.resolve(&package_ref) else {
                 continue;
             };
@@ -387,8 +473,30 @@ impl RebornLocalExtensionManagementPort {
         package_ref: LifecyclePackageRef,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let available = self.catalog.resolve(&package_ref)?;
-        let plan = prepare_install(available)?;
         let _operation_guard = self.operation_lock.lock().await;
+        self.install_available_locked(available).await?;
+
+        Ok(response_with_payload(
+            Some(package_ref.clone()),
+            LifecyclePhase::Installed,
+            LifecycleProductPayload::ExtensionInstall {
+                installed: true,
+                visible_capability_ids: visible_capability_ids(available)
+                    .map(|id| id.as_str().to_string())
+                    .collect(),
+                next_step: format!(
+                    "Call builtin.extension_activate now with input {{\"extension_id\":\"{}\"}}. Activation publishes the tools and opens the auth gate if credentials are missing.",
+                    package_ref.id.as_str()
+                ),
+            },
+        ))
+    }
+
+    async fn install_available_locked(
+        &self,
+        available: &AvailableExtensionPackage,
+    ) -> Result<(), ProductWorkflowError> {
+        let plan = prepare_install(available)?;
         self.ensure_not_installed(&available.package.id, plan.installation.installation_id())
             .await?;
         self.register_lifecycle_package(&available.package).await?;
@@ -422,21 +530,7 @@ impl RebornLocalExtensionManagementPort {
             }
             return Err(error);
         }
-
-        Ok(response_with_payload(
-            Some(package_ref.clone()),
-            LifecyclePhase::Installed,
-            LifecycleProductPayload::ExtensionInstall {
-                installed: true,
-                visible_capability_ids: visible_capability_ids(available)
-                    .map(|id| id.as_str().to_string())
-                    .collect(),
-                next_step: format!(
-                    "Call builtin.extension_activate now with input {{\"extension_id\":\"{}\"}}. Activation publishes the tools and opens the auth gate if credentials are missing.",
-                    package_ref.id.as_str()
-                ),
-            },
-        ))
+        Ok(())
     }
 
     pub(crate) async fn activate(
@@ -592,7 +686,7 @@ impl RebornLocalExtensionManagementPort {
         let message =
             activation_success_message(&package_ref, &active_package, &visible_capability_ids);
         // For an inbound-channel extension, attach the structured connect
-        // requirement so WebChat can render the in-chat pairing panel from
+        // requirement so WebChat can render the in-chat connection panel from
         // structured state (the activation message is model guidance only).
         let connection_required = if package_declares_inbound_product_adapter(&active_package) {
             Some(channel_connection_requirement(
@@ -626,12 +720,181 @@ impl RebornLocalExtensionManagementPort {
         Ok(is_hosted_http_mcp_package(&package))
     }
 
+    /// Remove an installed extension. This is the single convergence point both
+    /// removal entrypoints call — the WebUI facade
+    /// ([`LifecycleProductAction::ExtensionRemove`]) and the
+    /// `builtin.extension_remove` agent capability — so the credential
+    /// revocation below cannot be bypassed through one door.
+    ///
+    /// On success it revokes the removed extension's reusable personal
+    /// credentials for providers now exclusive to it (see
+    /// [`Self::revoke_exclusive_credentials`]).
     pub(crate) async fn remove(
+        &self,
+        package_ref: LifecyclePackageRef,
+        scope: &ResourceScope,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        // Capture the removed extension's credential providers and id BEFORE
+        // taking the operation lock: `activation_credential_requirements` takes
+        // the same lock, and the manifest is gone once removal succeeds.
+        let removed_extension_id = package_ref.id.as_str().to_string();
+        let removed_providers = self.removed_extension_providers(&package_ref).await;
+        let response = {
+            let _operation_guard = self.operation_lock.lock().await;
+            self.remove_locked(package_ref).await
+        };
+        if response.is_ok() {
+            self.revoke_exclusive_credentials(scope, &removed_extension_id, &removed_providers)
+                .await;
+        }
+        response
+    }
+
+    /// Credential providers the extension declares, captured before removal (its
+    /// manifest is gone afterward). Best-effort: on error returns empty so the
+    /// removal still proceeds without cleanup.
+    async fn removed_extension_providers(
+        &self,
+        package_ref: &LifecyclePackageRef,
+    ) -> Vec<AuthProviderId> {
+        match self.activation_credential_requirements(package_ref).await {
+            Ok(requirements) => {
+                let mut providers: Vec<AuthProviderId> = Vec::new();
+                for requirement in requirements {
+                    let provider = match AuthProviderId::new(requirement.provider.as_str()) {
+                        Ok(provider) => provider,
+                        Err(error) => {
+                            tracing::debug!(
+                                %error,
+                                provider = %requirement.provider,
+                                "runtime credential provider id invalid for credential cleanup"
+                            );
+                            continue;
+                        }
+                    };
+                    if !providers.contains(&provider) {
+                        providers.push(provider);
+                    }
+                }
+                providers
+            }
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    "could not resolve extension credential providers before removal; skipping credential cleanup"
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    /// After a successful removal, revoke the removed extension's reusable
+    /// personal credentials for providers now exclusive to it (no other
+    /// installed extension still declares them). Best-effort: cleanup never
+    /// fails or rolls back the removal, and it fails safe (revokes nothing) when
+    /// it cannot prove a provider is unused, so a shared credential is never
+    /// deleted out from under another extension.
+    async fn revoke_exclusive_credentials(
+        &self,
+        scope: &ResourceScope,
+        removed_extension_id: &str,
+        removed_providers: &[AuthProviderId],
+    ) {
+        let Some(cleanup) = self.credential_cleanup.as_ref() else {
+            return;
+        };
+        if removed_providers.is_empty() {
+            return;
+        }
+        let Some(providers_still_in_use) = self.providers_still_in_use().await else {
+            return;
+        };
+        let extension_id = match ExtensionId::new(removed_extension_id) {
+            Ok(extension_id) => extension_id,
+            Err(error) => {
+                tracing::debug!(%error, "removed extension id invalid for credential cleanup");
+                return;
+            }
+        };
+        for provider in removed_providers {
+            if providers_still_in_use.contains(provider) {
+                // Shared with another installed extension; preserve the account.
+                continue;
+            }
+            let request = SecretCleanupRequest {
+                scope: AuthProductScope::credential_owner(scope, AuthSurface::Callback),
+                extension_id: extension_id.clone(),
+                provider: Some(provider.clone()),
+                action: SecretCleanupAction::Uninstall,
+            };
+            if let Err(error) = cleanup.cleanup_for_lifecycle(request).await {
+                tracing::debug!(
+                    %error,
+                    %provider,
+                    "extension removal credential cleanup failed; continuing"
+                );
+            }
+        }
+    }
+
+    /// Providers still declared by extensions that remain installed after a
+    /// removal. Returns `None` when the set cannot be resolved so the caller
+    /// fails safe and skips revocation rather than risk deleting a shared
+    /// credential.
+    async fn providers_still_in_use(&self) -> Option<BTreeSet<AuthProviderId>> {
+        let response = match self.list_installed().await {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    "could not enumerate installed extensions after removal; skipping credential cleanup"
+                );
+                return None;
+            }
+        };
+        let Some(LifecycleProductPayload::ExtensionList { extensions, .. }) = response.payload
+        else {
+            return Some(BTreeSet::new());
+        };
+        let mut providers = BTreeSet::new();
+        for installed in extensions {
+            match self
+                .activation_credential_requirements(&installed.summary.package_ref)
+                .await
+            {
+                Ok(requirements) => {
+                    for requirement in requirements {
+                        let provider = match AuthProviderId::new(requirement.provider.as_str()) {
+                            Ok(provider) => provider,
+                            Err(error) => {
+                                tracing::debug!(
+                                    %error,
+                                    provider = %requirement.provider,
+                                    "remaining extension provider id invalid for credential cleanup"
+                                );
+                                return None;
+                            }
+                        };
+                        providers.insert(provider);
+                    }
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        "could not resolve a remaining extension's credential providers; skipping credential cleanup"
+                    );
+                    return None;
+                }
+            }
+        }
+        Some(providers)
+    }
+
+    async fn remove_locked(
         &self,
         package_ref: LifecyclePackageRef,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let (extension_id, installation_id) = extension_ids_from_package_ref(&package_ref)?;
-        let _operation_guard = self.operation_lock.lock().await;
         let installation = self
             .load_installation(&extension_id, &installation_id)
             .await?;
@@ -1206,8 +1469,8 @@ fn activation_success_message(
     visible_capability_ids: &[String],
 ) -> String {
     if package_declares_inbound_product_adapter(package) {
-        if package_ref.id.as_str() == "slack" {
-            return "Slack is installed as an inbound channel. If WebChat shows a Slack account connection panel, tell the user to DM the Slack app; the bot will reply with a pairing code. The user should paste that code into the Slack account connection panel in WebChat, not into normal chat. If the user's Slack account is already connected, continue the user's original request instead of asking them to pair again. Do not claim Slack message-reading tools are available unless a separate Slack read capability is installed.".to_string();
+        if package_ref.id.as_str() == "slack_bot" {
+            return "Slack is installed as an inbound entrypoint. If WebChat shows a Slack account connection panel, tell the user to configure Slack OAuth for this extension rather than pasting anything into normal chat. If the user's Slack account is already connected, continue the user's original request; Slack DMs and WebUI chat can use the same user-scoped Slack tools.".to_string();
         }
         return format!(
             "{} is installed as an external channel. If WebChat shows a channel connection panel, tell the user to open the extension's app or bot, get the pairing code or connection challenge, and paste it into the WebChat connection panel rather than normal chat. If the user's channel account is already connected, continue the user's original request instead of asking them to pair again. Do not claim the channel can receive or send messages for the user until connection is confirmed.",
@@ -1228,24 +1491,27 @@ fn activation_success_message(
     message
 }
 
-// Build the structured connect requirement for an inbound channel. The Slack copy
-// is kept identical to the connectable-channels descriptor
-// (`slack_inbound_proof_code_connectable_channel`) so the in-chat panel and the
-// Settings panel read identically — enforced by the cross-check test
+// Build the structured connect requirement for an inbound channel. The Slack OAuth
+// copy is kept identical to the connectable-channels descriptor so the in-chat
+// panel and the Settings panel read identically — enforced by
 // `slack_requirement_copy_matches_connectable_descriptor`, not just by convention.
-// Any other inbound channel gets a generic proof-code prompt.
+// Any other inbound channel gets a generic proof-code prompt. NOTE: no such
+// channel ships today (Slack is the only inbound product adapter), and no
+// backend mounts the generic proof-code redeem route — the first non-Slack
+// inbound channel must mount one alongside this requirement or its submit
+// will 404 (see PAIRING_REDEEM_PATH in the webui pairing-api.js).
 pub(crate) fn channel_connection_requirement(
     channel_id: &str,
     display_name: &str,
 ) -> ChannelConnectionRequirement {
-    if channel_id == "slack" {
+    if channel_id == "slack_bot" {
         ChannelConnectionRequirement {
             channel: "slack".to_string(),
-            strategy: RebornChannelConnectStrategy::InboundProofCode,
-            instructions: "Message the IronClaw Reborn app in Slack to get a pairing code, then paste it here. Codes expire in 10 minutes. If a code is invalid or expired, run /pair in Slack for a fresh one.".to_string(),
-            input_placeholder: "Enter Slack pairing code...".to_string(),
-            submit_label: "Connect".to_string(),
-            error_message: "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one.".to_string(),
+            strategy: RebornChannelConnectStrategy::OAuth,
+            instructions: "Connect Slack with OAuth from the extension configuration, then message the Slack bot directly.".to_string(),
+            input_placeholder: String::new(),
+            submit_label: "Connect Slack".to_string(),
+            error_message: "Slack OAuth connection failed. Try configuring Slack again.".to_string(),
         }
     } else {
         ChannelConnectionRequirement {
@@ -1471,8 +1737,11 @@ mod tests {
         let payload = LifecycleProductPayload::ExtensionSearch {
             extensions: vec![LifecycleSearchExtensionSummary {
                 summary: LifecycleExtensionSummary {
-                    package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack")
-                        .expect("valid package ref"),
+                    package_ref: LifecyclePackageRef::new(
+                        LifecyclePackageKind::Extension,
+                        "slack_bot",
+                    )
+                    .expect("valid package ref"),
                     name: "Slack".to_string(),
                     version: "1.0.0".to_string(),
                     description: "Slack channel".to_string(),
@@ -1642,16 +1911,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn extension_activate_returns_slack_pairing_guidance_for_external_channel_package() {
+    async fn extension_activate_returns_slack_oauth_guidance_for_external_channel_package() {
         let (_dir, _storage_root, facade, _active_registry, _installation_store) =
             extension_lifecycle_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_packages(vec![fixture_external_channel_package(
-                    "slack", "Slack",
+                    "slack_bot",
+                    "Slack",
                 )]),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
             );
-        let package_ref =
-            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("valid ref");
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack_bot")
+            .expect("valid ref");
         facade
             .execute(
                 lifecycle_surface_context(),
@@ -1675,17 +1945,16 @@ mod tests {
         assert_eq!(activate.phase, LifecyclePhase::Active);
         let message = activate.message.as_deref().expect("activation message");
         assert!(
-            message.contains("DM the Slack app")
-                && message.contains("pairing code")
+            message.contains("configure Slack OAuth")
                 && message.contains("WebChat")
-                && message.contains("not into normal chat")
+                && message.contains("rather than pasting anything into normal chat")
                 && message.contains("continue the user's original request")
-                && message.contains("Do not claim Slack message-reading tools"),
-            "Slack activation should guide the model into pairing UI, got: {message}"
+                && message.contains("user-scoped Slack tools"),
+            "Slack activation should guide the model into OAuth setup UI, got: {message}"
         );
         assert!(
-            !message.contains("still needs pairing"),
-            "activation is package-level and must not claim the caller is unpaired once the user may already be connected: {message}"
+            !message.contains("pairing"),
+            "Slack activation must not mention legacy manual-code flows: {message}"
         );
         let Some(LifecycleProductPayload::ExtensionActivate {
             visible_capability_ids,
@@ -1699,21 +1968,22 @@ mod tests {
             visible_capability_ids.is_empty(),
             "Slack channel activation must not imply model-visible Slack read tools"
         );
-        // The structured connect requirement is what drives the in-chat pairing
-        // panel; the prose message above is model guidance only.
+        // The structured connect requirement is what drives the in-chat
+        // connection panel; the prose message above is model guidance only.
         let requirement = connection_required
             .as_ref()
             .expect("slack channel activation must carry a structured connection requirement");
         assert_eq!(requirement.channel, "slack");
+        assert_eq!(requirement.strategy, RebornChannelConnectStrategy::OAuth);
+        assert_eq!(requirement.input_placeholder, "");
+        assert_eq!(requirement.submit_label, "Connect Slack");
         assert_eq!(
-            requirement.strategy,
-            RebornChannelConnectStrategy::InboundProofCode
+            requirement.instructions,
+            "Connect Slack with OAuth from the extension configuration, then message the Slack bot directly."
         );
-        assert_eq!(requirement.input_placeholder, "Enter Slack pairing code...");
-        assert!(
-            requirement.error_message.contains("/pair"),
-            "invalid-code copy must point the user at /pair: {}",
-            requirement.error_message
+        assert_eq!(
+            requirement.error_message,
+            "Slack OAuth connection failed. Try configuring Slack again."
         );
     }
 
@@ -1783,15 +2053,20 @@ mod tests {
 
     #[tokio::test]
     async fn extension_search_distinguishes_external_channel_connect_from_delivery() {
+        // Generic external-channel search guidance. Uses a neutral `example_bot`
+        // fixture rather than the real Slack bot: under model B `slack_bot` is
+        // hidden from search, so a Slack-named fixture would be filtered out and
+        // this generic guidance would go untested.
         let (_dir, _storage_root, facade, _active_registry, _installation_store) =
             extension_lifecycle_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_packages(vec![fixture_external_channel_package(
-                    "slack", "Slack",
+                    "example_bot",
+                    "Example",
                 )]),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
             );
-        let package_ref =
-            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("valid ref");
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "example_bot")
+            .expect("valid ref");
         facade
             .execute(
                 lifecycle_surface_context(),
@@ -1800,7 +2075,7 @@ mod tests {
                 },
             )
             .await
-            .expect("install slack channel");
+            .expect("install example channel");
         facade
             .execute(
                 lifecycle_surface_context(),
@@ -1809,17 +2084,17 @@ mod tests {
                 },
             )
             .await
-            .expect("activate slack channel");
+            .expect("activate example channel");
 
         let search = facade
             .execute(
                 lifecycle_surface_context(),
                 LifecycleProductAction::ExtensionSearch {
-                    query: "slack".to_string(),
+                    query: "example".to_string(),
                 },
             )
             .await
-            .expect("search active slack channel");
+            .expect("search active example channel");
 
         let message = search.message.as_deref().expect("search guidance");
         assert!(
@@ -1839,11 +2114,198 @@ mod tests {
         else {
             panic!("expected extension search payload");
         };
-        let slack = extensions
+        let example = extensions
             .iter()
-            .find(|extension| extension.summary.package_ref.id.as_str() == "slack")
-            .expect("slack search result");
-        assert_eq!(slack.installation_phase, Some(LifecyclePhase::Active));
+            .find(|extension| extension.summary.package_ref.id.as_str() == "example_bot")
+            .expect("example search result");
+        assert_eq!(example.installation_phase, Some(LifecyclePhase::Active));
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[tokio::test]
+    async fn slack_tools_extension_installs_activates_and_publishes_capabilities() {
+        let (_dir, _storage_root, port, _active_registry, installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        // Model B: the user-installable Slack extension is the tools package
+        // (`slack`); the bot channel (`slack_bot`) is operator-provisioned and
+        // hidden. Installing the tools extension installs only itself — there is
+        // no hidden companion.
+        let slack_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("slack ref");
+
+        port.install(slack_ref.clone())
+            .await
+            .expect("install Slack tools extension");
+
+        let installed_ids = installation_store
+            .list_installations()
+            .await
+            .expect("list installations")
+            .into_iter()
+            .map(|installation| installation.extension_id().as_str().to_string())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            installed_ids,
+            ["slack"]
+                .into_iter()
+                .map(String::from)
+                .collect::<BTreeSet<_>>(),
+            "installing the Slack tools extension installs only itself, with no hidden companion"
+        );
+
+        let list = port.list_installed().await.expect("list installed");
+        let Some(LifecycleProductPayload::ExtensionList { extensions, count }) = list.payload
+        else {
+            panic!("expected extension list payload");
+        };
+        assert_eq!(count, 1);
+        assert_eq!(extensions[0].summary.package_ref.id.as_str(), "slack");
+
+        let search = port.search("slack", None).await.expect("search slack");
+        let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) = search.payload
+        else {
+            panic!("expected extension search payload");
+        };
+        assert_eq!(
+            extensions
+                .iter()
+                .map(|extension| extension.summary.package_ref.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["slack"],
+            "search exposes the tools extension (slack); the bot channel (slack_bot) is hidden"
+        );
+
+        port.activate_with_prechecked_credentials_for_test(
+            slack_ref,
+            ExtensionActivationMode::Static,
+        )
+        .await
+        .expect("activate Slack tools extension");
+
+        let active_capability_ids = port
+            .active_model_visible_capabilities()
+            .await
+            .expect("active capabilities")
+            .into_iter()
+            .map(|capability| capability.id.as_str().to_string())
+            .collect::<BTreeSet<_>>();
+        assert!(
+            active_capability_ids.contains("slack.search_messages"),
+            "activating the Slack tools extension publishes its read tools"
+        );
+        assert!(
+            active_capability_ids.contains("slack.send_message"),
+            "activating the Slack tools extension publishes its write tool"
+        );
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[tokio::test]
+    async fn slack_tools_extension_activation_requires_personal_oauth() {
+        let (_dir, _storage_root, port, _active_registry, _installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let slack_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("slack ref");
+
+        port.install(slack_ref.clone())
+            .await
+            .expect("install public Slack extension");
+
+        let requirements = port
+            .activation_credential_requirements(&slack_ref)
+            .await
+            .expect("Slack activation requirements");
+        assert_eq!(requirements.len(), 1);
+        let requirement = &requirements[0];
+        assert_eq!(requirement.provider.as_str(), "slack_personal");
+        assert_eq!(requirement.requester_extension.as_str(), "slack");
+        let expected_scopes = [
+            "channels:history",
+            "channels:read",
+            "chat:write",
+            "groups:history",
+            "groups:read",
+            "im:history",
+            "im:read",
+            "mpim:history",
+            "mpim:read",
+            "search:read",
+            "users:read",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect::<BTreeSet<_>>();
+        assert_eq!(
+            requirement
+                .provider_scopes
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            expected_scopes
+        );
+        let RuntimeCredentialAccountSetup::OAuth { scopes } = &requirement.setup else {
+            panic!("Slack personal setup should use OAuth");
+        };
+        assert_eq!(
+            scopes.iter().cloned().collect::<BTreeSet<_>>(),
+            expected_scopes
+        );
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[tokio::test]
+    async fn slack_tools_extension_removes_cleanly() {
+        let (_dir, _storage_root, port, _active_registry, installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let slack_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("slack ref");
+
+        port.install(slack_ref.clone())
+            .await
+            .expect("install public Slack extension");
+        port.activate_with_prechecked_credentials_for_test(
+            slack_ref.clone(),
+            ExtensionActivationMode::Static,
+        )
+        .await
+        .expect("activate Slack and internal user tools");
+        port.remove(slack_ref, &hosted_mcp_scope("extension-remove-test"))
+            .await
+            .expect("remove public Slack");
+
+        let installed_ids = installation_store
+            .list_installations()
+            .await
+            .expect("list installations")
+            .into_iter()
+            .map(|installation| installation.extension_id().as_str().to_string())
+            .collect::<BTreeSet<_>>();
+        assert!(
+            installed_ids.is_empty(),
+            "removing the public Slack extension must not leave hidden Slack user-tool installations behind"
+        );
+        let active_capability_ids = port
+            .active_model_visible_capabilities()
+            .await
+            .expect("active capabilities")
+            .into_iter()
+            .map(|capability| capability.id.as_str().to_string())
+            .collect::<BTreeSet<_>>();
+        assert!(
+            active_capability_ids
+                .iter()
+                .all(|capability_id| !capability_id.starts_with("slack.")),
+            "Slack user tools must not remain active after public Slack removal"
+        );
     }
 
     #[tokio::test]
@@ -2119,7 +2581,7 @@ mod tests {
             .await
             .expect("tools/list request should start");
 
-        port.remove(package_ref)
+        port.remove(package_ref, &hosted_mcp_scope("extension-remove-test"))
             .await
             .expect("remove can proceed while discovery is in flight");
         release_tools_list
@@ -2179,7 +2641,7 @@ mod tests {
             vec![EffectKind::Network, EffectKind::ExternalWrite]
         );
 
-        port.remove(package_ref)
+        port.remove(package_ref, &hosted_mcp_scope("extension-remove-test"))
             .await
             .expect("remove fixture extension");
         let removed_decision = trust_policy
@@ -2455,6 +2917,85 @@ mod tests {
                 .snapshot()
                 .get_extension(&ExtensionId::new("fixture").unwrap())
                 .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_removes_retired_slack_user_installation_without_catalog_entry() {
+        let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
+        let extension_id =
+            ExtensionId::new(RETIRED_SLACK_USER_EXTENSION_ID).expect("valid extension id");
+        let installation_id =
+            ExtensionInstallationId::new(RETIRED_SLACK_USER_EXTENSION_ID).expect("valid install");
+        let manifest_hash = "sha256:retired-slack-user".to_string();
+        installation_store
+            .upsert_manifest(fixture_manifest_record_with_source(
+                retired_slack_user_manifest(),
+                ManifestSource::HostBundled,
+                Some(manifest_hash.clone()),
+            ))
+            .await
+            .expect("upsert retired slack_user manifest");
+        installation_store
+            .upsert_installation(
+                ExtensionInstallation::new(
+                    installation_id.clone(),
+                    extension_id.clone(),
+                    ExtensionActivationState::Enabled,
+                    ExtensionManifestRef::new(
+                        extension_id.clone(),
+                        Some(ManifestHash::new(manifest_hash).expect("valid hash")),
+                    ),
+                    Vec::new(),
+                    chrono::Utc::now(),
+                )
+                .expect("retired slack_user installation"),
+            )
+            .await
+            .expect("upsert retired slack_user installation");
+        let restored_lifecycle = Arc::new(Mutex::new(ExtensionLifecycleService::new(
+            ExtensionRegistry::new(),
+        )));
+        let restored_active_registry =
+            Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let restored_trust_policy = test_extension_trust_policy();
+        let restored_active_extensions = test_active_extension_publisher(
+            Arc::clone(&restored_active_registry),
+            Arc::clone(&restored_trust_policy),
+        );
+        let installation_store_trait: Arc<dyn ExtensionInstallationStore> =
+            installation_store.clone();
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(LocalFilesystem::new());
+
+        restore_extension_lifecycle_state(
+            &AvailableExtensionCatalog::from_packages(Vec::new()),
+            &filesystem,
+            &installation_store_trait,
+            &restored_lifecycle,
+            &restored_active_extensions,
+        )
+        .await
+        .expect("retired slack_user install is cleaned up during restore");
+
+        assert!(
+            installation_store
+                .get_installation(&installation_id)
+                .await
+                .expect("read retired installation")
+                .is_none()
+        );
+        assert!(
+            installation_store
+                .get_manifest(&extension_id)
+                .await
+                .expect("read retired manifest")
+                .is_none()
+        );
+        assert!(
+            restored_active_registry
+                .snapshot()
+                .get_extension(&extension_id)
+                .is_none()
         );
     }
 
@@ -3265,6 +3806,7 @@ mod tests {
                 Arc::clone(&active_registry),
                 test_extension_trust_policy(),
             ),
+            None,
         );
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
@@ -3416,7 +3958,7 @@ mod tests {
         );
 
         let error = port
-            .remove(package_ref)
+            .remove(package_ref, &hosted_mcp_scope("extension-remove-test"))
             .await
             .expect_err("delete installation failure is reported");
 
@@ -3471,7 +4013,7 @@ mod tests {
         let trust_input = extension_trust_policy_input(&package).expect("trust input");
 
         let error = port
-            .remove(package_ref)
+            .remove(package_ref, &hosted_mcp_scope("extension-remove-test"))
             .await
             .expect_err("delete manifest failure is reported");
 
@@ -3510,7 +4052,7 @@ mod tests {
         let trust_input = extension_trust_policy_input(&package).expect("trust input");
 
         let error = port
-            .remove(package_ref)
+            .remove(package_ref, &hosted_mcp_scope("extension-remove-test"))
             .await
             .expect_err("delete files failure is reported");
 
@@ -3616,6 +4158,122 @@ mod tests {
         )
     }
 
+    #[derive(Default)]
+    struct RecordingExtensionCredentialCleanup {
+        requests: std::sync::Mutex<Vec<SecretCleanupRequest>>,
+    }
+
+    #[async_trait]
+    impl ExtensionCredentialCleanup for RecordingExtensionCredentialCleanup {
+        async fn cleanup_for_lifecycle(
+            &self,
+            request: SecretCleanupRequest,
+        ) -> Result<SecretCleanupReport, RebornServicesError> {
+            self.requests.lock().expect("cleanup lock").push(request);
+            Ok(SecretCleanupReport::default())
+        }
+    }
+
+    #[tokio::test]
+    async fn ui_facade_extension_remove_revokes_exclusive_credential_at_convergence_point() {
+        // Convergence coverage: the WebUI facade removal door (`ExtensionRemove`)
+        // and the `builtin.extension_remove` agent capability both call
+        // `RebornLocalExtensionManagementPort::remove`, so credential revocation
+        // cannot be bypassed through the UI door — the door users actually use.
+        let cleanup = Arc::new(RecordingExtensionCredentialCleanup::default());
+        let (_dir, _storage_root, facade, _active_registry, _installation_store) =
+            extension_lifecycle_fixture_with_catalog_service_and_cleanup(
+                AvailableExtensionCatalog::from_first_party_assets()
+                    .expect("first-party GitHub catalog"),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+                Some(cleanup.clone() as Arc<dyn ExtensionCredentialCleanup>),
+            );
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").expect("valid ref");
+
+        facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("install github");
+        let remove = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionRemove { package_ref },
+            )
+            .await
+            .expect("remove github via the WebUI facade");
+        assert_eq!(remove.phase, LifecyclePhase::Removed);
+
+        let requests = cleanup.requests.lock().expect("cleanup lock");
+        assert_eq!(
+            requests.len(),
+            1,
+            "the UI-facade removal door must revoke exactly the exclusive github credential"
+        );
+        assert_eq!(
+            requests[0]
+                .provider
+                .as_ref()
+                .map(|provider| provider.as_str()),
+            Some("github")
+        );
+        assert_eq!(requests[0].extension_id.as_str(), "github");
+        assert_eq!(requests[0].action, SecretCleanupAction::Uninstall);
+    }
+
+    #[tokio::test]
+    async fn ui_facade_extension_remove_preserves_credential_still_shared_with_another_extension() {
+        // Fail-safe coverage for `revoke_exclusive_credentials`: `gmail` and
+        // `google-calendar` both authorize against the shared `google` provider.
+        // Removing `gmail` while `google-calendar` remains installed must NOT
+        // revoke the personal Google credential — it is still exclusive to the
+        // remaining extension, and deleting it would silently break Calendar.
+        // This exercises the `providers_still_in_use` preservation branch the
+        // single-extension revoke test above cannot reach.
+        let cleanup = Arc::new(RecordingExtensionCredentialCleanup::default());
+        let (_dir, _storage_root, facade, _active_registry, _installation_store) =
+            extension_lifecycle_fixture_with_catalog_service_and_cleanup(
+                AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+                Some(cleanup.clone() as Arc<dyn ExtensionCredentialCleanup>),
+            );
+        let gmail =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "gmail").expect("valid ref");
+        let calendar = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "google-calendar")
+            .expect("valid ref");
+
+        for package_ref in [gmail.clone(), calendar.clone()] {
+            facade
+                .execute(
+                    lifecycle_surface_context(),
+                    LifecycleProductAction::ExtensionInstall { package_ref },
+                )
+                .await
+                .expect("install Google extension");
+        }
+
+        let remove = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionRemove { package_ref: gmail },
+            )
+            .await
+            .expect("remove gmail via the WebUI facade");
+        assert_eq!(remove.phase, LifecyclePhase::Removed);
+
+        let requests = cleanup.requests.lock().expect("cleanup lock");
+        assert!(
+            requests.is_empty(),
+            "the shared google credential must be preserved while google-calendar \
+             still authorizes against it, got cleanup requests: {requests:?}"
+        );
+    }
+
     fn extension_management_port_fixture_with_catalog_and_service(
         catalog: AvailableExtensionCatalog,
         lifecycle_service: ExtensionLifecycleService,
@@ -3709,6 +4367,7 @@ mod tests {
                 Arc::clone(&active_registry),
                 Arc::clone(&trust_policy),
             ),
+            None,
         ));
         (
             dir,
@@ -3722,6 +4381,24 @@ mod tests {
     fn extension_lifecycle_fixture_with_catalog_and_service(
         catalog: AvailableExtensionCatalog,
         lifecycle_service: ExtensionLifecycleService,
+    ) -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        crate::extension_host::lifecycle::RebornLocalLifecycleFacade,
+        Arc<SharedExtensionRegistry>,
+        Arc<InMemoryExtensionInstallationStore>,
+    ) {
+        extension_lifecycle_fixture_with_catalog_service_and_cleanup(
+            catalog,
+            lifecycle_service,
+            None,
+        )
+    }
+
+    fn extension_lifecycle_fixture_with_catalog_service_and_cleanup(
+        catalog: AvailableExtensionCatalog,
+        lifecycle_service: ExtensionLifecycleService,
+        credential_cleanup: Option<Arc<dyn ExtensionCredentialCleanup>>,
     ) -> (
         tempfile::TempDir,
         std::path::PathBuf,
@@ -3771,6 +4448,7 @@ mod tests {
                 Arc::clone(&active_registry),
                 test_extension_trust_policy(),
             ),
+            credential_cleanup,
         ));
         let facade =
             crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(skill_management)
@@ -3887,6 +4565,7 @@ mod tests {
                 Arc::clone(&active_registry),
                 Arc::clone(&trust_policy),
             ),
+            None,
         );
         (dir, port, active_registry, failing_store, trust_policy)
     }
@@ -3933,6 +4612,7 @@ mod tests {
                 Arc::clone(&active_registry),
                 Arc::clone(&trust_policy),
             ),
+            None,
         );
         (dir, port, active_registry, installation_store, trust_policy)
     }
@@ -4495,6 +5175,7 @@ mod tests {
                 ),
                 refresh_secret: None,
                 scopes: Vec::new(),
+                provider_identity: None,
                 created_at: now,
                 updated_at: now,
             })
@@ -4660,6 +5341,36 @@ section = "capability_provider.tools"
 [[capability_provider.tools.capabilities]]
 id = "fixture.search"
 description = "Search fixture data"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/search.input.json"
+output_schema_ref = "schemas/search.output.json"
+"#
+    }
+
+    fn retired_slack_user_manifest() -> &'static str {
+        r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "slack_user"
+name = "Retired Slack User Extension"
+version = "0.1.0"
+description = "Retired internal Slack user tools companion"
+trust = "first_party_requested"
+
+[runtime]
+kind = "wasm"
+module = "wasm/slack_user_tool.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "slack_user.search"
+description = "Search Slack messages"
 effects = ["network"]
 default_permission = "ask"
 visibility = "model"

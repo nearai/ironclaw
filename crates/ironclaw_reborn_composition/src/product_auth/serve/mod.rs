@@ -4,6 +4,7 @@
 //! composition, one-way hashing of callback material, and sanitized response
 //! rendering. It deliberately delegates durable flow state, provider exchange,
 //! credential mutation, and continuation dispatch to [`RebornProductAuthServices`].
+// arch-exempt: large_file, product-auth serve router and DTO/route composition surface; decomposition into per-route submodules tracked by the Slack-OAuth audit, plan #5604
 
 mod accounts;
 mod lifecycle;
@@ -34,13 +35,18 @@ use ironclaw_auth::{
     CredentialAccountLabel, CredentialAccountListPage, CredentialAccountListRequest,
     CredentialAccountProjection, CredentialAccountSelectionRequest, CredentialAccountStatus,
     CredentialAccountUpdateBinding, CredentialRecoveryProjection, CredentialRecoveryRequest,
-    CredentialRefreshReport, CredentialRefreshRequest, GOOGLE_PROVIDER_ID,
-    GoogleOAuthCallbackState, GoogleOAuthRouteConfig, OAuthAuthorizationCode,
-    OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OpaqueStateHash, PkceVerifierHash,
-    PkceVerifierSecret, ProviderScope, SecretCleanupAction, SecretCleanupReport,
+    CredentialRefreshReport, CredentialRefreshRequest, GOOGLE_PROVIDER_ID, GoogleOAuthRouteConfig,
+    OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthCallbackState, OAuthCallbackStateKind,
+    OAuthProviderCallbackRequest, OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret,
+    ProviderScope, SLACK_PERSONAL_PROVIDER_ID, SecretCleanupAction, SecretCleanupReport,
     SecretCleanupRequest, Timestamp, TurnRunRef, binding_scope_owns_account,
     build_google_authorization_url, parse_google_callback_scopes, parse_google_requested_scopes,
     pkce_s256_challenge,
+};
+#[cfg(feature = "slack-v2-host-beta")]
+use ironclaw_auth::{
+    OAuthAuthorizationEndpoint, OAuthAuthorizeUrlRequest, OAuthScopeParam,
+    SLACK_PERSONAL_AUTHORIZATION_ENDPOINT, build_authorization_url_with_scope_param,
 };
 use ironclaw_host_api::NetworkMethod;
 use ironclaw_host_api::ingress::{
@@ -60,6 +66,12 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::product_auth::api::auth::{RebornDcrOAuthStartFlowRequest, RebornOAuthStartFlowRequest};
+#[cfg(feature = "slack-v2-host-beta")]
+use crate::slack_host_beta::SlackPersonalConnectionScopeResolver;
+#[cfg(feature = "slack-v2-host-beta")]
+use crate::slack_personal_binding::{
+    RebornUserIdentityBindingDeleteStore, SlackPersonalUserBinder,
+};
 use crate::{
     RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse,
     RebornOAuthCallbackError, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
@@ -68,9 +80,14 @@ use crate::{
 
 pub(crate) const OAUTH_START_PATH: &str = "/api/reborn/product-auth/oauth/start";
 pub(crate) const OAUTH_CALLBACK_PATH: &str = "/api/reborn/product-auth/oauth/callback/{flow_id}";
+pub(crate) const OAUTH_FLOW_STATUS_PATH: &str =
+    "/api/reborn/product-auth/oauth/flow/{flow_id}/status";
 pub(crate) const GOOGLE_OAUTH_START_PATH: &str = "/api/reborn/product-auth/oauth/google/start";
 pub(crate) const GOOGLE_OAUTH_CALLBACK_PATH: &str =
     "/api/reborn/product-auth/oauth/google/callback";
+#[cfg(feature = "slack-v2-host-beta")]
+pub(crate) const SLACK_PERSONAL_OAUTH_CALLBACK_PATH: &str =
+    "/api/reborn/product-auth/oauth/slack_personal/callback";
 pub(crate) const EXTENSION_OAUTH_START_PATH: &str =
     "/api/webchat/v2/extensions/{package_id}/setup/oauth/start";
 pub(crate) const MANUAL_TOKEN_SUBMIT_PATH: &str = "/api/reborn/product-auth/manual-token/submit";
@@ -85,8 +102,11 @@ pub(crate) const LIFECYCLE_CLEANUP_PATH: &str = "/api/reborn/product-auth/lifecy
 
 const OAUTH_START_ROUTE_ID: &str = "product_auth.oauth.start";
 const OAUTH_CALLBACK_ROUTE_ID: &str = "product_auth.oauth.callback";
+const OAUTH_FLOW_STATUS_ROUTE_ID: &str = "product_auth.oauth.flow_status";
 const GOOGLE_OAUTH_START_ROUTE_ID: &str = "product_auth.oauth.google.start";
 const GOOGLE_OAUTH_CALLBACK_ROUTE_ID: &str = "product_auth.oauth.google.callback";
+#[cfg(feature = "slack-v2-host-beta")]
+const SLACK_PERSONAL_OAUTH_CALLBACK_ROUTE_ID: &str = "product_auth.oauth.slack_personal.callback";
 const EXTENSION_OAUTH_START_ROUTE_ID: &str = "webui_v2.extensions.oauth.start";
 const MANUAL_TOKEN_SUBMIT_ROUTE_ID: &str = "product_auth.manual_token.submit";
 const MANUAL_TOKEN_SETUP_ROUTE_ID: &str = "product_auth.manual_token.setup";
@@ -123,6 +143,15 @@ const OAUTH_CALLBACK_MAX_REQUESTS: NonZeroU32 = match NonZeroU32::new(120) {
     // SAFETY: 120 is a non-zero literal rate limit.
     None => unreachable!(),
 };
+// The reconnect watcher polls flow status on a ~2s cadence (30 req/min) while a
+// user completes OAuth in a popup, so the read cap is deliberately higher than
+// the 20/min mutation cap. Still per-caller and bounded so a client cannot spin
+// the read hot.
+const OAUTH_FLOW_STATUS_MAX_REQUESTS: NonZeroU32 = match NonZeroU32::new(120) {
+    Some(value) => value,
+    // SAFETY: 120 is a non-zero literal rate limit.
+    None => unreachable!(),
+};
 const OAUTH_RATE_WINDOW_SECONDS: NonZeroU32 = match NonZeroU32::new(60) {
     Some(value) => value,
     // SAFETY: 60 is a non-zero literal rate-limit window.
@@ -142,6 +171,10 @@ pub(crate) struct ProductAuthRouteState {
     default_agent_id: Option<AgentId>,
     default_project_id: Option<ProjectId>,
     google_oauth: Option<GoogleOAuthRouteConfig>,
+    #[cfg(feature = "slack-v2-host-beta")]
+    slack_personal_oauth: Option<crate::slack_setup::SlackPersonalSetupServiceSlot>,
+    #[cfg(feature = "slack-v2-host-beta")]
+    slack_personal_oauth_binding: Option<SlackPersonalOAuthBindingConfig>,
     // First-slice WebUI OAuth stores the raw PKCE verifier process-locally
     // because `AuthFlowRecord` deliberately serializes hashes only. Production
     // HA must replace this with a host-owned encrypted verifier store before
@@ -162,6 +195,10 @@ impl ProductAuthRouteState {
             default_agent_id,
             default_project_id,
             google_oauth: None,
+            #[cfg(feature = "slack-v2-host-beta")]
+            slack_personal_oauth: None,
+            #[cfg(feature = "slack-v2-host-beta")]
+            slack_personal_oauth_binding: None,
             pkce_verifiers: ExpiringLruCache::new(
                 OAUTH_PKCE_VERIFIER_CACHE_CAPACITY,
                 StoredPkceVerifier::expires_at,
@@ -178,6 +215,57 @@ impl ProductAuthRouteState {
         self.google_oauth
             .as_ref()
             .ok_or_else(ProductAuthRouteFailure::backend_unavailable)
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) fn with_slack_personal_oauth(
+        mut self,
+        slot: crate::slack_setup::SlackPersonalSetupServiceSlot,
+    ) -> Self {
+        self.slack_personal_oauth = Some(slot);
+        self
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(super) async fn slack_personal_oauth_credentials(
+        &self,
+    ) -> Result<
+        (
+            ironclaw_auth::OAuthClientId,
+            ironclaw_auth::OAuthRedirectUri,
+        ),
+        ProductAuthRouteFailure,
+    > {
+        let slot = self.slack_personal_oauth.as_ref().ok_or_else(|| {
+            tracing::warn!(
+                "Slack personal OAuth slot not configured (IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI not set)"
+            );
+            ProductAuthRouteFailure::backend_unavailable()
+        })?;
+        let service = slot.get().ok_or_else(|| {
+            tracing::warn!("Slack personal OAuth slot not yet filled (startup race)");
+            ProductAuthRouteFailure::backend_unavailable()
+        })?;
+        let (client_id, _secret) = service.oauth_credentials().await.map_err(|e| {
+            tracing::warn!(error = %e, "Slack personal OAuth credentials not configured");
+            ProductAuthRouteFailure::malformed_config()
+        })?;
+        let redirect_uri = slot.redirect_uri().clone();
+        Ok((client_id, redirect_uri))
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) fn with_slack_personal_oauth_binding(
+        mut self,
+        config: SlackPersonalOAuthBindingConfig,
+    ) -> Self {
+        self.slack_personal_oauth_binding = Some(config);
+        self
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    fn slack_personal_oauth_binding_config(&self) -> Option<&SlackPersonalOAuthBindingConfig> {
+        self.slack_personal_oauth_binding.as_ref()
     }
 
     fn store_pkce_verifier(
@@ -212,14 +300,67 @@ impl ProductAuthRouteState {
 
 impl std::fmt::Debug for ProductAuthRouteState {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ProductAuthRouteState")
+        let mut builder = formatter.debug_struct("ProductAuthRouteState");
+        builder
             .field("product_auth", &"Arc<RebornProductAuthServices>")
             .field("tenant_id", &self.tenant_id)
             .field("default_agent_id", &self.default_agent_id)
             .field("default_project_id", &self.default_project_id)
-            .field("google_oauth", &self.google_oauth.is_some())
+            .field("google_oauth", &self.google_oauth.is_some());
+        #[cfg(feature = "slack-v2-host-beta")]
+        builder.field("slack_personal_oauth", &self.slack_personal_oauth.is_some());
+        #[cfg(feature = "slack-v2-host-beta")]
+        builder.field(
+            "slack_personal_oauth_binding",
+            &self.slack_personal_oauth_binding.is_some(),
+        );
+        builder
             .field("pkce_verifiers", &"ExpiringLruCache<...>")
+            .finish()
+    }
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+#[derive(Clone)]
+pub struct SlackPersonalOAuthBindingConfig {
+    pub(crate) binding_service: Arc<dyn SlackPersonalUserBinder>,
+    pub(crate) connection_scope_resolver: Arc<dyn SlackPersonalConnectionScopeResolver>,
+    /// Undoes an identity binding written by the callback identity hook when
+    /// `complete_oauth_callback` fails afterwards; the binding is the
+    /// user-visible "connected" signal, so it must not survive a completion
+    /// failure that already deleted the token material.
+    pub(crate) binding_rollback_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+impl SlackPersonalOAuthBindingConfig {
+    pub(crate) fn new(
+        binding_service: Arc<dyn SlackPersonalUserBinder>,
+        connection_scope_resolver: Arc<dyn SlackPersonalConnectionScopeResolver>,
+        binding_rollback_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
+    ) -> Self {
+        Self {
+            binding_service,
+            connection_scope_resolver,
+            binding_rollback_store,
+        }
+    }
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+impl std::fmt::Debug for SlackPersonalOAuthBindingConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SlackPersonalOAuthBindingConfig")
+            .field("binding_service", &self.binding_service)
+            .field(
+                "connection_scope_resolver",
+                &"Arc<dyn SlackPersonalConnectionScopeResolver>",
+            )
+            .field(
+                "binding_rollback_store",
+                &"Arc<dyn RebornUserIdentityBindingDeleteStore>",
+            )
             .finish()
     }
 }
@@ -306,9 +447,25 @@ pub(crate) struct ProductAuthRouteMount {
 // tool-dispatch path. Contract: `docs/reborn/contracts/auth-product.md`.
 // dispatch-exempt: host-owned auth/secret ingress, not in-turn tool dispatch
 pub(crate) fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductAuthRouteMount {
+    let public = Router::new()
+        .route(OAUTH_CALLBACK_PATH, get(oauth::oauth_callback_handler))
+        .route(
+            GOOGLE_OAUTH_CALLBACK_PATH,
+            get(oauth::google_oauth_callback_handler),
+        );
+    #[cfg(feature = "slack-v2-host-beta")]
+    let public = public.route(
+        SLACK_PERSONAL_OAUTH_CALLBACK_PATH,
+        get(oauth::slack_personal_oauth_callback_handler),
+    );
+
     ProductAuthRouteMount {
         protected: Router::new()
             .route(OAUTH_START_PATH, post(oauth::oauth_start_handler))
+            .route(
+                OAUTH_FLOW_STATUS_PATH,
+                get(oauth::oauth_flow_status_handler),
+            )
             .route(
                 GOOGLE_OAUTH_START_PATH,
                 post(oauth::google_oauth_start_handler),
@@ -347,13 +504,7 @@ pub(crate) fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductA
                 post(lifecycle::lifecycle_cleanup_handler),
             )
             .with_state(state.clone()),
-        public: Router::new()
-            .route(OAUTH_CALLBACK_PATH, get(oauth::oauth_callback_handler))
-            .route(
-                GOOGLE_OAUTH_CALLBACK_PATH,
-                get(oauth::google_oauth_callback_handler),
-            )
-            .with_state(state),
+        public: public.with_state(state),
         descriptors: product_auth_route_descriptors(),
     }
 }
@@ -398,6 +549,12 @@ pub(crate) fn product_auth_route_descriptors() -> Vec<IngressRouteDescriptor> {
         accounts_refresh_policy(),
     ));
     descriptors.push(descriptor(
+        OAUTH_FLOW_STATUS_ROUTE_ID,
+        NetworkMethod::Get,
+        OAUTH_FLOW_STATUS_PATH,
+        flow_status_policy(),
+    ));
+    descriptors.push(descriptor(
         OAUTH_CALLBACK_ROUTE_ID,
         NetworkMethod::Get,
         OAUTH_CALLBACK_PATH,
@@ -407,6 +564,13 @@ pub(crate) fn product_auth_route_descriptors() -> Vec<IngressRouteDescriptor> {
         GOOGLE_OAUTH_CALLBACK_ROUTE_ID,
         NetworkMethod::Get,
         GOOGLE_OAUTH_CALLBACK_PATH,
+        callback_policy(),
+    ));
+    #[cfg(feature = "slack-v2-host-beta")]
+    descriptors.push(descriptor(
+        SLACK_PERSONAL_OAUTH_CALLBACK_ROUTE_ID,
+        NetworkMethod::Get,
+        SLACK_PERSONAL_OAUTH_CALLBACK_PATH,
         callback_policy(),
     ));
     descriptors
@@ -444,6 +608,29 @@ pub(super) fn protected_mutation_policy() -> IngressPolicy {
         effect_path: AllowedEffectPath::ProductWorkflow,
     })
     .expect("product-auth OAuth start policy must validate") // safety: LocalGateway + bearer + AuthenticatedCaller is the same authenticated local product workflow shape used by WebUI mutations.
+}
+
+pub(super) fn flow_status_policy() -> IngressPolicy {
+    IngressPolicy::new(IngressPolicyParts {
+        listener_class: ListenerClass::LocalGateway,
+        auth: IngressAuthPolicy::Required {
+            schemes: vec![IngressAuthScheme::BearerToken],
+        },
+        scope_source: ironclaw_host_api::IngressScopeSource::AuthenticatedCaller,
+        // Read-only status probe: no request body is read, so reject any.
+        body_limit: BodyLimitPolicy::NoBody,
+        rate_limit: RateLimitPolicy::Limited {
+            scope: RateLimitScope::PerCaller,
+            max_requests: OAUTH_FLOW_STATUS_MAX_REQUESTS,
+            window_seconds: OAUTH_RATE_WINDOW_SECONDS,
+        },
+        cors: CorsPolicy::SameOriginOnly,
+        websocket_origin: WebSocketOriginPolicy::NotApplicable,
+        streaming: StreamingMode::None,
+        audit: AuditTraceClass::UserAction,
+        effect_path: AllowedEffectPath::ProductWorkflow,
+    })
+    .expect("product-auth OAuth flow-status policy must validate") // safety: same authenticated LocalGateway shape as the OAuth start mutation, but NoBody + read-only per-caller poll cadence.
 }
 
 pub(super) fn accounts_refresh_policy() -> IngressPolicy {
@@ -553,6 +740,25 @@ pub(crate) struct ProductOAuthStartResponse {
     pub(crate) expires_at: Timestamp,
     pub(crate) continuation: AuthContinuationRef,
     pub(crate) callback_scope: OAuthCallbackScopeHint,
+}
+
+/// Sanitized durable flow-status projection returned by the origin-independent
+/// OAuth flow-status poll. Carries the lifecycle status enum ONLY — never
+/// tokens, PKCE verifiers, authorization codes, or opaque state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct OAuthFlowStatusResponse {
+    pub(crate) status: AuthFlowStatus,
+}
+
+/// Query fields for the flow-status poll. The browser echoes back the
+/// `invocation_id` the start response minted (`callback_scope.invocation_id`)
+/// so the caller-scoped handler can re-derive the exact `AuthProductScope`
+/// `get_flow` matched on when the flow was created; the trusted
+/// tenant/user/agent/project still come from the authenticated caller, so a
+/// forged `invocation_id` cannot reach another owner's flow.
+#[derive(Deserialize)]
+pub(super) struct OAuthFlowStatusQuery {
+    invocation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1365,6 +1571,54 @@ mod tests {
     use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
     use ironclaw_turns::{TurnRunId, TurnScope};
     use tower::ServiceExt;
+
+    // Contract: the origin-independent reconnect flow-status route is a
+    // read-only, authenticated, per-caller poll. Locking its policy here stops
+    // a future edit from silently loosening it (e.g. dropping bearer auth,
+    // accepting a body, or widening the rate-limit scope to per-IP/public).
+    #[test]
+    fn flow_status_route_descriptor_locks_read_only_bearer_policy() {
+        let descriptors = product_auth_route_descriptors();
+        let flow_status = descriptors
+            .iter()
+            .find(|descriptor| descriptor.route_id().as_str() == OAUTH_FLOW_STATUS_ROUTE_ID)
+            .expect("the flow-status descriptor must be registered");
+
+        assert_eq!(flow_status.method(), NetworkMethod::Get);
+
+        let policy = flow_status.policy();
+        // Read-only status probe: it never reads a request body.
+        assert!(
+            matches!(policy.body_limit(), BodyLimitPolicy::NoBody),
+            "flow-status must reject any request body"
+        );
+        // Bearer auth, scoped to the authenticated caller — so a browser cannot
+        // forge tenant/user and read another caller's flow.
+        assert!(
+            matches!(
+                policy.auth(),
+                IngressAuthPolicy::Required { schemes }
+                    if schemes.contains(&IngressAuthScheme::BearerToken)
+            ),
+            "flow-status must require bearer auth"
+        );
+        assert_eq!(
+            policy.scope_source(),
+            ironclaw_host_api::IngressScopeSource::AuthenticatedCaller
+        );
+        // Per-caller rate limit for the poll cadence; never per-IP/public.
+        assert!(
+            matches!(
+                policy.rate_limit(),
+                RateLimitPolicy::Limited {
+                    scope: RateLimitScope::PerCaller,
+                    ..
+                }
+            ),
+            "flow-status must be per-caller rate limited"
+        );
+        assert_eq!(policy.cors(), CorsPolicy::SameOriginOnly);
+    }
 
     struct NoopDispatcher;
 

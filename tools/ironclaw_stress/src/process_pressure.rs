@@ -100,10 +100,13 @@ fn run_one_operation(args: &Args, worker_index: usize, operation_index: usize) -
         Scenario::ReserveRelease
         | Scenario::ReserveReconcile
         | Scenario::ChatTurn
+        | Scenario::TurnLifecycleChurn
+        | Scenario::ThreadList
         | Scenario::MixedUserSession
         | Scenario::ContextGrowth
         | Scenario::ToolSession
-        | Scenario::ApiUserCapacity => {
+        | Scenario::ApiUserCapacity
+        | Scenario::SecretConsume => {
             unreachable!("process pressure only handles process-local scenarios")
         }
     }
