@@ -4,7 +4,7 @@ use std::{
     path::Path,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -27,6 +27,8 @@ use crate::{
 
 const DEFAULT_READ_MIX: &str = "list_threads=50,timeline=45,session=5";
 const MAX_ERROR_BODY_CHARS: usize = 512;
+const MAX_MOCK_LLM_REQUEST_BODY_BYTES: usize = 1024 * 1024;
+const MAX_READ_WORKER_SLEEP: Duration = Duration::from_secs(3600);
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct ApiCapacitySummary {
@@ -260,6 +262,33 @@ struct WindowResult {
     api_samples: Vec<ApiRequestSample>,
 }
 
+struct ReadShutdown {
+    stopped: AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl ReadShutdown {
+    fn new() -> Self {
+        Self {
+            stopped: AtomicBool::new(false),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn stop(&self) {
+        self.stopped.store(true, Ordering::Relaxed);
+        self.notify.notify_waiters();
+    }
+
+    fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::Relaxed)
+    }
+
+    async fn notified(&self) {
+        self.notify.notified().await;
+    }
+}
+
 async fn run_window(
     args: &Args,
     operation_namespace: &str,
@@ -269,7 +298,7 @@ async fn run_window(
     progress: Arc<ProgressCounters>,
 ) -> Result<WindowResult, String> {
     let mut tasks = JoinSet::new();
-    let stop_reads = Arc::new(tokio::sync::Notify::new());
+    let stop_reads = Arc::new(ReadShutdown::new());
 
     for user in users.iter().cloned() {
         let harness = harness.clone();
@@ -303,7 +332,7 @@ async fn run_window(
         if result.writer_done {
             writer_remaining = writer_remaining.saturating_sub(1);
             if writer_remaining == 0 {
-                stop_reads.notify_waiters();
+                stop_reads.stop();
             }
         }
         flow_samples.extend(result.flow_samples);
@@ -457,21 +486,24 @@ async fn run_read_worker(
     users: Arc<Vec<ApiUser>>,
     read_mix: ReadMix,
     worker_index: usize,
-    stop_reads: Arc<tokio::sync::Notify>,
+    stop_reads: Arc<ReadShutdown>,
 ) -> Result<TaskResult, String> {
-    let aggregate_qps = args.api_read_qps_per_user * args.users as f64;
-    let worker_count = read_worker_count(args).max(1) as f64;
-    let sleep = if aggregate_qps <= 0.0 {
-        Duration::from_secs(3600)
-    } else {
-        Duration::from_secs_f64((worker_count / aggregate_qps).max(0.001))
-    };
+    let sleep = read_worker_interval(args);
+    let mut interval = tokio::time::interval(sleep);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    interval.tick().await;
     let mut api_samples = Vec::new();
     let mut operation_index = 0_u64;
     loop {
+        if stop_reads.is_stopped() {
+            break;
+        }
         tokio::select! {
             _ = stop_reads.notified() => break,
-            _ = tokio::time::sleep(sleep) => {}
+            _ = interval.tick() => {}
+        }
+        if stop_reads.is_stopped() {
+            break;
         }
         let user = &users[(worker_index + operation_index as usize) % users.len()];
         let endpoint = read_mix.endpoint_for(operation_index);
@@ -482,6 +514,9 @@ async fn run_read_worker(
         };
         api_samples.push(call.sample);
         operation_index += 1;
+        if stop_reads.is_stopped() {
+            break;
+        }
     }
 
     Ok(TaskResult {
@@ -594,17 +629,29 @@ impl ApiHarness {
         let result = match tokio::time::timeout(self.request_timeout, request.send()).await {
             Ok(Ok(response)) => {
                 let status = response.status();
-                let text = response.text().await.unwrap_or_default();
-                if !status.is_success() {
-                    Err(FailureCause::new(
-                        format!("api_http_status_{}", status.as_u16()),
+                match response.text().await {
+                    Ok(text) => {
+                        if !status.is_success() {
+                            Err(FailureCause::new(
+                                format!("api_http_status_{}", status.as_u16()),
+                                name,
+                                truncate_detail(format!("{url}: {text}")),
+                            ))
+                        } else {
+                            serde_json::from_str::<Value>(&text).map_err(|error| {
+                                FailureCause::new(
+                                    "api_json_decode",
+                                    name,
+                                    format!("{url}: {error}"),
+                                )
+                            })
+                        }
+                    }
+                    Err(error) => Err(FailureCause::new(
+                        "api_http_body",
                         name,
-                        truncate_detail(format!("{url}: {text}")),
-                    ))
-                } else {
-                    serde_json::from_str::<Value>(&text).map_err(|error| {
-                        FailureCause::new("api_json_decode", name, format!("{url}: {error}"))
-                    })
+                        format!("{url}: {error}"),
+                    )),
                 }
             }
             Ok(Err(error)) => Err(FailureCause::new("api_http_request", name, error)),
@@ -868,6 +915,32 @@ fn read_worker_count(args: &Args) -> usize {
     }
 }
 
+fn read_worker_interval(args: &Args) -> Duration {
+    read_worker_interval_for(
+        args.api_read_qps_per_user,
+        args.users,
+        read_worker_count(args),
+    )
+}
+
+fn read_worker_interval_for(
+    api_read_qps_per_user: f64,
+    users: usize,
+    read_workers: usize,
+) -> Duration {
+    let aggregate_qps = api_read_qps_per_user * users as f64;
+    if !aggregate_qps.is_finite() || aggregate_qps <= 0.0 {
+        return MAX_READ_WORKER_SLEEP;
+    }
+    let worker_count = read_workers.max(1) as f64;
+    let sleep_secs = (worker_count / aggregate_qps).max(0.001);
+    if !sleep_secs.is_finite() || sleep_secs > MAX_READ_WORKER_SLEEP.as_secs_f64() {
+        MAX_READ_WORKER_SLEEP
+    } else {
+        Duration::from_secs_f64(sleep_secs)
+    }
+}
+
 fn extract_thread_id(value: &Value) -> Option<String> {
     value
         .pointer("/thread/thread_id")
@@ -1017,7 +1090,19 @@ async fn handle_mock_llm_connection(
     };
     let headers = String::from_utf8_lossy(&request[..header_end]).into_owned();
     let content_length = parse_content_length(&headers).unwrap_or(0);
-    while request.len() < header_end + 4 + content_length {
+    if content_length > MAX_MOCK_LLM_REQUEST_BODY_BYTES {
+        write_mock_response(&mut stream, 413, "text/plain", b"request too large").await?;
+        return Ok(());
+    }
+    let body_start = header_end + 4;
+    let total_request_len = match body_start.checked_add(content_length) {
+        Some(total) => total,
+        None => {
+            write_mock_response(&mut stream, 413, "text/plain", b"request too large").await?;
+            return Ok(());
+        }
+    };
+    while request.len() < total_request_len {
         let read = stream
             .read(&mut buffer)
             .await
@@ -1027,9 +1112,8 @@ async fn handle_mock_llm_connection(
         }
         request.extend_from_slice(&buffer[..read]);
     }
-    let body_start = header_end + 4;
     let body = request
-        .get(body_start..body_start.saturating_add(content_length))
+        .get(body_start..total_request_len)
         .unwrap_or_default();
     let first_line = headers.lines().next().unwrap_or_default();
     let path = first_line.split_whitespace().nth(1).unwrap_or("/");
@@ -1126,7 +1210,7 @@ fn deterministic_jitter_ms(request_index: u64, jitter_ms: u64) -> u64 {
     request_index
         .wrapping_mul(1_103_515_245)
         .wrapping_add(12_345)
-        % (jitter_ms + 1)
+        % jitter_ms.saturating_add(1)
 }
 
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
@@ -1207,5 +1291,27 @@ mod tests {
             ]
         });
         assert!(timeline_has_finalized_assistant(&value));
+    }
+
+    #[test]
+    fn deterministic_jitter_handles_max_ceiling() {
+        let expected = 42_u64.wrapping_mul(1_103_515_245).wrapping_add(12_345) % u64::MAX;
+        assert_eq!(deterministic_jitter_ms(42, u64::MAX), expected);
+    }
+
+    #[test]
+    fn read_worker_interval_clamps_invalid_or_huge_values() {
+        assert_eq!(
+            read_worker_interval_for(f64::NAN, 10, 4),
+            MAX_READ_WORKER_SLEEP
+        );
+        assert_eq!(
+            read_worker_interval_for(f64::MIN_POSITIVE, 10, 4),
+            MAX_READ_WORKER_SLEEP
+        );
+        assert_eq!(
+            read_worker_interval_for(f64::INFINITY, 10, 4),
+            MAX_READ_WORKER_SLEEP
+        );
     }
 }
