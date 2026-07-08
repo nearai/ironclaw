@@ -94,12 +94,12 @@ impl LocalDevSyntheticCapabilityHandler for SkillActivationHandler {
             .map(|name| name.to_ascii_lowercase())
             .collect::<Vec<_>>();
         let requested_names = names.iter().cloned().collect::<HashSet<_>>();
-        let plan = match self
+        let outcome = match self
             .skill_activation_source
             .activate_skills_for_run(&invocation.run_context, &names)
             .await
         {
-            Ok(plan) => plan,
+            Ok(outcome) => outcome,
             // A model-recoverable selection failure (the model selected too many
             // or too-large skills, or named an ambiguous skill) must surface as a
             // model-visible tool error so the run continues and the model can
@@ -110,7 +110,12 @@ impl LocalDevSyntheticCapabilityHandler for SkillActivationHandler {
             // `skill_activation_selection_outcome`.
             Err(error) => return skill_activation_selection_outcome(error),
         };
-        let activated = plan
+        // Report only THIS call's named selection — not the merged run plan —
+        // so a skill that was already active via criteria/mention selection is
+        // never re-attributed to this call. `feedback` carries the sanitized
+        // reason for every requested name the selector dropped (previously
+        // discarded, which made drops silent to the model).
+        let activated = outcome
             .selection
             .activations
             .iter()
@@ -120,6 +125,7 @@ impl LocalDevSyntheticCapabilityHandler for SkillActivationHandler {
         let output = serde_json::json!({
             "activated": activated,
             "count": activated.len(),
+            "feedback": outcome.selection.feedback,
         });
         let write_result = invocation
             .result_writer

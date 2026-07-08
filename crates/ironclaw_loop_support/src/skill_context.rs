@@ -55,12 +55,13 @@ pub struct HostSkillContextCandidate {
     pub trust: Option<SkillTrust>,
     /// Host-approved model visibility. `None` fails the build closed.
     pub visibility: Option<SkillVisibility>,
-    /// Whether the skill body may be disclosed to the model, independent of the
-    /// tool-attenuation trust tier. Trusted-authorship provenance (system, user,
-    /// and admin-installed tenant-shared skills) is disclosable; untrusted
+    /// Whether the skill body may be disclosed to the model, independent of
+    /// the tool-policy trust tier (which Reborn does not yet enforce as a
+    /// tool ceiling — #5581). Vetted authorship (`Trusted`, plus
+    /// admin-installed tenant-shared skills) is disclosable; untrusted
     /// registry content is not. Defaults to `trust == Trusted` in the
-    /// constructors; sources with disclosable-but-attenuated provenance
-    /// (tenant-shared) opt in via [`with_content_disclosable`].
+    /// constructors; tenant-shared sources opt in via
+    /// [`with_content_disclosable`].
     ///
     /// [`with_content_disclosable`]: HostSkillContextCandidate::with_content_disclosable
     pub content_disclosable: bool,
@@ -112,9 +113,10 @@ impl HostSkillContextCandidate {
     }
 
     /// Override whether the skill body may be disclosed to the model,
-    /// independent of the tool-attenuation trust tier. Used by sources whose
-    /// content is admin-vetted (disclosable) but still runs with attenuated
-    /// tools (`Installed` trust) — e.g. tenant-shared skills.
+    /// independent of the tool-policy trust tier. Used by sources whose
+    /// content is admin-vetted (disclosable) but keeps the `Installed`
+    /// tier — e.g. tenant-shared skills. (No Reborn tool ceiling enforces
+    /// the tier yet — #5581.)
     pub fn with_content_disclosable(mut self, content_disclosable: bool) -> Self {
         self.content_disclosable = content_disclosable;
         self
@@ -265,8 +267,8 @@ pub fn build_skill_run_snapshot(
 
 /// Default disclosability when a source does not set it explicitly: trusted
 /// authorship (`SkillTrust::Trusted`) is disclosable, everything else is not.
-/// Sources whose content is admin-vetted but tool-attenuated (tenant-shared)
-/// opt in via [`HostSkillContextCandidate::with_content_disclosable`].
+/// Admin-vetted `Installed`-tier sources (tenant-shared) opt in via
+/// [`HostSkillContextCandidate::with_content_disclosable`].
 pub(crate) fn default_content_disclosable(trust: Option<SkillTrust>) -> bool {
     matches!(trust, Some(SkillTrust::Trusted))
 }
@@ -280,8 +282,8 @@ fn parsed_skill_to_snapshot_entry(
 ) -> InstalledSkillSnapshot {
     let name = parsed.manifest.name;
     let trust = skill_trust_level(trust);
-    // Disclosure is decoupled from the tool-trust tier: an admin-vetted
-    // tenant-shared skill is `Installed` trust (attenuated tools) yet
+    // Disclosure is decoupled from the tool-policy trust tier: an
+    // admin-vetted tenant-shared skill keeps the `Installed` tier yet is
     // content-disclosable, so its body still reaches the model. Untrusted
     // content stays description-only.
     let prompt_content = if content_disclosable {

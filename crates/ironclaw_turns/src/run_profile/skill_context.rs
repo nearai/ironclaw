@@ -7,16 +7,18 @@
 //!
 //! Every installed skill in a run has four dimensions that gate what the model sees:
 //!
-//! - **Trust level** ([`SkillTrustLevel`]): governs the *tool-attenuation* ceiling
-//!   (`Trusted` skills run with full tools, `Installed` skills with read-only/attenuated
-//!   tools). It does *not* by itself decide body disclosure — see the disclosure axis.
+//! - **Trust level** ([`SkillTrustLevel`]): records the authorship tier used for tool
+//!   policy (`Trusted` = hand-placed/user-authored, `Installed` = third-party content).
+//!   v1 enforced a per-tier tool ceiling (`attenuate_tools`); Reborn does not enforce
+//!   one yet (#5581), so today the tier gates neither tools nor, by itself, body
+//!   disclosure — see the disclosure axis.
 //!
 //! - **Content disclosure** ([`InstalledSkillSnapshot::content_disclosable`]): governs
 //!   whether the skill *body* reaches the model, decoupled from the tool tier. Trusted
 //!   authorship (system/user skills and admin-installed tenant-shared skills) is
 //!   disclosable; untrusted registry content exposes only a safe description. This lets an
-//!   admin-vetted tenant-shared skill instruct the model while keeping `Installed`
-//!   (attenuated) tool trust. `Trusted`-tier skills are always disclosable, which is also
+//!   admin-vetted tenant-shared skill instruct the model while keeping the `Installed`
+//!   tool-trust tier. `Trusted`-tier skills are always disclosable, which is also
 //!   the back-compatible default for snapshots serialized before this axis existed.
 //!
 //! - **Visibility** ([`SkillVisibility`]): determines whether the model sees the skill at all.
@@ -114,10 +116,11 @@ pub enum SkillVisibility {
 /// Trust level for an installed skill, owned by this crate.
 ///
 /// Mirrors the upstream `SkillTrust` enum without creating a production dependency
-/// on `ironclaw_skills`.
-///
-/// - `Installed`: read-only context; the model sees only the safe description.
-/// - `Trusted`: loaded context may include description and prompt content.
+/// on `ironclaw_skills`. Records the authorship tier used for tool policy; body
+/// disclosure is governed by [`InstalledSkillSnapshot::content_disclosable`]
+/// (`Trusted` implies disclosable; `Installed` requires an explicit host
+/// opt-in such as admin-installed tenant-shared content). No Reborn tool
+/// ceiling enforces the tier yet (#5581).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillTrustLevel {
@@ -221,11 +224,12 @@ pub struct InstalledSkillSnapshot {
     #[serde(default = "default_skill_activation_state")]
     pub activation_state: SkillActivationState,
     /// Whether the skill body may be disclosed to the model. Decoupled from
-    /// [`trust`](Self::trust) (which governs tool attenuation) so that
+    /// [`trust`](Self::trust) (the tool-policy authorship tier) so that
     /// admin-vetted content — e.g. tenant-shared skills installed by an
-    /// operator — can instruct the model while still running with the
-    /// attenuated (`Installed`) tool ceiling. Defaults to `false`
-    /// (fail-closed) for snapshots serialized before this axis existed.
+    /// operator — can instruct the model while keeping the `Installed`
+    /// tier. (No Reborn tool ceiling enforces that tier yet — #5581.)
+    /// Defaults to `false` (fail-closed) for snapshots serialized before
+    /// this axis existed.
     #[serde(default)]
     pub content_disclosable: bool,
     /// Full prompt content. Only included in model context when
@@ -295,7 +299,8 @@ pub struct SkillContextSnippet {
     pub safe_summary: String,
     /// Model-visible skill name used for telemetry, never for authority decisions.
     pub skill_name: String,
-    /// Host-approved trust tier used for telemetry and downstream attenuation checks.
+    /// Host-approved trust tier used for telemetry and future tool-policy
+    /// decisions (no Reborn tool ceiling enforces it yet — #5581).
     pub trust: SkillTrustLevel,
 }
 
@@ -600,11 +605,12 @@ fn canonicalize_skill_entry(entry: &mut InstalledSkillSnapshot) {
 }
 
 fn can_disclose_prompt_content(entry: &InstalledSkillSnapshot) -> bool {
-    // Disclosure is decoupled from the tool-attenuation tier: `trust` governs
-    // the tool ceiling, while disclosure governs whether the skill body reaches
-    // the model. A body is disclosed when either the entry is explicitly marked
-    // `content_disclosable` (admin-vetted tenant-shared content, which keeps its
-    // attenuated `Installed` tool trust) OR it carries the `Trusted` authorship
+    // Disclosure is decoupled from the tool-policy trust tier: `trust` records
+    // authorship for tool policy (no Reborn ceiling yet — #5581), while
+    // disclosure governs whether the skill body reaches the model. A body is
+    // disclosed when either the entry is explicitly marked
+    // `content_disclosable` (admin-vetted tenant-shared content, which keeps
+    // its `Installed` tier) OR it carries the `Trusted` authorship
     // tier. The `Trusted` clause preserves the historical contract and is also
     // the back-compatible default for snapshots serialized before the
     // `content_disclosable` axis existed (which deserialize it as `false`).
@@ -870,8 +876,8 @@ mod tests {
 
     #[tokio::test]
     async fn installed_trust_skill_discloses_body_when_content_disclosable() {
-        // Regression: an admin-vetted tenant-shared skill is `Installed` trust
-        // (attenuated tools) yet must still instruct the model. Disclosure is
+        // Regression: an admin-vetted tenant-shared skill keeps the `Installed`
+        // tool-trust tier yet must still instruct the model. Disclosure is
         // gated on `content_disclosable`, not on `trust == Trusted`.
         let entry = loaded_entry(SkillTrustLevel::Installed, true);
         let snapshot = SkillRunSnapshot::from_entries(vec![entry]);
