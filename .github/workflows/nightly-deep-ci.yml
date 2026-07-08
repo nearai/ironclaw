@@ -59,6 +59,12 @@ jobs:
   reborn-tests:
     name: Reborn Tests
     uses: ./.github/workflows/reborn-tests.yml
+    # reborn-tests.yml references secrets.SCCACHE_* for the sccache-dist
+    # setup. A called workflow that references secrets the caller does not
+    # pass fails validation at trigger time — the whole nightly run becomes a
+    # startup_failure with zero jobs (including nightly-alert, which is why
+    # the breakage was silent from 2026-06-20 to 2026-07-08).
+    secrets: inherit
     with:
       ref: ${{ github.sha }}
 
