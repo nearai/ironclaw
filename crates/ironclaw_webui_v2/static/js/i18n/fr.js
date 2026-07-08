@@ -250,6 +250,12 @@ registerPack("fr", {
   "traceCommons.lastSyncDesc": "Vue locale à la dernière synchronisation",
   "traceCommons.never": "jamais",
   "traceCommons.recentExplanations": "Explications de crédit récentes",
+  "traceCommons.submittedTracesTitle": "Traces soumises",
+  "traceCommons.tracesLoadFailed": "Impossible de charger vos traces soumises.",
+  "traceCommons.traceStatus": "Statut",
+  "traceCommons.tracePendingCredit": "Crédit en attente",
+  "traceCommons.traceFinalCredit": "Crédit final",
+  "traceCommons.traceReceivedAt": "Reçu",
   "traceCommons.note": "Vue locale à la dernière synchronisation — le registre de crédits faisant autorité est côté serveur. Le crédit final peut changer après examen de confidentialité, replay/éval, contrôles de doublons et évaluation d'utilité en aval.",
 
 

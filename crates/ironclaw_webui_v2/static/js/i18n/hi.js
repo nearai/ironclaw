@@ -250,6 +250,12 @@ registerPack("hi", {
   "traceCommons.lastSyncDesc": "अंतिम सिंक के समय का स्थानीय दृश्य",
   "traceCommons.never": "कभी नहीं",
   "traceCommons.recentExplanations": "हाल की क्रेडिट व्याख्याएँ",
+  "traceCommons.submittedTracesTitle": "सबमिट किए गए ट्रेस",
+  "traceCommons.tracesLoadFailed": "आपके सबमिट किए गए ट्रेस लोड नहीं हो सके।",
+  "traceCommons.traceStatus": "स्थिति",
+  "traceCommons.tracePendingCredit": "लंबित क्रेडिट",
+  "traceCommons.traceFinalCredit": "अंतिम क्रेडिट",
+  "traceCommons.traceReceivedAt": "प्राप्त हुआ",
   "traceCommons.note": "अंतिम सिंक के समय का स्थानीय दृश्य — आधिकारिक क्रेडिट बहीखाता सर्वर-साइड है। गोपनीयता समीक्षा, रीप्ले/मूल्यांकन, डुप्लिकेट जाँच और बाद की उपयोगिता स्कोरिंग के बाद अंतिम क्रेडिट बदल सकता है।",
 
 
