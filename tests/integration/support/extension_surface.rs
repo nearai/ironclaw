@@ -208,7 +208,7 @@ pub fn bundled_extension_manifest_capability_ids()
         let asset_root = repo_root()
             .join("crates/ironclaw_first_party_extensions/assets")
             .join(dir_name);
-        let manifest = ironclaw_extensions::ExtensionManifest::parse_with_host_api_contracts(
+        let manifest = ironclaw_extensions::ExtensionManifest::parse(
             &std::fs::read_to_string(asset_root.join("manifest.toml"))?,
             ironclaw_extensions::ManifestSource::HostBundled,
             &ironclaw_host_runtime::default_host_port_catalog()?,

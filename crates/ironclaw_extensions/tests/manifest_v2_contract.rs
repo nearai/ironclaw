@@ -6,8 +6,8 @@ use ironclaw_extensions::{
     CapabilityProviderHostApiContract, CapabilitySurfaceDeclV2, CapabilityVisibility,
     ExtensionManifestV2, ExtensionRuntimeV2, HostApiContractRegistry, HostApiId,
     HostApiManifestContext, HostApiManifestContract, HostApiManifestProjection,
-    HostApiMultiplicity, HostApiRefV2, MANIFEST_SCHEMA_VERSION, ManifestSectionPath,
-    ManifestSource, ManifestV2Error,
+    HostApiMultiplicity, HostApiRefV2, HostApiSectionError, MANIFEST_SCHEMA_VERSION,
+    ManifestSectionPath, ManifestSource, ManifestV2Error,
 };
 use ironclaw_host_api::{
     CapabilityProfileId, CapabilitySurfaceKind, ExtensionId, HostPortCatalog, HostPortCatalogEntry,
@@ -20,6 +20,16 @@ use ironclaw_host_api::{
 const TELEGRAM_TOKEN_PORT: &str = "host.secrets.telegram_bot_token";
 const AUDIT_PORT: &str = "host.events.audit";
 const SQL_TX_PORT: &str = "host.storage.sql_transaction.first_party";
+
+fn contracts() -> HostApiContractRegistry {
+    let mut registry = HostApiContractRegistry::new();
+    registry
+        .register(Arc::new(
+            CapabilityProviderHostApiContract::new().expect("contract"),
+        ))
+        .expect("register capability provider contract");
+    registry
+}
 
 fn catalog() -> HostPortCatalog {
     HostPortCatalog::new(vec![
@@ -44,7 +54,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/example.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "{cap}"
 description = "Echoes input"
 default_permission = "allow"
@@ -61,8 +77,13 @@ output_schema_ref = "schemas/example/echo.output.v1.json"
 #[test]
 fn parses_minimum_valid_v2_manifest_for_installed_third_party_extension() {
     let toml = third_party_wasm_manifest("acme-tools", "acme-tools.echo");
-    let manifest =
-        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap();
+    let manifest = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap();
 
     assert_eq!(manifest.schema_version, MANIFEST_SCHEMA_VERSION);
     assert_eq!(manifest.id, ExtensionId::new("acme-tools").unwrap());
@@ -87,8 +108,13 @@ runtime_credentials = [
 ]
 default_permission = "allow""#,
     );
-    let manifest =
-        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap();
+    let manifest = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap();
 
     let credential = &manifest.capabilities[0].runtime_credentials[0];
     assert_eq!(
@@ -127,8 +153,13 @@ runtime_credentials = [
 ]
 default_permission = "allow""#,
     );
-    let manifest =
-        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap();
+    let manifest = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap();
 
     assert_eq!(
         manifest.capabilities[0].runtime_credentials[0].source,
@@ -149,8 +180,13 @@ runtime_credentials = [
 ]
 default_permission = "allow""#,
     );
-    let manifest =
-        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap();
+    let manifest = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap();
 
     assert_eq!(
         manifest.capabilities[0].runtime_credentials[0].provider_scopes,
@@ -177,8 +213,13 @@ default_permission = "allow""#
             ),
         );
 
-        let err = ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog())
-            .unwrap_err();
+        let err = ExtensionManifestV2::parse(
+            &toml,
+            ManifestSource::InstalledLocal,
+            &catalog(),
+            &contracts(),
+        )
+        .unwrap_err();
         assert!(matches!(err, ManifestV2Error::Invalid { .. }), "{err:?}");
         assert!(
             err.to_string().contains("provider scope"),
@@ -197,8 +238,13 @@ runtime_credentials = [
 ]
 default_permission = "allow""#,
     );
-    let err =
-        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
+    let err = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap_err();
 
     assert!(matches!(err, ManifestV2Error::Invalid { .. }), "{err:?}");
     assert!(
@@ -216,8 +262,13 @@ fn rejects_runtime_credentials_without_use_secret_effect() {
 ]
 default_permission = "allow""#,
     );
-    let err =
-        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
+    let err = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap_err();
     assert!(matches!(err, ManifestV2Error::Invalid { .. }), "{err:?}");
     assert!(err.to_string().contains("use_secret"), "{err:?}");
 }
@@ -232,8 +283,13 @@ runtime_credentials = [
 ]
 default_permission = "allow""#,
     );
-    let err =
-        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
+    let err = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap_err();
     assert!(matches!(err, ManifestV2Error::Invalid { .. }), "{err:?}");
     assert!(
         err.to_string()
@@ -252,8 +308,13 @@ runtime_credentials = [
 ]
 default_permission = "allow""#,
     );
-    let err =
-        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
+    let err = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap_err();
     assert!(matches!(err, ManifestV2Error::Invalid { .. }), "{err:?}");
     assert!(
         err.to_string()
@@ -278,8 +339,13 @@ runtime_credentials = [
 default_permission = "allow""#
             ),
         );
-        let err = ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog())
-            .unwrap_err();
+        let err = ExtensionManifestV2::parse(
+            &toml,
+            ManifestSource::InstalledLocal,
+            &catalog(),
+            &contracts(),
+        )
+        .unwrap_err();
         assert!(matches!(err, ManifestV2Error::Invalid { .. }), "{err:?}");
         assert!(err.to_string().contains("https scheme"), "{err:?}");
     }
@@ -295,8 +361,13 @@ runtime_credentials = [
 ]
 default_permission = "allow""#,
     );
-    let err =
-        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
+    let err = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("invalid secret"), "{err:?}");
 }
 
@@ -312,12 +383,22 @@ runtime_credentials = [
 ]
 default_permission = "allow""#,
     );
-    let err =
-        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
-    // Unknown source.type produces a Parse error (serde unknown variant), not Invalid.
+    let err = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap_err();
+    // Unknown source.type fails the owning capability-provider section
+    // fail-closed (serde unknown variant), never silently defaulting.
     assert!(
-        matches!(err, ManifestV2Error::Parse { .. }),
-        "expected parse error for unknown source type, got {err:?}"
+        matches!(
+            &err,
+            ManifestV2Error::HostApiSectionRejected { reason, .. }
+                if reason.contains("unknown variant `oauth_token_v99`")
+        ),
+        "expected section rejection for unknown source type, got {err:?}"
     );
 }
 
@@ -332,8 +413,13 @@ runtime_credentials = [
 ]
 default_permission = "allow""#,
     );
-    let err =
-        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
+    let err = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap_err();
     assert!(matches!(err, ManifestV2Error::Invalid { .. }), "{err:?}");
     assert!(
         err.to_string().contains("duplicate runtime credential"),
@@ -356,7 +442,13 @@ oops = true
 kind = "wasm"
 module = "wasm/echo.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "acme-tools.echo"
 description = "echo"
 default_permission = "allow"
@@ -364,22 +456,39 @@ visibility = "host_internal"
 input_schema_ref = "schemas/acme/echo.input.v1.json"
 output_schema_ref = "schemas/acme/echo.output.v1.json"
 "#;
-    let err =
-        ExtensionManifestV2::parse(toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
+    let err = ExtensionManifestV2::parse(
+        toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap_err();
     assert!(matches!(err, ManifestV2Error::Parse { .. }), "{err:?}");
 }
 
 #[test]
-fn rejects_unknown_top_level_tables_in_legacy_capability_manifests() {
+fn rejects_unknown_top_level_tables_as_unreferenced_operational_sections() {
     let toml = third_party_wasm_manifest("acme-tools", "acme-tools.echo")
         + r#"
 
 [surprise]
 enabled = true
 "#;
-    let err =
-        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
-    assert!(matches!(err, ManifestV2Error::Parse { .. }), "{err:?}");
+    let err = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            ManifestV2Error::UnreferencedOperationalSection { section }
+                if section.as_str() == "surprise"
+        ),
+        "{err:?}"
+    );
 }
 
 #[test]
@@ -397,7 +506,13 @@ trust = "first_party_requested"
 kind = "wasm"
 module = "wasm/echo.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "acme-tools.echo"
 description = "echo"
 default_permission = "allow"
@@ -407,8 +522,13 @@ output_schema_ref = "schemas/acme/echo.output.v1.json"
 "#,
         schema = MANIFEST_SCHEMA_VERSION,
     );
-    let err =
-        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
+    let err = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap_err();
     assert!(
         matches!(
             err,
@@ -436,7 +556,13 @@ trust = "third_party"
 kind = "first_party"
 service = "native_memory_provider"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "acme-tools.echo"
 description = "echo"
 default_permission = "allow"
@@ -446,8 +572,13 @@ output_schema_ref = "schemas/acme/echo.output.v1.json"
 "#,
         schema = MANIFEST_SCHEMA_VERSION,
     );
-    let err =
-        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
+    let err = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap_err();
     assert!(
         matches!(
             err,
@@ -475,7 +606,13 @@ trust = "first_party_requested"
 kind = "first_party"
 service = "native_memory_provider"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "ironclaw.memory.native.context.retrieve"
 implements = ["memory.context_retrieval.v1"]
 description = "Retrieve bounded provider-neutral memory context."
@@ -491,7 +628,8 @@ required_host_ports = [
         schema = MANIFEST_SCHEMA_VERSION,
     );
     let manifest =
-        ExtensionManifestV2::parse(&toml, ManifestSource::HostBundled, &catalog()).unwrap();
+        ExtensionManifestV2::parse(&toml, ManifestSource::HostBundled, &catalog(), &contracts())
+            .unwrap();
     assert_eq!(
         manifest.requested_trust,
         RequestedTrustClass::FirstPartyRequested
@@ -516,8 +654,13 @@ required_host_ports = [
 #[test]
 fn rejects_reserved_id_prefix_for_installed_source() {
     let toml = third_party_wasm_manifest("ironclaw.fake", "ironclaw.fake.echo");
-    let err = ExtensionManifestV2::parse(&toml, ManifestSource::RegistryInstalled, &catalog())
-        .unwrap_err();
+    let err = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::RegistryInstalled,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap_err();
     assert!(
         matches!(err, ManifestV2Error::ReservedIdForInstalledSource { .. }),
         "{err:?}"
@@ -527,8 +670,13 @@ fn rejects_reserved_id_prefix_for_installed_source() {
 #[test]
 fn rejects_capability_id_without_provider_prefix() {
     let toml = third_party_wasm_manifest("acme-tools", "other.echo");
-    let err =
-        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
+    let err = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap_err();
     assert!(
         matches!(err, ManifestV2Error::CapabilityIdNotPrefixed { .. }),
         "{err:?}"
@@ -550,7 +698,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/echo.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "acme-tools.echo"
 description = "echo"
 default_permission = "allow"
@@ -561,8 +715,13 @@ required_host_ports = ["host.does.not.exist"]
 "#,
         schema = MANIFEST_SCHEMA_VERSION,
     );
-    let err =
-        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
+    let err = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap_err();
     assert!(
         matches!(err, ManifestV2Error::UnknownHostPort { .. }),
         "{err:?}"
@@ -584,7 +743,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/echo.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "acme-tools.echo"
 description = "echo"
 default_permission = "allow"
@@ -594,8 +759,13 @@ output_schema_ref = "schemas/acme/echo.output.v1.json"
 "#,
         schema = MANIFEST_SCHEMA_VERSION,
     );
-    let manifest =
-        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap();
+    let manifest = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap();
     assert_eq!(manifest.capabilities.len(), 1);
     assert!(manifest.capabilities[0].prompt_doc_ref.is_none());
 }
@@ -621,7 +791,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/echo.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "acme-tools.echo"
 description = "echo"
 default_permission = "allow"
@@ -632,8 +808,13 @@ output_schema_ref = "schemas/acme/echo.output.v1.json"
             schema = MANIFEST_SCHEMA_VERSION,
             bad = bad_ref,
         );
-        let err = ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog())
-            .unwrap_err();
+        let err = ExtensionManifestV2::parse(
+            &toml,
+            ManifestSource::InstalledLocal,
+            &catalog(),
+            &contracts(),
+        )
+        .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -661,7 +842,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/echo.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "acme-tools.echo"
 description = "echo"
 default_permission = "allow"
@@ -669,8 +856,13 @@ visibility = "host_internal"
 input_schema_ref = "schemas/acme/echo.input.v1.json"
 output_schema_ref = "schemas/acme/echo.output.v1.json"
 "#;
-    let err =
-        ExtensionManifestV2::parse(toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
+    let err = ExtensionManifestV2::parse(
+        toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap_err();
     assert!(
         matches!(err, ManifestV2Error::SchemaVersion { .. }),
         "{err:?}"
@@ -691,7 +883,13 @@ description = "x"
 kind = "wasm"
 module = "wasm/echo.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "acme-tools.echo"
 description = "echo"
 default_permission = "allow"
@@ -701,8 +899,13 @@ output_schema_ref = "schemas/acme/echo.output.v1.json"
 "#,
         schema = MANIFEST_SCHEMA_VERSION,
     );
-    let manifest =
-        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap();
+    let manifest = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap();
     assert_eq!(manifest.requested_trust, RequestedTrustClass::Untrusted);
     assert_eq!(manifest.descriptor_trust_default, TrustClass::Sandbox);
 }
@@ -723,7 +926,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/echo.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "acme-tools.echo"
 description = "echo"
 default_permission = "allow"
@@ -736,8 +945,13 @@ output_schema_ref = "schemas/acme/echo.output.v1.json"
             version = if field == "version" { value } else { "0.1" },
             description = if field == "description" { value } else { "x" },
         );
-        let err = ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog())
-            .unwrap_err();
+        let err = ExtensionManifestV2::parse(
+            &toml,
+            ManifestSource::InstalledLocal,
+            &catalog(),
+            &contracts(),
+        )
+        .unwrap_err();
         assert!(
             matches!(err, ManifestV2Error::Invalid { .. }),
             "{field}={value:?} should be rejected, got {err:?}"
@@ -773,7 +987,13 @@ trust = "third_party"
 kind = "wasm"
 module = "{bad}"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "acme-tools.echo"
 description = "echo"
 default_permission = "allow"
@@ -784,8 +1004,13 @@ output_schema_ref = "schemas/acme/echo.output.v1.json"
             schema = MANIFEST_SCHEMA_VERSION,
             bad = bad.replace('\\', "\\\\"),
         );
-        let err = ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog())
-            .unwrap_err();
+        let err = ExtensionManifestV2::parse(
+            &toml,
+            ManifestSource::InstalledLocal,
+            &catalog(),
+            &contracts(),
+        )
+        .unwrap_err();
         assert!(
             matches!(err, ManifestV2Error::InvalidWasmModuleRef { .. }),
             "wasm module {bad:?} should be rejected, got {err:?}"
@@ -796,7 +1021,13 @@ output_schema_ref = "schemas/acme/echo.output.v1.json"
 #[test]
 fn mcp_runtime_enforces_transport_and_shape() {
     let cap_block = r#"
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "acme-mcp.search"
 description = "search"
 default_permission = "allow"
@@ -823,8 +1054,13 @@ trust = "third_party"
         "[runtime]\nkind = \"mcp\"\ntransport = \"sse\"\nurl = \"https://example.com/mcp\"\n",
     ] {
         let toml = format!("{header}\n{runtime}\n{cap_block}");
-        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog())
-            .unwrap_or_else(|err| panic!("valid mcp runtime rejected: {err:?}\n{runtime}"));
+        ExtensionManifestV2::parse(
+            &toml,
+            ManifestSource::InstalledLocal,
+            &catalog(),
+            &contracts(),
+        )
+        .unwrap_or_else(|err| panic!("valid mcp runtime rejected: {err:?}\n{runtime}"));
     }
 
     // rejects: stdio with url; http without url; http with command; unknown transport; ftp url.
@@ -838,8 +1074,13 @@ trust = "third_party"
         "[runtime]\nkind = \"mcp\"\ntransport = \"\"\n",
     ] {
         let toml = format!("{header}\n{runtime}\n{cap_block}");
-        let err = ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog())
-            .unwrap_err();
+        let err = ExtensionManifestV2::parse(
+            &toml,
+            ManifestSource::InstalledLocal,
+            &catalog(),
+            &contracts(),
+        )
+        .unwrap_err();
         assert!(
             matches!(err, ManifestV2Error::InvalidMcpRuntime { .. }),
             "runtime should be rejected:\n{runtime}\n got {err:?}"
@@ -862,7 +1103,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/echo.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "acme-tools.echo"
 description = "echo"
 default_permission = "allow"
@@ -873,8 +1120,13 @@ required_host_ports = ["host.events.audit", "host.events.audit"]
 "#,
         schema = MANIFEST_SCHEMA_VERSION,
     );
-    let err =
-        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
+    let err = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap_err();
     assert!(
         matches!(err, ManifestV2Error::DuplicateRequiredHostPort { .. }),
         "{err:?}"
@@ -896,7 +1148,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/echo.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "acme-tools.echo"
 implements = ["memory.context_retrieval.v1", "memory.context_retrieval.v1"]
 description = "echo"
@@ -907,8 +1165,13 @@ output_schema_ref = "schemas/acme/echo.output.v1.json"
 "#,
         schema = MANIFEST_SCHEMA_VERSION,
     );
-    let err =
-        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
+    let err = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap_err();
     assert!(
         matches!(err, ManifestV2Error::DuplicateImplementedProfile { .. }),
         "{err:?}"
@@ -930,7 +1193,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/echo.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "acme-tools.echo"
 description = "echo"
 default_permission = "allow"
@@ -941,9 +1210,21 @@ sneaky = true
 "#,
         schema = MANIFEST_SCHEMA_VERSION,
     );
-    let err =
-        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
-    assert!(matches!(err, ManifestV2Error::Parse { .. }), "{err:?}");
+    let err = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            ManifestV2Error::HostApiSectionRejected { reason, .. }
+                if reason.contains("unknown field `sneaky`")
+        ),
+        "{err:?}"
+    );
 }
 
 #[test]
@@ -961,7 +1242,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/echo.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "acme-tools.echo"
 description = "echo"
 default_permission = "allow"
@@ -969,7 +1256,7 @@ visibility = "host_internal"
 input_schema_ref = "schemas/acme/echo.input.v1.json"
 output_schema_ref = "schemas/acme/echo.output.v1.json"
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "acme-tools.echo"
 description = "echo (dup)"
 default_permission = "allow"
@@ -979,8 +1266,13 @@ output_schema_ref = "schemas/acme/echo.output.v1.json"
 "#,
         schema = MANIFEST_SCHEMA_VERSION,
     );
-    let err =
-        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
+    let err = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap_err();
     assert!(
         matches!(err, ManifestV2Error::DuplicateCapability { .. }),
         "{err:?}"
@@ -999,7 +1291,8 @@ fn host_bundled_accepts_non_reserved_id() {
     // accidentally become a "must use" rule downstream.
     let toml = third_party_wasm_manifest("memory-native", "memory-native.echo");
     let manifest =
-        ExtensionManifestV2::parse(&toml, ManifestSource::HostBundled, &catalog()).unwrap();
+        ExtensionManifestV2::parse(&toml, ManifestSource::HostBundled, &catalog(), &contracts())
+            .unwrap();
     assert_eq!(manifest.source, ManifestSource::HostBundled);
     assert_eq!(manifest.id, ExtensionId::new("memory-native").unwrap());
 }
@@ -1019,7 +1312,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/acme.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "acme-tools.echo"
 implements = ["acme.echo.v1"]
 description = "echo"
@@ -1028,7 +1327,7 @@ visibility = "host_internal"
 input_schema_ref = "schemas/acme/echo.input.v1.json"
 output_schema_ref = "schemas/acme/echo.output.v1.json"
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "acme-tools.reverse"
 implements = ["acme.reverse.v1", "acme.string_ops.v1"]
 description = "reverse a string"
@@ -1040,8 +1339,13 @@ prompt_doc_ref = "prompt/acme/reverse.md"
 "#,
         schema = MANIFEST_SCHEMA_VERSION,
     );
-    let manifest =
-        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap();
+    let manifest = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap();
     assert_eq!(manifest.capabilities.len(), 2);
     assert_eq!(
         manifest.capabilities[0].implements,
@@ -1066,8 +1370,13 @@ fn rejects_manifest_exceeding_max_size() {
     while huge.len() <= MAX_MANIFEST_BYTES {
         huge.push_str("# filler line to defeat short-circuit eval\n");
     }
-    let err =
-        ExtensionManifestV2::parse(&huge, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
+    let err = ExtensionManifestV2::parse(
+        &huge,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap_err();
     assert!(
         matches!(err, ManifestV2Error::ManifestTooLarge { bytes, max } if bytes == huge.len() && max == MAX_MANIFEST_BYTES),
         "{err:?}"
@@ -1089,7 +1398,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/acme.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "acme-tools.echo"
 description = "echo"
 default_permission = "allow"
@@ -1100,8 +1415,13 @@ output_schema_ref = "schemas/acme/echo.output.v1.json"
 "#,
         schema = MANIFEST_SCHEMA_VERSION,
     );
-    let err =
-        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
+    let err = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap_err();
     assert!(
         matches!(err, ManifestV2Error::DuplicateEffect { .. }),
         "{err:?}"
@@ -1126,7 +1446,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/acme.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "acme-tools.echo"
 description = "echo"
 default_permission = "allow"
@@ -1136,8 +1462,13 @@ output_schema_ref = "schemas/acme/echo.output.v1.json"
 "#,
         schema = MANIFEST_SCHEMA_VERSION,
     );
-    let err =
-        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
+    let err = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap_err();
     match err {
         ManifestV2Error::InvalidSchemaRef { field, .. } => {
             assert_eq!(field, "input_schema_ref");
@@ -1189,14 +1520,17 @@ impl HostApiManifestContract for FakeHostApiContract {
         &self,
         _host_api: &HostApiRefV2,
         section: &toml::Value,
-    ) -> Result<(), String> {
+    ) -> Result<(), HostApiSectionError> {
         let table = section
             .as_table()
-            .ok_or_else(|| "section must be a table".to_string())?;
+            .ok_or_else(|| HostApiSectionError::from("section must be a table"))?;
         if table.contains_key(self.required_key) {
             Ok(())
         } else {
-            Err(format!("missing required key {}", self.required_key))
+            Err(HostApiSectionError::from(format!(
+                "missing required key {}",
+                self.required_key
+            )))
         }
     }
 }
@@ -1265,7 +1599,7 @@ prompt_doc_ref = "prompts/telegram/send_message.md"
 #[test]
 fn parses_multi_host_api_extension_contracts_with_explicit_sections() {
     let registry = host_api_registry();
-    let manifest = ExtensionManifestV2::parse_with_host_api_contracts(
+    let manifest = ExtensionManifestV2::parse(
         &telegram_multi_host_api_manifest(),
         ManifestSource::InstalledLocal,
         &catalog(),
@@ -1295,28 +1629,13 @@ fn parses_multi_host_api_extension_contracts_with_explicit_sections() {
 }
 
 #[test]
-fn host_api_manifests_require_contract_registry() {
-    let err = ExtensionManifestV2::parse(
-        &telegram_multi_host_api_manifest(),
-        ManifestSource::InstalledLocal,
-        &catalog(),
-    )
-    .unwrap_err();
-    assert!(matches!(err, ManifestV2Error::Invalid { .. }), "{err:?}");
-}
-
-#[test]
 fn rejects_unknown_host_api_fail_closed() {
     let registry = host_api_registry();
     let toml = telegram_multi_host_api_manifest()
         .replace("ironclaw.product_adapter/v1", "ironclaw.unknown/v1");
-    let err = ExtensionManifestV2::parse_with_host_api_contracts(
-        &toml,
-        ManifestSource::InstalledLocal,
-        &catalog(),
-        &registry,
-    )
-    .unwrap_err();
+    let err =
+        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog(), &registry)
+            .unwrap_err();
     assert!(
         matches!(err, ManifestV2Error::UnknownHostApi { .. }),
         "{err:?}"
@@ -1336,13 +1655,9 @@ section = "capability_provider.more_tools"
 [capability_provider.more_tools]
 capabilities = [{ id = "edit_message" }]
 "#;
-    let err = ExtensionManifestV2::parse_with_host_api_contracts(
-        &toml,
-        ManifestSource::InstalledLocal,
-        &catalog(),
-        &registry,
-    )
-    .unwrap_err();
+    let err =
+        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog(), &registry)
+            .unwrap_err();
     assert!(
         matches!(err, ManifestV2Error::DuplicateHostApi { .. }),
         "{err:?}"
@@ -1362,13 +1677,9 @@ section = "product_adapter.admin"
 [product_adapter.admin]
 surface_kind = "telegram_admin"
 "#;
-    let manifest = ExtensionManifestV2::parse_with_host_api_contracts(
-        &toml,
-        ManifestSource::InstalledLocal,
-        &catalog(),
-        &registry,
-    )
-    .unwrap();
+    let manifest =
+        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog(), &registry)
+            .unwrap();
     assert_eq!(manifest.host_apis.len(), 3);
 }
 
@@ -1379,13 +1690,9 @@ fn rejects_missing_referenced_host_api_section() {
         "section = \"product_adapter.inbound\"",
         "section = \"product_adapter.missing\"",
     );
-    let err = ExtensionManifestV2::parse_with_host_api_contracts(
-        &toml,
-        ManifestSource::InstalledLocal,
-        &catalog(),
-        &registry,
-    )
-    .unwrap_err();
+    let err =
+        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog(), &registry)
+            .unwrap_err();
     assert!(
         matches!(err, ManifestV2Error::MissingHostApiSection { .. }),
         "{err:?}"
@@ -1407,13 +1714,9 @@ icon = "telegram"
 [x.experimental]
 note = "ignored by core parser"
 "#;
-    let err = ExtensionManifestV2::parse_with_host_api_contracts(
-        &toml,
-        ManifestSource::InstalledLocal,
-        &catalog(),
-        &registry,
-    )
-    .unwrap_err();
+    let err =
+        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog(), &registry)
+            .unwrap_err();
     assert!(
         matches!(err, ManifestV2Error::UnreferencedOperationalSection { .. }),
         "{err:?}"
@@ -1434,13 +1737,9 @@ visibility = "host_internal"
 input_schema_ref = "schemas/telegram/legacy.input.v1.json"
 output_schema_ref = "schemas/telegram/legacy.output.v1.json"
 "#;
-    let err = ExtensionManifestV2::parse_with_host_api_contracts(
-        &toml,
-        ManifestSource::InstalledLocal,
-        &catalog(),
-        &registry,
-    )
-    .unwrap_err();
+    let err =
+        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog(), &registry)
+            .unwrap_err();
     assert!(matches!(err, ManifestV2Error::Invalid { .. }), "{err:?}");
 }
 
@@ -1476,7 +1775,7 @@ fn duplicate_contract_registration_does_not_replace_existing_contract() {
     );
     registry.register(capabilities).unwrap();
 
-    ExtensionManifestV2::parse_with_host_api_contracts(
+    ExtensionManifestV2::parse(
         &telegram_multi_host_api_manifest(),
         ManifestSource::InstalledLocal,
         &catalog(),
@@ -1518,13 +1817,9 @@ surface_kind = "telegram"
         schema = MANIFEST_SCHEMA_VERSION,
     );
 
-    let err = ExtensionManifestV2::parse_with_host_api_contracts(
-        &toml,
-        ManifestSource::InstalledLocal,
-        &catalog(),
-        &registry,
-    )
-    .unwrap_err();
+    let err =
+        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog(), &registry)
+            .unwrap_err();
     assert!(
         matches!(err, ManifestV2Error::DuplicateHostApiSection { .. }),
         "{err:?}"
@@ -1570,7 +1865,7 @@ impl HostApiManifestContract for SurfaceProjectingContract {
         &self,
         _host_api: &HostApiRefV2,
         _section: &toml::Value,
-    ) -> Result<(), String> {
+    ) -> Result<(), HostApiSectionError> {
         Ok(())
     }
 
@@ -1579,7 +1874,7 @@ impl HostApiManifestContract for SurfaceProjectingContract {
         _context: &HostApiManifestContext<'_>,
         _host_api: &HostApiRefV2,
         _section: &toml::Value,
-    ) -> Result<HostApiManifestProjection, String> {
+    ) -> Result<HostApiManifestProjection, HostApiSectionError> {
         Ok(HostApiManifestProjection {
             surfaces: self.surfaces.clone(),
             ..HostApiManifestProjection::default()
@@ -1601,7 +1896,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/example.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "{ext}.read"
 description = "Reads provider data"
 effects = ["network", "use_secret"]
@@ -1623,8 +1924,13 @@ output_schema_ref = "schemas/example/read.output.v1.json"
 #[test]
 fn tool_only_manifest_projects_one_tool_surface_per_capability_and_nothing_else() {
     let toml = third_party_wasm_manifest("acme-tools", "acme-tools.echo");
-    let manifest =
-        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap();
+    let manifest = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap();
 
     let surfaces = manifest.capability_surfaces();
     assert_eq!(surfaces.len(), 1, "{surfaces:?}");
@@ -1657,7 +1963,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/example.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "acme-tools.search"
 description = "Search"
 effects = ["network", "use_secret"]
@@ -1669,7 +1981,7 @@ visibility = "model"
 input_schema_ref = "schemas/acme/search.input.v1.json"
 output_schema_ref = "schemas/acme/search.output.v1.json"
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "acme-tools.send"
 description = "Send"
 effects = ["network", "use_secret"]
@@ -1681,7 +1993,7 @@ visibility = "model"
 input_schema_ref = "schemas/acme/send.input.v1.json"
 output_schema_ref = "schemas/acme/send.output.v1.json"
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "acme-tools.legacy"
 description = "Legacy manual-token path"
 effects = ["network", "use_secret"]
@@ -1695,8 +2007,13 @@ output_schema_ref = "schemas/acme/legacy.output.v1.json"
 "#,
         schema = MANIFEST_SCHEMA_VERSION,
     );
-    let manifest =
-        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap();
+    let manifest = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap();
 
     let auth_surfaces: Vec<_> = manifest
         .capability_surfaces()
@@ -1738,6 +2055,7 @@ fn extensions_sharing_one_provider_project_the_same_auth_provider() {
         ),
         ManifestSource::InstalledLocal,
         &catalog(),
+        &contracts(),
     )
     .unwrap();
     let drive = ExtensionManifestV2::parse(
@@ -1748,6 +2066,7 @@ fn extensions_sharing_one_provider_project_the_same_auth_provider() {
         ),
         ManifestSource::InstalledLocal,
         &catalog(),
+        &contracts(),
     )
     .unwrap();
 
@@ -1790,7 +2109,7 @@ fn contract_projected_channel_surface_is_retained_with_origin() {
         }))
         .unwrap();
 
-    let manifest = ExtensionManifestV2::parse_with_host_api_contracts(
+    let manifest = ExtensionManifestV2::parse(
         &telegram_multi_host_api_manifest(),
         ManifestSource::InstalledLocal,
         &catalog(),
@@ -1862,7 +2181,7 @@ surface_kind = "telegram"
 "#,
             schema = MANIFEST_SCHEMA_VERSION,
         );
-        let err = ExtensionManifestV2::parse_with_host_api_contracts(
+        let err = ExtensionManifestV2::parse(
             &toml,
             ManifestSource::InstalledLocal,
             &catalog(),

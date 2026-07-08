@@ -198,7 +198,7 @@ async fn convert_installation(
         input.version,
         input.description,
     );
-    let manifest = match ExtensionManifestRecord::from_toml_with_contracts(
+    let manifest = match ExtensionManifestRecord::from_toml(
         manifest_toml,
         ManifestSource::InstalledLocal,
         catalog,

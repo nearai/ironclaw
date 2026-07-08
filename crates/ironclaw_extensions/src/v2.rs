@@ -9,6 +9,9 @@
 //! - manifests carry a loader-supplied [`ManifestSource`]; first-party / system
 //!   trust and runtime are only ever effective for [`ManifestSource::HostBundled`];
 //! - extension IDs starting with `ironclaw.` are reserved for HostBundled;
+//! - every manifest declares at least one `[[host_api]]` contract; top-level
+//!   `[[capabilities]]` is rejected — capabilities are declared under
+//!   `ironclaw.capability_provider/v1` sections;
 //! - installed manifests must use `wasm` / `mcp` / `script` runtimes only;
 //! - every capability declares `visibility`, relative
 //!   [`CapabilityProfileSchemaRef`] input/output schema refs, optional lazy
@@ -247,11 +250,43 @@ pub struct HostApiManifestProjection {
     pub surfaces: Vec<CapabilitySurfaceKind>,
 }
 
+/// Error a host API contract raises for one manifest section.
+///
+/// Contracts that validate with this crate's own vocabulary (the
+/// capability-provider contract parses [`CapabilityDeclV2`] declarations)
+/// preserve the typed [`ManifestV2Error`] so callers keep precise variants
+/// (`DuplicateEffect`, `UnknownHostPort`, ...). Domain crates outside this
+/// crate report a redacted reason string, which the parse path wraps as
+/// [`ManifestV2Error::HostApiSectionRejected`].
+#[derive(Debug)]
+pub enum HostApiSectionError {
+    Manifest(Box<ManifestV2Error>),
+    Contract(String),
+}
+
+impl From<ManifestV2Error> for HostApiSectionError {
+    fn from(error: ManifestV2Error) -> Self {
+        Self::Manifest(Box::new(error))
+    }
+}
+
+impl From<String> for HostApiSectionError {
+    fn from(reason: String) -> Self {
+        Self::Contract(reason)
+    }
+}
+
+impl From<&str> for HostApiSectionError {
+    fn from(reason: &str) -> Self {
+        Self::Contract(reason.to_string())
+    }
+}
+
 /// Host API contract validator registered by composition.
 ///
 /// `ironclaw_extensions` owns the generic envelope and section dispatch. Domain
-/// crates own section patterns, cardinality, typed schema validation, and
-/// projection into their read models.
+/// crates own section patterns, cardinality, typed section schema validation,
+/// and projection into their read models.
 pub trait HostApiManifestContract: Send + Sync {
     fn id(&self) -> &HostApiId;
 
@@ -265,14 +300,14 @@ pub trait HostApiManifestContract: Send + Sync {
         &self,
         host_api: &HostApiRefV2,
         section: &toml::Value,
-    ) -> Result<(), String>;
+    ) -> Result<(), HostApiSectionError>;
 
     fn validate_section_with_context(
         &self,
         context: &HostApiManifestContext<'_>,
         host_api: &HostApiRefV2,
         section: &toml::Value,
-    ) -> Result<(), String> {
+    ) -> Result<(), HostApiSectionError> {
         let _ = context;
         self.validate_section(host_api, section)
     }
@@ -282,7 +317,7 @@ pub trait HostApiManifestContract: Send + Sync {
         context: &HostApiManifestContext<'_>,
         host_api: &HostApiRefV2,
         section: &toml::Value,
-    ) -> Result<HostApiManifestProjection, String> {
+    ) -> Result<HostApiManifestProjection, HostApiSectionError> {
         self.validate_section_with_context(context, host_api, section)?;
         Ok(HostApiManifestProjection::default())
     }
@@ -348,10 +383,15 @@ impl HostApiContractRegistry {
             };
             let section_projection = contract
                 .project_section_with_context(&context, host_api, section)
-                .map_err(|reason| ManifestV2Error::HostApiSectionRejected {
-                    id: host_api.id.clone(),
-                    section: host_api.section.clone(),
-                    reason,
+                .map_err(|error| match error {
+                    HostApiSectionError::Manifest(error) => *error,
+                    HostApiSectionError::Contract(reason) => {
+                        ManifestV2Error::HostApiSectionRejected {
+                            id: host_api.id.clone(),
+                            section: host_api.section.clone(),
+                            reason,
+                        }
+                    }
                 })?;
             for capability in section_projection.capabilities {
                 if !seen_capabilities.insert(capability.id.clone()) {
@@ -542,8 +582,9 @@ pub struct ExtensionManifestV2 {
     /// the policy; they must not read this field as authoritative.
     pub descriptor_trust_default: TrustClass,
     pub runtime: ExtensionRuntimeV2,
-    /// Host API contracts this extension implements. Empty only for legacy v2
-    /// capability-only manifests during cutover.
+    /// Host API contracts this extension implements. Never empty: every
+    /// manifest declares at least one contract, and every capability and
+    /// surface reaches the manifest through one.
     ///
     /// Contract handlers must treat manifest trust fields as untrusted
     /// declaration metadata. Runtime authority and effective trust must come
@@ -553,7 +594,7 @@ pub struct ExtensionManifestV2 {
     pub host_apis: Vec<HostApiRefV2>,
     pub capabilities: Vec<CapabilityDeclV2>,
     /// Surfaces projected by host API contract sections during
-    /// `parse_with_host_api_contracts` (channel and future section-declared
+    /// [`Self::parse`] (channel and future section-declared
     /// kinds). Tool and auth surfaces are *not* stored here — they derive on
     /// demand from capability declarations; [`Self::capability_surfaces`]
     /// returns the complete set. Empty when the manifest was parsed without
@@ -622,10 +663,6 @@ pub enum ManifestV2Error {
         prefix: &'static str,
     },
     #[error(
-        "manifest source {manifest_source:?} is not allowed to use legacy top-level capabilities; declare ironclaw.capability_provider/v1 host_api instead"
-    )]
-    LegacyTopLevelCapabilitiesForInstalledSource { manifest_source: ManifestSource },
-    #[error(
         "capability {capability} declares unknown host port '{port}' (not in host-defined catalog)"
     )]
     UnknownHostPort {
@@ -687,13 +724,21 @@ impl ExtensionManifestV2 {
         self.runtime.kind()
     }
 
-    /// Parse a v2 manifest TOML body and validate it against `host_port_catalog`.
+    /// Parse a v2 manifest TOML body: validate the envelope against
+    /// `host_port_catalog`, require at least one `[[host_api]]` contract,
+    /// and validate/project every declared contract section through the
+    /// composition-supplied registry.
+    ///
+    /// This is the only parse entry point. Every capability, surface, and
+    /// operational section reaches the manifest through a registered host
+    /// API contract — there is no contract-free manifest form.
     ///
     /// `source` is supplied by the loader/install path, never read from TOML.
     pub fn parse(
         input: &str,
         source: ManifestSource,
         host_port_catalog: &HostPortCatalog,
+        registry: &HostApiContractRegistry,
     ) -> Result<Self, ManifestV2Error> {
         // Fail closed on pathological inputs *before* invoking the TOML parser.
         // `toml::from_str` will otherwise read and allocate the full input.
@@ -704,84 +749,12 @@ impl ExtensionManifestV2 {
             });
         }
         let document = RawManifestDocumentV2::parse(input)?;
-        if !document.raw.host_api.is_empty() {
-            return Err(ManifestV2Error::Invalid {
-                reason: "host_api manifests require parse_with_host_api_contracts".to_string(),
-            });
-        }
-        if let Some(key) = document.sections.first_non_envelope_top_level_key() {
-            return Err(ManifestV2Error::Parse {
-                reason: format!("unknown top-level field {key:?}"),
-            });
-        }
-        Self::from_raw(document.raw, source, host_port_catalog, &document.sections)
-    }
-
-    /// Parse a v2 manifest and validate every `[[host_api]]` contract through
-    /// the composition-supplied registry.
-    pub fn parse_with_host_api_contracts(
-        input: &str,
-        source: ManifestSource,
-        host_port_catalog: &HostPortCatalog,
-        registry: &HostApiContractRegistry,
-    ) -> Result<Self, ManifestV2Error> {
-        if input.len() > MAX_MANIFEST_BYTES {
-            return Err(ManifestV2Error::ManifestTooLarge {
-                bytes: input.len(),
-                max: MAX_MANIFEST_BYTES,
-            });
-        }
-        let document = RawManifestDocumentV2::parse(input)?;
-        let mut manifest =
-            Self::from_raw(document.raw, source, host_port_catalog, &document.sections)?;
+        let mut manifest = Self::from_raw(document.raw, source, &document.sections)?;
         manifest.project_and_extend_capabilities(
             &document.sections,
             host_port_catalog,
             registry,
         )?;
-        Ok(manifest)
-    }
-
-    /// Parse a v2 manifest for production discovery.
-    ///
-    /// Legacy top-level capability manifests keep the stricter no-extra-table
-    /// rule from [`Self::parse`]. Manifests that declare `[[host_api]]` are
-    /// validated through the composition-supplied contract registry.
-    pub fn parse_with_optional_host_api_contracts(
-        input: &str,
-        source: ManifestSource,
-        host_port_catalog: &HostPortCatalog,
-        registry: &HostApiContractRegistry,
-    ) -> Result<Self, ManifestV2Error> {
-        if input.len() > MAX_MANIFEST_BYTES {
-            return Err(ManifestV2Error::ManifestTooLarge {
-                bytes: input.len(),
-                max: MAX_MANIFEST_BYTES,
-            });
-        }
-        let document = RawManifestDocumentV2::parse(input)?;
-        let mut manifest =
-            Self::from_raw(document.raw, source, host_port_catalog, &document.sections)?;
-        if manifest.host_apis.is_empty() {
-            if let Some(key) = document.sections.first_non_envelope_top_level_key() {
-                return Err(ManifestV2Error::Parse {
-                    reason: format!("unknown top-level field {key:?}"),
-                });
-            }
-            if !source.allows_first_party() && !manifest.capabilities.is_empty() {
-                return Err(
-                    ManifestV2Error::LegacyTopLevelCapabilitiesForInstalledSource {
-                        manifest_source: source,
-                    },
-                );
-            }
-        } else {
-            manifest.project_and_extend_capabilities(
-                &document.sections,
-                host_port_catalog,
-                registry,
-            )?;
-        }
         Ok(manifest)
     }
 
@@ -876,7 +849,6 @@ impl ExtensionManifestV2 {
     fn from_raw(
         raw: RawManifestV2,
         source: ManifestSource,
-        host_port_catalog: &HostPortCatalog,
         sections: &ManifestSectionsV2,
     ) -> Result<Self, ManifestV2Error> {
         if raw.schema_version != MANIFEST_SCHEMA_VERSION {
@@ -904,17 +876,16 @@ impl ExtensionManifestV2 {
                 reason: "description must not be empty".to_string(),
             });
         }
-        if raw.capabilities.is_empty() && raw.host_api.is_empty() {
+        if !raw.capabilities.is_empty() {
             return Err(ManifestV2Error::Invalid {
-                reason: "at least one host_api contract or legacy capability is required"
+                reason: "top-level [[capabilities]] is not supported; declare capabilities \
+                         under an ironclaw.capability_provider/v1 host_api section"
                     .to_string(),
             });
         }
-        if !raw.host_api.is_empty() && !raw.capabilities.is_empty() {
+        if raw.host_api.is_empty() {
             return Err(ManifestV2Error::Invalid {
-                reason:
-                    "top-level capabilities are not allowed when host_api contracts are declared"
-                        .to_string(),
+                reason: "at least one host_api contract is required".to_string(),
             });
         }
 
@@ -953,16 +924,9 @@ impl ExtensionManifestV2 {
 
         let hooks = validate_hook_entries(raw.hooks)?;
 
-        let mut seen_capabilities = BTreeSet::new();
-        let mut capabilities = Vec::with_capacity(raw.capabilities.len());
-        for raw_cap in raw.capabilities {
-            let cap = CapabilityDeclV2::from_raw(raw_cap, &id, host_port_catalog)?;
-            if !seen_capabilities.insert(cap.id.clone()) {
-                return Err(ManifestV2Error::DuplicateCapability { id: cap.id });
-            }
-            capabilities.push(cap);
-        }
-
+        // `capabilities` and `host_api_surfaces` start empty and are filled
+        // exclusively by host API contract projection in
+        // [`Self::project_and_extend_capabilities`].
         Ok(Self {
             schema_version: raw.schema_version,
             id,
@@ -974,7 +938,7 @@ impl ExtensionManifestV2 {
             descriptor_trust_default,
             runtime,
             host_apis,
-            capabilities,
+            capabilities: Vec::new(),
             host_api_surfaces: Vec::new(),
             hooks,
         })
@@ -1464,13 +1428,6 @@ struct ManifestSectionsV2 {
 }
 
 impl ManifestSectionsV2 {
-    fn first_non_envelope_top_level_key(&self) -> Option<&str> {
-        self.table
-            .keys()
-            .find(|key| !is_envelope_key(key))
-            .map(String::as_str)
-    }
-
     fn get(&self, path: &ManifestSectionPath) -> Result<&toml::Value, ManifestV2Error> {
         let mut current = &self.table;
         let mut segments = path.segments().peekable();
@@ -1584,8 +1541,12 @@ struct RawManifestV2 {
     runtime: RawRuntimeV2,
     #[serde(default)]
     host_api: Vec<RawHostApiRefV2>,
+    /// Legacy top-level `[[capabilities]]` payload. Kept only so its
+    /// presence can be rejected with an actionable error; entries are never
+    /// parsed. Capabilities are declared under
+    /// `ironclaw.capability_provider/v1` host_api sections.
     #[serde(default)]
-    capabilities: Vec<RawCapabilityV2>,
+    capabilities: Vec<toml::Value>,
     /// Raw `[[hooks]]` entries. Each is an arbitrary TOML table validated
     /// structurally here (table shape, non-empty `id`, size bound) and
     /// projected into a typed hook entry by the composition loader. Kept as

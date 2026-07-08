@@ -45,7 +45,7 @@ pub(crate) fn bundled_host_ingress_descriptors(
     let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(projection)?;
     let contracts =
         ironclaw_host_runtime::default_host_api_contract_registry().map_err(projection)?;
-    let record = ExtensionManifestRecord::from_toml_with_contracts(
+    let record = ExtensionManifestRecord::from_toml(
         manifest_toml,
         ManifestSource::HostBundled,
         &host_ports,

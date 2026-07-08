@@ -80,7 +80,13 @@ trust = "first_party_requested"
 kind = "wasm"
 module = "wasm/visprobe.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "visprobe.search"
 description = "Model-visible probe capability"
 effects = ["network"]
@@ -89,7 +95,7 @@ visibility = "model"
 input_schema_ref = "schemas/search.input.json"
 output_schema_ref = "schemas/search.output.json"
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "visprobe.audit"
 description = "Host-internal probe capability"
 effects = ["network", "external_write"]
@@ -104,6 +110,7 @@ fn visibility_probe_package() -> HarnessResult<ironclaw_extensions::ExtensionPac
         VISIBILITY_PROBE_MANIFEST,
         ironclaw_extensions::ManifestSource::HostBundled,
         &ironclaw_host_api::host_port::HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )?;
     Ok(ironclaw_extensions::ExtensionPackage::from_manifest(
         manifest,
@@ -249,4 +256,15 @@ fn extension_lifecycle_credential_seeds() -> &'static [ExtensionLifecycleCredent
             scopes: &[],
         },
     ]
+}
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
 }

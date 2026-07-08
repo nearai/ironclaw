@@ -683,9 +683,17 @@ fn nearai_mcp_manifest_toml_for_endpoint(
     runtime.insert("url".to_string(), Value::String(endpoint.url.clone()));
 
     let capabilities = manifest
-        .get_mut("capabilities")
+        .get_mut("capability_provider")
+        .and_then(Value::as_table_mut)
+        .and_then(|section| section.get_mut("tools"))
+        .and_then(Value::as_table_mut)
+        .and_then(|tools| tools.get_mut("capabilities"))
         .and_then(Value::as_array_mut)
-        .ok_or_else(|| map_binding_error("bundled NEAR AI manifest lacks capabilities array"))?;
+        .ok_or_else(|| {
+            map_binding_error(
+                "bundled NEAR AI manifest lacks capability_provider.tools capabilities array",
+            )
+        })?;
     let search = capabilities
         .first_mut()
         .and_then(Value::as_table_mut)
@@ -740,7 +748,7 @@ fn bundled_extension_package(
                 reason: format!("host API contracts rejected bundled {label} extension: {error}"),
             }
         })?;
-    let record = ExtensionManifestRecord::from_toml_with_contracts(
+    let record = ExtensionManifestRecord::from_toml(
         manifest_toml,
         ManifestSource::HostBundled,
         &host_ports,
@@ -1670,7 +1678,7 @@ where
                 reason: format!("available extension manifest is not UTF-8: {error}"),
             }
         })?;
-        let record = ExtensionManifestRecord::from_toml_with_contracts(
+        let record = ExtensionManifestRecord::from_toml(
             manifest_toml,
             ManifestSource::HostBundled,
             &host_ports,
@@ -1765,6 +1773,17 @@ fn visible_capabilities(
 
 #[cfg(test)]
 mod tests {
+
+    fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+        let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+        contracts
+            .register(std::sync::Arc::new(
+                ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                    .expect("capability provider contract"),
+            ))
+            .expect("register capability provider contract");
+        contracts
+    }
     use std::{
         collections::{BTreeSet, HashMap, HashSet},
         sync::{Arc, Mutex},
@@ -2557,15 +2576,10 @@ handle = "web_token"
             manifest["runtime"]["url"].as_str(),
             Some("https://10.0.0.12:8443/%22%0Atrust=%22system/mcp")
         );
-        assert_eq!(
-            manifest["capabilities"][0]["runtime_credentials"][0]["audience"]["host_pattern"]
-                .as_str(),
-            Some("10.0.0.12")
-        );
-        assert_eq!(
-            manifest["capabilities"][0]["runtime_credentials"][0]["audience"]["port"].as_integer(),
-            Some(8443)
-        );
+        let audience = &manifest["capability_provider"]["tools"]["capabilities"][0]["runtime_credentials"]
+            [0]["audience"];
+        assert_eq!(audience["host_pattern"].as_str(), Some("10.0.0.12"));
+        assert_eq!(audience["port"].as_integer(), Some(8443));
     }
 
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
@@ -2940,7 +2954,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/fixture.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "fixture.search"
 description = "Search"
 effects = ["network"]
@@ -2949,7 +2969,7 @@ visibility = "model"
 input_schema_ref = "schemas/search.input.json"
 output_schema_ref = "schemas/search.output.json"
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "fixture.write"
 description = "Write"
 effects = ["external_write"]
@@ -2962,6 +2982,7 @@ output_schema_ref = "schemas/write.output.json"
             MANIFEST,
             ManifestSource::HostBundled,
             &HostPortCatalog::empty(),
+            &capability_provider_contracts(),
         )
         .expect("manifest");
         let package = ExtensionPackage::from_manifest(

@@ -16,7 +16,13 @@ module = "wasm/slack_user_tool.wasm"
 # read-only users needs a write-opt-in / scope-upgrade re-consent flow — tracked
 # separately (see the follow-up issue referenced on SLACK_PERSONAL_OAUTH_SETUP_SCOPES).
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "slack.search_messages"
 description = "Search across all messages you can see (your DMs, group DMs, and channels you belong to). Requires the search:read user scope."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -30,7 +36,7 @@ output_schema_ref = "schemas/slack/raw_output.v1.json"
 prompt_doc_ref = "prompts/slack/search_messages.md"
 required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "slack.list_conversations"
 description = "List channels, private channels, DMs (im), and group DMs (mpim) you belong to. Use this to discover DM conversation IDs."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -44,7 +50,7 @@ output_schema_ref = "schemas/slack/raw_output.v1.json"
 prompt_doc_ref = "prompts/slack/list_conversations.md"
 required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "slack.get_conversation_history"
 description = "Read message history from any channel or DM you can see, identified by its conversation ID."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -58,7 +64,7 @@ output_schema_ref = "schemas/slack/raw_output.v1.json"
 prompt_doc_ref = "prompts/slack/get_conversation_history.md"
 required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "slack.get_user_info"
 description = "Get information about a Slack user (name, real name)."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -72,7 +78,7 @@ output_schema_ref = "schemas/slack/raw_output.v1.json"
 prompt_doc_ref = "prompts/slack/get_user_info.md"
 required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "slack.send_message"
 description = "Send a message as you to a channel or DM. Requires the chat:write user scope; the message appears to come from your account."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]

@@ -230,7 +230,7 @@ impl WireManifestRecord {
             .map_err(invalid_installation_error)?;
         let contracts = ironclaw_host_runtime::default_host_api_contract_registry()
             .map_err(invalid_installation_error)?;
-        ExtensionManifestRecord::from_toml_with_contracts(
+        ExtensionManifestRecord::from_toml(
             self.raw_toml,
             self.source.into_manifest_source(),
             &host_ports,
@@ -284,6 +284,17 @@ fn invalid_installation_error(error: impl std::fmt::Display) -> ExtensionInstall
 
 #[cfg(test)]
 mod tests {
+
+    fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+        let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+        contracts
+            .register(std::sync::Arc::new(
+                ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                    .expect("capability provider contract"),
+            ))
+            .expect("register capability provider contract");
+        contracts
+    }
     use std::sync::Arc;
 
     use chrono::Utc;
@@ -368,7 +379,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/gmail.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "gmail.echo"
 description = "Echoes input"
 default_permission = "allow"
@@ -382,6 +399,7 @@ prompt_doc_ref = "prompts/gmail/echo.md"
             ManifestSource::HostBundled,
             &HostPortCatalog::empty(),
             None,
+            &capability_provider_contracts(),
         )
         .expect("valid manifest");
         store

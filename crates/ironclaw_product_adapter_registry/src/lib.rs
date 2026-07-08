@@ -19,7 +19,8 @@ use ironclaw_extensions::{
     ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationStore,
     ExtensionManifestRecord, ExtensionManifestV2, HostApiContractRegistry, HostApiId,
     HostApiManifestContext, HostApiManifestContract, HostApiManifestProjection,
-    HostApiMultiplicity, HostApiRefV2, ManifestSectionPath, ManifestSource, ManifestV2Error,
+    HostApiMultiplicity, HostApiRefV2, HostApiSectionError, ManifestSectionPath, ManifestSource,
+    ManifestV2Error,
 };
 use ironclaw_host_api::{
     CapabilitySurfaceKind, ExtensionId, HostPortCatalog, IngressAuthPolicy, IngressRouteDescriptor,
@@ -50,7 +51,7 @@ pub fn parse_product_adapter_manifest_record(
     let contract = Arc::new(ProductAdapterHostApiContract::new()?);
     let mut contracts = HostApiContractRegistry::new();
     contracts.register(contract)?;
-    let record = ExtensionManifestRecord::from_toml_with_contracts(
+    let record = ExtensionManifestRecord::from_toml(
         raw_toml,
         source,
         host_port_catalog,
@@ -389,21 +390,22 @@ impl HostApiManifestContract for ProductAdapterHostApiContract {
         &self,
         host_api: &HostApiRefV2,
         section: &toml::Value,
-    ) -> Result<(), String> {
+    ) -> Result<(), HostApiSectionError> {
         // The contract hook runs while the generic manifest parser is still
         // validating the host-api section envelope, before it exposes the real
         // extension id to contract implementations. `from_value` needs an id
         // only to derive the adapter_id that this shape-only path discards;
         // cross-field checks involving the real extension id belong in
         // `project_product_adapter_sections` below.
-        let placeholder = ExtensionId::new("x").map_err(|e| e.to_string())?;
+        let placeholder =
+            ExtensionId::new("x").map_err(|e| HostApiSectionError::from(e.to_string()))?;
         ProductAdapterHostApiSection::from_value(
             &placeholder,
             host_api.section.clone(),
             section.clone(),
         )
         .map(|_| ())
-        .map_err(|e| e.to_string())
+        .map_err(|e| HostApiSectionError::from(e.to_string()))
     }
 
     fn validate_section_with_context(
@@ -411,14 +413,14 @@ impl HostApiManifestContract for ProductAdapterHostApiContract {
         context: &HostApiManifestContext<'_>,
         host_api: &HostApiRefV2,
         section: &toml::Value,
-    ) -> Result<(), String> {
+    ) -> Result<(), HostApiSectionError> {
         ProductAdapterHostApiSection::from_value(
             context.extension_id,
             host_api.section.clone(),
             section.clone(),
         )
         .map(|_| ())
-        .map_err(|e| e.to_string())
+        .map_err(|e| HostApiSectionError::from(e.to_string()))
     }
 
     fn project_section_with_context(
@@ -426,13 +428,13 @@ impl HostApiManifestContract for ProductAdapterHostApiContract {
         context: &HostApiManifestContext<'_>,
         host_api: &HostApiRefV2,
         section: &toml::Value,
-    ) -> Result<HostApiManifestProjection, String> {
+    ) -> Result<HostApiManifestProjection, HostApiSectionError> {
         let parsed = ProductAdapterHostApiSection::from_value(
             context.extension_id,
             host_api.section.clone(),
             section.clone(),
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| HostApiSectionError::from(e.to_string()))?;
         // External-channel adapter sections are the extension's channel
         // surface. The other product surface kinds (`web`, `cli`,
         // `synchronous_api`) describe host-native surfaces and project no

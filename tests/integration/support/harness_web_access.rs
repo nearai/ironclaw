@@ -60,7 +60,7 @@ pub(super) const WEB_ACCESS_PROVIDER_ID: &str = "web-access";
 /// `web-access.search` and `web-access.get_content`, and their real JSON
 /// Schema refs come from the manifest itself — no hand-authored schema.
 pub(super) fn web_access_extension_package() -> HarnessResult<ExtensionPackage> {
-    let manifest = ExtensionManifest::parse_with_host_api_contracts(
+    let manifest = ExtensionManifest::parse(
         &std::fs::read_to_string(asset_root().join("manifest.toml"))?,
         ManifestSource::HostBundled,
         &default_host_port_catalog()?,

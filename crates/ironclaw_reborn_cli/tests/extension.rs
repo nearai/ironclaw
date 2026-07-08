@@ -197,7 +197,13 @@ transport = "stdio"
 command = "zztest-mcp-server"
 args = ["--stdio"]
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "{extension_id}.search_issues"
 description = "Search GitHub issues"
 effects = ["network", "dispatch_capability"]

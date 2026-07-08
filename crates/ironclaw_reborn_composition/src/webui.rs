@@ -970,6 +970,17 @@ fn status_check(
 
 #[cfg(test)]
 mod tests {
+
+    fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+        let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+        contracts
+            .register(std::sync::Arc::new(
+                ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                    .expect("capability provider contract"),
+            ))
+            .expect("register capability provider contract");
+        contracts
+    }
     use super::*;
     use ironclaw_extensions::{
         ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
@@ -1472,7 +1483,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/{extension_id}.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "{extension_id}.{capability_name}"
 description = "{capability_name}"
 effects = ["network"]
@@ -1486,6 +1503,7 @@ output_schema_ref = "schemas/{capability_name}.output.json"
             &manifest_toml,
             ManifestSource::HostBundled,
             &HostPortCatalog::empty(),
+            &capability_provider_contracts(),
         )
         .expect("manifest parses");
         ExtensionPackage::from_manifest(

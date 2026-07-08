@@ -140,7 +140,7 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
     assert!(github_asset_root.join("wasm-src/Cargo.toml").is_file());
 
     let (_storage, fs) = mounted_github_package_fs();
-    let manifest = ExtensionManifest::parse_with_host_api_contracts(
+    let manifest = ExtensionManifest::parse(
         &std::fs::read_to_string(github_asset_root.join("manifest.toml")).unwrap(),
         ManifestSource::HostBundled,
         &default_host_port_catalog().unwrap(),

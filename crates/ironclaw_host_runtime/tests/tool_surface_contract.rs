@@ -318,6 +318,7 @@ fn hot_capability_manifest_rejects_traversal_schema_ref_at_parse_boundary() {
         &manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .unwrap_err();
 
@@ -409,7 +410,13 @@ trust = "first_party_requested"
 kind = "wasm"
 module = "wasm/github.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "github.search_issues"
 description = "search"
 effects = ["network"]
@@ -418,7 +425,7 @@ visibility = "model"
 input_schema_ref = "schemas/github/search.input.json"
 output_schema_ref = "schemas/github/search.output.json"
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "github.get_issue"
 description = "get"
 effects = ["network"]
@@ -427,7 +434,7 @@ visibility = "model"
 input_schema_ref = "schemas/github/get.input.json"
 output_schema_ref = "schemas/github/get.output.json"
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "github.comment_issue"
 description = "comment"
 effects = ["network", "external_write"]
@@ -440,6 +447,7 @@ output_schema_ref = "schemas/github/comment.output.json"
         manifest,
         ManifestSource::HostBundled,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .unwrap();
     let package = ExtensionPackage::from_manifest(
@@ -1796,6 +1804,7 @@ fn hot_catalog_fixture_with_prompt_bytes(
         HOT_CAPABILITY_MANIFEST,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .unwrap();
     hot_catalog_fixture_with_manifest(input_schema, output_schema, prompt_doc, manifest)
@@ -1848,6 +1857,7 @@ fn manifest_without_prompt_doc_ref() -> ExtensionManifest {
         HOT_CAPABILITY_MANIFEST,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .unwrap();
     manifest.capabilities[0].prompt_doc_ref = None;
@@ -1859,6 +1869,7 @@ fn manifest_with_visibility(visibility: CapabilityVisibility) -> ExtensionManife
         HOT_CAPABILITY_MANIFEST,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .unwrap();
     manifest.capabilities[0].visibility = visibility;
@@ -1938,6 +1949,7 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
         &manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .unwrap()
 }
@@ -2167,7 +2179,13 @@ trust = "third_party"
 kind = "wasm"
 module = "echo.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "echo.say"
 description = "Echoes input"
 effects = ["dispatch_capability"]
@@ -2372,3 +2390,14 @@ effects = ["dispatch_capability"]
 default_permission = "allow"
 parameters_schema = {}
 "#;
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
+}

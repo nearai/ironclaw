@@ -131,6 +131,7 @@ fn asset_manifest(extension_id: &str) -> ironclaw_extensions::ExtensionManifest 
         manifest_toml,
         ManifestSource::HostBundled,
         &ironclaw_host_api::HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .unwrap()
 }
@@ -705,4 +706,15 @@ async fn bundled_gsuite_handler_projects_stage_backend_to_first_party_dispatch_b
         Some(RuntimeDispatchErrorKind::Backend),
         "stage Backend must produce Dispatch {{ kind: Backend }}"
     );
+}
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
 }

@@ -170,38 +170,9 @@ impl ExtensionManifest {
         input: &str,
         source: ManifestSource,
         host_port_catalog: &HostPortCatalog,
-    ) -> Result<Self, ExtensionError> {
-        ExtensionManifestV2::parse(input, source, host_port_catalog)?.try_into()
-    }
-
-    pub fn parse_with_host_api_contracts(
-        input: &str,
-        source: ManifestSource,
-        host_port_catalog: &HostPortCatalog,
         registry: &HostApiContractRegistry,
     ) -> Result<Self, ExtensionError> {
-        ExtensionManifestV2::parse_with_host_api_contracts(
-            input,
-            source,
-            host_port_catalog,
-            registry,
-        )?
-        .try_into()
-    }
-
-    pub fn parse_with_optional_host_api_contracts(
-        input: &str,
-        source: ManifestSource,
-        host_port_catalog: &HostPortCatalog,
-        registry: &HostApiContractRegistry,
-    ) -> Result<Self, ExtensionError> {
-        ExtensionManifestV2::parse_with_optional_host_api_contracts(
-            input,
-            source,
-            host_port_catalog,
-            registry,
-        )?
-        .try_into()
+        ExtensionManifestV2::parse(input, source, host_port_catalog, registry)?.try_into()
     }
 
     pub fn runtime_kind(&self) -> RuntimeKind {
@@ -425,9 +396,9 @@ pub use v2::{
     CapabilityDeclV2, CapabilitySurfaceDeclV2, CapabilityVisibility, ExtensionManifestV2,
     ExtensionRuntimeV2, HookSectionEntryV2, HostApiContractRegistry, HostApiId,
     HostApiManifestContext, HostApiManifestContract, HostApiManifestProjection,
-    HostApiMultiplicity, HostApiRefV2, MANIFEST_SCHEMA_VERSION, MAX_HOOK_ENTRY_BYTES,
-    MAX_MANIFEST_BYTES, MAX_MANIFEST_HOOKS, ManifestSectionPath, ManifestSource, ManifestV2Error,
-    RESERVED_HOST_BUNDLED_ID_PREFIX,
+    HostApiMultiplicity, HostApiRefV2, HostApiSectionError, MANIFEST_SCHEMA_VERSION,
+    MAX_HOOK_ENTRY_BYTES, MAX_MANIFEST_BYTES, MAX_MANIFEST_HOOKS, ManifestSectionPath,
+    ManifestSource, ManifestV2Error, RESERVED_HOST_BUNDLED_ID_PREFIX,
 };
 
 pub type CapabilityManifest = CapabilityDeclV2;
@@ -448,25 +419,6 @@ pub use registry::{ExtensionRegistry, SharedExtensionRegistry};
 pub struct ExtensionDiscovery;
 
 impl ExtensionDiscovery {
-    pub async fn discover<F>(
-        fs: &F,
-        root: &VirtualPath,
-    ) -> Result<ExtensionRegistry, ExtensionError>
-    where
-        F: RootFilesystem,
-    {
-        let host_port_catalog = HostPortCatalog::empty();
-        let host_api_contracts = HostApiContractRegistry::new();
-        Self::discover_with_manifest_contracts(
-            fs,
-            root,
-            ManifestSource::InstalledLocal,
-            &host_port_catalog,
-            &host_api_contracts,
-        )
-        .await
-    }
-
     pub async fn discover_with_manifest_contracts<F>(
         fs: &F,
         root: &VirtualPath,
@@ -661,12 +613,8 @@ impl ExtensionDiscovery {
         let text = String::from_utf8(bytes).map_err(|error| ExtensionError::ManifestParse {
             reason: error.to_string(),
         })?;
-        let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
-            &text,
-            source,
-            host_port_catalog,
-            host_api_contracts,
-        )?;
+        let manifest =
+            ExtensionManifest::parse(&text, source, host_port_catalog, host_api_contracts)?;
         if manifest.id != expected {
             return Err(ExtensionError::ManifestIdMismatch {
                 root: entry.path.clone(),
