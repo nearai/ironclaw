@@ -7669,6 +7669,16 @@ output_schema_ref = "schemas/write.output.json"
             .expect("parent cancellation succeeds");
 
         let result_ref = LoopResultRef::new("result:runtime-cancel-child").unwrap();
+        let parent_resolved_run_profile = InMemoryRunProfileResolver::default()
+            .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+            .await
+            .expect("resolve run profile");
+        let parent_run_context = LoopRunContext::new(
+            parent_scope.clone(),
+            TurnId::new(),
+            parent_run_id,
+            parent_resolved_run_profile,
+        );
         runtime
             .thread_service
             .append_tool_result_reference(AppendToolResultReferenceRequest {
@@ -7707,6 +7717,9 @@ output_schema_ref = "schemas/write.output.json"
                         mode: SpawnSubagentMode::Blocking,
                         result_ref,
                         handoff: None,
+                        parent_run_context: parent_run_context.clone(),
+                        gate_ref: ironclaw_turns::GateRef::new("gate:runtime-cancel-child")
+                            .unwrap(),
                     })
                     .unwrap(),
                 ),

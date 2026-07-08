@@ -288,6 +288,19 @@ pub struct SubagentThreadMetadata {
     pub result_ref: LoopResultRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff: Option<String>,
+    /// The spawning parent's `LoopRunContext`, cached verbatim at spawn time
+    /// (`finish_spawn` already has it in hand — no new store fetch). Lets
+    /// `ironclaw_reborn`'s `reconstruct_edge` rebuild a lost/never-opened
+    /// await-edge with zero live `turn_state_store` lookups for the parent,
+    /// avoiding the re-entrant deadlock of querying the store from inside
+    /// the child's own commit-observer callback. New field on fresh threads
+    /// only — the capability is deny-filtered in prod, so no old-thread
+    /// migration is needed.
+    pub parent_run_context: LoopRunContext,
+    /// The spawn-time gate ref (also computed in `finish_spawn`), including
+    /// the shared D3 batch-gate value when this spawn is part of a group —
+    /// reconstruction has no other way to recover that shared value.
+    pub gate_ref: GateRef,
 }
 
 #[async_trait]
@@ -912,6 +925,8 @@ impl SubagentSpawnCapabilityPort {
                     mode,
                     result_ref: result_ref.clone(),
                     handoff: args.handoff.clone(),
+                    parent_run_context: self.run_context.clone(),
+                    gate_ref: gate_ref.clone(),
                 })?),
             })
             .await

@@ -8,7 +8,6 @@
 //! fix — keeps this file to the reactive settle path only).
 
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
 
 use ironclaw_host_api::{CapabilityId, UserId};
 use ironclaw_loop_support::{
@@ -34,10 +33,6 @@ use crate::subagent::spawn_result::{
 use crate::subagent::untrusted_text::{
     sanitize_tool_result_summary, sanitize_untrusted_terminal_reason, wrap_untrusted_subagent_text,
 };
-
-/// Bound on `reconstruct_edge`'s live parent-run-record lookup — see the call
-/// site's comment.
-const PARENT_RECORD_LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct AwaitEdgeResolver<
     S: SessionThreadService + ?Sized,
@@ -241,13 +236,18 @@ where
             })
     }
 
-    /// Rebuild a lost/never-written edge from the child's run record +
-    /// thread metadata (first-touch recovery path — this is the *only*
-    /// lookup path now, not a `has_gate_record` fallback: there is no
-    /// in-memory cross-index anymore). Same anti-tamper cross-check as the
-    /// original `reconstruct_record`: the parent lookup is anchored to the
-    /// spawn-time `parent_run_id` on the trusted child record, never the
-    /// subagent's own (tamperable) thread metadata alone.
+    /// Rebuild a lost/never-written edge purely from the child's run record +
+    /// thread metadata — a pure data transformation, zero `turn_state_store`
+    /// calls for the parent. The live parent-record lookup this used to do
+    /// was reached from the same synchronous `TurnCommittedEventObserver`
+    /// callback the child's own commit invokes, and deadlocked re-entering
+    /// the store for a *different* run id (see `parent_run_context`'s doc
+    /// comment above); `SubagentThreadMetadata.parent_run_context`/`gate_ref`
+    /// (spawn-time-cached, `ironclaw_loop_support::subagent_spawn_port`) now
+    /// supply everything that lookup used to provide. Same anti-tamper
+    /// cross-check as before: the parent's identity is anchored to the
+    /// trusted child record's own axes + the recovered event owner, never to
+    /// the subagent's own (tamperable) thread metadata alone.
     async fn reconstruct_edge(
         &self,
         child_record: &TurnRunRecord,
@@ -278,60 +278,45 @@ where
         // Same `thread_owner` mismatch class as `resume_parent` (§ this
         // module's doc comment above): `TurnScope::new` defaults
         // `thread_owner` to `ActorFallback`, which mismatches a real parent
-        // scope carrying `TurnThreadOwner::ExplicitUser{..}` and makes
-        // `get_run_record`'s `record.scope == *scope` filter silently return
-        // `None`. The child's *own* `scope.thread_owner` is NOT a safe
-        // source here — `subagent_spawn_port.rs`'s `child_turn_scope` is
-        // itself built via `TurnScope::new`, so it is always `ActorFallback`
-        // regardless of the real owner, unlike the parent (submitted via
-        // `TurnScope::new_with_owner` for any real multi-user turn). The
-        // caller (`handle_child_terminal_inner`) already ran
-        // `event_with_recovered_owner` before calling this method, so
-        // `event.owner_user_id` is guaranteed `Some` here — that recovered
-        // owner, not the child's own defaulted scope, is the correct source.
+        // scope carrying `TurnThreadOwner::ExplicitUser{..}`. The child's
+        // *own* `scope.thread_owner` is NOT a safe source here —
+        // `subagent_spawn_port.rs`'s `child_turn_scope` is itself built via
+        // `TurnScope::new`, so it is always `ActorFallback` regardless of the
+        // real owner, unlike the parent (submitted via `TurnScope::new_with_owner`
+        // for any real multi-user turn). The caller (`handle_child_terminal_inner`)
+        // already ran `event_with_recovered_owner` before calling this
+        // method, so `event.owner_user_id` is guaranteed `Some` here — that
+        // recovered owner, not the child's own defaulted scope, is the
+        // correct source.
+        let owner_user_id =
+            event
+                .owner_user_id
+                .clone()
+                .ok_or_else(|| TurnError::InvalidRequest {
+                    reason: "subagent completion recovery missing recovered owner user id"
+                        .to_string(),
+                })?;
         let parent_scope = TurnScope {
             tenant_id: child_record.scope.tenant_id.clone(),
             agent_id: child_record.scope.agent_id.clone(),
             project_id: child_record.scope.project_id.clone(),
             thread_id: metadata.parent_thread_id.clone(),
-            thread_owner: ironclaw_turns::scope::TurnThreadOwner::explicit(
-                event.owner_user_id.clone(),
-            ),
+            thread_owner: ironclaw_turns::scope::TurnThreadOwner::explicit(Some(
+                owner_user_id.clone(),
+            )),
         };
-        // Timeout-bounded, defense-in-depth: this recovery-only branch is
-        // reached from the same `TurnCommittedEventObserver` callback whose
-        // *other* parent-lookup call once deadlocked when re-entering the
-        // turn-state store from inside the child's own commit dispatch (see
-        // `parent_run_context`'s doc comment above). That specific call is
-        // now cached away, but this reconstruction branch has no cached
-        // value to fall back on and still must query the store live. A
-        // bound here turns an unverified worst case into a fail-closed
-        // `Unavailable` (retried by redelivery/recovery) instead of an
-        // unbounded hang.
-        let Some(parent_record) = tokio::time::timeout(
-            PARENT_RECORD_LOOKUP_TIMEOUT,
-            self.turn_state_store
-                .get_run_record(&parent_scope, parent_run_id),
-        )
-        .await
-        .map_err(|_| TurnError::Unavailable {
-            reason: "await-edge reconstruction timed out waiting for parent run record".to_string(),
-        })??
-        else {
-            tracing::warn!(
-                child_run_id = %child_record.run_id,
-                parent_run_id = %parent_run_id,
-                "subagent completion recovery found child metadata but missing parent run record"
-            );
-            return Ok(None);
-        };
-        let gate_ref = recovered_gate_ref(&parent_record, child_record, metadata.mode)?;
-        let parent_run_context = LoopRunContext::new(
-            parent_record.scope.clone(),
-            parent_record.turn_id,
-            parent_record.run_id,
-            parent_record.profile.resolved.clone(),
-        );
+        // Anti-tamper pin: only `scope`/`thread_id`/`actor`/`run_id` are
+        // overridden with the trusted anchor above — every other field
+        // (turn_id, resolved profile/model route, driver/checkpoint
+        // versions, product_context) is trusted wholesale from the cached
+        // `parent_run_context`, since those carry no scope/identity
+        // authority of their own.
+        let mut parent_run_context = metadata.parent_run_context.clone();
+        parent_run_context.scope = parent_scope.clone();
+        parent_run_context.thread_id = parent_scope.thread_id.clone();
+        parent_run_context.actor = Some(TurnActor::new(owner_user_id));
+        parent_run_context.run_id = parent_run_id;
+        let gate_ref = recovered_gate_ref(&metadata, child_record)?;
         Ok(Some(AwaitEdge {
             child_scope: child_record.scope.clone(),
             child_thread_id: child_record.scope.thread_id.clone(),
@@ -830,6 +815,452 @@ mod tests {
         assert!(!is_benign_already_resumed(&TurnError::ScopeNotFound));
         assert!(!is_benign_already_resumed(&TurnError::Unauthorized));
     }
+
+    // ─── reconstruct_edge (FIX A): pure data transformation off cached
+    // `SubagentThreadMetadata`, zero `turn_state_store` calls for the
+    // parent ──────────────────────────────────────────────────────────
+
+    struct ReconResultWriter;
+
+    #[async_trait::async_trait]
+    impl ironclaw_loop_support::LoopCapabilityResultWriter for ReconResultWriter {
+        async fn write_capability_result(
+            &self,
+            _write: ironclaw_loop_support::CapabilityResultWrite<'_>,
+        ) -> Result<ironclaw_loop_support::CapabilityWriteResult, AgentLoopHostError> {
+            Err(AgentLoopHostError::new(
+                ironclaw_turns::run_profile::AgentLoopHostErrorKind::Unavailable,
+                "not exercised by reconstruct_edge tests",
+            ))
+        }
+    }
+
+    fn recon_scoped_fs()
+    -> Arc<ironclaw_filesystem::ScopedFilesystem<ironclaw_filesystem::InMemoryBackend>> {
+        use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+        use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/turns").unwrap(),
+            VirtualPath::new("/turns").unwrap(),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .unwrap();
+        Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::new(InMemoryBackend::new()),
+            mounts,
+        ))
+    }
+
+    fn recon_resolver(
+        thread_service: Arc<ironclaw_threads::InMemorySessionThreadService>,
+    ) -> AwaitEdgeResolver<
+        ironclaw_threads::InMemorySessionThreadService,
+        ironclaw_filesystem::InMemoryBackend,
+    > {
+        let store = Arc::new(FilesystemAwaitEdgeStore::new(recon_scoped_fs()));
+        let goal_store: Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore> =
+            Arc::new(crate::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new());
+        let turn_state_store: Arc<dyn TurnSpawnTreeStateStore> =
+            Arc::new(ironclaw_turns::InMemoryTurnStateStore::default());
+        let result_writer: Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter> =
+            Arc::new(ReconResultWriter);
+        AwaitEdgeResolver::new_unbound(
+            store,
+            goal_store,
+            turn_state_store,
+            result_writer,
+            thread_service,
+        )
+    }
+
+    fn recon_child_record(
+        tenant_id: &ironclaw_host_api::TenantId,
+        agent_id: &ironclaw_host_api::AgentId,
+        child_thread_id: &ironclaw_host_api::ThreadId,
+        child_run_id: TurnRunId,
+        parent_run_id: TurnRunId,
+        resolved_run_profile: ironclaw_turns::run_profile::ResolvedRunProfile,
+    ) -> TurnRunRecord {
+        TurnRunRecord {
+            run_id: child_run_id,
+            turn_id: ironclaw_turns::TurnId::new(),
+            scope: TurnScope::new(
+                tenant_id.clone(),
+                Some(agent_id.clone()),
+                None,
+                child_thread_id.clone(),
+            ),
+            accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("msg:child").unwrap(),
+            source_binding_ref: ironclaw_turns::SourceBindingRef::new("source:child").unwrap(),
+            reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new("reply:child")
+                .unwrap(),
+            status: TurnStatus::Completed,
+            profile: ironclaw_turns::TurnRunProfile::from_resolved(resolved_run_profile),
+            resolved_model_route: None,
+            checkpoint_id: None,
+            gate_ref: None,
+            blocked_activity_id: None,
+            credential_requirements: Vec::new(),
+            failure: None,
+            event_cursor: ironclaw_turns::EventCursor(1),
+            runner_id: None,
+            lease_token: None,
+            lease_expires_at: None,
+            last_heartbeat_at: None,
+            claim_count: 0,
+            received_at: chrono::Utc::now(),
+            parent_run_id: Some(parent_run_id),
+            subagent_depth: 1,
+            spawn_tree_root_run_id: Some(parent_run_id),
+            product_context: None,
+            resume_disposition: None,
+        }
+    }
+
+    fn recon_event(
+        child_run_id: TurnRunId,
+        scope: TurnScope,
+        owner_user_id: UserId,
+    ) -> TurnLifecycleEvent {
+        TurnLifecycleEvent {
+            cursor: ironclaw_turns::EventCursor(1),
+            scope,
+            occurred_at: None,
+            owner_user_id: Some(owner_user_id),
+            run_id: child_run_id,
+            status: TurnStatus::Completed,
+            kind: ironclaw_turns::TurnEventKind::Completed,
+            blocked_gate: None,
+            sanitized_reason: None,
+            retryable: None,
+            detail: None,
+        }
+    }
+
+    async fn recon_seed_thread(
+        thread_service: &ironclaw_threads::InMemorySessionThreadService,
+        tenant_id: &ironclaw_host_api::TenantId,
+        agent_id: &ironclaw_host_api::AgentId,
+        child_thread_id: &ironclaw_host_api::ThreadId,
+        owner_user_id: &UserId,
+        metadata_json: Option<String>,
+    ) {
+        thread_service
+            .ensure_thread(ironclaw_threads::EnsureThreadRequest {
+                scope: ThreadScope {
+                    tenant_id: tenant_id.clone(),
+                    agent_id: agent_id.clone(),
+                    project_id: None,
+                    owner_user_id: Some(owner_user_id.clone()),
+                    mission_id: None,
+                },
+                thread_id: Some(child_thread_id.clone()),
+                created_by_actor_id: "test".to_string(),
+                title: None,
+                metadata_json,
+            })
+            .await
+            .unwrap();
+    }
+
+    // (T1) well-formed metadata -> correct AwaitEdge with gate_ref +
+    // parent_run_context sourced from metadata. Mutation: source gate_ref
+    // from a derived token instead of `metadata.gate_ref` -> RED (the
+    // shared-batch-gate assertion below fails because a derived token never
+    // matches the metadata-cached one).
+    #[tokio::test]
+    async fn reconstruct_edge_builds_edge_from_cached_metadata() {
+        let tenant_id = ironclaw_host_api::TenantId::new("recon-tenant-t1").unwrap();
+        let agent_id = ironclaw_host_api::AgentId::new("recon-agent-t1").unwrap();
+        let child_thread_id = ironclaw_host_api::ThreadId::new("recon-child-thread-t1").unwrap();
+        let parent_thread_id = ironclaw_host_api::ThreadId::new("recon-parent-thread-t1").unwrap();
+        let owner_user_id = UserId::new("recon-owner-t1").unwrap();
+        let parent_run_id = TurnRunId::new();
+        let child_run_id = TurnRunId::new();
+
+        let parent_context = ironclaw_agent_loop::test_support::test_run_context("recon-t1");
+        let child_record = recon_child_record(
+            &tenant_id,
+            &agent_id,
+            &child_thread_id,
+            child_run_id,
+            parent_run_id,
+            parent_context.resolved_run_profile.clone(),
+        );
+        let event = recon_event(
+            child_run_id,
+            child_record.scope.clone(),
+            owner_user_id.clone(),
+        );
+        // Distinct from the derived `gate:subagent-<child_run_id>` token so
+        // the test can tell "sourced from metadata" apart from "recomputed".
+        let metadata_gate_ref = GateRef::new("gate:subagent-shared-batch").unwrap();
+        let metadata = ironclaw_loop_support::SubagentThreadMetadata {
+            kind: ironclaw_loop_support::SubagentThreadKind::Subagent,
+            parent_run_id,
+            parent_thread_id: parent_thread_id.clone(),
+            tree_root_run_id: parent_run_id,
+            child_run_id,
+            subagent_kind: ironclaw_loop_support::SubagentKindId::new("general").unwrap(),
+            mode: ironclaw_loop_support::SpawnSubagentMode::Blocking,
+            result_ref: ironclaw_turns::LoopResultRef::new("result:subagent.recon-t1").unwrap(),
+            handoff: None,
+            parent_run_context: parent_context.clone(),
+            gate_ref: metadata_gate_ref.clone(),
+        };
+
+        let thread_service = Arc::new(ironclaw_threads::InMemorySessionThreadService::default());
+        recon_seed_thread(
+            &thread_service,
+            &tenant_id,
+            &agent_id,
+            &child_thread_id,
+            &owner_user_id,
+            Some(serde_json::to_string(&metadata).unwrap()),
+        )
+        .await;
+        let resolver = recon_resolver(thread_service);
+
+        let edge = resolver
+            .reconstruct_edge(&child_record, parent_run_id, &event)
+            .await
+            .unwrap()
+            .expect("well-formed metadata should reconstruct an edge");
+
+        assert_eq!(edge.gate_ref, metadata_gate_ref);
+        assert_eq!(edge.parent_run_context.turn_id, parent_context.turn_id);
+        assert_eq!(
+            edge.parent_run_context.resolved_run_profile,
+            parent_context.resolved_run_profile
+        );
+        assert_eq!(edge.parent_run_context.run_id, parent_run_id);
+        assert_eq!(edge.parent_run_context.thread_id, parent_thread_id);
+        assert_eq!(
+            edge.parent_run_context.actor,
+            Some(TurnActor::new(owner_user_id))
+        );
+        assert_eq!(edge.parent_thread_id, parent_thread_id);
+        assert_eq!(edge.tree_root_run_id, parent_run_id);
+        assert_eq!(
+            edge.mode,
+            ironclaw_loop_support::SpawnSubagentMode::Blocking
+        );
+    }
+
+    // (T2) identity mismatch: metadata's own `parent_run_id` disagrees with
+    // the trusted child record's `parent_run_id` argument -> fail closed to
+    // `Ok(None)`, never reconstruct against the wrong parent.
+    #[tokio::test]
+    async fn reconstruct_edge_fails_closed_on_parent_run_id_mismatch() {
+        let tenant_id = ironclaw_host_api::TenantId::new("recon-tenant-t2").unwrap();
+        let agent_id = ironclaw_host_api::AgentId::new("recon-agent-t2").unwrap();
+        let child_thread_id = ironclaw_host_api::ThreadId::new("recon-child-thread-t2").unwrap();
+        let parent_thread_id = ironclaw_host_api::ThreadId::new("recon-parent-thread-t2").unwrap();
+        let owner_user_id = UserId::new("recon-owner-t2").unwrap();
+        let parent_run_id = TurnRunId::new();
+        let wrong_parent_run_id = TurnRunId::new();
+        let child_run_id = TurnRunId::new();
+
+        let parent_context = ironclaw_agent_loop::test_support::test_run_context("recon-t2");
+        let child_record = recon_child_record(
+            &tenant_id,
+            &agent_id,
+            &child_thread_id,
+            child_run_id,
+            parent_run_id,
+            parent_context.resolved_run_profile.clone(),
+        );
+        let event = recon_event(
+            child_run_id,
+            child_record.scope.clone(),
+            owner_user_id.clone(),
+        );
+        let metadata = ironclaw_loop_support::SubagentThreadMetadata {
+            kind: ironclaw_loop_support::SubagentThreadKind::Subagent,
+            parent_run_id: wrong_parent_run_id,
+            parent_thread_id: parent_thread_id.clone(),
+            tree_root_run_id: wrong_parent_run_id,
+            child_run_id,
+            subagent_kind: ironclaw_loop_support::SubagentKindId::new("general").unwrap(),
+            mode: ironclaw_loop_support::SpawnSubagentMode::Blocking,
+            result_ref: ironclaw_turns::LoopResultRef::new("result:subagent.recon-t2").unwrap(),
+            handoff: None,
+            parent_run_context: parent_context,
+            gate_ref: GateRef::new("gate:subagent-t2").unwrap(),
+        };
+
+        let thread_service = Arc::new(ironclaw_threads::InMemorySessionThreadService::default());
+        recon_seed_thread(
+            &thread_service,
+            &tenant_id,
+            &agent_id,
+            &child_thread_id,
+            &owner_user_id,
+            Some(serde_json::to_string(&metadata).unwrap()),
+        )
+        .await;
+        let resolver = recon_resolver(thread_service);
+
+        let result = resolver
+            .reconstruct_edge(&child_record, parent_run_id, &event)
+            .await
+            .unwrap();
+
+        assert!(
+            result.is_none(),
+            "parent_run_id mismatch must fail closed to None"
+        );
+    }
+
+    // (T3) malformed/absent metadata -> `Ok(None)`, never an error and never
+    // a fabricated edge.
+    #[tokio::test]
+    async fn reconstruct_edge_returns_none_for_absent_or_malformed_metadata() {
+        let tenant_id = ironclaw_host_api::TenantId::new("recon-tenant-t3").unwrap();
+        let agent_id = ironclaw_host_api::AgentId::new("recon-agent-t3").unwrap();
+        let child_thread_id = ironclaw_host_api::ThreadId::new("recon-child-thread-t3").unwrap();
+        let owner_user_id = UserId::new("recon-owner-t3").unwrap();
+        let parent_run_id = TurnRunId::new();
+        let child_run_id = TurnRunId::new();
+        let parent_context = ironclaw_agent_loop::test_support::test_run_context("recon-t3");
+        let child_record = recon_child_record(
+            &tenant_id,
+            &agent_id,
+            &child_thread_id,
+            child_run_id,
+            parent_run_id,
+            parent_context.resolved_run_profile.clone(),
+        );
+        let event = recon_event(
+            child_run_id,
+            child_record.scope.clone(),
+            owner_user_id.clone(),
+        );
+
+        // (a) no metadata at all on the child's thread.
+        let thread_service_absent =
+            Arc::new(ironclaw_threads::InMemorySessionThreadService::default());
+        recon_seed_thread(
+            &thread_service_absent,
+            &tenant_id,
+            &agent_id,
+            &child_thread_id,
+            &owner_user_id,
+            None,
+        )
+        .await;
+        let resolver_absent = recon_resolver(thread_service_absent);
+        let result_absent = resolver_absent
+            .reconstruct_edge(&child_record, parent_run_id, &event)
+            .await
+            .unwrap();
+        assert!(result_absent.is_none(), "absent metadata must return None");
+
+        // (b) metadata present but not subagent-kind shaped.
+        let thread_service_malformed =
+            Arc::new(ironclaw_threads::InMemorySessionThreadService::default());
+        recon_seed_thread(
+            &thread_service_malformed,
+            &tenant_id,
+            &agent_id,
+            &child_thread_id,
+            &owner_user_id,
+            Some("{\"kind\":\"not-a-subagent\"}".to_string()),
+        )
+        .await;
+        let resolver_malformed = recon_resolver(thread_service_malformed);
+        let result_malformed = resolver_malformed
+            .reconstruct_edge(&child_record, parent_run_id, &event)
+            .await
+            .unwrap();
+        assert!(
+            result_malformed.is_none(),
+            "malformed metadata must return None"
+        );
+    }
+
+    // (T4) ANTI-TAMPER PIN: metadata's cached `parent_run_context.scope`
+    // disagrees with the trusted anchor (different tenant) -> the resulting
+    // edge uses the anchor's scope/actor, never metadata's. Mutation: trust
+    // `metadata.parent_run_context` wholesale (skip the anchor override) ->
+    // RED (the tenant/thread_id assertions below fail against the tampered
+    // values).
+    #[tokio::test]
+    async fn reconstruct_edge_anti_tamper_pin_overrides_metadata_scope_with_trusted_anchor() {
+        let tenant_id = ironclaw_host_api::TenantId::new("recon-tenant-t4").unwrap();
+        let agent_id = ironclaw_host_api::AgentId::new("recon-agent-t4").unwrap();
+        let child_thread_id = ironclaw_host_api::ThreadId::new("recon-child-thread-t4").unwrap();
+        let parent_thread_id = ironclaw_host_api::ThreadId::new("recon-parent-thread-t4").unwrap();
+        let owner_user_id = UserId::new("recon-owner-t4").unwrap();
+        let parent_run_id = TurnRunId::new();
+        let child_run_id = TurnRunId::new();
+
+        let mut tampered_context = ironclaw_agent_loop::test_support::test_run_context("recon-t4");
+        // Attacker-controlled thread metadata claims a different
+        // tenant/thread than the trusted child run record — this must never
+        // win.
+        let attacker_tenant = ironclaw_host_api::TenantId::new("attacker-tenant-t4").unwrap();
+        let attacker_thread = ironclaw_host_api::ThreadId::new("attacker-thread-t4").unwrap();
+        tampered_context.scope =
+            TurnScope::new(attacker_tenant.clone(), None, None, attacker_thread.clone());
+
+        let child_record = recon_child_record(
+            &tenant_id,
+            &agent_id,
+            &child_thread_id,
+            child_run_id,
+            parent_run_id,
+            tampered_context.resolved_run_profile.clone(),
+        );
+        let event = recon_event(
+            child_run_id,
+            child_record.scope.clone(),
+            owner_user_id.clone(),
+        );
+        let metadata = ironclaw_loop_support::SubagentThreadMetadata {
+            kind: ironclaw_loop_support::SubagentThreadKind::Subagent,
+            parent_run_id,
+            parent_thread_id: parent_thread_id.clone(),
+            tree_root_run_id: parent_run_id,
+            child_run_id,
+            subagent_kind: ironclaw_loop_support::SubagentKindId::new("general").unwrap(),
+            mode: ironclaw_loop_support::SpawnSubagentMode::Blocking,
+            result_ref: ironclaw_turns::LoopResultRef::new("result:subagent.recon-t4").unwrap(),
+            handoff: None,
+            parent_run_context: tampered_context,
+            gate_ref: GateRef::new("gate:subagent-t4").unwrap(),
+        };
+
+        let thread_service = Arc::new(ironclaw_threads::InMemorySessionThreadService::default());
+        recon_seed_thread(
+            &thread_service,
+            &tenant_id,
+            &agent_id,
+            &child_thread_id,
+            &owner_user_id,
+            Some(serde_json::to_string(&metadata).unwrap()),
+        )
+        .await;
+        let resolver = recon_resolver(thread_service);
+
+        let edge = resolver
+            .reconstruct_edge(&child_record, parent_run_id, &event)
+            .await
+            .unwrap()
+            .expect("tampered-but-parseable metadata should still reconstruct");
+
+        // The anchor (built from the trusted child record + recovered
+        // owner) must win — never the attacker-controlled tenant/thread.
+        assert_eq!(edge.parent_run_context.scope.tenant_id, tenant_id);
+        assert_ne!(edge.parent_run_context.scope.tenant_id, attacker_tenant);
+        assert_eq!(edge.parent_run_context.scope.thread_id, parent_thread_id);
+        assert_ne!(edge.parent_run_context.scope.thread_id, attacker_thread);
+        assert_eq!(edge.parent_run_context.thread_id, parent_thread_id);
+        assert_eq!(
+            edge.parent_run_context.actor,
+            Some(TurnActor::new(owner_user_id))
+        );
+    }
 }
 
 #[async_trait::async_trait]
@@ -1006,27 +1437,24 @@ fn event_kind_from_terminal_status(
     }
 }
 
+/// Blocking mode recovers the exact spawn-time `gate_ref` cached on the
+/// child's thread metadata — including the shared D3 batch-gate value siblings
+/// spawned in the same call carry, which no derived token could reconstruct.
+/// Background mode has no live status to consult from a reconstruction path
+/// (the old live-status heuristic is gone), so it falls back to the same
+/// derived-token format the spawn path itself uses for that mode.
 fn recovered_gate_ref(
-    parent_record: &TurnRunRecord,
+    metadata: &ironclaw_loop_support::SubagentThreadMetadata,
     child_record: &TurnRunRecord,
-    mode: ironclaw_loop_support::SpawnSubagentMode,
 ) -> Result<GateRef, TurnError> {
-    if mode == ironclaw_loop_support::SpawnSubagentMode::Blocking
-        && parent_record.status == TurnStatus::BlockedDependentRun
-        && let Some(gate_ref) = parent_record.gate_ref.clone()
-    {
-        return Ok(gate_ref);
-    }
-    // Mirrors the spawn path's `LoopGateRef`-compatible gate token format.
-    GateRef::new(match mode {
-        ironclaw_loop_support::SpawnSubagentMode::Blocking => {
-            format!("gate:subagent-{}", child_record.run_id)
-        }
+    match metadata.mode {
+        ironclaw_loop_support::SpawnSubagentMode::Blocking => Ok(metadata.gate_ref.clone()),
         ironclaw_loop_support::SpawnSubagentMode::Background => {
-            format!("gate:subagent-bg-{}", child_record.run_id)
+            // Mirrors the spawn path's `LoopGateRef`-compatible gate token format.
+            GateRef::new(format!("gate:subagent-bg-{}", child_record.run_id))
+                .map_err(|reason| TurnError::InvalidRequest { reason })
         }
-    })
-    .map_err(|reason| TurnError::InvalidRequest { reason })
+    }
 }
 
 fn parse_optional_subagent_thread_metadata(

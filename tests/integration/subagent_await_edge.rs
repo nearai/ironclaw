@@ -27,8 +27,11 @@ use ironclaw_reborn::subagent::await_edge::{
     store::FilesystemAwaitEdgeStore,
 };
 use ironclaw_reborn_composition::wrap_scoped;
-use ironclaw_threads::InMemorySessionThreadService;
-use ironclaw_turns::{InMemoryTurnStateStore, TurnRunId, TurnScope};
+use ironclaw_threads::{InMemorySessionThreadService, SessionThreadService, ThreadScope};
+use ironclaw_turns::{
+    DefaultTurnCoordinator, InMemoryTurnStateStore, TurnCoordinator, TurnRunId, TurnScope,
+    TurnSpawnTreePort, runner::TurnRunTransitionPort,
+};
 
 fn scope(tenant: &str, user: &str, agent: Option<&str>, project: Option<&str>) -> TurnScope {
     let mut turn_scope = TurnScope::new(
@@ -361,6 +364,350 @@ async fn brand_new_scope_with_no_unclosed_edges_is_admitted_immediately() {
         driver.check_scope_recovered(&scope).await.is_ok(),
         "a scope with nothing to recover must never be rejected on first touch"
     );
+}
+
+// Required test (FIX A backstop, design doc §2): the real lost-edge window
+// is NOT "crash between the child's run-record commit and the parent's
+// `store.open()`" (edge-before-submit already rules that out) — it is
+// `SpawnCompensationState::rollback` (`ironclaw_loop_support::subagent_spawn_port`)
+// unconditionally deleting the just-opened edge while its own child-run
+// cancellation is best-effort and unconfirmed, so the child can keep
+// running to a real terminal state with no edge left to deliver it
+// through. `reconstruct_edge` is the backstop.
+//
+// SUBSTITUTION, reported explicitly: driving the actual capability-port
+// rollback race (forcing `mark_message_submitted` to fail after
+// `submit_child_run` succeeds) is not reachable from this crate — that
+// race lives inside `ironclaw_loop_support::subagent_spawn_port`'s private
+// `SpawnCompensationState::rollback`, a different crate with no injectable
+// failure seam at the await-edge integration-test layer. This test drives
+// the closest feasible seam instead: open the edge exactly as
+// `record_awaited_child` does, then delete it directly via the store
+// (exactly what `rollback`'s `abandon_awaited_child` call does), leaving
+// the child free to keep running to a real terminal state with no edge on
+// disk — then asserts delivery still completes via `reconstruct_edge`.
+#[tokio::test]
+async fn rollback_deleted_edge_is_reconstructed_so_the_parent_still_gets_the_result() {
+    let store = real_store();
+    let state_store = Arc::new(InMemoryTurnStateStore::default());
+    let coordinator = Arc::new(DefaultTurnCoordinator::new(Arc::clone(&state_store)));
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+
+    let tenant = TenantId::new("tenant-rollback").unwrap();
+    let user = UserId::new("user-rollback").unwrap();
+    let agent = AgentId::new("agent-rollback").unwrap();
+    let parent_thread_id = ThreadId::new("parent-thread-rollback").unwrap();
+    let parent_scope = TurnScope::new_with_owner(
+        tenant.clone(),
+        Some(agent.clone()),
+        None,
+        parent_thread_id.clone(),
+        Some(user.clone()),
+    );
+    let actor = ironclaw_turns::TurnActor::new(user.clone());
+
+    // 1. Submit and block the parent on a dependent-run gate — the exact
+    // state a real parent is in while its blocking-mode child runs.
+    let submitted = coordinator
+        .submit_turn(ironclaw_turns::SubmitTurnRequest {
+            scope: parent_scope.clone(),
+            actor: actor.clone(),
+            accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("msg:parent-rollback")
+                .unwrap(),
+            source_binding_ref: ironclaw_turns::SourceBindingRef::new("source:parent-rollback")
+                .unwrap(),
+            reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
+                "reply:parent-rollback",
+            )
+            .unwrap(),
+            requested_run_profile: None,
+            idempotency_key: ironclaw_turns::IdempotencyKey::new("idem:parent-rollback").unwrap(),
+            received_at: chrono::Utc::now(),
+            requested_run_id: None,
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
+            product_context: None,
+        })
+        .await
+        .unwrap();
+    let ironclaw_turns::SubmitTurnResponse::Accepted {
+        run_id: parent_run_id,
+        ..
+    } = submitted;
+    let runner_id = ironclaw_turns::TurnRunnerId::new();
+    let lease_token = ironclaw_turns::TurnLeaseToken::new();
+    state_store
+        .claim_next_run(ironclaw_turns::runner::ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .expect("parent run claimable");
+    let gate_ref = ironclaw_turns::GateRef::new("gate:subagent-rollback-test").unwrap();
+    state_store
+        .block_run(ironclaw_turns::runner::BlockRunRequest {
+            run_id: parent_run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: ironclaw_turns::TurnCheckpointId::new(),
+            state_ref: ironclaw_turns::run_profile::LoopCheckpointStateRef::new(
+                "checkpoint:rollback-test",
+            )
+            .unwrap(),
+            reason: ironclaw_turns::BlockedReason::AwaitDependentRun {
+                gate_ref: gate_ref.clone(),
+            },
+        })
+        .await
+        .unwrap();
+
+    // 2. Submit the child as a real lineage child of the parent.
+    let child_thread_id = ThreadId::new("child-thread-rollback").unwrap();
+    let child_scope = TurnScope::new_with_owner(
+        tenant.clone(),
+        Some(agent.clone()),
+        None,
+        child_thread_id.clone(),
+        Some(user.clone()),
+    );
+    let child_submitted = coordinator
+        .submit_child_run(ironclaw_turns::SubmitChildRunRequest {
+            parent_scope: parent_scope.clone(),
+            parent_run_id,
+            child_scope: child_scope.clone(),
+            actor: actor.clone(),
+            accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("msg:child-rollback")
+                .unwrap(),
+            source_binding_ref: ironclaw_turns::SourceBindingRef::new("source:child-rollback")
+                .unwrap(),
+            reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
+                "reply:child-rollback",
+            )
+            .unwrap(),
+            requested_run_profile: None,
+            idempotency_key: ironclaw_turns::IdempotencyKey::new("idem:child-rollback").unwrap(),
+            received_at: chrono::Utc::now(),
+            requested_run_id: None,
+            spawn_tree_descendant_cap: 16,
+        })
+        .await
+        .unwrap();
+    let ironclaw_turns::SubmitTurnResponse::Accepted {
+        run_id: child_run_id,
+        ..
+    } = child_submitted;
+
+    // 3. Write the child's thread metadata — exactly what `finish_spawn`
+    // does before the (simulated) rollback ever runs, now including the
+    // FIX A fields (`parent_run_context`, `gate_ref`).
+    let mut parent_run_context =
+        ironclaw_agent_loop::test_support::test_run_context("rollback-parent");
+    parent_run_context.scope = parent_scope.clone();
+    parent_run_context.run_id = parent_run_id;
+    parent_run_context.actor = Some(actor.clone());
+    let result_ref = ironclaw_turns::LoopResultRef::new("result:subagent.rollback").unwrap();
+    let metadata = ironclaw_loop_support::SubagentThreadMetadata {
+        kind: ironclaw_loop_support::SubagentThreadKind::Subagent,
+        parent_run_id,
+        parent_thread_id: parent_thread_id.clone(),
+        tree_root_run_id: parent_run_id,
+        child_run_id,
+        subagent_kind: ironclaw_loop_support::SubagentKindId::new("general").unwrap(),
+        mode: ironclaw_loop_support::SpawnSubagentMode::Blocking,
+        result_ref: result_ref.clone(),
+        handoff: None,
+        parent_run_context,
+        gate_ref: gate_ref.clone(),
+    };
+    thread_service
+        .ensure_thread(ironclaw_threads::EnsureThreadRequest {
+            scope: ThreadScope {
+                tenant_id: tenant.clone(),
+                agent_id: agent.clone(),
+                project_id: None,
+                owner_user_id: Some(user.clone()),
+                mission_id: None,
+            },
+            thread_id: Some(child_thread_id.clone()),
+            created_by_actor_id: "test".to_string(),
+            title: Some("Subagent".to_string()),
+            metadata_json: Some(serde_json::to_string(&metadata).unwrap()),
+        })
+        .await
+        .unwrap();
+
+    // The parent's own thread must carry the placeholder tool-result
+    // reference the spawn-time `write_capability_result` call would have
+    // appended — `update_parent_result_reference` (drain path) updates it
+    // in place, it does not create it.
+    thread_service
+        .ensure_thread(ironclaw_threads::EnsureThreadRequest {
+            scope: ThreadScope {
+                tenant_id: tenant.clone(),
+                agent_id: agent.clone(),
+                project_id: None,
+                owner_user_id: Some(user.clone()),
+                mission_id: None,
+            },
+            thread_id: Some(parent_thread_id.clone()),
+            created_by_actor_id: "test".to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    thread_service
+        .append_tool_result_reference(ironclaw_threads::AppendToolResultReferenceRequest {
+            scope: ThreadScope {
+                tenant_id: tenant.clone(),
+                agent_id: agent.clone(),
+                project_id: None,
+                owner_user_id: Some(user.clone()),
+                mission_id: None,
+            },
+            thread_id: parent_thread_id.clone(),
+            turn_run_id: parent_run_id.to_string(),
+            result_ref: result_ref.as_str().to_string(),
+            safe_summary: ironclaw_threads::ToolResultSafeSummary::new("subagent spawned").unwrap(),
+            provider_call: None,
+            model_observation: None,
+        })
+        .await
+        .unwrap();
+
+    // 4. Open the edge (what `record_awaited_child` does), then delete it
+    // directly (what `rollback`'s `abandon_awaited_child` call does) —
+    // simulating the unconfirmed-cancel race: the edge is gone, but the
+    // child (below) keeps running regardless.
+    store
+        .record_awaited_child(test_record(&child_scope, parent_run_id, child_run_id))
+        .await
+        .unwrap();
+    store
+        .abandon_awaited_child(&child_scope, parent_run_id, child_run_id)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .list_unclosed_for_scope(&child_scope)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the edge must actually be gone before the child reaches terminal -- that's the race"
+    );
+
+    // 5. The child, unaware its edge was deleted, keeps running to a real
+    // terminal state.
+    let child_runner_id = ironclaw_turns::TurnRunnerId::new();
+    let child_lease = ironclaw_turns::TurnLeaseToken::new();
+    state_store
+        .claim_next_run(ironclaw_turns::runner::ClaimRunRequest {
+            runner_id: child_runner_id,
+            lease_token: child_lease,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .expect("child run claimable");
+    state_store
+        .complete_run(ironclaw_turns::runner::CompleteRunRequest {
+            run_id: child_run_id,
+            runner_id: child_runner_id,
+            lease_token: child_lease,
+        })
+        .await
+        .unwrap();
+
+    // 6. Deliver the child's terminal event through the resolver — the
+    // exact call `TurnCommittedEventObserver::observe_committed_event`
+    // makes in production.
+    let goal_store: Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore> =
+        Arc::new(ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new());
+    let turn_state_store: Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore> = state_store.clone();
+    let result_writer: Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter> =
+        Arc::new(AllowResultWriter);
+    let resolver = Arc::new(AwaitEdgeResolver::new_unbound(
+        Arc::clone(&store),
+        goal_store,
+        turn_state_store,
+        result_writer,
+        Arc::clone(&thread_service),
+    ));
+    let coordinator_dyn: Arc<dyn TurnCoordinator> = coordinator.clone();
+    resolver.bind_coordinator(coordinator_dyn).unwrap();
+
+    let event = ironclaw_turns::TurnLifecycleEvent {
+        cursor: ironclaw_turns::events::EventCursor(1),
+        scope: child_scope.clone(),
+        occurred_at: None,
+        owner_user_id: Some(user.clone()),
+        run_id: child_run_id,
+        status: ironclaw_turns::TurnStatus::Completed,
+        kind: ironclaw_turns::TurnEventKind::Completed,
+        blocked_gate: None,
+        sanitized_reason: None,
+        retryable: None,
+        detail: None,
+    };
+    let outcome = resolver
+        .handle_child_terminal(&event)
+        .await
+        .expect("resolver should not error");
+    assert_eq!(
+        outcome,
+        ironclaw_loop_support::ResolveOutcome::Resumed,
+        "reconstruct_edge must rebuild the deleted edge from cached thread metadata \
+         and deliver the result -- the parent must not be left stuck"
+    );
+
+    // 7. The parent actually left `BlockedDependentRun` -- not stuck.
+    let parent_state = coordinator
+        .get_run_state(ironclaw_turns::GetRunStateRequest {
+            scope: parent_scope.clone(),
+            run_id: parent_run_id,
+        })
+        .await
+        .unwrap();
+    assert_ne!(
+        parent_state.status,
+        ironclaw_turns::TurnStatus::BlockedDependentRun,
+        "the parent must actually resume, not stay stuck on its dependent-run gate"
+    );
+}
+
+struct AllowResultWriter;
+
+#[async_trait::async_trait]
+impl ironclaw_loop_support::LoopCapabilityResultWriter for AllowResultWriter {
+    async fn write_capability_result(
+        &self,
+        write: ironclaw_loop_support::CapabilityResultWrite<'_>,
+    ) -> Result<
+        ironclaw_loop_support::CapabilityWriteResult,
+        ironclaw_turns::run_profile::AgentLoopHostError,
+    > {
+        Ok(
+            ironclaw_loop_support::CapabilityWriteResult::without_output_digest(
+                ironclaw_turns::LoopResultRef::new(format!("result:{}", write.capability_id))
+                    .unwrap(),
+                0,
+            ),
+        )
+    }
+
+    async fn update_capability_result(
+        &self,
+        _run_context: &ironclaw_turns::run_profile::LoopRunContext,
+        _result_ref: &ironclaw_turns::LoopResultRef,
+        output: serde_json::Value,
+    ) -> Result<u64, ironclaw_turns::run_profile::AgentLoopHostError> {
+        Ok(serde_json::to_vec(&output)
+            .map(|bytes| bytes.len() as u64)
+            .unwrap_or(0))
+    }
 }
 
 fn test_record(

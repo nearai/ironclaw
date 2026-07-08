@@ -7,14 +7,18 @@
 //! specifies a shared `Semaphore(4)` + a *bounded pending queue* with a
 //! *per-tenant in-flight cap* (round-5, §4.3) so a cold-boot burst from one
 //! tenant cannot starve every other tenant's recovery. This implementation
-//! ships the semaphore-bounded concurrency and the `in_progress` dedupe
-//! guard (§5.3's core admission contract: a scope with in-flight recovery
-//! returns `ScopeRecoveryInProgress` immediately, never blocks the caller),
-//! but the bounded-queue-with-per-tenant-cap fairness refinement is
-//! deferred — a saturated semaphore currently blocks the *background task*
-//! (not the caller) rather than dropping a queued task per the round-5
-//! fairness rule. Named here as a real, reported scope cut, not silently
-//! dropped.
+//! ships the round-4 floor — one shared semaphore across boot and lazy
+//! recovery (`run_boot_recovery` takes the same `Arc<Semaphore>` the
+//! `ScopeRecoveryDriver` it runs alongside uses, via
+//! [`ScopeRecoveryDriver::semaphore`]) — plus the `in_progress` dedupe guard
+//! (§5.3's core admission contract: a scope with in-flight recovery returns
+//! `ScopeRecoveryInProgress` immediately, never blocks the caller). The
+//! round-5 bounded-pending-queue-with-per-tenant-cap fairness refinement is
+//! still deferred to PR2's boot-wiring change (`run_boot_recovery` has zero
+//! production callers in PR1, so there is nothing yet to starve) — a
+//! saturated semaphore currently blocks the *background task* (not the
+//! caller) rather than dropping a queued task per the round-5 fairness rule.
+//! Named here as a real, reported scope cut, not silently dropped.
 
 use std::{
     collections::HashSet,
@@ -100,17 +104,21 @@ where
 }
 
 /// Boot-time roster walk (§4.3): enumerate every scope with unclosed edges
-/// and drive each one's recovery, bounded by `BOOT_RECOVERY_MAX_CONCURRENT_SCOPES`.
+/// and drive each one's recovery, bounded by the caller-supplied `semaphore`
+/// — the *same* `Arc<Semaphore>` a co-running [`ScopeRecoveryDriver`]'s lazy
+/// backstop uses (via [`ScopeRecoveryDriver::semaphore`]), per the round-4
+/// "one limiter, not a separate pool per origin" ruling. Callers must pass
+/// `Arc::clone` of that shared semaphore, never a freshly constructed one.
 pub async fn run_boot_recovery<S, F>(
     resolver: Arc<AwaitEdgeResolver<S, F>>,
     fs: Arc<ironclaw_filesystem::ScopedFilesystem<F>>,
+    semaphore: Arc<Semaphore>,
 ) -> ResolveReport
 where
     S: SessionThreadService + ?Sized + 'static,
     F: RootFilesystem + ?Sized + 'static,
 {
     let keys = roster::walk_roster_shards(&fs).await;
-    let semaphore = Arc::new(Semaphore::new(BOOT_RECOVERY_MAX_CONCURRENT_SCOPES));
     let mut report = ResolveReport::default();
     let mut handles = Vec::new();
     for key in keys {
@@ -195,6 +203,14 @@ where
 
     fn lock_set(set: &Mutex<HashSet<String>>) -> std::sync::MutexGuard<'_, HashSet<String>> {
         set.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// The shared limiter this driver's lazy recovery tasks acquire against
+    /// (round-4: one limiter, not a separate pool per origin). Future boot
+    /// wiring must pass `Arc::clone(&driver.semaphore())` into
+    /// [`run_boot_recovery`] rather than constructing a second `Semaphore`.
+    pub fn semaphore(&self) -> Arc<Semaphore> {
+        Arc::clone(&self.semaphore)
     }
 }
 
@@ -287,5 +303,123 @@ where
         self.store
             .abandon_awaited_child(child_scope, parent_run_id, child_run_id)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::{
+        MountAlias, MountGrant, MountPermissions, MountView, TenantId, UserId, VirtualPath,
+    };
+    use ironclaw_threads::InMemorySessionThreadService;
+    use ironclaw_turns::TurnSpawnTreeStateStore;
+
+    use super::*;
+
+    struct NoopResultWriter;
+
+    #[async_trait::async_trait]
+    impl ironclaw_loop_support::LoopCapabilityResultWriter for NoopResultWriter {
+        async fn write_capability_result(
+            &self,
+            _write: ironclaw_loop_support::CapabilityResultWrite<'_>,
+        ) -> Result<ironclaw_loop_support::CapabilityWriteResult, AgentLoopHostError> {
+            Err(AgentLoopHostError::new(
+                ironclaw_turns::run_profile::AgentLoopHostErrorKind::Unavailable,
+                "not exercised by shared-semaphore tests",
+            ))
+        }
+    }
+
+    fn boot_sem_scoped_fs() -> Arc<ScopedFilesystem<InMemoryBackend>> {
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/turns").unwrap(),
+            VirtualPath::new("/turns").unwrap(),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .unwrap();
+        Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::new(InMemoryBackend::new()),
+            mounts,
+        ))
+    }
+
+    fn boot_sem_resolver(
+        fs: Arc<ScopedFilesystem<InMemoryBackend>>,
+    ) -> Arc<AwaitEdgeResolver<InMemorySessionThreadService, InMemoryBackend>> {
+        let store = Arc::new(FilesystemAwaitEdgeStore::new(fs));
+        let goal_store: Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore> =
+            Arc::new(crate::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new());
+        let turn_state_store: Arc<dyn TurnSpawnTreeStateStore> =
+            Arc::new(ironclaw_turns::InMemoryTurnStateStore::default());
+        let result_writer: Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter> =
+            Arc::new(NoopResultWriter);
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        Arc::new(AwaitEdgeResolver::new_unbound(
+            store,
+            goal_store,
+            turn_state_store,
+            result_writer,
+            thread_service,
+        ))
+    }
+
+    // Required test (§4.3 round-4 fix, boot_recovery.rs module header):
+    // `run_boot_recovery` and `ScopeRecoveryDriver`'s lazy backstop must
+    // contend for the *same* semaphore, not one each. Proven by having a
+    // lazy-shaped caller hold every permit on `driver.semaphore()`, then
+    // driving `run_boot_recovery` against `Arc::clone` of that exact
+    // semaphore and asserting it is blocked until the held permits are
+    // released — a boot pass with its own separate semaphore would complete
+    // immediately regardless of what the lazy origin was holding.
+    // Mutation: give `run_boot_recovery` its own freshly constructed
+    // `Semaphore::new(BOOT_RECOVERY_MAX_CONCURRENT_SCOPES)` internally
+    // instead of taking the caller's -> RED (boot no longer blocks).
+    #[tokio::test]
+    async fn boot_and_lazy_recovery_share_one_semaphore_not_separate_pools() {
+        let fs = boot_sem_scoped_fs();
+        let resolver = boot_sem_resolver(Arc::clone(&fs));
+        let store = Arc::new(FilesystemAwaitEdgeStore::new(Arc::clone(&fs)));
+        let driver = ScopeRecoveryDriver::new(Arc::clone(&resolver), store);
+
+        // Seed exactly one roster entry so boot's walk has one scope to
+        // attempt a permit acquisition for.
+        let roster_key = RosterKey {
+            tenant_id: TenantId::new("boot-sem-tenant").unwrap(),
+            user_id: UserId::new("boot-sem-user").unwrap(),
+            agent_id: None,
+            project_id: None,
+        };
+        roster::touch_roster_marker(&fs, &roster_key).await.unwrap();
+
+        // Simulate `BOOT_RECOVERY_MAX_CONCURRENT_SCOPES` lazy-origin
+        // recovery tasks already holding every permit on the shared
+        // limiter.
+        let shared_semaphore = driver.semaphore();
+        let held_permits = shared_semaphore
+            .try_acquire_many(BOOT_RECOVERY_MAX_CONCURRENT_SCOPES as u32)
+            .expect("semaphore should start with every permit free");
+
+        let mut boot_handle = tokio::spawn(run_boot_recovery(
+            Arc::clone(&resolver),
+            Arc::clone(&fs),
+            Arc::clone(&shared_semaphore),
+        ));
+
+        let raced = tokio::time::timeout(Duration::from_millis(150), &mut boot_handle).await;
+        assert!(
+            raced.is_err(),
+            "boot recovery completed while the shared semaphore was fully held \
+             by another origin — it must be blocked on the SAME limiter, proving \
+             it is not acquiring against a separate pool"
+        );
+
+        drop(held_permits);
+
+        tokio::time::timeout(Duration::from_secs(5), boot_handle)
+            .await
+            .expect("boot recovery should complete once the shared semaphore frees up")
+            .expect("boot recovery task should not panic");
     }
 }
