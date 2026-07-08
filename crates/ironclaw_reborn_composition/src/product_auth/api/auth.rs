@@ -1532,6 +1532,9 @@ fn auth_product_error_from_reborn_error(error: RebornAuthProductError) -> AuthPr
         AuthErrorCode::CredentialMissing => AuthProductError::CredentialMissing,
         AuthErrorCode::AccountSelectionRequired => AuthProductError::AccountSelectionRequired,
         AuthErrorCode::BackendUnavailable => AuthProductError::BackendUnavailable,
+        AuthErrorCode::ProviderIdentityAlreadyConnected => {
+            AuthProductError::ProviderIdentityAlreadyConnected
+        }
         AuthErrorCode::MalformedConfig => AuthProductError::MalformedConfig,
         AuthErrorCode::MalformedCallback => AuthProductError::MalformedCallback,
         AuthErrorCode::Canceled => AuthProductError::Canceled,
