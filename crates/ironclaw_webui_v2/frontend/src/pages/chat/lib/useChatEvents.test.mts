@@ -827,6 +827,69 @@ test("useChatEvents: category-only failure update upgrades existing error", () =
   assert.equal(harness.messages[0].content, "category:model_unavailable");
 });
 
+test("useChatEvents: adjacent duplicate run failures collapse across unknown and known run ids", () => {
+  const harness = createUseChatEventsHarness({
+    failureMessageForRunStatus: ({ failureCategory }) =>
+      failureCategory || "run failed",
+  });
+  const failureCategory = "model_credentials_invalid";
+
+  harness.handleEvent({
+    type: "failed",
+    frame: {
+      run_state: {
+        status: "failed",
+        failure: { category: failureCategory },
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            run_status: {
+              run_id: "run-known-failure",
+              status: "failed",
+              failure_category: failureCategory,
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, "err-run-known-failure");
+  assert.equal(harness.messages[0].content, failureCategory);
+
+  harness.replaceMessages([
+    ...harness.messages,
+    { id: "pending-next", role: "user", content: "try again" },
+  ]);
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            run_status: {
+              run_id: "run-next-failure",
+              status: "failed",
+              failure_category: failureCategory,
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 3);
+  assert.equal(harness.messages[2].id, "err-run-next-failure");
+  assert.equal(harness.messages[2].content, failureCategory);
+});
+
 test("useChatEvents: locally resolved approval gate is not restored by stale projection", () => {
   const runId = "run-denied";
   const gateRef = "gate:approval-denied";

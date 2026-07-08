@@ -678,6 +678,14 @@ function appendRunFailureMessage(
       };
       return next;
     }
+    const lastMessage = prev[prev.length - 1];
+    if (isAdjacentDuplicateRunFailure(lastMessage, content)) {
+      const replacement = promotedRunFailureMessage(lastMessage, messageId);
+      if (replacement === lastMessage) return prev;
+      const next = [...prev];
+      next[next.length - 1] = replacement;
+      return next;
+    }
     return [
       ...prev,
       {
@@ -688,6 +696,23 @@ function appendRunFailureMessage(
       },
     ];
   });
+}
+
+function isAdjacentDuplicateRunFailure(message, content) {
+  const id = typeof message?.id === "string" ? message.id : "";
+  return (
+    message?.role === "error" &&
+    id.startsWith("err-") &&
+    !id.startsWith("err-request-") &&
+    !id.startsWith("err-stream-") &&
+    message.content === content
+  );
+}
+
+function promotedRunFailureMessage(message, messageId) {
+  return message?.id === "err-unknown" && messageId !== "err-unknown"
+    ? { ...message, id: messageId }
+    : message;
 }
 
 function appendStreamFailureMessage(setMessages, { error, kind, retryable }) {

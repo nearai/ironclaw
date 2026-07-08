@@ -9,13 +9,14 @@ import { AttachmentPreviewModal } from "./attachment-preview.js";
 import { useT } from "../../../lib/i18n.js";
 
 /* User keeps a tinted bubble; assistant is borderless (document-like);
-   system / error stay as centered tinted notices. Reasoning ("thinking")
-   renders as a collapsible disclosure (see ThinkingDisclosure). */
+   system stays as a centered notice, and error renders as an inline
+   assistant-side alert. Reasoning ("thinking") renders as a collapsible
+   disclosure (see ThinkingDisclosure). */
 const ROLE_STYLES = {
   user: "ml-auto rounded-[18px] border border-signal/25 bg-signal/10 px-4 py-3 text-iron-100",
   assistant: "mr-auto px-1 text-iron-100",
   system: "mx-auto rounded-[18px] border border-copper/20 bg-copper/10 px-4 py-3 text-center text-copper",
-  error: "mx-auto rounded-[18px] border border-red-400/20 bg-red-500/10 px-4 py-3 text-center text-red-200",
+  error: "mr-auto rounded-[18px] border border-red-400/25 bg-red-500/10 px-4 py-3 text-left text-red-200",
 };
 
 function formatTimestamp(value) {
@@ -117,13 +118,17 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
 
   const timeLabel = formatTimestamp(timestamp);
   const showActions = role === "user" || (role === "assistant" && !isOptimistic);
-  const isNotice = role === "system" || role === "error";
+  const isNotice = role === "system";
+  const isError = role === "error";
   const bubbleWidthClass = isUser
     ? "v2-chat-readable-width"
     : isNotice
     ? "mx-auto v2-chat-readable-width"
+    : isError
+    ? "mr-auto v2-chat-readable-width"
     : "w-full v2-chat-readable-width";
-  const contentWidthClass = isUser ? "min-w-0 max-w-full" : "w-full min-w-0 max-w-full";
+  const contentWidthClass =
+    isUser || isError ? "min-w-0 max-w-full" : "w-full min-w-0 max-w-full";
   const showRetryAction = status === "error" && onRetry;
   const showMetaRow = showActions || showRetryAction || timeLabel;
 
@@ -183,7 +188,11 @@ function MessageBubbleImpl({ message, onRetry, threadId }) {
         <div
           className=${[
             "mt-1 flex min-h-7 w-max v2-chat-readable-width flex-nowrap items-center gap-3 px-1 text-iron-400 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100",
-            isUser ? "self-end justify-end" : isNotice ? "self-center justify-center" : "self-start justify-start",
+            isUser
+              ? "self-end justify-end"
+              : isNotice
+              ? "self-center justify-center"
+              : "self-start justify-start",
           ].join(" ")}
         >
           ${timeLabel && html`<time dateTime=${timestamp} className="shrink-0 font-mono text-[11px] text-iron-500">${timeLabel}</time>`}

@@ -105,6 +105,29 @@ test("conversation bubbles use mobile-safe shared widths and wrap long user toke
   );
 });
 
+test("error messages render as inline chat bubbles, not centered notices", () => {
+  assert.match(
+    messageBubbleSource,
+    /error:\s*"mr-auto[^"]*text-left text-red-200"/,
+    "error role should align with the assistant-side chat stream",
+  );
+  assert.match(
+    messageBubbleSource,
+    /const isNotice = role === "system";/,
+    "system notices may stay centered, but error messages should not share that branch",
+  );
+  assert.match(
+    messageBubbleSource,
+    /: isError\s*\?\s*"mr-auto v2-chat-readable-width"/,
+    "error bubbles should use a compact readable-width bubble instead of a full-width centered notice",
+  );
+  assert.doesNotMatch(
+    messageBubbleSource,
+    /error:\s*"mx-auto[^"]*text-center/,
+    "error role must not regress to the old centered banner styling",
+  );
+});
+
 test("message timestamp and actions share a hover-only meta row", () => {
   assert.match(
     messageBubbleSource,
