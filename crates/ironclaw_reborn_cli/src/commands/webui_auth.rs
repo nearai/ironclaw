@@ -18,7 +18,8 @@ use ironclaw_reborn_composition::{
     LocalTriggerAccessStore, PublicRouteMount, RebornIdentityResolver, WebuiAuthenticator,
 };
 use ironclaw_reborn_webui_ingress::{
-    SignedSessionLoginConfig, build_signed_session_login, empty_webui_v2_auth_providers_mount,
+    CompositeAuthenticator, SessionAuthenticator, SignedSessionLoginConfig,
+    build_signed_session_login, empty_webui_v2_auth_providers_mount, signed_session_store,
 };
 use secrecy::SecretString;
 
@@ -49,8 +50,9 @@ pub(crate) struct LocalTriggerAccessBootstrapConfig {
 /// Build the auth surface from resolved startup config.
 ///
 /// With no SSO provider configured (`sso_startup` is `None`), the listener
-/// keeps its plain env-bearer authenticator and mounts only the inert auth
-/// surface so `/auth/providers` can return an empty provider list.
+/// keeps its env-bearer authenticator, also validates signed session tokens
+/// minted by the admin API, and mounts only the inert auth surface so
+/// `/auth/providers` can return an empty provider list.
 /// With providers configured, this layers the fail-closed email-domain
 /// admission adapter on top of the runtime-owned canonical Reborn identity
 /// resolver and hands the result to the ingress signed-session builder.
@@ -73,13 +75,27 @@ pub(crate) async fn build_webui_auth_surface(
     local_trigger_access: Option<LocalTriggerAccessBootstrapConfig>,
 ) -> anyhow::Result<WebuiAuthSurface> {
     let Some(sso) = sso_startup else {
-        // No SSO providers: keep the env-bearer authenticator and mount only
-        // inert provider discovery. Login/session/logout routes require a
-        // revocable SSO session store, which env-bearer mode deliberately
-        // does not have.
+        // No SSO providers: no public login routes, and no SSO logins to seed
+        // local trigger access for (bootstrap config is unused here). But the
+        // serve layer *always* wires the admin-API token minter, which mints
+        // signed **session** tokens (the user-create bearer). Those validate
+        // only through a `SessionAuthenticator` over the same signed store —
+        // absent it, an admin-created user's API token would 401 on every
+        // request (regression caught by `tests/e2e/scenarios/test_admin_api.py`).
+        // Compose the env-bearer (operator) authenticator with a session
+        // authenticator over that store so minted tokens work without SSO;
+        // operator capabilities still follow the env token only, so the session
+        // bearer stays non-operator.
+        let session_authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(
+            SessionAuthenticator::new(signed_session_store(&session_signing_secret, &tenant_id)),
+        );
+        let authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(CompositeAuthenticator::new(
+            session_authenticator,
+            env_authenticator,
+        ));
         let public_mount = empty_webui_v2_auth_providers_mount();
         return Ok(WebuiAuthSurface {
-            authenticator: env_authenticator,
+            authenticator,
             public_mount: Some(public_mount),
         });
     };
@@ -218,10 +234,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_sso_keeps_env_authenticator_and_mounts_empty_provider_route() {
-        // With no SSO configured the surface is the plain env-bearer
-        // authenticator plus an inert public auth mount. The absent-resolver
-        // check must not fire on this path, and a bootstrap config is unused.
+    async fn no_sso_composes_env_and_session_auth_and_mounts_empty_provider_route() {
+        // With no SSO configured the surface still needs env-bearer access
+        // plus signed-session bearer access for admin-created users. It also
+        // mounts an inert public auth surface for provider discovery. The
+        // absent-resolver check must not fire on this path, and a bootstrap
+        // config is unused.
         let result = build_webui_auth_surface(
             None,
             None,

@@ -1454,7 +1454,13 @@ fn serve_with_env_auth_seeds_reborn_config_before_binding() {
         .env_clear()
         .env("HOME", &home)
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
-        .env("IRONCLAW_REBORN_WEBUI_TOKEN", "test-token")
+        .env(
+            "IRONCLAW_REBORN_WEBUI_TOKEN",
+            // >=32 bytes: serve now enforces the session-signing entropy
+            // floor unconditionally (it signs admin-minted session tokens
+            // even without SSO).
+            "reborn-smoke-test-token-0123456789abcdef",
+        )
         .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1575,7 +1581,13 @@ fn serve_env_slack_enabled_mounts_slack_events_route() {
         .env_clear()
         .env("HOME", &home)
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
-        .env("IRONCLAW_REBORN_WEBUI_TOKEN", "test-token")
+        .env(
+            "IRONCLAW_REBORN_WEBUI_TOKEN",
+            // >=32 bytes: serve now enforces the session-signing entropy
+            // floor unconditionally (it signs admin-minted session tokens
+            // even without SSO).
+            "reborn-smoke-test-token-0123456789abcdef",
+        )
         .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
         .env("IRONCLAW_REBORN_SLACK_ENABLED", "true")
         .stdout(Stdio::piped())
@@ -1744,7 +1756,13 @@ max_body_bytes_fallback = 0
 
         let output = isolated_no_llm_command(temp.path(), &reborn_home)
             .args(["serve", "--host", "127.0.0.1", "--port", "0"])
-            .env("IRONCLAW_REBORN_WEBUI_TOKEN", "test-token")
+            .env(
+                "IRONCLAW_REBORN_WEBUI_TOKEN",
+                // >=32 bytes: serve now enforces the session-signing entropy
+                // floor unconditionally (it signs admin-minted session tokens
+                // even without SSO).
+                "reborn-smoke-test-token-0123456789abcdef",
+            )
             .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
             .output()
             .expect("ironclaw-reborn serve should not crash");
@@ -1800,6 +1818,40 @@ fn serve_fails_closed_when_sso_provider_has_no_allowed_domain_allowlist() {
     assert!(
         !stderr.contains("ironclaw-reborn: WebChat v2 listener"),
         "serve must not bind after SSO admission misconfiguration; got: {stderr}"
+    );
+}
+
+#[cfg(feature = "webui-v2-beta")]
+#[test]
+fn serve_fails_closed_when_session_token_lacks_entropy_without_sso() {
+    // Regression for the offline HMAC-oracle gap: serve always wires the admin
+    // API token minter, which signs user-visible session tokens from the env
+    // bearer secret. A weak secret is therefore an offline forgery target even
+    // when no SSO provider is configured, so the >=32-byte entropy floor must
+    // fire unconditionally — not only when SSO startup is present.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+
+    let output = isolated_no_llm_command(temp.path(), &reborn_home)
+        .args(["serve", "--host", "127.0.0.1", "--port", "0"])
+        // 16 bytes: below the floor, and NO SSO provider env is set.
+        .env("IRONCLAW_REBORN_WEBUI_TOKEN", "short-weak-token")
+        .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
+        .output()
+        .expect("ironclaw-reborn serve should not crash");
+
+    assert!(
+        !output.status.success(),
+        "serve must fail closed on a low-entropy session-signing secret even without SSO"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("session-signing key") && stderr.contains("at least 32 bytes"),
+        "stderr should explain the session-signing entropy floor; got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("ironclaw-reborn: WebChat v2 listener"),
+        "serve must not bind with a low-entropy session-signing secret; got: {stderr}"
     );
 }
 
@@ -3226,7 +3278,13 @@ fn serve_confirmed_local_dev_yolo_rejects_non_loopback_cli_host() {
         &temp,
         &["serve", "--confirm-host-access", "--host", "0.0.0.0"],
     )
-    .env("IRONCLAW_REBORN_WEBUI_TOKEN", "test-token")
+    .env(
+        "IRONCLAW_REBORN_WEBUI_TOKEN",
+        // >=32 bytes: serve now enforces the session-signing entropy
+        // floor unconditionally (it signs admin-minted session tokens
+        // even without SSO).
+        "reborn-smoke-test-token-0123456789abcdef",
+    )
     .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
     .output()
     .expect("ironclaw-reborn serve should not crash");
@@ -3259,7 +3317,13 @@ listen_host = "0.0.0.0"
     .expect("write config");
 
     let output = local_yolo_command(&temp, &["serve", "--confirm-host-access"])
-        .env("IRONCLAW_REBORN_WEBUI_TOKEN", "test-token")
+        .env(
+            "IRONCLAW_REBORN_WEBUI_TOKEN",
+            // >=32 bytes: serve now enforces the session-signing entropy
+            // floor unconditionally (it signs admin-minted session tokens
+            // even without SSO).
+            "reborn-smoke-test-token-0123456789abcdef",
+        )
         .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
         .output()
         .expect("ironclaw-reborn serve should not crash");
