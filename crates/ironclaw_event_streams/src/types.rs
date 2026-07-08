@@ -171,6 +171,10 @@ pub struct ThreadLiveProjectionUpdate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadLiveProjectionItem {
+    Text {
+        id: String,
+        body: String,
+    },
     Thinking {
         id: String,
         run_id: TurnRunId,

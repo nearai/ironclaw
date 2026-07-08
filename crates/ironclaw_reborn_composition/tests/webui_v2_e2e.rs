@@ -721,6 +721,45 @@ fn events_include_final_reply(bytes: &[u8]) -> bool {
         .any(|event| event.event.as_deref() == Some("final_reply"))
 }
 
+fn event_has_assistant_text_update(event: &ParsedSseEvent, needle: &str) -> bool {
+    if event.event.as_deref() != Some("projection_update") {
+        return false;
+    }
+    let payload = event_payload_json(event);
+    payload["state"]["items"].as_array().is_some_and(|items| {
+        items.iter().any(|item| {
+            item["text"]["body"]
+                .as_str()
+                .is_some_and(|body| body.contains(needle))
+        })
+    })
+}
+
+fn event_has_completed_run_status(event: &ParsedSseEvent) -> bool {
+    if !matches!(
+        event.event.as_deref(),
+        Some("projection_update") | Some("projection_snapshot")
+    ) {
+        return false;
+    }
+    let payload = event_payload_json(event);
+    payload["state"]["items"].as_array().is_some_and(|items| {
+        items.iter().any(|item| {
+            item["run_status"]["status"]
+                .as_str()
+                .is_some_and(|status| matches!(status, "completed" | "succeeded"))
+        })
+    })
+}
+
+fn events_include_completed_status_and_assistant_text(bytes: &[u8], needle: &str) -> bool {
+    let events = parse_sse_events(bytes);
+    events.iter().any(event_has_completed_run_status)
+        && events
+            .iter()
+            .any(|event| event_has_assistant_text_update(event, needle))
+}
+
 fn cursor_scopes_thread(cursor: &str, thread_id: &str) -> bool {
     let Ok(cursor) = serde_json::from_str::<Value>(cursor) else {
         return false;
@@ -975,6 +1014,55 @@ async fn webui_v2_beta_acceptance_stream_replay_restart_and_redaction() {
         .shutdown()
         .await
         .expect("reopened runtime shutdown clean");
+}
+
+#[tokio::test]
+async fn webui_v2_sse_streams_assistant_text_before_terminal_completion() {
+    let harness = build_harness().await;
+
+    let thread_id = create_thread(&harness.router, "e2e-streaming-text-create").await;
+    let response = open_sse(&harness.router, &thread_id, None).await;
+    let mut body = response.into_body();
+
+    send_message(&harness.router, &thread_id, "e2e-streaming-text-send").await;
+
+    let sse_bytes = collect_sse_until(&mut body, Duration::from_secs(10), |bytes| {
+        events_include_completed_status_and_assistant_text(bytes, "e2e tool ok")
+    })
+    .await;
+    drop(body);
+
+    assert_no_sensitive_payload("assistant text SSE stream", &sse_bytes);
+    let events = parse_sse_events(&sse_bytes);
+    let text_index = events
+        .iter()
+        .position(|event| event_has_assistant_text_update(event, "e2e tool ok"))
+        .unwrap_or_else(|| {
+            panic!(
+                "SSE stream never emitted assistant text projection before timeout; events={events:?}; raw={}",
+                String::from_utf8_lossy(&sse_bytes)
+            )
+        });
+    let completed_index = events
+        .iter()
+        .position(event_has_completed_run_status)
+        .unwrap_or_else(|| {
+            panic!(
+                "SSE stream never emitted terminal completed status before timeout; events={events:?}; raw={}",
+                String::from_utf8_lossy(&sse_bytes)
+            )
+        });
+    assert!(
+        text_index < completed_index,
+        "assistant text projection must be observable before terminal completion; events={events:?}; raw={}",
+        String::from_utf8_lossy(&sse_bytes)
+    );
+
+    harness
+        .runtime
+        .shutdown()
+        .await
+        .expect("runtime shutdown clean");
 }
 
 #[tokio::test]

@@ -15,7 +15,7 @@ use crate::identity::{AdapterInstallationId, ProductAdapterId};
 const PROJECTION_CURSOR_MAX_BYTES: usize = 1024;
 const PROJECTION_THREAD_ID_MAX_BYTES: usize = 512;
 const PROJECTION_ITEM_ID_MAX_BYTES: usize = 512;
-const PROJECTION_TEXT_MAX_BYTES: usize = 128 * 1024;
+pub const PROJECTION_TEXT_MAX_BYTES: usize = 128 * 1024;
 const PROJECTION_WORK_SUMMARY_MAX_BYTES: usize = 1024;
 /// Maximum byte length for a projected skill activation name.
 pub const PROJECTION_SKILL_NAME_MAX_BYTES: usize = 128;

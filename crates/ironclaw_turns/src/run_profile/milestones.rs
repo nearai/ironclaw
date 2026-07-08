@@ -86,6 +86,9 @@ pub enum LoopHostMilestoneKind {
     ModelReasoningDelta {
         safe_delta: String,
     },
+    ModelTextDelta {
+        safe_text: String,
+    },
     ModelFailed {
         reason_kind: AgentLoopHostErrorKind,
     },
@@ -252,6 +255,7 @@ impl LoopHostMilestoneKind {
             Self::ModelStarted { .. } => "model_started",
             Self::ModelCompleted { .. } => "model_completed",
             Self::ModelReasoningDelta { .. } => "model_reasoning_delta",
+            Self::ModelTextDelta { .. } => "model_text_delta",
             Self::ModelFailed { .. } => "model_failed",
             Self::CapabilityInvoked { .. } => "capability_invoked",
             Self::CapabilityCompleted { .. } => "capability_completed",
@@ -456,6 +460,11 @@ where
         safe_delta: String,
     ) -> Result<(), AgentLoopHostError> {
         self.publish(LoopHostMilestoneKind::ModelReasoningDelta { safe_delta })
+            .await
+    }
+
+    pub async fn model_text_delta(&self, safe_text: String) -> Result<(), AgentLoopHostError> {
+        self.publish(LoopHostMilestoneKind::ModelTextDelta { safe_text })
             .await
     }
 

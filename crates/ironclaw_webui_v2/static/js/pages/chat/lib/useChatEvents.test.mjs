@@ -173,6 +173,59 @@ test("useChatEvents: projection activity preserves reasoning/tool chronology", (
   );
 });
 
+test("useChatEvents: projection text streams into one assistant bubble without ending the run", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-1", status: "running" } },
+          { text: { id: "text:run-1", body: "partial" } },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.isProcessing, true);
+  assert.deepEqual(plain(harness.activeRun), {
+    runId: "run-1",
+    threadId: "thread-1",
+    status: "running",
+  });
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, "text-text:run-1");
+  assert.equal(harness.messages[0].role, "assistant");
+  assert.equal(harness.messages[0].content, "partial");
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ text: { id: "text:run-1", body: "partial answer" } }],
+      },
+    },
+  });
+
+  assert.equal(harness.isProcessing, true);
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].content, "partial answer");
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "completed" } }],
+      },
+    },
+  });
+
+  assert.equal(harness.isProcessing, false);
+  assert.equal(harness.activeRun, null);
+  assert.deepEqual(harness.settledRuns, [{ runId: "run-1", success: true }]);
+});
+
 test("useChatEvents: skill activation projection stays out of chat transcript", () => {
   const harness = createUseChatEventsHarness();
 

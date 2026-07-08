@@ -454,6 +454,26 @@ where
                 );
             }
         }
+        if matches!(response.output, ParentLoopOutput::AssistantReply(_)) {
+            let mut accumulated_text = String::new();
+            for chunk in &response.chunks {
+                if chunk.safe_text_delta.is_empty() {
+                    continue;
+                }
+                accumulated_text.push_str(&chunk.safe_text_delta);
+                if let Err(error) = self
+                    .milestones
+                    .model_text_delta(accumulated_text.clone())
+                    .await
+                {
+                    tracing::debug!(
+                        kind = ?error.kind,
+                        diagnostic_ref = ?error.diagnostic_ref,
+                        "loop model text milestone failed after successful model response"
+                    );
+                }
+            }
+        }
         if let Err(error) = self
             .milestones
             .model_completed(response.effective_model_profile_id.clone())

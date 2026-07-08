@@ -11,9 +11,10 @@ use ironclaw_event_projections::{
 use ironclaw_event_streams::{
     AllowAllProjectionAccessPolicy, EventStreamManager, InMemoryProjectionStreamAdmissionPolicy,
     InMemoryProjectionUpdateSource, NoExposureProjectionRedactionValidator,
-    ProjectionStreamError as EventProjectionStreamError, ProjectionStreamItem,
-    ProjectionSubscribeRequest, ProjectionSubscription as EventProjectionSubscription,
-    ProjectionTarget, ProjectionViewClass, SubscriberCapabilities, ThreadLiveProjectionUpdate,
+    ProductProjectionEnvelope, ProjectionStreamError as EventProjectionStreamError,
+    ProjectionStreamItem, ProjectionSubscribeRequest,
+    ProjectionSubscription as EventProjectionSubscription, ProjectionTarget, ProjectionViewClass,
+    SubscriberCapabilities, ThreadLiveProjectionUpdate,
 };
 use ironclaw_events::{DurableEventLog, EventCursor, EventStreamKey, ReadScope};
 use ironclaw_first_party_extension_ports::SkillActivationObserver;
@@ -257,19 +258,29 @@ impl ProjectionStream for WebuiRuntimeProjectionStream {
 
         let is_resuming_runtime_payloads = origin_cursor.runtime_payloads_delivered > 0;
         let mut batch = WebuiProjectionBatch::new(origin_cursor);
-        if let Some(item) = subscription.next().await
-            && batch
-                .push_runtime_item(item, &request.scope, self.display_previews.as_ref())
-                .await?
-            && !is_resuming_runtime_payloads
-        {
-            consume_buffered_runtime_items(
-                &mut subscription,
+        if let Some(item) = subscription.next().await {
+            let buffered = if is_resuming_runtime_payloads {
+                Vec::new()
+            } else {
+                collect_buffered_runtime_items(&mut subscription)
+            };
+            let keep_consuming = push_ordered_initial_runtime_items(
                 &mut batch,
+                item,
+                buffered,
                 &request.scope,
                 self.display_previews.as_ref(),
             )
             .await?;
+            if keep_consuming && !is_resuming_runtime_payloads {
+                consume_buffered_runtime_items(
+                    &mut subscription,
+                    &mut batch,
+                    &request.scope,
+                    self.display_previews.as_ref(),
+                )
+                .await?;
+            }
         }
 
         if batch.runtime_payloads_pushed == 0 && !is_resuming_runtime_payloads {
@@ -325,21 +336,112 @@ async fn consume_buffered_runtime_items(
     scope: &TurnScope,
     display_previews: &dyn CapabilityDisplayPreviewSource,
 ) -> Result<(), ProductAdapterError> {
-    for _ in 0..WEBUI_PROJECTION_PAGE_LIMIT {
-        if !batch.has_runtime_payload_capacity() {
-            break;
-        }
-        let Some(item) = subscription.try_next_buffered() else {
-            break;
-        };
-        if !batch
-            .push_runtime_item(item, scope, display_previews)
-            .await?
-        {
+    for item in collect_buffered_runtime_items(subscription) {
+        if !push_runtime_item(batch, item, scope, display_previews).await? {
             break;
         }
     }
     Ok(())
+}
+
+fn collect_buffered_runtime_items(
+    subscription: &mut EventProjectionSubscription,
+) -> Vec<ProjectionStreamItem> {
+    let mut items = Vec::new();
+    for _ in 0..WEBUI_PROJECTION_PAGE_LIMIT {
+        let Some(item) = subscription.try_next_buffered() else {
+            break;
+        };
+        items.push(item);
+    }
+    items
+}
+
+async fn push_ordered_initial_runtime_items(
+    batch: &mut WebuiProjectionBatch,
+    first: ProjectionStreamItem,
+    buffered: Vec<ProjectionStreamItem>,
+    scope: &TurnScope,
+    display_previews: &dyn CapabilityDisplayPreviewSource,
+) -> Result<bool, ProductAdapterError> {
+    // Live progress and durable state use independent cursor rails. When both
+    // are buffered, drain live updates before a terminal durable run status so
+    // the browser can render assistant text/progress before settling the run.
+    if durable_item_has_terminal_run_status(&first)
+        && buffered.first().is_some_and(projection_item_is_live_update)
+    {
+        let live_prefix_len = buffered
+            .iter()
+            .take_while(|item| projection_item_is_live_update(item))
+            .count();
+        for item in buffered.iter().take(live_prefix_len).cloned() {
+            if !push_runtime_item(batch, item, scope, display_previews).await? {
+                return Ok(false);
+            }
+        }
+        if !push_runtime_item(batch, first, scope, display_previews).await? {
+            return Ok(false);
+        }
+        for item in buffered.into_iter().skip(live_prefix_len) {
+            if !push_runtime_item(batch, item, scope, display_previews).await? {
+                return Ok(false);
+            }
+        }
+        return Ok(true);
+    }
+
+    if !push_runtime_item(batch, first, scope, display_previews).await? {
+        return Ok(false);
+    }
+    for item in buffered {
+        if !push_runtime_item(batch, item, scope, display_previews).await? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+async fn push_runtime_item(
+    batch: &mut WebuiProjectionBatch,
+    item: ProjectionStreamItem,
+    scope: &TurnScope,
+    display_previews: &dyn CapabilityDisplayPreviewSource,
+) -> Result<bool, ProductAdapterError> {
+    if !batch.has_runtime_payload_capacity() {
+        return Ok(false);
+    }
+    batch.push_runtime_item(item, scope, display_previews).await
+}
+
+fn projection_item_is_live_update(item: &ProjectionStreamItem) -> bool {
+    matches!(
+        item,
+        ProjectionStreamItem::Update(envelope)
+            if matches!(envelope.as_ref(), ProductProjectionEnvelope::ThreadLiveUpdate(_))
+    )
+}
+
+fn durable_item_has_terminal_run_status(item: &ProjectionStreamItem) -> bool {
+    match item {
+        ProjectionStreamItem::Snapshot(envelope) => envelope_has_terminal_run_status(envelope),
+        ProjectionStreamItem::Update(envelope) => envelope_has_terminal_run_status(envelope),
+        ProjectionStreamItem::RebaseRequired { snapshot, .. } => {
+            envelope_has_terminal_run_status(snapshot)
+        }
+        ProjectionStreamItem::Lagged { .. } | ProjectionStreamItem::KeepAlive => false,
+    }
+}
+
+fn envelope_has_terminal_run_status(envelope: &ProductProjectionEnvelope) -> bool {
+    let runs = match envelope {
+        ProductProjectionEnvelope::ThreadSnapshot(snapshot) => &snapshot.runs,
+        ProductProjectionEnvelope::ThreadUpdates(replay) => &replay.runs,
+        ProductProjectionEnvelope::ThreadLiveUpdate(_)
+        | ProductProjectionEnvelope::DeliveryStatus(_)
+        | ProductProjectionEnvelope::Debug(_) => return false,
+    };
+    runs.iter()
+        .any(|run| run.status != RunProjectionStatus::Running)
 }
 
 struct WebuiProjectionBatch {
