@@ -1,13 +1,14 @@
 name: Nightly Deep CI
 
-# This workflow intentionally reuses the Legacy Tests workflow instead of
-# duplicating job definitions here. The called .github/workflows/test.yml
-# workflow runs the legacy deterministic deep suite:
-# - full Rust test matrix: all-features, default, libsql-only
-# - heavy runtime integration tests
-# - Telegram integration partitions
-# - replay snapshot gate
-# - Telegram and Slack channel tests
+# The legacy v1 suite (.github/workflows/test.yml) is deliberately NOT
+# invoked here: v1 (src/) is frozen pending removal ("Clean up old
+# architecture" roadmap), so its deep suite is paused rather than spending
+# nightly compute on retired code. Note the consequence: test.yml is the
+# ONLY place the root `ironclaw` package's tests run, so until src/ is
+# deleted, a v1 bug fix that must land should temporarily restore the
+# `deterministic-deep-tests` call job (git log this file for the removed
+# block). This is an explicit freeze, not the silent-death failure mode
+# this workflow's history is infamous for.
 #
 # Cross-cutting platform and compatibility coverage is reused from
 # .github/workflows/platform-and-compat.yml:
@@ -41,13 +42,6 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deterministic-deep-tests:
-    name: Legacy Tests
-    uses: ./.github/workflows/test.yml
-    with:
-      ref: ${{ github.sha }}
-      include_docker: false
-
   platform-and-compat:
     name: Platform & Compat
     uses: ./.github/workflows/platform-and-compat.yml

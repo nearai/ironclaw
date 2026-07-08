@@ -55,10 +55,11 @@ Rules for a roll-up job that is (or may become) required:
 
 ## Deep tier (nightly)
 
-`nightly-deep-ci.yml` (04:00 UTC) reuses `test.yml` (legacy suite),
-`platform-and-compat.yml`, `reborn-tests.yml`, and `reborn-e2e.yml` via
-`workflow_call` at full scope. Two hard-won gotchas are encoded in the
-configuration:
+`nightly-deep-ci.yml` (04:00 UTC) reuses `platform-and-compat.yml`,
+`reborn-tests.yml`, and `reborn-e2e.yml` via `workflow_call` at full scope.
+The legacy v1 suite (`test.yml`) is deliberately not invoked — see the
+freeze note in `nightly-deep-ci.yml`. Two hard-won gotchas are encoded in
+the configuration:
 
 - **`github.event_name` in a reusable workflow is the caller's event** — it is
   never `workflow_call`. Conditions written as `github.event_name ==
@@ -102,8 +103,11 @@ own run on a startup_failure and can never see a cron that didn't fire.
   in `crates/ironclaw_safety` today.
 - **Replay Snapshot Gate** runs on push + via the nightly legacy suite; it
   covers the retiring v1 engine.
-- **Tests (Legacy)** (`test.yml`) is `workflow_call`-only, invoked by Nightly
-  Deep CI. The v1 suite does not gate merges.
+- **Tests (Legacy)** (`test.yml`) is deliberately invoked nowhere — v1
+  (`src/`) is frozen pending removal, and this suite is the only place the
+  root `ironclaw` package's tests run. Until `src/` is deleted, a v1 bug fix
+  that must land should temporarily restore the `deterministic-deep-tests`
+  call in `nightly-deep-ci.yml`. Delete `test.yml` together with `src/`.
 - **Scope classifiers** (`scripts/ci/classify-test-scope.sh` and per-workflow
   `changes` jobs) are curated allowlists. Adding a new crate or test directory
   requires updating them, or the queue's scoped checks silently narrow. Keep
