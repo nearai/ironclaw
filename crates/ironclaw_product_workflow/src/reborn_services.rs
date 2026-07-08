@@ -91,8 +91,8 @@ pub use admin_users::{
 };
 pub use error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
 pub use trace_credits::{
-    RebornAccountTrace, RebornAccountTracesResponse, RebornTraceCreditsResponse,
-    RebornTraceHoldAuthorizeResponse,
+    RebornAccountLoginLinkResponse, RebornAccountTrace, RebornAccountTracesResponse,
+    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse,
 };
 
 pub use fs_browse::{
@@ -2093,6 +2093,29 @@ pub trait RebornServicesApi: Send + Sync {
     ) -> Result<RebornAccountTracesResponse, RebornServicesError> {
         let actor = caller.actor();
         trace_credits::account_traces_for_user(&caller.tenant_id, &actor.user_id)
+            .await
+            .map_err(RebornServicesError::internal_from)
+    }
+
+    /// Mint a one-time Trace Commons browser login link for the
+    /// authenticated caller, so hosted users (no host-file access) can open
+    /// their contributor account from the WebUI.
+    ///
+    /// The scope is always derived from the authenticated caller's tenant +
+    /// user id — never from request input. An unenrolled caller gets the
+    /// zero-state (`minted: false, enrolled: false`), never an error.
+    ///
+    /// SECURITY: the returned URL is a one-time account-access credential. It
+    /// travels only over this authenticated response to the caller's own
+    /// browser; it must never be logged or exposed on a model-visible
+    /// surface. The default body is the production implementation (pinned
+    /// direct client, same lane as `trace_account_traces`).
+    async fn trace_account_login_link(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornAccountLoginLinkResponse, RebornServicesError> {
+        let actor = caller.actor();
+        trace_credits::account_login_link_for_user(&caller.tenant_id, &actor.user_id)
             .await
             .map_err(RebornServicesError::internal_from)
     }

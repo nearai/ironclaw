@@ -252,6 +252,10 @@ registerPack("ko", {
   "traceCommons.lastSyncDesc": "마지막 동기화 기준 로컬 보기",
   "traceCommons.never": "없음",
   "traceCommons.recentExplanations": "최근 크레딧 내역",
+  "traceCommons.openAccount": "Trace Commons 계정 열기",
+  "traceCommons.openingAccount": "여는 중…",
+  "traceCommons.openAccountFailed":
+    "Trace Commons 계정을 열 수 없습니다. 등록 상태를 확인하고 다시 시도하세요.",
   "traceCommons.submittedTracesTitle": "제출한 트레이스",
   "traceCommons.tracesLoadFailed": "제출한 트레이스를 불러오지 못했습니다.",
   "traceCommons.traceStatus": "상태",

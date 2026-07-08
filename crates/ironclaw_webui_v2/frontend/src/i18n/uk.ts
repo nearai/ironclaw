@@ -252,6 +252,10 @@ registerPack("uk", {
   "traceCommons.lastSyncDesc": "Локальний перегляд станом на останню синхронізацію",
   "traceCommons.never": "ніколи",
   "traceCommons.recentExplanations": "Останні пояснення кредитів",
+  "traceCommons.openAccount": "Відкрити обліковий запис Trace Commons",
+  "traceCommons.openingAccount": "Відкриття…",
+  "traceCommons.openAccountFailed":
+    "Не вдалося відкрити ваш обліковий запис Trace Commons. Перевірте реєстрацію та спробуйте ще раз.",
   "traceCommons.submittedTracesTitle": "Надіслані трейси",
   "traceCommons.tracesLoadFailed": "Не вдалося завантажити ваші надіслані трейси.",
   "traceCommons.traceStatus": "Статус",

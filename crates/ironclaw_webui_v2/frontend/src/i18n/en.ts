@@ -263,6 +263,10 @@ registerPack("en", {
   "traceCommons.recentExplanations": "Recent credit explanations",
   "traceCommons.note":
     "Local view as of last sync — the authoritative credit ledger is server-side. Final credit can change after privacy review, replay/eval, duplicate checks, and downstream utility scoring.",
+  "traceCommons.openAccount": "Open Trace Commons account",
+  "traceCommons.openingAccount": "Opening…",
+  "traceCommons.openAccountFailed":
+    "Could not open your Trace Commons account. Check enrollment and try again.",
   "traceCommons.submittedTracesTitle": "Submitted traces",
   "traceCommons.tracesLoadFailed": "Could not load your submitted traces.",
   "traceCommons.traceStatus": "Status",

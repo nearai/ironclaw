@@ -252,6 +252,10 @@ registerPack("zh-CN", {
   "traceCommons.lastSyncDesc": "截至最近同步的本地视图",
   "traceCommons.never": "从未",
   "traceCommons.recentExplanations": "最近的积分说明",
+  "traceCommons.openAccount": "打开 Trace Commons 账户",
+  "traceCommons.openingAccount": "正在打开…",
+  "traceCommons.openAccountFailed":
+    "无法打开您的 Trace Commons 账户。请检查注册状态后重试。",
   "traceCommons.submittedTracesTitle": "已提交的跟踪记录",
   "traceCommons.tracesLoadFailed": "无法加载您已提交的跟踪记录。",
   "traceCommons.traceStatus": "状态",

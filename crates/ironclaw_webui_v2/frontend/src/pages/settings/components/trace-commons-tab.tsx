@@ -1,7 +1,10 @@
+import { useState } from "react";
+
 import { Card } from "../../../design-system/card";
 import { useT } from "../../../lib/i18n";
 import { useTraceCredits } from "../hooks/useTraceCredits";
 import { useAccountTraces } from "../hooks/useAccountTraces";
+import { mintAccountLoginLink } from "../lib/settings-api";
 import { matchesSearch } from "../lib/settings-search";
 import { SettingsSearchEmpty } from "./settings-search-empty";
 
@@ -18,6 +21,29 @@ export function formatTimestamp(value, t) {
   if (!value) return t("traceCommons.never");
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? t("traceCommons.never") : parsed.toLocaleString();
+}
+
+// Open the caller's Trace Commons account in a new tab via a one-time login
+// link. Pure/injectable so tests can drive it without a browser: `mint` is the
+// API call, `open` is the window.open-shaped opener. Opens a blank tab
+// SYNCHRONOUSLY (before the async mint) so popup blockers attribute it to the
+// user's click, then navigates it to the minted URL. The URL exists only in
+// this flow — never logged, never stored.
+export async function openAccountLoginLink({ mint, open }) {
+  const win = open("about:blank", "_blank", "noopener,noreferrer");
+  try {
+    const response = await mint();
+    if (!response || response.minted !== true || !response.url) {
+      if (win) win.close();
+      return { status: "unavailable" };
+    }
+    if (!win) return { status: "blocked" };
+    win.location = response.url;
+    return { status: "opened" };
+  } catch (error) {
+    if (win) win.close();
+    return { status: "error", error };
+  }
 }
 
 // Decide how the submitted-traces section renders. Pure so the branch logic is
@@ -49,6 +75,16 @@ export function TraceCommonsTab({ searchQuery = "" }) {
   const t = useT();
   const { credits, query, authorize } = useTraceCredits();
   const { traces, enrolled: tracesEnrolled, query: tracesQuery } = useAccountTraces();
+  const [openState, setOpenState] = useState("idle");
+
+  const handleOpenAccount = async () => {
+    setOpenState("pending");
+    const result = await openAccountLoginLink({
+      mint: mintAccountLoginLink,
+      open: (url, target, features) => window.open(url, target, features),
+    });
+    setOpenState(result.status === "opened" ? "idle" : "failed");
+  };
 
   if (
     !matchesSearch(searchQuery, [
@@ -278,6 +314,26 @@ export function TraceCommonsTab({ searchQuery = "" }) {
       <p className="text-sm leading-6 text-[var(--v2-text-muted)]">
         {t("traceCommons.description")}
       </p>
+
+      {(credits?.enrolled || tracesEnrolled) && (
+        <div className="mt-3">
+          <button
+            type="button"
+            onClick={handleOpenAccount}
+            disabled={openState === "pending"}
+            className="rounded-lg border border-[var(--v2-accent-soft)] px-3 py-1.5 text-xs font-medium text-[var(--v2-accent-text)] transition-colors hover:bg-[var(--v2-accent-soft)] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {openState === "pending"
+              ? t("traceCommons.openingAccount")
+              : t("traceCommons.openAccount")}
+          </button>
+          {openState === "failed" && (
+            <span className="ml-3 text-xs text-red-300">
+              {t("traceCommons.openAccountFailed")}
+            </span>
+          )}
+        </div>
+      )}
 
       {body}
 
