@@ -395,13 +395,24 @@ impl HookMilestoneSink for InMemoryHookMilestoneSink {
     }
 }
 
-#[derive(Clone)]
 pub struct LoopHostMilestoneEmitter<S>
 where
     S: LoopHostMilestoneSink + ?Sized,
 {
     context: LoopRunContext,
     sink: Arc<S>,
+}
+
+impl<S> Clone for LoopHostMilestoneEmitter<S>
+where
+    S: LoopHostMilestoneSink + ?Sized,
+{
+    fn clone(&self) -> Self {
+        Self {
+            context: self.context.clone(),
+            sink: Arc::clone(&self.sink),
+        }
+    }
 }
 
 impl<S> LoopHostMilestoneEmitter<S>

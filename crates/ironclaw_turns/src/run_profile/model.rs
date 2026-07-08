@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -198,6 +201,19 @@ pub trait LoopModelGateway: Send + Sync {
         &self,
         request: LoopModelGatewayRequest,
     ) -> Result<LoopModelResponse, LoopModelGatewayError>;
+
+    async fn stream_model_with_progress(
+        &self,
+        request: LoopModelGatewayRequest,
+        _progress_sink: Arc<dyn LoopModelProgressSink>,
+    ) -> Result<LoopModelResponse, LoopModelGatewayError> {
+        self.stream_model(request).await
+    }
+}
+
+#[async_trait]
+pub trait LoopModelProgressSink: Send + Sync {
+    async fn model_text_update(&self, safe_text: String);
 }
 
 /// Provider/model policy guard consulted before dispatching a model call.
@@ -335,7 +351,7 @@ where
 impl<G, S> LoopModelPort for HostManagedLoopModelPort<G, S>
 where
     G: LoopModelGateway + ?Sized,
-    S: LoopHostMilestoneSink + ?Sized,
+    S: LoopHostMilestoneSink + ?Sized + 'static,
 {
     async fn stream_model(
         &self,
@@ -383,10 +399,17 @@ where
         // Bound the primary model call so a hung provider/gateway surfaces as a
         // retryable error before the runner lease reclaims this run mid-flight.
         // See `PRIMARY_MODEL_CALL_TIMEOUT`.
-        let gateway_call = self.gateway.stream_model(LoopModelGatewayRequest {
-            context: self.context.clone(),
-            request: request.clone(),
+        let progress_sink = Arc::new(MilestoneModelProgressSink {
+            milestones: self.milestones.clone(),
+            emitted_text: AtomicBool::new(false),
         });
+        let gateway_call = self.gateway.stream_model_with_progress(
+            LoopModelGatewayRequest {
+                context: self.context.clone(),
+                request: request.clone(),
+            },
+            progress_sink.clone(),
+        );
         let gateway_result =
             match tokio::time::timeout(PRIMARY_MODEL_CALL_TIMEOUT, gateway_call).await {
                 Ok(result) => result.map(sanitize_model_response),
@@ -454,7 +477,9 @@ where
                 );
             }
         }
-        if matches!(response.output, ParentLoopOutput::AssistantReply(_)) {
+        if matches!(response.output, ParentLoopOutput::AssistantReply(_))
+            && !progress_sink.emitted_text()
+        {
             let mut accumulated_text = String::new();
             for chunk in &response.chunks {
                 if chunk.safe_text_delta.is_empty() {
@@ -486,6 +511,40 @@ where
             );
         }
         Ok(response)
+    }
+}
+
+struct MilestoneModelProgressSink<S>
+where
+    S: LoopHostMilestoneSink + ?Sized,
+{
+    milestones: LoopHostMilestoneEmitter<S>,
+    emitted_text: AtomicBool,
+}
+
+impl<S> MilestoneModelProgressSink<S>
+where
+    S: LoopHostMilestoneSink + ?Sized,
+{
+    fn emitted_text(&self) -> bool {
+        self.emitted_text.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl<S> LoopModelProgressSink for MilestoneModelProgressSink<S>
+where
+    S: LoopHostMilestoneSink + ?Sized,
+{
+    async fn model_text_update(&self, safe_text: String) {
+        self.emitted_text.store(true, Ordering::SeqCst);
+        if let Err(error) = self.milestones.model_text_delta(safe_text).await {
+            tracing::debug!(
+                kind = ?error.kind,
+                diagnostic_ref = ?error.diagnostic_ref,
+                "loop model text progress milestone failed during model stream"
+            );
+        }
     }
 }
 
