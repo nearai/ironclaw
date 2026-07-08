@@ -1083,6 +1083,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn channel_connection_required_preview_keeps_oauth_copy() {
+        // The connect-requirement payload is backend-authored first-party copy.
+        // Drive the real preview builder and pin the Slack OAuth copy end-to-end.
+        let value = json!({
+            "channel": "slack",
+            "strategy": "oauth",
+            "instructions": "Connect Slack with OAuth from the extension configuration, then message the Slack bot directly.",
+            "input_placeholder": "",
+            "submit_label": "Connect Slack",
+            "error_message": "Slack OAuth connection failed. Try configuring Slack again."
+        });
+        let preview = output_preview(&value);
+        let text = preview
+            .preview
+            .expect("connect requirement renders a preview");
+        assert!(
+            text.contains("Connect Slack with OAuth"),
+            "instructions must keep the OAuth copy, got: {text}"
+        );
+        assert!(
+            !text.contains("[redacted]"),
+            "first-party OAuth copy must not be redacted, got: {text}"
+        );
+    }
+
+    #[test]
     fn record_input_recovers_from_poisoned_pending_input_lock() {
         let store = CapabilityDisplayPreviewStore::default();
         let poison_result = catch_unwind(AssertUnwindSafe(|| {

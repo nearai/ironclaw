@@ -162,6 +162,7 @@ mod tests {
 
     fn request() -> LoopModelRequest {
         LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: Vec::new(),
             surface_version: None,
             model_preference: None,

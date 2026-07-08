@@ -49,10 +49,12 @@ fn responses_create_request_accepts_text_or_item_input() {
         "model": "gpt-reborn",
         "input": "hello",
         "stream": false,
+        "temperature": 0.42,
         "previous_response_id": "resp_previous"
     }))
     .expect("text input");
     assert!(matches!(text.input, OpenAiResponsesInput::Text(_)));
+    assert_eq!(text.temperature, Some(0.42));
     assert_eq!(
         text.previous_response_id
             .as_ref()

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # One-shot refresh of WebUI v2 frontend artifacts for local inspection or
-# vendored dependency updates. Cargo builds the SPA bundle into OUT_DIR when
-# `webui-v2-beta` is enabled, so static/dist/ is ignored and must not be
-# committed. Only commit static/vendor/ changes when refreshing pinned vendor
-# assets.
+# vendored dependency updates. Vite writes generated output into ignored
+# dist/. Cargo embeds that prebuilt output when `webui-v2-beta` is enabled, so
+# dist/ must exist locally but must not be committed. Only commit
+# public/vendor/ changes when refreshing pinned vendor assets.
 #
-#   ./build.sh           # vendor + npm ci + bundle
+#   ./build.sh           # vendor + pnpm install + Vite build
 #   ./build.sh --no-vendor   # skip re-downloading vendored CDN assets
 set -euo pipefail
 
@@ -16,15 +16,15 @@ if [[ "${1:-}" != "--no-vendor" ]]; then
   bash vendor.sh
 fi
 
-echo "Installing build dependencies (npm ci)…"
-if [[ ! -f package-lock.json ]]; then
-  echo "Error: package-lock.json is missing — refusing to fall back to 'npm install'." >&2
+echo "Installing build dependencies (pnpm install --frozen-lockfile)…"
+if [[ ! -f pnpm-lock.yaml ]]; then
+  echo "Error: pnpm-lock.yaml is missing — refusing to install without a lockfile." >&2
   echo "Artifacts must build from the committed lockfile. Restore it and re-run." >&2
   exit 1
 fi
-npm ci
+corepack pnpm install --frozen-lockfile
 
-echo "Bundling SPA…"
-node build.mjs
+echo "Building SPA with Vite…"
+pnpm build
 
 echo "All WebUI v2 frontend artifacts rebuilt."

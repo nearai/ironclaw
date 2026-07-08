@@ -120,6 +120,27 @@ fn reborn_crate_dependency_boundaries_hold() {
             .collect::<Vec<_>>(),
     );
 
+    // Canonical Reborn identity layer: it maps external identities to a stable
+    // `UserId` at the bottom of the stack, so among internal ironclaw crates it
+    // may depend ONLY on `ironclaw_host_api` (identity/scope newtypes) and
+    // `ironclaw_filesystem` (the durable substrate it persists behind). Enforced
+    // as an allowlist so it can never reach UPSTREAM (into
+    // `ironclaw_reborn_composition` / `ironclaw_product_workflow`) or onto the v1
+    // legacy enclave — the "never reach upstream" property the crate guarantees.
+    let reborn_identity_allowed = [
+        "ironclaw_reborn_identity",
+        "ironclaw_host_api",
+        "ironclaw_filesystem",
+    ];
+    assert_no_normal_workspace_deps(
+        &dependencies,
+        "ironclaw_reborn_identity",
+        workspace_ironclaw_crates(&dependencies)
+            .into_iter()
+            .filter(|name| !reborn_identity_allowed.contains(name))
+            .collect::<Vec<_>>(),
+    );
+
     for rule in boundary_rules() {
         assert_no_normal_workspace_deps(&dependencies, rule.crate_name, rule.forbidden);
     }
@@ -713,10 +734,10 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
         "crates/ironclaw_reborn/src/tool_disclosure_port.rs",
         // Composition-local protocol surfaces that reconstruct provider-shaped
         // output or local-dev provider tools.
-        "crates/ironclaw_reborn_composition/src/openai_compat_serve.rs",
+        "crates/ironclaw_reborn_composition/src/llm_admin/openai_compat_serve.rs",
         "crates/ironclaw_reborn_composition/src/runtime/local_dev/external_tool_capability.rs",
         "crates/ironclaw_reborn_composition/src/runtime/local_dev/synthetic_capability.rs",
-        "crates/ironclaw_reborn_composition/src/trace_capture.rs",
+        "crates/ironclaw_reborn_composition/src/observability/trace_capture.rs",
     ]);
     let violations = uses
         .into_iter()
@@ -914,7 +935,7 @@ fn reborn_boot_config_file_layout_is_pinned() {
     // composition without forcing `ironclaw_reborn_config` to depend
     // on `ironclaw_llm` (which would violate _config's standalone
     // boundary). The composition crate is the legitimate consumer.
-    let llm_catalog = root.join("crates/ironclaw_reborn_composition/src/llm_catalog.rs");
+    let llm_catalog = root.join("crates/ironclaw_reborn_composition/src/llm_admin/llm_catalog.rs");
     assert!(
         llm_catalog.exists(),
         "composition must expose a catalog resolver at {} so the CLI can stitch \
@@ -1589,14 +1610,14 @@ fn reborn_product_auth_contract_stays_reborn_native() {
     let mut violations = Vec::new();
     collect_forbidden_uses(&auth_src, &root, &forbidden, &mut violations);
     collect_forbidden_reborn_auth_file_uses(
-        &root.join("crates/ironclaw_reborn_composition/src/auth.rs"),
+        &root.join("crates/ironclaw_reborn_composition/src/product_auth/api/auth.rs"),
         &root,
         &forbidden,
         &mut violations,
     );
     collect_forbidden_reborn_auth_path_uses(
-        &root.join("crates/ironclaw_reborn_composition/src/product_auth_serve"),
-        &root.join("crates/ironclaw_reborn_composition/src/product_auth_serve.rs"),
+        &root.join("crates/ironclaw_reborn_composition/src/product_auth/serve"),
+        &root.join("crates/ironclaw_reborn_composition/src/product_auth/serve.rs"),
         &root,
         &forbidden,
         &mut violations,
@@ -1839,6 +1860,36 @@ struct BoundaryRule {
 
 fn boundary_rules() -> Vec<BoundaryRule> {
     vec![
+        BoundaryRule {
+            // The v1→Reborn migration tool is an intentional one-way bridge:
+            // it reads through the root `ironclaw` crate and writes through the
+            // Reborn state substrate + composition's `migration-support` seam.
+            // That bridge must stay a *state* converter — it must not grow
+            // direct deps on the serving/runtime/engine layers (gateway, engine,
+            // runtime lanes, dispatcher, webui) or it would quietly become a
+            // second live entry point into Reborn.
+            crate_name: "ironclaw_reborn_migration",
+            forbidden: vec![
+                "ironclaw_dispatcher",
+                "ironclaw_engine",
+                "ironclaw_gateway",
+                "ironclaw_llm",
+                "ironclaw_loop_support",
+                "ironclaw_mcp",
+                "ironclaw_network",
+                "ironclaw_product_adapters",
+                "ironclaw_product_workflow",
+                "ironclaw_reborn",
+                "ironclaw_reborn_cli",
+                "ironclaw_reborn_event_store",
+                "ironclaw_run_state",
+                "ironclaw_runtime_policy",
+                "ironclaw_scripts",
+                "ironclaw_tui",
+                "ironclaw_wasm",
+                "ironclaw_webui_v2",
+            ],
+        },
         BoundaryRule {
             crate_name: "ironclaw_product_workflow",
             forbidden: vec![

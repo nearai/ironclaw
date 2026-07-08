@@ -52,6 +52,13 @@ Slack Events API must reach the Reborn listener over a public HTTPS URL:
 https://<public-host>/webhooks/slack/events
 ```
 
+Slack personal OAuth must also redirect back to the Reborn product-auth
+callback:
+
+```text
+https://<public-host>/api/reborn/product-auth/oauth/slack_personal/callback
+```
+
 For local development, expose the local listener through a tunnel and use the
 tunnel URL in Slack. The listener defaults to `127.0.0.1:3000`; use
 `serve --host 0.0.0.0 --port 3000` only when intentionally exposing it behind a
@@ -111,8 +118,9 @@ enabled = true
 overrides only the route enablement gate: `true`/`1` mounts Slack, while
 `false`/`0` acts as a deployment kill switch.
 
-Slack enablement mounts `POST /webhooks/slack/events` and exposes Slack channel
-setup in WebUI.
+Slack enablement mounts `POST /webhooks/slack/events`, exposes Slack channel
+setup in WebUI, and makes personal Slack connection available through the Slack
+extension's OAuth configuration flow.
 Slack installation ids, team/app ids, the bot token, the signing secret,
 and channel mappings are configured after startup from WebUI channel setup.
 
@@ -145,9 +153,15 @@ Basic Information:
 
 OAuth & Permissions:
 
+- Add the redirect URL:
+
+```text
+https://<public-host>/api/reborn/product-auth/oauth/slack_personal/callback
+```
+
 - Add bot token scopes:
   - `chat:write` for final replies and temporary working messages.
-  - `im:write` for opening DMs used by the pairing-code flow.
+  - `im:write` for opening DMs after a user has connected with OAuth.
   - `app_mentions:read` for channel mentions.
   - `im:history` for direct-message events.
   - `channels:history` if the bot should receive public-channel message events
@@ -155,6 +169,8 @@ OAuth & Permissions:
   - `groups:history` if the bot should receive private-channel message events.
   - `mpim:history` if the bot should receive group-DM message events.
   - `files:read` if Slack file attachments should be downloaded and processed.
+- Add user token scopes:
+  - `users:read` for binding the authenticated Slack user to the Reborn user.
 - Install or reinstall the app to the workspace after changing scopes.
 - Copy `Bot User OAuth Token` into WebUI Slack workspace setup.
 
@@ -193,6 +209,8 @@ features:
     display_name: IronClaw Reborn
     always_online: false
 oauth_config:
+  redirect_urls:
+    - https://<public-host>/api/reborn/product-auth/oauth/slack_personal/callback
   scopes:
     bot:
       - chat:write
@@ -203,6 +221,8 @@ oauth_config:
       - groups:history
       - mpim:history
       - files:read
+    user:
+      - users:read
 settings:
   event_subscriptions:
     request_url: https://<public-host>/webhooks/slack/events
@@ -247,8 +267,9 @@ Verification checklist:
 - Slack Event Subscriptions shows the Request URL as verified.
 - `POST /webhooks/slack/events` returns the Slack URL-verification challenge
   during setup.
-- A DM to the app either produces a pairing code or routes through the paired
-  Reborn user.
+- After the user installs and configures the Slack extension, the OAuth callback
+  binds that Slack user to the authenticated Reborn user.
+- A DM to the app routes through the OAuth-connected Reborn user.
 - A channel `@app` mention replies in the same channel thread.
 - Bot-originated and subtyped Slack messages are ignored.
 
@@ -270,9 +291,9 @@ Confirm the WebUI Slack setup signing secret matches the app signing secret and 
 
 Add or confirm chat:write, reinstall the Slack app, and update the bot token in WebUI Slack setup if Slack issued a new token.
 
-### Pairing code DM fails
+### Slack OAuth callback fails
 
-Confirm im:write and chat:write, reinstall the app, and verify the bot token in WebUI Slack setup starts with xoxb-.
+Confirm the Slack redirect URL is exactly https://<public-host>/api/reborn/product-auth/oauth/slack_personal/callback, the user scope includes users:read, the app was reinstalled after changing OAuth settings, and the WebUI Slack setup client id/client secret match the Slack app.
 
 ### Channel mention does not reach Reborn
 

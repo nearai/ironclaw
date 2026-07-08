@@ -39,12 +39,15 @@ pub(crate) fn sanitized_failure(category: &'static str) -> Option<SanitizedFailu
     }
 }
 
-pub(crate) fn sanitized_driver_failure(reason_kind: &str) -> Option<SanitizedFailure> {
-    if matches!(
+pub(crate) fn sanitized_driver_failure(
+    reason_kind: &str,
+    detail: Option<&str>,
+) -> Option<SanitizedFailure> {
+    let base = if matches!(
         reason_kind,
         MODEL_CREDITS_EXHAUSTED_CATEGORY | MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY
     ) {
-        return match SanitizedFailure::new(reason_kind.to_string()) {
+        match SanitizedFailure::new(reason_kind.to_string()) {
             Ok(failure) => Some(failure),
             Err(error) => {
                 debug!(
@@ -54,9 +57,16 @@ pub(crate) fn sanitized_driver_failure(reason_kind: &str) -> Option<SanitizedFai
                 );
                 sanitized_failure("driver_failed")
             }
-        };
-    }
-    sanitized_failure("driver_failed")
+        }
+    } else {
+        sanitized_failure("driver_failed")
+    };
+    // Carry the secret-scrubbed model-visible detail onto the failure record so
+    // it can reach `TurnLifecycleEvent.detail` and the failure explainer.
+    base.map(|failure| match detail {
+        Some(detail) => failure.with_detail(detail),
+        None => failure,
+    })
 }
 
 /// Factory trait for constructing a per-run `AgentLoopDriverHost`.
@@ -99,3 +109,26 @@ impl std::fmt::Display for HostFactoryError {
 }
 
 impl std::error::Error for HostFactoryError {}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitized_driver_failure;
+
+    #[test]
+    fn sanitized_driver_failure_returns_driver_failed_for_invalid_category() {
+        let failure = sanitized_driver_failure("invalid category with spaces", None)
+            .expect("driver_failed fallback is valid");
+
+        assert_eq!(failure.category(), "driver_failed");
+        assert_eq!(failure.detail(), None);
+    }
+
+    #[test]
+    fn sanitized_driver_failure_carries_detail_onto_failure_record() {
+        let failure = sanitized_driver_failure("driver_failed", Some("HTTP 404 model not found"))
+            .expect("driver_failed is valid");
+
+        assert_eq!(failure.category(), "driver_failed");
+        assert_eq!(failure.detail(), Some("HTTP 404 model not found"));
+    }
+}

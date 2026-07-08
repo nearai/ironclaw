@@ -6,7 +6,8 @@ use secrecy::{ExposeSecret, SecretString};
 
 use crate::{
     AuthFlowId, AuthProductError, AuthProductScope, AuthorizationCodeHash, CredentialAccountId,
-    CredentialAccountLabel, PkceVerifierHash, ProviderScope, ids::AuthProviderId,
+    CredentialAccountLabel, OAuthProviderIdentity, PkceVerifierHash, ProviderScope,
+    ids::AuthProviderId,
 };
 
 macro_rules! one_shot_secret {
@@ -99,6 +100,7 @@ pub struct OAuthProviderExchange {
     pub refresh_secret: Option<SecretHandle>,
     pub scopes: Vec<ProviderScope>,
     pub account_id: Option<CredentialAccountId>,
+    pub provider_identity: Option<OAuthProviderIdentity>,
 }
 
 /// One-shot provider refresh input. This type intentionally does not implement

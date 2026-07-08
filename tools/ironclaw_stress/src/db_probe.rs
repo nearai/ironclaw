@@ -2,7 +2,9 @@ use std::{io::ErrorKind, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Args, Backend, redaction::redact_postgres_url};
+#[cfg(feature = "postgres")]
+use crate::redaction::redact_postgres_url;
+use crate::{Args, Backend};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct DbProbeSummary {

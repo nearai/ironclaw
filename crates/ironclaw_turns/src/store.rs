@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -6,12 +8,12 @@ use ironclaw_host_api::{AgentId, ProjectId, RuntimeCredentialAuthRequirement, Te
 use crate::{
     AcceptedMessageRef, AdmissionRejection, CancelRunRequest, CancelRunResponse,
     CapabilityActivityId, GateRef, GetRunStateRequest, IdempotencyKey, LoopCheckpointRecord,
-    ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileResolver,
-    SourceBindingRef, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
-    TurnActiveRunRefState, TurnActor, TurnAdmissionPolicy, TurnAdmissionReservationRecord,
-    TurnCapacityResource, TurnCheckpointId, TurnError, TurnErrorCategory, TurnId, TurnLeaseToken,
-    TurnLifecycleEvent, TurnRunId, TurnRunProfile, TurnRunState, TurnRunnerId, TurnScope,
-    TurnStatus, TurnTimestamp,
+    ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest,
+    RetryTurnResponse, RunProfileResolver, SourceBindingRef, SubmitChildRunRequest,
+    SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActiveRunRefState, TurnActor,
+    TurnAdmissionPolicy, TurnAdmissionReservationRecord, TurnCapacityResource, TurnCheckpointId,
+    TurnError, TurnErrorCategory, TurnId, TurnLeaseToken, TurnLifecycleEvent, TurnRunId,
+    TurnRunProfile, TurnRunState, TurnRunnerId, TurnScope, TurnStatus, TurnTimestamp,
     events::EventCursor,
     run_profile::{LoopCheckpointKind, LoopCheckpointStateRef, LoopModelRouteSnapshot},
 };
@@ -29,6 +31,8 @@ pub trait TurnStateStore: Send + Sync {
         &self,
         request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError>;
+
+    async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError>;
 
     async fn request_cancel(
         &self,
@@ -111,11 +115,37 @@ pub trait TurnSpawnTreeStateStore: TurnStateStore {
     ) -> Result<SpawnTreeReservation, TurnError>;
 
     /// Release descendant capacity for a root run after validating root scope.
+    ///
+    /// `idempotency_key` dedups the release against a durable per-child
+    /// record (`SpawnTreeReservation.released_children`) so a retried call
+    /// for the same child (recovery re-driving an edge stuck at
+    /// `ReservationReleaseState::Claimed`, or a rollback retry) is a no-op
+    /// rather than a second decrement — see
+    /// `docs/reborn/subagent-spawn/thread-harness-design.md` §5.5 round-5/6.
+    /// Callers pass the child's own `TurnRunId`, which never recurs (ABA-immune).
     async fn release_tree_descendants(
         &self,
         scope: &TurnScope,
         root_run_id: TurnRunId,
         delta: u32,
+        idempotency_key: TurnRunId,
+    ) -> Result<(), TurnError>;
+
+    /// Remove one child's dedup entry from `SpawnTreeReservation.released_children`
+    /// once its await-edge is about to be deleted (§5.5 round-7) — called
+    /// strictly *before* the edge's `delete_if_version`, never after, so a
+    /// crash between prune and delete just re-derives the same prune on the
+    /// next recovery pass (idempotent: pruning an absent entry is a no-op).
+    /// Without this, `released_children` grows for the tree's entire
+    /// cumulative lifetime instead of staying bounded by the live descendant
+    /// cap. Missing root is benign here (the tree may already be fully
+    /// released and its reservation record deleted) — only real backend
+    /// failures return `Err`.
+    async fn prune_released_child(
+        &self,
+        scope: &TurnScope,
+        root_run_id: TurnRunId,
+        child_run_id: TurnRunId,
     ) -> Result<(), TurnError>;
 }
 
@@ -229,6 +259,13 @@ pub struct SpawnTreeReservation {
     pub scope: TurnScope,
     pub root_run_id: TurnRunId,
     pub descendant_count: u64,
+    /// Per-child dedup record for `release_tree_descendants`'s idempotency
+    /// key (§5.5 round-5/6) — present only for children whose release has
+    /// been recorded but whose await-edge hasn't finished closing yet
+    /// (pruned in lockstep with edge deletion, so this stays bounded by the
+    /// live descendant cap, never the tree's cumulative lifetime count).
+    #[serde(default)]
+    pub released_children: BTreeSet<TurnRunId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -278,6 +315,7 @@ pub struct TurnCheckpointRecord {
 pub enum TurnIdempotencyOperationKind {
     Submit,
     Resume,
+    Retry,
     Cancel,
 }
 
@@ -288,6 +326,7 @@ pub enum TurnIdempotencyOutcomeKind {
     ThreadBusy,
     AdmissionRejected,
     Resumed,
+    Retried,
     CancelRecorded,
     ScopeNotFound,
     Unauthorized,
@@ -308,6 +347,7 @@ impl TurnIdempotencyOutcomeKind {
             TurnError::Unavailable { .. } => Self::Unavailable,
             TurnError::CapacityExceeded { .. } => Self::CapacityExceeded,
             TurnError::Conflict { .. }
+            | TurnError::RunNotRetryable { .. }
             | TurnError::InvalidTransition { .. }
             | TurnError::LeaseMismatch => Self::Conflict,
             TurnError::InvalidRunOriginAdapter => Self::InvalidRequest,
@@ -321,6 +361,8 @@ pub enum TurnIdempotencyReplay {
     SubmitThreadBusy(ThreadBusy),
     SubmitAdmissionRejected(AdmissionRejection),
     ResumeSucceeded(ResumeTurnResponse),
+    RetrySucceeded(RetryTurnResponse),
+    RetryThreadBusy(ThreadBusy),
     CancelRecorded(CancelRunResponse),
     Error(TurnIdempotencyErrorReplay),
 }
@@ -436,6 +478,23 @@ impl TurnIdempotencyRecord {
             TurnIdempotencyReplay::CancelRecorded(response) => Some(Ok(response.clone())),
             TurnIdempotencyReplay::Error(error)
                 if self.operation == TurnIdempotencyOperationKind::Cancel =>
+            {
+                Some(Err(error.to_error()))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn replay_retry(&self) -> Option<Result<RetryTurnResponse, TurnError>> {
+        if self.operation != TurnIdempotencyOperationKind::Retry {
+            return None;
+        }
+        match &self.replay {
+            TurnIdempotencyReplay::RetrySucceeded(response) => Some(Ok(response.clone())),
+            // Same-thread busy is a transient lock state, not an idempotent retry outcome.
+            TurnIdempotencyReplay::RetryThreadBusy(_) => None,
+            TurnIdempotencyReplay::Error(error)
+                if self.operation == TurnIdempotencyOperationKind::Retry =>
             {
                 Some(Err(error.to_error()))
             }

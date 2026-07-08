@@ -24,7 +24,11 @@
 //! per-store public APIs.
 
 use std::future::Future;
-use std::sync::{Arc, OnceLock, mpsc};
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicUsize, Ordering},
+    mpsc,
+};
 
 use ironclaw_filesystem::{
     CasApply, CasUpdateError, ContentType, Entry, RecordKind, RootFilesystem, ScopedFilesystem,
@@ -336,16 +340,16 @@ where
 
 type AsyncStorageJob = Box<dyn FnOnce(&tokio::runtime::Runtime) + Send + 'static>;
 
-struct AsyncStorageWorker {
+pub(crate) struct AsyncStorageWorker {
     sender: mpsc::Sender<AsyncStorageJob>,
 }
 
 impl AsyncStorageWorker {
-    fn spawn(name: &'static str) -> Result<Self, String> {
+    fn spawn(name: String) -> Result<Self, String> {
         let (sender, receiver) = mpsc::channel::<AsyncStorageJob>();
         let (ready_sender, ready_receiver) = mpsc::channel::<Result<(), String>>();
         std::thread::Builder::new()
-            .name(name.to_string())
+            .name(name)
             .spawn(move || {
                 let runtime = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -389,9 +393,44 @@ impl AsyncStorageWorker {
     }
 }
 
-type AsyncStorageWorkerCell = Arc<OnceLock<Result<AsyncStorageWorker, String>>>;
+pub(crate) struct AsyncStorageWorkerPool {
+    workers: Vec<AsyncStorageWorker>,
+    next_worker: AtomicUsize,
+}
 
-fn run_on_worker<T, E, Fut, F>(
+impl AsyncStorageWorkerPool {
+    fn spawn(name: &'static str, worker_count: usize) -> Result<Self, String> {
+        let worker_count = worker_count.max(1);
+        let mut workers = Vec::with_capacity(worker_count);
+        for index in 0..worker_count {
+            workers.push(AsyncStorageWorker::spawn(format!("{name}-{index}"))?);
+        }
+        Ok(Self {
+            workers,
+            next_worker: AtomicUsize::new(0),
+        })
+    }
+
+    fn run<T, E, Fut, F>(&self, build: F) -> Result<T, E>
+    where
+        T: Send + 'static,
+        E: StorageError,
+        Fut: Future<Output = Result<T, E>> + Send + 'static,
+        F: FnOnce() -> Fut + Send + 'static,
+    {
+        let index = self.next_worker.fetch_add(1, Ordering::Relaxed) % self.workers.len();
+        self.workers[index].run(build)
+    }
+}
+
+pub(crate) type AsyncStorageWorkerCell = Arc<OnceLock<Result<AsyncStorageWorker, String>>>;
+pub(crate) type AsyncStorageWorkerPoolCell = Arc<OnceLock<Result<AsyncStorageWorkerPool, String>>>;
+
+pub(crate) fn new_worker_pool_cell() -> AsyncStorageWorkerPoolCell {
+    Arc::new(OnceLock::new())
+}
+
+pub(crate) fn run_on_worker<T, E, Fut, F>(
     worker_cell: &AsyncStorageWorkerCell,
     worker_thread_name: &'static str,
     build: F,
@@ -402,9 +441,29 @@ where
     Fut: Future<Output = Result<T, E>> + Send + 'static,
     F: FnOnce() -> Fut + Send + 'static,
 {
-    let worker = worker_cell.get_or_init(|| AsyncStorageWorker::spawn(worker_thread_name));
+    let worker = worker_cell.get_or_init(|| AsyncStorageWorker::spawn(worker_thread_name.into()));
     match worker {
         Ok(worker) => worker.run(build),
+        Err(error) => Err(E::storage(error.clone())),
+    }
+}
+
+pub(crate) fn run_on_worker_pool<T, E, Fut, F>(
+    worker_cell: &AsyncStorageWorkerPoolCell,
+    worker_thread_name: &'static str,
+    worker_count: usize,
+    build: F,
+) -> Result<T, E>
+where
+    T: Send + 'static,
+    E: StorageError,
+    Fut: Future<Output = Result<T, E>> + Send + 'static,
+    F: FnOnce() -> Fut + Send + 'static,
+{
+    let workers =
+        worker_cell.get_or_init(|| AsyncStorageWorkerPool::spawn(worker_thread_name, worker_count));
+    match workers {
+        Ok(workers) => workers.run(build),
         Err(error) => Err(E::storage(error.clone())),
     }
 }

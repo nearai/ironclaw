@@ -231,8 +231,8 @@ cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- repl --confirm-host
 ### WebUI service
 
 The Reborn WebUI is compiled behind the `webui-v2-beta` Cargo feature. Builds
-with this feature require Node.js/npm so Cargo can generate and embed the SPA
-bundle. Build or run the binary with that feature to enable the `serve`
+with this feature require Node.js 22 with Corepack/pnpm so Cargo can generate
+and embed the SPA bundle. Build or run the binary with that feature to enable the `serve`
 command:
 
 ```bash
@@ -425,7 +425,7 @@ IronClaw is the AI assistant you can actually trust with your personal and profe
 
 - Rust 1.96+
 - PostgreSQL 15+ with [pgvector](https://github.com/pgvector/pgvector) extension
-- Node.js 22+ (npm) for source builds that enable the `webui-v2-beta` feature
+- Node.js 22+ with Corepack/pnpm for source builds that enable the `webui-v2-beta` feature
 - NEAR AI account (authentication handled via setup wizard)
 - `libclang` and a working C toolchain if you build the WeChat voice/SILK path from source
 
@@ -633,9 +633,7 @@ External content passes through multiple security layers:
 | **Workspace** | Persistent memory with hybrid search |
 | **Safety Layer** | Prompt injection defense and content sanitization |
 
-## Legacy IronClaw Usage
-
-Engine v2 is opt-in right now. If you want to run the new engine instead of the legacy agent loop, start IronClaw with `ENGINE_V2=true`. See [Engine v2 architecture](docs/internal/engine-v2-architecture.md#enabling-engine-v2) for more details.
+## IronClaw Usage
 
 ```bash
 # First-time setup (configures database, auth, etc.)
@@ -644,11 +642,8 @@ ironclaw onboard
 # Start interactive REPL
 cargo run
 
-# Start interactive REPL with engine v2
-ENGINE_V2=true cargo run
-
-# Engine v2 with debug logging
-ENGINE_V2=true RUST_LOG=ironclaw=debug cargo run
+# REPL with debug logging
+RUST_LOG=ironclaw=debug cargo run
 ```
 
 ## Development
