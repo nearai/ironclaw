@@ -24,7 +24,7 @@ test("redeemPairingCode posts channel and code through the v2 extensions endpoin
   installFetch(t, async (path, options) => {
     calls.push({ path, options });
     return new Response(
-      JSON.stringify({ provider: "slack", provider_user_id: "install-alpha:U123" }),
+      JSON.stringify({ provider: "telegram", provider_user_id: "install-alpha:U123" }),
       {
         status: 200,
         headers: { "content-type": "application/json" },
@@ -32,11 +32,11 @@ test("redeemPairingCode posts channel and code through the v2 extensions endpoin
     );
   });
 
-  const response = await redeemPairingCode("slack", "A1B2C3");
+  const response = await redeemPairingCode("telegram", "A1B2C3");
 
   assert.deepEqual(response, {
     success: true,
-    provider: "slack",
+    provider: "telegram",
     provider_user_id: "install-alpha:U123",
     resumeError: false,
     resumedRunCount: 0,
@@ -48,7 +48,7 @@ test("redeemPairingCode posts channel and code through the v2 extensions endpoin
   assert.equal(calls[0].options.headers.get("Authorization"), "Bearer token-1");
   assert.equal(calls[0].options.headers.get("Content-Type"), "application/json");
   assert.deepEqual(JSON.parse(calls[0].options.body), {
-    channel: "slack",
+    channel: "telegram",
     code: "A1B2C3",
   });
 });
@@ -62,7 +62,7 @@ test("redeemPairingCode preserves the ApiError envelope on 400", async (t) => {
   );
 
   await assert.rejects(
-    () => redeemPairingCode("slack", "BADCODE"),
+    () => redeemPairingCode("telegram", "BADCODE"),
     (error) => {
       assert.equal(error.name, "ApiError");
       assert.equal(error.status, 400);

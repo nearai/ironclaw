@@ -13,9 +13,15 @@ on:
         description: Commit SHA or ref to test
         required: false
         type: string
+  # No `branches:` filter on pull_request: a `branches: [main]` filter made
+  # this workflow skip every stacked PR (base = a feature branch, not main),
+  # so composition crate-tests, group-tests, webui-v2 JS tests, and the Reborn
+  # integration tier never ran on a stacked slice — a rename in one slice broke
+  # a composition test in another and no per-PR run caught it. Matching
+  # code_style.yml (unfiltered pull_request) runs the scoped suite on any PR
+  # base; the `changes`/classify job still bounds which suites run by file path.
+  # merge_group and push stay main-only — they only ever fire against main.
   pull_request:
-    branches:
-      - main
   merge_group:
     branches:
       - main
@@ -704,15 +710,16 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Run Reborn settings JS tests
+      - name: Run Reborn webui JS tests
         run: |
           mapfile -t tests < <(
-            find crates/ironclaw_webui_v2/static/js/pages/settings \
+            find crates/ironclaw_webui_v2/static/js \
               -type f \( -name '*.test.mjs' -o -name '*.test.js' \) \
+              -not -path '*/node_modules/*' -not -path '*/dist/*' \
               | sort
           )
           if [ "${#tests[@]}" -eq 0 ]; then
-            echo "No Reborn settings JS tests found"
+            echo "No Reborn webui JS tests found"
             exit 1
           fi
           node --test "${tests[@]}"

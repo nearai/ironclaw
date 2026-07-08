@@ -68,6 +68,9 @@ const SLACK_AUTH_CANCELED_MESSAGE: &str = "Authentication canceled.";
 /// Posted when a run blocks on a credential-entry (non-OAuth) auth challenge:
 /// entering a secret in chat is a security risk, so it must be done in the web app.
 const SLACK_AUTH_UNAVAILABLE_MESSAGE: &str = "Setting this up needs a credential (an API key or token). Sharing one here is a security risk — anything entered in chat is stored in the conversation — so credential-based connections can only be set up in the Ironclaw web app. Connect it there, then ask me again here.";
+// Model B: greeting for a first-contact DM from a Slack user who has not yet
+// connected their account. Fixed, host-authored text only — no agent runs.
+const SLACK_CONNECT_NUDGE_MESSAGE: &str = "\u{1F44B} To use me, connect your Slack account in the Ironclaw web app: install the Slack extension and finish the connect step, then message me here again.";
 const SLACK_DELIVERY_TIMEOUT_MESSAGE: &str =
     "This is taking longer than expected — check the WebUI for the result.";
 const SLACK_DELIVERY_ERROR_MESSAGE: &str =
@@ -749,6 +752,60 @@ impl SlackFinalReplyDeliveryObserver {
         }
         true
     }
+
+    /// Model B: a first-contact DM from a Slack user with no identity binding is
+    /// rejected with `BindingRequired`. Instead of silently dropping it, greet
+    /// them with a connect nudge — but ONLY in a 1:1 DM. An unbound user's
+    /// app-mention in a shared channel also rejects with `BindingRequired`, and
+    /// the host nudge must never be posted into a shared channel where everyone
+    /// sees a message addressed to one person, so this gates on the DM channel
+    /// id prefix ('D') and skips shared/group conversations. Deliberately
+    /// performs NO binding lookup (the sender is unbound by definition) and
+    /// posts only a fixed, host-authored message — no agent turn runs, no tools
+    /// execute, no data is read. Slack transport retries arrive as `Duplicate`
+    /// (not `Rejected`), so this fires at most once per inbound event.
+    async fn post_connect_nudge_if_unbound_user_message(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        ack: &ProductInboundAck,
+    ) -> bool {
+        let ProductInboundAck::Rejected(rejection) = ack else {
+            return false;
+        };
+        if !matches!(rejection.kind, ProductRejectionKind::BindingRequired) {
+            return false;
+        }
+        if !matches!(envelope.payload(), ProductInboundPayload::UserMessage(_)) {
+            return false;
+        }
+        // Only nudge in a 1:1 DM. An unbound user's app-mention in a SHARED
+        // channel also rejects with `BindingRequired`; posting the host connect
+        // nudge there would drop a message addressed to one user into a channel
+        // everyone can see. Slack DM (im) channel ids start with 'D'; shared
+        // channels ('C') and multi-person/group DMs ('G') are excluded, and a
+        // missing/blank conversation ref fails closed (no post).
+        if !envelope
+            .external_conversation_ref()
+            .conversation_id()
+            .starts_with('D')
+        {
+            return false;
+        }
+        if let Err(error) = post_slack_message(
+            self.services.egress.as_ref(),
+            envelope.external_conversation_ref(),
+            SLACK_CONNECT_NUDGE_MESSAGE,
+        )
+        .await
+        {
+            tracing::debug!(
+                target = "ironclaw::reborn::slack_delivery",
+                error = %error,
+                "failed to post Slack connect nudge (best-effort)"
+            );
+        }
+        true
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1241,6 +1298,12 @@ impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
         {
             return;
         }
+        if self
+            .post_connect_nudge_if_unbound_user_message(&envelope, &ack)
+            .await
+        {
+            return;
+        }
         // A2b: Busy-thread hint — the user's message was silently dropped
         // because a run is busy (pending gate or generic RejectedBusy). Post a
         // one-shot state-aware hint so the user knows to approve/deny/wait (gate
@@ -1438,7 +1501,20 @@ impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
         let Some(ack) = rejection_ack_for_workflow_error(&error) else {
             return;
         };
-        self.post_rejection_hint_if_authorized(&envelope, &ack)
+        // An unbound user's first inbound resolves as a `BindingRequired`
+        // workflow *error*, surfaced here — NOT as an `Ok(Rejected)` ack in
+        // `observe_workflow_ack`. `post_rejection_hint_if_authorized` is a
+        // guaranteed no-op for them (its binding lookup fails by definition),
+        // so without the connect nudge an unbound 1:1 DM gets total silence.
+        // Mirror the ack-path ordering: authorized rejection hint first, then
+        // the connect nudge for unbound DMs.
+        if self
+            .post_rejection_hint_if_authorized(&envelope, &ack)
+            .await
+        {
+            return;
+        }
+        self.post_connect_nudge_if_unbound_user_message(&envelope, &ack)
             .await;
     }
 }
@@ -2912,6 +2988,23 @@ mod tests {
         event_id: &str,
         payload: ProductInboundPayload,
     ) -> ProductInboundEnvelope {
+        build_test_envelope(event_id, "D123", payload)
+    }
+
+    /// Like `envelope` but with a caller-specified conversation id, so tests can
+    /// distinguish a 1:1 DM ('D...') from a shared channel ('C...').
+    fn envelope_in_conversation(
+        conversation_id: &str,
+        payload: ProductInboundPayload,
+    ) -> ProductInboundEnvelope {
+        build_test_envelope("evt:test", conversation_id, payload)
+    }
+
+    fn build_test_envelope(
+        event_id: &str,
+        conversation_id: &str,
+        payload: ProductInboundPayload,
+    ) -> ProductInboundEnvelope {
         let adapter_id =
             ironclaw_product_adapters::ProductAdapterId::new("slack_v2").expect("adapter");
         let installation_id = AdapterInstallationId::new("install_alpha").expect("installation");
@@ -2931,7 +3024,8 @@ mod tests {
         let parsed = ParsedProductInbound::new(
             ExternalEventId::new(event_id).expect("event"),
             ExternalActorRef::new("slack_user", "U123", None::<String>).expect("actor"),
-            ExternalConversationRef::new(Some("T123"), "D123", None, None).expect("conversation"),
+            ExternalConversationRef::new(Some("T123"), conversation_id, None, None)
+                .expect("conversation"),
             payload,
         )
         .expect("parsed inbound");
@@ -4287,12 +4381,21 @@ mod tests {
         );
     }
 
-    /// Rejected user-message payload → nothing posted.
+    /// Model B: a rejected first-contact UserMessage from an unbound Slack user
+    /// (BindingRequired) is greeted with a connect nudge — no binding lookup, no
+    /// agent turn. Previously this was silently dropped.
     #[tokio::test]
-    async fn rejected_user_message_ack_posts_nothing() {
+    async fn rejected_unbound_user_message_posts_connect_nudge() {
         let install = "test-install";
         let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
         egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "1000.1"),
+            )),
+        );
 
         let outbound = Arc::new(InMemoryOutboundStateStore::default());
         let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
@@ -4304,10 +4407,119 @@ mod tests {
 
         observer.observe_workflow_ack(env, ack).await;
 
-        let calls = egress.calls();
+        let posted: Vec<String> = egress
+            .calls()
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .map(|c| String::from_utf8_lossy(&c.body).to_string())
+            .collect();
+        assert_eq!(
+            posted.len(),
+            1,
+            "an unbound first-contact DM should get exactly one connect nudge"
+        );
         assert!(
-            !calls.iter().any(|c| c.path == "/api/chat.postMessage"),
-            "no chat.postMessage expected for rejected user-message payload"
+            posted[0].contains("connect your Slack account"),
+            "the connect nudge must tell the user to connect, got: {}",
+            posted[0]
+        );
+    }
+
+    /// Regression: an unbound user's app-mention in a SHARED channel also
+    /// rejects with `BindingRequired`, but the host connect-nudge must NOT be
+    /// posted into the shared channel — only a 1:1 DM gets it. Same shape as
+    /// `rejected_unbound_user_message_posts_connect_nudge` but with a shared
+    /// channel ('C0SHARED') conversation, asserting zero posts.
+    #[tokio::test]
+    async fn rejected_unbound_user_message_in_shared_channel_posts_no_connect_nudge() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("C0SHARED", "1000.1"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::Running,
+        ));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+        let env = envelope_in_conversation("C0SHARED", user_message_payload());
+        let ack = rejected_ack(ironclaw_product_adapters::ProductRejectionKind::BindingRequired);
+
+        observer.observe_workflow_ack(env, ack).await;
+
+        let posted: Vec<String> = egress
+            .calls()
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .map(|c| String::from_utf8_lossy(&c.body).to_string())
+            .collect();
+        assert!(
+            posted.is_empty(),
+            "an unbound app-mention in a shared channel must NOT get a connect nudge posted into the channel, got: {posted:?}"
+        );
+    }
+
+    /// Regression (connect-nudge wiring): the coverage that was missing. In
+    /// production an unbound user's first-contact DM does NOT arrive at
+    /// `observe_workflow_ack` as an `Ok(Rejected)` ack — the workflow returns
+    /// `BindingRequired` as an ERROR (`ScopeNotFound`, status 404), so the
+    /// runner routes it to `observe_workflow_error`. The connect nudge must
+    /// fire on THAT path too. Before the fix this posted nothing (the nudge was
+    /// wired only into `observe_workflow_ack`); the ack-path unit test above
+    /// masked the gap by calling the ack method directly with a synthetic ack
+    /// instead of driving the real error path a live unbound DM takes.
+    #[tokio::test]
+    async fn unbound_user_message_via_workflow_error_posts_connect_nudge() {
+        let install = "test-install";
+        let egress = Arc::new(FakeProtocolHttpEgress::new(vec!["slack.com".to_string()]));
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            "slack.com",
+            Ok(EgressResponse::new(
+                200,
+                slack_post_ok_json("D123", "1000.1"),
+            )),
+        );
+
+        let outbound = Arc::new(InMemoryOutboundStateStore::default());
+        let coordinator = Arc::new(ScriptedTurnCoordinator::with_single_status(
+            TurnStatus::Running,
+        ));
+        let observer = make_observer(coordinator, egress.clone(), outbound, install);
+        let env = envelope(user_message_payload());
+        // The production shape: an unbound scope resolves as a BindingRequired
+        // workflow rejection ERROR (ScopeNotFound -> BindingRequired), surfaced
+        // through `observe_workflow_error`, NOT an `Ok(Rejected)` ack.
+        let error = ProductAdapterError::WorkflowRejected {
+            kind: ProductWorkflowRejectionKind::ScopeNotFound,
+            status_code: 404,
+            retryable: false,
+            reason: ironclaw_product_adapters::RedactedString::new("scope not found"),
+        };
+
+        observer.observe_workflow_error(env, error).await;
+
+        let posted: Vec<String> = egress
+            .calls()
+            .iter()
+            .filter(|c| c.path == "/api/chat.postMessage")
+            .map(|c| String::from_utf8_lossy(&c.body).to_string())
+            .collect();
+        assert_eq!(
+            posted.len(),
+            1,
+            "an unbound first-contact DM must get the connect nudge via the ERROR observer path (the real production path), got: {posted:?}"
+        );
+        assert!(
+            posted[0].contains("connect your Slack account"),
+            "the connect nudge must tell the user to connect, got: {}",
+            posted[0]
         );
     }
 

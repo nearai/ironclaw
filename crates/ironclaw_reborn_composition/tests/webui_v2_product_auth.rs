@@ -11,14 +11,15 @@ use axum::extract::ConnectInfo;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_auth::{
-    AuthChallenge, AuthContinuationEvent, AuthFlowId, AuthFlowManager, AuthInteractionId,
-    AuthInteractionService, AuthProductError, AuthProductScope, AuthProviderClient, AuthProviderId,
-    AuthSurface, CredentialAccountLabel, CredentialAccountService, CredentialAccountStatus,
-    CredentialOwnership, CredentialSetupService, GOOGLE_CALENDAR_READONLY_SCOPE,
-    GOOGLE_GMAIL_READONLY_SCOPE, InMemoryAuthProductServices, ManualTokenSetupRequest,
-    NewCredentialAccount, OAuthProviderCallbackRequest, OAuthProviderExchange,
-    OAuthProviderExchangeContext, OAuthProviderRefresh, OAuthProviderRefreshRequest, ProviderScope,
-    SecretCleanupService, SecretSubmitRequest, SecretSubmitResult,
+    AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthFlowId, AuthFlowKind,
+    AuthFlowManager, AuthInteractionId, AuthInteractionService, AuthProductError, AuthProductScope,
+    AuthProviderClient, AuthProviderId, AuthSurface, CredentialAccountLabel,
+    CredentialAccountService, CredentialAccountStatus, CredentialOwnership, CredentialSetupService,
+    GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_READONLY_SCOPE, InMemoryAuthProductServices,
+    ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthAuthorizationUrl,
+    OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderExchangeContext,
+    OAuthProviderRefresh, OAuthProviderRefreshRequest, ProviderScope, SecretCleanupService,
+    SecretSubmitRequest, SecretSubmitResult,
 };
 use ironclaw_host_api::{
     AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
@@ -147,6 +148,7 @@ impl AuthProviderClient for RecordingProviderClient {
             ),
             scopes: request.scopes,
             account_id: None,
+            provider_identity: None,
         })
     }
 
@@ -611,6 +613,26 @@ async fn post_oauth_start(app: &axum::Router, body: serde_json::Value) -> axum::
                 .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot")
+}
+
+async fn get_oauth_flow_status(
+    app: &axum::Router,
+    flow_id: &str,
+    query: &str,
+) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!(
+                    "/api/reborn/product-auth/oauth/flow/{flow_id}/status{query}"
+                ))
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .body(Body::empty())
                 .expect("request"),
         )
         .await
@@ -1257,6 +1279,129 @@ async fn product_auth_oauth_routes_create_flow_and_complete_callback() {
     assert_eq!(callback_json["flow_id"], started.flow_id);
     assert_eq!(callback_json["status"], "completed");
     assert_eq!(dispatcher.events().len(), 1);
+}
+
+// The origin-independent reconnect backstop: after the callback marks the flow
+// completed, the caller-scoped flow-status poll reports "completed" so the
+// reconnect modal can close even when the same-origin browser signal never
+// arrived. Also locks the read's error surface: malformed id → 400, unknown id
+// → 404, and no secret material ever crosses the read.
+#[tokio::test]
+async fn product_auth_oauth_flow_status_reports_completed_without_secrets() {
+    let (app, _dispatcher) = build_app_with_product_auth();
+    // Start WITHOUT session/thread so the flow scope is thread/session-free —
+    // exactly what the caller-scoped poll re-derives from the invocation id.
+    let started =
+        start_oauth_flow(&app, "status-state-secret", "status-pkce-secret", json!({})).await;
+    let callback_response = app
+        .clone()
+        .oneshot(callback_request(callback_uri(
+            &started.flow_id,
+            &started.invocation_id,
+            USER,
+            "status-state-secret",
+            "&provider=github&account_label=work%20github&code=status-auth-code&scopes=repo",
+        )))
+        .await
+        .expect("oneshot");
+    assert_eq!(callback_response.status(), StatusCode::OK);
+
+    // Origin-independent poll: the browser echoes the invocation id the start
+    // response minted so the caller-scoped `get_flow` can match its own flow.
+    let response = get_oauth_flow_status(
+        &app,
+        &started.flow_id,
+        &format!("?invocation_id={}", started.invocation_id),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+    let json: serde_json::Value = serde_json::from_str(&body).expect("status json");
+    assert_eq!(json["status"], "completed");
+    // Status enum only — no state/PKCE/code/token material may cross this read.
+    assert!(!body.contains("status-state-secret"));
+    assert!(!body.contains("status-pkce-secret"));
+    assert!(!body.contains("status-auth-code"));
+    assert!(!body.contains("oauth-access"));
+    assert!(!body.contains("oauth-refresh"));
+
+    // Malformed flow id → 4xx before any backend read.
+    let malformed = get_oauth_flow_status(
+        &app,
+        "not-a-uuid",
+        &format!("?invocation_id={}", started.invocation_id),
+    )
+    .await;
+    assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+
+    // Unknown flow id → 404, indistinguishable from a cross-scope flow.
+    let unknown = get_oauth_flow_status(
+        &app,
+        "11111111-1111-1111-1111-111111111111",
+        &format!("?invocation_id={}", started.invocation_id),
+    )
+    .await;
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+}
+
+// A flow owned by a DIFFERENT scope must surface as 404, never 403: the read
+// cannot be used as a cross-user existence oracle. Full-scope equality in
+// `get_flow` rejects the mismatched owner even when the attacker supplies the
+// exact invocation id, because the trusted tenant/user come from the
+// authenticated caller — not the browser.
+#[tokio::test]
+async fn product_auth_oauth_flow_status_hides_cross_scope_flow_as_not_found() {
+    let shared = Arc::new(InMemoryAuthProductServices::new());
+    let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+        shared.clone(),
+        Arc::new(RecordingAuthDispatcher::default()),
+    ));
+    let app = build_app_with_product_auth_service(product_auth);
+
+    // Seed a flow owned by a DIFFERENT user in the same tenant/agent/project.
+    let other_invocation = InvocationId::new();
+    let other_scope = AuthProductScope::new(
+        ResourceScope {
+            tenant_id: TenantId::new(TENANT).expect("tenant"),
+            user_id: UserId::new("user-mallory").expect("user"),
+            agent_id: Some(AgentId::new(AGENT).expect("agent")),
+            project_id: Some(ProjectId::new(PROJECT).expect("project")),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: other_invocation,
+        },
+        AuthSurface::Callback,
+    );
+    let flow = shared
+        .create_flow(NewAuthFlow {
+            id: Some(AuthFlowId::new()),
+            scope: other_scope,
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: AuthProviderId::new("github").expect("provider"),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
+                    .expect("authorization url"),
+                expires_at: Utc::now() + ChronoDuration::minutes(5),
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            opaque_state_hash: None,
+            pkce_verifier_hash: None,
+            expires_at: Utc::now() + ChronoDuration::minutes(5),
+        })
+        .await
+        .expect("seed cross-user flow");
+
+    // USER (the only authenticated identity) polls mallory's flow, even with the
+    // exact invocation id. Cross-scope must read as not-found, never forbidden.
+    let response = get_oauth_flow_status(
+        &app,
+        &flow.id.to_string(),
+        &format!("?invocation_id={other_invocation}"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_ne!(response.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
@@ -1906,4 +2051,153 @@ async fn product_auth_callback_malformed_flow_id_uses_sanitized_error() {
     assert!(!body.contains("malformed-flow-code"));
     assert!(!body.contains("malformed-flow-pkce"));
     assert!(dispatcher.events().is_empty());
+}
+
+// Caller-level coverage for the Slack personal OAuth serve wiring: the
+// handler-level tests in product_auth_serve construct ProductAuthRouteState
+// directly, which would stay green if webui_serve stopped carrying
+// WebuiServeConfig::with_slack_personal_oauth into webui_v2_app. These tests
+// drive the composed router so that composition seam cannot regress silently.
+#[cfg(feature = "slack-v2-host-beta")]
+mod slack_personal_oauth_serve {
+    use super::*;
+    use ironclaw_reborn_composition::{OAuthRedirectUri, SlackPersonalSetupServiceSlot};
+
+    const SLACK_PERSONAL_CALLBACK_PATH: &str =
+        "/api/reborn/product-auth/oauth/slack_personal/callback";
+    const SLACK_START_PATH: &str = "/api/webchat/v2/extensions/slack/setup/oauth/start";
+
+    async fn slack_personal_slot() -> SlackPersonalSetupServiceSlot {
+        SlackPersonalSetupServiceSlot::filled_with_in_memory_setup_for_tests(
+            OAuthRedirectUri::new(
+                "http://127.0.0.1:3000/api/reborn/product-auth/oauth/slack_personal/callback",
+            )
+            .expect("slack redirect uri"),
+            "slack-client-id",
+            "slack-client-secret",
+        )
+        .await
+    }
+
+    async fn build_app_with_slack_personal_oauth() -> axum::Router {
+        let dispatcher = Arc::new(RecordingAuthDispatcher::default());
+        let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+            Arc::new(InMemoryAuthProductServices::new()),
+            dispatcher,
+        ));
+        let bundle = RebornWebuiBundle {
+            api: Arc::new(UnusedServices),
+            product_auth: Some(product_auth),
+            readiness: RebornReadiness::disabled(),
+        };
+        let config = WebuiServeConfig::new(
+            TenantId::new(TENANT).expect("tenant"),
+            Arc::new(OnlyValidToken),
+            vec![HeaderValue::from_static("http://localhost:1234")],
+        )
+        .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+        .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
+        .with_slack_personal_oauth(slack_personal_slot().await);
+        webui_v2_app(bundle, config).expect("webui v2 app")
+    }
+
+    fn slack_oauth_start_body() -> serde_json::Value {
+        json!({
+            "provider": "slack_personal",
+            "account_label": "personal slack",
+            "scopes": ["search:read"],
+            "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
+            "invocation_id": InvocationId::new().to_string(),
+        })
+    }
+
+    #[tokio::test]
+    async fn slack_personal_oauth_start_requires_bearer_auth() {
+        let app = build_app_with_slack_personal_oauth().await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(SLACK_START_PATH)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(slack_oauth_start_body().to_string()))
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn slack_personal_oauth_start_serves_through_composed_router() {
+        let app = build_app_with_slack_personal_oauth().await;
+
+        let response = post_extension_oauth_start(&app, "slack", slack_oauth_start_body()).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_body_string(response).await;
+        let json: serde_json::Value = serde_json::from_str(&body).expect("start json");
+        let authorization_url = json["authorization_url"]
+            .as_str()
+            .expect("authorization url");
+        let parsed = url::Url::parse(authorization_url).expect("slack authorization url");
+        assert_eq!(parsed.host_str(), Some("slack.com"));
+        let user_scope = parsed
+            .query_pairs()
+            .find_map(|(name, value)| (name == "user_scope").then(|| value.into_owned()))
+            .expect("user_scope in slack authorize url");
+        assert!(
+            user_scope.contains("search:read"),
+            "server-side scope set must reach the authorize url: {user_scope}"
+        );
+    }
+
+    #[tokio::test]
+    async fn slack_personal_oauth_start_fails_closed_without_slot() {
+        // Product auth is mounted but the Slack slot was never carried into
+        // the serve config — the exact state a dropped webui_serve wiring
+        // block would produce.
+        let (app, _) = build_app_with_product_auth();
+
+        let response = post_extension_oauth_start(&app, "slack", slack_oauth_start_body()).await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = read_body_string(response).await;
+        assert!(body.contains("\"code\":\"backend_unavailable\""));
+    }
+
+    #[tokio::test]
+    async fn slack_personal_oauth_callback_is_mounted_and_fails_closed_sanitized() {
+        // The slot is wired but the binding config deliberately is not — the
+        // callback must be mounted (not 404) and fail closed with a sanitized
+        // error rather than proceeding without an identity binding path.
+        let app = build_app_with_slack_personal_oauth().await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!(
+                        "{SLACK_PERSONAL_CALLBACK_PATH}?state=malformed-state&code=denied"
+                    ))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_ne!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "the public slack_personal callback must be mounted by webui_v2_app"
+        );
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = read_body_string(response).await;
+        assert!(
+            !body.contains("malformed-state"),
+            "raw state must not be echoed: {body}"
+        );
+    }
 }

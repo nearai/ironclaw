@@ -10531,6 +10531,7 @@ output_schema_ref = "schemas/write.output.json"
                 ),
                 refresh_secret: None,
                 scopes: Vec::new(),
+                provider_identity: None,
                 created_at: now,
                 updated_at: now,
             })

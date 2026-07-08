@@ -35,6 +35,14 @@ const FIELD_HELP = {
     bodyKey: "slackSetup.help.signingSecret",
     exampleKey: "",
   },
+  oauthClientId: {
+    body: "Slack app OAuth & Permissions > App Credentials > Client ID. Required for personal (user-token) OAuth.",
+    example: "Example: 123456789012.123456789012",
+  },
+  oauthClientSecret: {
+    body: "Slack app OAuth & Permissions > App Credentials > Client Secret. Required for personal (user-token) OAuth.",
+    example: "",
+  },
 };
 
 export function SlackAdminManagedSection({ action }) {
@@ -93,7 +101,8 @@ export function SlackSetupPanel({ action, setupQuery }) {
     form.team_id.trim() &&
     form.api_app_id.trim() &&
     (status?.bot_token_configured || form.bot_token.trim()) &&
-    (status?.signing_secret_configured || form.signing_secret.trim());
+    (status?.signing_secret_configured || form.signing_secret.trim()) &&
+    (status?.oauth_client_secret_configured || !form.oauth_client_id.trim() || form.oauth_client_secret.trim());
 
   return html`
     <div className="mt-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
@@ -172,6 +181,20 @@ export function SlackSetupPanel({ action, setupQuery }) {
           FIELD_HELP.signingSecret,
           t,
         )}
+        ${textInput(
+          "OAuth client ID",
+          form.oauth_client_id,
+          update("oauth_client_id"),
+          "optional",
+          FIELD_HELP.oauthClientId,
+        )}
+        ${secretInput(
+          "OAuth client secret",
+          form.oauth_client_secret,
+          update("oauth_client_secret"),
+          status?.oauth_client_secret_configured,
+          FIELD_HELP.oauthClientSecret,
+        )}
       </div>
 
       <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -208,6 +231,8 @@ function formFromStatus(status) {
     shared_subject_user_id: status.shared_subject_user_id || "",
     bot_token: "",
     signing_secret: "",
+    oauth_client_id: status.oauth_client_id || "",
+    oauth_client_secret: "",
   };
 }
 
@@ -220,6 +245,8 @@ function emptyForm() {
     shared_subject_user_id: "",
     bot_token: "",
     signing_secret: "",
+    oauth_client_id: "",
+    oauth_client_secret: "",
   };
 }
 

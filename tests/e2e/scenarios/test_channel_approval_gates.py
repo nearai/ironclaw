@@ -269,11 +269,10 @@ async def telegram_with_ask_each_time(telegram_e2e_server):
 async def slack_with_ask_each_time(slack_e2e_server):
     """Activate Slack and pin the http tool to ask_each_time."""
     base_url = slack_e2e_server["base_url"]
-    http_url = slack_e2e_server["http_url"]
     fake_slack_url = slack_e2e_server["fake_slack_url"]
     channels_dir = slack_e2e_server["channels_dir"]
 
-    await activate_slack(base_url, http_url, fake_slack_url, channels_dir)
+    await activate_slack(base_url, fake_slack_url, channels_dir)
     await reset_fake_slack(fake_slack_url)
     await _set_tool_permission(base_url, "http", "ask_each_time")
     return slack_e2e_server

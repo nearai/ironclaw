@@ -240,15 +240,21 @@ fn collect(root: &Path, dir: &Path, url_prefix: &str, out: &mut Vec<(String, Pat
             collect(root, &path, url_prefix, out);
         } else if file_type.is_file() {
             // `*.test.js` / `*.test.mjs` are colocated Node `node:test` unit
-            // tests, not browser assets — never embed or serve them (shipping
-            // test-only code to clients is dead weight + needless exposure). A
-            // path ending in `.test.js`/`.test.mjs` implies its file name does
-            // too, so check the path. The `assets.rs` regression tests that
-            // assert `.test.mjs` content read it from disk, not this table.
-            if path
-                .to_str()
-                .is_some_and(|p| p.ends_with(".test.js") || p.ends_with(".test.mjs"))
-            {
+            // tests, and `*.vm-inline.mjs` / `vm-inline-source.mjs` are the
+            // test-only source-stripping shims those Node tests inline into a
+            // `vm.runInNewContext` sandbox — none are browser assets, so never
+            // embed or serve them (shipping test-only code to clients is dead
+            // weight + needless exposure). The Node tests import the shims via
+            // on-disk relative paths, so excluding them here does not affect the
+            // JS suite. A path ending in one of these suffixes implies its file
+            // name does too, so check the path. The `assets.rs` regression tests
+            // that assert `.test.mjs` content read it from disk, not this table.
+            if path.to_str().is_some_and(|p| {
+                p.ends_with(".test.js")
+                    || p.ends_with(".test.mjs")
+                    || p.ends_with(".vm-inline.mjs")
+                    || p.ends_with("vm-inline-source.mjs")
+            }) {
                 continue;
             }
             println!("cargo:rerun-if-changed={}", path.display());

@@ -181,15 +181,14 @@ Reborn-native product-auth surface:
 rate-limit middlewares consume so the two enforcers cannot drift on
 which request belongs to which descriptor.
 
-### Extension pairing routes
+### Slack personal OAuth setup
 
-When Slack host-beta personal binding is configured, `webui_v2_app`
-mounts `POST /api/webchat/v2/extensions/pairing/redeem` inside the same
-bearer-auth layer as the native WebUI v2 extension routes. The request
-body carries `{ channel, code }`; the route validates the channel server-side
-and currently resolves the supported Slack channel aliases to the Slack
-personal-binding pairing service. The browser must not call provider-specific
-pairing paths directly.
+Slack host-beta normal personal setup is extension-card driven: the user
+installs the Slack extension, clicks Configure, and the card starts the
+`slack_personal` product-auth OAuth flow. The successful callback binds the
+Slack `authed_user.id` to the authenticated Reborn user through the host-owned
+identity binding store. Slack personal setup is OAuth-only; the old browser
+manual-code redeem route and Slack command flow are not mounted.
 
 When Slack host-beta channel routing is configured, `webui_v2_app` also mounts
 `GET|PUT|DELETE /api/webchat/v2/channels/slack/routes` and

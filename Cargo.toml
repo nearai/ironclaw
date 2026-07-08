@@ -542,17 +542,6 @@ name = "reborn_integration_skill_activate"
 path = "tests/integration/skill_activate.rs"
 
 [[test]]
-name = "reborn_integration_slack_pairing_actor_resolution"
-path = "tests/integration/slack_pairing_actor_resolution.rs"
-
-[[test]]
-name = "reborn_integration_slack_pairing_redeem"
-path = "tests/integration/slack_pairing_redeem.rs"
-# Drives the real durable backend (`LibSqlRootFilesystem`) — the store's
-# consume path needs versioned CAS, which plain LocalFilesystem lacks.
-required-features = ["libsql"]
-
-[[test]]
 name = "reborn_integration_tool_call"
 path = "tests/integration/tool_call.rs"
 

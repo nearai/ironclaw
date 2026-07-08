@@ -160,19 +160,6 @@ pub use slack_personal_binding::{
     SlackPersonalUserBindingRequest, SlackPersonalUserBindingService,
 };
 #[cfg(feature = "slack-v2-host-beta")]
-pub use slack_personal_binding_pairing::{
-    IssuedSlackPersonalBindingPairingChallenge, SlackPairingActorResolver,
-    SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingChallengeStore,
-    SlackPersonalBindingPairingCode, SlackPersonalBindingPairingError,
-    SlackPersonalBindingPairingNotification, SlackPersonalBindingPairingNotifier,
-    SlackPersonalBindingPairingService,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack_personal_binding_pairing_serve::{
-    SlackPersonalBindingPairingRedeemResponse, SlackPersonalBindingPairingRouteConfig,
-    WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH,
-};
-#[cfg(feature = "slack-v2-host-beta")]
 pub use slack_personal_binding_serve::{
     SLACK_PERSONAL_BINDING_OAUTH_CALLBACK_PATH, SLACK_PERSONAL_BINDING_OAUTH_START_PATH,
     SlackPersonalBindingAuthorizationUrl, SlackPersonalBindingOAuthClient,

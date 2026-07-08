@@ -144,6 +144,8 @@ use ironclaw_turns::{InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore};
 
 use crate::RebornProductAuthServicePorts;
 #[cfg(feature = "slack-v2-host-beta")]
+use crate::available_extensions::slack_bot_manifest_digest;
+#[cfg(feature = "slack-v2-host-beta")]
 use crate::available_extensions::slack_manifest_digest;
 use crate::default_system_prompt::seed_default_system_prompt;
 use crate::input::{RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput};
@@ -172,7 +174,7 @@ use crate::{
     },
     extension_installation_store::FilesystemExtensionInstallationStore,
     extension_lifecycle::{
-        ActiveExtensionPublisher, RebornLocalExtensionManagementPort,
+        ActiveExtensionPublisher, ExtensionCredentialCleanup, RebornLocalExtensionManagementPort,
         restore_extension_lifecycle_state,
     },
     extension_lifecycle_capabilities::{
@@ -1071,13 +1073,35 @@ pub async fn build_reborn_services(
 
 fn auth_continuation_dispatcher(
     turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
+    blocked_auth_snapshot_source: Option<
+        Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>,
+    >,
 ) -> Arc<dyn RebornAuthContinuationDispatcher> {
-    Arc::new(ProductAuthTurnGateResumeDispatcher::new(turn_coordinator))
+    let single_run: Arc<dyn RebornAuthContinuationDispatcher> = Arc::new(
+        ProductAuthTurnGateResumeDispatcher::new(Arc::clone(&turn_coordinator)),
+    );
+    match blocked_auth_snapshot_source {
+        // Local paths fan a completed flow out to the caller's other
+        // provider-blocked runs (pair/authorize once, all waiting chats
+        // continue). Production-shaped builders pass None until their
+        // turn-state snapshot source is wired.
+        Some(snapshot_source) => {
+            Arc::new(crate::blocked_auth_resume::BlockedAuthResumeFanout::new(
+                single_run,
+                snapshot_source,
+                turn_coordinator,
+            ))
+        }
+        None => single_run,
+    }
 }
 
 fn compose_product_auth_services(
     ports: RebornProductAuthServicePorts,
     turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
+    blocked_auth_snapshot_source: Option<
+        Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>,
+    >,
     provider_composition: OAuthProviderComposition,
     security_audit_sink: Option<Arc<dyn ironclaw_events::SecurityAuditSink>>,
     secret_store: Arc<dyn SecretStore>,
@@ -1087,8 +1111,10 @@ fn compose_product_auth_services(
         Some(provider_client) => ports.with_provider_client(provider_client),
         None => ports,
     };
-    let mut services =
-        ports.into_services(auth_continuation_dispatcher(turn_coordinator), secret_store);
+    let mut services = ports.into_services(
+        auth_continuation_dispatcher(turn_coordinator, blocked_auth_snapshot_source),
+        secret_store,
+    );
     if let Some(sink) = security_audit_sink {
         services = services.with_security_audit_sink(sink);
     }
@@ -1137,6 +1163,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_provider_configs,
+        #[cfg(feature = "slack-v2-host-beta")]
+        slack_personal_oauth_lazy_slot,
         nearai_mcp_bootstrap_config,
         owner_id,
         local_runtime_identity,
@@ -1449,6 +1477,10 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         oauth_dcr_provider_configs,
         Arc::clone(&secret_store),
         product_auth_runtime_ports.clone(),
+        #[cfg(feature = "slack-v2-host-beta")]
+        slack_personal_oauth_lazy_slot,
+        #[cfg(not(feature = "slack-v2-host-beta"))]
+        None,
     )?;
     let security_audit_sink = services.security_audit_sink();
     let nearai_mcp_host_managed_scope =
@@ -1457,6 +1489,10 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         Some(ports) => compose_product_auth_services(
             ports,
             turn_coordinator.clone(),
+            Some(Arc::clone(&store_graph.turn_state)
+                as Arc<
+                    dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource,
+                >),
             provider_composition,
             security_audit_sink.clone(),
             Arc::clone(&secret_store),
@@ -1488,7 +1524,13 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                 )
                 .with_provider_client(Arc::clone(&provider_client))
                 .into_services(
-                    auth_continuation_dispatcher(turn_coordinator.clone()),
+                    auth_continuation_dispatcher(
+                        turn_coordinator.clone(),
+                        Some(Arc::clone(&store_graph.turn_state)
+                            as Arc<
+                                dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource,
+                            >),
+                    ),
                     Arc::clone(&secret_store),
                 )
                 .with_provider_client(Arc::clone(&provider_client))
@@ -1511,9 +1553,14 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             }
             #[cfg(not(any(feature = "libsql", feature = "postgres")))]
             {
-                let services = RebornProductAuthServices::local_dev_in_memory(
-                    auth_continuation_dispatcher(turn_coordinator.clone()),
-                );
+                let services =
+                    RebornProductAuthServices::local_dev_in_memory(auth_continuation_dispatcher(
+                        turn_coordinator.clone(),
+                        Some(Arc::clone(&store_graph.turn_state)
+                            as Arc<
+                                dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource,
+                            >),
+                    ));
                 let services = match provider_composition.client.clone() {
                     Some(provider_client) => services.with_provider_client(provider_client),
                     None => services,
@@ -1528,6 +1575,11 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                 };
                 let services = match provider_composition.gate_registry.clone() {
                     Some(registry) => services.with_oauth_gate_registry(registry),
+                    None => services,
+                };
+                #[cfg(feature = "slack-v2-host-beta")]
+                let services = match provider_composition.slack_gate_registry.clone() {
+                    Some(registry) => services.with_slack_oauth_gate_registry(registry),
                     None => services,
                 };
                 Arc::new(services.with_host_managed_nearai_credential_scope(
@@ -1596,6 +1648,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         extension_installation_store,
         extension_lifecycle_service,
         active_extensions,
+        Some(Arc::clone(&product_auth) as Arc<dyn ExtensionCredentialCleanup>),
     ));
     let nearai_mcp_bootstrap_outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
         nearai_mcp_bootstrap_config,
@@ -3700,13 +3753,24 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
     ];
     #[cfg(feature = "slack-v2-host-beta")]
     entries.push(AdminEntry::for_local_manifest(
-        PackageId::new("slack").map_err(|error| RebornBuildError::InvalidConfig {
+        PackageId::new("slack_bot").map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("Slack first-party package id is invalid: {error}"),
+        })?,
+        "/system/extensions/slack_bot/manifest.toml".to_string(),
+        Some(slack_bot_manifest_digest()),
+        HostTrustAssignment::first_party(),
+        Vec::new(),
+        None,
+    ));
+    #[cfg(feature = "slack-v2-host-beta")]
+    entries.push(AdminEntry::for_local_manifest(
+        PackageId::new("slack").map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("Slack personal first-party package id is invalid: {error}"),
         })?,
         "/system/extensions/slack/manifest.toml".to_string(),
         Some(slack_manifest_digest()),
         HostTrustAssignment::first_party(),
-        Vec::new(),
+        slack_user_allowed_effects(),
         None,
     ));
     HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries(entries))]).map_err(|error| {
@@ -3717,6 +3781,16 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
 }
 
 fn gsuite_allowed_effects() -> Vec<EffectKind> {
+    vec![
+        EffectKind::DispatchCapability,
+        EffectKind::Network,
+        EffectKind::UseSecret,
+        EffectKind::ExternalWrite,
+    ]
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+fn slack_user_allowed_effects() -> Vec<EffectKind> {
     vec![
         EffectKind::DispatchCapability,
         EffectKind::Network,
@@ -3773,6 +3847,8 @@ async fn build_production_shaped(
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_provider_configs,
+        #[cfg(feature = "slack-v2-host-beta")]
+        slack_personal_oauth_lazy_slot,
         nearai_mcp_bootstrap_config: _,
         turn_state_store_limits,
     } = input;
@@ -3797,6 +3873,8 @@ async fn build_production_shaped(
         oauth_dcr_provider_configs,
         turn_state_store_limits,
     );
+    #[cfg(feature = "slack-v2-host-beta")]
+    let _ = slack_personal_oauth_lazy_slot;
 
     match storage {
         RebornStorageInput::Disabled | RebornStorageInput::LocalDev { .. } => {
@@ -3845,6 +3923,8 @@ async fn build_production_shaped(
                 product_auth_ports,
                 oauth_provider_configs,
                 oauth_dcr_provider_configs,
+                #[cfg(feature = "slack-v2-host-beta")]
+                slack_personal_oauth_lazy_slot,
                 owner_id,
                 local_runtime_identity,
                 turn_state_store_limits,
@@ -3881,6 +3961,8 @@ async fn build_production_shaped(
                 product_auth_ports,
                 oauth_provider_configs,
                 oauth_dcr_provider_configs,
+                #[cfg(feature = "slack-v2-host-beta")]
+                slack_personal_oauth_lazy_slot,
                 owner_id,
                 local_runtime_identity,
                 turn_state_store_limits,
@@ -3916,6 +3998,8 @@ struct RebornProductionBuildContext {
     product_auth_ports: Option<RebornProductAuthServicePorts>,
     oauth_provider_configs: Vec<crate::input::OAuthProviderBackendConfig>,
     oauth_dcr_provider_configs: Vec<crate::input::OAuthDcrProviderBackendConfig>,
+    #[cfg(feature = "slack-v2-host-beta")]
+    slack_personal_oauth_lazy_slot: Option<crate::slack_setup::SlackPersonalSetupServiceSlot>,
     owner_id: String,
     local_runtime_identity: Option<RebornLocalRuntimeIdentity>,
     turn_state_store_limits: ironclaw_turns::InMemoryTurnStateStoreLimits,
@@ -4298,6 +4382,8 @@ where
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_provider_configs,
+        #[cfg(feature = "slack-v2-host-beta")]
+        slack_personal_oauth_lazy_slot,
         owner_id,
         local_runtime_identity,
         turn_state_store_limits,
@@ -4415,6 +4501,10 @@ where
         oauth_dcr_provider_configs,
         Arc::clone(&secret_store),
         product_auth_runtime_ports.clone(),
+        #[cfg(feature = "slack-v2-host-beta")]
+        slack_personal_oauth_lazy_slot,
+        #[cfg(not(feature = "slack-v2-host-beta"))]
+        None,
     )?;
     let services = apply_production_runtime_process_binding(
         services,
@@ -4457,6 +4547,11 @@ where
     let product_auth_services = compose_product_auth_services(
         product_auth_ports,
         turn_coordinator.clone(),
+        // No blocked-auth fan-out here yet: this builder's turn state is the
+        // generic filesystem store, not the local-dev alias the snapshot
+        // source is implemented for. Completions resume only their own run,
+        // exactly this builder's prior behavior.
+        None,
         provider_composition,
         security_audit_sink,
         Arc::clone(&secret_store),
@@ -5334,6 +5429,55 @@ mod tests {
         assert_eq!(
             completed_flow.status,
             ironclaw_auth::AuthFlowStatus::Completed
+        );
+    }
+
+    /// Caller-level regression for the Slack durable conversation store mount
+    /// alias. `slack_host_state_mount_view` has a unit test for the grant set,
+    /// but the grant only matters through the composed path: production wraps
+    /// the local-dev root filesystem with that view via
+    /// `local_dev_slack_host_state_filesystem`, then opens the store with
+    /// `RebornFilesystemConversationServices::new`, whose init reads
+    /// `/conversations/state.json`. Without the `/conversations` alias the
+    /// ScopedFilesystem rejects that path ("no mount alias matches scoped
+    /// path"), init fails, and every inbound Slack DM is silently dropped (the
+    /// bug fixed in 7917cf89f). This drives that exact composition so a future
+    /// edit that drops the alias fails here, not just in the mount-view unit
+    /// test the composition never consults directly.
+    #[cfg(all(
+        any(feature = "libsql", feature = "postgres"),
+        feature = "slack-v2-host-beta"
+    ))]
+    #[tokio::test]
+    async fn slack_durable_conversation_store_initializes_through_composed_host_state_mount() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let local_dev_root = dir.path().join("local-dev");
+        // `local_dev_project_filesystem` mounts these host paths; they must
+        // exist before the root filesystem is built.
+        std::fs::create_dir_all(local_dev_root.join("workspace")).expect("workspace dir");
+        std::fs::create_dir_all(local_dev_root.join("system/extensions"))
+            .expect("system extensions dir");
+
+        let root_filesystem = build_local_dev_root_filesystem(
+            &local_dev_root,
+            &local_dev_root.join("workspace"),
+            None,
+            LocalDevStorageBackendInput::LocalDefault,
+        )
+        .await
+        .expect("local-dev root filesystem")
+        .filesystem;
+
+        // Exactly how production composes the Slack host-state filesystem.
+        let host_state_filesystem = local_dev_slack_host_state_filesystem(root_filesystem);
+
+        let conversations = RebornFilesystemConversationServices::new(host_state_filesystem).await;
+
+        assert!(
+            conversations.is_ok(),
+            "durable conversation store must open `/conversations/state.json` \
+             through the composed Slack host-state mount view; got {:?}",
+            conversations.err()
         );
     }
 
@@ -6420,7 +6564,14 @@ mod tests {
             .as_ref()
             .expect("extension management");
         extension_management
-            .remove(nearai_ref.clone())
+            .remove(
+                nearai_ref.clone(),
+                &ironclaw_host_api::ResourceScope::local_default(
+                    ironclaw_host_api::UserId::new("factory-remove-test").expect("valid user"),
+                    ironclaw_host_api::InvocationId::new(),
+                )
+                .expect("valid scope"),
+            )
             .await
             .expect("disable NEAR AI MCP extension");
         let outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
@@ -7247,7 +7398,7 @@ mod tests {
         digest: Option<String>,
     ) -> ironclaw_host_api::PackageIdentity {
         ironclaw_host_api::PackageIdentity::new(
-            ironclaw_host_api::PackageId::new("slack").expect("slack package id"),
+            ironclaw_host_api::PackageId::new("slack_bot").expect("slack package id"),
             ironclaw_host_api::PackageSource::LocalManifest {
                 path: manifest_path.to_string(),
             },
@@ -7260,13 +7411,13 @@ mod tests {
     #[test]
     fn builtin_first_party_trust_policy_includes_slack_local_manifest_entry() {
         let policy = builtin_first_party_trust_policy().expect("trust policy");
-        let expected_digest = slack_manifest_digest();
+        let expected_digest = slack_bot_manifest_digest();
 
         let matching = ironclaw_trust::TrustPolicy::evaluate(
             &policy,
             &ironclaw_trust::TrustPolicyInput {
                 identity: slack_identity(
-                    "/system/extensions/slack/manifest.toml",
+                    "/system/extensions/slack_bot/manifest.toml",
                     Some(expected_digest.clone()),
                 ),
                 requested_trust: ironclaw_host_api::RequestedTrustClass::FirstPartyRequested,
@@ -7285,7 +7436,7 @@ mod tests {
             &policy,
             &ironclaw_trust::TrustPolicyInput {
                 identity: slack_identity(
-                    "/system/extensions/slack/manifest.toml",
+                    "/system/extensions/slack_bot/manifest.toml",
                     Some(
                         "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
                             .to_string(),
@@ -7307,7 +7458,7 @@ mod tests {
             &policy,
             &ironclaw_trust::TrustPolicyInput {
                 identity: slack_identity(
-                    "/system/extensions/slack/other-manifest.toml",
+                    "/system/extensions/slack_bot/other-manifest.toml",
                     Some(expected_digest),
                 ),
                 requested_trust: ironclaw_host_api::RequestedTrustClass::FirstPartyRequested,

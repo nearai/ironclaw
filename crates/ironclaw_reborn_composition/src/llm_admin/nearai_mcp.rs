@@ -507,6 +507,7 @@ mod tests {
                 .map(|handle| ironclaw_host_api::SecretHandle::new(handle).expect("secret handle")),
             refresh_secret: None,
             scopes: Vec::new(),
+            provider_identity: None,
             created_at: chrono::DateTime::from_timestamp(updated_at_secs, 0).expect("timestamp"),
             updated_at: chrono::DateTime::from_timestamp(updated_at_secs, 0).expect("timestamp"),
         }
