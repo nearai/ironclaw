@@ -678,6 +678,406 @@ async fn rollback_deleted_edge_is_reconstructed_so_the_parent_still_gets_the_res
     );
 }
 
+// D3 batch-gate group drain must report each member's own status/reason,
+// never the last-settling member's (external review, PR #5819). Mutation:
+// revert `drain_settled_group`'s per-member derivation to the driving
+// event -> RED (child_a reads "completed" instead of "failed").
+#[tokio::test]
+async fn mixed_status_batch_group_reports_each_members_own_status_and_reason() {
+    let store = real_store();
+    let state_store = Arc::new(InMemoryTurnStateStore::default());
+    let coordinator = Arc::new(DefaultTurnCoordinator::new(Arc::clone(&state_store)));
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+
+    let tenant = TenantId::new("tenant-mixed-batch").unwrap();
+    let user = UserId::new("user-mixed-batch").unwrap();
+    let agent = AgentId::new("agent-mixed-batch").unwrap();
+    let parent_thread_id = ThreadId::new("parent-thread-mixed-batch").unwrap();
+    let parent_scope = TurnScope::new_with_owner(
+        tenant.clone(),
+        Some(agent.clone()),
+        None,
+        parent_thread_id.clone(),
+        Some(user.clone()),
+    );
+    let actor = ironclaw_turns::TurnActor::new(user.clone());
+
+    // 1. Submit and block the parent on a shared dependent-run gate.
+    let submitted = coordinator
+        .submit_turn(ironclaw_turns::SubmitTurnRequest {
+            scope: parent_scope.clone(),
+            actor: actor.clone(),
+            accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("msg:parent-mixed-batch")
+                .unwrap(),
+            source_binding_ref: ironclaw_turns::SourceBindingRef::new("source:parent-mixed-batch")
+                .unwrap(),
+            reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
+                "reply:parent-mixed-batch",
+            )
+            .unwrap(),
+            requested_run_profile: None,
+            idempotency_key: ironclaw_turns::IdempotencyKey::new("idem:parent-mixed-batch")
+                .unwrap(),
+            received_at: chrono::Utc::now(),
+            requested_run_id: None,
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
+            product_context: None,
+        })
+        .await
+        .unwrap();
+    let ironclaw_turns::SubmitTurnResponse::Accepted {
+        run_id: parent_run_id,
+        ..
+    } = submitted;
+    let runner_id = ironclaw_turns::TurnRunnerId::new();
+    let lease_token = ironclaw_turns::TurnLeaseToken::new();
+    state_store
+        .claim_next_run(ironclaw_turns::runner::ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .expect("parent run claimable");
+    let gate_ref = ironclaw_turns::GateRef::new("gate:subagent-mixed-batch-test").unwrap();
+    state_store
+        .block_run(ironclaw_turns::runner::BlockRunRequest {
+            run_id: parent_run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: ironclaw_turns::TurnCheckpointId::new(),
+            state_ref: ironclaw_turns::run_profile::LoopCheckpointStateRef::new(
+                "checkpoint:mixed-batch-test",
+            )
+            .unwrap(),
+            reason: ironclaw_turns::BlockedReason::AwaitDependentRun {
+                gate_ref: gate_ref.clone(),
+            },
+        })
+        .await
+        .unwrap();
+
+    // 2. Submit both children as real lineage children of the parent --
+    // their own run status never advances past Queued; the resolver drives
+    // entirely off the `TurnLifecycleEvent`s constructed below, exactly like
+    // a real `TurnCommittedEventObserver` dispatch would.
+    let child_a_thread_id = ThreadId::new("child-a-thread-mixed-batch").unwrap();
+    let child_a_scope = TurnScope::new_with_owner(
+        tenant.clone(),
+        Some(agent.clone()),
+        None,
+        child_a_thread_id.clone(),
+        Some(user.clone()),
+    );
+    let ironclaw_turns::SubmitTurnResponse::Accepted {
+        run_id: child_a_run_id,
+        ..
+    } = coordinator
+        .submit_child_run(ironclaw_turns::SubmitChildRunRequest {
+            parent_scope: parent_scope.clone(),
+            parent_run_id,
+            child_scope: child_a_scope.clone(),
+            actor: actor.clone(),
+            accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new(
+                "msg:child-a-mixed-batch",
+            )
+            .unwrap(),
+            source_binding_ref: ironclaw_turns::SourceBindingRef::new("source:child-a-mixed-batch")
+                .unwrap(),
+            reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
+                "reply:child-a-mixed-batch",
+            )
+            .unwrap(),
+            requested_run_profile: None,
+            idempotency_key: ironclaw_turns::IdempotencyKey::new("idem:child-a-mixed-batch")
+                .unwrap(),
+            received_at: chrono::Utc::now(),
+            requested_run_id: None,
+            spawn_tree_descendant_cap: 16,
+        })
+        .await
+        .unwrap();
+
+    let child_b_thread_id = ThreadId::new("child-b-thread-mixed-batch").unwrap();
+    let child_b_scope = TurnScope::new_with_owner(
+        tenant.clone(),
+        Some(agent.clone()),
+        None,
+        child_b_thread_id.clone(),
+        Some(user.clone()),
+    );
+    let ironclaw_turns::SubmitTurnResponse::Accepted {
+        run_id: child_b_run_id,
+        ..
+    } = coordinator
+        .submit_child_run(ironclaw_turns::SubmitChildRunRequest {
+            parent_scope: parent_scope.clone(),
+            parent_run_id,
+            child_scope: child_b_scope.clone(),
+            actor: actor.clone(),
+            accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new(
+                "msg:child-b-mixed-batch",
+            )
+            .unwrap(),
+            source_binding_ref: ironclaw_turns::SourceBindingRef::new("source:child-b-mixed-batch")
+                .unwrap(),
+            reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
+                "reply:child-b-mixed-batch",
+            )
+            .unwrap(),
+            requested_run_profile: None,
+            idempotency_key: ironclaw_turns::IdempotencyKey::new("idem:child-b-mixed-batch")
+                .unwrap(),
+            received_at: chrono::Utc::now(),
+            requested_run_id: None,
+            spawn_tree_descendant_cap: 16,
+        })
+        .await
+        .unwrap();
+
+    // 3. Ensure both children's own (empty) threads exist --
+    // `child_terminal_output` looks up each child's latest assistant message
+    // by thread, and errors on a wholly unknown thread rather than treating
+    // it as "no final message yet".
+    for (child_thread_id, child_agent) in
+        [(&child_a_thread_id, &agent), (&child_b_thread_id, &agent)]
+    {
+        thread_service
+            .ensure_thread(ironclaw_threads::EnsureThreadRequest {
+                scope: ThreadScope {
+                    tenant_id: tenant.clone(),
+                    agent_id: child_agent.clone(),
+                    project_id: None,
+                    owner_user_id: Some(user.clone()),
+                    mission_id: None,
+                },
+                thread_id: Some(child_thread_id.clone()),
+                created_by_actor_id: "test".to_string(),
+                title: Some("Subagent".to_string()),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    // 4. Open both edges directly under the SAME shared `gate_ref` -- what
+    // `record_awaited_child` does at spawn time for a D3 batch of spawns
+    // issued in one call.
+    let mut parent_run_context =
+        ironclaw_agent_loop::test_support::test_run_context("mixed-batch-parent");
+    parent_run_context.scope = parent_scope.clone();
+    parent_run_context.thread_id = parent_thread_id.clone();
+    parent_run_context.run_id = parent_run_id;
+    parent_run_context.actor = Some(actor.clone());
+    let result_ref_a = ironclaw_turns::LoopResultRef::new("result:subagent.mixed-a").unwrap();
+    let result_ref_b = ironclaw_turns::LoopResultRef::new("result:subagent.mixed-b").unwrap();
+    store
+        .record_awaited_child(mixed_batch_record(
+            &child_a_scope,
+            child_a_thread_id.clone(),
+            parent_run_id,
+            child_a_run_id,
+            gate_ref.clone(),
+            result_ref_a.clone(),
+            parent_run_context.clone(),
+        ))
+        .await
+        .unwrap();
+    store
+        .record_awaited_child(mixed_batch_record(
+            &child_b_scope,
+            child_b_thread_id.clone(),
+            parent_run_id,
+            child_b_run_id,
+            gate_ref.clone(),
+            result_ref_b.clone(),
+            parent_run_context,
+        ))
+        .await
+        .unwrap();
+
+    // 5. Seed the parent thread with both spawn-time placeholder tool-result
+    // references -- `update_parent_result_reference` updates them in place,
+    // it does not create them.
+    let parent_thread_scope = ThreadScope {
+        tenant_id: tenant.clone(),
+        agent_id: agent.clone(),
+        project_id: None,
+        owner_user_id: Some(user.clone()),
+        mission_id: None,
+    };
+    thread_service
+        .ensure_thread(ironclaw_threads::EnsureThreadRequest {
+            scope: parent_thread_scope.clone(),
+            thread_id: Some(parent_thread_id.clone()),
+            created_by_actor_id: "test".to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    for result_ref in [&result_ref_a, &result_ref_b] {
+        thread_service
+            .append_tool_result_reference(ironclaw_threads::AppendToolResultReferenceRequest {
+                scope: parent_thread_scope.clone(),
+                thread_id: parent_thread_id.clone(),
+                turn_run_id: parent_run_id.to_string(),
+                result_ref: result_ref.as_str().to_string(),
+                safe_summary: ironclaw_threads::ToolResultSafeSummary::new("subagent spawned")
+                    .unwrap(),
+                provider_call: None,
+                model_observation: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    // 6. Build the resolver and deliver each child's own terminal event --
+    // child_a fails first (group not yet fully settled -> no drain), then
+    // child_b completes last and drives the batch drain.
+    let goal_store: Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore> =
+        Arc::new(ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new());
+    let turn_state_store: Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore> = state_store.clone();
+    let result_writer: Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter> =
+        Arc::new(AllowResultWriter);
+    let resolver = Arc::new(AwaitEdgeResolver::new_unbound(
+        Arc::clone(&store),
+        goal_store,
+        turn_state_store,
+        result_writer,
+        Arc::clone(&thread_service),
+    ));
+    let coordinator_dyn: Arc<dyn TurnCoordinator> = coordinator.clone();
+    resolver.bind_coordinator(coordinator_dyn).unwrap();
+
+    let child_a_failure_reason = "child_a_specific_failure_reason";
+    let event_a = ironclaw_turns::TurnLifecycleEvent {
+        cursor: ironclaw_turns::events::EventCursor(1),
+        scope: child_a_scope.clone(),
+        occurred_at: None,
+        owner_user_id: Some(user.clone()),
+        run_id: child_a_run_id,
+        status: ironclaw_turns::TurnStatus::Failed,
+        kind: ironclaw_turns::TurnEventKind::Failed,
+        blocked_gate: None,
+        sanitized_reason: Some(child_a_failure_reason.to_string()),
+        retryable: None,
+        detail: None,
+    };
+    let outcome_a = resolver
+        .handle_child_terminal(&event_a)
+        .await
+        .expect("settling child_a should not error");
+    assert_eq!(
+        outcome_a,
+        ironclaw_loop_support::ResolveOutcome::AlreadyClosed,
+        "child_a settling first must not drive the batch drain -- child_b is still Open"
+    );
+
+    let event_b = ironclaw_turns::TurnLifecycleEvent {
+        cursor: ironclaw_turns::events::EventCursor(1),
+        scope: child_b_scope.clone(),
+        occurred_at: None,
+        owner_user_id: Some(user.clone()),
+        run_id: child_b_run_id,
+        status: ironclaw_turns::TurnStatus::Completed,
+        kind: ironclaw_turns::TurnEventKind::Completed,
+        blocked_gate: None,
+        sanitized_reason: None,
+        retryable: None,
+        detail: None,
+    };
+    let outcome_b = resolver
+        .handle_child_terminal(&event_b)
+        .await
+        .expect("settling child_b should not error");
+    assert_eq!(
+        outcome_b,
+        ironclaw_loop_support::ResolveOutcome::Resumed,
+        "child_b settling last must drive the batch drain and resume the parent"
+    );
+
+    // 7. Each member's OWN parent-transcript summary must reflect its OWN
+    // status/reason -- never the other member's (or the driving event's).
+    let history = thread_service
+        .list_thread_history(ironclaw_threads::ThreadHistoryRequest {
+            scope: parent_thread_scope,
+            thread_id: parent_thread_id,
+        })
+        .await
+        .unwrap();
+    let summary_for = |result_ref: &str| -> String {
+        let message = history
+            .messages
+            .iter()
+            .find(|message| message.tool_result_ref.as_deref() == Some(result_ref))
+            .unwrap_or_else(|| panic!("no tool-result-reference message found for {result_ref}"));
+        let content = message.content.as_deref().expect("message has content");
+        let envelope = ironclaw_threads::ToolResultReferenceEnvelope::from_json_str(content)
+            .expect("valid tool-result-reference envelope");
+        envelope.safe_summary.as_str().to_string()
+    };
+
+    let summary_a = summary_for(result_ref_a.as_str());
+    assert!(
+        summary_a.contains("failed"),
+        "child_a's own summary must report its own Failed status: {summary_a}"
+    );
+    assert!(
+        summary_a.contains(child_a_failure_reason),
+        "child_a's own summary must carry its own failure reason: {summary_a}"
+    );
+
+    let summary_b = summary_for(result_ref_b.as_str());
+    assert!(
+        summary_b.contains("completed"),
+        "child_b's own summary must report its own Completed status, not child_a's Failed \
+         status: {summary_b}"
+    );
+    assert!(
+        !summary_b.contains(child_a_failure_reason),
+        "child_b's own summary must never carry child_a's failure reason: {summary_b}"
+    );
+}
+
+fn mixed_batch_record(
+    scope: &TurnScope,
+    child_thread_id: ThreadId,
+    parent_run_id: TurnRunId,
+    child_run_id: TurnRunId,
+    gate_ref: ironclaw_turns::GateRef,
+    result_ref: ironclaw_turns::LoopResultRef,
+    parent_run_context: ironclaw_turns::run_profile::LoopRunContext,
+) -> ironclaw_loop_support::AwaitedChildSetRecord {
+    use ironclaw_loop_support::{AwaitedChildSetRecord, SpawnSubagentMode, SubagentKindId};
+    use ironclaw_turns::{ReplyTargetBindingRef, SourceBindingRef};
+
+    AwaitedChildSetRecord {
+        gate_ref,
+        parent_run_context,
+        tree_root_run_id: parent_run_id,
+        child_scope: scope.clone(),
+        child_run_id,
+        child_thread_id,
+        source_binding_ref: SourceBindingRef::new(format!("subagent-source:{child_run_id}"))
+            .unwrap(),
+        reply_target_binding_ref: ReplyTargetBindingRef::new(format!(
+            "subagent-reply:{child_run_id}"
+        ))
+        .unwrap(),
+        subagent_kind: SubagentKindId::new("general").unwrap(),
+        spawn_capability_id: ironclaw_host_api::CapabilityId::new(
+            ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID,
+        )
+        .unwrap(),
+        result_ref,
+        mode: SpawnSubagentMode::Blocking,
+    }
+}
+
 struct AllowResultWriter;
 
 #[async_trait::async_trait]

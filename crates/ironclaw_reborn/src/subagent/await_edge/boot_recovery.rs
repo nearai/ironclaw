@@ -77,20 +77,28 @@ where
                 continue;
             }
             super::AwaitEdgeState::Settled => {
+                // Re-drive the resolver's own write -> resume -> release ->
+                // prune -> delete path (`drain_settled_group`), not a bare
+                // `close_edge` -- a crash after this child settled but
+                // before drain ran left the parent's result reference
+                // unwritten and the parent still blocked; jumping straight
+                // to `close_edge` here used to delete the evidence without
+                // ever writing/resuming (external review finding on this
+                // PR).
                 match resolver
-                    .close_edge(scope, parent_run_id, child_run_id)
+                    .drain_settled_group(scope, parent_run_id, child_run_id)
                     .await
                 {
-                    Ok(()) => ironclaw_loop_support::ResolveOutcome::Drained,
+                    Ok(outcome) => outcome,
                     Err(error) => {
-                        tracing::debug!(error = %error, %parent_run_id, %child_run_id, "await-edge recovery close failed");
+                        tracing::debug!(error = %error, %parent_run_id, %child_run_id, "await-edge recovery drain failed");
                         ironclaw_loop_support::ResolveOutcome::AlreadyClosed
                     }
                 }
             }
             super::AwaitEdgeState::Drained | super::AwaitEdgeState::Abandoned => {
                 match resolver
-                    .close_edge(scope, parent_run_id, child_run_id)
+                    .close_edge(scope, parent_run_id, edge.tree_root_run_id, child_run_id)
                     .await
                 {
                     Ok(()) => ironclaw_loop_support::ResolveOutcome::Drained,
@@ -228,21 +236,38 @@ where
         if Self::lock_set(&self.booted).contains(&key) {
             return Ok(());
         }
-        if Self::lock_set(&self.in_progress).contains(&key) {
+        // Claim this scope's first-touch check atomically *before* the async
+        // `list_unclosed_for_scope` call below, not after it — otherwise N
+        // concurrent first-touches on the same new/recovering scope would
+        // all pass this gate while the key is still absent and each
+        // redundantly run the async list call (external review finding on
+        // this PR). The claim below is the single admission decision point:
+        // exactly one caller sees `already_claimed == false` and goes on to
+        // check/spawn recovery; every other concurrent caller for this key
+        // is rejected immediately, no wasted I/O.
+        let already_claimed = {
+            let mut in_progress = Self::lock_set(&self.in_progress);
+            if in_progress.contains(&key) {
+                true
+            } else {
+                in_progress.insert(key.clone());
+                false
+            }
+        };
+        if already_claimed {
             return Err(ScopeRecoveryInProgress {
                 retry_after_hint: Duration::from_millis(200),
             });
         }
-        // First touch for this scope in this process: check whether there is
-        // actually anything to recover before ever rejecting admission. A
-        // scope with no unclosed edges (the overwhelmingly common case — a
-        // brand new scope's very first spawn) has nothing a background
-        // recovery task would do; gating it behind `ScopeRecoveryInProgress`
-        // regardless would reject every first-ever spawn for every scope,
-        // which is not what §5.3 intends (recovery exists for scopes that
-        // *might* have unclosed edges from a prior crash, not as a tax on
-        // first contact). Only scopes the roster/edge-tree actually shows
-        // unclosed work for go through the async recovery+reject path below.
+        // This call now uniquely owns the `in_progress` claim for `key` —
+        // check whether there is actually anything to recover before ever
+        // rejecting admission. A scope with no unclosed edges (the
+        // overwhelmingly common case — a brand new scope's very first
+        // spawn) has nothing a background recovery task would do; gating it
+        // behind `ScopeRecoveryInProgress` regardless would reject every
+        // first-ever spawn for every scope, which is not what §5.3 intends
+        // (recovery exists for scopes that *might* have unclosed edges from
+        // a prior crash, not as a tax on first contact).
         let has_unclosed_edges = match self.store.list_unclosed_for_scope(scope).await {
             Ok(edges) => !edges.is_empty(),
             Err(error) => {
@@ -255,33 +280,23 @@ where
             }
         };
         if !has_unclosed_edges {
+            Self::lock_set(&self.in_progress).remove(&key);
             Self::lock_set(&self.booted).insert(key);
             return Ok(());
         }
-        let already_running = {
-            let mut in_progress = Self::lock_set(&self.in_progress);
-            if in_progress.contains(&key) {
-                true
-            } else {
-                in_progress.insert(key.clone());
-                false
-            }
-        };
-        if !already_running {
-            let resolver = Arc::clone(&self.resolver);
-            let store = Arc::clone(&self.store);
-            let semaphore = Arc::clone(&self.semaphore);
-            let in_progress = Arc::clone(&self.in_progress);
-            let booted = Arc::clone(&self.booted);
-            let scope = scope.clone();
-            let key = key.clone();
-            tokio::spawn(async move {
-                let _permit = semaphore.acquire().await;
-                let _ = recover_scope(&resolver, &store, &scope).await;
-                Self::lock_set(&in_progress).remove(&key);
-                Self::lock_set(&booted).insert(key);
-            });
-        }
+        let resolver = Arc::clone(&self.resolver);
+        let store = Arc::clone(&self.store);
+        let semaphore = Arc::clone(&self.semaphore);
+        let in_progress = Arc::clone(&self.in_progress);
+        let booted = Arc::clone(&self.booted);
+        let scope = scope.clone();
+        let key = key.clone();
+        tokio::spawn(async move {
+            let _permit = semaphore.acquire().await;
+            let _ = recover_scope(&resolver, &store, &scope).await;
+            Self::lock_set(&in_progress).remove(&key);
+            Self::lock_set(&booted).insert(key);
+        });
         Err(ScopeRecoveryInProgress {
             retry_after_hint: Duration::from_millis(200),
         })
@@ -312,7 +327,7 @@ mod tests {
     use ironclaw_host_api::{
         MountAlias, MountGrant, MountPermissions, MountView, TenantId, UserId, VirtualPath,
     };
-    use ironclaw_threads::InMemorySessionThreadService;
+    use ironclaw_threads::{InMemorySessionThreadService, ThreadScope};
     use ironclaw_turns::TurnSpawnTreeStateStore;
 
     use super::*;
@@ -421,5 +436,289 @@ mod tests {
             .await
             .expect("boot recovery should complete once the shared semaphore frees up")
             .expect("boot recovery task should not panic");
+    }
+
+    // A crash-settled edge must re-drive write+resume, not just `close_edge`,
+    // or the parent stays blocked forever (external review, PR #5819).
+    // Mutation: revert the `Settled` branch to a bare `close_edge` call ->
+    // RED (parent never leaves `BlockedDependentRun`, `report.resumed == 0`).
+    #[tokio::test]
+    async fn recover_scope_redrives_write_and_resume_for_a_crash_settled_undrained_edge() {
+        use ironclaw_turns::{
+            DefaultTurnCoordinator, GateRef, SubmitChildRunRequest, SubmitTurnRequest, TurnActor,
+            TurnCoordinator, TurnSpawnTreePort, runner::TurnRunTransitionPort,
+        };
+
+        let fs = boot_sem_scoped_fs();
+        let store = Arc::new(FilesystemAwaitEdgeStore::new(Arc::clone(&fs)));
+        let state_store = Arc::new(ironclaw_turns::InMemoryTurnStateStore::default());
+        let coordinator = DefaultTurnCoordinator::new(Arc::clone(&state_store));
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+
+        let tenant_id = ironclaw_host_api::TenantId::new("recover-settled-tenant").unwrap();
+        let agent_id = ironclaw_host_api::AgentId::new("recover-settled-agent").unwrap();
+        let owner = UserId::new("recover-settled-owner").unwrap();
+        let actor = TurnActor::new(owner.clone());
+        let parent_thread_id =
+            ironclaw_host_api::ThreadId::new("recover-settled-parent-thread").unwrap();
+        let parent_scope = TurnScope::new_with_owner(
+            tenant_id.clone(),
+            Some(agent_id.clone()),
+            None,
+            parent_thread_id.clone(),
+            Some(owner.clone()),
+        );
+
+        // 1. Submit + block the parent on a dependent-run gate.
+        let ironclaw_turns::SubmitTurnResponse::Accepted {
+            run_id: parent_run_id,
+            ..
+        } = coordinator
+            .submit_turn(SubmitTurnRequest {
+                scope: parent_scope.clone(),
+                actor: actor.clone(),
+                accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new(
+                    "msg:recover-settled-parent",
+                )
+                .unwrap(),
+                source_binding_ref: ironclaw_turns::SourceBindingRef::new(
+                    "source:recover-settled-parent",
+                )
+                .unwrap(),
+                reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
+                    "reply:recover-settled-parent",
+                )
+                .unwrap(),
+                requested_run_profile: None,
+                idempotency_key: ironclaw_turns::IdempotencyKey::new("idem:recover-settled-parent")
+                    .unwrap(),
+                received_at: chrono::Utc::now(),
+                requested_run_id: None,
+                parent_run_id: None,
+                subagent_depth: 0,
+                spawn_tree_root_run_id: None,
+                product_context: None,
+            })
+            .await
+            .unwrap();
+        let runner_id = ironclaw_turns::TurnRunnerId::new();
+        let lease_token = ironclaw_turns::TurnLeaseToken::new();
+        state_store
+            .claim_next_run(ironclaw_turns::runner::ClaimRunRequest {
+                runner_id,
+                lease_token,
+                scope_filter: None,
+            })
+            .await
+            .unwrap()
+            .expect("parent run claimable");
+        let gate_ref = GateRef::new("gate:recover-settled-test").unwrap();
+        state_store
+            .block_run(ironclaw_turns::runner::BlockRunRequest {
+                run_id: parent_run_id,
+                runner_id,
+                lease_token,
+                checkpoint_id: ironclaw_turns::TurnCheckpointId::new(),
+                state_ref: ironclaw_turns::run_profile::LoopCheckpointStateRef::new(
+                    "checkpoint:recover-settled-test",
+                )
+                .unwrap(),
+                reason: ironclaw_turns::BlockedReason::AwaitDependentRun {
+                    gate_ref: gate_ref.clone(),
+                },
+            })
+            .await
+            .unwrap();
+
+        // 2. Submit the child as a real lineage child of the parent (its own
+        // run status never needs to advance -- the edge below carries the
+        // already-`Settled` terminal state directly, simulating "crashed
+        // after settle, before drain").
+        let child_thread_id =
+            ironclaw_host_api::ThreadId::new("recover-settled-child-thread").unwrap();
+        let child_scope = TurnScope::new_with_owner(
+            tenant_id.clone(),
+            Some(agent_id.clone()),
+            None,
+            child_thread_id.clone(),
+            Some(owner.clone()),
+        );
+        let ironclaw_turns::SubmitTurnResponse::Accepted {
+            run_id: child_run_id,
+            ..
+        } = coordinator
+            .submit_child_run(SubmitChildRunRequest {
+                parent_scope: parent_scope.clone(),
+                parent_run_id,
+                child_scope: child_scope.clone(),
+                actor: actor.clone(),
+                accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new(
+                    "msg:recover-settled-child",
+                )
+                .unwrap(),
+                source_binding_ref: ironclaw_turns::SourceBindingRef::new(
+                    "source:recover-settled-child",
+                )
+                .unwrap(),
+                reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
+                    "reply:recover-settled-child",
+                )
+                .unwrap(),
+                requested_run_profile: None,
+                idempotency_key: ironclaw_turns::IdempotencyKey::new("idem:recover-settled-child")
+                    .unwrap(),
+                received_at: chrono::Utc::now(),
+                requested_run_id: None,
+                spawn_tree_descendant_cap: 16,
+            })
+            .await
+            .unwrap();
+
+        // 3. Seed both threads and the parent's spawn-time tool-result
+        // placeholder.
+        thread_service
+            .ensure_thread(ironclaw_threads::EnsureThreadRequest {
+                scope: ThreadScope {
+                    tenant_id: tenant_id.clone(),
+                    agent_id: agent_id.clone(),
+                    project_id: None,
+                    owner_user_id: Some(owner.clone()),
+                    mission_id: None,
+                },
+                thread_id: Some(child_thread_id.clone()),
+                created_by_actor_id: "test".to_string(),
+                title: Some("Subagent".to_string()),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        thread_service
+            .ensure_thread(ironclaw_threads::EnsureThreadRequest {
+                scope: ThreadScope {
+                    tenant_id: tenant_id.clone(),
+                    agent_id: agent_id.clone(),
+                    project_id: None,
+                    owner_user_id: Some(owner.clone()),
+                    mission_id: None,
+                },
+                thread_id: Some(parent_thread_id.clone()),
+                created_by_actor_id: "test".to_string(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        let result_ref =
+            ironclaw_turns::LoopResultRef::new("result:subagent.recover-settled").unwrap();
+        thread_service
+            .append_tool_result_reference(ironclaw_threads::AppendToolResultReferenceRequest {
+                scope: ThreadScope {
+                    tenant_id: tenant_id.clone(),
+                    agent_id: agent_id.clone(),
+                    project_id: None,
+                    owner_user_id: Some(owner.clone()),
+                    mission_id: None,
+                },
+                thread_id: parent_thread_id.clone(),
+                turn_run_id: parent_run_id.to_string(),
+                result_ref: result_ref.as_str().to_string(),
+                safe_summary: ironclaw_threads::ToolResultSafeSummary::new("subagent spawned")
+                    .unwrap(),
+                provider_call: None,
+                model_observation: None,
+            })
+            .await
+            .unwrap();
+
+        // 4. Open the edge already in `Settled` state -- simulating a crash
+        // that landed after the settle CAS write but before drain ran.
+        let mut parent_run_context =
+            ironclaw_agent_loop::test_support::test_run_context("recover-settled-parent-ctx");
+        parent_run_context.scope = parent_scope.clone();
+        parent_run_context.thread_id = parent_thread_id.clone();
+        parent_run_context.run_id = parent_run_id;
+        parent_run_context.actor = Some(actor.clone());
+        let edge = super::super::AwaitEdge {
+            child_scope: child_scope.clone(),
+            child_thread_id: child_thread_id.clone(),
+            parent_thread_id: parent_thread_id.clone(),
+            parent_run_context,
+            tree_root_run_id: parent_run_id,
+            gate_ref: gate_ref.clone(),
+            source_binding_ref: ironclaw_turns::SourceBindingRef::new(
+                "subagent-source:recover-settled",
+            )
+            .unwrap(),
+            reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
+                "subagent-reply:recover-settled",
+            )
+            .unwrap(),
+            subagent_kind: ironclaw_loop_support::SubagentKindId::new("general").unwrap(),
+            spawn_capability_id: ironclaw_host_api::CapabilityId::new(
+                ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID,
+            )
+            .unwrap(),
+            result_ref,
+            mode: ironclaw_loop_support::SpawnSubagentMode::Blocking,
+            state: super::super::AwaitEdgeState::Settled,
+            terminal_kind: Some(super::super::EdgeTerminalKind::Completed),
+            terminal_byte_len: None,
+            terminal_reason: None,
+            reservation_release: super::super::ReservationReleaseState::Unclaimed,
+            created_at: chrono::Utc::now(),
+            settled_at: Some(chrono::Utc::now()),
+        };
+        store
+            .open(&child_scope, parent_run_id, child_run_id, edge)
+            .await
+            .unwrap();
+
+        // 5. Build the resolver, bind the real coordinator, and re-drive
+        // recovery over this exact scope.
+        let goal_store: Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore> =
+            Arc::new(crate::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new());
+        let turn_state_store: Arc<dyn TurnSpawnTreeStateStore> = state_store.clone();
+        let resolver = Arc::new(AwaitEdgeResolver::new_unbound(
+            Arc::clone(&store),
+            goal_store,
+            turn_state_store,
+            Arc::new(NoopResultWriter),
+            Arc::clone(&thread_service),
+        ));
+        let coordinator_dyn: Arc<dyn ironclaw_turns::TurnCoordinator> = Arc::new(coordinator);
+        resolver
+            .bind_coordinator(Arc::clone(&coordinator_dyn))
+            .unwrap();
+
+        let report = recover_scope(&resolver, &store, &child_scope).await;
+        assert_eq!(
+            report.resumed, 1,
+            "recovery must actually drive the write+resume path, not just close the edge"
+        );
+        assert_eq!(report.failed, 0);
+
+        // 6. The parent actually left `BlockedDependentRun` -- not stuck.
+        let parent_state = coordinator_dyn
+            .get_run_state(ironclaw_turns::GetRunStateRequest {
+                scope: parent_scope,
+                run_id: parent_run_id,
+            })
+            .await
+            .unwrap();
+        assert_ne!(
+            parent_state.status,
+            ironclaw_turns::TurnStatus::BlockedDependentRun,
+            "the parent must actually resume, not stay stuck on its dependent-run gate"
+        );
+
+        // 7. The edge is actually gone -- the close half of the sequence
+        // still ran too.
+        assert!(
+            store
+                .list_unclosed_for_scope(&child_scope)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

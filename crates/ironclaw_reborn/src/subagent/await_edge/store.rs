@@ -22,6 +22,17 @@ use super::{
 };
 use crate::subagent::await_edge::roster::{self, RosterKey};
 
+/// Test-only fault-injection hooks for [`FilesystemAwaitEdgeStore::close_with_release`]'s
+/// two named crash windows (§5.5 round-7 scenarios (a) and (b)). Bundled into
+/// one struct instead of two more positional `Option<&dyn Fn()>` parameters —
+/// keeps that method under `clippy::too_many_arguments` without an exemption.
+/// `Default::default()` (both `None`) in production.
+#[derive(Default, Clone, Copy)]
+pub struct CloseCrashHooks<'a> {
+    pub before_prune: Option<&'a (dyn Fn() + Send + Sync)>,
+    pub before_delete: Option<&'a (dyn Fn() + Send + Sync)>,
+}
+
 /// Thin CAS wrapper around one shared `Arc<ScopedFilesystem<F>>`. Generic
 /// over the backend, matching every other filesystem-backed reborn store
 /// (`goal_store.rs`'s `FilesystemSubagentGoalStore<F>`,
@@ -197,6 +208,7 @@ where
         child_run_id: TurnRunId,
         terminal_kind: EdgeTerminalKind,
         terminal_byte_len: Option<u64>,
+        terminal_reason: Option<String>,
     ) -> Result<Option<AwaitEdge>, AwaitEdgeStoreError> {
         let Some((mut edge, version)) = self.get_edge(scope, parent_run_id, child_run_id).await?
         else {
@@ -208,6 +220,7 @@ where
         edge.state = AwaitEdgeState::Settled;
         edge.terminal_kind = Some(terminal_kind);
         edge.terminal_byte_len = terminal_byte_len;
+        edge.terminal_reason = terminal_reason;
         edge.settled_at = Some(Utc::now());
         match self
             .put_edge_cas(
@@ -496,12 +509,13 @@ where
     /// `Released` CAS's own returned version. `release_fn` performs the
     /// actual `TurnStateStore::release_tree_descendants` call — injected so
     /// `store.rs` stays independent of `ironclaw_turns::TurnStateStore`'s
-    /// concrete wiring (the resolver supplies it). `crash_hook_before_prune`
-    /// and `crash_hook_before_delete` are test-only fault-injection points
-    /// for the two crash windows named in §5.5 round-7: (a) between the
-    /// `Released` CAS and the prune, (b) between the prune and
-    /// `delete_if_version`. Both are `None` in production.
-    #[allow(clippy::too_many_arguments)] // arch-exempt: two test-only crash hooks, one prod call site
+    /// concrete wiring (the resolver supplies it). `crash_hooks` bundles the
+    /// two test-only fault-injection points for the crash windows named in
+    /// §5.5 round-7: (a) between the `Released` CAS and the prune, (b)
+    /// between the prune and `delete_if_version`. `CloseCrashHooks::default()`
+    /// (both `None`) in production — bundled into one struct rather than two
+    /// more positional `Option<&dyn Fn()>` parameters so this method stays
+    /// under `clippy::too_many_arguments` without an exemption.
     pub async fn close_with_release<Fut, PruneFut>(
         &self,
         scope: &TurnScope,
@@ -509,35 +523,28 @@ where
         child_run_id: TurnRunId,
         release_fn: impl FnOnce() -> Fut,
         prune_fn: impl FnOnce() -> PruneFut,
-        crash_hook_before_prune: Option<&(dyn Fn() + Send + Sync)>,
-        crash_hook_before_delete: Option<&(dyn Fn() + Send + Sync)>,
+        crash_hooks: CloseCrashHooks<'_>,
     ) -> Result<(), AwaitEdgeStoreError>
     where
         Fut: std::future::Future<Output = Result<(), AwaitEdgeStoreError>>,
         PruneFut: std::future::Future<Output = Result<(), AwaitEdgeStoreError>>,
     {
-        let Some(edge) = self.peek(scope, parent_run_id, child_run_id).await? else {
+        let crash_hook_before_prune = crash_hooks.before_prune;
+        let crash_hook_before_delete = crash_hooks.before_delete;
+        // Single fetch, reused for every branch below -- the previous
+        // `peek` (which discards the version) plus a second `get_edge` per
+        // branch read+deserialized the same edge redundantly.
+        let Some((edge, version)) = self.get_edge(scope, parent_run_id, child_run_id).await? else {
             return Ok(());
         };
         let released_version = match edge.reservation_release {
-            ReservationReleaseState::Released => {
-                // Already released by an earlier pass — recovery must not
-                // re-invoke the release call (that would double-decrement);
-                // just re-read the current version for the delete token.
-                let Some((_, version)) = self.get_edge(scope, parent_run_id, child_run_id).await?
-                else {
-                    return Ok(());
-                };
-                version
-            }
+            // Already released by an earlier pass — recovery must not
+            // re-invoke the release call (that would double-decrement); the
+            // version already in hand is the delete token.
+            ReservationReleaseState::Released => version,
             ReservationReleaseState::Unclaimed | ReservationReleaseState::Claimed => {
                 let claimed_version =
                     if edge.reservation_release == ReservationReleaseState::Claimed {
-                        let Some((_, version)) =
-                            self.get_edge(scope, parent_run_id, child_run_id).await?
-                        else {
-                            return Ok(());
-                        };
                         version
                     } else {
                         match self
@@ -672,6 +679,7 @@ where
             state: AwaitEdgeState::Open,
             terminal_kind: None,
             terminal_byte_len: None,
+            terminal_reason: None,
             reservation_release: ReservationReleaseState::Unclaimed,
             created_at: Utc::now(),
             settled_at: None,
@@ -792,6 +800,7 @@ mod tests {
             state: AwaitEdgeState::Open,
             terminal_kind: None,
             terminal_byte_len: None,
+            terminal_reason: None,
             reservation_release: ReservationReleaseState::Unclaimed,
             created_at: Utc::now(),
             settled_at: None,
@@ -812,7 +821,14 @@ mod tests {
         assert!(store.peek(&scope, parent, child).await.unwrap().is_some());
 
         let settled = store
-            .settle(&scope, parent, child, EdgeTerminalKind::Completed, Some(42))
+            .settle(
+                &scope,
+                parent,
+                child,
+                EdgeTerminalKind::Completed,
+                Some(42),
+                None,
+            )
             .await
             .unwrap()
             .unwrap();
@@ -826,8 +842,7 @@ mod tests {
                 child,
                 || async { Ok(()) },
                 || async { Ok(()) },
-                None,
-                None,
+                CloseCrashHooks::default(),
             )
             .await
             .unwrap();
@@ -895,7 +910,14 @@ mod tests {
         );
 
         store
-            .settle(&scope, parent, child, EdgeTerminalKind::Completed, None)
+            .settle(
+                &scope,
+                parent,
+                child,
+                EdgeTerminalKind::Completed,
+                None,
+                None,
+            )
             .await
             .unwrap();
         store
@@ -905,8 +927,7 @@ mod tests {
                 child,
                 || async { Ok(()) },
                 || async { Ok(()) },
-                None,
-                None,
+                CloseCrashHooks::default(),
             )
             .await
             .unwrap();
@@ -941,7 +962,14 @@ mod tests {
         let roster_path = roster::roster_path(&roster_key).unwrap();
 
         store
-            .settle(&scope, parent, child_a, EdgeTerminalKind::Completed, None)
+            .settle(
+                &scope,
+                parent,
+                child_a,
+                EdgeTerminalKind::Completed,
+                None,
+                None,
+            )
             .await
             .unwrap();
         store
@@ -951,8 +979,7 @@ mod tests {
                 child_a,
                 || async { Ok(()) },
                 || async { Ok(()) },
-                None,
-                None,
+                CloseCrashHooks::default(),
             )
             .await
             .unwrap();
@@ -982,7 +1009,14 @@ mod tests {
             .await
             .unwrap();
         store
-            .settle(&scope, parent, child, EdgeTerminalKind::Completed, None)
+            .settle(
+                &scope,
+                parent,
+                child,
+                EdgeTerminalKind::Completed,
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -1008,8 +1042,12 @@ mod tests {
                                 prune_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                                 async { Ok(()) }
                             },
-                            Some(&|| panic!("simulated crash between Released CAS and prune")),
-                            None,
+                            CloseCrashHooks {
+                                before_prune: Some(&|| {
+                                    panic!("simulated crash between Released CAS and prune")
+                                }),
+                                before_delete: None,
+                            },
                         ))
                     }))
                 })
@@ -1049,8 +1087,7 @@ mod tests {
                     prune_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     async { Ok(()) }
                 },
-                None,
-                None,
+                CloseCrashHooks::default(),
             )
             .await
             .unwrap();
@@ -1086,7 +1123,14 @@ mod tests {
             .unwrap()
             .unwrap();
         store
-            .settle(&scope, parent, child, EdgeTerminalKind::Completed, None)
+            .settle(
+                &scope,
+                parent,
+                child,
+                EdgeTerminalKind::Completed,
+                None,
+                None,
+            )
             .await
             .unwrap();
         let claimed_version = store
@@ -1200,7 +1244,14 @@ mod tests {
             .await
             .unwrap();
         store
-            .settle(&scope, parent, child, EdgeTerminalKind::Completed, None)
+            .settle(
+                &scope,
+                parent,
+                child,
+                EdgeTerminalKind::Completed,
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -1233,8 +1284,12 @@ mod tests {
                                 prune_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                                 async { Ok(()) }
                             },
-                            None,
-                            Some(&|| panic!("simulated crash between prune and delete")),
+                            CloseCrashHooks {
+                                before_prune: None,
+                                before_delete: Some(&|| {
+                                    panic!("simulated crash between prune and delete")
+                                }),
+                            },
                         ))
                     }))
                 })
@@ -1278,8 +1333,7 @@ mod tests {
                     prune_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     async { Ok(()) }
                 },
-                None,
-                None,
+                CloseCrashHooks::default(),
             )
             .await
             .unwrap();
@@ -1321,7 +1375,14 @@ mod tests {
             .await
             .unwrap();
         store
-            .settle(&scope, parent, child, EdgeTerminalKind::Completed, None)
+            .settle(
+                &scope,
+                parent,
+                child,
+                EdgeTerminalKind::Completed,
+                None,
+                None,
+            )
             .await
             .unwrap();
         let claimed_version = store
@@ -1352,8 +1413,7 @@ mod tests {
                     }
                 },
                 || async { Ok(()) },
-                None,
-                None,
+                CloseCrashHooks::default(),
             )
             .await;
         assert!(

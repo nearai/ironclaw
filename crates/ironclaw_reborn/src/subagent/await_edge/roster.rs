@@ -100,16 +100,25 @@ fn percent_decode(value: &str) -> Result<String, AwaitEdgeStoreError> {
     })
 }
 
+// Tagged presence prefixes (`-some-`/bare `-none`), not a bare `agent-<value>`
+// vs. `agent-none` sentinel: `AgentId`/`ProjectId`'s `validate_scope_id` does
+// not reserve the literal string `"none"`, so a real `Some("none")` id used
+// to encode to the exact same segment as the missing-axis sentinel below —
+// `Some("none")` and `None` collided and one silently round-tripped as the
+// other, colliding roster markers/lazy-recovery scope keys for that axis
+// (external review finding on this PR). The `-some-`/bare-`-none` tag makes
+// the two forms textually distinct before percent-encoding even touches
+// them, for every possible axis value including the literal `"none"`.
 fn agent_segment(agent_id: Option<&str>) -> String {
     match agent_id {
-        Some(value) => format!("agent-{value}"),
+        Some(value) => format!("agent-some-{value}"),
         None => "agent-none".to_string(),
     }
 }
 
 fn project_segment(project_id: Option<&str>) -> String {
     match project_id {
-        Some(value) => format!("project-{value}"),
+        Some(value) => format!("project-some-{value}"),
         None => "project-none".to_string(),
     }
 }
@@ -147,25 +156,35 @@ pub fn decode_roster_filename(filename: &str) -> Result<RosterKey, AwaitEdgeStor
             reason: format!("roster filename user_id invalid: {error}"),
         })?;
     let agent_decoded = percent_decode(agent)?;
-    let agent_id = agent_decoded
-        .strip_prefix("agent-")
-        .filter(|value| *value != "none")
-        .map(|value| {
+    let agent_id = if agent_decoded == "agent-none" {
+        None
+    } else {
+        let value = agent_decoded.strip_prefix("agent-some-").ok_or_else(|| {
+            AwaitEdgeStoreError::Backend {
+                reason: format!("roster filename agent segment malformed: {agent_decoded}"),
+            }
+        })?;
+        Some(
             AgentId::new(value).map_err(|error| AwaitEdgeStoreError::Backend {
                 reason: format!("roster filename agent_id invalid: {error}"),
-            })
-        })
-        .transpose()?;
+            })?,
+        )
+    };
     let project_decoded = percent_decode(project)?;
-    let project_id = project_decoded
-        .strip_prefix("project-")
-        .filter(|value| *value != "none")
-        .map(|value| {
+    let project_id = if project_decoded == "project-none" {
+        None
+    } else {
+        let value = project_decoded
+            .strip_prefix("project-some-")
+            .ok_or_else(|| AwaitEdgeStoreError::Backend {
+                reason: format!("roster filename project segment malformed: {project_decoded}"),
+            })?;
+        Some(
             ProjectId::new(value).map_err(|error| AwaitEdgeStoreError::Backend {
                 reason: format!("roster filename project_id invalid: {error}"),
-            })
-        })
-        .transpose()?;
+            })?,
+        )
+    };
     Ok(RosterKey {
         tenant_id,
         user_id,
@@ -415,6 +434,44 @@ mod tests {
         assert_ne!(encoded_a, encoded_b);
         assert_eq!(decode_roster_filename(&encoded_a).unwrap(), a);
         assert_eq!(decode_roster_filename(&encoded_b).unwrap(), b);
+    }
+
+    // External review finding on this PR: `AgentId`/`ProjectId` do not
+    // reserve the literal `"none"`, so `Some("none")` must not encode (and
+    // round-trip) identically to the missing-axis sentinel `None` -- a real
+    // scope with agent/project id literally `"none"` must stay distinct from
+    // an agentless/projectless scope, both in the encoded filename and after
+    // decoding it back.
+    #[test]
+    fn roster_key_encoding_disambiguates_literal_none_id_from_missing_axis() {
+        let with_literal_none_agent = key("tenant", "user", Some("none"), None);
+        let without_agent = key("tenant", "user", None, None);
+        let encoded_literal = encode_roster_filename(&with_literal_none_agent);
+        let encoded_absent = encode_roster_filename(&without_agent);
+        assert_ne!(
+            encoded_literal, encoded_absent,
+            "Some(\"none\") and None must not collide in the encoded filename"
+        );
+        assert_eq!(
+            decode_roster_filename(&encoded_literal).unwrap(),
+            with_literal_none_agent,
+            "Some(\"none\") must round-trip as Some(\"none\"), not collapse to None"
+        );
+        assert_eq!(
+            decode_roster_filename(&encoded_absent).unwrap(),
+            without_agent
+        );
+
+        // Same collision class on the project axis.
+        let with_literal_none_project = key("tenant", "user", None, Some("none"));
+        let without_project = key("tenant", "user", None, None);
+        let encoded_literal_project = encode_roster_filename(&with_literal_none_project);
+        let encoded_absent_project = encode_roster_filename(&without_project);
+        assert_ne!(encoded_literal_project, encoded_absent_project);
+        assert_eq!(
+            decode_roster_filename(&encoded_literal_project).unwrap(),
+            with_literal_none_project
+        );
     }
 
     // Required test (§4.5 round-5): `roster_shard_prefix_is_deterministic_and_well_distributed`.

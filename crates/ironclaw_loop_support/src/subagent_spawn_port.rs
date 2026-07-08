@@ -23,11 +23,12 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
         CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityDenied,
-        CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef,
-        CapabilityInvocation, CapabilityOutcome, ConcurrencyHint, LoopCapabilityPort,
-        LoopRunContext, LoopSafeSummary, ProviderToolCall, ProviderToolCallCapabilityIds,
-        ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
-        VisibleCapabilityRequest, VisibleCapabilitySurface, sanitize_model_visible_text,
+        CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailure,
+        CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
+        ConcurrencyHint, LoopCapabilityPort, LoopRunContext, LoopSafeSummary, ProviderToolCall,
+        ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
+        RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        sanitize_model_visible_text,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -932,25 +933,45 @@ impl SubagentSpawnCapabilityPort {
             .await
             .map_err(map_thread_error)?;
         compensation.thread_written = Some((child_scope.clone(), child_thread.thread_id.clone()));
-        let child_turn_scope = TurnScope::new(
-            child_scope.tenant_id.clone(),
-            Some(child_scope.agent_id.clone()),
-            child_scope.project_id.clone(),
-            child_thread.thread_id.clone(),
-        );
+        // Mirror the parent's own scope ownership mode instead of always
+        // defaulting to `ActorFallback`: an `ActorFallback` child scope maps
+        // to the system mount, but `has_awaited_child_gate` reads this edge
+        // back under the parent's real-owner scope, so a multi-user parent's
+        // edge would be invisible to its own evidence check (external
+        // review, PR #5819). A parent with no explicit owner is unaffected.
+        let child_turn_scope = match self.run_context.scope.explicit_owner_user_id() {
+            Some(owner_user_id) => TurnScope::new_with_owner(
+                child_scope.tenant_id.clone(),
+                Some(child_scope.agent_id.clone()),
+                child_scope.project_id.clone(),
+                child_thread.thread_id.clone(),
+                Some(owner_user_id.clone()),
+            ),
+            None => TurnScope::new(
+                child_scope.tenant_id.clone(),
+                Some(child_scope.agent_id.clone()),
+                child_scope.project_id.clone(),
+                child_thread.thread_id.clone(),
+            ),
+        };
         // Lazy-recovery admission gate (§5.3): refuse to open a new edge onto
-        // a scope whose boot/lazy recovery is still in flight — retryable,
-        // handled like `ThreadBusy` by callers.
-        self.deps
+        // a scope whose boot/lazy recovery is still in flight. Transient and
+        // retryable, like the `spawn_rejected(...)` outcomes above — surface
+        // it as `CapabilityOutcome::Failed`, not `Err(AgentLoopHostError)`,
+        // which maps to a run-ending `HostUnavailable` (external review,
+        // PR #5819).
+        if let Err(error) = self
+            .deps
             .await_edge_writer
             .check_scope_recovered(&child_turn_scope)
             .await
-            .map_err(|error| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::Unavailable,
-                    format!("subagent spawn scope recovery in progress: {error}"),
-                )
-            })?;
+        {
+            return Ok(CapabilityOutcome::Failed(CapabilityFailure {
+                error_kind: CapabilityFailureKind::Transient,
+                safe_summary: format!("subagent spawn scope recovery in progress: {error}"),
+                detail: None,
+            }));
+        }
         self.deps
             .goal_store
             .put_goal(

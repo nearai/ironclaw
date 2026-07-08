@@ -80,6 +80,45 @@ struct NoopResultWriter;
 
 struct NoopGoalStore;
 
+/// Wraps [`InMemoryAwaitEdgeWriter`] but always rejects the lazy-recovery
+/// admission check — drives `finish_spawn`'s `check_scope_recovered` reject
+/// branch (external review finding: this must surface as a retryable
+/// `CapabilityOutcome::Failed`, never `Err(AgentLoopHostError)`).
+#[derive(Default)]
+struct AlwaysRecoveringAwaitEdgeWriter {
+    inner: InMemoryAwaitEdgeWriter,
+}
+
+#[async_trait]
+impl crate::AwaitEdgeWriter for AlwaysRecoveringAwaitEdgeWriter {
+    async fn check_scope_recovered(
+        &self,
+        _scope: &TurnScope,
+    ) -> Result<(), crate::ScopeRecoveryInProgress> {
+        Err(crate::ScopeRecoveryInProgress {
+            retry_after_hint: std::time::Duration::from_millis(50),
+        })
+    }
+
+    async fn record_awaited_child(
+        &self,
+        record: AwaitedChildSetRecord,
+    ) -> Result<(), AgentLoopHostError> {
+        self.inner.record_awaited_child(record).await
+    }
+
+    async fn abandon_awaited_child(
+        &self,
+        child_scope: &TurnScope,
+        parent_run_id: TurnRunId,
+        child_run_id: TurnRunId,
+    ) -> Result<(), AgentLoopHostError> {
+        self.inner
+            .abandon_awaited_child(child_scope, parent_run_id, child_run_id)
+            .await
+    }
+}
+
 struct StaticCoordinator;
 
 struct StaticTurnStateStore {
@@ -1040,6 +1079,27 @@ async fn test_run_context_with_agent_actor(label: &str) -> LoopRunContext {
         UserId::new(format!("user-{label}")).unwrap(),
     ));
     context.scope.agent_id = Some(AgentId::new(format!("agent-{label}")).unwrap());
+    context
+}
+
+/// Like [`test_run_context_with_agent_actor`], but the parent's own scope
+/// carries an *explicit* thread owner (`TurnScope::new_with_owner`) matching
+/// its actor — the real multi-user/product-turn shape, as opposed to the
+/// `ActorFallback` scope every other helper here builds.
+async fn test_run_context_with_explicit_owner_scope(label: &str) -> LoopRunContext {
+    let mut context = test_run_context_with_agent_actor(label).await;
+    let owner = context
+        .actor
+        .clone()
+        .expect("with_agent_actor sets an actor")
+        .user_id;
+    context.scope = TurnScope::new_with_owner(
+        context.scope.tenant_id.clone(),
+        context.scope.agent_id.clone(),
+        context.scope.project_id.clone(),
+        context.scope.thread_id.clone(),
+        Some(owner),
+    );
     context
 }
 
@@ -2055,6 +2115,121 @@ async fn invoke_spawn_submits_child_run_through_spawn_tree_port() {
     assert_eq!(awaited[0].child_scope, request.child_scope);
     assert_eq!(awaited[0].result_ref.as_str(), "result:spawn");
     assert_eq!(awaited[0].mode, SpawnSubagentMode::Blocking);
+}
+
+// A multi-user parent's explicit thread owner must carry onto
+// `child_turn_scope`, not default to `ActorFallback` -- otherwise the
+// await-edge writes under the system mount while evidence reads under the
+// parent's real-owner mount (external review, PR #5819). Mutation: revert to
+// unconditional `TurnScope::new(...)` -> RED (owner is `None`).
+#[tokio::test]
+async fn invoke_spawn_preserves_parents_explicit_owner_on_child_await_edge_scope() {
+    let context = test_run_context_with_explicit_owner_scope("spawn-explicit-owner").await;
+    let expected_owner = context
+        .scope
+        .explicit_owner_user_id()
+        .cloned()
+        .expect("test context has an explicit owner");
+    let turn_store = Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0))));
+    let child_runs = Arc::new(RecordingChildRuns::default());
+    let gate_store = Arc::new(InMemoryAwaitEdgeWriter::default());
+    let deps = Arc::new(SubagentSpawnDeps {
+        coordinator: Arc::new(StaticCoordinator),
+        child_runs: child_runs.clone(),
+        turn_state_store: turn_store,
+        thread_service: Arc::new(InMemorySessionThreadService::default()),
+        goal_store: Arc::new(NoopGoalStore),
+        await_edge_writer: gate_store.clone(),
+        definition_resolver: Arc::new(StaticDefinitionResolver {
+            resolved: Some(subagent_definition(false)),
+            parent: None,
+        }),
+        spawn_input_codec: Arc::new(StaticSpawnInputCodec {
+            args: default_spawn_args(),
+        }),
+        result_writer: Arc::new(NoopResultWriter),
+    });
+    let port = SubagentSpawnCapabilityPort::new(
+        Arc::new(AuthPassPort),
+        context.clone(),
+        CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+        SubagentSpawnLimits::default(),
+        deps,
+        Vec::new(),
+    );
+    authorize_spawn_input(&port);
+
+    let outcome = invoke_spawn(&port).await;
+    assert!(
+        matches!(outcome, CapabilityOutcome::AwaitDependentRun { .. }),
+        "expected the spawn to suspend the parent on the child, got {outcome:?}"
+    );
+
+    let awaited = gate_store.records();
+    assert_eq!(awaited.len(), 1);
+    assert_eq!(
+        awaited[0].child_scope.explicit_owner_user_id(),
+        Some(&expected_owner),
+        "await-edge child scope must preserve the parent's real owner, not default to ActorFallback"
+    );
+
+    // The child run actually submitted to `child_runs` must carry the same
+    // owner-preserving scope the await-edge was opened with — the two must
+    // never diverge (that divergence is exactly the class of bug this test
+    // guards against).
+    let requests = child_runs.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].child_scope.explicit_owner_user_id(),
+        Some(&expected_owner)
+    );
+}
+
+// Recovery-in-progress must surface as a retryable `CapabilityOutcome::Failed`,
+// not `Err(Unavailable)` -- that kind maps to a terminal `HostUnavailable`
+// and can end the run instead of letting the model retry (external review,
+// PR #5819). Mutation: revert to `.map_err(...)?` -> RED (panics on unwrap).
+#[tokio::test]
+async fn invoke_spawn_surfaces_scope_recovery_in_progress_as_retryable_capability_failure() {
+    let context = test_run_context_with_agent_actor("spawn-recovery-in-progress").await;
+    let turn_store = Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0))));
+    let deps = Arc::new(SubagentSpawnDeps {
+        coordinator: Arc::new(StaticCoordinator),
+        child_runs: Arc::new(RecordingChildRuns::default()),
+        turn_state_store: turn_store,
+        thread_service: Arc::new(InMemorySessionThreadService::default()),
+        goal_store: Arc::new(NoopGoalStore),
+        await_edge_writer: Arc::new(AlwaysRecoveringAwaitEdgeWriter::default()),
+        definition_resolver: Arc::new(StaticDefinitionResolver {
+            resolved: Some(subagent_definition(false)),
+            parent: None,
+        }),
+        spawn_input_codec: Arc::new(StaticSpawnInputCodec {
+            args: default_spawn_args(),
+        }),
+        result_writer: Arc::new(NoopResultWriter),
+    });
+    let port = SubagentSpawnCapabilityPort::new(
+        Arc::new(AuthPassPort),
+        context,
+        CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+        SubagentSpawnLimits::default(),
+        deps,
+        Vec::new(),
+    );
+    authorize_spawn_input(&port);
+
+    let outcome = invoke_spawn(&port).await;
+
+    let CapabilityOutcome::Failed(failure) = outcome else {
+        panic!("expected a retryable capability failure, got {outcome:?}");
+    };
+    assert_eq!(failure.error_kind, CapabilityFailureKind::Transient);
+    assert!(
+        failure.safe_summary.contains("scope recovery in progress"),
+        "safe_summary should explain the retryable condition: {}",
+        failure.safe_summary
+    );
 }
 
 #[tokio::test]

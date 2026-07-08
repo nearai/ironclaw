@@ -150,6 +150,15 @@ pub struct AwaitEdge {
     pub terminal_kind: Option<EdgeTerminalKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_byte_len: Option<u64>,
+    /// The settling child's own sanitized failure category (mirrors
+    /// `TurnLifecycleEvent::sanitized_reason`), set in the same `settle()`
+    /// CAS write as `terminal_kind`. Exists so a D3 batch-gate group's drain
+    /// loop can read each member's own terminal state off its own edge
+    /// instead of misattributing the triggering sibling's status/reason to
+    /// every member (external review finding on this PR — see
+    /// `resolver.rs`'s `drain_settled_group`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_reason: Option<String>,
     pub reservation_release: ReservationReleaseState,
     pub created_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
