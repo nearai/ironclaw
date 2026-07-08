@@ -6,16 +6,15 @@
 use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
-use ironclaw_loop_support::{RunCancellationFactory, SpawnSubagentMode};
+use ironclaw_loop_support::RunCancellationFactory;
 use ironclaw_threads::{
     MessageKind, MessageStatus, SessionThreadService, ThreadHistory, ThreadHistoryRequest,
     ThreadMessageId, ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope,
 };
 use ironclaw_turns::{
-    CheckpointStateStore, GateRef, GetCheckpointStateRequest, GetLoopCheckpointRequest,
-    GetRunStateRequest, LoopBlockedKind, LoopCheckpointKind, LoopCheckpointStateRef, LoopGateRef,
-    LoopMessageRef, LoopResultRef, TurnError, TurnId, TurnRunId, TurnScope, TurnStateStore,
-    TurnStatus,
+    CheckpointStateStore, GetCheckpointStateRequest, GetLoopCheckpointRequest, GetRunStateRequest,
+    LoopBlockedKind, LoopCheckpointKind, LoopCheckpointStateRef, LoopGateRef, LoopMessageRef,
+    LoopResultRef, TurnError, TurnId, TurnRunId, TurnScope, TurnStateStore, TurnStatus,
 };
 
 pub use ironclaw_turns::loop_exit::{
@@ -589,33 +588,11 @@ where
     }
 }
 
-#[async_trait]
-impl AwaitDependentRunEvidenceStore
-    for crate::subagent::gate_resolution::BoundedSubagentGateResolutionStore
-{
-    async fn has_awaited_child_gate(
-        &self,
-        scope: &TurnScope,
-        run_id: TurnRunId,
-        gate_ref: &LoopGateRef,
-    ) -> Result<bool, TurnError> {
-        let gate_ref =
-            GateRef::new(gate_ref.as_str()).map_err(|reason| TurnError::InvalidRequest {
-                reason: format!("awaited child gate evidence has invalid gate ref: {reason}"),
-            })?;
-        let state = self
-            .state_for_gate(&gate_ref)
-            .map_err(|error| TurnError::Unavailable {
-                reason: error.safe_summary,
-            })?;
-        Ok(state.is_some_and(|state| {
-            state.record.parent_run_context.scope == *scope
-                && state.record.parent_run_context.run_id == run_id
-                && state.record.gate_ref == gate_ref
-                && state.record.mode == SpawnSubagentMode::Blocking
-        }))
-    }
-}
+// §3 replacement: the `AwaitDependentRunEvidenceStore` impl for the deleted
+// `BoundedSubagentGateResolutionStore` moves to
+// `subagent::await_edge::store::FilesystemAwaitEdgeStore` (same trait,
+// implemented against the new CAS'd edge store instead of the in-memory
+// gate map).
 
 fn thread_scope_from_turn_scope(scope: &TurnScope) -> Result<ThreadScope, TurnError> {
     // `ironclaw_threads::ThreadScope` is currently agent-scoped. Reject

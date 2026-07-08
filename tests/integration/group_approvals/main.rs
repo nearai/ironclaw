@@ -6,9 +6,10 @@
 //! `(tenant, user)` auto-approve toggle, all shared across threads). See
 //! `tests/integration/CLAUDE.md` §"Group tests".
 //!
-//! `concurrent_dual_gate_resume_parallel` (#5466) is `approvals_group_e2e`
-//! only (InMemory) -- never add a `StorageMode::LibSql` variant, see its
-//! own module doc (libsql SIGABRTs the whole test binary, #5466).
+//! `concurrent_dual_gate_resume_parallel` (#5466) runs in both
+//! `approvals_group_e2e` and `approvals_group_libsql_e2e` -- #5751 fixed the
+//! libsql SIGABRT root cause; see the scenario's own module doc for the
+//! cycle-3 fix lane's verification (50 libsql + 40 in-memory runs, 0 flakes).
 //!
 //! Every scenario in that test drives the REAL gate path: scripted
 //! `builtin.write_file` call → real `TurnStatus::BlockedApproval` gate
@@ -79,7 +80,7 @@ async fn approvals_group_e2e() {
         "concurrent_dual_gate_resume",
         scenario_concurrent_dual_gate_resume::run(&g).await,
     );
-    // #5466: InMemory only, see this scenario's own module doc + main.rs doc.
+    // #5466/#5751: libsql SIGABRT root-cause fixed; see main.rs module doc.
     report.record(
         "concurrent_dual_gate_resume_parallel",
         scenario_concurrent_dual_gate_resume_parallel::run(&g).await,
@@ -162,6 +163,11 @@ async fn approvals_group_libsql_e2e() {
     report.record(
         "concurrent_dual_gate_resume",
         scenario_concurrent_dual_gate_resume::run(&g).await,
+    );
+    // #5466/#5751: libsql SIGABRT root-cause fixed; see main.rs module doc.
+    report.record(
+        "concurrent_dual_gate_resume_parallel",
+        scenario_concurrent_dual_gate_resume_parallel::run(&g).await,
     );
     report.record(
         "failure_category_demasked",
