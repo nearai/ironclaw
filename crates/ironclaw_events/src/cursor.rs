@@ -115,23 +115,23 @@ impl ReadScope {
         Self::default()
     }
 
-    pub fn set_project_id(mut self, project_id: ProjectId) -> Self {
-        self.project_id = Some(project_id);
+    pub fn set_project_id(mut self, project_id: impl Into<Option<ProjectId>>) -> Self {
+        self.project_id = project_id.into();
         self
     }
 
-    pub fn set_mission_id(mut self, mission_id: MissionId) -> Self {
-        self.mission_id = Some(mission_id);
+    pub fn set_mission_id(mut self, mission_id: impl Into<Option<MissionId>>) -> Self {
+        self.mission_id = mission_id.into();
         self
     }
 
-    pub fn set_thread_id(mut self, thread_id: ThreadId) -> Self {
-        self.thread_id = Some(thread_id);
+    pub fn set_thread_id(mut self, thread_id: impl Into<Option<ThreadId>>) -> Self {
+        self.thread_id = thread_id.into();
         self
     }
 
-    pub fn set_process_id(mut self, process_id: ProcessId) -> Self {
-        self.process_id = Some(process_id);
+    pub fn set_process_id(mut self, process_id: impl Into<Option<ProcessId>>) -> Self {
+        self.process_id = process_id.into();
         self
     }
 

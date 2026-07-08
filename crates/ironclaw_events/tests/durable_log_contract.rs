@@ -1142,12 +1142,7 @@ async fn read_scope_filter_excludes_records_with_none_field_when_filter_is_some(
     .expect("without project");
 
     let stream = EventStreamKey::from_scope(&scope_with_project);
-    let filter = ReadScope::default().set_project_id(
-        scope_with_project
-            .project_id
-            .clone()
-            .expect("fixture has project id"),
-    );
+    let filter = ReadScope::default().set_project_id(scope_with_project.project_id.clone());
     let replay = log
         .read_after_cursor(&stream, &filter, None, 10)
         .await
