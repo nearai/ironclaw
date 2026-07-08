@@ -8,19 +8,23 @@ on:
         required: false
         type: string
   workflow_dispatch:
+  # pull_request deliberately has no `paths:` filter: the "Reborn E2E"
+  # roll-up must report on every PR so it can be a required status check (a
+  # required check that never reports blocks queueing). The `changes` job
+  # below resolves scope instead and skips the heavy jobs on out-of-scope
+  # PRs.
   pull_request:
     branches:
       - main
-    paths:
-      - "crates/ironclaw_*/**"
-      - "docs/reborn/**"
-      - "scripts/reborn-e2e-rust.sh"
-      - "tests/e2e/**"
-      - "build.rs"
-      - "providers.json"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - ".github/workflows/reborn-e2e.yml"
+  # The merge queue is the production gate: the deterministic Reborn contract
+  # and smoke coverage must pass on the merged state before it reaches main.
+  # merge_group does not support `paths:` filters, so scope is resolved by the
+  # `changes` job below instead.
+  merge_group:
+    branches:
+      - main
+    types:
+      - checks_requested
   push:
     branches:
       - main
@@ -43,8 +47,43 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Detect Reborn E2E scope
+    runs-on: ubuntu-latest
+    outputs:
+      has_e2e_scope: ${{ steps.non_diff.outputs.has_e2e_scope || steps.diff.outputs.has_e2e_scope }}
+    steps:
+      # push is scoped by its `paths:` filter in the `on:` block, and
+      # workflow_call/workflow_dispatch callers want the full gate.
+      - id: non_diff
+        if: github.event_name != 'merge_group' && github.event_name != 'pull_request'
+        run: echo "has_e2e_scope=true" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        if: github.event_name == 'merge_group' || github.event_name == 'pull_request'
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: diff
+        if: github.event_name == 'merge_group' || github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          CHANGED_FILES="$(git diff --name-only "$BASE_SHA"..."$HEAD_SHA")"
+
+          # Keep this pattern in sync with the push `paths:` filter in the
+          # `on:` block above.
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/ironclaw_[^/]+/|docs/reborn/|scripts/reborn-e2e-rust\.sh$|tests/e2e/|build\.rs$|providers\.json$|Cargo\.toml$|Cargo\.lock$|\.github/workflows/reborn-e2e\.yml$)'; then
+            echo "has_e2e_scope=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_e2e_scope=false" >> "$GITHUB_OUTPUT"
+            echo "No Reborn E2E scope in this change — E2E jobs will be skipped"
+          fi
+
   rust-reborn:
     name: Rust Reborn (${{ matrix.group }})
+    needs: changes
+    if: needs.changes.outputs.has_e2e_scope == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 35
     strategy:
@@ -77,6 +116,8 @@ jobs:
 
   gateway-smoke:
     name: Reborn gateway smoke
+    needs: changes
+    if: needs.changes.outputs.has_e2e_scope == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -130,6 +171,8 @@ jobs:
 
   webui-v2-smoke:
     name: Reborn WebUI v2 smoke
+    needs: changes
+    if: needs.changes.outputs.has_e2e_scope == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -204,12 +247,21 @@ jobs:
     runs-on: ubuntu-latest
     if: always()
     needs:
+      - changes
       - rust-reborn
       - gateway-smoke
       - webui-v2-smoke
     steps:
       - name: Check Reborn E2E jobs
         run: |
+          if [[ "${{ needs.changes.result }}" != "success" ]]; then
+            echo "changes (scope detection) failed: ${{ needs.changes.result }}"
+            exit 1
+          fi
+          if [[ "${{ needs.changes.outputs.has_e2e_scope }}" == "false" ]]; then
+            echo "No Reborn E2E scope in this merge group — roll-up passes"
+            exit 0
+          fi
           if [[ "${{ needs.rust-reborn.result }}" != "success" ]]; then
             echo "Rust Reborn E2E failed"
             exit 1
