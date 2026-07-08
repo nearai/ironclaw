@@ -695,8 +695,14 @@ mod raw_http_diagnostic_policy_tests {
 }
 
 /// Stable, sanitized failure categories.
+///
+// Deliberately NOT `#[non_exhaustive]`: the `Unknown` variant is the open-set
+// escape hatch for unrecognized runtime failures, so the attribute would only
+// force classifiers to keep a wildcard arm that silently buckets a new named
+// variant. Without it, disposition/classification matches are exhaustive and a
+// new named variant fails to compile until classified. See
+// `docs/plans/2026-06-28-reborn-error-recoverability-audit.md` §6.1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub enum RuntimeFailureKind {
     Authorization,
     Backend,
@@ -714,7 +720,6 @@ pub enum RuntimeFailureKind {
     Resource,
     Transient,
     Unavailable,
-    Unknown,
 }
 
 impl RuntimeFailureKind {
@@ -737,7 +742,6 @@ impl RuntimeFailureKind {
             Self::Resource => "resource",
             Self::Transient => "transient",
             Self::Unavailable => "unavailable",
-            Self::Unknown => "unknown",
         }
     }
 }
