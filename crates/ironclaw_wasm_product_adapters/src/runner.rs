@@ -429,8 +429,7 @@ mod tests {
     use ironclaw_product_adapters::{
         AuthRequirement, OutboundDeliverySink, ParsedProductInbound, ProductInboundPayload,
         ProductOutboundEnvelope, ProductRejection, ProductRejectionKind, ProductRenderOutcome,
-        ProductTriggerReason, ProjectionSubscriptionRequest, ProtocolHttpEgress,
-        UserMessagePayload,
+        ProductTriggerReason, ProtocolHttpEgress, UserMessagePayload,
     };
     use tokio::sync::Notify;
 
@@ -578,18 +577,6 @@ mod tests {
         }
     }
 
-    /// Helper for workflow stubs: `resolve_projection_subscription` is never
-    /// exercised by the runner tests (the runner only invokes `submit_inbound`),
-    /// but the trait requires it. Return a deterministic adapter-shape error
-    /// so accidental calls fail loudly.
-    fn projection_subscription_unimplemented() -> ProductAdapterError {
-        ProductAdapterError::Internal {
-            detail: ironclaw_product_adapters::redaction::RedactedString::new(
-                "test stub: resolve_projection_subscription not supported",
-            ),
-        }
-    }
-
     struct AckWorkflow;
 
     #[async_trait]
@@ -599,13 +586,6 @@ mod tests {
             _envelope: ProductInboundEnvelope,
         ) -> Result<ProductInboundAck, ProductAdapterError> {
             Ok(ProductInboundAck::NoOp)
-        }
-
-        async fn resolve_projection_subscription(
-            &self,
-            _envelope: ProductInboundEnvelope,
-        ) -> Result<ProjectionSubscriptionRequest, ProductAdapterError> {
-            Err(projection_subscription_unimplemented())
         }
     }
 
@@ -621,13 +601,6 @@ mod tests {
                 ProductRejectionKind::PolicyDenied,
                 "policy temporarily unavailable",
             )))
-        }
-
-        async fn resolve_projection_subscription(
-            &self,
-            _envelope: ProductInboundEnvelope,
-        ) -> Result<ProjectionSubscriptionRequest, ProductAdapterError> {
-            Err(projection_subscription_unimplemented())
         }
     }
 
@@ -647,13 +620,6 @@ mod tests {
                 .push(envelope.payload().clone());
             Ok(ProductInboundAck::NoOp)
         }
-
-        async fn resolve_projection_subscription(
-            &self,
-            _envelope: ProductInboundEnvelope,
-        ) -> Result<ProjectionSubscriptionRequest, ProductAdapterError> {
-            Err(projection_subscription_unimplemented())
-        }
     }
 
     struct PendingWorkflow;
@@ -666,13 +632,6 @@ mod tests {
         ) -> Result<ProductInboundAck, ProductAdapterError> {
             std::future::pending().await
         }
-
-        async fn resolve_projection_subscription(
-            &self,
-            _envelope: ProductInboundEnvelope,
-        ) -> Result<ProjectionSubscriptionRequest, ProductAdapterError> {
-            Err(projection_subscription_unimplemented())
-        }
     }
 
     struct PanicWorkflow;
@@ -684,13 +643,6 @@ mod tests {
             _envelope: ProductInboundEnvelope,
         ) -> Result<ProductInboundAck, ProductAdapterError> {
             panic!("workflow panic must be contained")
-        }
-
-        async fn resolve_projection_subscription(
-            &self,
-            _envelope: ProductInboundEnvelope,
-        ) -> Result<ProjectionSubscriptionRequest, ProductAdapterError> {
-            Err(projection_subscription_unimplemented())
         }
     }
 
@@ -708,13 +660,6 @@ mod tests {
             self.entered.notify_waiters();
             self.release.notified().await;
             Ok(ProductInboundAck::NoOp)
-        }
-
-        async fn resolve_projection_subscription(
-            &self,
-            _envelope: ProductInboundEnvelope,
-        ) -> Result<ProjectionSubscriptionRequest, ProductAdapterError> {
-            Err(projection_subscription_unimplemented())
         }
     }
 

@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
 import { productAuthOAuthEventsSource } from "../../../lib/product-auth-oauth-events.vm-inline.mjs";
-import { hasChannelSurface } from "../lib/extensions-schema.js";
+import { hasChannelSurface } from "../lib/extensions-schema";
 
 // Wire-shaped surface fixtures for the surfaces/runtime extension model.
 const channelSurfaces = [{ kind: "channel", inbound: true, outbound: true }];
@@ -267,13 +267,13 @@ test("useExtensions groups manifest-backed channels with channel entries", () =>
   );
   assert.deepEqual(
     extensions.tools.map((entry) => entry.package_ref.id),
-    ["github"],
-    "tools excludes channel surfaces AND the mcp runtime"
+    ["github", "notion"],
+    "tools = every non-channel extension; MCP-backed tools sit beside wasm ones"
   );
-  assert.deepEqual(
-    extensions.mcpServers.map((entry) => entry.package_ref.id),
-    ["notion"],
-    "the MCP grouping is the operator-facing runtime view"
+  assert.equal(
+    extensions.mcpServers,
+    undefined,
+    "runtime is a badge, never a grouping axis — no mcpServers rail"
   );
   assert.deepEqual(
     extensions.channelRegistry.map((entry) => entry.package_ref.id),

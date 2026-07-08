@@ -212,7 +212,7 @@ registerPack("uk", {
   // Extensions tabs
   "extensions.installed": "Встановлені",
   "extensions.channels": "Канали",
-  "extensions.mcp": "MCP-сервери",
+  "extensions.tools": "Tools",
   "extensions.registry": "Реєстр",
 
   // Settings tabs
@@ -1191,7 +1191,7 @@ registerPack("uk", {
   "extensions.reconfigure": "Повторно налаштувати",
   "extensions.configureName": "Налаштувати {name}",
   "extensions.allInstalled": "Усі встановлені розширення",
-  "mcp.installed": "Встановлені сервери MCP",
+  "tools.installed": "Installed tools",
   "extensions.oneCapability": "1 можливість",
   "extensions.pluralCapabilities": "Можливості {count}",
   "extensions.oneKeyword": "1 ключове слово",
@@ -1239,8 +1239,8 @@ registerPack("uk", {
   "extensions.reconnect": "Перепідключити",
   "extensions.emptyInstalledTitle": "Розширень не встановлено",
   "extensions.emptyInstalledDesc": "Перегляньте вкладку Реєстр, щоб знайти та встановити інструменти, канали та сервери WASM.",
-  "extensions.emptyMcpTitle": "Немає серверів MCP",
-  "extensions.emptyMcpDesc": "Сервери MCP розширюють агент за допомогою додаткових інструментальних можливостей за допомогою протоколу модельного контексту. Встановіть їх з реєстру.",
+  "extensions.emptyToolsTitle": "No tool extensions yet",
+  "extensions.emptyToolsDesc": "Install an extension with tool capabilities from the registry to see it here.",
   "common.dismiss": "Закрити",
   "common.pin": "Закріпити",
   "common.unpin": "Відкріпити",
@@ -1348,7 +1348,7 @@ registerPack("uk", {
   "pairing.resumeFailed": "{name} підключено, але цей чат не вдалося продовжити. Перезавантажте сторінку, щоб продовжити.",
   "extensions.channelInstalledSetup": "{name} встановлено. Підключіть обліковий запис за допомогою панелі налаштування нижче.",
   "extensions.authUrlHttpsRequired": "URL автентифікації має використовувати HTTPS.",
-  "mcp.available": "Доступні сервери MCP",
+  "tools.available": "Available tools",
   "slackSetup.title": "Налаштування Slack",
   "slackSetup.instructions": "Налаштуйте застосунок Slack перед призначенням каналів.",
   "slackSetup.save": "Зберегти налаштування",

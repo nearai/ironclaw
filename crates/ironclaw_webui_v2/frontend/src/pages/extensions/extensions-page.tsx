@@ -3,7 +3,7 @@ import React from "react";
 import { ActionToast } from "./components/action-toast";
 import { ChannelsTab } from "./components/channels-tab";
 import { ConfigureModal } from "./components/configure-modal";
-import { McpTab } from "./components/mcp-tab";
+import { ToolsTab } from "./components/tools-tab";
 import { RegistryTab } from "./components/registry-tab";
 import { useExtensions } from "./hooks/useExtensions";
 
@@ -14,9 +14,9 @@ export function ExtensionsPage() {
   const {
     status,
     channels,
-    mcpServers,
+    tools,
     channelRegistry,
-    mcpRegistry,
+    toolRegistry,
     catalogEntries,
     isLoading,
     isBusy,
@@ -75,7 +75,6 @@ export function ExtensionsPage() {
 
   const tabContent = {
     channels: (<ChannelsTab
-      status={status}
       channels={channels}
       channelRegistry={channelRegistry}
       onActivate={activate}
@@ -84,9 +83,9 @@ export function ExtensionsPage() {
       onInstall={handleInstall}
       isBusy={isBusy}
     />),
-    mcp: (<McpTab
-      mcpServers={mcpServers}
-      mcpRegistry={mcpRegistry}
+    tools: (<ToolsTab
+      tools={tools}
+      toolRegistry={toolRegistry}
       onActivate={activate}
       onConfigure={handleConfigure}
       onRemove={remove}

@@ -144,7 +144,7 @@ pub enum LifecyclePhase {
     Failed,
     Removing,
     Removed,
-    UnsupportedOrLegacy,
+    Unsupported,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -577,7 +577,7 @@ impl UnsupportedLifecycleProductFacade {
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         Ok(LifecycleProductResponse::projection(
             package_ref,
-            LifecyclePhase::UnsupportedOrLegacy,
+            LifecyclePhase::Unsupported,
             vec![LifecycleReadinessBlocker::runtime(Some(
                 self.runtime_ref.clone(),
             ))?],

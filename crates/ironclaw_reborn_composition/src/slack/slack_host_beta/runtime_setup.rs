@@ -19,10 +19,13 @@ use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPo
 use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
 use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
 use crate::provider_identity::{ProviderIdentityActorResolver, RebornUserIdentityLookup};
+use crate::provider_identity::{
+    RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
+    RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
+};
 use crate::slack::slack_channel_routes::{
-    SlackChannelRouteAdminRouteConfig, SlackChannelRouteAssignment, SlackChannelRouteError,
-    SlackChannelRouteStore, SlackChannelRouteSubjectResolver, SlackChannelSetupActivation,
-    SlackChannelSetupActivationError,
+    SlackChannelRouteAdminRouteConfig, SlackChannelRouteStore, SlackChannelRouteSubjectResolver,
+    SlackChannelSetupActivation, SlackChannelSetupActivationError,
 };
 use crate::slack::slack_delivery::{PostSubmitDeliveryHook, TriggeredRunDeliveryDriver};
 use crate::slack::slack_host_state::FilesystemSlackHostState;
@@ -31,8 +34,6 @@ use crate::slack::slack_outbound_targets::{
     SlackPersonalDmTargetError, SlackPersonalDmTargetProvisioner, SlackPersonalDmTargetStore,
 };
 use crate::slack::slack_personal_binding::{
-    RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
-    RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
     SlackPersonalBindingInstallation, SlackPersonalBindingPrincipal, SlackPersonalUserBinder,
     SlackPersonalUserBindingError, SlackPersonalUserBindingRequest,
     SlackPersonalUserBindingService,
@@ -43,17 +44,16 @@ use crate::slack::slack_serve::{
     slack_events_route_mount,
 };
 use crate::slack::slack_setup::{
-    SlackInstallationSetup, SlackInstallationSetupStore, SlackInstallationSetupUpdate,
-    SlackSetupService,
+    SlackInstallationSetup, SlackInstallationSetupStore, SlackSetupService,
 };
 
 use super::{
-    ProvisioningSlackPersonalUserBinder, SlackConversationServices, SlackHostBetaActorUserResolver,
-    SlackHostBetaBuildError, SlackHostBetaConfig, SlackHostBetaConfigInput, SlackHostBetaMounts,
-    SlackHostBetaRuntimeConfig, SlackHostBetaRuntimeParts, SlackPersonalConnectionScope,
-    SlackPersonalConnectionScopeResolver, SlackPersonalDmTargetProvisioning,
-    build_slack_installation_record_with_resolvers, build_triggered_run_delivery_hook_from_parts,
-    slack_bot_token_handle, slack_protocol_egress_from_parts,
+    ProvisioningSlackPersonalUserBinder, SlackConversationServices, SlackHostBetaBuildError,
+    SlackHostBetaConfig, SlackHostBetaConfigInput, SlackHostBetaMounts, SlackHostBetaRuntimeConfig,
+    SlackHostBetaRuntimeParts, SlackPersonalConnectionScope, SlackPersonalConnectionScopeResolver,
+    SlackPersonalDmTargetProvisioning, build_slack_installation_record_with_resolvers,
+    build_triggered_run_delivery_hook_from_parts, slack_bot_token_handle,
+    slack_protocol_egress_from_parts,
 };
 
 pub(super) async fn build_runtime_mounts(
@@ -98,15 +98,6 @@ pub(super) async fn build_runtime_mounts(
             Arc::clone(&dynamic_binding_service),
             dm_provisioner,
         ));
-    if let Some(legacy_setup) = config.legacy_setup.clone() {
-        seed_legacy_slack_setup_if_missing(
-            &setup_service,
-            Arc::clone(&binding_store),
-            Arc::clone(&channel_route_store),
-            legacy_setup,
-        )
-        .await?;
-    }
     let resolver = DynamicSlackInstallationResolver::new(
         Arc::clone(&parts),
         Arc::clone(&setup_service),
@@ -293,89 +284,6 @@ fn slack_dynamic_outbound_delivery_target_provider_key(
 fn hash_provider_key_field(hasher: &mut Sha256, value: &str) {
     hasher.update(value.len().to_be_bytes());
     hasher.update(value.as_bytes());
-}
-
-async fn seed_legacy_slack_setup_if_missing(
-    setup_service: &SlackSetupService,
-    _binding_store: Arc<dyn RebornUserIdentityBindingStore>,
-    channel_route_store: Arc<dyn SlackChannelRouteStore>,
-    legacy_setup: super::SlackHostBetaLegacySetup,
-) -> Result<(), SlackHostBetaBuildError> {
-    if setup_service
-        .current_setup()
-        .await
-        .map_err(map_legacy_setup_error("slack.legacy_setup"))?
-        .is_some()
-    {
-        return Ok(());
-    }
-
-    seed_legacy_slack_setup(setup_service, channel_route_store, legacy_setup).await
-}
-
-async fn seed_legacy_slack_setup(
-    setup_service: &SlackSetupService,
-    channel_route_store: Arc<dyn SlackChannelRouteStore>,
-    legacy_setup: super::SlackHostBetaLegacySetup,
-) -> Result<(), SlackHostBetaBuildError> {
-    let setup = setup_service
-        .save(SlackInstallationSetupUpdate {
-            installation_id: legacy_setup.installation_id,
-            team_id: legacy_setup.team_id.clone(),
-            api_app_id: legacy_setup.api_app_id,
-            user_id: Some(legacy_setup.user_id.to_string()),
-            shared_subject_user_id: legacy_setup
-                .shared_subject_user_id
-                .as_ref()
-                .map(ToString::to_string),
-            bot_token: None,
-            signing_secret: None,
-            oauth_client_id: None,
-            oauth_client_secret: None,
-        })
-        .await
-        .map_err(|error| SlackHostBetaBuildError::InvalidConfig {
-            field: "slack.legacy_setup",
-            reason: error.to_string(),
-        })?;
-
-    let installation_id = setup
-        .installation_id()
-        .map_err(map_legacy_setup_error("installation_id"))?;
-    if !legacy_setup.channel_routes.is_empty() {
-        let assignments = legacy_setup
-            .channel_routes
-            .into_iter()
-            .map(|route| SlackChannelRouteAssignment::new(route.channel_id, route.subject_user_id))
-            .collect();
-        channel_route_store
-            .replace_managed_routes(
-                setup_service.tenant_id(),
-                &installation_id,
-                legacy_setup.team_id.as_str(),
-                assignments,
-            )
-            .await
-            .map_err(map_legacy_channel_route_error)?;
-    }
-
-    Ok(())
-}
-
-fn map_legacy_setup_error(
-    field: &'static str,
-) -> impl FnOnce(crate::slack::slack_setup::SlackSetupError) -> SlackHostBetaBuildError {
-    move |error| SlackHostBetaBuildError::InvalidConfig {
-        field,
-        reason: error.to_string(),
-    }
-}
-
-fn map_legacy_channel_route_error(error: SlackChannelRouteError) -> SlackHostBetaBuildError {
-    SlackHostBetaBuildError::InvalidConfig {
-        field: "channel_routes",
-        reason: error.to_string(),
-    }
 }
 
 #[derive(Clone)]
@@ -637,8 +545,8 @@ impl DynamicSlackInstallationResolver {
             ))?;
         let identity_lookup: Arc<dyn crate::provider_identity::RebornUserIdentityLookup> =
             self.state.clone();
-        let actor_user_resolver = Arc::new(SlackHostBetaActorUserResolver::new(Arc::new(
-            slack_provider_identity_actor_resolver(Arc::clone(&identity_lookup)),
+        let actor_user_resolver = Arc::new(slack_provider_identity_actor_resolver(Arc::clone(
+            &identity_lookup,
         )));
         let subject_route_resolver: Arc<dyn ProductConversationSubjectRouteResolver> =
             Arc::new(SlackChannelRouteSubjectResolver::new(
@@ -1004,114 +912,12 @@ pub(crate) fn slack_provider_identity_actor_resolver(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex as StdMutex;
-
     use ironclaw_host_api::{SecretHandle, UserId};
     use ironclaw_secrets::InMemorySecretStore;
 
     use tokio::sync::RwLock;
 
     use super::*;
-    use crate::slack::slack_channel_routes::{
-        SlackChannelRoute, SlackChannelRouteKey, SlackChannelRouteListPage,
-    };
-    use crate::{SlackHostBetaChannelRoute, SlackHostBetaLegacySetup};
-
-    #[tokio::test]
-    async fn seed_legacy_slack_setup_fails_closed_without_identity_binding() {
-        let setup_store = Arc::new(InMemorySetupStore::empty());
-        let secret_store = Arc::new(InMemorySecretStore::default());
-        let setup_service = Arc::new(SlackSetupService::new(
-            TenantId::new("tenant:slack").unwrap(),
-            AgentId::new("agent:slack").unwrap(),
-            None,
-            UserId::new("user:operator").unwrap(),
-            setup_store.clone(),
-            secret_store,
-        ));
-        let binding_store = Arc::new(RecordingBindingStore::default());
-        let route_store = Arc::new(RecordingRouteStore::default());
-
-        let error = seed_legacy_slack_setup(
-            &setup_service,
-            route_store.clone(),
-            SlackHostBetaLegacySetup {
-                installation_id: "install-a".to_string(),
-                team_id: "T123".to_string(),
-                api_app_id: "A123".to_string(),
-                user_id: UserId::new("user:operator").unwrap(),
-                shared_subject_user_id: Some(UserId::new("user:shared-slack").unwrap()),
-                channel_routes: vec![SlackHostBetaChannelRoute::new(
-                    "CENG",
-                    UserId::new("user:eng-team-agent").unwrap(),
-                )],
-            },
-        )
-        .await
-        .expect_err("fresh legacy setup must fail closed without WebUI-provided secrets");
-
-        let recorded_routes = route_store.routes.lock().unwrap().clone();
-        assert!(
-            recorded_routes.is_empty(),
-            "routes must not be written after setup validation fails"
-        );
-
-        let bindings = binding_store.bindings.lock().unwrap().clone();
-        assert!(
-            bindings.is_empty(),
-            "legacy setup must not create a personal Slack identity binding; users connect through Slack OAuth"
-        );
-        assert!(
-            error.to_string().contains("Slack setup requires bot_token"),
-            "error should explain the fail-closed setup validation: {error}"
-        );
-    }
-
-    #[tokio::test]
-    async fn seed_legacy_slack_setup_if_missing_preserves_runtime_setup() {
-        let existing_setup = setup_record(7);
-        let setup_store = Arc::new(InMemorySetupStore::new(existing_setup.clone()));
-        let setup_service = Arc::new(SlackSetupService::new(
-            TenantId::new("tenant:slack").unwrap(),
-            AgentId::new("agent:slack").unwrap(),
-            None,
-            UserId::new("user:operator").unwrap(),
-            setup_store,
-            Arc::new(InMemorySecretStore::default()),
-        ));
-        let binding_store = Arc::new(RecordingBindingStore::default());
-        let route_store = Arc::new(RecordingRouteStore::default());
-
-        seed_legacy_slack_setup_if_missing(
-            &setup_service,
-            binding_store.clone(),
-            route_store.clone(),
-            SlackHostBetaLegacySetup {
-                installation_id: "install-legacy".to_string(),
-                team_id: "TLEGACY".to_string(),
-                api_app_id: "ALEGACY".to_string(),
-                user_id: UserId::new("user:legacy").unwrap(),
-                shared_subject_user_id: Some(UserId::new("user:legacy-shared").unwrap()),
-                channel_routes: vec![SlackHostBetaChannelRoute::new(
-                    "CLEGACY",
-                    UserId::new("user:legacy-agent").unwrap(),
-                )],
-            },
-        )
-        .await
-        .expect("existing setup skips legacy seed");
-
-        assert_eq!(
-            setup_service
-                .current_setup()
-                .await
-                .expect("setup read")
-                .expect("setup remains"),
-            existing_setup
-        );
-        assert!(binding_store.bindings.lock().unwrap().is_empty());
-        assert!(route_store.routes.lock().unwrap().is_empty());
-    }
 
     #[tokio::test]
     async fn dynamic_personal_connection_scope_resolver_reads_current_setup() {
@@ -1217,90 +1023,6 @@ mod tests {
         ) -> Result<(), crate::slack::slack_setup::SlackSetupError> {
             *self.setup.write().await = None;
             Ok(())
-        }
-    }
-
-    #[derive(Debug, Default)]
-    struct RecordingBindingStore {
-        bindings: StdMutex<Vec<RebornUserIdentityBinding>>,
-    }
-
-    #[async_trait::async_trait]
-    impl RebornUserIdentityBindingStore for RecordingBindingStore {
-        async fn bind_user_identity(
-            &self,
-            binding: RebornUserIdentityBinding,
-        ) -> Result<(), RebornUserIdentityBindingError> {
-            self.bindings.lock().unwrap().push(binding);
-            Ok(())
-        }
-    }
-
-    #[derive(Debug, Default)]
-    struct RecordingRouteStore {
-        routes: StdMutex<Vec<SlackChannelRouteAssignment>>,
-    }
-
-    #[async_trait::async_trait]
-    impl SlackChannelRouteStore for RecordingRouteStore {
-        async fn list_routes(
-            &self,
-            _tenant_id: &TenantId,
-            _installation_id: &AdapterInstallationId,
-            _team_id: &str,
-            _cursor: usize,
-            _limit: usize,
-        ) -> Result<SlackChannelRouteListPage, SlackChannelRouteError> {
-            Ok(SlackChannelRouteListPage {
-                routes: Vec::new(),
-                next_cursor: None,
-            })
-        }
-
-        async fn upsert_route(
-            &self,
-            key: SlackChannelRouteKey,
-            subject_user_id: UserId,
-        ) -> Result<SlackChannelRoute, SlackChannelRouteError> {
-            Ok(SlackChannelRoute::new(key, subject_user_id))
-        }
-
-        async fn delete_route(
-            &self,
-            _key: &SlackChannelRouteKey,
-        ) -> Result<bool, SlackChannelRouteError> {
-            Ok(false)
-        }
-
-        async fn replace_managed_routes(
-            &self,
-            tenant_id: &TenantId,
-            installation_id: &AdapterInstallationId,
-            team_id: &str,
-            assignments: Vec<SlackChannelRouteAssignment>,
-        ) -> Result<Vec<SlackChannelRoute>, SlackChannelRouteError> {
-            *self.routes.lock().unwrap() = assignments.clone();
-            assignments
-                .into_iter()
-                .map(|assignment| {
-                    Ok(SlackChannelRoute::new(
-                        SlackChannelRouteKey::new(
-                            tenant_id.clone(),
-                            installation_id.clone(),
-                            team_id.to_string(),
-                            assignment.channel_id,
-                        )?,
-                        assignment.subject_user_id,
-                    ))
-                })
-                .collect()
-        }
-
-        async fn resolve_subject_user_id(
-            &self,
-            _key: &SlackChannelRouteKey,
-        ) -> Result<Option<UserId>, SlackChannelRouteError> {
-            Ok(None)
         }
     }
 }

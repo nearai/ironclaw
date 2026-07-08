@@ -67,11 +67,10 @@ use uuid::Uuid;
 
 use crate::product_auth::api::auth::{RebornDcrOAuthStartFlowRequest, RebornOAuthStartFlowRequest};
 #[cfg(feature = "slack-v2-host-beta")]
-use crate::slack::slack_host_beta::SlackPersonalConnectionScopeResolver;
+use crate::provider_identity::RebornUserIdentityBindingDeleteStore;
 #[cfg(feature = "slack-v2-host-beta")]
-use crate::slack::slack_personal_binding::{
-    RebornUserIdentityBindingDeleteStore, SlackPersonalUserBinder,
-};
+use crate::slack::slack_host_beta::SlackPersonalConnectionScopeResolver;
+use crate::slack::slack_personal_binding::SlackPersonalUserBinder;
 use crate::{
     RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse,
     RebornOAuthCallbackError, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
@@ -106,7 +105,7 @@ const OAUTH_FLOW_STATUS_ROUTE_ID: &str = "product_auth.oauth.flow_status";
 const GOOGLE_OAUTH_START_ROUTE_ID: &str = "product_auth.oauth.google.start";
 const GOOGLE_OAUTH_CALLBACK_ROUTE_ID: &str = "product_auth.oauth.google.callback";
 #[cfg(feature = "slack-v2-host-beta")]
-const SLACK_PERSONAL_OAUTH_CALLBACK_ROUTE_ID: &str = "product_auth.oauth.slack_personal.callback";
+const SLACK_PERSONAL_OAUTH_CALLBACK_ROUTE_ID: &str = "product_auth.oauth.slack.callback";
 const EXTENSION_OAUTH_START_ROUTE_ID: &str = "webui_v2.extensions.oauth.start";
 const MANUAL_TOKEN_SUBMIT_ROUTE_ID: &str = "product_auth.manual_token.submit";
 const MANUAL_TOKEN_SETUP_ROUTE_ID: &str = "product_auth.manual_token.setup";

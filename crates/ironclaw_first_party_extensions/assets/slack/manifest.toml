@@ -84,7 +84,7 @@ required_host_ports = ["host.runtime.http_egress"]
 
 [[capability_provider.tools.capabilities]]
 id = "slack.send_message"
-description = "Send a message as you to a channel or DM. Requires the chat:write user scope; the message appears to come from your account."
+description = "Send a Slack message as the user to a channel or DM — a side effect inside the current job (the message appears to come from their account; requires the chat:write user scope). Never use this to deliver your final answer or reply to the user: the host delivers final replies on the conversation's outbound channel."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 runtime_credentials = [
   { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },

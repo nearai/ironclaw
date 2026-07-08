@@ -196,8 +196,9 @@ pub use product_live_adapters::{
 pub use production_runtime_policy::RebornProductionRuntimePolicy;
 pub use profile::{RebornCompositionProfile, RebornCompositionProfileParseError};
 pub use provider_identity::{
-    ProviderIdentityActorResolver, RebornUserIdentityLookup, RebornUserIdentityLookupError,
-    installation_scoped_provider_user_id,
+    ProviderIdentityActorResolver, RebornIdentityProviderId, RebornIdentityProviderUserId,
+    RebornUserIdentityBinding, RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
+    RebornUserIdentityLookup, RebornUserIdentityLookupError, installation_scoped_provider_user_id,
 };
 pub use readiness::{
     RebornFacadeReadiness, RebornReadiness, RebornReadinessDiagnostic,
@@ -244,15 +245,13 @@ pub use slack::slack_egress::{
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_host_beta::{
     SlackHostBetaBuildError, SlackHostBetaChannelRoute, SlackHostBetaConfig,
-    SlackHostBetaConfigInput, SlackHostBetaLegacySetup, SlackHostBetaMounts,
-    SlackHostBetaRuntimeConfig, build_slack_events_route_mount,
-    build_slack_events_route_mount_with_actor_user_resolver, build_slack_host_beta_mounts,
-    build_slack_host_beta_runtime_mounts, build_triggered_run_delivery_hook,
+    SlackHostBetaConfigInput, SlackHostBetaMounts, SlackHostBetaRuntimeConfig,
+    build_slack_events_route_mount, build_slack_events_route_mount_with_actor_user_resolver,
+    build_slack_host_beta_mounts, build_slack_host_beta_runtime_mounts,
+    build_triggered_run_delivery_hook,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_personal_binding::{
-    RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
-    RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
     SlackPersonalBindingInstallation, SlackPersonalBindingPrincipal, SlackPersonalUserBindingError,
     SlackPersonalUserBindingRequest, SlackPersonalUserBindingService,
 };

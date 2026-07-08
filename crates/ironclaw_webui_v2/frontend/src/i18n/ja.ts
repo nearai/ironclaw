@@ -212,7 +212,7 @@ registerPack("ja", {
   // Extensions tabs
   "extensions.installed": "インストール済み",
   "extensions.channels": "チャネル",
-  "extensions.mcp": "MCP サーバー",
+  "extensions.tools": "Tools",
   "extensions.registry": "レジストリ",
 
   // Settings tabs
@@ -1191,7 +1191,7 @@ registerPack("ja", {
   "extensions.reconfigure": "再設定",
   "extensions.configureName": "{name} を設定します",
   "extensions.allInstalled": "インストール済み",
-  "mcp.installed": "インストール済みの MCP サーバー",
+  "tools.installed": "Installed tools",
   "extensions.oneCapability": "1 機能",
   "extensions.pluralCapabilities": "{count} 機能",
   "extensions.oneKeyword": "1 キーワード",
@@ -1239,8 +1239,8 @@ registerPack("ja", {
   "extensions.reconnect": "再接続",
   "extensions.emptyInstalledTitle": "拡張機能がインストールされていません",
   "extensions.emptyInstalledDesc": "レジストリタブを参照して、WASMツール、チャネル、およびMCPサーバーをインストールしてください。",
-  "extensions.emptyMcpTitle": "MCPサーバーがありません",
-  "extensions.emptyMcpDesc": "MCPサーバーは設定によりModel Context Protocolを介したツール機能をエージェントに拡張します。レジストリからインストールしてください。",
+  "extensions.emptyToolsTitle": "No tool extensions yet",
+  "extensions.emptyToolsDesc": "Install an extension with tool capabilities from the registry to see it here.",
   "common.dismiss": "閉じる",
   "common.pin": "ピン留め",
   "common.unpin": "ピン留め解除",
@@ -1348,7 +1348,7 @@ registerPack("ja", {
   "pairing.resumeFailed": "{name} は接続されましたが、このチャットを続行できませんでした。ページを再読み込みして続けてください。",
   "extensions.channelInstalledSetup": "{name} をインストールしました。下の設定パネルでアカウントに接続してください。",
   "extensions.authUrlHttpsRequired": "認証 URL には HTTPS が必要です。",
-  "mcp.available": "利用可能な MCP サーバー",
+  "tools.available": "Available tools",
   "slackSetup.title": "Slack 設定",
   "slackSetup.instructions": "チャンネルを割り当てる前に Slack アプリを設定してください。",
   "slackSetup.save": "設定を保存",

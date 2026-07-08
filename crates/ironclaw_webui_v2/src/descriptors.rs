@@ -297,14 +297,8 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
     ]
 }
 
-/// Returns whether a route id belongs to the legacy operator-wide LLM config surface.
-///
-/// Prefer [`is_webui_v2_operator_webui_config_route_id`] for host route gating;
-/// this older predicate intentionally excludes newer `operator/*` routes.
-#[deprecated(
-    note = "Use `is_webui_v2_operator_webui_config_route_id`; this predicate misses the operator/* routes."
-)]
-pub fn is_webui_v2_llm_config_route_id(route_id: &str) -> bool {
+/// Returns whether a route id belongs to any operator-wide WebUI config surface.
+pub fn is_webui_v2_operator_webui_config_route_id(route_id: &str) -> bool {
     matches!(
         route_id,
         WEBUI_V2_ROUTE_GET_LLM_CONFIG
@@ -316,26 +310,19 @@ pub fn is_webui_v2_llm_config_route_id(route_id: &str) -> bool {
             | WEBUI_V2_ROUTE_START_NEARAI_LOGIN
             | WEBUI_V2_ROUTE_COMPLETE_NEARAI_WALLET_LOGIN
             | WEBUI_V2_ROUTE_START_CODEX_LOGIN
+    ) || matches!(
+        route_id,
+        WEBUI_V2_ROUTE_OPERATOR_GET_SETUP
+            | WEBUI_V2_ROUTE_OPERATOR_RUN_SETUP
+            | WEBUI_V2_ROUTE_OPERATOR_LIST_CONFIG
+            | WEBUI_V2_ROUTE_OPERATOR_GET_CONFIG_KEY
+            | WEBUI_V2_ROUTE_OPERATOR_SET_CONFIG_KEY
+            | WEBUI_V2_ROUTE_OPERATOR_VALIDATE_CONFIG
+            | WEBUI_V2_ROUTE_OPERATOR_DIAGNOSTICS
+            | WEBUI_V2_ROUTE_OPERATOR_STATUS
+            | WEBUI_V2_ROUTE_OPERATOR_LOGS
+            | WEBUI_V2_ROUTE_OPERATOR_SERVICE_LIFECYCLE
     )
-}
-
-/// Returns whether a route id belongs to any operator-wide WebUI config surface.
-#[allow(deprecated)]
-pub fn is_webui_v2_operator_webui_config_route_id(route_id: &str) -> bool {
-    is_webui_v2_llm_config_route_id(route_id)
-        || matches!(
-            route_id,
-            WEBUI_V2_ROUTE_OPERATOR_GET_SETUP
-                | WEBUI_V2_ROUTE_OPERATOR_RUN_SETUP
-                | WEBUI_V2_ROUTE_OPERATOR_LIST_CONFIG
-                | WEBUI_V2_ROUTE_OPERATOR_GET_CONFIG_KEY
-                | WEBUI_V2_ROUTE_OPERATOR_SET_CONFIG_KEY
-                | WEBUI_V2_ROUTE_OPERATOR_VALIDATE_CONFIG
-                | WEBUI_V2_ROUTE_OPERATOR_DIAGNOSTICS
-                | WEBUI_V2_ROUTE_OPERATOR_STATUS
-                | WEBUI_V2_ROUTE_OPERATOR_LOGS
-                | WEBUI_V2_ROUTE_OPERATOR_SERVICE_LIFECYCLE
-        )
 }
 
 fn get_session_descriptor() -> IngressRouteDescriptor {

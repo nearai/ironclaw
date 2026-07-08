@@ -1,8 +1,8 @@
 export function buildRuntimeContext({ gatewayStatus, activeThread }) {
   const turnCount = activeThread?.turn_count || 0;
   const connections = gatewayStatus?.total_connections;
-  const engineLabel =
-    gatewayStatus?.engine_v2_enabled === false ? "Engine v1" : "Engine v2";
+  // Reborn has one engine; the v1/v2 split is gone.
+  const engineLabel = "Reborn";
 
   return {
     mode: "Auto-review",

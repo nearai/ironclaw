@@ -937,7 +937,7 @@ impl LifecycleProductFacade for RecordingLifecycleFacade {
             .expect("lock")
             .push(package_ref.clone());
         let phase = if self.credential_requirements.is_empty() {
-            LifecyclePhase::UnsupportedOrLegacy
+            LifecyclePhase::Unsupported
         } else {
             LifecyclePhase::Configured
         };
@@ -4158,7 +4158,7 @@ async fn resolve_gate_rejects_missing_run_state_actor() {
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
                 "gate_ref": "gate-alpha",
-                "resolution": "denied"
+                "resolution": "declined"
             }))
             .expect("request"),
         )
@@ -4190,7 +4190,7 @@ async fn resolve_gate_rejects_mismatched_run_state_actor() {
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
                 "gate_ref": "gate-alpha",
-                "resolution": "denied"
+                "resolution": "declined"
             }))
             .expect("request"),
         )
@@ -4253,7 +4253,7 @@ async fn blocked_auth_run_routes_non_prefixed_gate_to_auth_interaction_service()
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
                 "gate_ref": "custom-auth-gate",
-                "resolution": "denied"
+                "resolution": "declined"
             }))
             .expect("request"),
         )
@@ -4361,7 +4361,7 @@ async fn blocked_approval_run_with_stale_gate_ref_returns_conflict() {
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
                 "gate_ref": "gate-stale",
-                "resolution": "denied"
+                "resolution": "declined"
             }))
             .expect("request"),
         )
@@ -4471,7 +4471,7 @@ async fn approval_gate_denial_uses_approval_interaction_service_and_returns_canc
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
                 "gate_ref": gate_ref.as_str(),
-                "resolution": "denied"
+                "resolution": "declined"
             }))
             .expect("request"),
         )
@@ -4582,7 +4582,7 @@ async fn hook_auth_gate_denial_uses_auth_interaction_service() {
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
                 "gate_ref": "gate:hook-auth-alpha",
-                "resolution": "denied"
+                "resolution": "declined"
             }))
             .expect("request"),
         )
@@ -4650,7 +4650,7 @@ async fn hook_auth_gate_denial_maps_to_reborn_resumed() {
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
                 "gate_ref": "gate:hook-auth-denial-resumed",
-                "resolution": "denied"
+                "resolution": "declined"
             }))
             .expect("request"),
         )
@@ -4687,7 +4687,7 @@ async fn missing_run_state_for_auth_gate_still_routes_to_auth_interaction_servic
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
                 "gate_ref": "gate:hook-auth-missing",
-                "resolution": "denied"
+                "resolution": "declined"
             }))
             .expect("request"),
         )
@@ -4725,7 +4725,7 @@ async fn denied_gate_resolution_cancels_run() {
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
                 "gate_ref": "gate-alpha",
-                "resolution": "denied"
+                "resolution": "declined"
             }))
             .expect("request"),
         )
@@ -4846,7 +4846,7 @@ async fn resolve_gate_rejects_cross_user_access() {
                 "thread_id": "thread-alice",
                 "run_id": run_id_string(),
                 "gate_ref": "gate-alpha",
-                "resolution": "denied"
+                "resolution": "declined"
             }))
             .expect("request"),
         )
@@ -4969,7 +4969,7 @@ async fn denied_gate_resolution_with_stale_gate_ref_returns_conflict() {
                 "thread_id": "thread-alpha",
                 "run_id": run_id_string(),
                 "gate_ref": "gate-stale",
-                "resolution": "denied"
+                "resolution": "declined"
             }))
             .expect("request"),
         )
@@ -5088,7 +5088,7 @@ async fn setup_extension_projects_through_configured_lifecycle_facade() {
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
             .expect("valid package ref")
     );
-    assert_eq!(response.phase, LifecyclePhase::UnsupportedOrLegacy);
+    assert_eq!(response.phase, LifecyclePhase::Unsupported);
     assert!(response.blockers.iter().any(|blocker| matches!(
         blocker,
         LifecycleReadinessBlocker::Runtime { ref_id: Some(ref_id) }

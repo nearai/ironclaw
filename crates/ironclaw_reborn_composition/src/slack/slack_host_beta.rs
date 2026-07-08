@@ -20,8 +20,8 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::RebornFilesystemIdempotencyLedger;
 use ironclaw_product_workflow::{
     ApprovalInteractionService, AuthInteractionService, ConversationBindingService,
-    DefaultInboundTurnService, DefaultProductWorkflow, ProductActorUserResolutionRequest,
-    ProductActorUserResolver, ProductConversationBindingService, ProductConversationRouteKey,
+    DefaultInboundTurnService, DefaultProductWorkflow, ProductActorUserResolver,
+    ProductConversationBindingService, ProductConversationRouteKey,
     ProductConversationSubjectRouteResolver, ProductInstallationKey, ProductInstallationScope,
     ProductWorkflowError, ResolveBindingRequest, ResolvedBinding,
     StaticProductInstallationResolver,
@@ -46,6 +46,9 @@ use crate::RebornRuntime;
 use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
 use crate::product_auth::serve::SlackPersonalOAuthBindingConfig;
 use crate::provider_identity::RebornUserIdentityLookup;
+use crate::provider_identity::{
+    RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingStore,
+};
 use crate::slack::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteStore, SlackChannelRouteSubjectResolver,
 };
@@ -61,10 +64,9 @@ use crate::slack::slack_outbound_targets::{
     SlackPersonalDmTargetProvisioner, SlackPersonalDmTargetStore,
 };
 use crate::slack::slack_personal_binding::{
-    RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
-    RebornUserIdentityBindingStore, SlackPersonalBindingInstallation,
-    SlackPersonalBindingPrincipal, SlackPersonalUserBinder, SlackPersonalUserBindingError,
-    SlackPersonalUserBindingRequest, SlackPersonalUserBindingService,
+    SlackPersonalBindingInstallation, SlackPersonalBindingPrincipal, SlackPersonalUserBinder,
+    SlackPersonalUserBindingError, SlackPersonalUserBindingRequest,
+    SlackPersonalUserBindingService,
 };
 use crate::slack::slack_serve::{
     SlackEventsRouteState, SlackInstallationRecord, SlackInstallationResolver,
@@ -176,17 +178,6 @@ pub struct SlackHostBetaRuntimeConfig {
     pub agent_id: AgentId,
     pub project_id: Option<ProjectId>,
     pub operator_user_id: UserId,
-    pub legacy_setup: Option<SlackHostBetaLegacySetup>,
-}
-
-#[derive(Debug, Clone)]
-pub struct SlackHostBetaLegacySetup {
-    pub installation_id: String,
-    pub team_id: String,
-    pub api_app_id: String,
-    pub user_id: UserId,
-    pub shared_subject_user_id: Option<UserId>,
-    pub channel_routes: Vec<SlackHostBetaChannelRoute>,
 }
 
 impl SlackHostBetaRuntimeConfig {
@@ -201,13 +192,7 @@ impl SlackHostBetaRuntimeConfig {
             agent_id,
             project_id,
             operator_user_id,
-            legacy_setup: None,
         }
-    }
-
-    pub fn with_legacy_setup(mut self, legacy_setup: SlackHostBetaLegacySetup) -> Self {
-        self.legacy_setup = Some(legacy_setup);
-        self
     }
 }
 
@@ -719,11 +704,11 @@ pub fn build_slack_host_beta_mounts(
     let personal_oauth_binder: Arc<dyn SlackPersonalUserBinder> = Arc::new(
         ProvisioningSlackPersonalUserBinder::new(Arc::clone(&binding_service), dm_provisioner),
     );
-    let actor_user_resolver = Arc::new(SlackHostBetaActorUserResolver::new(Arc::new(
+    let actor_user_resolver = Arc::new(
         crate::slack::slack_host_beta::runtime_setup::slack_provider_identity_actor_resolver(
             state.clone(),
         ),
-    )));
+    );
     let channel_route_store: Arc<dyn SlackChannelRouteStore> = state.clone();
     let personal_dm_target_store: Arc<dyn SlackPersonalDmTargetStore> = state.clone();
     let subject_route_resolver: Arc<dyn ProductConversationSubjectRouteResolver> =
@@ -1153,40 +1138,6 @@ fn slack_declared_egress_targets(
     let host = DeclaredEgressHost::new(SLACK_API_HOST)
         .map_err(|reason| invalid_config("slack_api_host", reason.to_string()))?;
     Ok(vec![DeclaredEgressTarget::new(host, Some(token_handle))])
-}
-
-#[derive(Clone)]
-struct SlackHostBetaActorUserResolver {
-    cached_identity: Arc<dyn ProductActorUserResolver>,
-}
-
-impl SlackHostBetaActorUserResolver {
-    fn new(cached_identity: Arc<dyn ProductActorUserResolver>) -> Self {
-        Self { cached_identity }
-    }
-}
-
-impl std::fmt::Debug for SlackHostBetaActorUserResolver {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("SlackHostBetaActorUserResolver(..)")
-    }
-}
-
-#[async_trait::async_trait]
-impl ProductActorUserResolver for SlackHostBetaActorUserResolver {
-    async fn resolve_product_actor_user(
-        &self,
-        request: ProductActorUserResolutionRequest,
-    ) -> Result<Option<UserId>, ProductWorkflowError> {
-        if let Some(user_id) = self
-            .cached_identity
-            .resolve_product_actor_user(request.clone())
-            .await?
-        {
-            return Ok(Some(user_id));
-        }
-        Ok(None)
-    }
 }
 
 fn invalid_config(field: &'static str, reason: String) -> SlackHostBetaBuildError {

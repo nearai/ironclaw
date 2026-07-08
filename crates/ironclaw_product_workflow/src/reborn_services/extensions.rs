@@ -452,7 +452,7 @@ fn phase_status(phase: LifecyclePhase) -> &'static str {
         LifecyclePhase::Disabled => "disabled",
         LifecyclePhase::Removed => "removed",
         LifecyclePhase::Failed => "failed",
-        LifecyclePhase::UnsupportedOrLegacy => "unsupported",
+        LifecyclePhase::Unsupported => "unsupported",
         LifecyclePhase::Discovered => "available",
         LifecyclePhase::Installing => "installing",
         LifecyclePhase::Installed => "installed",
@@ -470,7 +470,7 @@ fn action_response(
 ) -> RebornExtensionActionResponse {
     let success = !matches!(
         lifecycle.phase,
-        LifecyclePhase::Failed | LifecyclePhase::UnsupportedOrLegacy
+        LifecyclePhase::Failed | LifecyclePhase::Unsupported
     );
     let onboarding = projection
         .map(extension_onboarding::from_lifecycle)

@@ -427,9 +427,8 @@ mod tests {
     use ironclaw_product_adapters::{
         AuthRequirement, OutboundDeliverySink, ParsedProductInbound, ProductAdapter,
         ProductAdapterError, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
-        ProductOutboundEnvelope, ProductRenderOutcome, ProductTriggerReason,
-        ProjectionSubscriptionRequest, ProtocolAuthEvidence, ProtocolAuthFailure,
-        ProtocolHttpEgress, UserMessagePayload,
+        ProductOutboundEnvelope, ProductRenderOutcome, ProductTriggerReason, ProtocolAuthEvidence,
+        ProtocolAuthFailure, ProtocolHttpEgress, UserMessagePayload,
     };
     use ironclaw_slack_v2_adapter::SlackPayloadParseError;
     use ironclaw_wasm_product_adapters::{
@@ -696,17 +695,6 @@ mod tests {
         ) -> Result<ProductInboundAck, ProductAdapterError> {
             self.accepted_count.fetch_add(1, Ordering::SeqCst);
             Ok(ProductInboundAck::NoOp)
-        }
-
-        async fn resolve_projection_subscription(
-            &self,
-            _envelope: ProductInboundEnvelope,
-        ) -> Result<ProjectionSubscriptionRequest, ProductAdapterError> {
-            Err(ProductAdapterError::Internal {
-                detail: ironclaw_product_adapters::redaction::RedactedString::new(
-                    "test stub: resolve_projection_subscription not supported",
-                ),
-            })
         }
     }
 

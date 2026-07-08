@@ -20,10 +20,10 @@ use ironclaw_product_workflow::{
 use crate::{
     RebornProductAuthServices, SlackHostBetaMounts,
     extension_host::available_extensions::SLACK_EXTENSION_ID,
+    provider_identity::RebornUserIdentityBindingDeleteStore,
     provider_identity::RebornUserIdentityLookup,
     slack::slack_host_beta::{SlackPersonalConnectionScope, SlackPersonalConnectionScopeResolver},
     slack::slack_outbound_targets::SlackPersonalDmTargetStore,
-    slack::slack_personal_binding::RebornUserIdentityBindingDeleteStore,
 };
 
 /// Narrow disconnect-side port over product-auth lifecycle cleanup, so the
@@ -276,11 +276,11 @@ mod tests {
 
     use super::*;
     use crate::{
+        provider_identity::RebornUserIdentityBindingError,
         provider_identity::{RebornUserIdentityLookupError, installation_scoped_provider_user_id},
         slack::slack_outbound_targets::{
             InMemorySlackPersonalDmTargetStore, SlackPersonalDmTarget, SlackPersonalDmTargetKey,
         },
-        slack::slack_personal_binding::RebornUserIdentityBindingError,
         slack::slack_serve::SlackTeamId,
     };
 

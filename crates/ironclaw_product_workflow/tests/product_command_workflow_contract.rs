@@ -133,7 +133,7 @@ impl LifecycleProductFacade for RecordingLifecycleProductFacade {
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         Ok(LifecycleProductResponse::projection(
             Some(package_ref),
-            LifecyclePhase::UnsupportedOrLegacy,
+            LifecyclePhase::Unsupported,
             vec![],
         ))
     }
@@ -210,7 +210,7 @@ async fn command_payload_dispatches_through_command_service_not_inbound_turn_ser
     let envelope =
         sample_command_envelope("command-model", "model", "gpt-5-mini --ignored-for-now");
 
-    let ack = workflow.accept_inbound(envelope).await.expect("accept");
+    let ack = workflow.submit_inbound(envelope).await.expect("accept");
 
     assert!(matches!(ack, ProductInboundAck::NoOp));
     assert_eq!(inbound.accepted_count(), 0);
@@ -248,7 +248,7 @@ async fn lifecycle_command_dispatches_through_lifecycle_facade() {
     let envelope =
         sample_command_envelope("command-extension-install", "extension_install", "github");
 
-    let ack = workflow.accept_inbound(envelope).await.expect("accept");
+    let ack = workflow.submit_inbound(envelope).await.expect("accept");
 
     let ProductInboundAck::CommandResult { command, payload } = ack else {
         panic!("expected lifecycle command result ack");
@@ -288,7 +288,7 @@ async fn malformed_known_lifecycle_command_rejects_before_admission() {
         .with_product_command_service(command_service.clone());
     let envelope = sample_command_envelope("command-extension-invalid", "extension_install", "{}");
 
-    let ack = workflow.accept_inbound(envelope).await.expect("accept");
+    let ack = workflow.submit_inbound(envelope).await.expect("accept");
 
     assert!(matches!(
         ack,
@@ -322,7 +322,7 @@ async fn lifecycle_command_admission_rejects_before_facade_executes() {
     let envelope =
         sample_command_envelope("command-extension-denied", "extension_activate", "github");
 
-    let ack = workflow.accept_inbound(envelope).await.expect("accept");
+    let ack = workflow.submit_inbound(envelope).await.expect("accept");
 
     assert!(matches!(ack, ProductInboundAck::Rejected(_)));
     assert!(lifecycle_facade.commands().is_empty());
@@ -344,7 +344,7 @@ async fn lifecycle_command_service_rejects_non_lifecycle_commands_without_facade
         .with_product_command_service(command_service);
     let envelope = sample_command_envelope("command-status-lifecycle-service", "status", "");
 
-    let ack = workflow.accept_inbound(envelope).await.expect("accept");
+    let ack = workflow.submit_inbound(envelope).await.expect("accept");
 
     assert!(matches!(
         ack,
@@ -379,7 +379,7 @@ async fn lifecycle_facade_error_bubbles_and_releases_idempotency_lease() {
     );
 
     let err = workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect_err("lifecycle facade error must bubble");
 
@@ -401,7 +401,7 @@ async fn default_command_admission_rejects_before_command_service_executes() {
         .with_product_command_service(command_service.clone());
     let envelope = sample_command_envelope("command-default-reject", "model", "gpt-5-mini");
 
-    let ack = workflow.accept_inbound(envelope).await.expect("accept");
+    let ack = workflow.submit_inbound(envelope).await.expect("accept");
 
     assert!(matches!(
         ack,
@@ -433,7 +433,7 @@ async fn command_admission_receives_authority_context_and_action_metadata() {
     let expected_auth_claim = envelope.auth_claim().clone();
     let expected_received_at = envelope.received_at();
 
-    let ack = workflow.accept_inbound(envelope).await.expect("accept");
+    let ack = workflow.submit_inbound(envelope).await.expect("accept");
 
     assert!(matches!(ack, ProductInboundAck::NoOp));
     let records = admission_service.records();
@@ -473,7 +473,7 @@ async fn command_admission_error_releases_idempotency_lease() {
     let envelope = sample_command_envelope("command-admission-error", "model", "gpt-5-mini");
 
     let err = workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect_err("transient admission error must bubble");
 
@@ -501,7 +501,7 @@ async fn command_service_error_releases_idempotency_lease() {
     let envelope = sample_command_envelope("command-service-error", "model", "gpt-5-mini");
 
     let err = workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect_err("transient command error must bubble");
 
@@ -522,7 +522,7 @@ async fn default_command_service_rejects_when_admission_is_supplied() {
         .with_product_command_admission_service(admission_service);
     let envelope = sample_command_envelope("command-default-service-reject", "status", "");
 
-    let ack = workflow.accept_inbound(envelope).await.expect("accept");
+    let ack = workflow.submit_inbound(envelope).await.expect("accept");
 
     assert!(matches!(
         ack,
@@ -551,7 +551,7 @@ async fn command_service_turn_ack_is_rejected_before_turn_dispatch_kind_is_recor
     let envelope = sample_command_envelope("command-turn-ack", "status", "");
 
     workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect_err("turn-shaped command ack must fail");
 
@@ -583,7 +583,7 @@ async fn command_service_rejected_busy_ack_yields_unsupported_action_kind_error(
     let envelope = sample_command_envelope("command-rejected-busy", "status", "");
 
     let err = workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect_err("RejectedBusy from command service must yield UnsupportedActionKind error");
     assert!(

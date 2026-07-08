@@ -25,6 +25,10 @@ use ironclaw_product_adapters::AdapterInstallationId;
 use rand::RngExt as _;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
+use crate::provider_identity::{
+    RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
+    RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
+};
 use crate::provider_identity::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
 use crate::slack::slack_channel_routes::{
     SlackChannelRoute, SlackChannelRouteAssignment, SlackChannelRouteError, SlackChannelRouteKey,
@@ -33,10 +37,6 @@ use crate::slack::slack_channel_routes::{
 use crate::slack::slack_outbound_targets::{
     SlackPersonalDmTarget, SlackPersonalDmTargetError, SlackPersonalDmTargetKey,
     SlackPersonalDmTargetStore,
-};
-use crate::slack::slack_personal_binding::{
-    RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
-    RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
 };
 use crate::slack::slack_serve::{SlackTeamId, SlackUserId};
 use crate::slack::slack_setup::{
@@ -1400,15 +1400,14 @@ impl StoredSlackUserIdentity {
     #[cfg(test)]
     fn binding(&self) -> Option<RebornUserIdentityBinding> {
         Some(RebornUserIdentityBinding {
-            provider: crate::slack::slack_personal_binding::RebornIdentityProviderId::new(
+            provider: crate::provider_identity::RebornIdentityProviderId::new(
                 self.provider.clone(),
             )
             .ok()?,
-            provider_user_id:
-                crate::slack::slack_personal_binding::RebornIdentityProviderUserId::new(
-                    self.provider_user_id.clone(),
-                )
-                .ok()?,
+            provider_user_id: crate::provider_identity::RebornIdentityProviderUserId::new(
+                self.provider_user_id.clone(),
+            )
+            .ok()?,
             user_id: UserId::new(self.user_id.clone()).ok()?,
         })
     }
@@ -1698,7 +1697,7 @@ mod tests {
     };
     use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 
-    use crate::slack::slack_personal_binding::{
+    use crate::provider_identity::{
         RebornIdentityProviderId, RebornIdentityProviderUserId,
         RebornUserIdentityBindingDeleteStore,
     };

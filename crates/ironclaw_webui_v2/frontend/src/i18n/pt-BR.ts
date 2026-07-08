@@ -212,7 +212,7 @@ registerPack("pt-BR", {
   // Extensions tabs
   "extensions.installed": "Instaladas",
   "extensions.channels": "Canais",
-  "extensions.mcp": "Servidores MCP",
+  "extensions.tools": "Tools",
   "extensions.registry": "Registro",
 
   // Settings tabs
@@ -1191,7 +1191,7 @@ registerPack("pt-BR", {
   "extensions.reconfigure": "Reconfigurar",
   "extensions.configureName": "Configurar {name}",
   "extensions.allInstalled": "Todas as extensões instaladas",
-  "mcp.installed": "Servidores MCP instalados",
+  "tools.installed": "Installed tools",
   "extensions.oneCapability": "1 capacidade",
   "extensions.pluralCapabilities": "Capacidades {count}",
   "extensions.oneKeyword": "1 palavra-chave",
@@ -1239,8 +1239,8 @@ registerPack("pt-BR", {
   "extensions.reconnect": "Reconectar",
   "extensions.emptyInstalledTitle": "Nenhuma extensão instalada",
   "extensions.emptyInstalledDesc": "Navegue pela guia Registro para descobrir e instalar ferramentas WASM, canais e servidores MCP.",
-  "extensions.emptyMcpTitle": "Nenhum servidor MCP",
-  "extensions.emptyMcpDesc": "Os servidores MCP estendem o agente com recursos de ferramenta adicionais através do Model Context Protocol. Instale-os a partir do registro.",
+  "extensions.emptyToolsTitle": "No tool extensions yet",
+  "extensions.emptyToolsDesc": "Install an extension with tool capabilities from the registry to see it here.",
   "common.dismiss": "Dispensar",
   "common.pin": "Fixar",
   "common.unpin": "Desafixar",
@@ -1348,7 +1348,7 @@ registerPack("pt-BR", {
   "pairing.resumeFailed": "{name} foi conectado, mas este chat não pôde continuar. Recarregue a página para seguir.",
   "extensions.channelInstalledSetup": "{name} instalado. Conecte a conta usando o painel de configuração abaixo.",
   "extensions.authUrlHttpsRequired": "A URL de autenticação deve usar HTTPS.",
-  "mcp.available": "Servidores MCP disponíveis",
+  "tools.available": "Available tools",
   "slackSetup.title": "Configuração do Slack",
   "slackSetup.instructions": "Configure o app do Slack antes de atribuir canais.",
   "slackSetup.save": "Salvar configuração",

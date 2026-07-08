@@ -1633,7 +1633,7 @@ test("useChat.approve deny marks the current gated tool declined before resume",
     threadId,
     runId,
     gateRef,
-    resolution: "denied",
+    resolution: "declined",
     always: false,
   });
   assert.equal(renderedMessages.length, 1);
@@ -5130,14 +5130,14 @@ function createResolveGateContext({
   return context;
 }
 
-test("useChat.resolveGate: denied keeps isProcessing true and does not clear activeRun", async () => {
+test("useChat.resolveGate: declined keeps isProcessing true and does not clear activeRun", async () => {
   const stateUpdates = [];
   const context = createResolveGateContext({ stateUpdates });
 
   runUseChatSource(context);
 
   const chat = context.globalThis.__testExports.useChat("thread-1");
-  await chat.resolveGate("denied");
+  await chat.resolveGate("declined");
 
   // pendingGate (index 4) is cleared
   const pendingGateUpdates = stateUpdates.filter((u) => u.index === 4);
@@ -5159,18 +5159,18 @@ test("useChat.resolveGate: denied keeps isProcessing true and does not clear act
     JSON.parse(JSON.stringify(
       context.chatEventsArgs.locallyResolvedGatesRef.current.get("run-1\ngate-1"),
     )),
-    { resolution: "denied", outcome: "resumed" },
+    { resolution: "declined", outcome: "resumed" },
   );
 });
 
-test("useChat.resolveGate: resumed cancelled auth keeps processing until follow-up run settles", async () => {
+test("useChat.resolveGate: resumed declined auth keeps processing until follow-up run settles", async () => {
   const stateUpdates = [];
   const context = createResolveGateContext({ stateUpdates });
 
   runUseChatSource(context);
 
   const chat = context.globalThis.__testExports.useChat("thread-1");
-  await chat.resolveGate("cancelled");
+  await chat.resolveGate("declined");
 
   // isProcessing (index 3) is set to true — run continues
   const isProcessingUpdates = stateUpdates.filter((u) => u.index === 3);
@@ -5187,7 +5187,7 @@ test("useChat.resolveGate: resumed cancelled auth keeps processing until follow-
     JSON.parse(JSON.stringify(
       context.chatEventsArgs.locallyResolvedGatesRef.current.get("run-1\ngate-1"),
     )),
-    { resolution: "cancelled", outcome: "resumed" },
+    { resolution: "declined", outcome: "resumed" },
   );
 });
 
@@ -5206,7 +5206,7 @@ test("useChat.resolveGate: terminal cancelled clears processing and activeRun", 
   runUseChatSource(context);
 
   const chat = context.globalThis.__testExports.useChat("thread-1");
-  await chat.resolveGate("cancelled");
+  await chat.resolveGate("declined");
 
   const isProcessingUpdates = stateUpdates.filter((u) => u.index === 3);
   assert.ok(isProcessingUpdates.length > 0, "isProcessing should be updated");
@@ -5221,7 +5221,7 @@ test("useChat.resolveGate: terminal cancelled clears processing and activeRun", 
     JSON.parse(JSON.stringify(
       context.chatEventsArgs.locallyResolvedGatesRef.current.get("run-1\ngate-1"),
     )),
-    { resolution: "cancelled", outcome: "cancelled" },
+    { resolution: "declined", outcome: "cancelled" },
   );
 });
 

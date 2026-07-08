@@ -212,7 +212,7 @@ registerPack("zh-CN", {
   // Extensions tabs
   "extensions.installed": "已安装",
   "extensions.channels": "渠道",
-  "extensions.mcp": "MCP 服务器",
+  "extensions.tools": "Tools",
   "extensions.registry": "注册表",
 
   // Settings tabs
@@ -1191,7 +1191,7 @@ registerPack("zh-CN", {
   "extensions.reconfigure": "重新配置",
   "extensions.configureName": "配置 {name}",
   "extensions.allInstalled": "所有已安装扩展",
-  "mcp.installed": "已安装的 MCP 服务",
+  "tools.installed": "Installed tools",
   "extensions.oneCapability": "1 个能力",
   "extensions.pluralCapabilities": "{count} 个能力",
   "extensions.oneKeyword": "1 个关键字",
@@ -1239,8 +1239,8 @@ registerPack("zh-CN", {
   "extensions.reconnect": "重新连接",
   "extensions.emptyInstalledTitle": "还未安装任何扩展",
   "extensions.emptyInstalledDesc": "浏览扩展注册表去发现并安装 WASM 工具、服务通道 和各种 MCP 协议服务服务器。",
-  "extensions.emptyMcpTitle": "暂无 MCP 代理服务器",
-  "extensions.emptyMcpDesc": "MCP 服务器可通过模型上下文协议（Model Context Protocol）扩展代理与外界交互能力。从应用注册表（Registry）处可获取与安装。",
+  "extensions.emptyToolsTitle": "No tool extensions yet",
+  "extensions.emptyToolsDesc": "Install an extension with tool capabilities from the registry to see it here.",
   "common.dismiss": "关闭",
   "common.pin": "置顶",
   "common.unpin": "取消置顶",
@@ -1348,7 +1348,7 @@ registerPack("zh-CN", {
   "pairing.resumeFailed": "{name} 已连接，但此聊天无法继续。请重新加载页面后继续。",
   "extensions.channelInstalledSetup": "已安装 {name}。请使用下方设置面板连接账号。",
   "extensions.authUrlHttpsRequired": "认证 URL 必须使用 HTTPS。",
-  "mcp.available": "可用的 MCP 服务器",
+  "tools.available": "Available tools",
   "slackSetup.title": "Slack 设置",
   "slackSetup.instructions": "分配频道前，请先配置 Slack 应用。",
   "slackSetup.save": "保存设置",

@@ -19,7 +19,7 @@ function renderExtensionsPage(tab) {
     ActionToast() {},
     ChannelsTab() {},
     ConfigureModal() {},
-    McpTab() {},
+    ToolsTab() {},
     Navigate() {},
     React: {
       useCallback: (fn) => fn,
@@ -33,9 +33,9 @@ function renderExtensionsPage(tab) {
     useExtensions: () => ({
       status: {},
       channels: [],
-      mcpServers: [],
+      tools: [],
       channelRegistry: [],
-      mcpRegistry: [],
+      toolRegistry: [],
       catalogEntries: [],
       isLoading: false,
       isBusy: false,

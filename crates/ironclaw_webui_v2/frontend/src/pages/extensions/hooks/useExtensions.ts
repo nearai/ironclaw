@@ -275,20 +275,14 @@ export function useExtensions() {
       })),
   ].sort(catalogSort);
 
-  // Views over surfaces (product taxonomy) — the MCP grouping alone keys on
-  // the honest runtime label, because it is an operator-facing runtime view.
+  // Views over surfaces (product taxonomy). Runtime never groups: an
+  // MCP-backed tool extension sits beside a wasm one, with its runtime shown
+  // as a badge on the card.
   const channels = extensions.filter(hasChannelSurface);
-  const mcpServers = extensions.filter((e) => e.runtime === "mcp");
-  const tools = extensions.filter((e) => !hasChannelSurface(e) && e.runtime !== "mcp");
+  const tools = extensions.filter((e) => !hasChannelSurface(e));
 
   const channelRegistry = registry.filter((e) => hasChannelSurface(e) && !e.installed);
-  const mcpRegistry = registry.filter((e) => e.runtime === "mcp" && !e.installed);
-  const toolRegistry = registry.filter(
-    (e) =>
-      e.runtime !== "mcp" &&
-      !hasChannelSurface(e) &&
-      !e.installed
-  );
+  const toolRegistry = registry.filter((e) => !hasChannelSurface(e) && !e.installed);
 
   const isLoading = extensionsQuery.isLoading || registryQuery.isLoading;
   const isBusy = installMutation.isPending || activateMutation.isPending || removeMutation.isPending;
@@ -305,10 +299,8 @@ export function useExtensions() {
     status,
     extensions,
     channels,
-    mcpServers,
     tools,
     channelRegistry,
-    mcpRegistry,
     toolRegistry,
     registry,
     catalogEntries,

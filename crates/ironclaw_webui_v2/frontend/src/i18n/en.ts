@@ -218,7 +218,7 @@ registerPack("en", {
   // Extensions tabs
   "extensions.installed": "Installed",
   "extensions.channels": "Channels",
-  "extensions.mcp": "MCP Servers",
+  "extensions.tools": "Tools",
   "extensions.registry": "Registry",
 
   // Settings tabs
@@ -1282,7 +1282,7 @@ registerPack("en", {
   "extensions.connect": "Connect",
   "extensions.configureName": "Configure {name}",
   "extensions.allInstalled": "All installed extensions",
-  "mcp.installed": "Installed MCP servers",
+  "tools.installed": "Installed tools",
   "extensions.oneCapability": "1 capability",
   "extensions.pluralCapabilities": "{count} capabilities",
   "extensions.oneKeyword": "1 keyword",
@@ -1330,8 +1330,8 @@ registerPack("en", {
   "extensions.reconnect": "Reconnect",
   "extensions.emptyInstalledTitle": "No extensions installed",
   "extensions.emptyInstalledDesc": "Browse the Registry tab to discover and install WASM tools, channels, and MCP servers.",
-  "extensions.emptyMcpTitle": "No MCP servers",
-  "extensions.emptyMcpDesc": "MCP servers extend the agent with additional tool capabilities over the Model Context Protocol. Install them from the registry.",
+  "extensions.emptyToolsTitle": "No tool extensions yet",
+  "extensions.emptyToolsDesc": "Install an extension with tool capabilities from the registry to see it here.",
   "common.dismiss": "Dismiss",
   "common.pin": "Pin",
   "common.unpin": "Unpin",
@@ -1398,7 +1398,7 @@ registerPack("en", {
   "pairing.resumeFailed": "{name} connected, but this chat couldn't continue. Reload the page to keep going.",
   "extensions.channelInstalledSetup": "{name} installed. Connect the account using the setup panel below.",
   "extensions.authUrlHttpsRequired": "Authentication URL must use HTTPS.",
-  "mcp.available": "Available MCP servers",
+  "tools.available": "Available tools",
   "slackSetup.title": "Slack setup",
   "slackSetup.instructions": "Configure the Slack app before assigning channels.",
   "slackSetup.save": "Save setup",

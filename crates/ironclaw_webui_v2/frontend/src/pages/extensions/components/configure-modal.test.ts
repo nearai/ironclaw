@@ -4,9 +4,9 @@ import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
 
-import { rememberChannelConnectionWaiter } from "../../../lib/channel-connection-events.js";
-import { hasChannelSurface } from "../lib/extensions-schema.js";
-import { redeemPairingCode as realRedeemPairingCode } from "../lib/pairing-api.js";
+import { rememberChannelConnectionWaiter } from "../../../lib/channel-connection-events";
+import { hasChannelSurface } from "../lib/extensions-schema";
+import { redeemPairingCode as realRedeemPairingCode } from "../lib/pairing-api";
 
 // Wire-shaped surface fixtures: a channel extension declares a channel
 // surface; a plain tool extension declares only a tool surface.

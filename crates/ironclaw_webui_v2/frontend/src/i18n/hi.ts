@@ -212,7 +212,7 @@ registerPack("hi", {
   // Extensions tabs
   "extensions.installed": "इंस्टॉल किए गए",
   "extensions.channels": "चैनल",
-  "extensions.mcp": "MCP सर्वर",
+  "extensions.tools": "Tools",
   "extensions.registry": "रजिस्ट्री",
 
   // Settings tabs
@@ -1191,7 +1191,7 @@ registerPack("hi", {
   "extensions.reconfigure": "पुन: कॉन्फ़िगर करें",
   "extensions.configureName": "{name} कॉन्फ़िगर करें",
   "extensions.allInstalled": "सभी स्थापित एक्सटेंशन",
-  "mcp.installed": "स्थापित MCP सर्वर",
+  "tools.installed": "Installed tools",
   "extensions.oneCapability": "1 क्षमता",
   "extensions.pluralCapabilities": "{count} क्षमताएं",
   "extensions.oneKeyword": "1 कीवर्ड",
@@ -1239,8 +1239,8 @@ registerPack("hi", {
   "extensions.reconnect": "पुनः कनेक्ट करें",
   "extensions.emptyInstalledTitle": "कोई एक्सटेंशन इंस्टॉल नहीं है",
   "extensions.emptyInstalledDesc": "WASM टूल, चैनल और MCP सर्वर को खोजने और इंस्टॉल करने के लिए रजिस्ट्री टैब ब्राउज़ करें।",
-  "extensions.emptyMcpTitle": "कोई MCP सर्वर नहीं",
-  "extensions.emptyMcpDesc": "MCP सर्वर मॉडल कॉन्टेक्स्ट प्रोटोकॉल पर अतिरिक्त टूल क्षमताओं के साथ एजेंट का विस्तार करते हैं। उन्हें र��िस्ट्री से स्थापित करें.",
+  "extensions.emptyToolsTitle": "No tool extensions yet",
+  "extensions.emptyToolsDesc": "Install an extension with tool capabilities from the registry to see it here.",
   "common.dismiss": "खारिज करें",
   "common.pin": "पिन करें",
   "common.unpin": "अनपिन करें",
@@ -1348,7 +1348,7 @@ registerPack("hi", {
   "pairing.resumeFailed": "{name} कनेक्ट हो गया, लेकिन यह चैट जारी नहीं रह सकी। जारी रखने के लिए पेज फिर से लोड करें।",
   "extensions.channelInstalledSetup": "{name} इंस्टॉल हो गया। नीचे दिए सेटअप पैनल से खाता कनेक्ट करें।",
   "extensions.authUrlHttpsRequired": "ऑथेंटिकेशन URL में HTTPS होना चाहिए।",
-  "mcp.available": "उपलब्ध MCP सर्वर",
+  "tools.available": "Available tools",
   "slackSetup.title": "Slack सेटअप",
   "slackSetup.instructions": "चैनल असाइन करने से पहले Slack ऐप कॉन्फ़िगर करें।",
   "slackSetup.save": "सेटअप सहेजें",

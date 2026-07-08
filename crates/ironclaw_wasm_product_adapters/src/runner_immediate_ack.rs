@@ -193,9 +193,8 @@ mod tests {
     use ironclaw_product_adapters::{
         AuthRequirement, OutboundDeliverySink, ParsedProductInbound, ProductAdapter,
         ProductAdapterError, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
-        ProductOutboundEnvelope, ProductRenderOutcome, ProductTriggerReason,
-        ProjectionSubscriptionRequest, ProtocolAuthEvidence, ProtocolAuthFailure,
-        ProtocolHttpEgress, UserMessagePayload,
+        ProductOutboundEnvelope, ProductRenderOutcome, ProductTriggerReason, ProtocolAuthEvidence,
+        ProtocolAuthFailure, ProtocolHttpEgress, UserMessagePayload,
     };
     use tokio::sync::Notify;
 
@@ -289,17 +288,6 @@ mod tests {
         ) -> Result<ProductInboundAck, ProductAdapterError> {
             Ok(ProductInboundAck::NoOp)
         }
-
-        async fn resolve_projection_subscription(
-            &self,
-            _envelope: ProductInboundEnvelope,
-        ) -> Result<ProjectionSubscriptionRequest, ProductAdapterError> {
-            Err(ProductAdapterError::Internal {
-                detail: ironclaw_product_adapters::redaction::RedactedString::new(
-                    "test stub: resolve_projection_subscription not supported",
-                ),
-            })
-        }
     }
 
     struct RejectingWorkflow;
@@ -315,17 +303,6 @@ mod tests {
                 status_code: 404,
                 retryable: false,
                 reason: ironclaw_product_adapters::RedactedString::new("missing binding"),
-            })
-        }
-
-        async fn resolve_projection_subscription(
-            &self,
-            _envelope: ProductInboundEnvelope,
-        ) -> Result<ProjectionSubscriptionRequest, ProductAdapterError> {
-            Err(ProductAdapterError::Internal {
-                detail: ironclaw_product_adapters::redaction::RedactedString::new(
-                    "test stub: resolve_projection_subscription not supported",
-                ),
             })
         }
     }
@@ -348,17 +325,6 @@ mod tests {
                     "policy temporarily unavailable",
                 ),
             ))
-        }
-
-        async fn resolve_projection_subscription(
-            &self,
-            _envelope: ProductInboundEnvelope,
-        ) -> Result<ProjectionSubscriptionRequest, ProductAdapterError> {
-            Err(ProductAdapterError::Internal {
-                detail: ironclaw_product_adapters::redaction::RedactedString::new(
-                    "test stub: resolve_projection_subscription not supported",
-                ),
-            })
         }
     }
 
@@ -428,17 +394,6 @@ mod tests {
             self.entered.fetch_add(1, Ordering::SeqCst);
             self.release.notified().await;
             Ok(ProductInboundAck::NoOp)
-        }
-
-        async fn resolve_projection_subscription(
-            &self,
-            _envelope: ProductInboundEnvelope,
-        ) -> Result<ProjectionSubscriptionRequest, ProductAdapterError> {
-            Err(ProductAdapterError::Internal {
-                detail: ironclaw_product_adapters::redaction::RedactedString::new(
-                    "test stub: resolve_projection_subscription not supported",
-                ),
-            })
         }
     }
 

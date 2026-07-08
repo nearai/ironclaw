@@ -43,7 +43,7 @@ prompt_doc_ref = "prompts/gmail/get_message.md"
 
 [[capability_provider.tools.capabilities]]
 id = "gmail.send_message"
-description = "Send a Gmail message."
+description = "Send a Gmail message as the user — a side effect inside the current job (the email comes from their account). Never use this to deliver your final answer to the user: the host delivers final replies on the conversation's outbound channel."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
@@ -69,7 +69,7 @@ prompt_doc_ref = "prompts/gmail/create_draft.md"
 
 [[capability_provider.tools.capabilities]]
 id = "gmail.reply_to_message"
-description = "Reply to a Gmail message."
+description = "Reply to a Gmail message as the user — a side effect inside the current job, not a way to deliver your final answer."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"

@@ -950,7 +950,7 @@ impl RebornBinaryE2EHarness {
             binding.subject_user_id.clone(),
         );
         let actor = TurnActor::new(binding.actor_user_id.clone());
-        let ack = self.workflow.accept_inbound(envelope).await?;
+        let ack = self.workflow.submit_inbound(envelope).await?;
         let run_id = match &ack {
             ProductInboundAck::Accepted {
                 submitted_run_id, ..

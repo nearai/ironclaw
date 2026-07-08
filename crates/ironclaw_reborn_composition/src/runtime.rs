@@ -9936,7 +9936,7 @@ output_schema_ref = "schemas/write.output.json"
                     thread_id: Some(created.thread.thread_id.to_string()),
                     run_id: Some(TurnRunId::new().to_string()),
                     gate_ref: Some("gate:hook-auth-missing".to_string()),
-                    resolution: Some("denied".to_string()),
+                    resolution: Some("declined".to_string()),
                     always: None,
                     credential_ref: None,
                 },

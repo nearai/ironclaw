@@ -212,7 +212,7 @@ registerPack("ar", {
   // Extensions tabs
   "extensions.installed": "مثبتة",
   "extensions.channels": "القنوات",
-  "extensions.mcp": "خوادم MCP",
+  "extensions.tools": "Tools",
   "extensions.registry": "السجل",
 
   // Settings tabs
@@ -1191,7 +1191,7 @@ registerPack("ar", {
   "extensions.reconfigure": "إعادة تكوين",
   "extensions.configureName": "تكوين {name}",
   "extensions.allInstalled": "جميع الامتدادات المثبتة",
-  "mcp.installed": "خوادم MCP المثبتة",
+  "tools.installed": "Installed tools",
   "extensions.oneCapability": "قدرة واحدة",
   "extensions.pluralCapabilities": "إمكانات {count}",
   "extensions.oneKeyword": "كلمة رئيسية واحدة",
@@ -1239,8 +1239,8 @@ registerPack("ar", {
   "extensions.reconnect": "إعادة الاتصال",
   "extensions.emptyInstalledTitle": "لم يتم تثبيت أي ملحقات",
   "extensions.emptyInstalledDesc": "تصفح علامة التبويب \"التسجيل\" لاكتشاف وتثبيت أدوات وقنوات WASM وخوادم MCP.",
-  "extensions.emptyMcpTitle": "لا توجد خوادم MCP",
-  "extensions.emptyMcpDesc": "تعمل خوادم MCP على توسيع الوكيل بقدرات أداة إضافية عبر بروتوكول سياق النموذج. تثبيتها من التسجيل.",
+  "extensions.emptyToolsTitle": "No tool extensions yet",
+  "extensions.emptyToolsDesc": "Install an extension with tool capabilities from the registry to see it here.",
   "common.dismiss": "تجاهل",
   "common.pin": "تثبيت",
   "common.unpin": "إلغاء التثبيت",
@@ -1348,7 +1348,7 @@ registerPack("ar", {
   "pairing.resumeFailed": "تم ربط {name}، لكن تعذر متابعة هذه المحادثة. أعد تحميل الصفحة للمتابعة.",
   "extensions.channelInstalledSetup": "تم تثبيت {name}. اربط الحساب باستخدام لوحة الإعداد أدناه.",
   "extensions.authUrlHttpsRequired": "يجب أن يستخدم عنوان URL للمصادقة HTTPS.",
-  "mcp.available": "خوادم MCP المتاحة",
+  "tools.available": "Available tools",
   "slackSetup.title": "إعداد Slack",
   "slackSetup.instructions": "قم بتكوين تطبيق Slack قبل تعيين القنوات.",
   "slackSetup.save": "حفظ الإعداد",

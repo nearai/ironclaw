@@ -1482,12 +1482,31 @@ fn activation_success_message(
     visible_capability_ids: &[String],
 ) -> String {
     if package_declares_inbound_product_adapter(package) {
-        if package_ref.id.as_str() == "slack" {
-            return "Slack is installed as an inbound entrypoint. If WebChat shows a Slack account connection panel, tell the user to configure Slack OAuth for this extension rather than pasting anything into normal chat. If the user's Slack account is already connected, continue the user's original request; Slack DMs and WebUI chat can use the same user-scoped Slack tools.".to_string();
-        }
+        let display_name = package.manifest.name.as_str();
+        let connection = channel_connection_requirement(package_ref.id.as_str(), display_name);
+        let connect_guidance = match connection.strategy {
+            RebornChannelConnectStrategy::OAuth => format!(
+                "If WebChat shows an account connection panel, tell the user to connect \
+                 {display_name} via OAuth from the extension's configuration rather than \
+                 pasting anything into normal chat. If the user's account is already \
+                 connected, continue the user's original request."
+            ),
+            RebornChannelConnectStrategy::InboundProofCode
+            | RebornChannelConnectStrategy::WebGeneratedCode
+            | RebornChannelConnectStrategy::QrCode
+            | RebornChannelConnectStrategy::AdminManagedChannels => format!(
+                "If WebChat shows a channel connection panel, tell the user to open \
+                 {display_name}'s app or bot, get the pairing code or connection challenge, \
+                 and paste it into the connection panel rather than normal chat. If the \
+                 user's account is already connected, continue the user's original request \
+                 instead of asking them to pair again. Do not claim the channel can receive \
+                 or send messages for the user until connection is confirmed."
+            ),
+        };
         return format!(
-            "{} is installed as an external channel. If WebChat shows a channel connection panel, tell the user to open the extension's app or bot, get the pairing code or connection challenge, and paste it into the WebChat connection panel rather than normal chat. If the user's channel account is already connected, continue the user's original request instead of asking them to pair again. Do not claim the channel can receive or send messages for the user until connection is confirmed.",
-            package.manifest.name.as_str()
+            "{display_name} is installed as a channel surface. {connect_guidance} Final \
+             replies on this channel are delivered by the host's outbound delivery, never \
+             by calling the extension's tools."
         );
     }
     if visible_capability_ids.is_empty() {
@@ -1969,11 +1988,11 @@ mod tests {
         assert_eq!(activate.phase, LifecyclePhase::Active);
         let message = activate.message.as_deref().expect("activation message");
         assert!(
-            message.contains("configure Slack OAuth")
+            message.contains("connect Slack via OAuth")
                 && message.contains("WebChat")
                 && message.contains("rather than pasting anything into normal chat")
                 && message.contains("continue the user's original request")
-                && message.contains("user-scoped Slack tools"),
+                && message.contains("delivered by the host's outbound delivery"),
             "Slack activation should guide the model into OAuth setup UI, got: {message}"
         );
         assert!(
@@ -2043,14 +2062,15 @@ mod tests {
         assert_eq!(activate.phase, LifecyclePhase::Active);
         let message = activate.message.as_deref().expect("activation message");
         assert!(
-            message.contains("Telegram is installed as an external channel")
+            message.contains("Telegram is installed as a channel surface")
                 && message.contains("app or bot")
                 && message.contains("pairing code")
-                && message.contains("WebChat connection panel")
+                && message.contains("connection panel")
                 && message.contains("rather than normal chat")
                 && message.contains("continue the user's original request")
                 && message.contains("already connected")
-                && message.contains("until connection is confirmed"),
+                && message.contains("until connection is confirmed")
+                && message.contains("delivered by the host's outbound delivery"),
             "external channel activation should guide the model into generic pairing UI, got: {message}"
         );
         let Some(LifecycleProductPayload::ExtensionActivate {
@@ -5527,7 +5547,7 @@ output_schema_ref = "schemas/search.output.json"
         response: LifecycleProductResponse,
         expected_ref: &str,
     ) {
-        assert_eq!(response.phase, LifecyclePhase::UnsupportedOrLegacy);
+        assert_eq!(response.phase, LifecyclePhase::Unsupported);
         assert!(response.blockers.iter().any(|blocker| matches!(
             blocker,
             LifecycleReadinessBlocker::Runtime { ref_id: Some(ref_id) }

@@ -11,9 +11,10 @@ use crate::product_auth::api::auth::OAuthProviderIdentityCheck;
 use crate::product_auth::api::auth::OAuthProviderIdentityCheckFuture;
 use crate::product_auth::oauth::oauth_dcr::DcrOAuthCallbackState;
 #[cfg(feature = "slack-v2-host-beta")]
+use crate::provider_identity::RebornUserIdentityBindingError;
+#[cfg(feature = "slack-v2-host-beta")]
 use crate::slack::slack_personal_binding::{
-    RebornUserIdentityBindingError, SlackPersonalBindingPrincipal, SlackPersonalUserBindingError,
-    SlackPersonalUserBindingRequest,
+    SlackPersonalBindingPrincipal, SlackPersonalUserBindingError, SlackPersonalUserBindingRequest,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::slack::slack_serve::{SlackApiAppId, SlackEnterpriseId, SlackTeamId, SlackUserId};
@@ -1297,12 +1298,14 @@ mod tests {
     };
 
     #[cfg(feature = "slack-v2-host-beta")]
+    use crate::provider_identity::{
+        RebornUserIdentityBinding, RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
+    };
+    #[cfg(feature = "slack-v2-host-beta")]
     use crate::slack::slack_host_beta::{
         SlackPersonalConnectionScope, StaticSlackPersonalConnectionScopeResolver,
     };
-    #[cfg(feature = "slack-v2-host-beta")]
     use crate::slack::slack_personal_binding::{
-        RebornUserIdentityBinding, RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
         SlackPersonalBindingInstallation, SlackPersonalUserBindingService,
     };
     #[cfg(feature = "slack-v2-host-beta")]
@@ -2437,9 +2440,7 @@ mod tests {
 
     #[cfg(feature = "slack-v2-host-beta")]
     #[async_trait]
-    impl crate::slack::slack_personal_binding::RebornUserIdentityBindingDeleteStore
-        for RecordingBindingStore
-    {
+    impl crate::provider_identity::RebornUserIdentityBindingDeleteStore for RecordingBindingStore {
         async fn delete_user_identity_bindings_for_user(
             &self,
             provider: &str,

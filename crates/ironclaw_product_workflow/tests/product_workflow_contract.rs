@@ -1107,7 +1107,7 @@ async fn user_message_dispatches_through_inbound_turn_service() {
     let (workflow, inbound, ledger) = build_workflow();
     let envelope = sample_envelope("1");
 
-    let ack = workflow.accept_inbound(envelope).await.expect("accept");
+    let ack = workflow.submit_inbound(envelope).await.expect("accept");
 
     assert!(matches!(ack, ProductInboundAck::Accepted { .. }));
     assert_eq!(inbound.accepted_count(), 1);
@@ -1135,7 +1135,7 @@ async fn approval_resolution_payload_routes_through_approval_interaction_service
         ),
     );
 
-    let ack = workflow.accept_inbound(envelope).await.expect("accept");
+    let ack = workflow.submit_inbound(envelope).await.expect("accept");
 
     assert!(matches!(ack, ProductInboundAck::Accepted { .. }));
     let resolutions = approval_service.resolutions();
@@ -1183,7 +1183,7 @@ async fn concrete_approval_resolution_rejects_unknown_installation_via_product_b
     );
 
     let err = workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect_err("unknown installation should reject before interaction dispatch");
 
@@ -1226,7 +1226,7 @@ async fn auth_resolution_payload_routes_through_auth_interaction_service() {
         ),
     );
 
-    let ack = workflow.accept_inbound(envelope).await.expect("accept");
+    let ack = workflow.submit_inbound(envelope).await.expect("accept");
 
     assert!(matches!(ack, ProductInboundAck::Accepted { .. }));
     let resolutions = auth_service.resolutions();
@@ -1280,7 +1280,7 @@ async fn auth_callback_and_denied_payloads_route_through_auth_interaction_servic
             ),
         );
 
-        let ack = workflow.accept_inbound(envelope).await.expect("accept");
+        let ack = workflow.submit_inbound(envelope).await.expect("accept");
 
         assert!(matches!(ack, ProductInboundAck::Accepted { .. }));
         let resolutions = auth_service.resolutions();
@@ -1354,7 +1354,7 @@ async fn auth_deny_from_threaded_direct_prompt_uses_base_direct_binding() {
     );
 
     let ack = workflow
-        .accept_inbound(threaded_deny)
+        .submit_inbound(threaded_deny)
         .await
         .expect("threaded direct auth deny should use base binding");
 
@@ -1394,11 +1394,11 @@ async fn approval_resolution_idempotency_key_is_stable_for_same_external_event()
     let (workflow_b, approval_b) = build();
 
     workflow_a
-        .accept_inbound(envelope())
+        .submit_inbound(envelope())
         .await
         .expect("first accept");
     workflow_b
-        .accept_inbound(envelope())
+        .submit_inbound(envelope())
         .await
         .expect("second accept");
 
@@ -1440,11 +1440,11 @@ async fn approval_resolution_idempotency_key_ignores_actor_display_name() {
     let (workflow_b, approval_b) = build();
 
     workflow_a
-        .accept_inbound(envelope("Alice A."))
+        .submit_inbound(envelope("Alice A."))
         .await
         .expect("first accept");
     workflow_b
-        .accept_inbound(envelope("Alice B."))
+        .submit_inbound(envelope("Alice B."))
         .await
         .expect("second accept");
 
@@ -1474,7 +1474,7 @@ async fn approval_resolution_deny_routes_through_approval_interaction_service() 
         ),
     );
 
-    let ack = workflow.accept_inbound(envelope).await.expect("accept");
+    let ack = workflow.submit_inbound(envelope).await.expect("accept");
 
     assert!(matches!(ack, ProductInboundAck::Accepted { .. }));
     let resolutions = approval_service.resolutions();
@@ -1505,7 +1505,7 @@ async fn approval_resolution_always_allow_routes_through_approval_interaction_se
     );
 
     workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect("always allow routes through approval interaction");
 
@@ -1539,7 +1539,7 @@ async fn scoped_approval_resolution_rejects_ambiguous_gate() {
     );
 
     let err = workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect_err("ambiguous gate should reject before interaction dispatch");
 
@@ -1571,7 +1571,7 @@ async fn scoped_approval_resolves_via_conversation_route() {
     .with_delivered_gate_routes(route_store);
 
     let ack = workflow
-        .accept_inbound(scoped_approval_thread_reply_envelope(
+        .submit_inbound(scoped_approval_thread_reply_envelope(
             "scoped-approval-conversation-route",
         ))
         .await
@@ -1614,7 +1614,7 @@ async fn scoped_approval_misses_if_route_expired() {
     .with_delivered_gate_routes(route_store);
 
     let error = workflow
-        .accept_inbound(scoped_approval_thread_reply_envelope(
+        .submit_inbound(scoped_approval_thread_reply_envelope(
             "scoped-approval-expired-route",
         ))
         .await
@@ -1638,7 +1638,7 @@ async fn scoped_approval_misses_if_no_route() {
     .with_delivered_gate_routes(route_store);
 
     let error = workflow
-        .accept_inbound(scoped_approval_thread_reply_envelope(
+        .submit_inbound(scoped_approval_thread_reply_envelope(
             "scoped-approval-no-route",
         ))
         .await
@@ -1665,7 +1665,7 @@ async fn scoped_approval_delivered_route_store_error_propagates_as_transient() {
     .with_delivered_gate_routes(route_store);
 
     let err = workflow
-        .accept_inbound(scoped_approval_thread_reply_envelope(
+        .submit_inbound(scoped_approval_thread_reply_envelope(
             "store-error-transient",
         ))
         .await
@@ -1724,7 +1724,7 @@ async fn scoped_approval_missing_gate_fallback_reuses_dispatcher_binding() {
     .with_delivered_gate_routes(route_store);
 
     let ack = workflow
-        .accept_inbound(scoped_approval_thread_reply_envelope(
+        .submit_inbound(scoped_approval_thread_reply_envelope(
             "scoped-approval-binding-reuse",
         ))
         .await
@@ -1770,7 +1770,7 @@ async fn auth_resolution_resolves_via_conversation_route_after_missing_auth() {
     .with_delivered_gate_routes(route_store);
 
     let ack = workflow
-        .accept_inbound(auth_thread_reply_envelope(
+        .submit_inbound(auth_thread_reply_envelope(
             "auth-conversation-route",
             gate_ref.as_str(),
         ))
@@ -1815,7 +1815,7 @@ async fn explicit_approval_delivered_route_requires_gate_ref_match() {
     .with_delivered_gate_routes(route_store);
 
     let error = workflow
-        .accept_inbound(explicit_approval_thread_reply_envelope(
+        .submit_inbound(explicit_approval_thread_reply_envelope(
             "approval-explicit-route-mismatch",
             payload_gate_ref.as_str(),
         ))
@@ -1851,7 +1851,7 @@ async fn explicit_auth_delivered_route_requires_gate_ref_match() {
     .with_delivered_gate_routes(route_store);
 
     let error = workflow
-        .accept_inbound(auth_thread_reply_envelope(
+        .submit_inbound(auth_thread_reply_envelope(
             "auth-explicit-route-mismatch",
             payload_gate_ref.as_str(),
         ))
@@ -1919,7 +1919,7 @@ async fn scoped_approval_two_pending_routes_resolves_most_recent() {
     .with_delivered_gate_routes(route_store.clone());
 
     let ack = workflow
-        .accept_inbound(scoped_approval_thread_reply_envelope("two-pending-recency"))
+        .submit_inbound(scoped_approval_thread_reply_envelope("two-pending-recency"))
         .await
         .expect("recency tiebreak must resolve the most-recently-delivered gate");
 
@@ -2000,7 +2000,7 @@ async fn scoped_approval_one_stale_one_pending_resolves_and_prunes() {
     .with_delivered_gate_routes(route_store.clone());
 
     let ack = workflow
-        .accept_inbound(scoped_approval_thread_reply_envelope("stale-plus-pending"))
+        .submit_inbound(scoped_approval_thread_reply_envelope("stale-plus-pending"))
         .await
         .expect("single pending gate must resolve once stale candidate is dropped");
 
@@ -2061,7 +2061,7 @@ async fn scoped_approval_one_expired_one_live_resolves_live() {
     .with_delivered_gate_routes(route_store);
 
     let ack = workflow
-        .accept_inbound(scoped_approval_thread_reply_envelope(
+        .submit_inbound(scoped_approval_thread_reply_envelope(
             "expired-plus-live-resolves",
         ))
         .await
@@ -2134,7 +2134,7 @@ async fn scoped_approval_actor_mismatch_filtered_out() {
     .with_delivered_gate_routes(route_store);
 
     let err = workflow
-        .accept_inbound(scoped_approval_thread_reply_envelope(
+        .submit_inbound(scoped_approval_thread_reply_envelope(
             "actor-mismatch-filtered",
         ))
         .await
@@ -2172,7 +2172,7 @@ async fn explicit_approval_gate_ref_mismatch_leaves_original_rejection() {
     .with_delivered_gate_routes(route_store);
 
     let err = workflow
-        .accept_inbound(explicit_approval_thread_reply_envelope(
+        .submit_inbound(explicit_approval_thread_reply_envelope(
             "explicit-mismatch-original-rejection",
             payload_gate_ref.as_str(),
         ))
@@ -2249,7 +2249,7 @@ async fn auth_two_live_routes_same_conversation_rejects_ambiguous() {
     .with_delivered_gate_routes(route_store.clone());
 
     let err = workflow
-        .accept_inbound(auth_thread_reply_envelope(
+        .submit_inbound(auth_thread_reply_envelope(
             "auth-two-live-ambiguous",
             shared_gate_ref.as_str(),
         ))
@@ -2340,7 +2340,7 @@ async fn bare_auth_deny_with_stale_approval_route_selects_auth_route_not_approva
     // the key assertion is that the stale approval route is not forwarded to
     // the auth service as a run_id_hint.
     let err = workflow
-        .accept_inbound(auth_thread_reply_envelope(
+        .submit_inbound(auth_thread_reply_envelope(
             "bare-auth-deny-stale-approval",
             auth_gate_ref.as_str(),
         ))
@@ -2486,7 +2486,7 @@ async fn auth_resolution_stale_auth_does_not_fall_back_to_delivered_route() {
     .with_delivered_gate_routes(route_store);
 
     let err = workflow
-        .accept_inbound(auth_thread_reply_envelope(
+        .submit_inbound(auth_thread_reply_envelope(
             "stale-auth-no-fallback",
             gate_ref.as_str(),
         ))
@@ -2541,7 +2541,7 @@ async fn explicit_approval_stale_gate_surfaces_without_fallback() {
     .with_delivered_gate_routes(route_store);
 
     let err = workflow
-        .accept_inbound(explicit_approval_thread_reply_envelope(
+        .submit_inbound(explicit_approval_thread_reply_envelope(
             "explicit-stale-no-fallback",
             gate_ref.as_str(),
         ))
@@ -2633,7 +2633,7 @@ async fn exact_named_generic_approval_gate_is_forwarded_not_dropped_by_kind_filt
     // expected_gate_ref = Some("gate:approve-slack").  The kind filter must NOT
     // drop the stored route (even though is_auth_gate_ref returns false for it).
     let ack = workflow
-        .accept_inbound(auth_thread_reply_envelope(
+        .submit_inbound(auth_thread_reply_envelope(
             "generic-gate-forwarded-not-dropped",
             generic_gate_ref,
         ))
@@ -2704,7 +2704,7 @@ async fn explicit_auth_gate_ref_mismatch_leaves_original_rejection() {
     .with_delivered_gate_routes(route_store);
 
     let err = workflow
-        .accept_inbound(auth_thread_reply_envelope(
+        .submit_inbound(auth_thread_reply_envelope(
             "auth-explicit-mismatch-original-rejection",
             payload_gate_ref.as_str(),
         ))
@@ -2775,7 +2775,7 @@ async fn bare_approve_with_invalid_stored_approval_route_rejects_invalid_gate_re
     .with_delivered_gate_routes(route_store);
 
     let err = workflow
-        .accept_inbound(scoped_approval_thread_reply_envelope(
+        .submit_inbound(scoped_approval_thread_reply_envelope(
             "bare-approve-invalid-stored-gate-ref",
         ))
         .await
@@ -2860,7 +2860,7 @@ async fn bare_auth_deny_with_invalid_stored_auth_route_rejects_invalid_gate_ref(
     .with_delivered_gate_routes(route_store);
 
     let err = workflow
-        .accept_inbound(auth_thread_reply_envelope(
+        .submit_inbound(auth_thread_reply_envelope(
             "bare-auth-invalid-stored-gate-ref",
             &invalid_gate_ref_str,
         ))
@@ -2903,7 +2903,7 @@ async fn approval_resolution_without_interaction_service_returns_retryable_unava
     );
 
     let err = workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect_err("unwired approval service");
 
@@ -2931,7 +2931,7 @@ async fn before_inbound_policy_rewrite_reaches_inbound_turn_service() {
     );
     let envelope = sample_envelope("policy-rewrite");
 
-    let ack = workflow.accept_inbound(envelope).await.expect("accept");
+    let ack = workflow.submit_inbound(envelope).await.expect("accept");
 
     assert!(matches!(ack, ProductInboundAck::Accepted { .. }));
     assert_eq!(policy.request_count(), 1);
@@ -2975,7 +2975,7 @@ async fn before_inbound_policy_path_probes_replay_once() {
         .with_before_inbound_policy(policy.clone());
     let envelope = sample_envelope("policy-replay-once");
 
-    let ack = workflow.accept_inbound(envelope).await.expect("accept");
+    let ack = workflow.submit_inbound(envelope).await.expect("accept");
 
     assert!(matches!(ack, ProductInboundAck::Accepted { .. }));
     assert_eq!(inbound.replay_attempt_count(), 1);
@@ -3000,7 +3000,7 @@ async fn before_inbound_policy_rewrite_revalidates_payload_before_turn_path() {
     let envelope = sample_envelope("policy-rewrite-invalid");
 
     let err = workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect_err("invalid policy rewrite should fail before staging");
 
@@ -3021,7 +3021,7 @@ async fn before_inbound_policy_rejection_skips_transcript_and_turn_path() {
     let envelope = sample_envelope("policy-reject");
 
     let ack = workflow
-        .accept_inbound(envelope.clone())
+        .submit_inbound(envelope.clone())
         .await
         .expect("policy rejection ack");
 
@@ -3045,7 +3045,7 @@ async fn before_inbound_policy_rejection_skips_transcript_and_turn_path() {
     );
 
     let replay = workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect("policy rejection replay");
     assert!(matches!(replay, ProductInboundAck::Duplicate { .. }));
@@ -3063,7 +3063,7 @@ async fn before_inbound_policy_retryable_rejection_releases_fingerprint() {
     let envelope = sample_envelope("policy-reject-retryable");
 
     let first = workflow
-        .accept_inbound(envelope.clone())
+        .submit_inbound(envelope.clone())
         .await
         .expect("retryable rejection still returns an ack");
     let ProductInboundAck::Rejected(rejection) = first else {
@@ -3089,7 +3089,7 @@ async fn before_inbound_policy_retryable_rejection_releases_fingerprint() {
     // Re-submitting the same envelope must re-invoke the policy (no duplicate
     // replay caching), because retryable rejections release the fingerprint.
     let second = workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect("released fingerprint should let retryable rejection re-run policy");
     assert!(matches!(second, ProductInboundAck::Rejected(_)));
@@ -3112,7 +3112,7 @@ async fn before_inbound_policy_rewrite_replays_rewritten_outcome_on_duplicate() 
     let envelope = sample_envelope("policy-rewrite-dup");
 
     let first = workflow
-        .accept_inbound(envelope.clone())
+        .submit_inbound(envelope.clone())
         .await
         .expect("first accept");
     let ProductInboundAck::Accepted {
@@ -3127,7 +3127,7 @@ async fn before_inbound_policy_rewrite_replays_rewritten_outcome_on_duplicate() 
     assert_eq!(ledger.settled_count(), 1);
 
     let replay = workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect("duplicate replay");
     let ProductInboundAck::Duplicate { prior } = replay else {
@@ -3215,7 +3215,7 @@ async fn rejected_busy_is_settled_and_transport_retry_gets_duplicate() {
     let envelope = sample_envelope("policy-busy-retry");
 
     let first = workflow
-        .accept_inbound(envelope.clone())
+        .submit_inbound(envelope.clone())
         .await
         .expect("busy ack");
     assert!(matches!(first, ProductInboundAck::RejectedBusy { .. }));
@@ -3225,7 +3225,7 @@ async fn rejected_busy_is_settled_and_transport_retry_gets_duplicate() {
     assert_eq!(ledger.in_flight_count(), 0);
 
     let second = workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect("transport retry after settled RejectedBusy");
     assert!(matches!(
@@ -3248,7 +3248,7 @@ async fn before_inbound_policy_transient_failure_releases_fingerprint() {
     let envelope = sample_envelope("policy-transient");
 
     let first = workflow
-        .accept_inbound(envelope.clone())
+        .submit_inbound(envelope.clone())
         .await
         .expect_err("policy failure should be retryable");
     assert!(first.is_retryable());
@@ -3258,7 +3258,7 @@ async fn before_inbound_policy_transient_failure_releases_fingerprint() {
     assert_eq!(ledger.in_flight_count(), 0);
 
     let second = workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect_err("released fingerprint should retry policy");
     assert!(second.is_retryable());
@@ -3276,7 +3276,7 @@ async fn before_inbound_policy_retryable_failure_releases_fingerprint() {
     let envelope = sample_envelope("policy-retryable-failure");
 
     let first = workflow
-        .accept_inbound(envelope.clone())
+        .submit_inbound(envelope.clone())
         .await
         .expect_err("retryable policy failure should release fingerprint");
     assert!(first.is_retryable());
@@ -3286,7 +3286,7 @@ async fn before_inbound_policy_retryable_failure_releases_fingerprint() {
     assert_eq!(ledger.in_flight_count(), 0);
 
     let second = workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect_err("released fingerprint should retry policy");
     assert!(second.is_retryable());
@@ -3301,7 +3301,7 @@ async fn before_inbound_policy_timeout_releases_fingerprint_for_retry() {
     let envelope = sample_envelope("policy-timeout-release");
 
     let first = workflow
-        .accept_inbound(envelope.clone())
+        .submit_inbound(envelope.clone())
         .await
         .expect_err("timed-out policy should be retryable");
     assert!(first.is_retryable());
@@ -3319,7 +3319,7 @@ async fn before_inbound_policy_timeout_releases_fingerprint_for_retry() {
     );
 
     let second = workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect_err("released fingerprint should retry timed-out policy");
     assert!(second.is_retryable());
@@ -3340,7 +3340,7 @@ async fn before_inbound_policy_permanent_failure_settles_terminal_rejection() {
     let envelope = sample_envelope("policy-permanent-failure");
 
     let err = workflow
-        .accept_inbound(envelope.clone())
+        .submit_inbound(envelope.clone())
         .await
         .expect_err("permanent policy failure should surface rejected error");
     assert!(!err.is_retryable());
@@ -3356,7 +3356,7 @@ async fn before_inbound_policy_permanent_failure_settles_terminal_rejection() {
     );
 
     let replay = workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect("terminal policy failure should replay duplicate ack");
     let ProductInboundAck::Duplicate { prior } = replay else {
@@ -3472,7 +3472,7 @@ async fn noop_returns_noop_ack() {
     let (workflow, inbound, ledger) = build_workflow();
     let envelope = sample_noop_envelope("noop1");
 
-    let ack = workflow.accept_inbound(envelope).await.expect("accept");
+    let ack = workflow.submit_inbound(envelope).await.expect("accept");
 
     assert!(matches!(ack, ProductInboundAck::NoOp));
     assert_eq!(inbound.accepted_count(), 0);
@@ -3517,7 +3517,7 @@ async fn subscription_request_via_accept_inbound_rejects_before_mutating_ledger(
     );
 
     let err = workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect_err("subscription requests use the projection resolver, not accept_inbound");
 
@@ -3774,14 +3774,15 @@ async fn projection_subscription_accepts_canonical_subject_without_inbound_envel
     assert_eq!(ledger.released_count(), 0);
 }
 
-#[tokio::test]
-async fn projection_subscription_rejects_non_subscription_payload() {
-    let (workflow, _inbound, _ledger, _binding_service) = build_workflow_with_binding();
-
-    let err = workflow
-        .resolve_projection_subscription(sample_envelope("projection-non-subscription"))
-        .await
-        .expect_err("non-subscription payload rejects");
+#[test]
+fn projection_input_rejects_non_subscription_payload() {
+    // The typed projection door starts at ProductProjectionSubscribeInput:
+    // a non-subscription envelope is rejected at conversion, before any
+    // workflow call.
+    let err = ProductProjectionSubscribeInput::from_inbound_envelope(&sample_envelope(
+        "projection-non-subscription",
+    ))
+    .expect_err("non-subscription payload rejects");
 
     assert!(matches!(
         err,
@@ -3803,7 +3804,10 @@ async fn projection_subscription_rejects_mismatched_thread_hint() {
     binding_service.program_binding(envelope.source_binding_key(), binding);
 
     let err = workflow
-        .resolve_projection_subscription(envelope)
+        .subscribe_projection(
+            ProductProjectionSubscribeInput::from_inbound_envelope(&envelope)
+                .expect("projection input"),
+        )
         .await
         .expect_err("mismatched hint rejects");
 
@@ -3836,7 +3840,10 @@ async fn projection_subscription_rejects_malformed_thread_hint() {
     binding_service.program_binding(envelope.source_binding_key(), binding);
 
     let err = workflow
-        .resolve_projection_subscription(envelope)
+        .subscribe_projection(
+            ProductProjectionSubscribeInput::from_inbound_envelope(&envelope)
+                .expect("projection input"),
+        )
         .await
         .expect_err("malformed hint rejects");
 
@@ -3881,7 +3888,10 @@ async fn projection_subscription_requires_existing_conversation_binding() {
     );
 
     let err = workflow
-        .resolve_projection_subscription(envelope)
+        .subscribe_projection(
+            ProductProjectionSubscribeInput::from_inbound_envelope(&envelope)
+                .expect("projection input"),
+        )
         .await
         .expect_err("subscription must not create a missing binding");
 
@@ -3914,7 +3924,7 @@ async fn preconfigured_actor_binding_accepts_user_message_without_legacy_pairing
     );
 
     let ack = workflow
-        .accept_inbound(sample_envelope("preconfigured-actor"))
+        .submit_inbound(sample_envelope("preconfigured-actor"))
         .await
         .expect("preconfigured actor should be accepted");
 
@@ -3966,7 +3976,7 @@ async fn preconfigured_actor_binding_rejects_unconfigured_actor() {
     );
 
     let err = workflow
-        .accept_inbound(sample_envelope("unconfigured-actor"))
+        .submit_inbound(sample_envelope("unconfigured-actor"))
         .await
         .expect_err("unconfigured actor should fail closed");
 
@@ -4004,7 +4014,7 @@ async fn actor_user_resolver_accepts_user_message_without_legacy_pairing() {
     );
 
     let ack = workflow
-        .accept_inbound(sample_envelope("resolver-actor"))
+        .submit_inbound(sample_envelope("resolver-actor"))
         .await
         .expect("resolved actor should be accepted");
 
@@ -4037,7 +4047,7 @@ async fn actor_user_resolver_rejects_unknown_actor_before_turn_submission() {
     );
 
     let err = workflow
-        .accept_inbound(sample_envelope("resolver-missing-actor"))
+        .submit_inbound(sample_envelope("resolver-missing-actor"))
         .await
         .expect_err("unknown actor should require binding");
 
@@ -4073,7 +4083,7 @@ async fn actor_user_resolver_propagates_resolver_error_without_turn_submission()
     );
 
     let err = workflow
-        .accept_inbound(sample_envelope("resolver-error"))
+        .submit_inbound(sample_envelope("resolver-error"))
         .await
         .expect_err("resolver error should fail the workflow");
 
@@ -4204,11 +4214,11 @@ async fn concrete_product_workflow_accepts_user_message_for_trusted_installation
     let envelope = sample_envelope("concrete-happy");
 
     let first = workflow
-        .accept_inbound(envelope.clone())
+        .submit_inbound(envelope.clone())
         .await
         .expect("accepted");
     let duplicate = workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect("duplicate replay");
 
@@ -4280,7 +4290,7 @@ async fn concrete_product_workflow_accepts_shared_route_participant_on_existing_
     );
 
     workflow
-        .accept_inbound(sample_envelope_with_payload(
+        .submit_inbound(sample_envelope_with_payload(
             "shared-alice",
             ProductInboundPayload::UserMessage(
                 UserMessagePayload::new("hello shared", vec![], ProductTriggerReason::BotMention)
@@ -4300,7 +4310,7 @@ async fn concrete_product_workflow_accepts_shared_route_participant_on_existing_
         .expect("bob participant added");
 
     workflow
-        .accept_inbound(sample_envelope_with_context(
+        .submit_inbound(sample_envelope_with_context(
             ProductAdapterId::new("test_adapter").expect("adapter"),
             AdapterInstallationId::new("install_alpha").expect("install"),
             ExternalEventId::new("evt:shared-bob").expect("event"),
@@ -4364,7 +4374,7 @@ async fn concrete_product_workflow_persists_first_bind_default_scope() {
         Arc::new(binding_alpha),
     );
     workflow_alpha
-        .accept_inbound(sample_envelope("persisted-default-scope"))
+        .submit_inbound(sample_envelope("persisted-default-scope"))
         .await
         .expect("first bind accepted");
 
@@ -4384,12 +4394,15 @@ async fn concrete_product_workflow_persists_first_bind_default_scope() {
         Arc::new(binding_beta),
     );
     let subscription = workflow_beta
-        .resolve_projection_subscription(sample_envelope_with_payload(
-            "projection-existing-scope",
-            ProductInboundPayload::SubscriptionRequest(
-                ProjectionSubscriptionPayload::new(None, None).expect("valid subscription"),
-            ),
-        ))
+        .subscribe_projection(
+            ProductProjectionSubscribeInput::from_inbound_envelope(&sample_envelope_with_payload(
+                "projection-existing-scope",
+                ProductInboundPayload::SubscriptionRequest(
+                    ProjectionSubscriptionPayload::new(None, None).expect("valid subscription"),
+                ),
+            ))
+            .expect("projection input"),
+        )
         .await
         .expect("existing binding resolves");
 
@@ -4456,11 +4469,11 @@ async fn concrete_product_workflow_keeps_installations_tenant_isolated() {
     );
 
     workflow
-        .accept_inbound(sample_envelope("tenant-a"))
+        .submit_inbound(sample_envelope("tenant-a"))
         .await
         .expect("tenant a accepted");
     workflow
-        .accept_inbound(sample_envelope_with_context(
+        .submit_inbound(sample_envelope_with_context(
             ProductAdapterId::new("test_adapter").expect("adapter"),
             AdapterInstallationId::new("install_beta").expect("install"),
             ExternalEventId::new("evt:tenant-b").expect("event"),
@@ -5420,7 +5433,7 @@ async fn concrete_product_workflow_bot_mention_uses_shared_route() {
     );
 
     workflow
-        .accept_inbound(sample_envelope_with_payload(
+        .submit_inbound(sample_envelope_with_payload(
             "shared-owner",
             ProductInboundPayload::UserMessage(
                 UserMessagePayload::new("hello shared", vec![], ProductTriggerReason::BotMention)
@@ -5473,7 +5486,7 @@ async fn concrete_product_workflow_reply_to_bot_requires_existing_binding() {
     );
 
     let err = workflow
-        .accept_inbound(sample_envelope_with_context(
+        .submit_inbound(sample_envelope_with_context(
             ProductAdapterId::new("test_adapter").expect("adapter"),
             AdapterInstallationId::new("install_alpha").expect("install"),
             ExternalEventId::new("evt:random-thread-reply").expect("event"),
@@ -5532,7 +5545,7 @@ async fn concrete_product_workflow_reuses_prepared_binding_for_content_only_poli
     .with_before_inbound_policy(policy);
 
     workflow
-        .accept_inbound(sample_envelope_with_payload(
+        .submit_inbound(sample_envelope_with_payload(
             "policy-rewrite-direct-route",
             ProductInboundPayload::UserMessage(
                 UserMessagePayload::new("hello direct", vec![], ProductTriggerReason::DirectChat)
@@ -5582,7 +5595,7 @@ async fn concrete_product_workflow_recomputes_route_after_policy_rewrites_trigge
     .with_before_inbound_policy(policy);
 
     workflow
-        .accept_inbound(sample_envelope_with_payload(
+        .submit_inbound(sample_envelope_with_payload(
             "policy-rewrite-shared-route",
             ProductInboundPayload::UserMessage(
                 UserMessagePayload::new("hello direct", vec![], ProductTriggerReason::DirectChat)
@@ -5630,7 +5643,7 @@ async fn concrete_product_workflow_rejects_unknown_installation_as_terminal() {
     let envelope = sample_envelope("unknown-install");
 
     let err = workflow
-        .accept_inbound(envelope.clone())
+        .submit_inbound(envelope.clone())
         .await
         .expect_err("unknown installation rejected");
     assert!(matches!(
@@ -5643,7 +5656,7 @@ async fn concrete_product_workflow_rejects_unknown_installation_as_terminal() {
         }
     ));
     let duplicate = workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect("terminal rejection replays");
     assert!(matches!(duplicate, ProductInboundAck::Duplicate { .. }));
@@ -5677,7 +5690,7 @@ async fn concrete_product_workflow_rejects_unpaired_actor_before_turn_submission
 
     let envelope = sample_envelope("unpaired");
     let err = workflow
-        .accept_inbound(envelope.clone())
+        .submit_inbound(envelope.clone())
         .await
         .expect_err("unpaired actor rejected");
     assert!(matches!(
@@ -5692,7 +5705,7 @@ async fn concrete_product_workflow_rejects_unpaired_actor_before_turn_submission
     assert!(coordinator.submissions().is_empty());
 
     let duplicate = workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect("terminal rejection replays");
     assert!(matches!(duplicate, ProductInboundAck::Duplicate { .. }));
@@ -5744,7 +5757,7 @@ async fn terminal_rejection_for_unpaired_actor_does_not_poison_other_actor_event
         ),
     );
     let err = workflow
-        .accept_inbound(unpaired)
+        .submit_inbound(unpaired)
         .await
         .expect_err("unpaired actor rejected");
     assert!(matches!(
@@ -5767,7 +5780,7 @@ async fn terminal_rejection_for_unpaired_actor_does_not_poison_other_actor_event
         ),
     );
     let accepted = workflow
-        .accept_inbound(valid_other_actor)
+        .submit_inbound(valid_other_actor)
         .await
         .expect("different actor with same event should not replay rejection");
     assert!(matches!(accepted, ProductInboundAck::Accepted { .. }));
@@ -5810,7 +5823,7 @@ async fn accepted_message_replay_validates_current_actor_before_submit() {
     );
 
     let first = sample_envelope("accepted-replay-actor-check");
-    let busy = workflow.accept_inbound(first).await.expect("busy ack");
+    let busy = workflow.submit_inbound(first).await.expect("busy ack");
     assert!(matches!(busy, ProductInboundAck::RejectedBusy { .. }));
 
     let unpaired_retry = sample_envelope_with_context(
@@ -5825,7 +5838,7 @@ async fn accepted_message_replay_validates_current_actor_before_submit() {
         ),
     );
     let err = workflow
-        .accept_inbound(unpaired_retry)
+        .submit_inbound(unpaired_retry)
         .await
         .expect_err("unpaired retry must not replay accepted message");
     assert!(matches!(
@@ -5872,7 +5885,7 @@ async fn concrete_product_workflow_replays_binding_access_denied_rejection() {
         Arc::new(binding),
     );
     workflow
-        .accept_inbound(sample_envelope("direct-owner"))
+        .submit_inbound(sample_envelope("direct-owner"))
         .await
         .expect("owner accepted");
     let direct_thread = coordinator.submissions()[0].scope.thread_id.clone();
@@ -5910,7 +5923,7 @@ async fn concrete_product_workflow_replays_binding_access_denied_rejection() {
     );
 
     let err = workflow
-        .accept_inbound(denied.clone())
+        .submit_inbound(denied.clone())
         .await
         .expect_err("direct participant rejected");
     assert!(matches!(
@@ -5923,7 +5936,7 @@ async fn concrete_product_workflow_replays_binding_access_denied_rejection() {
         }
     ));
     let duplicate = workflow
-        .accept_inbound(denied)
+        .submit_inbound(denied)
         .await
         .expect("terminal rejection replays");
     assert!(matches!(duplicate, ProductInboundAck::Duplicate { .. }));
@@ -6450,7 +6463,7 @@ async fn duplicate_envelope_replays_prior_outcome() {
     // First submission.
     let envelope = sample_envelope("dup1");
     let first_ack = workflow
-        .accept_inbound(envelope.clone())
+        .submit_inbound(envelope.clone())
         .await
         .expect("first accept");
     assert!(matches!(first_ack, ProductInboundAck::Accepted { .. }));
@@ -6458,7 +6471,7 @@ async fn duplicate_envelope_replays_prior_outcome() {
 
     // Second submission of same envelope.
     let second_ack = workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect("second accept");
     assert!(matches!(second_ack, ProductInboundAck::Duplicate { .. }));
@@ -6471,7 +6484,7 @@ async fn settled_user_message_records_actual_submitted_run_id() {
     let (workflow, _inbound, ledger) = build_workflow();
     let envelope = sample_envelope("run-id");
 
-    let ack = workflow.accept_inbound(envelope).await.expect("accept");
+    let ack = workflow.submit_inbound(envelope).await.expect("accept");
     let ProductInboundAck::Accepted {
         submitted_run_id, ..
     } = ack
@@ -6497,7 +6510,7 @@ async fn retryable_dispatch_failure_releases_fingerprint_for_recovery() {
 
     let envelope = sample_envelope("transient-released");
     let first_err = workflow
-        .accept_inbound(envelope.clone())
+        .submit_inbound(envelope.clone())
         .await
         .expect_err("first attempt should be retryable");
     assert!(first_err.is_retryable());
@@ -6505,7 +6518,7 @@ async fn retryable_dispatch_failure_releases_fingerprint_for_recovery() {
     assert_eq!(ledger.in_flight_count(), 0);
 
     let second_err = workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect_err("released fingerprint should retry dispatch");
     assert!(second_err.is_retryable());
@@ -6526,7 +6539,7 @@ async fn rejected_busy_is_settled_and_duplicate_on_transport_retry() {
 
     let envelope = sample_envelope("busy-retry");
     let first = workflow
-        .accept_inbound(envelope.clone())
+        .submit_inbound(envelope.clone())
         .await
         .expect("busy ack");
     assert!(matches!(first, ProductInboundAck::RejectedBusy { .. }));
@@ -6534,7 +6547,7 @@ async fn rejected_busy_is_settled_and_duplicate_on_transport_retry() {
     assert_eq!(ledger.in_flight_count(), 0);
 
     let second = workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect("transport retry of settled RejectedBusy");
     assert!(matches!(
@@ -6590,14 +6603,14 @@ async fn permanent_turn_submission_failure_settles_terminal_rejection() {
 
     let envelope = sample_envelope("terminal-turn-error");
     let err = workflow
-        .accept_inbound(envelope.clone())
+        .submit_inbound(envelope.clone())
         .await
         .expect_err("unauthorized turn rejection should surface error");
     assert!(!err.is_retryable());
     assert_eq!(ledger.settled_count(), 1);
 
     let replay = workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect("terminal rejection should replay duplicate ack");
     let ProductInboundAck::Duplicate { prior } = replay else {
@@ -6623,7 +6636,7 @@ async fn retryable_turn_submission_failure_releases_for_retry() {
 
     let envelope = sample_envelope("retryable-turn-error");
     let first = workflow
-        .accept_inbound(envelope.clone())
+        .submit_inbound(envelope.clone())
         .await
         .expect_err("unavailable turn rejection should surface retryable error");
     assert!(first.is_retryable());
@@ -6631,7 +6644,7 @@ async fn retryable_turn_submission_failure_releases_for_retry() {
     assert_eq!(ledger.in_flight_count(), 0);
 
     let second = workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect_err("released retryable turn rejection should dispatch again");
     assert!(second.is_retryable());
@@ -6647,7 +6660,7 @@ async fn settle_failure_does_not_return_success_ack() {
 
     let envelope = sample_envelope("settle-fail");
     let err = workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect_err("settle failure should fail request");
     assert!(err.is_retryable());
@@ -6684,14 +6697,14 @@ async fn unsupported_action_is_settled_as_terminal_rejection() {
         ProductInboundEnvelope::from_trusted_parse(context, parsed).expect("envelope");
 
     let err = workflow
-        .accept_inbound(unsupported.clone())
+        .submit_inbound(unsupported.clone())
         .await
         .expect_err("unsupported should error");
     assert!(!err.is_retryable());
     assert_eq!(ledger.settled_count(), 1);
 
     let replay = workflow
-        .accept_inbound(unsupported)
+        .submit_inbound(unsupported)
         .await
         .expect("duplicate replay");
     assert!(matches!(replay, ProductInboundAck::Duplicate { .. }));
@@ -6706,7 +6719,7 @@ async fn ledger_transient_failure_surfaces_retryable_error() {
 
     let envelope = sample_envelope("fail1");
     let err = workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect_err("should fail");
     assert!(err.is_retryable());
@@ -6727,7 +6740,7 @@ async fn rejected_busy_with_no_active_run_id_is_settled_and_duplicate_on_transpo
     let envelope = sample_envelope("busy-no-run");
 
     let first = workflow
-        .accept_inbound(envelope.clone())
+        .submit_inbound(envelope.clone())
         .await
         .expect("first busy ack");
     assert!(
@@ -6750,7 +6763,7 @@ async fn rejected_busy_with_no_active_run_id_is_settled_and_duplicate_on_transpo
 
     // Transport retry — same envelope — must return Duplicate without re-invoking inbound.
     let second = workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect("transport retry after settled RejectedBusy(None)");
     assert!(

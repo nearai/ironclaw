@@ -8,21 +8,21 @@ import {
   notifyChannelConnected,
   rememberChannelConnectionWaiter,
   subscribeChannelConnected,
-} from "../../../lib/channel-connection-events.js";
+} from "../../../lib/channel-connection-events";
 import {
   completionMatchesFlow,
   failureMatchesFlow,
   openAuthPopup,
   readLatestProductAuthOAuthCompletion,
   subscribeProductAuthOAuthCompletion,
-} from "../../../lib/product-auth-oauth-events.js";
-import { queryClient } from "../../../lib/query-client.js";
+} from "../../../lib/product-auth-oauth-events";
+import { queryClient } from "../../../lib/query-client";
 import {
   fetchExtensionSetup,
   fetchExtensions,
   startExtensionOauth,
-} from "../../extensions/lib/extensions-api.js";
-import { redeemPairingCode } from "../../extensions/lib/pairing-api.js";
+} from "../../extensions/lib/extensions-api";
+import { redeemPairingCode } from "../../extensions/lib/pairing-api";
 
 const DISMISSED_ONBOARDING_STORAGE_PREFIX =
   "ironclaw.chat.dismissedOnboarding.v1:";

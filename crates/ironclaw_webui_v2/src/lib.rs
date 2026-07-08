@@ -58,9 +58,6 @@ mod sse_capacity;
 #[cfg(feature = "webui-v2-beta")]
 pub mod static_assets;
 
-#[allow(deprecated)]
-#[cfg(feature = "webui-v2-beta")]
-pub use descriptors::is_webui_v2_llm_config_route_id;
 #[cfg(feature = "webui-v2-beta")]
 pub use descriptors::{
     WEBUI_V2_ROUTE_ACTIVATE_EXTENSION, WEBUI_V2_ROUTE_ADD_PROJECT_MEMBER,

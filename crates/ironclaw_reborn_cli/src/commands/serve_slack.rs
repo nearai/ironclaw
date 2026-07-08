@@ -137,7 +137,6 @@ mod tests {
             Some("project")
         );
         assert_eq!(resolved.operator_user_id.as_str(), "web-user");
-        assert!(resolved.legacy_setup.is_none());
     }
 
     #[cfg(feature = "slack-v2-host-beta")]

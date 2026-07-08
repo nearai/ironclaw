@@ -961,7 +961,7 @@ impl RebornServicesApi for StubServices {
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
         Ok(RebornSetupExtensionResponse {
             package_ref,
-            phase: LifecyclePhase::UnsupportedOrLegacy,
+            phase: LifecyclePhase::Unsupported,
             blockers: Vec::new(),
             payload: None,
             secrets: Vec::new(),
@@ -1964,7 +1964,7 @@ async fn setup_extension_returns_lifecycle_projection_via_facade() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_body_string(response).await;
     assert!(
-        body.contains("\"phase\":\"unsupported_or_legacy\""),
+        body.contains("\"phase\":\"unsupported\""),
         "setup_extension must surface lifecycle phase, got: {body}",
     );
     assert!(

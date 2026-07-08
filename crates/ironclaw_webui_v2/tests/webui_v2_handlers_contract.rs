@@ -1283,7 +1283,7 @@ impl RebornServicesApi for StubServices {
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
         Ok(RebornSetupExtensionResponse {
             package_ref,
-            phase: LifecyclePhase::UnsupportedOrLegacy,
+            phase: LifecyclePhase::Unsupported,
             blockers: Vec::new(),
             payload: None,
             secrets: Vec::new(),
@@ -4188,7 +4188,7 @@ async fn get_extension_setup_dispatches_package_ref_to_facade() {
     let body = read_json(response).await;
     assert_eq!(body["package_ref"]["id"], "telegram");
     assert_eq!(body["package_ref"]["kind"], "extension");
-    assert_eq!(body["phase"], "unsupported_or_legacy");
+    assert_eq!(body["phase"], "unsupported");
 }
 
 // The path segment must become a lifecycle package ref at the
@@ -4218,7 +4218,7 @@ async fn setup_extension_dispatches_package_ref_to_facade() {
         "facade must echo the package id from the path",
     );
     assert_eq!(body["package_ref"]["kind"], "extension");
-    assert_eq!(body["phase"], "unsupported_or_legacy");
+    assert_eq!(body["phase"], "unsupported");
     assert!(
         body.get("status").is_none(),
         "setup_extension must not expose legacy status aliases: {body}"

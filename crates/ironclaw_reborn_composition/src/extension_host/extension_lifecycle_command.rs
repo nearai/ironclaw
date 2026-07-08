@@ -169,7 +169,7 @@ fn phase_label(phase: LifecyclePhase) -> &'static str {
         LifecyclePhase::Failed => "failed",
         LifecyclePhase::Removing => "removing",
         LifecyclePhase::Removed => "removed",
-        LifecyclePhase::UnsupportedOrLegacy => "unsupported_or_legacy",
+        LifecyclePhase::Unsupported => "unsupported",
     }
 }
 

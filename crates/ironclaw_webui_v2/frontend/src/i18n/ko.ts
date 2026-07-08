@@ -212,7 +212,7 @@ registerPack("ko", {
   // Extensions tabs
   "extensions.installed": "설치됨",
   "extensions.channels": "채널",
-  "extensions.mcp": "MCP 서버",
+  "extensions.tools": "Tools",
   "extensions.registry": "레지스트리",
 
   // Settings tabs
@@ -1191,7 +1191,7 @@ registerPack("ko", {
   "extensions.reconfigure": "재구성",
   "extensions.configureName": "{name} 구성",
   "extensions.allInstalled": "설치된 모든 확장 프로그램",
-  "mcp.installed": "설치된 MCP 서버",
+  "tools.installed": "Installed tools",
   "extensions.oneCapability": "1개 기능",
   "extensions.pluralCapabilities": "{count} 기능",
   "extensions.oneKeyword": "1개 키워드",
@@ -1239,8 +1239,8 @@ registerPack("ko", {
   "extensions.reconnect": "다시 연결",
   "extensions.emptyInstalledTitle": "설치된 확장 프로그램 없음",
   "extensions.emptyInstalledDesc": "WASM 도구, 채널 및 MCP 서버를 검색하고 설치하려면 레지스트리 탭을 탐색하세요.",
-  "extensions.emptyMcpTitle": "MCP 서버 없음",
-  "extensions.emptyMcpDesc": "MCP 서버는 모델 컨텍스트 프로토콜을 통해 추가 도구 기능으로 에이전트를 확장합니다. 레지스트리에서 설치하십시오.",
+  "extensions.emptyToolsTitle": "No tool extensions yet",
+  "extensions.emptyToolsDesc": "Install an extension with tool capabilities from the registry to see it here.",
   "common.dismiss": "닫기",
   "common.pin": "고정",
   "common.unpin": "고정 해제",
@@ -1348,7 +1348,7 @@ registerPack("ko", {
   "pairing.resumeFailed": "{name}이 연결되었지만 이 채팅을 계속할 수 없습니다. 계속하려면 페이지를 새로고침하세요.",
   "extensions.channelInstalledSetup": "{name}이 설치되었습니다. 아래 설정 패널에서 계정을 연결하세요.",
   "extensions.authUrlHttpsRequired": "인증 URL은 HTTPS를 사용해야 합니다.",
-  "mcp.available": "사용 가능한 MCP 서버",
+  "tools.available": "Available tools",
   "slackSetup.title": "Slack 설정",
   "slackSetup.instructions": "채널을 할당하기 전에 Slack 앱을 구성하세요.",
   "slackSetup.save": "설정 저장",
