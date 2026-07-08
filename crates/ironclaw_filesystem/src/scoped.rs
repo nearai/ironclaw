@@ -536,6 +536,25 @@ where
         result
     }
 
+    /// Delete the single entry at `path` only when its version equals
+    /// `expected_version`. See [`RootFilesystem::delete_if_version`].
+    pub async fn delete_if_version(
+        &self,
+        scope: &ResourceScope,
+        path: &ScopedPath,
+        expected_version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        let started_at = live_latency_started_at();
+        let virtual_path =
+            self.resolve_with_permission(scope, path, FilesystemOperation::Delete)?;
+        let result = self
+            .root
+            .delete_if_version(&virtual_path, expected_version)
+            .await;
+        trace_fs_latency("delete_if_version", path, started_at, &result, None);
+        result
+    }
+
     /// **DEPRECATED — the unified entry plane infers directories from path
     /// prefixes.** New consumer code must not call this.
     pub async fn create_dir_all(
@@ -701,6 +720,12 @@ impl StorageTxn for ScopedStorageTxn {
         self.check(FilesystemOperation::Delete)?;
         self.check_path(path)?;
         self.inner.delete(path).await
+    }
+
+    async fn reserve_sequence(&mut self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        self.check(FilesystemOperation::ReserveSeq)?;
+        self.check_path(path)?;
+        self.inner.reserve_sequence(path).await
     }
 
     async fn commit(self: Box<Self>) -> Result<(), FilesystemError> {

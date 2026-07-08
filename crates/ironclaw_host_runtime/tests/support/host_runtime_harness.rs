@@ -531,13 +531,15 @@ pub(crate) async fn approve_dispatch_for_services(
             approval_request_id,
             LeaseApproval {
                 issued_by: Principal::HostRuntime,
-                allowed_effects: vec![EffectKind::DispatchCapability],
-                mounts: MountView::default(),
-                network: NetworkPolicy::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await
@@ -558,13 +560,15 @@ pub(crate) async fn approve_spawn_for_services(
             approval_request_id,
             LeaseApproval {
                 issued_by: Principal::HostRuntime,
-                allowed_effects: process_sandbox_authority_effects(),
-                mounts: MountView::default(),
-                network: NetworkPolicy::default(),
-                secrets: Vec::new(),
-                resource_ceiling: None,
-                expires_at,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: process_sandbox_authority_effects(),
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await
@@ -733,7 +737,7 @@ impl ScriptExecutor for RecordingScriptExecutor {
         let usage = ResourceUsage::default();
         let receipt = governor.reconcile(reservation.id, usage.clone())?;
         Ok(ScriptExecutionResult {
-            result: ironclaw_scripts::ScriptCapabilityResult {
+            result: CapabilityHostResult {
                 output: request.invocation.input,
                 reservation_id: reservation.id,
                 usage,

@@ -125,13 +125,13 @@ use ironclaw_turns::{
         LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError, LoopCompactionMode,
         LoopCompactionOutcome, LoopCompactionPort, LoopCompactionRequest, LoopContextRequest,
         LoopDriverId, LoopDriverNoteKind, LoopGateKind, LoopHostMilestone, LoopHostMilestoneKind,
-        LoopInlineMessage, LoopInlineMessageRole, LoopInput, LoopInputAckToken, LoopInputCursor,
-        LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant, LoopModelGatewayError,
-        LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopProgressEvent,
-        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopSafeSummary, ModelWorkKind,
-        ModelWorkOutcome, ModelWorkRequest, NoOpBudgetAccountant, NoOpPolicyGuard,
-        ParentLoopOutput, PersonalContextPolicy, PromptMode, SkillVisibility,
-        StageCheckpointPayloadRequest, SystemInferenceTaskId, UserProfileContext,
+        LoopInlineMessage, LoopInlineMessageBody, LoopInlineMessageRole, LoopInput,
+        LoopInputAckToken, LoopInputCursor, LoopInputCursorToken, LoopInputPort,
+        LoopModelBudgetAccountant, LoopModelGatewayError, LoopModelPort, LoopModelRequest,
+        LoopModelRouteSnapshot, LoopProgressEvent, LoopPromptBundleRequest, LoopPromptPort,
+        LoopRunContext, LoopSafeSummary, ModelWorkKind, ModelWorkOutcome, ModelWorkRequest,
+        NoOpBudgetAccountant, NoOpPolicyGuard, ParentLoopOutput, PersonalContextPolicy, PromptMode,
+        SkillVisibility, StageCheckpointPayloadRequest, SystemInferenceTaskId, UserProfileContext,
         VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::{
@@ -231,6 +231,7 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
 
     let model_response = host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: Some(surface.version.clone()),
             model_preference: None,
@@ -345,6 +346,7 @@ async fn text_only_host_factory_sanitizes_gateway_error_summaries() {
 
     let error = host
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
@@ -401,6 +403,7 @@ async fn text_only_host_factory_invokes_model_budget_accountant() {
         .unwrap();
 
     host.stream_model(LoopModelRequest {
+        inline_messages: Vec::new(),
         messages: prompt_bundle.messages,
         surface_version: None,
         model_preference: None,
@@ -1348,7 +1351,7 @@ async fn text_only_model_reply_driver_sanitizes_model_failures_and_skips_transcr
 
     assert!(matches!(
         error,
-        AgentLoopDriverError::Failed { ref reason_kind } if reason_kind == "model_error"
+        AgentLoopDriverError::Failed { ref reason_kind, detail: _ } if reason_kind == "model_error"
     ));
     assert_driver_error_hides_raw_payloads(&error);
     assert_no_assistant_message(&fixture).await;
@@ -1374,7 +1377,7 @@ async fn text_only_model_reply_driver_rejects_capability_calls_without_dispatchi
 
     assert!(matches!(
         error,
-        AgentLoopDriverError::Failed { ref reason_kind } if reason_kind == "invalid_model_output"
+        AgentLoopDriverError::Failed { ref reason_kind, detail: _ } if reason_kind == "invalid_model_output"
     ));
     assert_driver_error_hides_raw_payloads(&error);
     assert_no_assistant_message(&fixture).await;
@@ -1442,6 +1445,7 @@ async fn text_only_host_factory_includes_safety_context_in_prompt_bundle() {
         .unwrap();
     host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
@@ -1493,6 +1497,7 @@ async fn text_only_host_factory_uses_explicit_local_noop_safety_context() {
         .unwrap();
     host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
@@ -1834,6 +1839,7 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
             thread_service.clone(),
             turn_store.clone(),
             loop_checkpoint_store.clone(),
+            Arc::new(BoundedSubagentGateResolutionStore::new()),
         ));
     let applier = Arc::new(LoopExitApplier::new(transition_port, evidence));
     let gateway = Arc::new(RecordingGateway::reply("model says hi"));
@@ -2137,7 +2143,7 @@ async fn turn_runner_worker_full_reborn_fails_when_checkpoint_state_disk_is_full
 
     assert_eq!(
         failed.failure.expect("failure").category(),
-        "driver_unavailable"
+        "host_stage_unavailable_checkpoint"
     );
     assert!(
         fixture.gateway.requests().is_empty(),
@@ -2204,7 +2210,7 @@ async fn turn_runner_worker_full_reborn_fails_cleanly_when_model_provider_is_off
 
     assert_eq!(
         failed.failure.as_ref().expect("failure").category(),
-        "model_error"
+        "model_unavailable"
     );
     assert_driver_public_outputs_hide_raw_payloads(&failed);
     let model_requests = fixture.gateway.requests();
@@ -2819,6 +2825,7 @@ async fn text_only_host_e2e_keeps_persisted_model_route_through_full_flow() {
         .unwrap();
     let model_response = host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
@@ -3313,10 +3320,12 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
     let surface_resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
         CapabilityAllowSet::allowlist([allowed_id.clone()]),
     ));
+    let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
     let evidence = Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
         fixture.thread_service.clone(),
         turn_store.clone(),
         turn_store.clone(),
+        subagent_gate_store.clone(),
     ));
     let event_sink = Arc::new(InMemoryTurnEventSink::default());
     let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
@@ -3332,7 +3341,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
         capability_surface_resolver: surface_resolver,
         capability_result_writer: io.clone(),
         subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
-        subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
+        subagent_gate_store,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
         subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
@@ -3466,10 +3475,12 @@ async fn pre_minted_scheduler_wake_wiring_drives_scheduler_on_coordinator_submit
     let surface_resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
         CapabilityAllowSet::allowlist([allowed_id.clone()]),
     ));
+    let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
     let evidence = Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
         fixture.thread_service.clone(),
         turn_store.clone(),
         turn_store.clone(),
+        subagent_gate_store.clone(),
     ));
     // A 60-second poll interval ensures the scheduler cannot advance the run
     // via fallback polling within the 5-second assertion window. Only a wake
@@ -3487,7 +3498,7 @@ async fn pre_minted_scheduler_wake_wiring_drives_scheduler_on_coordinator_submit
         capability_surface_resolver: surface_resolver,
         capability_result_writer: io.clone(),
         subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
-        subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
+        subagent_gate_store,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
         subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
@@ -3632,10 +3643,12 @@ async fn build_runtime_host_with_optional_hooks(
     let surface_resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
         CapabilityAllowSet::allowlist([allowed_id.clone()]),
     ));
+    let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
     let evidence = Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
         fixture.thread_service.clone(),
         turn_store.clone(),
         turn_store.clone(),
+        subagent_gate_store.clone(),
     ));
     let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
@@ -3650,7 +3663,7 @@ async fn build_runtime_host_with_optional_hooks(
         capability_surface_resolver: surface_resolver,
         capability_result_writer: io.clone(),
         subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
-        subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
+        subagent_gate_store,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
         subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
@@ -3983,6 +3996,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
         ),
     );
 
+    let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
         turn_state: turn_store.clone(),
@@ -3998,7 +4012,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
         )),
         capability_result_writer: io.clone(),
         subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
-        subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
+        subagent_gate_store: subagent_gate_store.clone(),
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
         subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
@@ -4006,6 +4020,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
             fixture.thread_service.clone(),
             turn_state_store_dyn(&turn_store),
             turn_store,
+            subagent_gate_store,
         )),
         config: DefaultPlannedRuntimeConfig::default(),
         model_route_resolver: Some(model_route_resolver),
@@ -4055,6 +4070,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
         .unwrap();
     host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
@@ -4099,6 +4115,7 @@ async fn product_live_parts_for_gate_test(
             ModelRoute::new("nearai", "qwen3-coder").unwrap(),
         ),
     );
+    let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
     DefaultPlannedRuntimeParts {
         attachment_read_port: None,
         turn_state: turn_store.clone(),
@@ -4114,7 +4131,7 @@ async fn product_live_parts_for_gate_test(
         )),
         capability_result_writer: io.clone(),
         subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
-        subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
+        subagent_gate_store: subagent_gate_store.clone(),
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
         subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
@@ -4122,6 +4139,7 @@ async fn product_live_parts_for_gate_test(
             fixture.thread_service.clone(),
             turn_state_store_dyn(&turn_store),
             turn_store,
+            subagent_gate_store,
         )),
         config: DefaultPlannedRuntimeConfig::default(),
         model_route_resolver: Some(model_route_resolver),
@@ -4208,6 +4226,7 @@ async fn text_only_host_factory_threads_model_route_snapshot_to_gateway() {
 
     host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: host_dyn
                 .build_prompt_bundle(LoopPromptBundleRequest {
                     mode: PromptMode::TextOnly,
@@ -4485,6 +4504,7 @@ async fn text_only_host_e2e_flow_persists_checkpoint_mapping_in_turn_state_store
         .unwrap();
     let model_response = host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: Some(surface_version.clone()),
             model_preference: None,
@@ -4649,7 +4669,7 @@ async fn text_only_host_prompt_materializes_inline_messages() {
             capability_view: None,
             inline_messages: vec![LoopInlineMessage {
                 role: LoopInlineMessageRole::User,
-                safe_body: LoopSafeSummary::new("safe inline nudge").unwrap(),
+                safe_body: LoopInlineMessageBody::new("safe inline nudge").unwrap(),
             }],
         })
         .await
@@ -4813,6 +4833,7 @@ async fn text_only_host_factory_threads_identity_source_to_prompt_and_model() {
 
     host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: prompt_bundle.messages,
             surface_version: Some(surface.version),
             model_preference: None,
@@ -4904,6 +4925,7 @@ async fn text_only_host_factory_threads_user_profile_source_to_runtime_context()
     // only observable through the rendered model content.
     host_dyn
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: bundle.messages,
             surface_version: Some(surface_version),
             model_preference: None,
@@ -5605,6 +5627,7 @@ async fn text_only_host_prompt_bundle_includes_surface_metadata_and_still_stream
     assert_eq!(prompt_bundle.messages.len(), 4);
 
     host.stream_model(LoopModelRequest {
+        inline_messages: Vec::new(),
         messages: prompt_bundle.messages,
         surface_version: Some(surface.version),
         model_preference: None,
@@ -8048,6 +8071,7 @@ impl AgentLoopDriver for ScriptCapabilityFinalReplyDriver {
         let CapabilityOutcome::Completed(completed) = capability else {
             return Err(AgentLoopDriverError::Failed {
                 reason_kind: "script_capability_did_not_complete".to_string(),
+                detail: None,
             });
         };
         let prompt_bundle = host
@@ -8064,6 +8088,7 @@ impl AgentLoopDriver for ScriptCapabilityFinalReplyDriver {
             .map_err(driver_host_error)?;
         let model_response = host
             .stream_model(LoopModelRequest {
+                inline_messages: Vec::new(),
                 messages: prompt_bundle.messages,
                 surface_version: Some(surface.version),
                 model_preference: None,
@@ -8074,6 +8099,7 @@ impl AgentLoopDriver for ScriptCapabilityFinalReplyDriver {
         let ParentLoopOutput::AssistantReply(reply) = model_response.output else {
             return Err(AgentLoopDriverError::Failed {
                 reason_kind: "unexpected_model_output".to_string(),
+                detail: None,
             });
         };
         let reply_ref = host
@@ -8188,6 +8214,7 @@ impl AgentLoopDriver for TextOnlyFinalReplyDriver {
             .map_err(driver_host_error)?;
         let model_response = host
             .stream_model(LoopModelRequest {
+                inline_messages: Vec::new(),
                 messages: prompt_bundle.messages,
                 surface_version: Some(surface.version),
                 model_preference: None,
@@ -8198,6 +8225,7 @@ impl AgentLoopDriver for TextOnlyFinalReplyDriver {
         let ParentLoopOutput::AssistantReply(reply) = model_response.output else {
             return Err(AgentLoopDriverError::Failed {
                 reason_kind: "unexpected_model_output".to_string(),
+                detail: None,
             });
         };
         let reply_ref = host
@@ -8237,6 +8265,7 @@ fn driver_host_error(
 ) -> AgentLoopDriverError {
     AgentLoopDriverError::Failed {
         reason_kind: format!("{:?}", error.kind),
+        detail: error.detail,
     }
 }
 
@@ -8245,11 +8274,13 @@ fn loop_exit_applier_for_fixture(
     turn_store: Arc<InMemoryTurnStateStore>,
 ) -> Arc<LoopExitApplier> {
     let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
+    let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
     let evidence = Arc::new(
         ThreadCheckpointLoopExitEvidencePort::new(
             Arc::clone(&fixture.thread_service),
             turn_store.clone(),
             loop_checkpoint_store,
+            subagent_gate_store,
         )
         .with_checkpoint_state_store(fixture.checkpoint_state_store.clone()),
     );
@@ -8301,6 +8332,16 @@ impl TurnStateStore for StaticTurnStateStore {
         _request: ResumeTurnRequest,
     ) -> Result<ironclaw_turns::ResumeTurnResponse, TurnError> {
         panic!("resume_turn should not be called by static test turn state store")
+    }
+
+    async fn retry_turn(
+        &self,
+        request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        // WS-3 implements this.
+        Err(TurnError::RunNotRetryable {
+            run_id: request.run_id,
+        })
     }
 
     async fn request_cancel(

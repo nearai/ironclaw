@@ -129,6 +129,7 @@ Use `--scenario` for a single workload.
 | `reserve-release` | Resource governor reserve/release pressure. |
 | `reserve-reconcile` | Resource governor reserve/reconcile/release pressure. |
 | `chat-turn` | One realistic user turn with thread writes, turn state, assistant write, and context load. |
+| `turn-lifecycle-churn` | Turn-state-only submit/claim/complete churn for terminal-run cache and RSS checks. |
 | `mixed-user-session` | Realistic user turn with configurable synthetic or provider-backed model latency. |
 | `context-growth` | Sequentially grows history, then loads context to expose context read amplification. |
 | `tool-session` | Realistic turn with synthetic tool calls, tool previews, tool results, and optional tool wait/failure paths. |

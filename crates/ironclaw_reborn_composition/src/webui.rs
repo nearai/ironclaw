@@ -23,17 +23,20 @@ use ironclaw_triggers::TriggerRepository;
 use crate::{
     RebornAutomationProductFacade, RebornBuildError, RebornProductAuthServices, RebornReadiness,
     RebornReadinessDiagnostic, RebornReadinessDiagnosticStatus, RebornRuntime,
-    lifecycle::{
+    extension_host::lifecycle::{
         RebornLocalLifecycleFacade, RebornLocalSkillManagementError, RebornLocalSkillManagementPort,
     },
-    outbound_delivery_capability_surface::{
-        outbound_delivery_synthetic_provider, outbound_delivery_target_set_operator_tool_info,
-    },
-    outbound_preferences::{
+    extension_host::webui_extension_credentials::ProductAuthExtensionCredentialSetup,
+    observability::RebornLocalServiceLifecycle,
+    outbound::{
         OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistry,
-        RebornOutboundPreferencesFacade,
+        RebornOutboundPreferencesFacade, outbound_delivery_synthetic_provider,
+        outbound_delivery_target_set_operator_tool_info,
     },
-    webui_extension_credentials::ProductAuthExtensionCredentialSetup,
+    support::fs::{
+        MountScopedFilesystemReader, ProjectScopedAttachmentLander, ProjectScopedAttachmentReader,
+        ProjectScopedFilesystemReader,
+    },
 };
 
 static SKILL_CONTENT_SAFETY: std::sync::LazyLock<ironclaw_safety::Sanitizer> =
@@ -135,33 +138,47 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     )
     .with_approval_interactions(runtime.webui_approval_interaction_service())
     .with_auth_interactions(runtime.webui_auth_interaction_service());
+    // Admin user-management surface: wired only when the identity directory,
+    // the admin secret provisioner, and a token minter are all available.
+    // Otherwise the fail-closed RejectingAdminUserService default stands and
+    // admin routes report the service unavailable.
+    #[cfg(feature = "webui-v2-beta")]
+    if let (Some(directory), Some(provisioner), Some(minter)) = (
+        runtime.reborn_user_directory(),
+        runtime.reborn_admin_secret_provisioner(),
+        runtime.reborn_admin_token_minter(),
+    ) {
+        api = api.with_admin_user_service(Arc::new(
+            crate::admin_user_directory::RebornAdminUserDirectory::new(
+                directory,
+                provisioner,
+                minter,
+            ),
+        ));
+    }
     if let Some(workspace_filesystem) = runtime.webui_workspace_filesystem() {
         api = api
-            .with_inbound_attachments(Arc::new(
-                crate::attachment_landing::ProjectScopedAttachmentLander::new(Arc::clone(
-                    &workspace_filesystem,
-                )),
-            ))
+            .with_inbound_attachments(Arc::new(ProjectScopedAttachmentLander::new(Arc::clone(
+                &workspace_filesystem,
+            ))))
             // Read-only project filesystem backing directory listing and file
             // download chips, over the same workspace mount.
-            .with_project_filesystem_reader(Arc::new(
-                crate::project_filesystem_reader::ProjectScopedFilesystemReader::new(Arc::clone(
-                    &workspace_filesystem,
-                )),
-            ))
+            .with_project_filesystem_reader(Arc::new(ProjectScopedFilesystemReader::new(
+                Arc::clone(&workspace_filesystem),
+            )))
             // Read counterpart: serves landed attachment bytes back to the
             // browser (image thumbnails) through the same workspace mount.
-            .with_inbound_attachment_reader(Arc::new(
-                crate::attachment_landing::ProjectScopedAttachmentReader::new(workspace_filesystem),
-            ));
+            .with_inbound_attachment_reader(Arc::new(ProjectScopedAttachmentReader::new(
+                workspace_filesystem,
+            )));
     }
     // Standalone read-only filesystem viewer: browses memory + workspace over a
     // dedicated read-only multi-mount view (not the read-write workspace handle
     // above), so navigation can never become a write path.
     if let Some(browse_filesystem) = runtime.webui_browse_filesystem() {
-        api = api.with_filesystem_browser(Arc::new(
-            crate::mount_filesystem_reader::MountScopedFilesystemReader::new(browse_filesystem),
-        ));
+        api = api.with_filesystem_browser(Arc::new(MountScopedFilesystemReader::new(
+            browse_filesystem,
+        )));
     }
     if let Some(skill_activation_source) = runtime.webui_skill_activation_source() {
         let activation_recorder = Arc::clone(&skill_activation_source);
@@ -329,7 +346,7 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         #[cfg(not(feature = "root-llm-provider"))]
         let webui_boot_config = None;
         api = api.with_operator_service_lifecycle_service(Arc::new(
-            crate::operator_service_lifecycle::RebornLocalServiceLifecycle::new_for_operator_with_boot_config(
+            RebornLocalServiceLifecycle::new_for_operator_with_boot_config(
                 runtime.webui_tenant_id().clone(),
                 local_runtime.owner_user_id.clone(),
                 webui_boot_config,
@@ -980,7 +997,7 @@ mod tests {
         assert!(
             catalog.list_operator_tools().iter().any(|tool| {
                 tool.capability_id.as_str()
-                    == crate::outbound_delivery_capability_surface::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID
+                    == crate::outbound::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID
                     && tool.provider == synthetic_provider
             }),
             "synthetic outbound delivery capability must use the Settings > Tools provider key"

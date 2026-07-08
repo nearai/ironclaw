@@ -488,6 +488,53 @@ async fn filesystem_approval_request_store_discards_pending_request() {
     assert_eq!(store.records_for_scope(&scope).await.unwrap(), Vec::new());
 }
 
+/// Regression (#5467): discard must tombstone, not delete, so id reuse fails
+/// closed. Also covers the resolution path: `approve()`/`deny()` on an
+/// already-discarded id must reject with `ApprovalNotPending`, not resurrect
+/// the tombstone. Sibling of `filesystem_discard_tombstone_prevents_request_id_reuse`.
+#[tokio::test]
+async fn in_memory_discard_tombstone_prevents_request_id_reuse() {
+    let store = InMemoryApprovalRequestStore::new();
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let approval = approval_request(invocation_id);
+    let request_id = approval.id;
+
+    store.save_pending(scope.clone(), approval).await.unwrap();
+    store.discard_pending(&scope, request_id).await.unwrap();
+
+    let approve_err = store.approve(&scope, request_id).await.unwrap_err();
+    assert!(
+        matches!(
+            approve_err,
+            RunStateError::ApprovalNotPending { request_id: id, status }
+                if id == request_id && status == ApprovalStatus::Discarded
+        ),
+        "expected ApprovalNotPending(Discarded) but got {approve_err:?}",
+    );
+    let deny_err = store.deny(&scope, request_id).await.unwrap_err();
+    assert!(
+        matches!(
+            deny_err,
+            RunStateError::ApprovalNotPending { request_id: id, status }
+                if id == request_id && status == ApprovalStatus::Discarded
+        ),
+        "expected ApprovalNotPending(Discarded) but got {deny_err:?}",
+    );
+
+    let mut second = approval_request(invocation_id);
+    second.id = request_id;
+
+    let err = store.save_pending(scope, second).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RunStateError::ApprovalRequestAlreadyExists { request_id: id } if id == request_id
+        ),
+        "expected ApprovalRequestAlreadyExists but got {err:?}",
+    );
+}
+
 /// Regression test (PR #5234 review): `discard_pending` writes a `Discarded`
 /// tombstone rather than deleting the record, specifically to block a later
 /// `save_pending` from reusing the same request id. The existing discard
@@ -495,7 +542,9 @@ async fn filesystem_approval_request_store_discards_pending_request() {
 /// record — that would pass equally well if `discard_pending` deleted the
 /// file outright. This test pins the actual reuse-blocking invariant: a
 /// `save_pending` for an id that was previously discarded must fail with
-/// `ApprovalRequestAlreadyExists`, not silently succeed.
+/// `ApprovalRequestAlreadyExists`, not silently succeed. It also covers the
+/// resolution path: `deny()`/`approve()` on the discarded id must reject with
+/// `ApprovalNotPending`, not clobber the tombstone.
 #[tokio::test]
 async fn filesystem_discard_tombstone_prevents_request_id_reuse() {
     let fs = Arc::new(engine_filesystem());
@@ -507,6 +556,25 @@ async fn filesystem_discard_tombstone_prevents_request_id_reuse() {
 
     store.save_pending(scope.clone(), approval).await.unwrap();
     store.discard_pending(&scope, request_id).await.unwrap();
+
+    let deny_err = store.deny(&scope, request_id).await.unwrap_err();
+    assert!(
+        matches!(
+            deny_err,
+            RunStateError::ApprovalNotPending { request_id: id, status }
+                if id == request_id && status == ApprovalStatus::Discarded
+        ),
+        "expected ApprovalNotPending(Discarded) but got {deny_err:?}",
+    );
+    let approve_err = store.approve(&scope, request_id).await.unwrap_err();
+    assert!(
+        matches!(
+            approve_err,
+            RunStateError::ApprovalNotPending { request_id: id, status }
+                if id == request_id && status == ApprovalStatus::Discarded
+        ),
+        "expected ApprovalNotPending(Discarded) but got {approve_err:?}",
+    );
 
     let mut second = approval_request(invocation_id);
     second.id = request_id;

@@ -1,15 +1,15 @@
 use std::collections::{HashMap, HashSet};
 
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::{CapabilityId, DispatchInputIssueCode};
 use ironclaw_turns::{
     LoopResultRef,
     run_profile::{
         AgentLoopDriverHost, AppendCapabilityResultRef, CapabilityApprovalResume,
         CapabilityAuthResume, CapabilityCallCandidate, CapabilityDescriptorView, CapabilityFailure,
         CapabilityFailureDetail, CapabilityFailureKind, CapabilityInputIssue,
-        CapabilityInputIssueCode, CapabilityInputRepair, CapabilityInvocation,
-        CapabilityRecoveryHint, CapabilityResultMessage, CapabilitySurfaceVersion,
-        ModelVisibleToolObservation, ObservationTrust, ProviderToolCall, ProviderToolCallReference,
+        CapabilityInputRepair, CapabilityInvocation, CapabilityRecoveryHint,
+        CapabilityResultMessage, CapabilitySurfaceVersion, ModelVisibleToolObservation,
+        ObservationTrust, ProviderToolCall, ProviderToolCallReference,
         RegisterProviderToolCallRequest, SameCallRetryConstraint, ToolObservationDetail,
         ToolObservationStatus, ToolRecoveryObservation, VisibleCapabilitySurface,
     },
@@ -336,19 +336,42 @@ pub(super) fn model_visible_capability_failure_observation(
         Some(CapabilityFailureDetail::InvalidInput { issues }) => {
             invalid_input_observation(bounded_input_issues(issues))
         }
-        _ => ModelVisibleToolObservation {
-            schema_version:
-                ironclaw_turns::run_profile::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
-            status: ToolObservationStatus::Error,
-            summary: model_visible_failure_summary(&failure.error_kind),
-            detail: ToolObservationDetail::GenericFailure {
-                failure_kind: failure.error_kind.clone(),
-            },
-            artifacts: Vec::new(),
-            recovery: Some(generic_failure_recovery(&failure.error_kind)),
-            trust: ObservationTrust::UntrustedToolOutput,
-        },
+        detail => {
+            let diagnostic = match detail {
+                Some(CapabilityFailureDetail::Diagnostic { text }) => {
+                    Some(bounded_diagnostic_detail(text))
+                }
+                _ => None,
+            };
+            ModelVisibleToolObservation {
+                schema_version:
+                    ironclaw_turns::run_profile::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+                status: ToolObservationStatus::Error,
+                summary: model_visible_failure_summary(&failure.error_kind),
+                detail: ToolObservationDetail::GenericFailure {
+                    failure_kind: failure.error_kind.clone(),
+                    detail: diagnostic,
+                },
+                artifacts: Vec::new(),
+                recovery: Some(generic_failure_recovery(&failure.error_kind)),
+                trust: ObservationTrust::UntrustedToolOutput,
+            }
+        }
     }
+}
+
+/// Bound a free-text diagnostic to the model-visible detail cap, truncating on
+/// a UTF-8 boundary. The diagnostic is already secret-scrubbed by the producer.
+fn bounded_diagnostic_detail(value: &str) -> String {
+    const MAX: usize = ironclaw_turns::run_profile::MODEL_OBSERVATION_DETAIL_MAX_BYTES;
+    if value.len() <= MAX {
+        return value.to_string();
+    }
+    let mut end = MAX;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string() // safety: `end` reduced to a valid UTF-8 boundary.
 }
 
 fn model_visible_failure_summary(error_kind: &CapabilityFailureKind) -> String {
@@ -440,17 +463,17 @@ fn generic_failure_recovery(error_kind: &CapabilityFailureKind) -> ToolRecoveryO
 
 fn input_issue_repair(issue: &CapabilityInputIssue) -> CapabilityInputRepair {
     match issue.code {
-        CapabilityInputIssueCode::MissingRequired => CapabilityInputRepair::ProvideRequiredField {
+        DispatchInputIssueCode::MissingRequired => CapabilityInputRepair::ProvideRequiredField {
             path: issue.path.clone(),
         },
-        CapabilityInputIssueCode::UnexpectedField => CapabilityInputRepair::RemoveUnexpectedField {
+        DispatchInputIssueCode::UnexpectedField => CapabilityInputRepair::RemoveUnexpectedField {
             path: issue.path.clone(),
         },
-        CapabilityInputIssueCode::TypeMismatch => CapabilityInputRepair::ChangeType {
+        DispatchInputIssueCode::TypeMismatch => CapabilityInputRepair::ChangeType {
             path: issue.path.clone(),
             expected: issue.expected.clone(),
         },
-        CapabilityInputIssueCode::InvalidValue => CapabilityInputRepair::UseAllowedValue {
+        DispatchInputIssueCode::InvalidValue => CapabilityInputRepair::UseAllowedValue {
             path: issue.path.clone(),
         },
     }
@@ -720,6 +743,46 @@ mod tests {
             "without a callable set, an unadvertised tool is not visible"
         );
         assert!(capability_is_visible(&index, &candidate(&advertised)));
+    }
+
+    #[test]
+    fn generic_failure_observation_carries_diagnostic_detail_to_model() {
+        let path = "missing input_schema_ref at /system/extensions/google-calendar/schemas/google-calendar/list_calendars.input.v1.json";
+        let failure = CapabilityFailure {
+            error_kind: CapabilityFailureKind::MissingRuntime,
+            safe_summary: "capability invocation failed".to_string(),
+            detail: Some(CapabilityFailureDetail::Diagnostic {
+                text: path.to_string(),
+            }),
+        };
+
+        let observation = model_visible_capability_failure_observation(&failure);
+        observation
+            .validate()
+            .expect("observation with path-bearing diagnostic must validate");
+
+        let ToolObservationDetail::GenericFailure { detail, .. } = &observation.detail else {
+            panic!("expected a generic failure detail");
+        };
+        assert_eq!(
+            detail.as_deref(),
+            Some(path),
+            "the raw path-bearing cause must reach the model-visible observation"
+        );
+    }
+
+    #[test]
+    fn generic_failure_observation_without_diagnostic_has_no_detail() {
+        let failure = CapabilityFailure {
+            error_kind: CapabilityFailureKind::Backend,
+            safe_summary: "capability invocation failed".to_string(),
+            detail: None,
+        };
+        let observation = model_visible_capability_failure_observation(&failure);
+        let ToolObservationDetail::GenericFailure { detail, .. } = &observation.detail else {
+            panic!("expected a generic failure detail");
+        };
+        assert_eq!(detail.as_deref(), None);
     }
 
     #[test]

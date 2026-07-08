@@ -2,8 +2,9 @@
 //!
 //! This module hosts both filesystem-backed stores this crate exposes:
 //!
-//! - [`FilesystemResourceGovernorStore`] — the single resource-governor
-//!   snapshot at `/resources/snapshot.json`.
+//! - [`FilesystemResourceGovernorStore`] — the resource-governor compaction
+//!   snapshot at `/resources/snapshot.json` (and the legacy transactional
+//!   store used by snapshot-focused contract tests).
 //! - [`FilesystemBudgetGateStore`] — the budget-approval gate snapshot
 //!   at `/resources/budget-gates.json`.
 //!
@@ -72,12 +73,22 @@ const GATES_SNAPSHOT_PATH: &str = "/resources/budget-gates.json";
 /// under [`ResourceScope::system`] rather than a tenant scope —
 /// tenant-scoped resource accounting is a future capability that would
 /// change the [`ResourceGovernorStore`] trait surface.
-#[derive(Clone)]
 pub struct FilesystemResourceGovernorStore<F>
 where
     F: RootFilesystem,
 {
     store: CasSnapshotStore<F>,
+}
+
+impl<F> Clone for FilesystemResourceGovernorStore<F>
+where
+    F: RootFilesystem,
+{
+    fn clone(&self) -> Self {
+        Self {
+            store: self.store.clone(),
+        }
+    }
 }
 
 impl<F> FilesystemResourceGovernorStore<F>
@@ -668,6 +679,44 @@ mod tests {
             BudgetGateStatus::Cancelled { .. }
         ));
         assert!(store2.list_pending(&scope).unwrap().is_empty());
+    }
+
+    #[test]
+    fn approved_gate_with_increased_decimal_limit_reloads() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let scope = gate_scope("tenant-fs", "alice");
+        let scoped = scoped_resources_fs(Arc::clone(&backend), "tenant-fs", "alice");
+        let store = FilesystemBudgetGateStore::new(scoped);
+        let gate = sample_gate();
+        let id = gate.id;
+        let increased_limit = ResourceLimits {
+            max_usd: Some(dec!(1000.00)),
+            ..ResourceLimits::default()
+        };
+
+        store.open(&scope, gate).unwrap();
+        store
+            .resolve(
+                &scope,
+                id,
+                BudgetGateOutcome::Approve {
+                    increased_limit: increased_limit.clone(),
+                    by: UserId::new("alice").unwrap(),
+                },
+                Utc::now(),
+            )
+            .unwrap();
+
+        let scoped2 = scoped_resources_fs(Arc::clone(&backend), "tenant-fs", "alice");
+        let store2 = FilesystemBudgetGateStore::new(scoped2);
+        let reloaded = store2.get(&scope, id).unwrap().unwrap();
+        assert!(matches!(
+            reloaded.status,
+            BudgetGateStatus::Approved {
+                increased_limit: ref reloaded_limit,
+                ..
+            } if reloaded_limit == &increased_limit
+        ));
     }
 
     #[test]

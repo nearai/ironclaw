@@ -18,8 +18,8 @@ use ironclaw_authorization::{
 };
 use ironclaw_capabilities::{CapabilityHost, CapabilitySpawnRequest};
 use ironclaw_event_projections::{
-    AuditProjectionError, AuditProjectionRequest, AuditProjectionService, AuditProjectionStage,
-    EventProjectionService, ProjectionCursor, ProjectionError, ProjectionRequest, ProjectionScope,
+    AuditProjectionError, AuditProjectionRequest, AuditProjectionService, EventProjectionService,
+    ProjectionCursor, ProjectionError, ProjectionRequest, ProjectionScope,
     ReplayAuditProjectionService, ReplayEventProjectionService, RunProjectionStatus,
     TimelineEntryKind,
 };
@@ -2078,7 +2078,7 @@ async fn host_runtime_services_approval_resolution_projects_durable_audit_metada
 
     assert_eq!(snapshot.entries.len(), 1);
     let entry = &snapshot.entries[0];
-    assert_eq!(entry.stage, AuditProjectionStage::ApprovalResolved);
+    assert_eq!(entry.stage, AuditStage::ApprovalResolved);
     assert_eq!(entry.invocation_id, scope.invocation_id);
     assert_eq!(entry.thread_id, scope.thread_id);
     assert_eq!(entry.approval_request_id, Some(gate.approval_request_id));
@@ -3376,16 +3376,31 @@ async fn host_runtime_spawn_process_sandbox_rejects_invalid_plan_before_executor
     let mut request = process_sandbox_runtime_request_for_scope(scope);
     request.input = invalid_process_sandbox_input();
 
-    let error = runtime
+    // A malformed/invalid plan is model-fixable: it must surface as a
+    // recoverable, model-visible tool error (InvalidInput) so the run
+    // continues and the model can correct its arguments — never a terminal
+    // HostRuntimeError that kills the whole run.
+    let outcome = runtime
         .spawn_capability(request)
         .await
-        .expect_err("invalid sandbox plans must fail at the host runtime boundary");
+        .expect("invalid sandbox plans must not be a terminal host runtime error");
 
-    match error {
-        ironclaw_host_runtime::HostRuntimeError::InvalidRequest { reason } => {
-            assert!(reason.contains("SandboxProcessPlan"));
+    match outcome {
+        RuntimeCapabilityOutcome::Failed(failure) => {
+            assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+            assert_eq!(
+                failure.disposition(),
+                ironclaw_host_runtime::CapabilityFailureDisposition::ModelVisibleToolError,
+            );
+            assert!(
+                failure
+                    .message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("SandboxProcessPlan")
+            );
         }
-        other => panic!("expected invalid request, got {other:?}"),
+        other => panic!("expected recoverable InvalidInput failure, got {other:?}"),
     }
     assert!(
         sandbox_executor.requests().is_empty(),
@@ -3659,7 +3674,10 @@ async fn host_runtime_spawn_process_sandbox_resume_invalid_plan_fails_before_exe
     };
     let lease = approve_spawn_for_services(&services, &scope, approval_request_id, None).await;
 
-    let error = runtime
+    // Same recoverable contract on the resume path: a malformed/invalid plan
+    // is model-fixable, so it must surface as a recoverable InvalidInput tool
+    // error rather than a terminal host runtime error.
+    let outcome = runtime
         .resume_spawn_capability(RuntimeCapabilityResumeRequest::new(
             context,
             approval_request_id,
@@ -3669,13 +3687,24 @@ async fn host_runtime_spawn_process_sandbox_resume_invalid_plan_fails_before_exe
             process_sandbox_trust_decision(),
         ))
         .await
-        .expect_err("invalid sandbox resume input must fail at the host runtime boundary");
+        .expect("invalid sandbox resume input must not be a terminal host runtime error");
 
-    match error {
-        ironclaw_host_runtime::HostRuntimeError::InvalidRequest { reason } => {
-            assert!(reason.contains("SandboxProcessPlan"));
+    match outcome {
+        RuntimeCapabilityOutcome::Failed(failure) => {
+            assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+            assert_eq!(
+                failure.disposition(),
+                ironclaw_host_runtime::CapabilityFailureDisposition::ModelVisibleToolError,
+            );
+            assert!(
+                failure
+                    .message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("SandboxProcessPlan")
+            );
         }
-        other => panic!("expected invalid request, got {other:?}"),
+        other => panic!("expected recoverable InvalidInput failure, got {other:?}"),
     }
     assert!(
         sandbox_executor.requests().is_empty(),
@@ -4162,8 +4191,8 @@ async fn host_runtime_services_projects_resource_network_secret_obligation_audit
         .unwrap();
 
     assert_eq!(snapshot.entries.len(), 2);
-    assert_eq!(snapshot.entries[0].stage, AuditProjectionStage::Before);
-    assert_eq!(snapshot.entries[1].stage, AuditProjectionStage::After);
+    assert_eq!(snapshot.entries[0].stage, AuditStage::Before);
+    assert_eq!(snapshot.entries[1].stage, AuditStage::After);
     let mut status_labels = snapshot.entries[0]
         .result_status
         .as_deref()
@@ -6159,13 +6188,15 @@ async fn invoke_capability_secret_store_error_skips_preflight() {
             gate.approval_request_id,
             LeaseApproval {
                 issued_by: Principal::HostRuntime,
-                allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
-                mounts: MountView::default(),
-                network: NetworkPolicy::default(),
-                secrets: vec![SecretHandle::new("script_api_token").unwrap()],
-                resource_ceiling: None,
-                expires_at: None,
-                max_invocations: Some(1),
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: vec![SecretHandle::new("script_api_token").unwrap()],
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
             },
         )
         .await

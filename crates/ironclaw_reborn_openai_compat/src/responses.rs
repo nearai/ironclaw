@@ -11,6 +11,10 @@ pub struct OpenAiResponsesCreateRequest {
     pub input: OpenAiResponsesInput,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
+    /// Optional sampling temperature override. Must be in the inclusive
+    /// OpenAI-compatible range `[0.0, 2.0]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -1,17 +1,18 @@
 #[allow(dead_code)]
-#[path = "support/reborn/mod.rs"]
+#[path = "support/reborn_parity_qa/mod.rs"]
+mod parity_qa_support;
+#[allow(dead_code)]
+#[path = "integration/support/mod.rs"]
 mod reborn_support;
 mod support;
 
 use ironclaw_loop_support::{HostManagedModelMessageRole, HostManagedModelResponse};
 use ironclaw_turns::{TurnStatus, run_profile::LoopHostMilestoneKind};
-use reborn_support::{
-    harness::{
-        RebornBinaryE2EHarness, RecordingTestCapabilityPort, assert_milestone_order,
-        trace_tool_call_response,
-    },
-    model_replay::RebornTraceReplayModelGateway,
+use parity_qa_support::binary_e2e::{
+    RebornBinaryE2EHarness, assert_milestone_order, trace_tool_call_response,
 };
+use parity_qa_support::model_replay::RebornTraceReplayModelGateway;
+use reborn_support::harness::RecordingTestCapabilityPort;
 
 #[tokio::test]
 async fn reborn_recorded_trace_parity() {
