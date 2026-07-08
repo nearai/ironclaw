@@ -798,6 +798,7 @@ impl RebornBinaryE2EHarness {
             model_route_resolver: None,
             cancellation_factory: None,
             skill_context_source: None,
+            prompt_context_budget: None,
             input_queue: None,
             identity_context_source,
             user_profile_source: Arc::new(EmptyUserProfileSource),

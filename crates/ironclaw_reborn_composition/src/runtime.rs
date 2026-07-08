@@ -3711,6 +3711,7 @@ pub async fn build_reborn_runtime(
         model_route_resolver: None,
         cancellation_factory: None,
         skill_context_source,
+        prompt_context_budget: None,
         input_queue: None,
         identity_context_source: match local_runtime {
             Some(local_runtime) => Arc::new(

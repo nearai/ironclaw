@@ -358,6 +358,7 @@ impl ProductLiveAgentLoopHarness {
             model_route_resolver: Some(model_route_resolver),
             cancellation_factory: Some(cancellation_factory.clone()),
             skill_context_source: None,
+            prompt_context_budget: None,
             input_queue: Some(Arc::new(EmptyInputQueue)),
             identity_context_source: Arc::new(EmptyIdentityContextSource),
             user_profile_source: Arc::new(EmptyUserProfileSource),

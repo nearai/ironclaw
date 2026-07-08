@@ -1,5 +1,5 @@
 //! Runtime-wiring setters for [`RebornIntegrationGroupBuilder`] — `storage`,
-//! `safety_context`, `with_turn_event_sink`, `with_trace_capture`,
+//! `safety_context`, `prompt_context_token_budget`, `with_turn_event_sink`, `with_trace_capture`,
 //! `with_tool_disclosure_bridged`, `with_tool_disclosure_off`, `budget_accounting`,
 //! `communication_context_provider`, `hook_dispatcher_builder_factory`.
 //! Private child module of `group.rs` (owns the struct + `build_base`/
@@ -18,7 +18,9 @@ use std::time::Duration;
 use ironclaw_reborn::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_reborn::runtime::ToolDisclosureMode;
 use ironclaw_turns::InMemoryTurnEventSink;
-use ironclaw_turns::run_profile::{CommunicationContextProvider, InstructionSafetyContext};
+use ironclaw_turns::run_profile::{
+    CommunicationContextProvider, InstructionSafetyContext, PromptContextTokenBudget,
+};
 
 use super::super::builder::StorageMode;
 use super::RebornIntegrationGroupBuilder;
@@ -40,6 +42,16 @@ impl RebornIntegrationGroupBuilder {
     /// C-SAFETY). Defaults to `None` (no banner, matching today's behavior).
     pub fn safety_context(mut self, ctx: InstructionSafetyContext) -> Self {
         self.safety_context = Some(ctx);
+        self
+    }
+
+    /// Override the prompt-context transcript budget for the group's ONE
+    /// planned runtime. Harness seam mirrors production's
+    /// `DefaultPlannedRuntimeParts::prompt_context_budget` pass-through into
+    /// `RebornLoopDriverHostFactory::with_prompt_context_token_budget`; default
+    /// `None` leaves the loop-support port's default budget untouched.
+    pub fn prompt_context_token_budget(mut self, budget: PromptContextTokenBudget) -> Self {
+        self.prompt_context_budget = Some(budget);
         self
     }
 

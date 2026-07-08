@@ -42,7 +42,9 @@ use ironclaw_product_workflow::{
 use ironclaw_reborn::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_reborn::runtime::ToolDisclosureMode;
 use ironclaw_threads::ThreadScope;
-use ironclaw_turns::run_profile::{CommunicationContextProvider, InstructionSafetyContext};
+use ironclaw_turns::run_profile::{
+    CommunicationContextProvider, InstructionSafetyContext, PromptContextTokenBudget,
+};
 use ironclaw_turns::{
     CancelRunRequest, CancelRunResponse, FilesystemTurnStateStore, GateRef, GateResumeDisposition,
     GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef, ResumeTurnPrecondition,
@@ -110,6 +112,7 @@ pub struct RebornIntegrationHarnessBuilder {
     real_egress_response_bodies: Vec<Vec<u8>>,
     storage: StorageMode,
     safety_context: Option<InstructionSafetyContext>,
+    prompt_context_budget: Option<PromptContextTokenBudget>,
     /// How the `BuiltinHttpTools` backend wires `builtin.shell`. One enum instead
     /// of a `bool` + `Option` so the modes are mutually exclusive by
     /// construction — the last shell-selecting builder method wins, and a live
@@ -180,6 +183,15 @@ impl RebornIntegrationHarnessBuilder {
     /// `RebornIntegrationGroupBuilder::safety_context` for the underlying wiring.
     pub fn with_safety_context(mut self, ctx: InstructionSafetyContext) -> Self {
         self.safety_context = Some(ctx);
+        self
+    }
+
+    /// Override the transcript budget used when selecting persisted context for
+    /// model-visible prompt requests. Threaded through the underlying group via
+    /// `DefaultPlannedRuntimeParts::prompt_context_budget`, matching production
+    /// wiring. Defaults to `None`, preserving `PromptContextTokenBudget::default()`.
+    pub fn with_prompt_context_token_budget(mut self, budget: PromptContextTokenBudget) -> Self {
+        self.prompt_context_budget = Some(budget);
         self
     }
 
@@ -481,6 +493,9 @@ impl RebornIntegrationHarnessBuilder {
         if let Some(ctx) = self.safety_context {
             group_builder = group_builder.safety_context(ctx);
         }
+        if let Some(budget) = self.prompt_context_budget {
+            group_builder = group_builder.prompt_context_token_budget(budget);
+        }
         if self.turn_event_sink {
             group_builder = group_builder.with_turn_event_sink();
         }
@@ -602,6 +617,7 @@ impl RebornIntegrationHarness {
             real_egress_response_bodies: Vec::new(),
             storage: StorageMode::default(),
             safety_context: None,
+            prompt_context_budget: None,
             shell_mode: ShellMode::default(),
             park_gate: None,
             fail_model: false,

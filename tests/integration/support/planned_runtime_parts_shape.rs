@@ -17,7 +17,7 @@
 use ironclaw_loop_support::HostManagedModelGateway;
 use ironclaw_reborn::runtime::DefaultPlannedRuntimeParts;
 
-/// Some/None shape of `DefaultPlannedRuntimeParts`'s 13 `Option`-typed
+/// Some/None shape of `DefaultPlannedRuntimeParts`'s 14 `Option`-typed
 /// fields. Field VALUES are out of scope by design (see
 /// `tests/integration/wiring_parity.rs`'s module doc) — only whether each
 /// optional wiring seam is populated.
@@ -26,6 +26,7 @@ pub struct DefaultPlannedRuntimePartsShape {
     pub model_route_resolver: bool,
     pub cancellation_factory: bool,
     pub skill_context_source: bool,
+    pub prompt_context_budget: bool,
     pub attachment_read_port: bool,
     pub input_queue: bool,
     pub model_policy_guard: bool,
@@ -74,6 +75,7 @@ where
         model_route_resolver,
         cancellation_factory,
         skill_context_source,
+        prompt_context_budget,
         attachment_read_port,
         input_queue,
         identity_context_source: _,
@@ -91,6 +93,7 @@ where
         model_route_resolver: model_route_resolver.is_some(),
         cancellation_factory: cancellation_factory.is_some(),
         skill_context_source: skill_context_source.is_some(),
+        prompt_context_budget: prompt_context_budget.is_some(),
         attachment_read_port: attachment_read_port.is_some(),
         input_queue: input_queue.is_some(),
         model_policy_guard: model_policy_guard.is_some(),
