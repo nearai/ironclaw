@@ -150,6 +150,9 @@ pub(crate) fn render_run_summary(summary: &RunSummary) -> String {
     if let Some(stages) = &summary.stage_latency {
         push_stage_latency_table(&mut output, stages);
     }
+    if let Some(api_capacity) = &summary.api_capacity {
+        push_api_capacity_table(&mut output, api_capacity);
+    }
     push_errors_table(&mut output, &summary.errors);
     push_failure_causes_table(&mut output, &summary.failure_causes);
     output
@@ -374,6 +377,44 @@ fn operation_attribution_latency_rows(
         .filter(|(_, group)| group.count > 0)
         .map(|(name, group)| (name, group.count, &group.latency))
         .collect()
+}
+
+fn push_api_capacity_table(
+    output: &mut String,
+    api_capacity: &crate::api_capacity::ApiCapacitySummary,
+) {
+    push_overview(
+        output,
+        "API capacity",
+        &[
+            ("base_url", api_capacity.base_url.clone()),
+            ("virtual_users", api_capacity.virtual_users.to_string()),
+            (
+                "read_qps_per_user",
+                format!("{:.2}", api_capacity.read_qps_per_user),
+            ),
+            ("read_workers", api_capacity.read_workers.to_string()),
+            ("read_mix", api_capacity.read_mix.clone()),
+            ("page_size", api_capacity.page_size.to_string()),
+            (
+                "wait_for_assistant",
+                api_capacity.wait_for_assistant.to_string(),
+            ),
+            (
+                "terminal_timeout_ms",
+                api_capacity.terminal_timeout_ms.to_string(),
+            ),
+        ],
+    );
+    let mut rows: Vec<(&str, u64, &LatencySummary)> = api_capacity
+        .endpoints
+        .iter()
+        .map(|(name, summary)| (name.as_str(), summary.attempted, &summary.latency))
+        .collect();
+    rows.sort_by_key(|(name, _, _)| *name);
+    if !rows.is_empty() {
+        push_latency_table(output, "API endpoint latency", &rows);
+    }
 }
 
 fn push_prefill_table(output: &mut String, prefill: &crate::user_turn::PrefillSummary) {

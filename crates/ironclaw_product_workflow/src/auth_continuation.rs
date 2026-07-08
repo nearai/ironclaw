@@ -299,8 +299,8 @@ mod tests {
     use chrono::Utc;
     use ironclaw_auth::{
         AuthContinuationEvent, AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthGateRef,
-        AuthProductError, AuthProductScope, AuthSessionId, AuthSurface, LifecyclePackageRef,
-        TurnRunRef,
+        AuthProductError, AuthProductScope, AuthProviderId, AuthSessionId, AuthSurface,
+        LifecyclePackageRef, TurnRunRef,
     };
     use ironclaw_host_api::{
         AgentId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
@@ -465,6 +465,7 @@ mod tests {
             scope: AuthProductScope::new(resource, AuthSurface::Callback)
                 .with_session_id(AuthSessionId::new("session-auth").unwrap()),
             continuation,
+            provider: AuthProviderId::new("google").unwrap(),
             credential_account_id: None,
             emitted_at: Utc::now(),
         }

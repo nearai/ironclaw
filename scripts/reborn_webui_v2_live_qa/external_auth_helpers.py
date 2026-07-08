@@ -7,6 +7,7 @@ import json
 import os
 import sqlite3
 import uuid
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -101,7 +102,7 @@ def _telegram_preflight(
     copied_home_mentions = False
     db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
     if db_path.exists():
-        with sqlite3.connect(db_path) as db:
+        with closing(sqlite3.connect(db_path)) as db:
             row = db.execute(
                 "SELECT COUNT(*) FROM root_filesystem_entries "
                 "WHERE LOWER(path) LIKE '%telegram%' OR LOWER(CAST(contents AS TEXT)) LIKE '%telegram%'"
@@ -155,7 +156,7 @@ def _github_auth_preflight(
     token_present = any(_env_present(name, extra_env) for name in token_names)
     configured_accounts: list[str] = []
     if db_path.exists():
-        with sqlite3.connect(db_path) as db:
+        with closing(sqlite3.connect(db_path)) as db:
             try:
                 rows = db.execute(
                     """

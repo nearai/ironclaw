@@ -66,7 +66,7 @@ mod tests {
         // `/files/content` endpoint, so clicking opens the same
         // `AttachmentPreviewModal` (image/pdf/text preview + Download) as a
         // message attachment.
-        let chips = source_text("pages/chat/components/project-file-chips.ts");
+        let chips = source_text("pages/chat/components/project-file-chips.tsx");
         assert!(chips.contains("extractWorkspaceFilePaths"));
         assert!(chips.contains("statProjectFile"));
         assert!(chips.contains("projectFileContentUrl"));
@@ -78,21 +78,21 @@ mod tests {
         assert!(chips.contains("project-file-download"));
         assert!(chips.contains("dataPath"));
 
-        let bubble = source_text("pages/chat/components/message-bubble.ts");
+        let bubble = source_text("pages/chat/components/message-bubble.tsx");
         assert!(bubble.contains("ProjectFileChips"));
         assert!(bubble.contains("threadId"));
 
         // Both surfaces share the chip + preview implementation, so message
         // attachments and project files cannot drift. The shared chip renders
         // the stable e2e selector attributes.
-        let chip = source_text("pages/chat/components/attachment-chip.ts");
+        let chip = source_text("pages/chat/components/attachment-chip.tsx");
         assert!(chip.contains("export function AttachmentChip"));
         assert!(chip.contains("export function AttachmentThumbnail"));
-        assert!(chip.contains("data-testid=${testId}"));
-        assert!(chip.contains("data-file-path=${dataPath}"));
+        assert!(chip.contains("data-testid={testId}"));
+        assert!(chip.contains("data-file-path={dataPath}"));
         // The inline download icon fetches the bearer-authenticated bytes and
         // saves them directly (separate from the preview modal's own Download).
-        assert!(chip.contains("data-testid=${downloadTestId}"));
+        assert!(chip.contains("data-testid={downloadTestId}"));
         assert!(chip.contains("fetchAttachmentBlob"));
         assert!(chip.contains("saveBlob"));
         assert!(bubble.contains("AttachmentChip"));
@@ -100,7 +100,7 @@ mod tests {
         // The preview modal fetches the blob (bearer-authenticated, via the
         // shared `fetchAttachmentBlob`) and offers a Download action with a
         // stable test hook.
-        let preview = source_text("pages/chat/components/attachment-preview.ts");
+        let preview = source_text("pages/chat/components/attachment-preview.tsx");
         assert!(preview.contains("fetchAttachmentBlob"));
         assert!(preview.contains("data-testid=\"attachment-download\""));
 
@@ -126,7 +126,7 @@ mod tests {
 
     #[test]
     fn chat_auth_gate_assets_submit_manual_token_then_resolve_gate() {
-        let auth_card = source_text("pages/chat/components/auth-token-card.ts");
+        let auth_card = source_text("pages/chat/components/auth-token-card.tsx");
         assert!(auth_card.contains("await onSubmit(value);"));
         assert!(auth_card.contains("setToken(\"\");"));
         assert!(auth_card.contains("t(\"authGate.submitFailed\")"));
@@ -173,7 +173,7 @@ mod tests {
         // for the next user on the same browser.
         assert!(store.contains("stagedAttachments.clear()"));
 
-        let input = source_text("pages/chat/components/chat-input.ts");
+        let input = source_text("pages/chat/components/chat-input.tsx");
         // Initialized from the store (not a bare `[]`), persisted on change, and
         // cleared on a successful send.
         assert!(input.contains("getStagedAttachments(draftKey)"));
@@ -214,13 +214,13 @@ mod tests {
                 .contains("return ref.startsWith(\"msg:\") ? ref.slice(\"msg:\".length) : null;")
         );
 
-        let regression = source_text("pages/chat/lib/useChat-send.test.mts");
+        let regression = source_text("pages/chat/lib/useChat-send.test.ts");
         assert!(regression.contains("useChat.send: accepted ref reconciles"));
         assert!(regression.contains("accepted_message_ref: \"msg:message-1\""));
         assert!(regression.contains("await loadHistory();"));
         assert!(regression.contains("[\"msg-message-1\"]"));
 
-        let pending_regression = source_text("pages/chat/lib/pending-messages.test.mts");
+        let pending_regression = source_text("pages/chat/lib/pending-messages.test.ts");
         assert!(pending_regression.contains(
             "recordAcceptedMessageRef: null and non-msg refs leave pending record unchanged"
         ));
@@ -236,13 +236,13 @@ mod tests {
         // unit harness injects stubs for unknown identifiers, so only a
         // source-level pin (and the Playwright smoke) catches a re-drop.
         let use_chat = source_text("pages/chat/hooks/useChat.ts");
-        assert!(use_chat.contains("import { touchThreadInCache } from \"../lib/thread-cache.js\""));
+        assert!(use_chat.contains("import { touchThreadInCache } from \"../lib/thread-cache\""));
         assert!(use_chat.contains("touchThreadInCache({"));
     }
 
     #[test]
     fn markdown_code_blocks_keep_horizontal_scroll_local_to_block() {
-        let renderer = source_text("pages/chat/components/markdown-renderer.ts");
+        let renderer = source_text("pages/chat/components/markdown-renderer.tsx");
         assert!(renderer.contains("wrap.className = \"markdown-code-frame\";"));
         assert!(renderer.contains("pre.style.overflowX = \"auto\";"));
         assert!(renderer.contains("pre.style.overflowY = \"hidden\";"));
@@ -271,12 +271,12 @@ mod tests {
         assert!(styles.contains("@media (max-width: 639.98px) {"));
         assert!(!styles.contains("@media (max-width: 768px)"));
 
-        let message_list = source_text("pages/chat/components/message-list.ts");
+        let message_list = source_text("pages/chat/components/message-list.tsx");
         assert!(message_list.contains("relative flex min-h-0 min-w-0 flex-1"));
         assert!(message_list.contains("flex min-w-0 flex-1 overflow-y-auto overflow-x-hidden"));
         assert!(message_list.contains("mx-auto flex w-full min-w-0 max-w-5xl flex-col"));
 
-        let message_bubble = source_text("pages/chat/components/message-bubble.ts");
+        let message_bubble = source_text("pages/chat/components/message-bubble.tsx");
         assert!(message_bubble.contains("group flex w-full min-w-0 flex-col"));
         assert!(message_bubble.contains("const bubbleWidthClass = isUser"));
         assert!(message_bubble.contains("\"v2-chat-readable-width\""));
@@ -293,7 +293,7 @@ mod tests {
 
     #[test]
     fn chat_omits_connect_action_while_extensions_render_slack_setup_ui() {
-        let chat = source_text("pages/chat/chat.ts");
+        let chat = source_text("pages/chat/chat.tsx");
         assert!(!chat.contains("ChannelConnectCard"));
         assert!(!chat.contains("channelConnectAction"));
         assert!(!chat.contains("dismissChannelConnectAction"));
@@ -302,45 +302,47 @@ mod tests {
         assert!(!use_chat.contains("resolveConnectAction"));
         assert!(!use_chat.contains("channel_connect_action"));
 
-        let picker = source_text("components/slack-channel-picker.ts");
+        let picker = source_text("components/slack-channel-picker.tsx");
         assert!(picker.contains("listSlackAllowedChannels"));
         assert!(picker.contains("saveSlackAllowedChannels(channels)"));
 
-        let setup_panel = source_text("components/slack-setup-panel.ts");
+        let setup_panel = source_text("components/slack-setup-panel.tsx");
         assert!(setup_panel.contains("SlackChannelPicker"));
-        assert!(setup_panel.contains("<${SlackChannelPicker} action=${action} />"));
+        assert!(setup_panel.contains("<SlackChannelPicker action={action} />"));
 
-        let channels_tab = source_text("pages/extensions/components/channels-tab.ts");
+        let channels_tab = source_text("pages/extensions/components/channels-tab.tsx");
         assert!(channels_tab.contains("showBuiltinSlackConnectActions"));
         assert!(channels_tab.contains("admin_managed_channels"));
         assert!(channels_tab.contains("inbound_proof_code"));
         assert!(channels_tab.contains("SlackAdminManagedSection"));
-        assert!(channels_tab.contains("SlackPairingSection"));
         assert!(channels_tab.contains("findSlackConnectActions"));
         assert!(channels_tab.contains("slackConnectActions"));
-        assert!(channels_tab.contains("action=${action.action}"));
+        assert!(channels_tab.contains("action={action.action}"));
 
-        let regression = source_text("pages/chat/lib/useChat-send.test.mts");
+        let regression = source_text("pages/chat/lib/useChat-send.test.ts");
         assert!(regression.contains("connect-like prompts submit to the model"));
         assert!(!regression.contains("channel connect requests return an action"));
     }
 
     #[test]
     fn channel_connection_gate_rides_the_auth_rail() {
-        // The channel-connection-events module keeps only its display/notify
-        // half — the connect broadcast used for cross-tab cache invalidation.
-        // The waiter/continuation machinery (the historical-panel bug) is gone:
-        // pairing gates now block/resume on the standard auth-gate rail.
+        // Slack's bespoke pairing artifacts are gone (slack-pairing-api.js,
+        // SlackPairingSection); channel pairing now rides the standard
+        // auth-gate rail. The generic channel-connection machinery is retained
+        // and generalized: channel-connection-events keeps its cross-tab connect
+        // broadcast AND the waiter/continuation half that resumes a chat blocked
+        // on a channel connected in another tab. This dual wiring is locked by
+        // the useChat-send / configure-modal suites that PR #5604 authored.
         let events = source_text("lib/channel-connection-events.ts");
         assert!(events.contains("notifyChannelConnected"));
         assert!(events.contains("subscribeChannelConnected"));
         assert!(events.contains("BroadcastChannel"));
-        assert!(!events.contains("channelConnectionContinuationMessage"));
-        assert!(!events.contains("rememberChannelConnectionWaiter"));
-        assert!(!events.contains("resumeWaitingChannelConnections"));
-        assert!(!events.contains("ironclaw:channel-connection:waiting:v1"));
+        assert!(events.contains("channelConnectionContinuationMessage"));
+        assert!(events.contains("rememberChannelConnectionWaiter"));
+        assert!(events.contains("resumeWaitingChannelConnections"));
+        assert!(events.contains("ironclaw:channel-connection:waiting:v1"));
 
-        // gates.js recognizes the challenge kinds (manual_token / oauth_url)
+        // gates.ts recognizes the challenge kinds (manual_token / oauth_url)
         // that ALL auth gates use, and normalizes the optional channel
         // `connection` context onto the pending gate.
         let gates = source_text("pages/chat/lib/gates.ts");
@@ -348,30 +350,44 @@ mod tests {
         assert!(gates.contains("oauth_url"));
         assert!(gates.contains("connectionFromContext"));
 
-        // useChat keeps a cache-invalidation-only channel-connected subscription
-        // and a redeem-only pairing submit that does NOT call resolveGate (the
-        // backend resumes the parked turn). All waiter/derive heuristics are gone.
+        // The channel-connection/onboarding state machine — the channel-connected
+        // subscription, pairing redemption through the generic pairing API
+        // (submitOnboardingPairing -> redeemPairingCode; frontend scaffolding —
+        // no backend mounts the generic redeem route until the first non-Slack
+        // inbound channel lands, see PAIRING_REDEEM_PATH), and the
+        // waiter/onboarding-resume wiring that resumes a chat blocked on a
+        // channel connected in another tab — moved out of useChat into the
+        // dedicated useChannelOnboarding hook (PR #5604 mn10). useChat still
+        // wires that hook in and re-exposes its handles, so the wiring is
+        // verified here and the state machine itself in its new home below.
         let use_chat = source_text("pages/chat/hooks/useChat.ts");
-        assert!(use_chat.contains("subscribeChannelConnected"));
+        assert!(use_chat.contains("useChannelOnboarding(threadId, {"));
+        assert!(use_chat.contains("submitOnboardingPairing"));
         assert!(use_chat.contains("submitChannelConnectionPairing"));
-        assert!(!use_chat.contains("connectionEventMatchesOnboarding"));
-        assert!(!use_chat.contains("resumeOnboardingAfterChannelConnected"));
-        assert!(!use_chat.contains("rememberChannelConnectionWaiter"));
-        assert!(!use_chat.contains("forgetChannelConnectionWaiter"));
-        assert!(!use_chat.contains("channelConnectionRequirementFromCard"));
-        assert!(!use_chat.contains("pendingOnboarding"));
         assert!(!use_chat.contains("Slack is connected. Continue the previous request."));
 
-        // chat.js renders the pairing card off a manual_token gate carrying a
-        // connection, on the same auth-gate switch as the token / oauth cards.
-        let chat = source_text("pages/chat/chat.ts");
-        assert!(chat.contains("OnboardingPairingCard"));
-        assert!(chat.contains("isChannelPairingGate"));
-        assert!(chat.contains("submitChannelConnectionPairing"));
+        let use_channel_onboarding = source_text("pages/chat/hooks/useChannelOnboarding.ts");
+        assert!(use_channel_onboarding.contains("subscribeChannelConnected"));
+        assert!(use_channel_onboarding.contains("submitOnboardingPairing"));
+        assert!(use_channel_onboarding.contains("submitChannelConnectionPairing"));
+        assert!(use_channel_onboarding.contains("redeemPairingCode"));
+        assert!(use_channel_onboarding.contains("connectionEventMatchesOnboarding"));
+        // OAuth completion/failure matching goes through the shared flow-id
+        // matchers, not a hand-rolled comparison that could drift on the
+        // payload contract (type guard, snake_case flow_id fallback).
+        assert!(use_channel_onboarding.contains("completionMatchesFlow"));
+        assert!(use_channel_onboarding.contains("failureMatchesFlow"));
+        assert!(use_channel_onboarding.contains("rememberChannelConnectionWaiter"));
+        assert!(use_channel_onboarding.contains("forgetChannelConnectionWaiter"));
+        assert!(use_channel_onboarding.contains("channelConnectionRequirementFromCard"));
+        assert!(use_channel_onboarding.contains("pendingOnboarding"));
 
-        let slack_pairing = source_text("lib/slack-pairing-api.ts");
-        assert!(slack_pairing.contains("notifyChannelConnected"));
-        assert!(slack_pairing.contains("sourceThreadId: options.threadId || null"));
+        // chat.ts renders the pairing card off a manual_token gate carrying a
+        // connection, on the same auth-gate switch as the token / oauth cards.
+        let chat = source_text("pages/chat/chat.tsx");
+        assert!(chat.contains("OnboardingPairingCard"));
+        assert!(chat.contains("pendingGate.connection"));
+        assert!(chat.contains("submitChannelConnectionPairing"));
 
         let generic_pairing = source_text("pages/extensions/lib/pairing-api.ts");
         assert!(generic_pairing.contains("notifyChannelConnected"));
@@ -379,7 +395,7 @@ mod tests {
 
     #[test]
     fn automations_panel_assets_are_embedded() {
-        let app = source_text("app/app.ts");
+        let app = source_text("app/app.tsx");
         assert!(app.contains("AutomationsPage"));
         assert!(app.contains("path=\"automations\""));
 
@@ -401,7 +417,7 @@ mod tests {
         assert!(api.contains("/outbound/preferences"));
         assert!(api.contains("/outbound/targets"));
 
-        let page = source_text("pages/automations/automations-page.ts");
+        let page = source_text("pages/automations/automations-page.tsx");
         assert!(page.contains("AutomationsSummaryStrip"));
         assert!(page.contains("AutomationDeliveryDefaultsPanel"));
         assert!(page.contains("useOutboundDeliveryDefaults"));
@@ -412,11 +428,11 @@ mod tests {
         assert!(automations_hook.contains("nextAutomationsRefetchDelay"));
         assert!(automations_hook.contains("query.refetch()"));
 
-        let list = source_text("pages/automations/components/automations-list.ts");
+        let list = source_text("pages/automations/components/automations-list.tsx");
         assert!(list.contains("primary_status_label"));
         assert!(list.contains("primary_status_tone"));
 
-        let detail_panel = source_text("pages/automations/components/automation-detail-panel.ts");
+        let detail_panel = source_text("pages/automations/components/automation-detail-panel.tsx");
         assert!(detail_panel.contains("onPauseAutomation"));
         assert!(detail_panel.contains("onResumeAutomation"));
         assert!(detail_panel.contains("onDeleteAutomation"));
@@ -452,7 +468,7 @@ mod tests {
         );
 
         let defaults_panel =
-            source_text("pages/automations/components/automation-delivery-defaults-panel.ts");
+            source_text("pages/automations/components/automation-delivery-defaults-panel.tsx");
         assert!(defaults_panel.contains("finalReplyTargets"));
         assert!(defaults_panel.contains("saveFinalReplyTarget"));
         // Badge label must branch on optStatus — unavailable targets must not
@@ -462,7 +478,7 @@ mod tests {
             "unavailable badge label key must be used in the target option rows"
         );
         assert!(
-            !defaults_panel.contains(r#"label=${t("automations.delivery.pill.ready")}"#),
+            !defaults_panel.contains(r#"label={t("automations.delivery.pill.ready")}"#),
             "target option badge label must not be unconditionally hardcoded to .pill.ready"
         );
 
@@ -478,7 +494,7 @@ mod tests {
 
     #[test]
     fn sidebar_new_chat_label_owns_typography() {
-        let sidebar_nav = source_text("components/sidebar-nav.ts");
+        let sidebar_nav = source_text("components/sidebar-nav.tsx");
 
         assert!(sidebar_nav.contains("<span className=\"text-[13px] font-medium\""));
         assert!(sidebar_nav.contains("t(\"chat.newThread\")"));
@@ -486,17 +502,17 @@ mod tests {
 
     #[test]
     fn desktop_sidebar_toggle_assets_are_wired() {
-        let header = source_text("components/page-header.ts");
+        let header = source_text("components/page-header.tsx");
         assert!(header.contains("type=\"button\""));
         assert!(header.contains(r#"const toggleSidebarLabel = t("sidebar.toggle")"#));
-        assert!(header.contains("aria-label=${toggleSidebarLabel}"));
+        assert!(header.contains("aria-label={toggleSidebarLabel}"));
         assert!(header.contains("aria-controls=\"gateway-sidebar\""));
-        assert!(header.contains("aria-expanded=${sidebarOpen ? \"true\" : \"false\"}"));
-        assert!(header.contains("title=${toggleSidebarLabel}"));
+        assert!(header.contains("aria-expanded={sidebarOpen ? \"true\" : \"false\"}"));
+        assert!(header.contains("title={toggleSidebarLabel}"));
         assert!(!header.contains("md:hidden"));
 
-        let sidebar = source_text("components/sidebar.ts");
-        assert!(sidebar.contains("id=${id}"));
+        let sidebar = source_text("components/sidebar.tsx");
+        assert!(sidebar.contains("id={id}"));
 
         let sidebar_state = source_text("lib/sidebar-state.ts");
         assert!(sidebar_state.contains("ironclaw:v2-sidebar-open"));
@@ -506,7 +522,7 @@ mod tests {
         assert!(sidebar_state.contains("export function currentSidebarOpen"));
 
         let hook = source_text("hooks/useSidebar.ts");
-        assert!(hook.contains("from \"../lib/sidebar-state.js\""));
+        assert!(hook.contains("from \"../lib/sidebar-state\""));
         assert!(hook.contains("desktopOpen: readDesktopSidebarOpen()"));
         assert!(hook.contains("React.useState(() =>"));
         assert!(hook.contains("isDesktopSidebarViewport()"));
@@ -514,11 +530,11 @@ mod tests {
         assert!(hook.contains("toggleSidebarState(current, isDesktopViewport)"));
         assert!(hook.contains("currentOpen: currentSidebarOpen(state, isDesktopViewport)"));
 
-        let layout = source_text("layout/gateway-layout.ts");
-        assert!(layout.contains("${sidebar.mobileOpen &&"));
+        let layout = source_text("layout/gateway-layout.tsx");
+        assert!(layout.contains("{sidebar.mobileOpen &&"));
         assert!(layout.contains("sidebar.mobileOpen ? \"flex\" : \"hidden\""));
         assert!(layout.contains("sidebar.desktopOpen ? \"md:flex\" : \"md:hidden\""));
-        assert!(layout.contains("sidebarOpen=${sidebar.currentOpen}"));
+        assert!(layout.contains("sidebarOpen={sidebar.currentOpen}"));
 
         let bundle = bundled_javascript();
         assert!(bundle.contains("ironclaw:v2-sidebar-open"));
@@ -530,7 +546,7 @@ mod tests {
     fn sidebar_trace_credits_card_assets_are_embedded() {
         // The compact card is mounted in the sidebar above the conversation
         // list and reuses the existing trace-credits hook + endpoint.
-        let card = source_text("components/sidebar-trace-credits.ts");
+        let card = source_text("components/sidebar-trace-credits.tsx");
         assert!(card.contains("export function SidebarTraceCredits"));
         // Reuses the shared hook (and thus the `/api/webchat/v2/traces/credit`
         // endpoint), not a parallel fetch.
@@ -545,14 +561,14 @@ mod tests {
         assert!(card.contains("heldCount > 0"));
         assert!(card.contains("traceCommons.cardHeld"));
 
-        let sidebar = source_text("components/sidebar.ts");
+        let sidebar = source_text("components/sidebar.tsx");
         assert!(sidebar.contains("SidebarTraceCredits"));
         // Mounted between the nav and the threads list.
-        assert!(sidebar.contains("<${SidebarTraceCredits} />"));
+        assert!(sidebar.contains("<SidebarTraceCredits />"));
 
         // The Settings tab lists held traces (reason + submission id) sourced
         // from the credits response `holds[]`.
-        let tab = source_text("pages/settings/components/trace-commons-tab.ts");
+        let tab = source_text("pages/settings/components/trace-commons-tab.tsx");
         assert!(tab.contains("const holds = credits.holds || [];"));
         assert!(tab.contains("traceCommons.heldTitle"));
         assert!(tab.contains("traceCommons.heldDescription"));
@@ -613,35 +629,35 @@ mod tests {
         );
         assert!(!auth.contains("isAdmin: false"));
 
-        let sidebar_nav = source_text("components/sidebar-nav.ts");
+        let sidebar_nav = source_text("components/sidebar-nav.tsx");
         assert!(sidebar_nav.contains("isAdmin = false"));
         assert!(sidebar_nav.contains("[\"users\", \"inference\"].includes(subRoute.id)"));
 
-        let settings_page = source_text("pages/settings/settings-page.ts");
+        let settings_page = source_text("pages/settings/settings-page.tsx");
         assert!(settings_page.contains("isAdmin = false"));
         assert!(settings_page.contains("const defaultTabIsVisible = tabContentHas(defaultTab)"));
         assert!(settings_page.contains("const redirectTab = defaultTabIsVisible"));
         assert!(settings_page.contains("isOperatorTab(tab)"));
 
-        let settings_tabs = source_text("pages/settings/components/settings-tabs.ts");
+        let settings_tabs = source_text("pages/settings/components/settings-tabs.tsx");
         assert!(settings_tabs.contains("isAdmin = false"));
         assert!(!settings_tabs.contains("isAdmin = true"));
         assert!(settings_tabs.contains("tab.id !== \"inference\""));
 
-        let layout = source_text("layout/gateway-layout.ts");
+        let layout = source_text("layout/gateway-layout.tsx");
         assert!(layout.contains("enabled: isAdmin"));
         assert!(layout.contains("const needsOnboarding ="));
         assert!(layout.contains("isAdmin &&"));
         assert!(layout.contains("shouldRouteToOnboarding({"));
 
-        let app = source_text("app/app.ts");
-        assert!(app.contains("isChecking=${auth.isChecking}"));
+        let app = source_text("app/app.tsx");
+        assert!(app.contains("isChecking={auth.isChecking}"));
 
         let providers = source_text("pages/settings/hooks/useLlmProviders.ts");
         assert!(providers.contains("const hasActiveProvider = Boolean("));
         assert!(!providers.contains("!enabled || Boolean"));
 
-        let onboarding = source_text("pages/onboarding/onboarding-page.ts");
+        let onboarding = source_text("pages/onboarding/onboarding-page.tsx");
         assert!(onboarding.contains("isChecking = false"));
         assert!(onboarding.contains("if (isChecking) return null;"));
         assert!(onboarding.contains("if (!isAdmin)"));
@@ -689,7 +705,7 @@ mod tests {
 
     #[test]
     fn extensions_onboarding_messages_render_in_cards() {
-        let extension_card = source_text("pages/extensions/components/extension-card.ts");
+        let extension_card = source_text("pages/extensions/components/extension-card.tsx");
 
         assert!(
             extension_card.contains("state === \"setup_required\" || state === \"auth_required\""),
@@ -708,7 +724,7 @@ mod tests {
             "configured/no-credential onboarding should render next-step copy before setup copy"
         );
         assert!(
-            extension_card.contains("${onboardingHint}"),
+            extension_card.contains("{onboardingHint}"),
             "extension cards must render the projected onboarding hint"
         );
     }
@@ -727,19 +743,25 @@ mod tests {
             "active extensions must not be considered ready for another activation"
         );
 
-        let extension_card = source_text("pages/extensions/components/extension-card.ts");
+        let extension_card = source_text("pages/extensions/components/extension-card.tsx");
         assert!(extension_card.contains("activationStatus: ext.activation_status"));
         assert!(extension_card.contains("onboardingState: ext.onboarding_state"));
 
-        let configure_modal = source_text("pages/extensions/components/configure-modal.ts");
+        let configure_modal = source_text("pages/extensions/components/configure-modal.tsx");
         assert!(configure_modal.contains("const isActive = extensionIsActive(extension);"));
         assert!(
-            configure_modal.contains("const canActivate = setupReadyForActivation({ extension"),
+            configure_modal.contains("const canActivate =")
+                && configure_modal
+                    .contains("setupReadyForActivation({ extension, secrets, fields })"),
             "the modal Activate button must be gated by lifecycle-aware setup readiness"
+        );
+        assert!(
+            configure_modal.contains("!isChannelExtensionKind(extension?.kind)"),
+            "channel extensions activate via OAuth/pairing, not the generic Activate button"
         );
         assert!(configure_modal.contains("extensions.activeConfigured"));
 
-        let regression = source_text("pages/extensions/lib/extension-actions.test.mts");
+        let regression = source_text("pages/extensions/lib/extension-actions.test.ts");
         assert!(
             regression.contains("extensionIsActive accepts card payload lifecycle fields"),
             "caller-visible card payload lifecycle fields need JS regression coverage"
@@ -759,10 +781,23 @@ mod tests {
             use_extensions.contains("const watchOauthProgress = React.useCallback"),
             "OAuth setup should watch in-flight authorization, not only popup close"
         );
+        // The in-flight watcher polls on an interval; within that poll it must
+        // refresh setup state (so a setup-complete callback lands promptly)
+        // BEFORE it considers giving up because the popup was closed. Assert the
+        // ordering structurally rather than by exact whitespace so a reformat
+        // doesn't false-flag while a real reorder still would.
+        let poll_body_start = use_extensions
+            .find("browserWindow.setInterval(")
+            .expect("OAuth setup should poll on an interval while the popup is open");
+        let poll_body = &use_extensions[poll_body_start..];
+        let refresh_idx = poll_body
+            .find("refreshSetupState();")
+            .expect("OAuth setup poll must refresh setup state");
+        let popup_close_idx = poll_body
+            .find("popup && popup.closed")
+            .expect("OAuth setup poll must still handle the popup closing");
         assert!(
-            use_extensions.contains(
-                "refreshSetupState();\n        if (\n          setupIsConfigured() ||\n          (popup && popup.closed)"
-            ),
+            refresh_idx < popup_close_idx,
             "OAuth setup must refresh setup state before waiting for popup close"
         );
     }
@@ -770,8 +805,8 @@ mod tests {
     #[test]
     fn extension_registry_keeps_installed_entries_visible_first() {
         let use_extensions = source_text("pages/extensions/hooks/useExtensions.ts");
-        let registry_tab = source_text("pages/extensions/components/registry-tab.ts");
-        let extensions_page = source_text("pages/extensions/extensions-page.ts");
+        let registry_tab = source_text("pages/extensions/components/registry-tab.tsx");
+        let extensions_page = source_text("pages/extensions/extensions-page.tsx");
         let routes = source_text("app/routes.ts");
         let schema = source_text("pages/extensions/lib/extensions-schema.ts");
 
@@ -799,7 +834,7 @@ mod tests {
             "registry search should prefer richer registry metadata when installed entries are available"
         );
         assert!(
-            registry_tab.contains("<${ExtensionCard}") && registry_tab.contains("<${RegistryCard}"),
+            registry_tab.contains("<ExtensionCard") && registry_tab.contains("<RegistryCard"),
             "installed registry entries should keep management actions while available entries keep install actions"
         );
         assert!(

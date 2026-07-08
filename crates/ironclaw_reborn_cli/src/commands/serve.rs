@@ -22,7 +22,9 @@ use ironclaw_reborn_composition::{
     SlackOperatorRouteVisibility, build_slack_host_beta_runtime_mounts,
     build_webui_services_with_slack_host_beta_mounts,
 };
-use ironclaw_reborn_config::{IdentitySection, seed_default_config_file_if_missing};
+use ironclaw_reborn_config::{
+    IdentitySection, RebornConfigFile, seed_default_config_file_if_missing,
+};
 use ironclaw_reborn_webui_ingress::{
     DeferredWebuiRouterHandle, EnvBearerAuthenticator, RebornWebuiServeError,
     RebornWebuiServeOptions, deferred_webui_v2_startup_router, serve_webui_v2,
@@ -99,13 +101,16 @@ impl ServeCommand {
         // the local-dev-yolo host-access disclosure gate fires before any
         // WebUI env-var resolution below; the owner is aligned to the
         // authenticated WebUI user once it is resolved (see `with_owner_id`).
-        let runtime_input = crate::runtime::build_runtime_input_with_options(
+        let built = crate::runtime::build_runtime_input_with_options(
             context.boot_config(),
             crate::runtime::RuntimeInputCaller::Serve,
             RuntimeInputOptions {
                 confirm_host_access: self.confirm_host_access,
             },
         )?;
+        #[cfg(feature = "slack-v2-host-beta")]
+        let slack_personal_lazy_slot = built.slack_personal_lazy_slot;
+        let runtime_input = built.inner;
         let boot_config = context.boot_config();
         let config_file =
             ironclaw_reborn_config::RebornConfigFile::load(&boot_config.home().config_file_path())
@@ -211,8 +216,8 @@ impl ServeCommand {
             runtime_input.with_admin_api_token_minter(Arc::new(SignedSessionTokenMinter {
                 session_store: admin_session_store,
             }));
-        let slack_host_beta_config = crate::commands::serve_slack::resolve_slack_config_for_serve(
-            config_file.as_ref().and_then(|file| file.slack.as_ref()),
+        let slack_host_beta_config = resolve_slack_host_beta_config_for_serve_command(
+            config_file.as_ref(),
             &tenant_id,
             &default_agent_id,
             default_project_id.as_ref(),
@@ -440,7 +445,12 @@ impl ServeCommand {
                     .await
                     .context("failed to compose Slack host-beta routes")
                 {
-                    Ok(mounts) => Some(mounts),
+                    Ok(mounts) => {
+                        if let Some(slot) = &slack_personal_lazy_slot {
+                            mounts.fill_slack_personal_oauth_slot(slot);
+                        }
+                        Some(mounts)
+                    }
                     Err(error) => {
                         let shutdown_result = runtime.shutdown().await;
                         if let Err(shutdown_error) = shutdown_result {
@@ -552,6 +562,12 @@ impl ServeCommand {
                 }
                 serve_config = serve_config.with_google_oauth(route_config);
             }
+            #[cfg(feature = "slack-v2-host-beta")]
+            {
+                if let Some(slot) = slack_personal_lazy_slot {
+                    serve_config = serve_config.with_slack_personal_oauth(slot);
+                }
+            }
             if let Some(value) = csp_override {
                 serve_config = serve_config
                     .with_csp_header_str(value)
@@ -565,10 +581,10 @@ impl ServeCommand {
             }
             #[cfg(feature = "slack-v2-host-beta")]
             if let Some(slack_mounts) = slack_mounts {
+                let slack_personal_oauth_binding = slack_mounts.personal_oauth_binding_config();
                 serve_config = serve_config
                     .with_public_route_mount(slack_mounts.events)
-                    .with_public_route_mount(slack_mounts.commands)
-                    .with_slack_personal_binding_pairing(slack_mounts.personal_binding_pairing)
+                    .with_slack_personal_oauth_binding(slack_personal_oauth_binding)
                     .with_slack_channel_routes(slack_mounts.channel_routes);
             }
             // Public NEAR AI login callback route (token redirect target). Built
@@ -620,6 +636,44 @@ impl ServeCommand {
 
         Ok(())
     }
+}
+
+#[cfg(feature = "slack-v2-host-beta")]
+fn resolve_slack_host_beta_config_for_serve_command(
+    config_file: Option<&RebornConfigFile>,
+    tenant_id: &TenantId,
+    default_agent_id: &AgentId,
+    default_project_id: Option<&ProjectId>,
+    default_user_id: &UserId,
+    config_path: &std::path::Path,
+) -> anyhow::Result<Option<ironclaw_reborn_composition::SlackHostBetaRuntimeConfig>> {
+    crate::commands::serve_slack::resolve_slack_config_for_serve(
+        config_file.and_then(|file| file.slack.as_ref()),
+        tenant_id,
+        default_agent_id,
+        default_project_id,
+        default_user_id,
+        config_path,
+    )
+}
+
+#[cfg(not(feature = "slack-v2-host-beta"))]
+fn resolve_slack_host_beta_config_for_serve_command(
+    config_file: Option<&RebornConfigFile>,
+    tenant_id: &TenantId,
+    default_agent_id: &AgentId,
+    default_project_id: Option<&ProjectId>,
+    default_user_id: &UserId,
+    config_path: &std::path::Path,
+) -> anyhow::Result<Option<()>> {
+    crate::commands::serve_slack::resolve_slack_config_for_serve(
+        config_file.and_then(|file| file.slack.as_ref()),
+        tenant_id,
+        default_agent_id,
+        default_project_id,
+        default_user_id,
+        config_path,
+    )
 }
 
 struct StartupServe {
@@ -1007,6 +1061,47 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("reborn-cli"), "message: {message}");
         assert!(message.contains("local-user"), "message: {message}");
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn serve_startup_rejects_loaded_config_with_legacy_slack_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+api_version = "ironclaw.runtime/v1"
+
+[slack]
+enabled = true
+slack_user_id = "U123"
+"#,
+        )
+        .expect("write config");
+        let config_file = RebornConfigFile::load(&config_path)
+            .expect("config file loads")
+            .expect("config exists");
+
+        let error = resolve_slack_host_beta_config_for_serve_command(
+            Some(&config_file),
+            &TenantId::new("serve-slack-tenant").expect("tenant id"),
+            &AgentId::new("serve-slack-agent").expect("agent id"),
+            None,
+            &UserId::new("serve-slack-user").expect("user id"),
+            &config_path,
+        )
+        .expect_err("serve startup must reject legacy Slack config fields");
+        let message = error.to_string();
+
+        assert!(
+            message.contains("[slack].slack_user_id"),
+            "message: {message}"
+        );
+        assert!(
+            message.contains(&config_path.display().to_string()),
+            "message: {message}"
+        );
     }
 
     #[cfg(feature = "slack-v2-host-beta")]

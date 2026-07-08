@@ -1,0 +1,13 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Slack send_message",
+  "description": "Send a message as you to a channel or DM.",
+  "type": "object",
+  "required": ["channel", "text"],
+  "properties": {
+    "channel": { "type": "string", "description": "Channel ID or name (#general or C123...), or a DM conversation ID." },
+    "text": { "type": "string", "description": "Message text (Slack mrkdwn)." },
+    "thread_ts": { "type": "string", "description": "Optional thread timestamp to reply in a thread." }
+  },
+  "additionalProperties": false
+}

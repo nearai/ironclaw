@@ -1,15 +1,15 @@
 // @ts-nocheck
 import { useQuery } from "@tanstack/react-query";
-import { React } from "../lib/html.js";
-import { listThreads } from "../lib/api.js";
-import { useI18n } from "../lib/i18n.js";
-import { THREAD_STATE, useThreadStates } from "../lib/thread-state.js";
+import React from "react";
+import { listThreads } from "../lib/api";
+import { useI18n } from "../lib/i18n";
+import { THREAD_STATE, useThreadStates } from "../lib/thread-state";
 import {
   approvalThreadNotifications,
   getNotificationState,
   markNotificationIdsSeen,
   subscribeNotifications,
-} from "../lib/notifications.js";
+} from "../lib/notifications";
 
 const NOTIFICATION_THREAD_LIMIT = 20;
 const NOTIFICATION_REFETCH_MS = 10_000;

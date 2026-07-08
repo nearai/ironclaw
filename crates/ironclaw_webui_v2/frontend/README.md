@@ -30,17 +30,13 @@ Use `./build.sh --no-vendor` when you only want to rebuild the SPA.
 |---|---|---|
 | `frontend/dist/` | `corepack pnpm build` / `./build.sh` | No |
 | Cargo `OUT_DIR/webui-v2-frontend-dist/` | `build.rs` during Rust builds | No |
-| `frontend/public/vendor/` | `vendor.sh` / `./build.sh` | Yes, only when intentionally refreshing vendor assets |
+| `frontend/public/vendor/fonts/` | `vendor.sh` / `./build.sh` | Yes, only when intentionally refreshing self-hosted fonts |
 
 ## Runtime Assets
 
-Vite owns the SPA entrypoint, CSS, hashed assets, and the NEAR wallet connect
-entrypoint. The vendored browser globals remain separate same-origin files:
-
-- DOMPurify
-- marked
-- highlight.js
-- bundled fonts
+Vite owns the SPA entrypoint, CSS, markdown/syntax-highlighting libraries,
+hashed assets, and the NEAR wallet connect entrypoint. The self-hosted fonts
+remain separate same-origin files under `frontend/public/vendor/fonts/`.
 
 The NEAR wallet connect popup is still a separate entrypoint with its own CSP and
 must not be merged into the main SPA bundle.

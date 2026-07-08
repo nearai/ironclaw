@@ -13,6 +13,7 @@ use std::{
     },
 };
 
+mod await_edge_port;
 mod budget_accountant;
 mod budget_cost_table;
 mod budget_seeding;
@@ -40,6 +41,9 @@ mod token_estimator;
 mod turn_event_publisher;
 pub mod user_profile_context;
 
+pub use await_edge_port::{
+    AwaitEdgeSettler, AwaitEdgeWriter, ResolveOutcome, ResolveReport, ScopeRecoveryInProgress,
+};
 pub use budget_accountant::GovernorBackedAccountant;
 pub use budget_cost_table::{ModelCost, ModelCostTable, StaticModelCostTable, ZeroCostTable};
 pub use budget_seeding::BudgetSeedingPolicy;
@@ -100,11 +104,11 @@ pub use subagent_prompt_port::{
 pub use subagent_spawn_port::{
     AwaitedChildSetRecord, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, DEFAULT_SUBAGENT_MAX_DEPTH,
     DEFAULT_SUBAGENT_MAX_SPAWN_PER_TURN, DEFAULT_SUBAGENT_MAX_TREE_DESCENDANTS,
-    InMemorySubagentGateResolutionStore, JsonSpawnSubagentInputCodec, SpawnSubagentArgs,
+    InMemoryAwaitEdgeWriter, JsonSpawnSubagentInputCodec, SpawnSubagentArgs,
     SpawnSubagentFlavorDescriptor, SpawnSubagentInputCodec, SpawnSubagentMode, SubagentDefinition,
-    SubagentDefinitionResolver, SubagentGateResolutionStore, SubagentGoalRecord, SubagentKindId,
-    SubagentSpawnCapabilityPort, SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits,
-    SubagentThreadKind, SubagentThreadMetadata, build_spawn_subagent_parameters_schema,
+    SubagentDefinitionResolver, SubagentGoalRecord, SubagentKindId, SubagentSpawnCapabilityPort,
+    SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits, SubagentThreadKind,
+    SubagentThreadMetadata, build_spawn_subagent_parameters_schema,
 };
 pub use system_inference::{GuardedSystemInferencePort, ModelGatewayBackedSystemInferencePort};
 pub use user_profile_context::{EmptyUserProfileSource, HostUserProfileSource};
