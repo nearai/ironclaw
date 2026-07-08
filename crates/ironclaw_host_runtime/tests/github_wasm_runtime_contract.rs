@@ -2031,7 +2031,7 @@ impl RuntimeCredentialAccountResolver for FixedSlackRuntimeCredentialAccountReso
 }
 
 fn registry_with_slack_user_package() -> ExtensionRegistry {
-    let manifest = ExtensionManifest::parse_with_host_api_contracts(
+    let manifest = ExtensionManifest::parse(
         &std::fs::read_to_string(slack_user_asset_root().join("manifest.toml")).unwrap(),
         ManifestSource::HostBundled,
         &default_host_port_catalog().unwrap(),
@@ -2126,7 +2126,7 @@ fn slack_user_first_party_trust_policy() -> HostTrustPolicy {
 }
 
 fn registry_with_github_package() -> ExtensionRegistry {
-    let manifest = ExtensionManifest::parse_with_host_api_contracts(
+    let manifest = ExtensionManifest::parse(
         &std::fs::read_to_string(github_asset_root().join("manifest.toml")).unwrap(),
         ManifestSource::HostBundled,
         &default_host_port_catalog().unwrap(),
@@ -2163,7 +2163,7 @@ fn filesystem_with_google_drive_package() -> LocalFilesystem {
 }
 
 fn registry_with_google_package(package_id: &str) -> ExtensionRegistry {
-    let manifest = ExtensionManifest::parse_with_host_api_contracts(
+    let manifest = ExtensionManifest::parse(
         &std::fs::read_to_string(google_asset_root(package_id).join("manifest.toml")).unwrap(),
         ManifestSource::HostBundled,
         &default_host_port_catalog().unwrap(),

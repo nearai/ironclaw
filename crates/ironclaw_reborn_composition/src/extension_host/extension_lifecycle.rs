@@ -1879,7 +1879,7 @@ fn prepare_install(
     // stamping everything `HostBundled` here would launder an imported
     // (`InstalledLocal`) bundle into the stored-manifest tier that is allowed
     // first-party trust and the bundled hash-migration path below.
-    let manifest_record = ExtensionManifestRecord::from_toml_with_contracts(
+    let manifest_record = ExtensionManifestRecord::from_toml(
         &available.manifest_toml,
         available.source,
         &host_ports,
@@ -1927,7 +1927,7 @@ fn prepare_manifest_migration(
     // (`migrate_host_bundled_manifest_hash`) additionally requires the STORED
     // manifest to be `HostBundled` before migrating, so an imported extension
     // whose on-disk manifest changed fails closed instead of migrating.
-    let manifest_record = ExtensionManifestRecord::from_toml_with_contracts(
+    let manifest_record = ExtensionManifestRecord::from_toml(
         &available.manifest_toml,
         available.source,
         &host_ports,
@@ -2301,6 +2301,17 @@ fn compensation_failure(
 
 #[cfg(test)]
 mod tests {
+
+    fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+        let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+        contracts
+            .register(std::sync::Arc::new(
+                ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                    .expect("capability provider contract"),
+            ))
+            .expect("register capability provider contract");
+        contracts
+    }
     use std::{
         collections::BTreeSet,
         sync::atomic::{AtomicUsize, Ordering},
@@ -6514,7 +6525,13 @@ trust = "first_party_requested"
 kind = "wasm"
 module = "wasm/fixture.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "fixture.search"
 description = "Search fixture data"
 effects = ["network"]
@@ -6523,7 +6540,7 @@ visibility = "model"
 input_schema_ref = "schemas/search.input.json"
 output_schema_ref = "schemas/search.output.json"
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "fixture.write"
 description = "Write fixture data"
 effects = ["network", "external_write"]
@@ -6641,6 +6658,7 @@ output_schema_ref = "schemas/search.output.json"
             manifest_toml,
             ManifestSource::HostBundled,
             &HostPortCatalog::empty(),
+            &capability_provider_contracts(),
         )
         .expect("fixture manifest");
         fixture_extension_package_from_parsed_manifest(manifest_toml, root_id, manifest)
@@ -6657,7 +6675,7 @@ output_schema_ref = "schemas/search.output.json"
                     .expect("product adapter host API contract"),
             ))
             .expect("register product adapter host API contract");
-        let manifest = ExtensionManifest::parse_with_host_api_contracts(
+        let manifest = ExtensionManifest::parse(
             manifest_toml,
             ManifestSource::HostBundled,
             &HostPortCatalog::empty(),
@@ -6706,7 +6724,7 @@ output_schema_ref = "schemas/search.output.json"
         let host_ports =
             ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog");
         let contracts = product_extension_host_api_contract_registry().expect("host API contracts");
-        ExtensionManifestRecord::from_toml_with_contracts(
+        ExtensionManifestRecord::from_toml(
             manifest_toml,
             source,
             &host_ports,

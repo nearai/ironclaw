@@ -157,6 +157,7 @@ pub fn registry_with_echo_capability() -> ExtensionRegistry {
         ECHO_MANIFEST,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .unwrap();
     let package = ExtensionPackage::from_manifest(
@@ -174,6 +175,7 @@ pub fn registry_with_github_comment_capability() -> ExtensionRegistry {
         GITHUB_COMMENT_MANIFEST,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .unwrap();
     let package = ExtensionPackage::from_manifest(
@@ -270,7 +272,13 @@ trust = "third_party"
 kind = "wasm"
 module = "echo.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "echo.say"
 description = "Echoes input"
 effects = ["dispatch_capability"]
@@ -292,7 +300,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/github_tool.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "github.comment_issue"
 description = "Add a comment to a GitHub issue or pull request."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -302,3 +316,14 @@ input_schema_ref = "schemas/github/comment_issue.input.v1.json"
 output_schema_ref = "schemas/github/comment_issue.output.v1.json"
 prompt_doc_ref = "prompts/github/comment_issue.md"
 "#;
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
+}

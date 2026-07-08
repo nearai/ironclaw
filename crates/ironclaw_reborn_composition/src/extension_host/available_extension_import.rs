@@ -172,7 +172,7 @@ pub(crate) fn imported_extension_package(
         })?;
     // Uploads are always validated as InstalledLocal. Only binary-compiled
     // packages may claim the HostBundled trust/runtime tier.
-    let record = ExtensionManifestRecord::from_toml_with_contracts(
+    let record = ExtensionManifestRecord::from_toml(
         manifest_toml,
         ManifestSource::InstalledLocal,
         &host_ports,
@@ -604,7 +604,7 @@ prompt_doc_ref = "prompts/run.md"
                 ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog");
             let contracts = ironclaw_host_runtime::default_host_api_contract_registry()
                 .expect("host API contracts");
-            let record = ExtensionManifestRecord::from_toml_with_contracts(
+            let record = ExtensionManifestRecord::from_toml(
                 manifest,
                 ManifestSource::InstalledLocal,
                 &host_ports,

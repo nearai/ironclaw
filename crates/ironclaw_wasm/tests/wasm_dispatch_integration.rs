@@ -809,7 +809,7 @@ fn registry_with_package(manifest: &str) -> ironclaw_extensions::ExtensionRegist
 }
 
 fn package_from_manifest(manifest: &str) -> ExtensionPackage {
-    let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
+    let manifest = ExtensionManifest::parse(
         manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),

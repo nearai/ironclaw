@@ -1032,6 +1032,17 @@ fn status_check(
 
 #[cfg(test)]
 mod tests {
+
+    fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+        let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+        contracts
+            .register(std::sync::Arc::new(
+                ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                    .expect("capability provider contract"),
+            ))
+            .expect("register capability provider contract");
+        contracts
+    }
     use super::*;
     use async_trait::async_trait;
     use ironclaw_extensions::{
@@ -1109,7 +1120,9 @@ mod tests {
                  id = \"{ext}\"\nname = \"{ext}\"\nversion = \"0.1.0\"\n\
                  description = \"test\"\ntrust = \"third_party\"\n\n\
                  [runtime]\nkind = \"wasm\"\nmodule = \"wasm/{ext}.wasm\"\n\n\
-                 [[capabilities]]\nid = \"{ext}.{capability}\"\ndescription = \"{capability}\"\n\
+                 [[host_api]]\nid = \"ironclaw.capability_provider/v1\"\nsection = \"capability_provider.tools\"\n\n\
+                 [capability_provider.tools]\n\n\
+                 [[capability_provider.tools.capabilities]]\nid = \"{ext}.{capability}\"\ndescription = \"{capability}\"\n\
                  effects = [\"network\"]\ndefault_permission = \"ask\"\nvisibility = \"model\"\n\
                  input_schema_ref = \"schemas/{capability}.input.json\"\n\
                  output_schema_ref = \"schemas/{capability}.output.json\"\n"
@@ -1119,6 +1132,7 @@ mod tests {
                 ManifestSource::HostBundled,
                 &HostPortCatalog::empty(),
                 None,
+                &capability_provider_contracts(),
             )
             .expect("manifest record")
         }
@@ -1810,7 +1824,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/{extension_id}.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "{extension_id}.{capability_name}"
 description = "{capability_name}"
 effects = ["network"]
@@ -1824,6 +1844,7 @@ output_schema_ref = "schemas/{capability_name}.output.json"
             &manifest_toml,
             ManifestSource::HostBundled,
             &HostPortCatalog::empty(),
+            &capability_provider_contracts(),
         )
         .expect("manifest parses");
         ExtensionPackage::from_manifest(

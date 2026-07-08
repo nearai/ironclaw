@@ -77,7 +77,13 @@ kind = "mcp"
 transport = "http"
 url = "https://mcp.example.test/rpc"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "test.capability"
 description = "Search through MCP"
 effects = ["network"]

@@ -55,7 +55,7 @@ pub fn extension_registry() -> GithubSupportResult<ExtensionRegistry> {
 /// feeds it into `publish_bundled_extension_for_test` for github.* dispatch
 /// without a scripted install/activate handshake.
 pub fn extension_package() -> GithubSupportResult<ExtensionPackage> {
-    let manifest = ExtensionManifest::parse_with_host_api_contracts(
+    let manifest = ExtensionManifest::parse(
         &std::fs::read_to_string(asset_root().join("manifest.toml"))?,
         ManifestSource::HostBundled,
         &default_host_port_catalog()?,

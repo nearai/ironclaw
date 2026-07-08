@@ -138,7 +138,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/plain.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "plain-tool.do"
 description = "Do something"
 default_permission = "ask"
@@ -150,11 +156,18 @@ prompt_doc_ref = "prompts/do.md"
         schema = MANIFEST_SCHEMA_VERSION,
     );
     let plain_id = ExtensionId::new("plain-tool").unwrap();
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new().unwrap(),
+        ))
+        .unwrap();
     let plain_manifest = ExtensionManifestRecord::from_toml(
         plain_raw,
         ManifestSource::HostBundled,
         &ironclaw_host_api::HostPortCatalog::empty(),
         Some(manifest_hash("sha256:plain")),
+        &contracts,
     )
     .unwrap();
     let plain_install = ExtensionInstallation::new(

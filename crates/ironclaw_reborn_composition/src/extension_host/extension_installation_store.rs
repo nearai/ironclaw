@@ -263,7 +263,7 @@ impl WireManifestRecord {
             .map_err(invalid_installation_error)?;
         let contracts =
             product_extension_host_api_contract_registry().map_err(invalid_installation_error)?;
-        ExtensionManifestRecord::from_toml_with_contracts(
+        ExtensionManifestRecord::from_toml(
             self.raw_toml,
             self.source.into_manifest_source(),
             &host_ports,

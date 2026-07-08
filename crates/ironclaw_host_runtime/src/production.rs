@@ -2498,7 +2498,13 @@ kind = "script"
 runner = "sandboxed_process"
 command = "echo"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "test.cap"
 description = "Test capability"
 effects = ["network"]
@@ -2511,6 +2517,7 @@ output_schema_ref = "schemas/test.output.json"
             MANIFEST,
             ManifestSource::HostBundled,
             &HostPortCatalog::empty(),
+            &capability_provider_contracts(),
         )
         .unwrap();
         let package = ExtensionPackage::from_manifest_toml(
@@ -2982,6 +2989,7 @@ output_schema_ref = "schemas/test.output.json"
             manifest_toml,
             ManifestSource::InstalledLocal,
             &HostPortCatalog::empty(),
+            &capability_provider_contracts(),
         )
         .expect("manifest must parse");
         let cap_id = manifest.capabilities[0].id.clone();
@@ -3016,7 +3024,13 @@ runner = "sandboxed_process"
 command = "echo"
 args = []
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "script.echo"
 description = "Echo through Script"
 effects = ["dispatch_capability", "use_secret"]
@@ -3026,7 +3040,7 @@ input_schema_ref = "schemas/test/input.v1.json"
 output_schema_ref = "schemas/test/output.v1.json"
 prompt_doc_ref = "prompts/test.md"
 
-[[capabilities.runtime_credentials]]
+[[capability_provider.tools.capabilities.runtime_credentials]]
 handle = "script_api_token"
 source = { type = "secret_handle" }
 audience = { scheme = "https", host_pattern = "api.example.com" }
@@ -3087,7 +3101,13 @@ runner = "sandboxed_process"
 command = "echo"
 args = []
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "script.echo"
 description = "Echo through Script"
 effects = ["dispatch_capability", "use_secret"]
@@ -3097,7 +3117,7 @@ input_schema_ref = "schemas/test/input.v1.json"
 output_schema_ref = "schemas/test/output.v1.json"
 prompt_doc_ref = "prompts/test.md"
 
-[[capabilities.runtime_credentials]]
+[[capability_provider.tools.capabilities.runtime_credentials]]
 handle = "optional_api_token"
 source = { type = "secret_handle" }
 audience = { scheme = "https", host_pattern = "api.example.com" }
@@ -3140,7 +3160,13 @@ runner = "sandboxed_process"
 command = "echo"
 args = []
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "script.echo"
 description = "Echo through Script"
 effects = ["dispatch_capability", "use_secret"]
@@ -3150,7 +3176,7 @@ input_schema_ref = "schemas/test/input.v1.json"
 output_schema_ref = "schemas/test/output.v1.json"
 prompt_doc_ref = "prompts/test.md"
 
-[[capabilities.runtime_credentials]]
+[[capability_provider.tools.capabilities.runtime_credentials]]
 handle = "github_runtime_token"
 source = { type = "product_auth_account", provider = "github" }
 audience = { scheme = "https", host_pattern = "api.github.com" }
@@ -3274,5 +3300,16 @@ required = true
             }
             other => panic!("expected Unavailable, got {other:?}"),
         }
+    }
+
+    fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+        let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+        contracts
+            .register(std::sync::Arc::new(
+                ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                    .expect("capability provider contract"),
+            ))
+            .expect("register capability provider contract");
+        contracts
     }
 }
