@@ -5814,6 +5814,87 @@ async fn stream_events_ws_emits_projection_frames_and_redacted_error() {
 }
 
 #[tokio::test]
+async fn stream_events_ws_uses_subscription_when_facade_supports_it() {
+    use futures::StreamExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let services = Arc::new(StubServices::default());
+    let envelope_a = make_projection_update_envelope("cursor:ws-sub-a");
+    let envelope_b = make_projection_update_envelope("cursor:ws-sub-b");
+    services
+        .enable_stream_events_subscription(vec![Ok(envelope_a.clone()), Ok(envelope_b.clone())]);
+
+    let router = router_with(services.clone());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let serve_handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    let url = format!("ws://{addr}/api/webchat/v2/threads/thread-x/ws");
+    let (mut ws, response) = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio_tungstenite::connect_async(url),
+    )
+    .await
+    .expect("ws connect within 5s")
+    .expect("ws upgrade");
+    assert_eq!(response.status().as_u16(), 101);
+
+    let mut text_frames: Vec<String> = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline && text_frames.len() < 2 {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match tokio::time::timeout(remaining, ws.next()).await {
+            Ok(Some(Ok(WsMessage::Text(text)))) => text_frames.push(text.to_string()),
+            Ok(Some(Ok(WsMessage::Close(_)))) | Ok(None) => break,
+            Ok(Some(Ok(_))) => continue,
+            Ok(Some(Err(_))) => break,
+            Err(_) => break,
+        }
+    }
+    let _ = ws.close(None).await;
+    serve_handle.abort();
+
+    assert!(
+        text_frames.len() >= 2,
+        "expected subscription projection frames; got {} text frame(s): {:?}",
+        text_frames.len(),
+        text_frames,
+    );
+
+    let envelope_a_json: Value = serde_json::from_str(&text_frames[0]).expect("envelope a parses");
+    let expected_a: Value = serde_json::to_value(&envelope_a).expect("envelope a value");
+    assert_eq!(
+        envelope_a_json, expected_a,
+        "first WS frame must carry the first subscription envelope",
+    );
+    let envelope_b_json: Value = serde_json::from_str(&text_frames[1]).expect("envelope b parses");
+    let expected_b: Value = serde_json::to_value(&envelope_b).expect("envelope b value");
+    assert_eq!(
+        envelope_b_json, expected_b,
+        "second WS frame must carry the second subscription envelope",
+    );
+
+    assert_eq!(
+        services.stream_events_calls.lock().expect("lock").len(),
+        0,
+        "subscription-enabled WS route must not call the polling drain facade",
+    );
+    let subscribe_calls = services
+        .subscribe_events_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(subscribe_calls.len(), 1);
+    assert_eq!(subscribe_calls[0].thread_id, "thread-x");
+    assert!(subscribe_calls[0].after_cursor.is_none());
+}
+
+#[tokio::test]
 async fn stream_events_ws_resumes_from_last_event_id_before_query_cursor() {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
