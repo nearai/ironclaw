@@ -153,7 +153,7 @@ function ConfirmModal({ title, message, confirmLabel, onConfirm, onCancel }) {
   `;
 }
 
-function UserRow({ user, onSelect, onSuspend, onActivate, onChangeRole, onCreateToken }) {
+function UserRow({ user, onSelect, onSuspend, onActivate, onChangeRole }) {
   const t = useT();
   return html`
     <div className="flex items-center justify-between gap-4 border-t border-iron-700 py-3.5 first:border-0 first:pt-0">
@@ -189,12 +189,6 @@ function UserRow({ user, onSelect, onSuspend, onActivate, onChangeRole, onCreate
           >
             ${user.role === "admin" ? t("admin.users.demote") : t("admin.users.promote")}
           </button>
-          <button
-            onClick=${() => onCreateToken(user.id, user.display_name)}
-            className="rounded-md border border-iron-700 px-2.5 py-1.5 text-[11px] font-medium text-iron-300 hover:border-signal/30 hover:text-signal"
-          >
-            ${t("admin.users.token")}
-          </button>
         </div>
       </div>
     </div>
@@ -205,7 +199,7 @@ export function AdminUsersTab({ selectedUserId, onSelectUser }) {
   const t = useT();
   const {
     users, query, isForbidden, createUser, isCreating, createError,
-    updateUser, deleteUser, suspendUser, activateUser, createToken,
+    updateUser, deleteUser, suspendUser, activateUser,
     newToken, clearToken,
   } = useAdminUsers();
 
@@ -223,12 +217,6 @@ export function AdminUsersTab({ selectedUserId, onSelectUser }) {
       confirmLabel: t("admin.users.suspend"),
       onConfirm: () => { suspendUser(id); setConfirm(null); },
     });
-  };
-
-  const handleCreateToken = async (userId, displayName) => {
-    const name = window.prompt(t("admin.users.tokenNamePrompt", { name: displayName || t("admin.users.userFallback") }));
-    if (!name) return;
-    await createToken(userId, name);
   };
 
   if (query.isLoading) {
@@ -315,7 +303,6 @@ export function AdminUsersTab({ selectedUserId, onSelectUser }) {
                   onSuspend=${handleSuspend}
                   onActivate=${activateUser}
                   onChangeRole=${(id, role) => updateUser(id, { role })}
-                  onCreateToken=${handleCreateToken}
                 />
               `
             )}

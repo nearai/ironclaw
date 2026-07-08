@@ -194,21 +194,6 @@ impl TriggerMutatorAttemptGateway {
         self.registration_outcomes.lock().await.clone()
     }
 
-    async fn wait_for_registration_outcomes(
-        &self,
-        expected_len: usize,
-        timeout: Duration,
-    ) -> BTreeMap<String, Result<(), String>> {
-        let stop = Instant::now() + timeout;
-        loop {
-            let outcomes = self.registration_outcomes().await;
-            if outcomes.len() >= expected_len || Instant::now() >= stop {
-                return outcomes;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    }
-
     /// One provider tool call per scheduled-trigger mutator capability id,
     /// paired with a payload shaped for that capability's real input schema
     /// (see `ironclaw_host_runtime::first_party_tools::trigger_management`'s
@@ -329,6 +314,23 @@ impl HostManagedModelGateway for TriggerMutatorAttemptGateway {
             ))
         }
     }
+}
+
+async fn wait_for_mutator_registration_outcomes(
+    gateway: &TriggerMutatorAttemptGateway,
+    deadline: Duration,
+) -> BTreeMap<String, Result<(), String>> {
+    let stop = Instant::now() + deadline;
+    let mut last = BTreeMap::new();
+    while Instant::now() < stop {
+        let current = gateway.registration_outcomes().await;
+        if current.len() == 4 {
+            return current;
+        }
+        last = current;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    last
 }
 
 /// Poll `repo` until `predicate` returns `true` or `deadline` elapses.
@@ -1462,9 +1464,11 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
     // legitimate trigger's id before the fire runs.
     gateway.set_mutator_target_trigger_id(trigger_id).await;
 
-    // Wait for the fire submission to settle. `last_status` is written when
-    // the turn is accepted/replayed by the poller, before the asynchronous
-    // agent loop necessarily reaches the model gateway under coverage builds.
+    // Wait for the fire to settle, then for the model gateway to record the
+    // mutator self-attempts before shutting the runtime down. `last_status`
+    // can become visible before the test thread observes the gateway-side
+    // recording, but the assertions below are specifically about those
+    // registration attempts.
     let settled = wait_for_settled(
         &repo,
         &tenant_id,
@@ -1473,14 +1477,8 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
         |r| r.last_fired_slot.is_some() && r.last_run_at.is_some() && r.last_status.is_some(),
     )
     .await;
-
-    // Now wait for the fired run's only model turn to reach the gateway and
-    // attempt all four mutator registrations. Without this second wait the
-    // test can race on slower instrumented builds: the trigger record is
-    // already marked accepted, but the model-facing turn has not run yet.
-    let registration_outcomes = gateway
-        .wait_for_registration_outcomes(4, Duration::from_secs(15))
-        .await;
+    let registration_outcomes =
+        wait_for_mutator_registration_outcomes(&gateway, Duration::from_secs(15)).await;
 
     runtime.shutdown().await.expect("runtime shutdown");
 
