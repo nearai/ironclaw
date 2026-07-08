@@ -72,18 +72,6 @@ mod trigger_poller_trusted_submit;
 mod turn_run_snapshot;
 mod web_access;
 mod webui;
-#[cfg(feature = "webui-v2-beta")]
-mod webui_body_limit;
-#[cfg(feature = "webui-v2-beta")]
-mod webui_operator_auth;
-#[cfg(feature = "webui-v2-beta")]
-mod webui_rate_limit;
-#[cfg(feature = "webui-v2-beta")]
-mod webui_route_match;
-#[cfg(feature = "webui-v2-beta")]
-mod webui_serve;
-#[cfg(feature = "webui-v2-beta")]
-mod webui_ws_origin;
 
 pub use admin_token::AdminApiTokenMinter;
 pub use automation::RebornAutomationProductFacade;
@@ -277,11 +265,11 @@ pub use slack::slack_serve::{
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_setup::SlackPersonalSetupServiceSlot;
 pub use web_access::register_bundled_web_access_first_party_handlers;
-pub use webui::{RebornWebuiBundle, build_webui_services};
+pub use webui::facade::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
-pub use webui_rate_limit::RateLimitConfigError;
+pub use webui::webui_rate_limit::RateLimitConfigError;
 #[cfg(feature = "webui-v2-beta")]
-pub use webui_serve::{
+pub use webui::webui_serve::{
     ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount,
     WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, WebuiServeConfigError,
     WebuiServeError, WebuiV2App, webui_v2_app, webui_v2_app_with_lifecycle,
