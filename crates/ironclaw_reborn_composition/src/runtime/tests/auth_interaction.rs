@@ -161,7 +161,7 @@ async fn build_runtime(
     if let Some(ports) = product_auth_ports {
         services = services.with_product_auth_ports(ports);
     }
-    build_reborn_runtime(
+    let runtime = build_reborn_runtime(
         RebornRuntimeInput::from_services(services)
             .with_identity(RebornRuntimeIdentity {
                 tenant_id: format!("{owner}-tenant"),
@@ -176,7 +176,9 @@ async fn build_runtime(
             })
             .with_model_gateway_override(Arc::new(UnusedModelGateway)),
     )
-    .await
+    .await?;
+    runtime.turn_scheduler.stop_for_test().await;
+    Ok(runtime)
 }
 
 async fn submit_and_block_auth_run(

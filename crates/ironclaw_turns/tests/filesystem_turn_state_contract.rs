@@ -1261,7 +1261,7 @@ async fn filesystem_turn_state_row_store_persists_rows_without_state_blob() {
         .claim_next_run(ClaimRunRequest {
             runner_id,
             lease_token,
-            scope_filter: None,
+            scope_filter: Some(request.scope.clone()),
         })
         .await
         .unwrap()
