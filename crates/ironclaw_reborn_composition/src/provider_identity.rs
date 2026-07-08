@@ -121,6 +121,9 @@ fn validate_identity_value(
     Ok(())
 }
 
+// Positive resolutions only: a revoked binding may keep resolving for up to
+// this window, but an unbound actor is never cached, so connecting takes
+// effect immediately. Keys are per provider-user id — no cross-user reuse.
 const PROVIDER_IDENTITY_CACHE_TTL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Error)]

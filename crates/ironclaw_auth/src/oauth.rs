@@ -57,10 +57,15 @@ pub const GOOGLE_GMAIL_SEND_SCOPE: &str = "https://www.googleapis.com/auth/gmail
 /// Permission to modify Gmail messages and drafts.
 pub const GOOGLE_GMAIL_MODIFY_SCOPE: &str = "https://www.googleapis.com/auth/gmail.modify";
 
-/// Reborn auth provider id for Slack personal (user-token) OAuth accounts.
+/// Reborn auth provider id (credential authority namespace) for Slack
+/// user-token OAuth accounts.
 ///
-/// Deliberately distinct from the bot Slack extension (`slack`) so a user
-/// token can never collide with the workspace bot token.
+/// The provider id matches the unified `slack` extension id on purpose: a
+/// `ProviderId` names who issued the credential, not which extension uses
+/// it. User tokens still cannot collide with the workspace bot token —
+/// personal OAuth credentials live in owner-scoped credential accounts,
+/// while the bot token/signing secret are setup secrets under distinct
+/// handles (`slack_bot_token`, `slack_signing_secret`) in the setup store.
 pub const SLACK_PROVIDER_ID: &str = "slack";
 /// Slack OAuth v2 authorization endpoint (user-token consent).
 pub const SLACK_PERSONAL_AUTHORIZATION_ENDPOINT: &str = "https://slack.com/oauth/v2/authorize";

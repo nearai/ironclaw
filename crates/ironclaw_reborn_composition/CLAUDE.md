@@ -186,9 +186,10 @@ which request belongs to which descriptor.
 
 Slack host-beta normal personal setup is extension-card driven: the user
 installs the Slack extension, clicks Configure, and the card starts the
-`slack_personal` product-auth OAuth flow. The successful callback binds the
-Slack `authed_user.id` to the authenticated Reborn user through the host-owned
-identity binding store. Slack personal setup is OAuth-only; the old browser
+provider-`slack` product-auth OAuth flow (the retired `slack_personal`
+provider id survives only in the one-time forward data migration). The
+successful callback binds the Slack `authed_user.id` to the authenticated
+Reborn user through the host-owned identity binding store. Slack personal setup is OAuth-only; the old browser
 manual-code redeem route and Slack command flow are not mounted.
 
 When Slack host-beta channel routing is configured, `webui_v2_app` also mounts
