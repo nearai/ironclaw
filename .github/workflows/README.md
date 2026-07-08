@@ -111,6 +111,12 @@ own run on a startup_failure and can never see a cron that didn't fire.
   is deleted, a v1 bug fix that must land should temporarily restore the
   `deterministic-deep-tests` call in `nightly-deep-ci.yml` (and/or dispatch
   `e2e.yml` manually). Delete `test.yml` and `e2e.yml` together with `src/`.
+- **Full-path extension↔provider coverage has no scheduler on any stack**:
+  the Emulate-backed full-path tests (`test_reborn_emulate_full_path.py`)
+  boot the legacy binary (see `tests/e2e/CLAUDE.md`, Reborn E2E coverage
+  gate) and were frozen with it. A Reborn-native port — same
+  install → OAuth → tool call → provider-mutation contract through
+  `ironclaw-reborn serve` — is the follow-up that restores this tier.
 - **Scope classifiers** (`scripts/ci/classify-test-scope.sh` and per-workflow
   `changes` jobs) are curated allowlists. Adding a new crate or test directory
   requires updating them, or the queue's scoped checks silently narrow. Keep
