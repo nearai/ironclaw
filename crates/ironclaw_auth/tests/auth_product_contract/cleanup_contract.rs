@@ -57,6 +57,7 @@ async fn extension_owned_accounts_require_owner_and_cleanup_is_action_specific()
         .cleanup_for_lifecycle(SecretCleanupRequest {
             scope: owner.clone(),
             extension_id: extension.clone(),
+            provider: None,
             action: SecretCleanupAction::Deactivate,
         })
         .await
@@ -93,6 +94,7 @@ async fn extension_owned_accounts_require_owner_and_cleanup_is_action_specific()
         .cleanup_for_lifecycle(SecretCleanupRequest {
             scope: owner.clone(),
             extension_id: extension.clone(),
+            provider: None,
             action: SecretCleanupAction::Deactivate,
         })
         .await
@@ -119,6 +121,7 @@ async fn extension_owned_accounts_require_owner_and_cleanup_is_action_specific()
         .cleanup_for_lifecycle(SecretCleanupRequest {
             scope: owner,
             extension_id: extension,
+            provider: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await
@@ -168,6 +171,7 @@ async fn cleanup_for_lifecycle_ignores_cross_scope_accounts() {
         .cleanup_for_lifecycle(SecretCleanupRequest {
             scope: owner,
             extension_id: extension.clone(),
+            provider: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await
@@ -270,6 +274,7 @@ async fn cleanup_lifecycle_is_idempotent_and_quarantines_partial_failures() {
         .cleanup_for_lifecycle(SecretCleanupRequest {
             scope: owner.clone(),
             extension_id: extension.clone(),
+            provider: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await
@@ -324,6 +329,7 @@ async fn cleanup_lifecycle_is_idempotent_and_quarantines_partial_failures() {
         .cleanup_for_lifecycle(SecretCleanupRequest {
             scope: owner,
             extension_id: extension,
+            provider: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await
@@ -374,6 +380,7 @@ async fn deactivate_cleanup_quarantines_partial_failures_without_mutating_accoun
         .cleanup_for_lifecycle(SecretCleanupRequest {
             scope: owner.clone(),
             extension_id: extension.clone(),
+            provider: None,
             action: SecretCleanupAction::Deactivate,
         })
         .await
@@ -397,4 +404,96 @@ async fn deactivate_cleanup_quarantines_partial_failures_without_mutating_accoun
         .expect("lookup")
         .expect("account remains");
     assert_eq!(stored.status, CredentialAccountStatus::Configured);
+}
+
+/// OAuth-minted personal credentials are stored `UserReusable` with NO
+/// extension ownership or grants (`flows.rs` account creation), and every
+/// later lifecycle/disconnect caller re-derives the owner scope with a fresh
+/// `invocation_id` (and often a different thread) — the #4935 defect-A shape.
+/// Cleanup must therefore match at credential-owner granularity and be able to
+/// select accounts by PROVIDER, or an uninstall can never revoke the token.
+#[tokio::test]
+async fn cleanup_matches_owner_granularity_and_provider_selected_oauth_accounts() {
+    let services = InMemoryAuthProductServices::new();
+    let extension = ExtensionId::new("slack").unwrap();
+
+    // Exactly how the OAuth callback mints a personal credential.
+    let oauth_account = services
+        .create_account(NewCredentialAccount {
+            scope: scope("alice"),
+            provider: provider(),
+            label: label("personal oauth"),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("personal-access").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .expect("oauth account");
+
+    let report = services
+        .cleanup_for_lifecycle(SecretCleanupRequest {
+            scope: reconnect_scope("alice", "thread-uninstall"),
+            extension_id: extension.clone(),
+            provider: Some(provider()),
+            action: SecretCleanupAction::Uninstall,
+        })
+        .await
+        .expect("provider-selected cleanup");
+    assert_eq!(report.revoked_accounts, vec![oauth_account.id]);
+
+    // A different provider may share the owner/grant selectors, but it must
+    // not be revoked unless the cleanup explicitly selects that provider.
+    let other_provider_account = services
+        .create_account(NewCredentialAccount {
+            scope: scope("alice"),
+            provider: AuthProviderId::new("notion").unwrap(),
+            label: label("other provider"),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: Some(extension.clone()),
+            granted_extensions: vec![extension.clone()],
+            access_secret: Some(SecretHandle::new("other-access").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .expect("other provider account");
+
+    // Extension-owned accounts must also match across invocations/threads.
+    let owned = services
+        .create_account(NewCredentialAccount {
+            scope: scope("alice"),
+            provider: provider(),
+            label: label("owned"),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::ExtensionOwned,
+            owner_extension: Some(extension.clone()),
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("owned-access").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .expect("owned account");
+
+    let report = services
+        .cleanup_for_lifecycle(SecretCleanupRequest {
+            scope: reconnect_scope("alice", "thread-uninstall-2"),
+            extension_id: extension,
+            provider: None,
+            action: SecretCleanupAction::Uninstall,
+        })
+        .await
+        .expect("extension-keyed cleanup");
+    assert_eq!(report.revoked_accounts, vec![owned.id]);
+    assert_eq!(report.retained_accounts, vec![other_provider_account.id]);
+    assert_eq!(report.removed_grants, vec![other_provider_account.id]);
+    assert!(
+        !report.revoked_accounts.contains(&other_provider_account.id),
+        "an unrelated provider's account must survive extension-keyed cleanup"
+    );
 }

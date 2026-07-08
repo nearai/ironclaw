@@ -34,6 +34,7 @@ use super::model_work::{ModelWorkOutcome, ModelWorkRequest};
 /// provider error surfaces; this wrapper catches gateway-layer stalls the inner
 /// bound misses.
 const PRIMARY_MODEL_CALL_TIMEOUT: Duration = Duration::from_secs(75);
+const FALLBACK_TEXT_DELTA_MILESTONE_STEP: usize = 15;
 
 /// Outcome passed to [`LoopModelBudgetAccountant::post_model_call`] so the
 /// accountant can record usage on success or note the failure kind.
@@ -480,12 +481,22 @@ where
         if matches!(response.output, ParentLoopOutput::AssistantReply(_))
             && !progress_sink.emitted_text()
         {
+            let text_chunk_count = response
+                .chunks
+                .iter()
+                .filter(|chunk| !chunk.safe_text_delta.is_empty())
+                .count();
+            let mut text_chunk_index = 0;
             let mut accumulated_text = String::new();
             for chunk in &response.chunks {
                 if chunk.safe_text_delta.is_empty() {
                     continue;
                 }
                 accumulated_text.push_str(&chunk.safe_text_delta);
+                text_chunk_index += 1;
+                if !should_emit_fallback_text_delta(text_chunk_index, text_chunk_count) {
+                    continue;
+                }
                 if let Err(error) = self
                     .milestones
                     .model_text_delta(accumulated_text.clone())
@@ -602,6 +613,10 @@ fn sanitize_model_response(mut response: LoopModelResponse) -> LoopModelResponse
     response
 }
 
+fn should_emit_fallback_text_delta(chunk_index: usize, chunk_count: usize) -> bool {
+    chunk_index == chunk_count || chunk_index % FALLBACK_TEXT_DELTA_MILESTONE_STEP == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -620,5 +635,16 @@ mod tests {
             PRIMARY_MODEL_CALL_TIMEOUT.as_secs(),
             lease_secs,
         );
+    }
+
+    #[test]
+    fn fallback_model_text_delta_emission_is_throttled_and_final() {
+        let emitted = (1..=32)
+            .filter(|chunk_index| should_emit_fallback_text_delta(*chunk_index, 32))
+            .collect::<Vec<_>>();
+
+        assert_eq!(emitted, vec![15, 30, 32]);
+        assert!(should_emit_fallback_text_delta(14, 14));
+        assert!(!should_emit_fallback_text_delta(1, 14));
     }
 }

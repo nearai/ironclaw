@@ -1,5 +1,5 @@
 use crate::product_auth::oauth::oauth_provider_client::{
-    ExchangeScopePolicy, HostOAuthProviderSpec,
+    ExchangeScopePolicy, HostOAuthProviderSpec, TokenResponseShape,
 };
 
 pub(crate) const NOTION_PROVIDER_ID: &str = "notion";
@@ -15,5 +15,6 @@ pub(crate) fn notion_provider_spec() -> HostOAuthProviderSpec {
         secret_handle_prefix: "notion",
         resource: Some(NOTION_RESOURCE),
         exchange_scope_policy: ExchangeScopePolicy::FallbackToRequested,
+        token_response_shape: TokenResponseShape::Standard,
     }
 }

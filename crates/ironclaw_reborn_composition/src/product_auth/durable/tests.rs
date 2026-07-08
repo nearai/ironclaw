@@ -981,7 +981,7 @@ async fn filesystem_oauth_callback_claim_is_one_shot_and_completion_persists() {
                 flow_id: flow.id,
                 opaque_state_hash: state_hash("state"),
                 outcome: ironclaw_auth::ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: google_provider(),
                         account_label: account_label(),
                         authorization_code_hash: code_hash("code"),
@@ -990,7 +990,8 @@ async fn filesystem_oauth_callback_claim_is_one_shot_and_completion_persists() {
                         refresh_secret: Some(SecretHandle::new("oauth-refresh").unwrap()),
                         scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
                         account_id: None,
-                    },
+                        provider_identity: None,
+                    }),
                 },
             },
         )
@@ -1155,7 +1156,7 @@ async fn filesystem_oauth_continuation_marker_is_idempotent() {
                 flow_id: flow.id,
                 opaque_state_hash: state_hash("s"),
                 outcome: ironclaw_auth::ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: google_provider(),
                         account_label: account_label(),
                         authorization_code_hash: code_hash("c"),
@@ -1164,7 +1165,8 @@ async fn filesystem_oauth_continuation_marker_is_idempotent() {
                         refresh_secret: None,
                         scopes: vec![],
                         account_id: None,
-                    },
+                        provider_identity: None,
+                    }),
                 },
             },
         )
@@ -1481,6 +1483,7 @@ async fn filesystem_cleanup_for_lifecycle_deactivates_owner_and_revokes_on_unins
         .cleanup_for_lifecycle(SecretCleanupRequest {
             scope: scope.clone(),
             extension_id: ext_id.clone(),
+            provider: None,
             action: SecretCleanupAction::Deactivate,
         })
         .await
@@ -1500,6 +1503,7 @@ async fn filesystem_cleanup_for_lifecycle_deactivates_owner_and_revokes_on_unins
         .cleanup_for_lifecycle(SecretCleanupRequest {
             scope: scope.clone(),
             extension_id: ext_id.clone(),
+            provider: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await
@@ -1520,6 +1524,93 @@ async fn filesystem_cleanup_for_lifecycle_deactivates_owner_and_revokes_on_unins
             .unwrap()
             .is_none(),
         "Uninstall must delete refresh secret from SecretStore"
+    );
+}
+
+// ─── fix: cleanup matches owner granularity + provider-selected OAuth accounts ─
+
+/// The production shape the Slack disconnect issues: the OAuth flow stored the
+/// account under its own scope (fresh per-flow `invocation_id`), as
+/// `UserReusable` with NO extension ownership/grants; the later disconnect
+/// mints another fresh invocation. Full-scope-equality matching (the old
+/// behavior) silently revoked nothing.
+#[tokio::test]
+async fn filesystem_cleanup_matches_owner_granularity_and_provider_selector() {
+    use ironclaw_auth::{SecretCleanupAction, SecretCleanupRequest, SecretCleanupService};
+    use ironclaw_host_api::ExtensionId;
+
+    let filesystem = test_filesystem();
+    let concrete_secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
+    let flow_scope = test_scope();
+    let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
+
+    let access = SecretHandle::new("slack-personal-access").unwrap();
+    use secrecy::SecretString;
+    concrete_secret_store
+        .put(
+            flow_scope.resource.clone(),
+            access.clone(),
+            SecretString::from("xoxp-material"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Exactly how the OAuth callback mints a personal credential (flows.rs).
+    let account = service
+        .create_account(ironclaw_auth::NewCredentialAccount {
+            scope: flow_scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: vec![],
+            access_secret: Some(access.clone()),
+            refresh_secret: None,
+            scopes: vec![],
+        })
+        .await
+        .unwrap();
+
+    // Same owner, FRESH invocation id — the disconnect/lifecycle caller shape.
+    let cleanup_scope = test_scope();
+    assert_ne!(
+        cleanup_scope.resource.invocation_id, flow_scope.resource.invocation_id,
+        "fixture must model the cross-invocation caller"
+    );
+
+    // Extension-keyed cleanup alone must NOT sweep the reusable account…
+    let report = service
+        .cleanup_for_lifecycle(SecretCleanupRequest {
+            scope: cleanup_scope.clone(),
+            extension_id: ExtensionId::new("slack").unwrap(),
+            provider: None,
+            action: SecretCleanupAction::Uninstall,
+        })
+        .await
+        .unwrap();
+    assert!(report.revoked_accounts.is_empty());
+
+    // …but the explicit provider selector revokes it and purges the secret.
+    let report = service
+        .cleanup_for_lifecycle(SecretCleanupRequest {
+            scope: cleanup_scope,
+            extension_id: ExtensionId::new("slack").unwrap(),
+            provider: Some(google_provider()),
+            action: SecretCleanupAction::Uninstall,
+        })
+        .await
+        .unwrap();
+    assert_eq!(report.revoked_accounts, vec![account.id]);
+    assert!(
+        concrete_secret_store
+            .metadata(&flow_scope.resource, &access)
+            .await
+            .unwrap()
+            .is_none(),
+        "provider-selected Uninstall must purge the token material"
     );
 }
 
@@ -1786,7 +1877,7 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
                 flow_id: flow1.id,
                 opaque_state_hash: state_hash("state1"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: google_provider(),
                         account_label: account_label(),
                         authorization_code_hash: code_hash("code1"),
@@ -1795,7 +1886,8 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
                         refresh_secret: Some(refresh_v1.clone()),
                         scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
                         account_id: None,
-                    },
+                        provider_identity: None,
+                    }),
                 },
             },
         )
@@ -1890,7 +1982,7 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
                 flow_id: flow2.id,
                 opaque_state_hash: state_hash("state2"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: google_provider(),
                         account_label: account_label(),
                         authorization_code_hash: code_hash("code2"),
@@ -1899,7 +1991,8 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
                         refresh_secret: Some(refresh_v2.clone()),
                         scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
                         account_id: None,
-                    },
+                        provider_identity: None,
+                    }),
                 },
             },
         )
@@ -2001,7 +2094,7 @@ async fn filesystem_oauth_reauth_updates_bound_account_across_fresh_invocation()
                 flow_id: flow1.id,
                 opaque_state_hash: state_hash("state1"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: google_provider(),
                         account_label: account_label(),
                         authorization_code_hash: code_hash("code1"),
@@ -2010,7 +2103,8 @@ async fn filesystem_oauth_reauth_updates_bound_account_across_fresh_invocation()
                         refresh_secret: None,
                         scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
                         account_id: None,
-                    },
+                        provider_identity: None,
+                    }),
                 },
             },
         )
@@ -2072,7 +2166,7 @@ async fn filesystem_oauth_reauth_updates_bound_account_across_fresh_invocation()
                 flow_id: flow2.id,
                 opaque_state_hash: state_hash("state2"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: google_provider(),
                         account_label: account_label(),
                         authorization_code_hash: code_hash("code2"),
@@ -2081,7 +2175,8 @@ async fn filesystem_oauth_reauth_updates_bound_account_across_fresh_invocation()
                         refresh_secret: None,
                         scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
                         account_id: None,
-                    },
+                        provider_identity: None,
+                    }),
                 },
             },
         )
@@ -2162,6 +2257,7 @@ async fn filesystem_manual_token_submit_cleans_up_secret_when_account_write_fail
         access_secret: None,
         refresh_secret: None,
         scopes: vec![],
+        provider_identity: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
@@ -2275,7 +2371,7 @@ async fn filesystem_oauth_callback_cas_conflict_reuses_concurrent_account() {
                 flow_id: flow.id,
                 opaque_state_hash: state_hash("s2"),
                 outcome: ironclaw_auth::ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: google_provider(),
                         account_label: account_label(),
                         authorization_code_hash: code_hash("c2"),
@@ -2284,7 +2380,8 @@ async fn filesystem_oauth_callback_cas_conflict_reuses_concurrent_account() {
                         refresh_secret: Some(SecretHandle::new("new-refresh").unwrap()),
                         scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
                         account_id: None,
-                    },
+                        provider_identity: None,
+                    }),
                 },
             },
         )
@@ -2334,6 +2431,7 @@ async fn filesystem_cleanup_removes_grant_from_non_owner_account() {
         .cleanup_for_lifecycle(SecretCleanupRequest {
             scope: scope.clone(),
             extension_id: ext_id.clone(),
+            provider: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await
@@ -3169,7 +3267,7 @@ async fn filesystem_oauth_cas_conflict_branch_purges_previous_secrets() {
                 flow_id: flow.id,
                 opaque_state_hash: state_hash("cas-s"),
                 outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: OAuthProviderExchange {
+                    exchange: Box::new(OAuthProviderExchange {
                         provider: google_provider(),
                         account_label: account_label(),
                         authorization_code_hash: code_hash("cas-c"),
@@ -3178,7 +3276,8 @@ async fn filesystem_oauth_cas_conflict_branch_purges_previous_secrets() {
                         refresh_secret: Some(new_refresh.clone()),
                         scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
                         account_id: None,
-                    },
+                        provider_identity: None,
+                    }),
                 },
             },
         )
@@ -3513,6 +3612,7 @@ async fn filesystem_manual_token_consume_only_after_successful_account_write() {
         access_secret: None,
         refresh_secret: None,
         scopes: vec![],
+        provider_identity: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };

@@ -1,5 +1,5 @@
 use crate::product_auth::oauth::oauth_provider_client::{
-    ExchangeScopePolicy, HostOAuthProviderSpec,
+    ExchangeScopePolicy, HostOAuthProviderSpec, TokenResponseShape,
 };
 
 pub(crate) fn google_provider_spec() -> HostOAuthProviderSpec {
@@ -10,5 +10,6 @@ pub(crate) fn google_provider_spec() -> HostOAuthProviderSpec {
         secret_handle_prefix: "google",
         resource: None,
         exchange_scope_policy: ExchangeScopePolicy::RequireProviderScope,
+        token_response_shape: TokenResponseShape::Standard,
     }
 }

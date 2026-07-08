@@ -180,6 +180,7 @@ pub enum RebornChannelConnectStrategy {
     AdminManagedChannels,
     WebGeneratedCode,
     QrCode,
+    #[serde(rename = "oauth")]
     OAuth,
 }
 
@@ -187,7 +188,7 @@ pub enum RebornChannelConnectStrategy {
 pub struct RebornChannelConnectAction {
     pub title: String,
     pub instructions: String,
-    #[serde(rename = "input_placeholder", alias = "code_placeholder")]
+    #[serde(rename = "input_placeholder")]
     pub input_placeholder: String,
     pub submit_label: String,
     pub success_message: String,

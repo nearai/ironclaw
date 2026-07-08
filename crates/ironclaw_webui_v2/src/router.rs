@@ -9,14 +9,17 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use ironclaw_product_workflow::RebornServicesApi;
 use serde::Serialize;
 
 use crate::descriptors::{
-    WEBUI_V2_PATTERN_ACTIVATE_EXTENSION, WEBUI_V2_PATTERN_BROWSE_FS_DIR,
-    WEBUI_V2_PATTERN_CANCEL_RUN, WEBUI_V2_PATTERN_COMPLETE_NEARAI_WALLET_LOGIN,
-    WEBUI_V2_PATTERN_CREATE_THREAD, WEBUI_V2_PATTERN_DELETE_AUTOMATION,
+    WEBUI_V2_PATTERN_ACTIVATE_EXTENSION, WEBUI_V2_PATTERN_ADMIN_USER,
+    WEBUI_V2_PATTERN_ADMIN_USER_ROLE, WEBUI_V2_PATTERN_ADMIN_USER_SECRET,
+    WEBUI_V2_PATTERN_ADMIN_USER_SECRETS, WEBUI_V2_PATTERN_ADMIN_USER_STATUS,
+    WEBUI_V2_PATTERN_ADMIN_USERS, WEBUI_V2_PATTERN_AUTOMATION_DETAIL,
+    WEBUI_V2_PATTERN_BROWSE_FS_DIR, WEBUI_V2_PATTERN_CANCEL_RUN,
+    WEBUI_V2_PATTERN_COMPLETE_NEARAI_WALLET_LOGIN, WEBUI_V2_PATTERN_CREATE_THREAD,
     WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER, WEBUI_V2_PATTERN_DELETE_THREAD,
     WEBUI_V2_PATTERN_GET_ATTACHMENT, WEBUI_V2_PATTERN_GET_LLM_CONFIG, WEBUI_V2_PATTERN_GET_SESSION,
     WEBUI_V2_PATTERN_GET_TIMELINE, WEBUI_V2_PATTERN_INSTALL_EXTENSION,
@@ -153,6 +156,35 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
             WEBUI_V2_PATTERN_DELETE_THREAD,
             delete(handlers::delete_thread),
         )
+        // Admin user-management. Authorization (operator token or admin/owner
+        // role) and last-admin protection are enforced in the facade, so these
+        // are mounted unconditionally — a non-admin caller gets 403.
+        .route(
+            WEBUI_V2_PATTERN_ADMIN_USERS,
+            get(handlers::admin_list_users).post(handlers::admin_create_user),
+        )
+        .route(
+            WEBUI_V2_PATTERN_ADMIN_USER,
+            get(handlers::admin_get_user)
+                .patch(handlers::admin_update_user)
+                .delete(handlers::admin_delete_user),
+        )
+        .route(
+            WEBUI_V2_PATTERN_ADMIN_USER_STATUS,
+            post(handlers::admin_set_user_status),
+        )
+        .route(
+            WEBUI_V2_PATTERN_ADMIN_USER_ROLE,
+            post(handlers::admin_set_user_role),
+        )
+        .route(
+            WEBUI_V2_PATTERN_ADMIN_USER_SECRETS,
+            get(handlers::admin_list_user_secrets),
+        )
+        .route(
+            WEBUI_V2_PATTERN_ADMIN_USER_SECRET,
+            put(handlers::admin_put_user_secret).delete(handlers::admin_delete_user_secret),
+        )
         .route(WEBUI_V2_PATTERN_GET_SESSION, get(handlers::get_session))
         .route(WEBUI_V2_PATTERN_SEND_MESSAGE, post(handlers::send_message))
         .route(WEBUI_V2_PATTERN_GET_TIMELINE, get(handlers::get_timeline))
@@ -223,8 +255,8 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
             post(handlers::resume_automation),
         )
         .route(
-            WEBUI_V2_PATTERN_DELETE_AUTOMATION,
-            delete(handlers::delete_automation),
+            WEBUI_V2_PATTERN_AUTOMATION_DETAIL,
+            post(handlers::rename_automation).delete(handlers::delete_automation),
         )
         .route(WEBUI_V2_PATTERN_TRACE_CREDITS, get(handlers::trace_credits))
         .route(

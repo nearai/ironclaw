@@ -64,6 +64,10 @@ browser-reachable.
 | `webui.v2.retry_run` | POST | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/retry` | None | `TurnCoordinator` |
 | `webui.v2.resolve_gate` | POST | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/gates/{gate_ref}/resolve` | None | `TurnCoordinator` |
 | `webui.v2.list_automations` | GET | `/api/webchat/v2/automations` (optional `?limit=N&run_limit=N`) | None | `ProductWorkflow` |
+| `webui.v2.pause_automation` | POST | `/api/webchat/v2/automations/{automation_id}/pause` | None | `ProductWorkflow` |
+| `webui.v2.resume_automation` | POST | `/api/webchat/v2/automations/{automation_id}/resume` | None | `ProductWorkflow` |
+| `webui.v2.rename_automation` | POST | `/api/webchat/v2/automations/{automation_id}` | None | `ProductWorkflow` |
+| `webui.v2.delete_automation` | DELETE | `/api/webchat/v2/automations/{automation_id}` | None | `ProductWorkflow` |
 | `webui.v2.list_connectable_channels` | GET | `/api/webchat/v2/channels/connectable` | None | `ProjectionOnly` |
 | `webui.v2.list_extensions` | GET | `/api/webchat/v2/extensions` | None | `ProjectionOnly` |
 | `webui.v2.list_extension_registry` | GET | `/api/webchat/v2/extensions/registry` | None | `ProjectionOnly` |
@@ -91,6 +95,23 @@ browser-reachable.
 | `webui.v2.operator.status` | GET | `/api/webchat/v2/operator/status` | None | `ProjectionOnly` |
 | `webui.v2.operator.logs` | GET | `/api/webchat/v2/operator/logs` | None | `ProjectionOnly` |
 | `webui.v2.operator.service_lifecycle` | POST | `/api/webchat/v2/operator/service` | None | `ProductWorkflow` |
+| `webui.v2.admin.list_users` | GET | `/api/webchat/v2/admin/users` (optional `?status=...`) | None | `ProductWorkflow` |
+| `webui.v2.admin.create_user` | POST | `/api/webchat/v2/admin/users` | None | `ProductWorkflow` |
+| `webui.v2.admin.get_user` | GET | `/api/webchat/v2/admin/users/{user_id}` | None | `ProductWorkflow` |
+| `webui.v2.admin.update_user` | PATCH | `/api/webchat/v2/admin/users/{user_id}` | None | `ProductWorkflow` |
+| `webui.v2.admin.delete_user` | DELETE | `/api/webchat/v2/admin/users/{user_id}` | None | `ProductWorkflow` |
+| `webui.v2.admin.set_user_status` | POST | `/api/webchat/v2/admin/users/{user_id}/status` | None | `ProductWorkflow` |
+| `webui.v2.admin.set_user_role` | POST | `/api/webchat/v2/admin/users/{user_id}/role` | None | `ProductWorkflow` |
+| `webui.v2.admin.list_user_secrets` | GET | `/api/webchat/v2/admin/users/{user_id}/secrets` | None | `ProductWorkflow` |
+| `webui.v2.admin.put_user_secret` | PUT | `/api/webchat/v2/admin/users/{user_id}/secrets/{handle}` | None | `ProductWorkflow` |
+| `webui.v2.admin.delete_user_secret` | DELETE | `/api/webchat/v2/admin/users/{user_id}/secrets/{handle}` | None | `ProductWorkflow` |
+
+The `/api/webchat/v2/admin/*` user-management routes are admin/operator-gated:
+authorization (operator token or admin/owner role) and last-admin protection
+are enforced server-side in `ironclaw_product_workflow::AdminUserService`, and a
+non-admin caller receives `403`. `webui.v2.admin.create_user` returns the new
+user's one-time API bearer exactly once in `api_token`; there is no re-issue
+endpoint for existing users.
 | `webui.v2.trace_credits` | GET | `/api/webchat/v2/traces/credit` | None | `ProductWorkflow` |
 | `webui.v2.trace_account_traces` | GET | `/api/webchat/v2/traces/account` (optional `?limit=N`) | None | `ProductWorkflow` |
 | `webui.v2.authorize_trace_hold` | POST | `/api/webchat/v2/traces/holds/{submission_id}/authorize` | None | `ProductWorkflow` |

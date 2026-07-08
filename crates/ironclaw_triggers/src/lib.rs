@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use chrono::{SecondsFormat, Utc};
 use chrono_tz::Tz;
 use cron::Schedule;
+use ironclaw_common::{AutomationName, AutomationNameError};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
 use ironclaw_turns::TurnRunId;
 use serde::{Deserialize, Serialize};
@@ -41,7 +42,7 @@ const MAX_DUE_TRIGGER_POLL_LIMIT: usize = 128;
 const MAX_TRIGGER_LIST_LIMIT: usize = 100;
 const MAX_TRIGGER_RUN_HISTORY_LIMIT: usize = 500;
 const MAX_TRIGGER_RUN_HISTORY_RETAINED: usize = 500;
-pub const MAX_TRIGGER_NAME_BYTES: usize = 256;
+pub const MAX_TRIGGER_NAME_BYTES: usize = ironclaw_common::MAX_AUTOMATION_NAME_BYTES;
 pub const MAX_TRIGGER_PROMPT_BYTES: usize = 32 * 1024;
 const IDENTITY_VERSION_LABEL: &str = "ironclaw.trigger-fire.v1";
 const ROUTE_THREAD_DOMAIN: &str = "route-thread";
@@ -330,18 +331,7 @@ pub struct TriggerRecord {
 
 impl TriggerRecord {
     pub fn validate(&self) -> Result<(), TriggerError> {
-        if self.name.trim().is_empty() {
-            return Err(TriggerError::InvalidRecord {
-                kind: TriggerRecordValidationKind::NameEmpty,
-                reason: "trigger name must not be empty".to_string(),
-            });
-        }
-        if self.name.len() > MAX_TRIGGER_NAME_BYTES {
-            return Err(TriggerError::InvalidRecord {
-                kind: TriggerRecordValidationKind::NameTooLong,
-                reason: format!("trigger name must be at most {MAX_TRIGGER_NAME_BYTES} bytes"),
-            });
-        }
+        validate_trigger_name(&self.name)?;
         if self.prompt.trim().is_empty() {
             return Err(TriggerError::InvalidRecord {
                 kind: TriggerRecordValidationKind::PromptEmpty,
@@ -371,6 +361,26 @@ impl TriggerRecord {
     pub fn has_active_fire(&self) -> bool {
         self.active_fire_slot.is_some() || self.active_run_ref.is_some()
     }
+}
+
+pub(crate) fn validate_trigger_name(name: &str) -> Result<(), TriggerError> {
+    AutomationName::new(name.to_string())
+        .map(|_| ())
+        .map_err(trigger_name_error)
+}
+
+fn trigger_name_error(error: AutomationNameError) -> TriggerError {
+    let (kind, reason) = match error {
+        AutomationNameError::Empty => (
+            TriggerRecordValidationKind::NameEmpty,
+            "trigger name must not be empty".to_string(),
+        ),
+        AutomationNameError::TooLong => (
+            TriggerRecordValidationKind::NameTooLong,
+            format!("trigger name must be at most {MAX_TRIGGER_NAME_BYTES} bytes"),
+        ),
+    };
+    TriggerError::InvalidRecord { kind, reason }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1006,6 +1016,25 @@ pub trait TriggerRepository: Send + Sync {
         state: TriggerState,
     ) -> Result<Option<TriggerRecord>, TriggerError>;
 
+    /// Renames a trigger only when the full caller scope matches the stored record.
+    ///
+    /// This user-facing mutation updates only the human-readable label. It
+    /// must not alter schedule state, active-fire metadata, run history, or
+    /// prompt content.
+    async fn rename_scoped_trigger(
+        &self,
+        _tenant_id: TenantId,
+        _creator_user_id: UserId,
+        _agent_id: Option<AgentId>,
+        _project_id: Option<ProjectId>,
+        _trigger_id: TriggerId,
+        _name: AutomationName,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        Err(TriggerError::Backend {
+            reason: "rename_scoped_trigger not implemented by this repository".to_string(),
+        })
+    }
+
     /// Lists due triggers across all tenants for the trusted poller path.
     ///
     /// # Safety / Authorization
@@ -1344,6 +1373,30 @@ impl TriggerRepository for InMemoryTriggerRepository {
             return Ok(None);
         }
         record.state = new_state;
+        Ok(Some(record.clone()))
+    }
+
+    async fn rename_scoped_trigger(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        trigger_id: TriggerId,
+        name: AutomationName,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let mut state = self.lock_state()?;
+        let key = TriggerRepositoryKey::new(&tenant_id, trigger_id);
+        let Some(record) = state.records.get_mut(&key) else {
+            return Ok(None);
+        };
+        if record.creator_user_id != creator_user_id
+            || record.agent_id != agent_id
+            || record.project_id != project_id
+        {
+            return Ok(None);
+        }
+        record.name = name.into_inner();
         Ok(Some(record.clone()))
     }
 

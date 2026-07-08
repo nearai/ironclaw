@@ -51,11 +51,11 @@ pub(crate) fn lifecycle_credential_setup(
                 scopes: normalized_provider_scopes(scopes),
             }
         }
-        RuntimeCredentialAccountSetup::ChannelPairing { channel } => {
-            LifecycleExtensionCredentialSetup::ChannelPairing {
-                channel: channel.clone(),
-            }
-        }
+        // Retired kinds exist only in legacy persisted records, never in live
+        // manifests, so this arm is unreachable from the manifest-projection
+        // path; fold to the default manual shape rather than inventing a
+        // lifecycle variant for a kind nothing can set up.
+        RuntimeCredentialAccountSetup::Retired => LifecycleExtensionCredentialSetup::ManualToken,
     }
 }
 
@@ -77,23 +77,16 @@ pub(crate) fn can_merge_lifecycle_credential_setup(
     existing: &LifecycleExtensionCredentialSetup,
     candidate: &LifecycleExtensionCredentialSetup,
 ) -> bool {
-    match (existing, candidate) {
+    matches!(
+        (existing, candidate),
         (
             LifecycleExtensionCredentialSetup::ManualToken,
             LifecycleExtensionCredentialSetup::ManualToken,
+        ) | (
+            LifecycleExtensionCredentialSetup::OAuth { .. },
+            LifecycleExtensionCredentialSetup::OAuth { .. },
         )
-        | (
-            LifecycleExtensionCredentialSetup::OAuth { .. },
-            LifecycleExtensionCredentialSetup::OAuth { .. },
-        ) => true,
-        // Distinct channels are distinct requirements; only same-channel pairing
-        // requirements coalesce.
-        (
-            LifecycleExtensionCredentialSetup::ChannelPairing { channel: existing },
-            LifecycleExtensionCredentialSetup::ChannelPairing { channel: candidate },
-        ) => existing == candidate,
-        _ => false,
-    }
+    )
 }
 
 pub(crate) fn merge_lifecycle_credential_setup(
@@ -122,21 +115,16 @@ fn can_merge_runtime_credential_setup(
     existing: &RuntimeCredentialAccountSetup,
     candidate: &RuntimeCredentialAccountSetup,
 ) -> bool {
-    match (existing, candidate) {
+    matches!(
+        (existing, candidate),
         (
             RuntimeCredentialAccountSetup::ManualToken,
             RuntimeCredentialAccountSetup::ManualToken,
+        ) | (
+            RuntimeCredentialAccountSetup::OAuth { .. },
+            RuntimeCredentialAccountSetup::OAuth { .. },
         )
-        | (
-            RuntimeCredentialAccountSetup::OAuth { .. },
-            RuntimeCredentialAccountSetup::OAuth { .. },
-        ) => true,
-        (
-            RuntimeCredentialAccountSetup::ChannelPairing { channel: existing },
-            RuntimeCredentialAccountSetup::ChannelPairing { channel: candidate },
-        ) => existing == candidate,
-        _ => false,
-    }
+    )
 }
 
 fn merge_runtime_credential_auth_requirement(
@@ -174,9 +162,7 @@ fn normalized_runtime_credential_setup(
             scopes: normalized_provider_scopes(&scopes),
         },
         RuntimeCredentialAccountSetup::ManualToken => RuntimeCredentialAccountSetup::ManualToken,
-        RuntimeCredentialAccountSetup::ChannelPairing { channel } => {
-            RuntimeCredentialAccountSetup::ChannelPairing { channel }
-        }
+        RuntimeCredentialAccountSetup::Retired => RuntimeCredentialAccountSetup::Retired,
     }
 }
 

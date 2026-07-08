@@ -28,37 +28,44 @@ use ironclaw_product_workflow::{
     LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
     NearAiWalletLoginRequest, NearAiWalletLoginResult, ProductOutboundEnvelope,
     ProductWorkflowError, ProjectFsFile, ProjectionCursor, RebornAccountTracesResponse,
-    RebornAddMemberRequest, RebornAttachmentRequest, RebornAutomationMutationResponse,
-    RebornCancelRunResponse, RebornConnectableChannelListResponse, RebornCreateProjectRequest,
-    RebornCreateThreadResponse, RebornDeleteProjectRequest, RebornDeleteThreadRequest,
-    RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionListResponse,
-    RebornExtensionRegistryResponse, RebornFsListRequest, RebornFsListResponse,
-    RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
-    RebornGetProjectRequest, RebornListAutomationsResponse, RebornListMembersRequest,
-    RebornListMembersResponse, RebornListProjectsRequest, RebornListProjectsResponse,
-    RebornListThreadsResponse, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigGetResponse,
-    RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
-    RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
-    RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest,
-    RebornOperatorSetupResponse, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundPreferencesResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
-    RebornProjectFsReadRequest, RebornProjectFsStatRequest, RebornProjectFsStatResponse,
-    RebornProjectMemberInfo, RebornProjectResponse, RebornRemoveMemberRequest,
-    RebornResolveGateResponse, RebornRetryRunResponse, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
-    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
-    RebornSkillListResponse, RebornSkillSearchResponse, RebornStreamEventsRequest,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
-    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest,
-    RebornUpdateProjectRequest, SetActiveLlmRequest, SettingsToolPermissionState,
-    UpsertLlmProviderRequest, WebUiAttachmentCapabilities, WebUiAuthenticatedCaller,
-    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
-    WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    RebornAddMemberRequest, RebornAdminCreateUserRequest, RebornAdminPutSecretRequest,
+    RebornAdminSecretDeletedResponse, RebornAdminSecretResponse, RebornAdminSetRoleRequest,
+    RebornAdminSetStatusRequest, RebornAdminUpdateUserRequest, RebornAdminUserCreatedResponse,
+    RebornAdminUserDeletedResponse, RebornAdminUserListQuery, RebornAdminUserListResponse,
+    RebornAdminUserResponse, RebornAdminUserSecretsListResponse, RebornAttachmentRequest,
+    RebornAutomationMutationResponse, RebornCancelRunResponse,
+    RebornConnectableChannelListResponse, RebornCreateProjectRequest, RebornCreateThreadResponse,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
+    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
+    RebornFsListRequest, RebornFsListResponse, RebornFsMountsResponse, RebornFsReadRequest,
+    RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest,
+    RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
+    RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,
+    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
+    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
+    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest, RebornOperatorSetupResponse,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
+    RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsReadRequest,
+    RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectMemberInfo,
+    RebornProjectResponse, RebornRemoveMemberRequest, RebornResolveGateResponse,
+    RebornRetryRunResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
+    RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
+    SetActiveLlmRequest, SettingsToolPermissionState, UpsertLlmProviderRequest,
+    WebUiAttachmentCapabilities, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiRenameAutomationRequest,
     WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
     WebUiSetupExtensionRequest, webui_attachment_capabilities,
 };
 use serde::{Deserialize, Serialize};
+
+use ironclaw_host_api::{SecretHandle, UserId};
 
 use crate::error::WebUiV2HttpError;
 use crate::router::{WebUiV2Capabilities, WebUiV2State};
@@ -177,6 +184,180 @@ pub async fn delete_thread(
         .delete_thread(caller, RebornDeleteThreadRequest { thread_id })
         .await?;
     Ok(Json(response))
+}
+
+// --- Admin user management ---------------------------------------------------
+//
+// Every handler delegates straight to the facade, which enforces admin
+// authorization (operator token or admin/owner role) and last-admin protection.
+// The `{user_id}` and `{handle}` path segments are parsed into their domain
+// types (`UserId` / `SecretHandle`) here so a malformed value is a sanitized
+// 400 before the facade runs — raw strings are a boundary format and never
+// travel deeper than this edge (see `.claude/rules/types.md`).
+
+/// Parse a `{user_id}` path segment into a `UserId`, mapping a malformed value
+/// to a sanitized `400 invalid_request` before the facade is touched.
+fn parse_admin_user_id(raw: String) -> Result<UserId, WebUiV2HttpError> {
+    UserId::new(raw).map_err(|_| {
+        WebUiV2HttpError::from(RebornServicesError::from(WebUiInboundValidationError::new(
+            "user_id",
+            WebUiInboundValidationCode::InvalidId,
+        )))
+    })
+}
+
+/// Parse a `{handle}` path segment into a `SecretHandle`, mapping a malformed
+/// value to a sanitized `400 invalid_request` before the facade is touched.
+/// Keeps a bad handle a client fault (400), never an internal 500 downstream.
+fn parse_admin_secret_handle(raw: String) -> Result<SecretHandle, WebUiV2HttpError> {
+    SecretHandle::new(raw).map_err(|_| {
+        WebUiV2HttpError::from(RebornServicesError::from(WebUiInboundValidationError::new(
+            "handle",
+            WebUiInboundValidationCode::InvalidId,
+        )))
+    })
+}
+
+/// `GET /api/webchat/v2/admin/users`
+pub async fn admin_list_users(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Query(query): Query<RebornAdminUserListQuery>,
+) -> Result<Json<RebornAdminUserListResponse>, WebUiV2HttpError> {
+    Ok(Json(
+        state.services().list_admin_users(caller, query).await?,
+    ))
+}
+
+/// `POST /api/webchat/v2/admin/users`
+pub async fn admin_create_user(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<RebornAdminCreateUserRequest>,
+) -> Result<Json<RebornAdminUserCreatedResponse>, WebUiV2HttpError> {
+    Ok(Json(
+        state.services().create_admin_user(caller, body).await?,
+    ))
+}
+
+/// `GET /api/webchat/v2/admin/users/{user_id}`
+pub async fn admin_get_user(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(user_id): Path<String>,
+) -> Result<Json<RebornAdminUserResponse>, WebUiV2HttpError> {
+    let user_id = parse_admin_user_id(user_id)?;
+    Ok(Json(
+        state.services().get_admin_user(caller, user_id).await?,
+    ))
+}
+
+/// `PATCH /api/webchat/v2/admin/users/{user_id}`
+pub async fn admin_update_user(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(user_id): Path<String>,
+    Json(body): Json<RebornAdminUpdateUserRequest>,
+) -> Result<Json<RebornAdminUserResponse>, WebUiV2HttpError> {
+    let user_id = parse_admin_user_id(user_id)?;
+    Ok(Json(
+        state
+            .services()
+            .update_admin_user(caller, user_id, body)
+            .await?,
+    ))
+}
+
+/// `DELETE /api/webchat/v2/admin/users/{user_id}`
+pub async fn admin_delete_user(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(user_id): Path<String>,
+) -> Result<Json<RebornAdminUserDeletedResponse>, WebUiV2HttpError> {
+    let user_id = parse_admin_user_id(user_id)?;
+    Ok(Json(
+        state.services().delete_admin_user(caller, user_id).await?,
+    ))
+}
+
+/// `POST /api/webchat/v2/admin/users/{user_id}/status`
+pub async fn admin_set_user_status(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(user_id): Path<String>,
+    Json(body): Json<RebornAdminSetStatusRequest>,
+) -> Result<Json<RebornAdminUserResponse>, WebUiV2HttpError> {
+    let user_id = parse_admin_user_id(user_id)?;
+    Ok(Json(
+        state
+            .services()
+            .set_admin_user_status(caller, user_id, body)
+            .await?,
+    ))
+}
+
+/// `POST /api/webchat/v2/admin/users/{user_id}/role`
+pub async fn admin_set_user_role(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(user_id): Path<String>,
+    Json(body): Json<RebornAdminSetRoleRequest>,
+) -> Result<Json<RebornAdminUserResponse>, WebUiV2HttpError> {
+    let user_id = parse_admin_user_id(user_id)?;
+    Ok(Json(
+        state
+            .services()
+            .set_admin_user_role(caller, user_id, body)
+            .await?,
+    ))
+}
+
+/// `GET /api/webchat/v2/admin/users/{user_id}/secrets`
+pub async fn admin_list_user_secrets(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(user_id): Path<String>,
+) -> Result<Json<RebornAdminUserSecretsListResponse>, WebUiV2HttpError> {
+    let user_id = parse_admin_user_id(user_id)?;
+    Ok(Json(
+        state
+            .services()
+            .list_admin_user_secrets(caller, user_id)
+            .await?,
+    ))
+}
+
+/// `PUT /api/webchat/v2/admin/users/{user_id}/secrets/{handle}`
+pub async fn admin_put_user_secret(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path((user_id, handle)): Path<(String, String)>,
+    Json(body): Json<RebornAdminPutSecretRequest>,
+) -> Result<Json<RebornAdminSecretResponse>, WebUiV2HttpError> {
+    let user_id = parse_admin_user_id(user_id)?;
+    let handle = parse_admin_secret_handle(handle)?;
+    Ok(Json(
+        state
+            .services()
+            .put_admin_user_secret(caller, user_id, handle, body)
+            .await?,
+    ))
+}
+
+/// `DELETE /api/webchat/v2/admin/users/{user_id}/secrets/{handle}`
+pub async fn admin_delete_user_secret(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path((user_id, handle)): Path<(String, String)>,
+) -> Result<Json<RebornAdminSecretDeletedResponse>, WebUiV2HttpError> {
+    let user_id = parse_admin_user_id(user_id)?;
+    let handle = parse_admin_secret_handle(handle)?;
+    Ok(Json(
+        state
+            .services()
+            .delete_admin_user_secret(caller, user_id, handle)
+            .await?,
+    ))
 }
 
 /// `POST /api/webchat/v2/threads/{thread_id}/messages`
@@ -1122,6 +1303,20 @@ pub async fn resume_automation(
     let response = state
         .services()
         .resume_automation(caller, automation_id)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/automations/:automation_id`
+pub async fn rename_automation(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(automation_id): Path<String>,
+    Json(request): Json<WebUiRenameAutomationRequest>,
+) -> Result<Json<RebornAutomationMutationResponse>, WebUiV2HttpError> {
+    let response = state
+        .services()
+        .rename_automation(caller, automation_id, request)
         .await?;
     Ok(Json(response))
 }
