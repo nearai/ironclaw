@@ -197,6 +197,8 @@ pub struct ScopeRecoveryDriver<S: SessionThreadService + ?Sized, F: RootFilesyst
     // completion without needing `Arc<Self>` — `check_scope_recovered` only
     // gets `&self` from the trait signature.
     in_progress: Arc<Mutex<HashSet<String>>>,
+    // Unbounded in principle (no eviction) but bounded in practice by real
+    // tenant/user/agent/project scope cardinality — a process-lifetime cache.
     booted: Arc<Mutex<HashSet<String>>>,
 }
 
