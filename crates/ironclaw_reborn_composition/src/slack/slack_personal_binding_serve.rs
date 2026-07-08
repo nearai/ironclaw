@@ -752,12 +752,7 @@ mod tests {
                 provider_user_id: crate::provider_identity::RebornIdentityProviderUserId::new(
                     "install-alpha:U123",
                 )
-                .expect("provider"),
-                provider_user_id:
-                    crate::slack::slack_personal_binding::RebornIdentityProviderUserId::new(
-                        "install-alpha:U123",
-                    )
-                    .expect("provider user id"),
+                .expect("provider user id"),
                 user_id: user("user:alice"),
             }]
         );

@@ -2780,6 +2780,42 @@ mod tests {
         assert_eq!(routes.routes[0].channel_id, "CENG");
     }
 
+    #[tokio::test]
+    async fn filesystem_slack_host_state_user_identity_bindings_survive_state_recreation() {
+        let root = Arc::new(InMemoryBackend::default());
+        state_with_root(Arc::clone(&root))
+            .bind_user_identity(RebornUserIdentityBinding {
+                provider: RebornIdentityProviderId::new("slack").unwrap(),
+                provider_user_id: RebornIdentityProviderUserId::new("install-alpha:U123").unwrap(),
+                user_id: user("user:alice"),
+            })
+            .await
+            .expect("bind succeeds");
+
+        // Reopen: a brand-new host-state instance over the same filesystem
+        // must resolve the binding — actor identity resolution is durable
+        // state, not a property of the process that wrote it.
+        let reopened = state_with_root(Arc::clone(&root));
+        assert_eq!(
+            reopened
+                .resolve_user_identity("slack", "install-alpha:U123")
+                .await
+                .expect("reopened lookup succeeds"),
+            Some(user("user:alice"))
+        );
+
+        // Negative control: the same lookup over a fresh root resolves
+        // nothing, so the reopen assertion above cannot pass vacuously.
+        let fresh = state();
+        assert_eq!(
+            fresh
+                .resolve_user_identity("slack", "install-alpha:U123")
+                .await
+                .expect("fresh lookup succeeds"),
+            None
+        );
+    }
+
     fn state() -> FilesystemSlackHostState<InMemoryBackend> {
         state_with_root(Arc::new(InMemoryBackend::default()))
     }
