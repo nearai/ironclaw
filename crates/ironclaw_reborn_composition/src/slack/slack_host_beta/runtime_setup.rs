@@ -15,9 +15,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::RebornRuntime;
-use crate::extension_host::extension_lifecycle::{
-    ExtensionActivationMode, RebornLocalExtensionManagementPort,
-};
+use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
 use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
 use crate::provider_identity::{ProviderIdentityActorResolver, RebornUserIdentityLookup};
@@ -241,7 +239,7 @@ impl SlackChannelSetupActivation for DynamicSlackChannelSetupActivation {
     async fn activate_slack_channel_after_setup_save(
         &self,
     ) -> Result<(), SlackChannelSetupActivationError> {
-        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack_bot")
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack")
             .map_err(slack_setup_activation_error)?;
         // Slack is a tenant-shared channel; host setup activates it as the
         // tenant operator so it operates the shared install (#5459 P1).
@@ -261,7 +259,7 @@ impl SlackChannelSetupActivation for DynamicSlackChannelSetupActivation {
         // activate path (WebUI activateExtension after the connect flow),
         // which routes through activate_with_credential_gate.
         self.extension_management
-            .activate(package_ref, ExtensionActivationMode::Static, &caller)
+            .activate_for_channel_setup(package_ref, &caller)
             .await
             .map_err(slack_setup_activation_error)?;
         Ok(())

@@ -2114,7 +2114,7 @@ mod slack_personal_oauth_serve {
 
     fn slack_oauth_start_body() -> serde_json::Value {
         json!({
-            "provider": "slack_personal",
+            "provider": "slack",
             "account_label": "personal slack",
             "scopes": ["search:read"],
             "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),

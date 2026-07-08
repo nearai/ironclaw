@@ -14,7 +14,7 @@ use std::{
 };
 
 use ironclaw_auth::{
-    AuthProductScope, AuthProviderId, AuthSurface, SLACK_PERSONAL_PROVIDER_ID, SecretCleanupAction,
+    AuthProductScope, AuthProviderId, AuthSurface, SLACK_PROVIDER_ID, SecretCleanupAction,
     SecretCleanupReport, SecretCleanupRequest,
 };
 use ironclaw_conversations::{
@@ -28,7 +28,7 @@ use ironclaw_slack_v2_adapter::{SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID};
 
 use crate::{
     RebornProductAuthServices, SlackHostBetaMounts,
-    extension_host::available_extensions::SLACK_BOT_EXTENSION_ID,
+    extension_host::available_extensions::SLACK_EXTENSION_ID,
     provider_identity::{RebornUserIdentityLookup, parse_installation_scoped_provider_user_id},
     slack::slack_host_beta::{SlackPersonalConnectionScope, SlackPersonalConnectionScopeResolver},
     slack::slack_outbound_targets::SlackPersonalDmTargetStore,
@@ -353,10 +353,10 @@ fn personal_credential_cleanup_request(
             },
             AuthSurface::Callback,
         ),
-        extension_id: ExtensionId::new(SLACK_BOT_EXTENSION_ID)
+        extension_id: ExtensionId::new(SLACK_EXTENSION_ID)
             .map_err(|error| RebornServicesError::internal_from(error.to_string()))?,
         provider: Some(
-            AuthProviderId::new(SLACK_PERSONAL_PROVIDER_ID)
+            AuthProviderId::new(SLACK_PROVIDER_ID)
                 .map_err(|error| RebornServicesError::internal_from(error.to_string()))?,
         ),
         action: SecretCleanupAction::Uninstall,
@@ -549,10 +549,10 @@ mod tests {
             1,
             "disconnect must issue exactly one credential cleanup"
         );
-        assert_eq!(cleanup_requests[0].extension_id.as_str(), "slack_bot");
+        assert_eq!(cleanup_requests[0].extension_id.as_str(), "slack");
         assert_eq!(
             cleanup_requests[0].provider.as_ref().map(|p| p.as_str()),
-            Some(SLACK_PERSONAL_PROVIDER_ID),
+            Some(SLACK_PROVIDER_ID),
             "the provider selector is what reaches the grant-less OAuth account"
         );
         assert_eq!(cleanup_requests[0].action, SecretCleanupAction::Uninstall);
@@ -1027,7 +1027,7 @@ mod tests {
         );
         assert_eq!(
             cleanup_requests[0].provider.as_ref().map(|p| p.as_str()),
-            Some(SLACK_PERSONAL_PROVIDER_ID)
+            Some(SLACK_PROVIDER_ID)
         );
         assert_eq!(cleanup_requests[0].action, SecretCleanupAction::Uninstall);
         assert_eq!(

@@ -151,9 +151,7 @@ use ironclaw_turns::{InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore};
 
 use crate::RebornProductAuthServicePorts;
 #[cfg(feature = "slack-v2-host-beta")]
-use crate::extension_host::available_extensions::{
-    slack_bot_manifest_digest, slack_manifest_digest,
-};
+use crate::extension_host::available_extensions::slack_manifest_digest;
 use crate::extension_host::lifecycle::{
     RebornLocalSkillManagementPort, build_local_skill_management_port,
 };
@@ -3994,17 +3992,6 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
     ];
     #[cfg(feature = "slack-v2-host-beta")]
     entries.push(AdminEntry::for_local_manifest(
-        PackageId::new("slack_bot").map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("Slack first-party package id is invalid: {error}"),
-        })?,
-        "/system/extensions/slack_bot/manifest.toml".to_string(),
-        Some(slack_bot_manifest_digest()),
-        HostTrustAssignment::first_party(),
-        Vec::new(),
-        None,
-    ));
-    #[cfg(feature = "slack-v2-host-beta")]
-    entries.push(AdminEntry::for_local_manifest(
         PackageId::new("slack").map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("Slack personal first-party package id is invalid: {error}"),
         })?,
@@ -4940,6 +4927,16 @@ where
                 Arc::clone(&stores.filesystem),
                 Arc::clone(&secret_store),
             ));
+            // One-time forward data migration: fold persisted `slack_personal`
+            // credential accounts onto the unified `slack` provider id
+            // (NEA-25). Idempotent per boot; requires the sweep root.
+            let migrated_slack_accounts = durable.migrate_retired_slack_personal_provider().await;
+            if migrated_slack_accounts > 0 {
+                tracing::debug!(
+                    count = migrated_slack_accounts,
+                    "migrated retired slack_personal credential accounts to provider `slack`"
+                );
+            }
             credential_refresh_candidate_source = Some(Arc::clone(&durable)
                 as Arc<dyn crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshCandidateSource>);
             RebornProductAuthServicePorts::from_shared_with_provider(
@@ -7979,7 +7976,7 @@ mod tests {
         digest: Option<String>,
     ) -> ironclaw_host_api::PackageIdentity {
         ironclaw_host_api::PackageIdentity::new(
-            ironclaw_host_api::PackageId::new("slack_bot").expect("slack package id"),
+            ironclaw_host_api::PackageId::new("slack").expect("slack package id"),
             ironclaw_host_api::PackageSource::LocalManifest {
                 path: manifest_path.to_string(),
             },
@@ -7992,13 +7989,13 @@ mod tests {
     #[test]
     fn builtin_first_party_trust_policy_includes_slack_local_manifest_entry() {
         let policy = builtin_first_party_trust_policy().expect("trust policy");
-        let expected_digest = slack_bot_manifest_digest();
+        let expected_digest = slack_manifest_digest();
 
         let matching = ironclaw_trust::TrustPolicy::evaluate(
             &policy,
             &ironclaw_trust::TrustPolicyInput {
                 identity: slack_identity(
-                    "/system/extensions/slack_bot/manifest.toml",
+                    "/system/extensions/slack/manifest.toml",
                     Some(expected_digest.clone()),
                 ),
                 requested_trust: ironclaw_host_api::RequestedTrustClass::FirstPartyRequested,
@@ -8017,7 +8014,7 @@ mod tests {
             &policy,
             &ironclaw_trust::TrustPolicyInput {
                 identity: slack_identity(
-                    "/system/extensions/slack_bot/manifest.toml",
+                    "/system/extensions/slack/manifest.toml",
                     Some(
                         "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
                             .to_string(),
@@ -8039,7 +8036,7 @@ mod tests {
             &policy,
             &ironclaw_trust::TrustPolicyInput {
                 identity: slack_identity(
-                    "/system/extensions/slack_bot/other-manifest.toml",
+                    "/system/extensions/slack/other-manifest.toml",
                     Some(expected_digest),
                 ),
                 requested_trust: ironclaw_host_api::RequestedTrustClass::FirstPartyRequested,

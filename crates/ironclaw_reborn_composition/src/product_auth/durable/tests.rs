@@ -427,6 +427,54 @@ async fn create_manual_token_flow(
 }
 
 #[tokio::test]
+async fn migrate_retired_slack_personal_provider_rewrites_accounts_forward() {
+    // One-time forward migration: accounts persisted under the retired
+    // `slack_personal` provider id fold onto the unified `slack` provider at
+    // composition build. Idempotent; no runtime alias resolves the old id.
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = Arc::new(ScopedFilesystem::new(
+        Arc::clone(&backend),
+        crate::invocation_mount_view,
+    ));
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let scope = test_scope();
+    let service =
+        FilesystemAuthProductServices::new_with_root(scoped, backend, Arc::clone(&secret_store));
+
+    let created = service
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: AuthProviderId::new("slack_personal").unwrap(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("slack-access").unwrap()),
+            refresh_secret: None,
+            scopes: vec![ProviderScope::new("search:read").unwrap()],
+        })
+        .await
+        .unwrap();
+
+    let migrated = service.migrate_retired_slack_personal_provider().await;
+    assert_eq!(migrated, 1, "one retired account rewritten");
+    let second_pass = service.migrate_retired_slack_personal_provider().await;
+    assert_eq!(second_pass, 0, "migration is idempotent");
+
+    let account = service
+        .get_account(CredentialAccountLookupRequest {
+            scope: scope.clone(),
+            account_id: created.id,
+            requester_extension: None,
+        })
+        .await
+        .unwrap()
+        .expect("migrated account still resolvable");
+    assert_eq!(account.provider.as_str(), "slack");
+}
+
+#[tokio::test]
 async fn filesystem_accounts_survive_service_recreation() {
     let filesystem = test_filesystem();
     let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());

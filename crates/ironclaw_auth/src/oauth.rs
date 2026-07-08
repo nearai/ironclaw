@@ -69,7 +69,7 @@ pub const GOOGLE_GMAIL_MODIFY_SCOPE: &str = "https://www.googleapis.com/auth/gma
 ///
 /// Deliberately distinct from the bot Slack extension (`slack`) so a user
 /// token can never collide with the workspace bot token.
-pub const SLACK_PERSONAL_PROVIDER_ID: &str = "slack_personal";
+pub const SLACK_PROVIDER_ID: &str = "slack";
 /// Slack OAuth v2 authorization endpoint (user-token consent).
 pub const SLACK_PERSONAL_AUTHORIZATION_ENDPOINT: &str = "https://slack.com/oauth/v2/authorize";
 /// Slack OAuth v2 token endpoint (`oauth.v2.access`).
@@ -990,7 +990,7 @@ mod tests {
             OAuthAuthorizationEndpoint::new(SLACK_PERSONAL_AUTHORIZATION_ENDPOINT).unwrap();
         let slack_client = OAuthClientId::new("slack-client-id").unwrap();
         let slack_redirect = OAuthRedirectUri::new(
-            "http://127.0.0.1:3000/api/reborn/product-auth/oauth/slack_personal/callback",
+            "http://127.0.0.1:3000/api/reborn/product-auth/oauth/slack/callback",
         )
         .unwrap();
         let slack_state = OAuthState::new("teststatevalue").unwrap();

@@ -153,8 +153,8 @@ test("useOauthSetup waits for the matching Slack OAuth callback when reconnectin
           return {
             secrets: [
               {
-                name: "slack_personal_oauth",
-                provider: "slack_personal",
+                name: "slack_oauth",
+                provider: "slack",
                 provided: true,
               },
             ],
@@ -201,7 +201,7 @@ test("useOauthSetup waits for the matching Slack OAuth callback when reconnectin
     },
     {
       secret: {
-        provider: "slack_personal",
+        provider: "slack",
         provided: true,
       },
     },
@@ -297,8 +297,8 @@ test("useOauthSetup completes reconnect when polling sees Slack become configure
           return {
             secrets: [
               {
-                name: "slack_personal_oauth",
-                provider: "slack_personal",
+                name: "slack_oauth",
+                provider: "slack",
                 provided: true,
               },
             ],
@@ -348,7 +348,7 @@ test("useOauthSetup completes reconnect when polling sees Slack become configure
     },
     {
       secret: {
-        provider: "slack_personal",
+        provider: "slack",
         provided: true,
       },
     },
@@ -431,8 +431,8 @@ test("useOauthSetup keeps polling reconnect after Slack closes the OAuth popup",
           return {
             secrets: [
               {
-                name: "slack_personal_oauth",
-                provider: "slack_personal",
+                name: "slack_oauth",
+                provider: "slack",
                 provided: true,
               },
             ],
@@ -482,7 +482,7 @@ test("useOauthSetup keeps polling reconnect after Slack closes the OAuth popup",
     },
     {
       secret: {
-        provider: "slack_personal",
+        provider: "slack",
         provided: true,
       },
     },
@@ -717,8 +717,8 @@ test("useOauthSetup reconnect ignores the pre-flow configured snapshot and waits
           return {
             secrets: [
               {
-                name: "slack_personal_oauth",
-                provider: "slack_personal",
+                name: "slack_oauth",
+                provider: "slack",
                 provided: true,
               },
             ],
@@ -768,7 +768,7 @@ test("useOauthSetup reconnect ignores the pre-flow configured snapshot and waits
     },
     {
       secret: {
-        provider: "slack_personal",
+        provider: "slack",
         provided: true,
       },
     },
@@ -977,8 +977,8 @@ test("useOauthSetup completes reconnect from the origin-independent flow-status 
           return {
             secrets: [
               {
-                name: "slack_personal_oauth",
-                provider: "slack_personal",
+                name: "slack_oauth",
+                provider: "slack",
                 provided: true,
               },
             ],
@@ -1026,7 +1026,7 @@ test("useOauthSetup completes reconnect from the origin-independent flow-status 
     },
     {
       secret: {
-        provider: "slack_personal",
+        provider: "slack",
         provided: true,
       },
     },
@@ -1100,8 +1100,8 @@ test("useOauthSetup surfaces a failed flow-status poll as a retryable error when
           return {
             secrets: [
               {
-                name: "slack_personal_oauth",
-                provider: "slack_personal",
+                name: "slack_oauth",
+                provider: "slack",
                 provided: true,
               },
             ],
@@ -1149,7 +1149,7 @@ test("useOauthSetup surfaces a failed flow-status poll as a retryable error when
     },
     {
       secret: {
-        provider: "slack_personal",
+        provider: "slack",
         provided: true,
       },
     },

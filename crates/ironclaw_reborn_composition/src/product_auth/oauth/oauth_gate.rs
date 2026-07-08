@@ -907,7 +907,7 @@ mod tests {
         let registry =
             OAuthGateProviderRegistry::new(vec![slack_driver, Arc::new(fixture.driver.clone())]);
         let slack_requirement = RuntimeCredentialAuthRequirement {
-            provider: RuntimeCredentialAccountProviderId::new("slack_personal").unwrap(),
+            provider: RuntimeCredentialAccountProviderId::new("slack").unwrap(),
             setup: Default::default(),
             requester_extension: ExtensionId::new("slack").unwrap(),
             provider_scopes: Vec::new(),

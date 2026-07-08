@@ -45,7 +45,7 @@ use ironclaw_auth::{
     CredentialRefreshReport, CredentialRefreshRequest, GOOGLE_PROVIDER_ID, GoogleOAuthRouteConfig,
     OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthCallbackState, OAuthCallbackStateKind,
     OAuthProviderCallbackRequest, OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret,
-    ProviderScope, SLACK_PERSONAL_PROVIDER_ID, SecretCleanupAction, SecretCleanupReport,
+    ProviderScope, SLACK_PROVIDER_ID, SecretCleanupAction, SecretCleanupReport,
     SecretCleanupRequest, Timestamp, TurnRunRef, binding_scope_owns_account,
     build_google_authorization_url, parse_google_callback_scopes, parse_google_requested_scopes,
     pkce_s256_challenge,
@@ -465,7 +465,7 @@ async fn extension_oauth_start_handler(
 ) -> Result<Json<ProductOAuthStartResponse>, ProductAuthRouteFailure> {
     let requester_extension =
         ExtensionId::new(package_id).map_err(|_| ProductAuthRouteFailure::invalid_request())?;
-    if request.provider == SLACK_PERSONAL_PROVIDER_ID {
+    if request.provider == SLACK_PROVIDER_ID {
         #[cfg(feature = "slack-v2-host-beta")]
         return crate::slack::slack_personal_oauth::start_extension_oauth_flow(
             state,

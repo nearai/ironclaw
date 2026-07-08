@@ -414,7 +414,7 @@ output_schema_ref = "schemas/search.output.json"
     #[tokio::test]
     async fn filesystem_catalog_skips_reserved_host_bundled_extension_ids() {
         let fs = InMemoryBackend::default();
-        for id in ["gmail", "slack_bot"] {
+        for id in ["gmail", "slack"] {
             fs.write_file(
                 &VirtualPath::new(format!("/system/extensions/{id}/manifest.toml")).unwrap(),
                 b"not parsed because the id is host-bundled",
@@ -429,7 +429,7 @@ output_schema_ref = "schemas/search.output.json"
         .await
         .unwrap();
         assert_eq!(catalog.search("").count(), 0);
-        assert_eq!(catalog.search("slack_bot").count(), 0);
+        assert_eq!(catalog.search("slack").count(), 0);
     }
 
     #[tokio::test]
