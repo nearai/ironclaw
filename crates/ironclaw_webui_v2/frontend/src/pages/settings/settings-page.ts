@@ -20,7 +20,7 @@ export function SettingsPage() {
   const t = useT();
   const { tab: requestedTab } = useParams();
   const { gatewayStatus, gatewayStatusQuery, isAdmin = false } = useOutletContext();
-  const defaultTab = isAdmin ? "inference" : "appearance";
+  const defaultTab = isAdmin ? "inference" : "language";
   const tab = requestedTab || defaultTab;
   const {
     settings,

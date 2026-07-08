@@ -1,7 +1,10 @@
 // @ts-nocheck
 import { React } from "./html.js";
 
+// `ironclaw:v2-*` is the WebUI v2 browser-local preference namespace.
 export const CHAT_LOGS_SHORTCUT_STORAGE_KEY = "ironclaw:v2-chat-logs-shortcut";
+const STORED_BOOLEAN_TRUE = "true";
+const STORED_BOOLEAN_FALSE = "false";
 
 function browserWindow() {
   return typeof window === "undefined" ? null : window;
@@ -15,9 +18,18 @@ function browserStorage() {
   }
 }
 
+function parseStoredBoolean(value, defaultValue) {
+  if (value === STORED_BOOLEAN_TRUE) return true;
+  if (value === STORED_BOOLEAN_FALSE) return false;
+  return defaultValue;
+}
+
 export function readShowChatLogsShortcut(storage = browserStorage()) {
   try {
-    return storage?.getItem(CHAT_LOGS_SHORTCUT_STORAGE_KEY) !== "false";
+    return parseStoredBoolean(
+      storage?.getItem(CHAT_LOGS_SHORTCUT_STORAGE_KEY),
+      true
+    );
   } catch (_) {
     return true;
   }
@@ -25,7 +37,10 @@ export function readShowChatLogsShortcut(storage = browserStorage()) {
 
 export function writeShowChatLogsShortcut(show, storage = browserStorage()) {
   try {
-    storage?.setItem(CHAT_LOGS_SHORTCUT_STORAGE_KEY, show ? "true" : "false");
+    storage?.setItem(
+      CHAT_LOGS_SHORTCUT_STORAGE_KEY,
+      show ? STORED_BOOLEAN_TRUE : STORED_BOOLEAN_FALSE
+    );
   } catch (_) {
     // Best-effort UI preference; storage failures should not block chat.
   }
@@ -33,7 +48,7 @@ export function writeShowChatLogsShortcut(show, storage = browserStorage()) {
 
 export function useInterfacePreferences() {
   const [showChatLogsShortcut, setShowChatLogsShortcutState] = React.useState(
-    readShowChatLogsShortcut
+    () => readShowChatLogsShortcut()
   );
 
   const setShowChatLogsShortcut = React.useCallback((show) => {
@@ -47,7 +62,7 @@ export function useInterfacePreferences() {
     if (!win?.addEventListener) return undefined;
     const onStorage = (event) => {
       if (event.key !== CHAT_LOGS_SHORTCUT_STORAGE_KEY) return;
-      setShowChatLogsShortcutState(event.newValue !== "false");
+      setShowChatLogsShortcutState(parseStoredBoolean(event.newValue, true));
     };
     win.addEventListener("storage", onStorage);
     return () => win.removeEventListener("storage", onStorage);

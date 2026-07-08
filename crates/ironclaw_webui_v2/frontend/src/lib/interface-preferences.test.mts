@@ -52,6 +52,39 @@ test("readShowChatLogsShortcut defaults to visible unless stored false", () => {
     ),
     true
   );
+  assert.equal(
+    readShowChatLogsShortcut(
+      createLocalStorage({ [CHAT_LOGS_SHORTCUT_STORAGE_KEY]: "unexpected" })
+    ),
+    true
+  );
+});
+
+test("useInterfacePreferences initializes from localStorage as a boolean", () => {
+  const localStorage = createLocalStorage();
+  const { CHAT_LOGS_SHORTCUT_STORAGE_KEY, useInterfacePreferences } =
+    runVmModuleForTest(
+      "./interface-preferences.ts",
+      ["CHAT_LOGS_SHORTCUT_STORAGE_KEY", "useInterfacePreferences"],
+      {
+        React: {
+          useCallback: (fn) => fn,
+          useEffect: () => {},
+          useState: (initial) => [
+            typeof initial === "function" ? initial() : initial,
+            () => {},
+          ],
+        },
+        window: { localStorage },
+      },
+      import.meta.url
+    );
+  localStorage.setItem(CHAT_LOGS_SHORTCUT_STORAGE_KEY, "false");
+
+  const preferences = useInterfacePreferences();
+  assert.equal(preferences.showChatLogsShortcut, false);
+  assert.equal(typeof preferences.showChatLogsShortcut, "boolean");
+  assert.equal(typeof preferences.setShowChatLogsShortcut, "function");
 });
 
 test("writeShowChatLogsShortcut persists the chat terminal shortcut preference", () => {

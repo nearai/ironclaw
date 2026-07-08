@@ -5,6 +5,7 @@ import { test } from "vitest";
 import vm from "node:vm";
 
 import { channelConnectionDisplayName } from "../../../lib/channel-connection-events.ts";
+import { sourceForVmTest } from "../../../test-support/vm-module-harness.ts";
 
 function chatSourceForTest() {
   const source = readFileSync(new URL("../chat.ts", import.meta.url), "utf8");
@@ -59,6 +60,15 @@ function componentProps(node, component) {
   return props;
 }
 
+function createLocalStorage(initial = {}) {
+  const values = new Map(Object.entries(initial));
+  return {
+    getItem: (key) => (values.has(key) ? values.get(key) : null),
+    setItem: (key, value) => values.set(key, String(value)),
+    removeItem: (key) => values.delete(key),
+  };
+}
+
 function renderChat({
   hookState,
   activeThreadId = "thread-1",
@@ -83,6 +93,7 @@ function renderChat({
     SuggestionChips() {},
     TypingIndicator() {},
   };
+  const localStorage = createLocalStorage();
   const context = {
     ...components,
     React: {
@@ -92,7 +103,10 @@ function renderChat({
       },
       useMemo: (fn) => fn(),
       useRef: (initial) => ({ current: initial }),
-      useState: (initial) => [initial, () => {}],
+      useState: (initial) => [
+        typeof initial === "function" ? initial() : initial,
+        () => {},
+      ],
     },
     NEW_DRAFT_KEY: "new",
     THREAD_STATE: { NEEDS_ATTENTION: "needs_attention", RUNNING: "running" },
@@ -108,14 +122,30 @@ function renderChat({
     setTimeout: () => 1,
     clearTimeout: () => {},
     window: {
+      localStorage,
       addEventListener: () => {},
       removeEventListener: () => {},
     },
     useChat: () => hookState,
-    useInterfacePreferences: () => ({ showChatLogsShortcut }),
     useT: () => (key) => key,
   };
 
+  vm.runInNewContext(
+    sourceForVmTest(
+      "../../../lib/interface-preferences.ts",
+      ["CHAT_LOGS_SHORTCUT_STORAGE_KEY", "useInterfacePreferences"],
+      import.meta.url
+    ),
+    context
+  );
+  const {
+    CHAT_LOGS_SHORTCUT_STORAGE_KEY,
+    useInterfacePreferences,
+  } = context.globalThis.__testExports;
+  if (showChatLogsShortcut === false) {
+    localStorage.setItem(CHAT_LOGS_SHORTCUT_STORAGE_KEY, "false");
+  }
+  context.useInterfacePreferences = useInterfacePreferences;
   vm.runInNewContext(chatSourceForTest(), context);
   const tree = context.globalThis.__testExports.Chat({
     threads: activeThreadId ? [{ id: activeThreadId }] : [],
