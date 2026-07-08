@@ -144,6 +144,16 @@ impl TurnStateStore for StaticTurnStateStore {
         panic!("resume_turn should not be called by static test turn state store")
     }
 
+    async fn retry_turn(
+        &self,
+        request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        // WS-3 implements this.
+        Err(TurnError::RunNotRetryable {
+            run_id: request.run_id,
+        })
+    }
+
     async fn request_cancel(
         &self,
         _request: CancelRunRequest,
@@ -198,6 +208,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
         // factory's startup-time `visible_capabilities()` probe sees a valid
         // (non-empty) surface and registers the version.
         Ok(VisibleCapabilitySurface {
+            callable_capability_ids: None,
             version: self.surface_version.clone(),
             descriptors: vec![descriptor("cap.blocked"), descriptor("cap.allowed")],
         })
@@ -271,6 +282,7 @@ impl LoopCapabilityPort for ProviderAwareCapabilityPort {
         _request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         Ok(VisibleCapabilitySurface {
+            callable_capability_ids: None,
             version: self.surface_version.clone(),
             descriptors: self.descriptors.clone(),
         })
@@ -3697,6 +3709,7 @@ async fn after_model_fires_exactly_once_at_durable_boundary() {
         .await
         .expect("build_prompt_bundle succeeds before stream_model");
     host.stream_model(LoopModelRequest {
+        inline_messages: Vec::new(),
         messages: bundle.messages.clone(),
         surface_version: None,
         model_preference: None,

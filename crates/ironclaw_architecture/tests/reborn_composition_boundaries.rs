@@ -113,6 +113,63 @@ fn composition_public_api_is_facade_shaped() {
 }
 
 #[test]
+fn composition_public_pub_use_surface_matches_snapshot() {
+    let root = workspace_root();
+    let lib = std::fs::read_to_string(composition_src_path().join("lib.rs"))
+        .expect("composition lib.rs readable");
+    let snapshot = std::fs::read_to_string(root.join("docs/plans/composition-pubuse.snapshot"))
+        .expect("composition pub-use snapshot readable");
+
+    let actual = extract_pub_use_surface(&lib);
+    assert_eq!(
+        snapshot, actual,
+        "composition public pub-use surface must match docs/plans/composition-pubuse.snapshot; \
+         update the snapshot only for intentional public facade changes"
+    );
+}
+
+#[test]
+fn extension_host_cluster_stays_internal() {
+    let lib = std::fs::read_to_string(composition_src_path().join("lib.rs"))
+        .expect("composition lib.rs readable");
+    let extension_host =
+        std::fs::read_to_string(composition_src_path().join("extension_host/mod.rs"))
+            .expect("composition extension_host mod.rs readable");
+
+    assert!(
+        has_module_decl(&lib, "mod extension_host;"),
+        "extension_host must stay an internal crate-root module"
+    );
+    assert!(
+        !has_module_decl(&lib, "pub mod extension_host;"),
+        "extension_host must not become public"
+    );
+    assert!(
+        has_module_decl(&lib, "mod local_dev_capability_policy;"),
+        "local_dev_capability_policy is runtime-profile policy and must stay at the crate root"
+    );
+    assert!(
+        !extension_host.contains("local_dev_capability_policy"),
+        "local_dev_capability_policy must not be dragged into extension_host"
+    );
+
+    for module in EXTENSION_HOST_INTERNAL_MODULES {
+        let extension_host_decl = format!("pub(crate) mod {module};");
+        assert!(
+            has_module_decl(&extension_host, &extension_host_decl),
+            "{module} must stay behind extension_host as `pub(crate)`"
+        );
+
+        let root_decl = format!("mod {module};");
+        let public_root_decl = format!("pub mod {module};");
+        assert!(
+            !has_module_decl(&lib, &root_decl) && !has_module_decl(&lib, &public_root_decl),
+            "{module} must not be reintroduced as a crate-root module"
+        );
+    }
+}
+
+#[test]
 fn legacy_main_does_not_compose_reborn_runtime() {
     let root = workspace_root();
     let legacy_main =
@@ -257,6 +314,77 @@ fn strip_test_module(contents: &str) -> &str {
         Some(idx) => &contents[..idx],
         None => contents,
     }
+}
+
+const EXTENSION_HOST_INTERNAL_MODULES: &[&str] = &[
+    "available_extensions",
+    "bundled_skills",
+    "extension_activation_credentials",
+    "extension_credential_requirements",
+    "extension_installation_store",
+    "extension_lifecycle",
+    "extension_lifecycle_capabilities",
+    "extension_lifecycle_capabilities_auth_tests",
+    "extension_lifecycle_command",
+    "gsuite",
+    "lifecycle",
+    "mcp",
+    "mcp_discovery",
+    "skill_learning",
+    "skill_listing",
+    "webui_extension_credentials",
+];
+
+fn composition_src_path() -> PathBuf {
+    workspace_root().join("crates/ironclaw_reborn_composition/src")
+}
+
+fn extract_pub_use_surface(contents: &str) -> String {
+    let mut out = Vec::new();
+    let mut attrs = Vec::new();
+    let mut in_pub_use = false;
+
+    for line in contents.lines() {
+        let trimmed = line.trim_start();
+        if in_pub_use {
+            out.push(line);
+            if trimmed.contains(';') {
+                in_pub_use = false;
+            }
+            continue;
+        }
+
+        if line.starts_with("#[") {
+            attrs.push(line);
+            continue;
+        }
+
+        if line.starts_with("pub use") {
+            out.append(&mut attrs);
+            out.push(line);
+            if !trimmed.contains(';') {
+                in_pub_use = true;
+            }
+            continue;
+        }
+
+        attrs.clear();
+    }
+
+    assert!(
+        !out.is_empty(),
+        "expected at least one public pub-use in composition lib.rs"
+    );
+
+    let mut extracted = out.join("\n");
+    extracted.push('\n');
+    extracted
+}
+
+fn has_module_decl(contents: &str, declaration: &str) -> bool {
+    contents
+        .lines()
+        .any(|line| line.trim_start() == declaration)
 }
 
 /// A dedicated unit-test module file: a `tests.rs` module file, or any source

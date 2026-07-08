@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::Command;
 
 #[cfg(unix)]
@@ -165,6 +166,20 @@ fn reborn_dockerfile_uses_feature_matched_cache_and_loopback_default() {
     assert!(
         dockerfile.contains("config.hosted-single-tenant-volume.toml"),
         "image must include the hosted single-tenant volume seed config"
+    );
+}
+
+#[test]
+fn reborn_runtime_image_includes_sql_debug_clients() {
+    let dockerfile = read_repo_file("Dockerfile.reborn");
+
+    assert!(
+        dockerfile.contains("postgresql-client"),
+        "runtime image must include psql for Railway hosted Postgres inspection"
+    );
+    assert!(
+        dockerfile.contains("sqlite3"),
+        "runtime image must include sqlite3 for volume-backed libSQL/SQLite inspection"
     );
 }
 

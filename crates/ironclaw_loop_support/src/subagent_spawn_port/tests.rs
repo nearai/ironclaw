@@ -224,6 +224,7 @@ impl LoopCapabilityPort for SurfacePrimedSpawnAuthPort {
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         *self.visible_calls.lock().unwrap() += 1;
         Ok(VisibleCapabilitySurface {
+            callable_capability_ids: None,
             version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
             descriptors: vec![CapabilityDescriptorView {
                 capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
@@ -292,6 +293,7 @@ impl LoopCapabilityPort for StrictSpawnAuthPort {
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         *self.visible_calls.lock().unwrap() += 1;
         Ok(VisibleCapabilitySurface {
+            callable_capability_ids: None,
             version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
             descriptors: vec![CapabilityDescriptorView {
                 capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
@@ -354,6 +356,7 @@ impl LoopCapabilityPort for AuthPassPort {
         _request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         Ok(VisibleCapabilitySurface {
+            callable_capability_ids: None,
             version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
             descriptors: Vec::new(),
         })
@@ -412,6 +415,7 @@ impl LoopCapabilityPort for FixedToolPort {
         _request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         Ok(VisibleCapabilitySurface {
+            callable_capability_ids: None,
             version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
             descriptors: Vec::new(),
         })
@@ -446,6 +450,7 @@ impl LoopCapabilityPort for RecordingBatchPort {
         _request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         Ok(VisibleCapabilitySurface {
+            callable_capability_ids: None,
             version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
             descriptors: Vec::new(),
         })
@@ -481,6 +486,7 @@ impl LoopCapabilityPort for SuspendedBatchPort {
         _request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         Ok(VisibleCapabilitySurface {
+            callable_capability_ids: None,
             version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
             descriptors: Vec::new(),
         })
@@ -533,6 +539,7 @@ impl LoopCapabilityPort for FailingBatchPort {
         _request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         Ok(VisibleCapabilitySurface {
+            callable_capability_ids: None,
             version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
             descriptors: Vec::new(),
         })
@@ -619,6 +626,13 @@ impl TurnCoordinator for StaticCoordinator {
         _request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError> {
         unreachable!("spawn tests do not resume turns")
+    }
+
+    async fn retry_turn(
+        &self,
+        _request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        unreachable!("spawn tests do not retry turns")
     }
 
     async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
@@ -844,6 +858,16 @@ impl TurnStateStore for StaticTurnStateStore {
         _request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError> {
         unreachable!("spawn tests do not resume through state store")
+    }
+
+    async fn retry_turn(
+        &self,
+        request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        // WS-3 implements this.
+        Err(TurnError::RunNotRetryable {
+            run_id: request.run_id,
+        })
     }
 
     async fn request_cancel(

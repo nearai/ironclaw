@@ -29,8 +29,8 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     FsMount, LifecyclePackageRef, LifecyclePhase, LlmActiveSelection, LlmConfigSnapshot,
     LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, ProjectFsEntry,
-    ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RebornAddMemberRequest,
-    RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
+    ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RebornAccountTracesResponse,
+    RebornAddMemberRequest, RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
     RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationSource, RebornAutomationState,
     RebornCancelRunResponse, RebornChannelConnectAction, RebornChannelConnectStrategy,
@@ -55,16 +55,16 @@ use ironclaw_product_workflow::{
     RebornOutboundPreferencesResponse, RebornProjectInfo, RebornProjectMemberInfo,
     RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole, RebornProjectState,
     RebornRemoveMemberRequest, RebornResolveGateResponse, RebornResumeGateResponse,
-    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, RebornUpdateMemberRoleRequest,
-    RebornUpdateProjectRequest, SetActiveLlmRequest, UpsertLlmProviderRequest,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-    rejecting_reborn_services_error,
+    RebornRetryRunResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, SetActiveLlmRequest,
+    UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
+    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, rejecting_reborn_services_error,
 };
 use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
@@ -252,11 +252,16 @@ struct StubServices {
     stream_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
     cancel_run_calls: Mutex<Vec<WebUiCancelRunRequest>>,
     resolve_gate_calls: Mutex<Vec<WebUiResolveGateRequest>>,
+    retry_run_calls: Mutex<Vec<WebUiRetryRunRequest>>,
     list_threads_calls: Mutex<Vec<WebUiListThreadsRequest>>,
     list_automations_calls: Mutex<Vec<WebUiListAutomationsRequest>>,
     pause_automation_calls: Mutex<Vec<String>>,
     resume_automation_calls: Mutex<Vec<String>>,
     delete_automation_calls: Mutex<Vec<String>>,
+    /// Captures the authenticated caller's user id for each
+    /// `trace_account_traces` call, so the contract test can assert the handler
+    /// forwards the caller (the route is caller-scoped).
+    trace_account_traces_callers: Mutex<Vec<String>>,
     next_list_automations_error: Mutex<Option<RebornServicesError>>,
     next_delete_automation_error: Mutex<Option<RebornServicesError>>,
     get_outbound_preferences_calls: Mutex<usize>,
@@ -290,6 +295,7 @@ struct StubServices {
     test_llm_connection_calls: Mutex<Vec<String>>,
     list_llm_models_calls: Mutex<Vec<String>>,
     next_create_thread_error: Mutex<Option<RebornServicesError>>,
+    next_retry_run: Mutex<VecDeque<Result<RebornRetryRunResponse, RebornServicesError>>>,
     /// Per-call queued responses for `stream_events`. When non-empty, the
     /// front entry is popped and returned on each call so SSE tests can
     /// drive the handler through specific projection envelopes, error
@@ -349,6 +355,13 @@ impl StubServices {
             .next_set_operator_config_key_error
             .lock()
             .expect("lock") = Some(error);
+    }
+
+    fn enqueue_retry_run(&self, response: Result<RebornRetryRunResponse, RebornServicesError>) {
+        self.next_retry_run
+            .lock()
+            .expect("lock")
+            .push_back(response);
     }
 
     /// Queue one response for the next `stream_events` call. Tests use this
@@ -727,6 +740,22 @@ impl RebornServicesApi for StubServices {
         ))
     }
 
+    async fn retry_run(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: WebUiRetryRunRequest,
+    ) -> Result<RebornRetryRunResponse, RebornServicesError> {
+        self.retry_run_calls
+            .lock()
+            .expect("lock")
+            .push(request.clone());
+        self.next_retry_run
+            .lock()
+            .expect("lock")
+            .pop_front()
+            .expect("retry_run test stub called without queued response")
+    }
+
     async fn list_threads(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -924,11 +953,11 @@ impl RebornServicesApi for StubServices {
                 strategy: RebornChannelConnectStrategy::InboundProofCode,
                 action: RebornChannelConnectAction {
                     title: "Slack account connection".to_string(),
-                    instructions: "Message the Slack app, then enter the code here.".to_string(),
+                    instructions: "Run /pair in Slack to get a code, then paste it here. Codes expire in 10 minutes.".to_string(),
                     input_placeholder: "Enter Slack pairing code...".to_string(),
                     submit_label: "Connect".to_string(),
                     success_message: "Slack account connected.".to_string(),
-                    error_message: "Invalid or expired Slack pairing code.".to_string(),
+                    error_message: "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one.".to_string(),
                 },
                 command_aliases: vec!["slack".to_string()],
             }],
@@ -1342,6 +1371,25 @@ impl RebornServicesApi for StubServices {
             ok: true,
             models: vec!["model-a".to_string()],
             message: String::new(),
+        })
+    }
+
+    async fn trace_account_traces(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornAccountTracesResponse, RebornServicesError> {
+        // Capture the forwarded caller so the contract test can verify the
+        // caller-scoped route actually threads the authenticated identity.
+        self.trace_account_traces_callers
+            .lock()
+            .expect("lock")
+            .push(caller.actor().user_id.as_str().to_string());
+        // Hermetic zero-state stub — no filesystem or network access.
+        // Mirrors the unenrolled branch of the real `account_traces_for_user`
+        // so the contract test for `GET /traces/account` is fully self-contained.
+        Ok(RebornAccountTracesResponse {
+            enrolled: false,
+            traces: vec![],
         })
     }
 }
@@ -1878,6 +1926,107 @@ async fn resolve_gate_path_overrides_body_gate_ref() {
 }
 
 #[tokio::test]
+async fn retry_run_path_overrides_body_run_id() {
+    let services = Arc::new(StubServices::default());
+    services.enqueue_retry_run(Ok(RebornRetryRunResponse {
+        run_id: TurnRunId::new(),
+        status: TurnStatus::Queued,
+        event_cursor: EventCursor(5),
+    }));
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/threads/thread-x/runs/run-from-path/retry")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"client_action_id":"retry-1","thread_id":"other","run_id":"run-from-body"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services.retry_run_calls.lock().expect("lock").clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].thread_id.as_deref(), Some("thread-x"));
+    assert_eq!(calls[0].run_id.as_deref(), Some("run-from-path"));
+}
+
+#[tokio::test]
+async fn retry_run_non_retryable_error_maps_to_conflict_body() {
+    let services = Arc::new(StubServices::default());
+    services.enqueue_retry_run(Err(RebornServicesError {
+        code: RebornServicesErrorCode::Conflict,
+        kind: RebornServicesErrorKind::Conflict,
+        status_code: 409,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    }));
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/threads/thread-x/runs/run-y/retry")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"client_action_id":"retry-not-retryable"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "conflict");
+    assert_eq!(body["kind"], "conflict");
+    assert_eq!(body["retryable"], false);
+}
+
+#[tokio::test]
+async fn retry_run_idempotent_replay_returns_same_response_shape() {
+    let services = Arc::new(StubServices::default());
+    let run_id = TurnRunId::new();
+    let replay = RebornRetryRunResponse {
+        run_id,
+        status: TurnStatus::Queued,
+        event_cursor: EventCursor(42),
+    };
+    services.enqueue_retry_run(Ok(replay.clone()));
+    services.enqueue_retry_run(Ok(replay));
+    let router = router_with(services.clone());
+
+    async fn post_retry(router: Router) -> axum::response::Response {
+        router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/threads/thread-x/runs/run-y/retry")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"client_action_id":"retry-replay"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot")
+    }
+
+    let first = post_retry(router.clone()).await;
+    let second = post_retry(router).await;
+
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(second.status(), StatusCode::OK);
+    assert_eq!(read_json(first).await, read_json(second).await);
+    let calls = services.retry_run_calls.lock().expect("lock").clone();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].client_action_id, calls[1].client_action_id);
+}
+
+#[tokio::test]
 async fn create_thread_error_maps_to_http_status() {
     let services = Arc::new(StubServices::default());
     services.fail_create_thread(RebornServicesError {
@@ -2214,6 +2363,62 @@ async fn trace_credits_returns_caller_scoped_unenrolled_zero_state() {
             .as_str()
             .expect("note")
             .contains("authoritative ledger is server-side")
+    );
+}
+
+#[tokio::test]
+async fn trace_account_traces_returns_caller_scoped_unenrolled_zero_state() {
+    // The facade's default `trace_account_traces` body reads contributor-local
+    // Trace Commons state scoped by the authenticated caller's user id.
+    // A unique per-test user id guarantees a fresh scope so the
+    // unenrolled zero-state is deterministic on any machine.
+    let user_id = format!(
+        "webui-v2-account-traces-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    );
+    let unique_caller = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-alpha").expect("tenant"),
+        UserId::new(user_id.as_str()).expect("user"),
+        None,
+        None,
+    );
+    let services = Arc::new(StubServices::default());
+    let router = webui_v2_router(WebUiV2State::new(
+        services.clone(),
+        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+    ))
+    .layer(axum::Extension(unique_caller))
+    .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/traces/account")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["enrolled"], false);
+    assert_eq!(body["traces"].as_array().expect("traces array").len(), 0);
+
+    // The route is caller-scoped: the handler must forward the authenticated
+    // caller's user id to the facade (fails if it stops threading the caller).
+    assert_eq!(
+        services
+            .trace_account_traces_callers
+            .lock()
+            .expect("lock")
+            .clone(),
+        vec![user_id],
     );
 }
 
@@ -2676,7 +2881,11 @@ async fn list_connectable_channels_dispatches_through_facade() {
     assert_eq!(body["channels"][0]["strategy"], "inbound_proof_code");
     assert_eq!(
         body["channels"][0]["action"]["instructions"],
-        "Message the Slack app, then enter the code here."
+        "Run /pair in Slack to get a code, then paste it here. Codes expire in 10 minutes."
+    );
+    assert_eq!(
+        body["channels"][0]["action"]["error_message"],
+        "Invalid or expired Slack pairing code. Run /pair in Slack to get a new one."
     );
     assert_eq!(
         *services
@@ -4523,6 +4732,13 @@ async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime(
             _caller: WebUiAuthenticatedCaller,
             _request: WebUiResolveGateRequest,
         ) -> Result<RebornResolveGateResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+        async fn retry_run(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _request: WebUiRetryRunRequest,
+        ) -> Result<RebornRetryRunResponse, RebornServicesError> {
             unreachable!("not exercised by this test")
         }
         async fn get_run_state(

@@ -279,27 +279,11 @@ async fn bob_threads_list_excludes_alice_threads() {
 }
 
 // ---------------------------------------------------------------------------
-// Engine v2 — detail / steps / events
+// Retired Engine v2 — detail / steps / events
 //
-// Scope: these tests pin the *handler shape* — an unknown thread id
-// returns 404 / empty rather than 500ing or leaking. They do NOT
-// exercise the cross-tenant ownership branch (Alice's actual id with
-// Bob's token), because seeding an engine v2 thread requires
-// `ENGINE_STATE` (a process-wide `OnceCell` in `bridge/router.rs`)
-// to be initialized with a backing `Store`. That fixture doesn't
-// exist for the integration test surface today; building it without
-// breaking the singleton's invariants for parallel test runs is its
-// own change.
-//
-// The ownership gate itself lives in
-// `src/bridge/router.rs::{get_engine_thread, list_engine_thread_steps,
-// list_engine_thread_events}` and uses `thread.is_owned_by(user_id)`.
-// That predicate is unit-tested upstream; the missing piece here is
-// the call-site test through the handler.
-//
-// Follow-up: introduce a per-test `ENGINE_STATE` injection seam (or a
-// memory-backed `Store` test fixture) and add the Alice-seed/Bob-probe
-// variant of each test below.
+// Scope: these legacy paths are no longer mounted by the v1 gateway. Keep
+// them pinned to 404 so stale Engine-v2 clients fail closed instead of seeing
+// a synthetic empty collection that could be mistaken for an authorized read.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -323,7 +307,7 @@ async fn bob_engine_thread_detail_for_unknown_returns_404() {
 }
 
 #[tokio::test]
-async fn bob_engine_thread_steps_for_unknown_returns_empty() {
+async fn bob_engine_thread_steps_for_unknown_returns_404() {
     let (addr, _state, _db, _tmp) = start_server_with_db().await;
     let foreign_id = uuid::Uuid::new_v4();
 
@@ -338,17 +322,15 @@ async fn bob_engine_thread_steps_for_unknown_returns_empty() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    let steps = body["steps"].as_array().expect("steps array");
-    assert!(
-        steps.is_empty(),
-        "Engine steps must be empty for an unowned thread id; got {body:?}"
+    assert_eq!(
+        resp.status(),
+        404,
+        "Engine thread steps for an id Bob doesn't own must be 404"
     );
 }
 
 #[tokio::test]
-async fn bob_engine_thread_events_for_unknown_returns_empty() {
+async fn bob_engine_thread_events_for_unknown_returns_404() {
     let (addr, _state, _db, _tmp) = start_server_with_db().await;
     let foreign_id = uuid::Uuid::new_v4();
 
@@ -363,12 +345,10 @@ async fn bob_engine_thread_events_for_unknown_returns_empty() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    let events = body["events"].as_array().expect("events array");
-    assert!(
-        events.is_empty(),
-        "Engine events must be empty for unowned thread id"
+    assert_eq!(
+        resp.status(),
+        404,
+        "Engine thread events for an id Bob doesn't own must be 404"
     );
 }
 

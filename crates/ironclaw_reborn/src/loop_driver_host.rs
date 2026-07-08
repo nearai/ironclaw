@@ -191,6 +191,20 @@ impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
         self.inner.tool_definitions()
     }
 
+    fn provider_tool_call_capability_ids(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<ironclaw_turns::run_profile::ProviderToolCallCapabilityIds, AgentLoopHostError>
+    {
+        // MUST delegate to inner. The LoopCapabilityPort default resolves a call by
+        // searching `self.tool_definitions()` (the disclosed/advertised surface),
+        // which rejects every deferred tool with "outside the visible capability
+        // surface" before the inner tool-disclosure forgiving path can resolve it.
+        // This is the model gateway's resolvability pre-check, so it must reach
+        // inner — same reason validate/register below already delegate.
+        self.inner.provider_tool_call_capability_ids(tool_call)
+    }
+
     fn validate_provider_tool_call(
         &self,
         tool_call: &ProviderToolCall,
@@ -2350,13 +2364,15 @@ fn turn_error_to_host_error(error: TurnError) -> AgentLoopHostError {
             "checkpoint state scope was not found for this loop run",
             &error,
         ),
-        TurnError::Conflict { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
-            "checkpoint_state",
-            "write",
-            AgentLoopHostErrorKind::CheckpointRejected,
-            "checkpoint state write conflicted with current turn state",
-            &error,
-        ),
+        TurnError::Conflict { .. } | TurnError::RunNotRetryable { .. } => {
+            ironclaw_loop_support::raw_agent_loop_host_error(
+                "checkpoint_state",
+                "write",
+                AgentLoopHostErrorKind::CheckpointRejected,
+                "checkpoint state write conflicted with current turn state",
+                &error,
+            )
+        }
         TurnError::CapacityExceeded { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
             "checkpoint_state",
             "write",
@@ -3307,7 +3323,7 @@ mod event_subscription_scope_tests {
 #[cfg(test)]
 mod turn_error_to_host_error_tests {
     use super::*;
-    use ironclaw_turns::{TurnCapacityResource, TurnError};
+    use ironclaw_turns::{TurnCapacityResource, TurnError, TurnRunId};
 
     #[test]
     fn capacity_exceeded_maps_to_unavailable() {
@@ -3322,6 +3338,14 @@ mod turn_error_to_host_error_tests {
     fn conflict_maps_to_checkpoint_rejected() {
         let error = turn_error_to_host_error(TurnError::Conflict {
             reason: "checkpoint conflict".to_string(),
+        });
+        assert_eq!(error.kind, AgentLoopHostErrorKind::CheckpointRejected);
+    }
+
+    #[test]
+    fn run_not_retryable_maps_to_checkpoint_rejected() {
+        let error = turn_error_to_host_error(TurnError::RunNotRetryable {
+            run_id: TurnRunId::new(),
         });
         assert_eq!(error.kind, AgentLoopHostErrorKind::CheckpointRejected);
     }

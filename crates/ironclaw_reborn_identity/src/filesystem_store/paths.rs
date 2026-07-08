@@ -9,22 +9,29 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ironclaw_host_api::ScopedPath;
 
-use crate::RebornIdentityError;
+use crate::{RebornIdentityError, SurfaceKind};
 
 const IDENTITY_ROOT: &str = "/tenant-shared/reborn-identity";
 
 /// Path of the identity record for one
 /// `(tenant, surface, provider, instance, subject)` key.
+///
+/// `surface` is the typed [`SurfaceKind`] rather than a `&str`: it is a closed,
+/// trusted enum, so it crosses the boundary as a type (no transposition or
+/// arbitrary-string risk) and is rendered via its stable `as_str()`. Unlike the
+/// other key parts it needs no `segment()` encoding — the enum can never produce
+/// a delimiter-like value.
 pub(super) fn identity_path(
     tenant: &str,
-    surface: &str,
+    surface: SurfaceKind,
     provider: &str,
     instance: &str,
     subject: &str,
 ) -> Result<ScopedPath, RebornIdentityError> {
     scoped_path(&format!(
-        "{IDENTITY_ROOT}/external/{}/{surface}/{}/{}/{}.json",
+        "{IDENTITY_ROOT}/external/{}/{}/{}/{}/{}.json",
         segment(tenant),
+        surface.as_str(),
         segment(provider),
         segment(instance),
         segment(subject),

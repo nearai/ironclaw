@@ -1,7 +1,7 @@
 ---
 description: Classify all open PRs by module, review state, scope, and architectural impact — produces a prioritized triage dashboard
 disable-model-invocation: true
-allowed-tools: Bash(gh pr list:*), Bash(gh pr view:*), Bash(gh pr diff:*), Bash(gh api:*), Bash(gh pr checks:*), Bash(git log:*), Read, Grep, Glob, Task
+allowed-tools: Bash(gh pr list:*), Bash(gh pr view:*), Bash(gh pr diff:*), Bash(gh api:*), Bash(gh pr checks:*), Bash(git log:*), Read, Grep, Glob, Agent
 argument-hint: "[--label=<filter>] [--author=<filter>]"
 ---
 
@@ -27,17 +27,19 @@ gh pr list --state merged --search "merged:>=$(date -v-7d +%Y-%m-%d)" --limit 10
 
 ## Step 2: Classify each PR by module
 
-For each open PR, determine the primary module it touches by examining the `files` field. Classify into these categories based on the dominant `src/` subdirectory:
+For each open PR, determine the primary module it touches by examining the `files` field. Classify into these categories based on the dominant directory:
 
 | Category | Directories |
 |----------|------------|
-| **LLM & Inference** | `src/llm/` |
+| **Reborn stack (most current work)** | `crates/ironclaw_reborn/`, `crates/ironclaw_reborn_cli/`, `crates/ironclaw_reborn_composition/`, `crates/ironclaw_reborn_event_store/`, `crates/ironclaw_reborn_identity/`, `crates/ironclaw_reborn_openai_compat*/`, `crates/ironclaw_reborn_traces/`, `crates/ironclaw_reborn_webui_ingress/`, `crates/ironclaw_product_workflow/`, `crates/ironclaw_webui_v2*/`, `crates/ironclaw_turns/`, `crates/ironclaw_threads/`, `crates/ironclaw_agent_loop/`, `crates/ironclaw_host_runtime/`, `crates/ironclaw_loop_support/`, `crates/ironclaw_capabilities/` |
+| **Legacy v1 crates** | `crates/ironclaw_engine/`, `crates/ironclaw_gateway/`, `crates/ironclaw_oauth/`, `crates/ironclaw_embeddings/`, `crates/ironclaw_tui/` |
+| **LLM & Inference** | `crates/ironclaw_llm/` |
 | **Agent Core** | `src/agent/`, `src/skills/` |
 | **Tools** | `src/tools/`, `tools-src/` |
 | **Channels** | `src/channels/`, `channels-src/` |
 | **Storage & Memory** | `src/db/`, `src/workspace/`, `migrations/` |
 | **Security** | `src/safety/`, `src/secrets/` |
-| **Config & Setup** | `src/config.rs`, `src/setup/`, `src/cli/` |
+| **Config & Setup** | `src/config/`, `src/setup/`, `src/cli/`, `crates/ironclaw_reborn_config/` |
 | **Sandbox & Orchestration** | `src/sandbox/`, `src/orchestrator/`, `src/worker/` |
 | **Hooks & Extensions** | `src/hooks/`, `src/extensions/` |
 | **Context & History** | `src/context/`, `src/history/`, `src/estimation/`, `src/evaluation/` |
@@ -153,7 +155,7 @@ PRs that are clearly superseded by merged work. Include reasoning.
 ## Rules
 
 - Use `gh` CLI for all GitHub operations. Never guess PR state — always check.
-- For large PR lists (>15), use the Task tool to parallelize fetching PR details and diffs.
+- For large PR lists (>15), use the Agent tool to parallelize fetching PR details and diffs in appropriately sized batches for the active runtime and workload.
 - Be concise in summaries. One line per PR in tables.
 - When assessing "ready to merge", be conservative. If there's any unresolved concern from a repo member, it's not ready.
 - Flag any PR that has been open >14 days with no review as needing attention.

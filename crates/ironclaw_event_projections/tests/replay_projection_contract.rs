@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_event_projections::{
-    AuditProjectionCursor, AuditProjectionError, AuditProjectionRequest, AuditProjectionService,
-    AuditProjectionStage, AuditStreamResume, CapabilityActivityStatus, EventProjectionService,
+    AuditProjectionCursor, AuditProjectionEntry, AuditProjectionError, AuditProjectionRequest,
+    AuditProjectionService, AuditStreamResume, CapabilityActivityStatus, EventProjectionService,
     EventStreamManager, MAX_PROJECTION_PAGE_LIMIT, ProjectionCursor, ProjectionError,
     ProjectionReplay, ProjectionRequest, ProjectionScope, ReplayAuditProjectionService,
     ReplayEventProjectionService, RunProjectionStatus, RuntimeStreamResume, TimelineEntryKind,
@@ -15,10 +15,36 @@ use ironclaw_events::{
     RuntimeEventId, RuntimeEventKind, UNCLASSIFIED_ERROR_KIND,
 };
 use ironclaw_host_api::{
-    Action, ActionResultSummary, ActionSummary, AgentId, AuditEnvelope, AuditStage, CapabilityId,
-    CapabilitySet, CorrelationId, DenyReason, ExtensionId, InvocationId, MountView, ProcessId,
-    ProjectId, ResourceScope, RuntimeKind, ScopedPath, TenantId, ThreadId, TrustClass, UserId,
+    Action, ActionResultSummary, ActionSummary, AgentId, AuditEnvelope, AuditEventId, AuditStage,
+    CapabilityId, CapabilitySet, CorrelationId, DenyReason, ExtensionId, InvocationId, MountView,
+    ProcessId, ProjectId, ResourceScope, RuntimeKind, ScopedPath, TenantId, ThreadId, TrustClass,
+    UserId,
 };
+
+#[test]
+fn audit_projection_stage_wire_strings_stay_compatible_with_audit_stage() {
+    for (stage, wire) in [
+        (AuditStage::Before, "before"),
+        (AuditStage::After, "after"),
+        (AuditStage::Denied, "denied"),
+        (AuditStage::ApprovalRequested, "approval_requested"),
+        (AuditStage::ApprovalResolved, "approval_resolved"),
+        (AuditStage::ResourceReserved, "resource_reserved"),
+        (AuditStage::ResourceReconciled, "resource_reconciled"),
+        (AuditStage::ResourceReleased, "resource_released"),
+    ] {
+        let entry = audit_projection_entry_for_stage(stage);
+        let value = serde_json::to_value(&entry).unwrap();
+
+        assert_eq!(value["stage"], wire);
+        assert_eq!(
+            serde_json::from_value::<AuditProjectionEntry>(value)
+                .unwrap()
+                .stage,
+            stage
+        );
+    }
+}
 
 #[tokio::test]
 async fn replay_audit_projection_preserves_valid_capability_targets() {
@@ -56,6 +82,27 @@ async fn replay_audit_projection_preserves_valid_capability_targets() {
     );
 }
 
+fn audit_projection_entry_for_stage(stage: AuditStage) -> AuditProjectionEntry {
+    AuditProjectionEntry {
+        cursor: EventCursor::new(1),
+        event_id: AuditEventId::new(),
+        timestamp: Utc::now(),
+        stage,
+        correlation_id: CorrelationId::new(),
+        invocation_id: InvocationId::new(),
+        thread_id: Some(ThreadId::new("thread-a").unwrap()),
+        process_id: None,
+        approval_request_id: None,
+        extension_id: Some(ExtensionId::new("test").unwrap()),
+        action_kind: "dispatch".to_string(),
+        action_target: Some("test.capability".to_string()),
+        decision_kind: "approved".to_string(),
+        result_status: None,
+        output_bytes: None,
+        memory: None,
+    }
+}
+
 #[tokio::test]
 async fn replay_audit_projection_does_not_expose_unsafe_action_targets() {
     let log = Arc::new(InMemoryDurableAuditLog::new());
@@ -84,7 +131,7 @@ async fn replay_audit_projection_does_not_expose_unsafe_action_targets() {
         .unwrap();
 
     assert_eq!(snapshot.entries.len(), 1);
-    assert_eq!(snapshot.entries[0].stage, AuditProjectionStage::Denied);
+    assert_eq!(snapshot.entries[0].stage, AuditStage::Denied);
     assert_eq!(snapshot.entries[0].action_kind, "read_file");
     assert_eq!(snapshot.entries[0].action_target, None);
     let serialized = serde_json::to_string(&snapshot).unwrap();
@@ -561,7 +608,7 @@ async fn event_stream_manager_audit_resume_returns_updates_for_valid_cursor() {
     match resume {
         AuditStreamResume::Updates(replay) => {
             assert_eq!(replay.entries.len(), 1);
-            assert_eq!(replay.entries[0].stage, AuditProjectionStage::Denied);
+            assert_eq!(replay.entries[0].stage, AuditStage::Denied);
         }
         other => panic!("expected audit updates resume, got {other:?}"),
     }
@@ -708,7 +755,7 @@ async fn event_stream_manager_routes_audit_projection_and_preserves_no_exposure_
         .unwrap();
 
     assert_eq!(snapshot.entries.len(), 1);
-    assert_eq!(snapshot.entries[0].stage, AuditProjectionStage::Denied);
+    assert_eq!(snapshot.entries[0].stage, AuditStage::Denied);
     assert_eq!(snapshot.entries[0].action_kind, "read_file");
     assert_eq!(snapshot.entries[0].action_target, None);
     let serialized = serde_json::to_string(&snapshot).unwrap();

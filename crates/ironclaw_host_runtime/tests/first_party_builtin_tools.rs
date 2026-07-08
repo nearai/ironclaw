@@ -33,7 +33,8 @@ use ironclaw_host_runtime::{
     RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError,
     RuntimeProcessPort, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
     SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind,
-    TIME_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+    TIME_CAPABILITY_ID, TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
+    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
     TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
     TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
     TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
@@ -91,7 +92,8 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
             | TRIGGER_RESUME_CAPABILITY_ID
             | TRACE_COMMONS_ONBOARD_CAPABILITY_ID
             | TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID
-            | TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID => PermissionMode::Ask,
+            | TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID
+            | TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID => PermissionMode::Ask,
             _ => PermissionMode::Allow,
         };
         assert_eq!(descriptor.default_permission, expected_permission);
@@ -6488,7 +6490,9 @@ async fn read_file_enforces_byte_budget_on_long_lines_and_offers_continuation() 
     );
     let next = read["next_offset"].as_u64().unwrap();
     assert_eq!(next, shown + 1);
-    assert!(content.contains(&format!("Use offset={next} to continue")));
+    assert!(content.contains("run ONE shell command or script"));
+    assert!(content.contains("do NOT page through it"));
+    assert!(content.contains(&format!("offset={next}")));
 
     // Resuming from next_offset advances past the already-shown lines.
     let resumed = invoke_with_context(
@@ -8750,6 +8754,7 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         TRACE_COMMONS_CREDITS_CAPABILITY_ID,
         TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
         TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+        TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
         PROFILE_SET_CAPABILITY_ID,
         MEMORY_SEARCH_CAPABILITY_ID,
         MEMORY_WRITE_CAPABILITY_ID,

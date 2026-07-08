@@ -34,7 +34,7 @@ use crate::descriptors::{
     WEBUI_V2_PATTERN_PROJECT_MEMBER_DETAIL, WEBUI_V2_PATTERN_PROJECT_MEMBERS,
     WEBUI_V2_PATTERN_READ_FS_FILE, WEBUI_V2_PATTERN_READ_PROJECT_FILE,
     WEBUI_V2_PATTERN_REMOVE_EXTENSION, WEBUI_V2_PATTERN_RESOLVE_GATE,
-    WEBUI_V2_PATTERN_RESUME_AUTOMATION, WEBUI_V2_PATTERN_SEARCH_SKILLS,
+    WEBUI_V2_PATTERN_RESUME_AUTOMATION, WEBUI_V2_PATTERN_RETRY_RUN, WEBUI_V2_PATTERN_SEARCH_SKILLS,
     WEBUI_V2_PATTERN_SEND_MESSAGE, WEBUI_V2_PATTERN_SET_ACTIVE_LLM,
     WEBUI_V2_PATTERN_SET_AUTO_ACTIVATE_LEARNED, WEBUI_V2_PATTERN_SET_SKILL_AUTO_ACTIVATE,
     WEBUI_V2_PATTERN_SETTINGS_TOOL_PERMISSION, WEBUI_V2_PATTERN_SETTINGS_TOOLS,
@@ -42,8 +42,8 @@ use crate::descriptors::{
     WEBUI_V2_PATTERN_START_CODEX_LOGIN, WEBUI_V2_PATTERN_START_NEARAI_LOGIN,
     WEBUI_V2_PATTERN_STAT_FS_PATH, WEBUI_V2_PATTERN_STAT_PROJECT_FILE,
     WEBUI_V2_PATTERN_STREAM_EVENTS, WEBUI_V2_PATTERN_STREAM_EVENTS_WS,
-    WEBUI_V2_PATTERN_TEST_LLM_CONNECTION, WEBUI_V2_PATTERN_TRACE_CREDITS,
-    WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE,
+    WEBUI_V2_PATTERN_TEST_LLM_CONNECTION, WEBUI_V2_PATTERN_TRACE_ACCOUNT_TRACES,
+    WEBUI_V2_PATTERN_TRACE_CREDITS, WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE,
 };
 use crate::handlers;
 use crate::sse_capacity::SseCapacity;
@@ -209,6 +209,7 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
         )
         .route(WEBUI_V2_PATTERN_CANCEL_RUN, post(handlers::cancel_run))
         .route(WEBUI_V2_PATTERN_RESOLVE_GATE, post(handlers::resolve_gate))
+        .route(WEBUI_V2_PATTERN_RETRY_RUN, post(handlers::retry_run))
         .route(
             WEBUI_V2_PATTERN_LIST_AUTOMATIONS,
             get(handlers::list_automations),
@@ -226,6 +227,10 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
             delete(handlers::delete_automation),
         )
         .route(WEBUI_V2_PATTERN_TRACE_CREDITS, get(handlers::trace_credits))
+        .route(
+            WEBUI_V2_PATTERN_TRACE_ACCOUNT_TRACES,
+            get(handlers::trace_account_traces),
+        )
         .route(
             WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE,
             post(handlers::authorize_trace_hold),

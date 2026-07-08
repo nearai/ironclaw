@@ -13,6 +13,16 @@ use ironclaw_host_api::ingress::{
 use ironclaw_host_api::{IngressScopeSource, NetworkMethod};
 use std::num::{NonZeroU32, NonZeroU64};
 
+mod run_action_descriptors;
+
+pub use run_action_descriptors::{
+    WEBUI_V2_PATTERN_CANCEL_RUN, WEBUI_V2_PATTERN_RESOLVE_GATE, WEBUI_V2_PATTERN_RETRY_RUN,
+    WEBUI_V2_ROUTE_CANCEL_RUN, WEBUI_V2_ROUTE_RESOLVE_GATE, WEBUI_V2_ROUTE_RETRY_RUN,
+};
+use run_action_descriptors::{
+    cancel_run_descriptor, resolve_gate_descriptor, retry_run_descriptor,
+};
+
 pub const WEBUI_V2_ROUTE_CREATE_THREAD: &str = "webui.v2.create_thread";
 pub const WEBUI_V2_ROUTE_DELETE_THREAD: &str = "webui.v2.delete_thread";
 pub const WEBUI_V2_ROUTE_GET_SESSION: &str = "webui.v2.get_session";
@@ -22,13 +32,12 @@ pub const WEBUI_V2_ROUTE_GET_TIMELINE: &str = "webui.v2.get_timeline";
 pub const WEBUI_V2_ROUTE_GET_ATTACHMENT: &str = "webui.v2.get_attachment";
 pub const WEBUI_V2_ROUTE_STREAM_EVENTS: &str = "webui.v2.stream_events";
 pub const WEBUI_V2_ROUTE_STREAM_EVENTS_WS: &str = "webui.v2.stream_events_ws";
-pub const WEBUI_V2_ROUTE_CANCEL_RUN: &str = "webui.v2.cancel_run";
-pub const WEBUI_V2_ROUTE_RESOLVE_GATE: &str = "webui.v2.resolve_gate";
 pub const WEBUI_V2_ROUTE_LIST_AUTOMATIONS: &str = "webui.v2.list_automations";
 pub const WEBUI_V2_ROUTE_PAUSE_AUTOMATION: &str = "webui.v2.pause_automation";
 pub const WEBUI_V2_ROUTE_RESUME_AUTOMATION: &str = "webui.v2.resume_automation";
 pub const WEBUI_V2_ROUTE_DELETE_AUTOMATION: &str = "webui.v2.delete_automation";
 pub const WEBUI_V2_ROUTE_TRACE_CREDITS: &str = "webui.v2.trace_credits";
+pub const WEBUI_V2_ROUTE_TRACE_ACCOUNT_TRACES: &str = "webui.v2.trace_account_traces";
 pub const WEBUI_V2_ROUTE_TRACE_HOLD_AUTHORIZE: &str = "webui.v2.authorize_trace_hold";
 pub const WEBUI_V2_ROUTE_GET_OUTBOUND_PREFERENCES: &str = "webui.v2.get_outbound_preferences";
 pub const WEBUI_V2_ROUTE_SET_OUTBOUND_PREFERENCES: &str = "webui.v2.set_outbound_preferences";
@@ -104,10 +113,6 @@ pub const WEBUI_V2_PATTERN_GET_ATTACHMENT: &str =
     "/api/webchat/v2/threads/{thread_id}/messages/{message_id}/attachments/{attachment_id}";
 pub const WEBUI_V2_PATTERN_STREAM_EVENTS: &str = "/api/webchat/v2/threads/{thread_id}/events";
 pub const WEBUI_V2_PATTERN_STREAM_EVENTS_WS: &str = "/api/webchat/v2/threads/{thread_id}/ws";
-pub const WEBUI_V2_PATTERN_CANCEL_RUN: &str =
-    "/api/webchat/v2/threads/{thread_id}/runs/{run_id}/cancel";
-pub const WEBUI_V2_PATTERN_RESOLVE_GATE: &str =
-    "/api/webchat/v2/threads/{thread_id}/runs/{run_id}/gates/{gate_ref}/resolve";
 pub const WEBUI_V2_PATTERN_LIST_AUTOMATIONS: &str = "/api/webchat/v2/automations";
 pub const WEBUI_V2_PATTERN_PAUSE_AUTOMATION: &str =
     "/api/webchat/v2/automations/{automation_id}/pause";
@@ -115,6 +120,7 @@ pub const WEBUI_V2_PATTERN_RESUME_AUTOMATION: &str =
     "/api/webchat/v2/automations/{automation_id}/resume";
 pub const WEBUI_V2_PATTERN_DELETE_AUTOMATION: &str = "/api/webchat/v2/automations/{automation_id}";
 pub const WEBUI_V2_PATTERN_TRACE_CREDITS: &str = "/api/webchat/v2/traces/credit";
+pub const WEBUI_V2_PATTERN_TRACE_ACCOUNT_TRACES: &str = "/api/webchat/v2/traces/account";
 pub const WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE: &str =
     "/api/webchat/v2/traces/holds/{submission_id}/authorize";
 pub const WEBUI_V2_PATTERN_OUTBOUND_PREFERENCES: &str = "/api/webchat/v2/outbound/preferences";
@@ -194,11 +200,13 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         stream_events_ws_descriptor(),
         cancel_run_descriptor(),
         resolve_gate_descriptor(),
+        retry_run_descriptor(),
         list_automations_descriptor(),
         pause_automation_descriptor(),
         resume_automation_descriptor(),
         delete_automation_descriptor(),
         trace_credits_descriptor(),
+        trace_account_traces_descriptor(),
         authorize_trace_hold_descriptor(),
         get_outbound_preferences_descriptor(),
         set_outbound_preferences_descriptor(),
@@ -630,34 +638,6 @@ fn stream_events_descriptor() -> IngressRouteDescriptor {
     )
 }
 
-fn cancel_run_descriptor() -> IngressRouteDescriptor {
-    descriptor(
-        WEBUI_V2_ROUTE_CANCEL_RUN,
-        NetworkMethod::Post,
-        WEBUI_V2_PATTERN_CANCEL_RUN,
-        mutation_policy(
-            body_limit_kib(4),
-            mutation_rate_limit(),
-            AuditTraceClass::UserAction,
-            AllowedEffectPath::TurnCoordinator,
-        ),
-    )
-}
-
-fn resolve_gate_descriptor() -> IngressRouteDescriptor {
-    descriptor(
-        WEBUI_V2_ROUTE_RESOLVE_GATE,
-        NetworkMethod::Post,
-        WEBUI_V2_PATTERN_RESOLVE_GATE,
-        mutation_policy(
-            body_limit_kib(4),
-            mutation_rate_limit(),
-            AuditTraceClass::UserAction,
-            AllowedEffectPath::TurnCoordinator,
-        ),
-    )
-}
-
 fn list_threads_descriptor() -> IngressRouteDescriptor {
     descriptor(
         WEBUI_V2_ROUTE_LIST_THREADS,
@@ -746,6 +726,20 @@ fn trace_credits_descriptor() -> IngressRouteDescriptor {
         WEBUI_V2_ROUTE_TRACE_CREDITS,
         NetworkMethod::Get,
         WEBUI_V2_PATTERN_TRACE_CREDITS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn trace_account_traces_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_TRACE_ACCOUNT_TRACES,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_TRACE_ACCOUNT_TRACES,
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,

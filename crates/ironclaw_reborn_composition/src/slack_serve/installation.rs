@@ -310,6 +310,57 @@ impl std::fmt::Debug for ResolvedSlackIngress {
     }
 }
 
+/// A signature-verified Slack slash-command invocation, resolved to the
+/// installation that owns it.
+///
+/// Produced only by [`SlackInstallationResolver::resolve_command_ingress`], and
+/// only after the request signature verifies, so every field is trusted Slack
+/// input bound to `installation`. `slack_user_id` is the user who *typed* the
+/// command (the actor we pair), not the installing user.
+#[derive(Clone)]
+pub struct ResolvedSlackCommand {
+    installation: ResolvedSlackInstallation,
+    command: String,
+    slack_user_id: SlackUserId,
+}
+
+impl ResolvedSlackCommand {
+    pub fn new(
+        installation: ResolvedSlackInstallation,
+        command: String,
+        slack_user_id: SlackUserId,
+    ) -> Self {
+        Self {
+            installation,
+            command,
+            slack_user_id,
+        }
+    }
+
+    pub fn installation(&self) -> &ResolvedSlackInstallation {
+        &self.installation
+    }
+
+    pub fn command(&self) -> &str {
+        &self.command
+    }
+
+    pub fn slack_user_id(&self) -> &SlackUserId {
+        &self.slack_user_id
+    }
+}
+
+impl std::fmt::Debug for ResolvedSlackCommand {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ResolvedSlackCommand")
+            .field("installation", &self.installation)
+            .field("command", &self.command)
+            .field("slack_user_id", &self.slack_user_id)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum SlackIngressError {
     #[error(transparent)]
@@ -335,6 +386,20 @@ pub trait SlackInstallationResolver: Send + Sync {
         headers: &'a HeaderMap,
         body: &'a [u8],
     ) -> Pin<Box<dyn Future<Output = Result<ResolvedSlackIngress, SlackIngressError>> + Send + 'a>>;
+
+    /// Resolve a Slack slash-command (`application/x-www-form-urlencoded`)
+    /// request to its installation, verifying the request signature first.
+    ///
+    /// Slash commands carry no installing-user id, so routing matches on
+    /// team / app / enterprise only (see [`SlackInstallationSelector::matches_command`]).
+    /// This is a required method — every resolver participates in command
+    /// routing, so there is deliberately no defaulted no-op that could leave a
+    /// silent gap on the slash endpoint.
+    fn resolve_command_ingress<'a>(
+        &'a self,
+        headers: &'a HeaderMap,
+        body: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedSlackCommand, SlackIngressError>> + Send + 'a>>;
 
     fn drain_installations<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 }
@@ -533,6 +598,119 @@ impl SlackInstallationSelector {
             }
         }
     }
+
+    /// Match this selector against a Slack slash-command's routing dimensions.
+    ///
+    /// Unlike [`Self::matches`], a slash command carries no installing-user id,
+    /// so the per-install user dimension of the `*InstallUser` selectors is not
+    /// applied here — a command routes on team (plus app / enterprise where the
+    /// selector constrains them). If two installations share a team and differ
+    /// only by install user, both match and `verify_candidates` resolves the
+    /// ambiguity by signature (yielding `AmbiguousInstallation`), which the
+    /// handler surfaces as a safe ephemeral error rather than guessing.
+    fn matches_command(&self, context: &SlackCommandContext) -> bool {
+        match self {
+            Self::Team { team_id } => context.team_id.as_ref() == Some(team_id),
+            Self::AppTeam {
+                api_app_id,
+                team_id,
+            } => {
+                context.api_app_id.as_ref() == Some(api_app_id)
+                    && context.team_id.as_ref() == Some(team_id)
+            }
+            Self::EnterpriseTeam {
+                enterprise_id,
+                team_id,
+            } => {
+                context.enterprise_id.as_ref() == Some(enterprise_id)
+                    && context.team_id.as_ref() == Some(team_id)
+            }
+            Self::InstallUser { team_id, .. } => context.team_id.as_ref() == Some(team_id),
+            Self::EnterpriseInstallUser {
+                enterprise_id,
+                team_id,
+                ..
+            } => {
+                context.enterprise_id.as_ref() == Some(enterprise_id)
+                    && context.team_id.as_ref() == Some(team_id)
+            }
+            Self::AppInstallUser {
+                api_app_id,
+                team_id,
+                ..
+            } => {
+                context.api_app_id.as_ref() == Some(api_app_id)
+                    && context.team_id.as_ref() == Some(team_id)
+            }
+        }
+    }
+}
+
+/// The installation-routing dimensions Slack includes on a slash command.
+///
+/// Built from the untrusted form body and used only to narrow which
+/// installation's signing secret to check; trust is established by the
+/// subsequent signature verification, not by these fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SlackCommandContext {
+    team_id: Option<SlackTeamId>,
+    api_app_id: Option<SlackApiAppId>,
+    enterprise_id: Option<SlackEnterpriseId>,
+}
+
+impl SlackCommandContext {
+    fn from_form(form: &SlackCommandForm) -> Self {
+        Self {
+            team_id: non_empty(form.team_id.as_deref()).map(SlackTeamId::new),
+            api_app_id: non_empty(form.api_app_id.as_deref()).map(SlackApiAppId::new),
+            enterprise_id: non_empty(form.enterprise_id.as_deref()).map(SlackEnterpriseId::new),
+        }
+    }
+}
+
+/// The slash-command form fields IronClaw routes on. All optional: a missing
+/// field stays `None` so parsing never fails before signature verification —
+/// a parse that could fail would leak a pre-auth oracle distinguishing a
+/// malformed body from an unsigned one. Required fields are validated only
+/// after the signature verifies (see `resolve_command_sync`).
+#[derive(Debug, Default)]
+struct SlackCommandForm {
+    command: Option<String>,
+    team_id: Option<String>,
+    api_app_id: Option<String>,
+    enterprise_id: Option<String>,
+    user_id: Option<String>,
+}
+
+fn parse_slack_command_form(body: &[u8]) -> SlackCommandForm {
+    let mut form = SlackCommandForm::default();
+    for (key, value) in url::form_urlencoded::parse(body) {
+        match key.as_ref() {
+            "command" => form.command = Some(value.into_owned()),
+            "team_id" => form.team_id = Some(value.into_owned()),
+            "api_app_id" => form.api_app_id = Some(value.into_owned()),
+            "enterprise_id" => form.enterprise_id = Some(value.into_owned()),
+            "user_id" => form.user_id = Some(value.into_owned()),
+            _ => {}
+        }
+    }
+    form
+}
+
+/// Treat an empty form value as absent — Slack omits some fields by sending
+/// them blank rather than dropping the key.
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.filter(|candidate| !candidate.is_empty())
+}
+
+fn non_empty_owned(value: Option<String>) -> Option<String> {
+    value.filter(|candidate| !candidate.is_empty())
+}
+
+fn command_field_missing() -> SlackIngressError {
+    SlackIngressError::Envelope(SlackPayloadParseError::InvalidJson {
+        reason: "Slack slash command form missing required field".into(),
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -607,6 +785,45 @@ impl StaticSlackInstallationResolver {
         })
     }
 
+    fn resolve_command_sync(
+        &self,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> Result<ResolvedSlackCommand, SlackIngressError> {
+        let form = parse_slack_command_form(body);
+        let context = SlackCommandContext::from_form(&form);
+        let candidates: Vec<_> = self
+            .installations
+            .iter()
+            .filter(|installation| installation.selector.matches_command(&context))
+            .collect();
+        if candidates.is_empty() {
+            self.ensure_candidate_budget(self.installations.len())?;
+            self.verify_candidates(self.installations.iter(), headers, body)?;
+            return Err(SlackIngressError::InstallationNotFound);
+        }
+        self.ensure_candidate_budget(candidates.len())?;
+
+        let mut verified = self.verify_candidates(candidates, headers, body)?;
+        if verified.len() > 1 {
+            return Err(SlackIngressError::AmbiguousInstallation);
+        }
+        let (installation, evidence) = verified.remove(0);
+
+        // Signature verified above, so the form is now trusted Slack input. A
+        // real slash command always carries these fields; treat a
+        // verified-but-empty one as a malformed payload rather than minting a
+        // pairing code against a blank user.
+        let command = non_empty_owned(form.command).ok_or_else(command_field_missing)?;
+        let user_id = non_empty_owned(form.user_id).ok_or_else(command_field_missing)?;
+
+        Ok(ResolvedSlackCommand::new(
+            Self::resolved_installation(installation, evidence),
+            command,
+            SlackUserId::new(user_id),
+        ))
+    }
+
     fn resolve_unparseable(
         &self,
         headers: &HeaderMap,
@@ -676,6 +893,15 @@ impl SlackInstallationResolver for StaticSlackInstallationResolver {
     ) -> Pin<Box<dyn Future<Output = Result<ResolvedSlackIngress, SlackIngressError>> + Send + 'a>>
     {
         Box::pin(async move { self.resolve_sync(headers, body) })
+    }
+
+    fn resolve_command_ingress<'a>(
+        &'a self,
+        headers: &'a HeaderMap,
+        body: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedSlackCommand, SlackIngressError>> + Send + 'a>>
+    {
+        Box::pin(async move { self.resolve_command_sync(headers, body) })
     }
 
     fn drain_installations<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
@@ -825,6 +1051,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use axum::http::HeaderMap;
+    use ironclaw_product_adapters::ProtocolAuthFailure;
     use ironclaw_product_adapters::auth::mark_request_signature_verified;
     use ironclaw_wasm_product_adapters::{ImmediateAckWorkflowObserver, WebhookProcessOutcome};
 
@@ -1076,6 +1303,185 @@ mod tests {
             calls.load(Ordering::SeqCst),
             1,
             "malformed payloads should not HMAC every configured installation"
+        );
+    }
+
+    /// A dispatcher whose signature verification always fails, used to prove the
+    /// slash-command path rejects an unsigned (or wrongly signed) request.
+    struct FailingDispatcher;
+
+    impl SlackEventsWebhookDispatcher for FailingDispatcher {
+        fn verify_webhook_auth(
+            &self,
+            _headers: &HeaderMap,
+            _body: &[u8],
+        ) -> Result<ProtocolAuthEvidence, RunnerError> {
+            Err(RunnerError::AuthenticationFailed {
+                failure: ProtocolAuthFailure::SignatureMismatch,
+            })
+        }
+
+        fn process_verified_webhook_immediate_ack<'a>(
+            &'a self,
+            _body: &'a [u8],
+            _evidence: &'a ProtocolAuthEvidence,
+            _observer: Option<Arc<dyn ImmediateAckWorkflowObserver>>,
+        ) -> Pin<Box<dyn Future<Output = Result<WebhookProcessOutcome, RunnerError>> + Send + 'a>>
+        {
+            Box::pin(async {
+                Err(RunnerError::AuthenticationFailed {
+                    failure: ProtocolAuthFailure::SignatureMismatch,
+                })
+            })
+        }
+
+        fn drain_immediate_ack_tasks<'a>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+            Box::pin(async {})
+        }
+    }
+
+    fn failing_dispatcher() -> Arc<dyn SlackEventsWebhookDispatcher> {
+        Arc::new(FailingDispatcher)
+    }
+
+    /// Build a realistic Slack slash-command body (`application/x-www-form-urlencoded`).
+    fn slack_command_body(
+        team_id: &str,
+        user_id: &str,
+        command: &str,
+        response_url: &str,
+    ) -> Vec<u8> {
+        url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("token", "verification-token")
+            .append_pair("team_id", team_id)
+            .append_pair("api_app_id", "A-slack")
+            .append_pair("channel_id", "D123")
+            .append_pair("user_id", user_id)
+            .append_pair("command", command)
+            .append_pair("text", "")
+            .append_pair("response_url", response_url)
+            .append_pair("trigger_id", "123.456.abc")
+            .finish()
+            .into_bytes()
+    }
+
+    #[tokio::test]
+    async fn resolve_command_ingress_verifies_and_extracts_user() -> Result<(), String> {
+        let resolver = StaticSlackInstallationResolver::new(vec![SlackInstallationRecord::new(
+            tenant_id("tenant-a"),
+            installation_id("install-a"),
+            SlackInstallationSelector::team("T-A"),
+            dispatcher("install-a"),
+        )]);
+
+        let body = slack_command_body(
+            "T-A",
+            "U123",
+            "/pair",
+            "https://hooks.slack.com/commands/T-A/123/abc",
+        );
+
+        let command = resolver
+            .resolve_command_ingress(&HeaderMap::new(), &body)
+            .await
+            .map_err(|error| format!("verified /pair command should resolve: {error}"))?;
+
+        assert_eq!(command.installation().tenant_id().as_str(), "tenant-a");
+        assert_eq!(
+            command.installation().adapter_installation_id().as_str(),
+            "install-a"
+        );
+        assert_eq!(command.command(), "/pair");
+        assert_eq!(command.slack_user_id().as_str(), "U123");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn resolve_command_ingress_rejects_bad_signature() {
+        let resolver = StaticSlackInstallationResolver::new(vec![SlackInstallationRecord::new(
+            tenant_id("tenant-a"),
+            installation_id("install-a"),
+            SlackInstallationSelector::team("T-A"),
+            failing_dispatcher(),
+        )]);
+
+        let body = slack_command_body(
+            "T-A",
+            "U123",
+            "/pair",
+            "https://hooks.slack.com/commands/T-A/123/abc",
+        );
+
+        let error = resolver
+            .resolve_command_ingress(&HeaderMap::new(), &body)
+            .await
+            .expect_err("an unsigned /pair command must be rejected");
+
+        assert!(
+            matches!(
+                error,
+                SlackIngressError::Runner(RunnerError::AuthenticationFailed { .. })
+            ),
+            "error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_command_ingress_rejects_unknown_team() {
+        let resolver = StaticSlackInstallationResolver::new(vec![SlackInstallationRecord::new(
+            tenant_id("tenant-a"),
+            installation_id("install-a"),
+            SlackInstallationSelector::team("T-A"),
+            dispatcher("install-a"),
+        )]);
+
+        let body = slack_command_body(
+            "T-UNKNOWN",
+            "U123",
+            "/pair",
+            "https://hooks.slack.com/commands/T-UNKNOWN/123/abc",
+        );
+
+        let error = resolver
+            .resolve_command_ingress(&HeaderMap::new(), &body)
+            .await
+            .expect_err("a command from an unconfigured team must not resolve");
+
+        assert!(
+            matches!(error, SlackIngressError::InstallationNotFound),
+            "error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_command_ingress_authenticates_before_unknown_team_rejection() {
+        let resolver = StaticSlackInstallationResolver::new(vec![SlackInstallationRecord::new(
+            tenant_id("tenant-a"),
+            installation_id("install-a"),
+            SlackInstallationSelector::team("T-A"),
+            failing_dispatcher(),
+        )]);
+
+        let body = slack_command_body(
+            "T-UNKNOWN",
+            "U123",
+            "/pair",
+            "https://hooks.slack.com/commands/T-UNKNOWN/123/abc",
+        );
+
+        let error = resolver
+            .resolve_command_ingress(&HeaderMap::new(), &body)
+            .await
+            .expect_err("an unsigned unknown-team command must fail authentication first");
+
+        assert!(
+            matches!(
+                error,
+                SlackIngressError::Runner(RunnerError::AuthenticationFailed { .. })
+            ),
+            "error: {error}"
         );
     }
 }

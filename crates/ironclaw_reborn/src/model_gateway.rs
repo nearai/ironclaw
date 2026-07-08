@@ -61,6 +61,7 @@ use crate::{
 const MODEL_CREDITS_EXHAUSTED_SUMMARY: &str = "model provider account is out of credits";
 const PROVIDER_TOOL_ARGUMENTS_OMITTED_MARKER: &str =
     "arguments omitted because they exceeded the host provider-tool limit";
+const CONTEXT_SHADOW_TARGET: &str = "ironclaw::reborn::context_shadow";
 const UNAVAILABLE_CAPABILITY_REPLY: &str = "That capability is unavailable or disabled for this request, so I will not route it through another tool.";
 
 fn trace_model_latency_ok(
@@ -271,7 +272,7 @@ where
                 surface_version: request.surface_version.clone(),
                 checkpoint_state_ref: None,
                 max_messages: Some(self.max_messages.min(u32::MAX as usize) as u32),
-                inline_messages: Vec::new(),
+                inline_messages: request.inline_messages.clone(),
                 capability_view: None,
             })
             .await
@@ -871,6 +872,15 @@ where
                 "reborn model gateway resolved provider tool definitions"
             );
         }
+        if tracing::enabled!(target: CONTEXT_SHADOW_TARGET, tracing::Level::DEBUG) {
+            let est_tool_schema_tokens = estimate_tool_schema_tokens(&tool_definitions);
+            debug!(
+                target: CONTEXT_SHADOW_TARGET,
+                tool_definition_count = tool_definitions.len(),
+                est_tool_schema_tokens,
+                "reborn tool surface shadow measurement"
+            );
+        }
         if !tool_definitions.is_empty() {
             let unavailable_capability_guard =
                 unavailable_requested_capability_guard(&completion.messages, &tool_definitions);
@@ -1121,6 +1131,17 @@ fn provider_tool_definition_to_llm(definition: ProviderToolDefinition) -> ToolDe
     }
 }
 
+fn estimate_tool_schema_tokens(definitions: &[ProviderToolDefinition]) -> u32 {
+    definitions.iter().fold(0_u32, |total, definition| {
+        let schema = serde_json::json!({
+            "name": definition.name.as_str(),
+            "description": definition.description.as_str(),
+            "parameters": &definition.parameters,
+        });
+        total.saturating_add(crate::context_shadow::estimate_tokens(&schema.to_string()))
+    })
+}
+
 #[tracing::instrument(
     level = "debug",
     skip(response, capabilities, replay_identity),
@@ -1193,26 +1214,54 @@ async fn tool_response_to_host(
                 )
             })
             .collect::<Result<Vec<_>, HostManagedModelError>>()?;
-        if provider_calls
-            .iter()
-            .any(|provider_call| !advertised_tool_names.contains(&provider_call.name))
-        {
+        if !provider_calls_are_advertised_or_resolvable(
+            &advertised_tool_names,
+            capabilities.as_ref(),
+            &provider_calls,
+        ) {
             return Err(HostManagedModelError::safe(
                 HostManagedModelErrorKind::InvalidOutput,
                 "model returned a tool call outside the advertised capability surface",
             ));
         }
         for provider_call in &provider_calls {
-            capabilities
-                .validate_provider_tool_call(provider_call)
-                .map_err(map_provider_tool_output_error)?;
+            if let Err(error) = capabilities.validate_provider_tool_call(provider_call) {
+                // Fail loud: this rejection otherwise discards the whole response
+                // (budget released, no dispatch) and the run eventually fails with
+                // no trace of which call or why. Log before mapping/propagating.
+                debug!(
+                    tool_name = provider_call.name.as_str(),
+                    provider_call_id = provider_call.id.as_str(),
+                    error_kind = ?error.kind,
+                    // The safe_summary is layer-distinct ("outside the
+                    // model-visible capability view" = visible filter, "targets a
+                    // disabled capability" = deny filter, etc.), so it names which
+                    // port in the chain rejected the call.
+                    reason = error.safe_summary.as_str(),
+                    "reborn model gateway rejected provider tool call during validation"
+                );
+                return Err(map_provider_tool_output_error(error));
+            }
         }
         for provider_call in provider_calls {
-            let candidate = capabilities
+            let rejected_tool_name = provider_call.name.clone();
+            let rejected_provider_call_id = provider_call.id.clone();
+            match capabilities
                 .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call))
                 .await
-                .map_err(map_provider_tool_output_error)?;
-            candidates.push(candidate);
+            {
+                Ok(candidate) => candidates.push(candidate),
+                Err(error) => {
+                    debug!(
+                        tool_name = rejected_tool_name.as_str(),
+                        provider_call_id = rejected_provider_call_id.as_str(),
+                        error_kind = ?error.kind,
+                        reason = error.safe_summary.as_str(),
+                        "reborn model gateway rejected provider tool call during registration"
+                    );
+                    return Err(map_provider_tool_output_error(error));
+                }
+            }
         }
         debug!(
             capability_call_count = candidates.len(),
@@ -1270,6 +1319,36 @@ async fn tool_response_to_host(
     }
 }
 
+fn provider_calls_are_advertised_or_resolvable(
+    advertised_tool_names: &HashSet<ProviderToolName>,
+    capabilities: &dyn ironclaw_turns::run_profile::LoopCapabilityPort,
+    provider_calls: &[ProviderToolCall],
+) -> bool {
+    for provider_call in provider_calls {
+        if advertised_tool_names.contains(&provider_call.name) {
+            continue;
+        }
+        match capabilities.provider_tool_call_capability_ids(provider_call) {
+            Ok(ids) => {
+                debug!(
+                    tool_name = provider_call.name.as_str(),
+                    provider_capability_id = ids.provider_capability_id.as_str(),
+                    "reborn model gateway accepted resolvable unadvertised provider tool call"
+                );
+            }
+            Err(error) => {
+                debug!(
+                    tool_name = provider_call.name.as_str(),
+                    safe_summary = error.safe_summary.as_str(),
+                    "reborn model gateway rejected unresolved unadvertised provider tool call"
+                );
+                return false;
+            }
+        }
+    }
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UnavailableCapabilityGuard {
     capability_id: CapabilityId,
@@ -1287,27 +1366,66 @@ fn unavailable_requested_capability_guard(
         .iter()
         .map(|definition| definition.capability_id.as_str())
         .collect::<HashSet<_>>();
+    // Namespaces the agent actually has (a visible capability shares the prefix,
+    // e.g. `builtin`). Used only to rescue backticked references to REAL
+    // capability namespaces from the inline-code skip — a backticked `builtin.echo`
+    // is still a request, whereas a backticked `playwright.sync_api` (a library
+    // whose namespace this agent doesn't have) is a code reference.
+    let visible_namespaces = visible_capability_ids
+        .iter()
+        .filter_map(|id| id.split('.').next())
+        .collect::<HashSet<_>>();
 
-    extract_explicit_capability_request_ids(&latest_user.content)
+    extract_explicit_capability_request_ids(&latest_user.content, &visible_namespaces)
         .into_iter()
         .find(|capability_id| !visible_capability_ids.contains(capability_id.as_str()))
         .map(|capability_id| UnavailableCapabilityGuard { capability_id })
 }
 
-fn extract_explicit_capability_request_ids(content: &str) -> Vec<CapabilityId> {
+fn extract_explicit_capability_request_ids(
+    content: &str,
+    visible_namespaces: &HashSet<&str>,
+) -> Vec<CapabilityId> {
     let mut ids = Vec::new();
     let mut token_start = None;
+    // Track Markdown inline-code parity (per line) in this same single pass so we
+    // never rescan the line for each token — one long user line with many
+    // capability-shaped tokens would otherwise be O(n^2).
+    let mut in_inline_code = false;
+    let mut token_in_code = false;
     for (index, character) in content.char_indices() {
         if is_capability_token_char(character) {
-            token_start.get_or_insert(index);
+            if token_start.is_none() {
+                token_start = Some(index);
+                token_in_code = in_inline_code;
+            }
             continue;
         }
         if let Some(start) = token_start.take() {
-            push_explicit_capability_request_token(content, start, index, &mut ids);
+            push_explicit_capability_request_token(
+                content,
+                start,
+                index,
+                token_in_code,
+                visible_namespaces,
+                &mut ids,
+            );
+        }
+        match character {
+            '\n' => in_inline_code = false,
+            '`' => in_inline_code = !in_inline_code,
+            _ => {}
         }
     }
     if let Some(start) = token_start {
-        push_explicit_capability_request_token(content, start, content.len(), &mut ids);
+        push_explicit_capability_request_token(
+            content,
+            start,
+            content.len(),
+            token_in_code,
+            visible_namespaces,
+            &mut ids,
+        );
     }
     ids
 }
@@ -1322,11 +1440,26 @@ fn push_explicit_capability_request_token(
     content: &str,
     start: usize,
     end: usize,
+    in_inline_code: bool,
+    visible_namespaces: &HashSet<&str>,
     ids: &mut Vec<CapabilityId>,
 ) {
     let token = &content[start..end];
     if !is_likely_capability_reference(token)
         || !is_explicit_capability_request_token(content, start, end)
+    {
+        return;
+    }
+    // Tokens written in Markdown inline code (e.g. "use `playwright.sync_api`", a
+    // Python module) are code references, not capability requests — ignore them.
+    // Two exceptions keep genuine requests covered even when backticked:
+    //  - the prompt explicitly labels the token a tool/capability
+    //    ("use the `builtin.http` capability"), or
+    //  - the token names a real capability namespace this agent has
+    //    (`builtin.echo` — `builtin` is a live namespace, unlike `playwright`).
+    if in_inline_code
+        && !has_capability_noun_context(content, start, end)
+        && !token_namespace_is_visible(token, visible_namespaces)
     {
         return;
     }
@@ -1341,22 +1474,39 @@ fn is_likely_capability_reference(token: &str) -> bool {
     token.starts_with("builtin.") || token.split('.').count() == 2
 }
 
-fn is_explicit_capability_request_token(content: &str, start: usize, end: usize) -> bool {
-    let previous_content = &content[..start]; // safety: start is produced by char_indices or content.len().
-    let previous_word = previous_content
+/// True when the token's namespace (its first dotted segment) is one the agent
+/// actually has — a backticked reference to a real capability namespace is still
+/// a request, unlike a library reference (`playwright.sync_api`).
+fn token_namespace_is_visible(token: &str, visible_namespaces: &HashSet<&str>) -> bool {
+    token
+        .split('.')
+        .next()
+        .is_some_and(|namespace| visible_namespaces.contains(namespace))
+}
+
+/// The request-word immediately before `start` (alphanumeric/`_`/`-` run).
+fn previous_request_word(content: &str, start: usize) -> Option<&str> {
+    content[..start]
         .trim_end()
         .rsplit(|character: char| !is_capability_request_word_char(character))
-        .find(|word| !word.is_empty());
-    if previous_word.is_some_and(is_capability_request_verb) {
-        return true;
-    }
+        .find(|word| !word.is_empty())
+}
 
+/// True when the word right before or after the token is an explicit "tool" /
+/// "capability" noun — the prompt is calling the token out as a capability, so
+/// it's a genuine request even when written in backticks.
+fn has_capability_noun_context(content: &str, start: usize, end: usize) -> bool {
     let next_word = content[end..]
         .trim_start()
         .split(|character: char| !is_capability_request_word_char(character))
         .find(|word| !word.is_empty());
-    previous_word.is_some_and(is_capability_request_noun)
+    previous_request_word(content, start).is_some_and(is_capability_request_noun)
         || next_word.is_some_and(is_capability_request_noun)
+}
+
+fn is_explicit_capability_request_token(content: &str, start: usize, end: usize) -> bool {
+    previous_request_word(content, start).is_some_and(is_capability_request_verb)
+        || has_capability_noun_context(content, start, end)
 }
 
 fn is_capability_request_word_char(character: char) -> bool {
@@ -1478,6 +1628,7 @@ fn map_capability_host_error(error: AgentLoopHostError) -> HostManagedModelError
         | AgentLoopHostErrorKind::ScopeMismatch
         | AgentLoopHostErrorKind::StaleSurface => HostManagedModelErrorKind::InvalidRequest,
         AgentLoopHostErrorKind::Unavailable
+        | AgentLoopHostErrorKind::InvalidOutput
         | AgentLoopHostErrorKind::CheckpointRejected
         | AgentLoopHostErrorKind::TranscriptWriteFailed
         | AgentLoopHostErrorKind::Internal => HostManagedModelErrorKind::Unavailable,
@@ -1491,12 +1642,12 @@ fn map_capability_host_error(error: AgentLoopHostError) -> HostManagedModelError
 
 fn map_provider_tool_output_error(error: AgentLoopHostError) -> HostManagedModelError {
     match error.kind {
-        AgentLoopHostErrorKind::Invalid | AgentLoopHostErrorKind::InvalidInvocation => {
-            HostManagedModelError::safe(
-                HostManagedModelErrorKind::InvalidOutput,
-                error.safe_summary,
-            )
-        }
+        AgentLoopHostErrorKind::Invalid
+        | AgentLoopHostErrorKind::InvalidInvocation
+        | AgentLoopHostErrorKind::InvalidOutput => HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidOutput,
+            error.safe_summary,
+        ),
         _ => map_capability_host_error(error),
     }
 }
@@ -1568,10 +1719,80 @@ fn image_data_url(mime_type: &str, bytes: &[u8]) -> String {
     )
 }
 
+/// Env flag gating [`collapse_repeated_failure_observations`].
+///
+/// Defaults **off**: unset / empty / unrecognized leaves the replayed context
+/// byte-identical to the pre-feature path. An operator opts in with `on`, `1`,
+/// or `true`. Kept as a separate knob from `REBORN_TOOL_DISCLOSURE` because this
+/// context-dedup pass runs in the shared `convert_messages` path independently of
+/// tool disclosure.
+pub const REBORN_COLLAPSE_REPEATED_FAILURES_ENV: &str = "REBORN_COLLAPSE_REPEATED_FAILURES";
+
+fn collapse_repeated_failures_enabled() -> bool {
+    collapse_repeated_failures_from_raw(std::env::var(REBORN_COLLAPSE_REPEATED_FAILURES_ENV).ok())
+}
+
+/// Pure resolution of the collapse flag from a raw env value, so the default-off
+/// contract is testable without mutating process env.
+fn collapse_repeated_failures_from_raw(raw: Option<impl AsRef<str>>) -> bool {
+    match raw {
+        Some(value) => {
+            let value = value.as_ref().trim();
+            value.eq_ignore_ascii_case("on")
+                || value.eq_ignore_ascii_case("1")
+                || value.eq_ignore_ascii_case("true")
+        }
+        None => false,
+    }
+}
+
+/// Collapse runs of identical *error* tool observations in the replayed context.
+///
+/// A model that repeats the same failing call accumulates byte-for-byte identical
+/// error observations — one per attempt — and every one is replayed into every
+/// later prompt. That both bloats context and drowns the model in copies of its
+/// own failure so it cannot tell it is looping. Keep the FIRST and LAST occurrence
+/// of each identical error intact (first for original detail, last because it is
+/// most recent and carries any repair hints) and replace the ones in between with
+/// a compact marker. Nothing is dropped — every tool-result message stays, so
+/// provider tool-call/result pairing is preserved; only the observation *content*
+/// of interior duplicates shrinks. Success observations and a lone repeat are
+/// never touched (the 3+ threshold leaves the first/last-only case alone).
+fn collapse_repeated_failure_observations(messages: &mut [HostManagedModelMessage]) {
+    let mut occurrences: std::collections::HashMap<String, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (index, message) in messages.iter().enumerate() {
+        if let Some(HostManagedToolResultContent::Reference { envelope }) =
+            message.tool_result_content.as_ref()
+            && let Some(fingerprint) = envelope.error_observation_fingerprint()
+        {
+            occurrences.entry(fingerprint).or_default().push(index);
+        }
+    }
+    for indices in occurrences.values() {
+        if indices.len() < 3 {
+            continue;
+        }
+        for &index in &indices[1..indices.len() - 1] {
+            if let Some(HostManagedToolResultContent::Reference { envelope }) =
+                messages[index].tool_result_content.as_mut()
+            {
+                envelope.collapse_to_repeated_error_marker();
+            }
+        }
+    }
+}
+
 fn convert_messages(
-    messages: Vec<HostManagedModelMessage>,
+    mut messages: Vec<HostManagedModelMessage>,
     replay_identity: &ProviderReplayIdentity,
 ) -> Result<Vec<ChatMessage>, HostManagedModelError> {
+    // Off by default (see REBORN_COLLAPSE_REPEATED_FAILURES_ENV): only collapse
+    // interior duplicate error observations when an operator opts in, so the
+    // replayed context is otherwise byte-identical to the pre-feature path.
+    if collapse_repeated_failures_enabled() {
+        collapse_repeated_failure_observations(&mut messages);
+    }
     let mut converted = Vec::with_capacity(messages.len());
     let mut index = 0;
     while index < messages.len() {
@@ -1820,12 +2041,19 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
         error_debug = ?error,
         "reborn model provider error mapped to safe summary"
     );
+    // Tier 2b: carry the provider's real message (status line + body snippet)
+    // on the model-visible detail channel so the failure explainer can describe
+    // the actual fault. `safe_with_detail` scrubs credential-looking tokens
+    // (api_key=…, sk-…, access_token=…) before the text is stored; the safe
+    // summary stays a fixed host-authored category string.
+    let provider_detail = error.to_string();
     if is_credit_exhaustion_error(&error) {
         return HostManagedModelError::safe(
             HostManagedModelErrorKind::CredentialUnavailable,
             MODEL_CREDITS_EXHAUSTED_SUMMARY,
         )
-        .with_reason_kind(MODEL_CREDITS_EXHAUSTED_REASON_KIND);
+        .with_reason_kind(MODEL_CREDITS_EXHAUSTED_REASON_KIND)
+        .safe_with_detail(provider_detail.clone());
     }
     match error {
         LlmError::ContextLengthExceeded { .. } => HostManagedModelError::safe(
@@ -1847,6 +2075,7 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
             "model service is unavailable",
         ),
     }
+    .safe_with_detail(provider_detail)
 }
 
 fn is_credit_exhaustion_error(error: &LlmError) -> bool {
@@ -1874,6 +2103,83 @@ mod tests {
             provider: "test_provider".to_string(),
             reason: reason.to_string(),
         }
+    }
+
+    fn tool_def(capability_id: &str, name: &str) -> ProviderToolDefinition {
+        ProviderToolDefinition {
+            capability_id: CapabilityId::new(capability_id).unwrap(),
+            name: ProviderToolName::new(name).unwrap(),
+            description: String::new(),
+            parameters: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn guard_ignores_incidental_code_references() {
+        // The playwright/browser tasks literally instruct: "use `playwright.sync_api`"
+        // — a Python module named right after a request verb. That is NOT a
+        // capability request; the guard must not fire and suppress the model's
+        // legitimate write_file calls.
+        let messages = vec![ChatMessage::user(
+            "Read form.html, then use `playwright.sync_api` (Python sync API) to \
+             write an end-to-end test saved as test_form.py.",
+        )];
+        let tools = vec![
+            tool_def("builtin.write_file", "builtin__write_file"),
+            tool_def("builtin.read_file", "builtin__read_file"),
+        ];
+        assert!(
+            unavailable_requested_capability_guard(&messages, &tools).is_none(),
+            "guard must not misfire on the code reference `playwright.sync_api`"
+        );
+    }
+
+    #[test]
+    fn guard_still_fires_on_real_disabled_capability() {
+        // A genuine, un-backticked request for a capability that isn't visible must
+        // still fire (`builtin.http` is gated off here).
+        let messages = vec![ChatMessage::user(
+            "Fetch the page using the builtin.http capability.",
+        )];
+        let tools = vec![tool_def("builtin.write_file", "builtin__write_file")];
+        let guard = unavailable_requested_capability_guard(&messages, &tools);
+        assert!(
+            guard.is_some(),
+            "guard should still fire for a real builtin capability that is disabled"
+        );
+        assert_eq!(guard.unwrap().capability_id.as_str(), "builtin.http");
+    }
+
+    #[test]
+    fn guard_fires_on_backticked_capability_with_explicit_noun() {
+        // Backticks alone don't excuse a request the prompt explicitly labels a
+        // capability/tool — the inline-code skip must not swallow a genuine
+        // request. Here `builtin.http` is backticked but called a "capability".
+        let messages = vec![ChatMessage::user(
+            "Fetch the page using the `builtin.http` capability.",
+        )];
+        let tools = vec![tool_def("builtin.write_file", "builtin__write_file")];
+        let guard = unavailable_requested_capability_guard(&messages, &tools);
+        assert!(
+            guard.is_some(),
+            "explicitly-labeled capability must still fire even when backticked"
+        );
+        assert_eq!(guard.unwrap().capability_id.as_str(), "builtin.http");
+    }
+
+    #[test]
+    fn guard_fires_on_backticked_known_namespace_capability() {
+        // A backticked reference to a REAL capability namespace this agent has
+        // (`builtin`) is still a request, even with only a request verb and no
+        // tool/capability noun — unlike a library ref such as `playwright.sync_api`.
+        let messages = vec![ChatMessage::user("Use `builtin.echo` to print the banner.")];
+        let tools = vec![tool_def("builtin.write_file", "builtin__write_file")];
+        let guard = unavailable_requested_capability_guard(&messages, &tools);
+        assert!(
+            guard.is_some(),
+            "backticked known-namespace capability must still fire"
+        );
+        assert_eq!(guard.unwrap().capability_id.as_str(), "builtin.echo");
     }
 
     #[test]
@@ -1976,6 +2282,119 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&replay.model_content).unwrap(),
             observation
         );
+    }
+
+    fn error_tool_result_message(
+        result_ref: &str,
+        observation: serde_json::Value,
+    ) -> HostManagedModelMessage {
+        let envelope = ironclaw_threads::ToolResultReferenceEnvelope::with_model_observation(
+            result_ref,
+            ironclaw_threads::ToolResultSafeSummary::new("tool failed").expect("safe summary"),
+            observation,
+        )
+        .expect("valid observation envelope");
+        HostManagedModelMessage {
+            role: HostManagedModelMessageRole::ToolResult,
+            content: "tool failed".to_string(),
+            content_ref: ironclaw_turns::LoopMessageRef::new(
+                "msg:11111111-1111-1111-1111-111111111111",
+            )
+            .expect("valid message ref"),
+            tool_result_provider_call: None,
+            tool_result_content: Some(HostManagedToolResultContent::Reference { envelope }),
+            image_parts: Vec::new(),
+        }
+    }
+
+    fn tool_result_observation(message: &HostManagedModelMessage) -> serde_json::Value {
+        match message
+            .tool_result_content
+            .as_ref()
+            .expect("tool result content")
+        {
+            HostManagedToolResultContent::Reference { envelope } => envelope
+                .model_observation
+                .clone()
+                .expect("model observation"),
+            other => panic!("expected reference, got {other:?}"),
+        }
+    }
+
+    fn generic_error_observation() -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 1,
+            "status": "error",
+            "summary": "Capability failed with invalid_input.",
+            "detail": {"kind": "generic_failure", "failure_kind": "invalid_input"},
+            "trust": "untrusted_tool_output",
+        })
+    }
+
+    #[test]
+    fn collapse_repeated_failures_flag_defaults_off_and_opts_in_explicitly() {
+        // Unset / empty / unrecognized => off (byte-identical replayed context).
+        assert!(!collapse_repeated_failures_from_raw(None::<&str>));
+        assert!(!collapse_repeated_failures_from_raw(Some("")));
+        assert!(!collapse_repeated_failures_from_raw(Some("off")));
+        assert!(!collapse_repeated_failures_from_raw(Some("garbage")));
+        // Explicit truthy values opt in.
+        assert!(collapse_repeated_failures_from_raw(Some("on")));
+        assert!(collapse_repeated_failures_from_raw(Some("1")));
+        assert!(collapse_repeated_failures_from_raw(Some("true")));
+        assert!(collapse_repeated_failures_from_raw(Some(" TRUE ")));
+    }
+
+    #[test]
+    fn collapse_repeated_failure_observations_keeps_first_and_last_only() {
+        let error_obs = generic_error_observation();
+        let success_obs = serde_json::json!({
+            "schema_version": 1,
+            "status": "success",
+            "summary": "ok",
+            "detail": {"kind": "generic_failure", "failure_kind": "none"},
+            "trust": "untrusted_tool_output",
+        });
+        // Four identical failures (each its own result_ref) plus a success.
+        let mut messages = vec![
+            error_tool_result_message("result:err_1.1", error_obs.clone()),
+            error_tool_result_message("result:err_1.2", error_obs.clone()),
+            error_tool_result_message("result:err_1.3", error_obs.clone()),
+            error_tool_result_message("result:err_1.4", error_obs.clone()),
+            error_tool_result_message("result:ok_1.5", success_obs.clone()),
+        ];
+
+        collapse_repeated_failure_observations(&mut messages);
+
+        // First and last identical errors keep full detail.
+        assert_eq!(tool_result_observation(&messages[0]), error_obs);
+        assert_eq!(tool_result_observation(&messages[3]), error_obs);
+        // Interior duplicates collapse to the compact, schema-valid marker.
+        for index in [1usize, 2] {
+            let failure_kind = tool_result_observation(&messages[index])
+                .get("detail")
+                .and_then(|detail| detail.get("failure_kind"))
+                .and_then(|kind| kind.as_str())
+                .map(str::to_string);
+            assert_eq!(failure_kind.as_deref(), Some("repeated_error_elided"));
+        }
+        // Success observation is never touched.
+        assert_eq!(tool_result_observation(&messages[4]), success_obs);
+    }
+
+    #[test]
+    fn collapse_repeated_failure_observations_leaves_a_single_repeat_alone() {
+        let error_obs = generic_error_observation();
+        let mut messages = vec![
+            error_tool_result_message("result:err_2.1", error_obs.clone()),
+            error_tool_result_message("result:err_2.2", error_obs.clone()),
+        ];
+
+        collapse_repeated_failure_observations(&mut messages);
+
+        // Below the 3+ threshold: both copies stay intact.
+        assert_eq!(tool_result_observation(&messages[0]), error_obs);
+        assert_eq!(tool_result_observation(&messages[1]), error_obs);
     }
 
     fn user_message_with_images(

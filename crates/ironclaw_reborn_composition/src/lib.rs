@@ -22,99 +22,48 @@ use std::sync::Arc;
 
 #[cfg(test)]
 mod approval_test_support;
-mod attachment_landing;
-mod auth;
-#[cfg(test)]
-mod auth_dcr_tests;
-mod auth_prompt;
 mod automation;
-mod available_extensions;
-mod budget;
-mod budget_events;
-mod bundled_skills;
+#[cfg(feature = "slack-v2-host-beta")]
+mod channel_connection_resume;
 mod communication_context;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-mod credential_refresh_worker;
 mod default_system_prompt;
 mod error;
-mod extension_activation_credentials;
-mod extension_credential_requirements;
-mod extension_installation_store;
-mod extension_lifecycle;
-mod extension_lifecycle_capabilities;
-#[cfg(test)]
-mod extension_lifecycle_capabilities_auth_tests;
-mod extension_lifecycle_command;
+mod extension_host;
 mod factory;
+mod failure_lane;
 mod failure_summary;
-mod google_oauth;
-mod gsuite;
-mod hooks;
 mod input;
-mod lifecycle;
-#[cfg(feature = "root-llm-provider")]
-mod llm_catalog;
-#[cfg(feature = "root-llm-provider")]
-mod llm_config_service;
-#[cfg(feature = "root-llm-provider")]
-mod llm_key_store;
-#[cfg(feature = "root-llm-provider")]
-mod llm_reload;
+mod llm_admin;
 mod local_dev_authorization;
 mod local_dev_capability_policy;
 mod local_dev_mounts;
 mod local_runtime_profile;
-mod manual_token_flow;
-mod mcp;
-mod mcp_discovery;
-mod mount_filesystem_reader;
-#[cfg(all(feature = "root-llm-provider", feature = "webui-v2-beta"))]
-mod nearai_login_serve;
-mod nearai_mcp;
-mod notion_oauth;
-mod oauth_dcr;
-mod oauth_dcr_protocol;
-mod oauth_gate;
-mod oauth_provider_client;
-#[cfg(feature = "openai-compat-beta")]
-mod openai_compat_serve;
-mod operator_logs;
-mod operator_service_lifecycle;
-mod outbound_delivery_capability_surface;
-mod outbound_preferences;
-mod product_auth_durable;
-mod product_auth_providers;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-mod product_auth_refresh_lock;
-mod product_auth_runtime_credentials;
-#[cfg(feature = "webui-v2-beta")]
-mod product_auth_serve;
+mod observability;
+mod outbound;
+mod product_auth;
 mod product_live_adapters;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 mod production_runtime_policy;
 mod profile;
 mod profile_approval_authorization;
-mod project_filesystem_reader;
-mod project_service;
 mod projection;
-mod trajectory_observer;
-pub use auth_prompt::{AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller};
+pub use product_auth::api::auth_prompt::{
+    AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller,
+};
 #[cfg(feature = "slack-v2-host-beta")]
 mod delivered_gate_routing;
-#[cfg(feature = "root-llm-provider")]
-mod provider_admin;
-#[cfg(feature = "root-llm-provider")]
-mod provider_admin_product_command;
-#[cfg(feature = "root-llm-provider")]
-mod provider_repo;
+#[cfg(feature = "slack-v2-host-beta")]
+mod host_ingress;
 mod readiness;
+mod retry_disposition;
 mod runtime;
 mod runtime_input;
 mod runtime_profile_approval_policy;
-mod skill_learning;
-mod skill_listing;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_actor_identity;
+#[cfg(feature = "slack-v2-host-beta")]
+#[cfg(feature = "slack-v2-host-beta")]
+mod slack_channel_connection;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_channel_routes;
 #[cfg(feature = "slack-v2-host-beta")]
@@ -145,16 +94,16 @@ mod slack_personal_binding_serve;
 pub mod slack_serve;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_setup;
+mod support;
 #[cfg(feature = "test-support")]
 pub mod test_support;
-mod trace_capture;
 mod trigger_poller;
 mod trigger_poller_trusted_submit;
+mod turn_run_snapshot;
 mod web_access;
 mod webui;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_body_limit;
-mod webui_extension_credentials;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_operator_auth;
 #[cfg(feature = "webui-v2-beta")]
@@ -166,33 +115,25 @@ mod webui_serve;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_ws_origin;
 
-pub use auth::{
-    RebornAuthContinuationDispatcher, RebornAuthProductError, RebornCredentialLifecycleError,
-    RebornManualTokenChallenge, RebornManualTokenError, RebornManualTokenSetupRequest,
-    RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse, RebornOAuthCallbackError,
-    RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
-    RebornProductAuthServicePorts, RebornProductAuthServices,
-};
 pub use automation::RebornAutomationProductFacade;
-pub use budget::build_default_budget_accountant;
-pub use budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
 pub use error::RebornBuildError;
-pub use extension_lifecycle_command::{
+pub use extension_host::extension_lifecycle_command::{
     RebornExtensionLifecycleCommand, RebornExtensionLifecycleCommandError,
     execute_reborn_extension_lifecycle_command, render_reborn_extension_lifecycle_response,
 };
+pub use extension_host::gsuite::{
+    bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers,
+};
+pub use extension_host::skill_listing::{RebornSkillListError, list_reborn_local_skills};
+#[cfg(feature = "test-support")]
+pub use factory::AttachmentTestSupport;
 #[cfg(feature = "test-support")]
 pub use factory::RebornLocalDevApprovalTestParts;
+#[cfg(feature = "migration-support")]
+pub use factory::extension_installation_store_for_migration;
 pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
+pub use failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
 pub use failure_summary::reborn_failure_summary_for_category;
-pub use gsuite::{bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers};
-pub use hooks::{
-    HOOKS_ENABLED_ENV, HOOKS_THIRD_PARTY_ENABLED_ENV, HookDispatcherBuilderFactory,
-    HookProjectionRegistry, HooksActivationConfig, MAX_INSTALLED_EXTENSIONS_CONSIDERED,
-    MAX_TOTAL_HOOKS_PER_TENANT, ThirdPartyDiscoveryInput, build_hook_dispatcher_builder_factory,
-    build_hook_dispatcher_builder_factory_for_tenant, build_hook_projection_registry,
-    tenant_extension_root,
-};
 pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
 #[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_auth::GoogleOAuthRouteConfig;
@@ -212,26 +153,55 @@ pub use ironclaw_skills::{
 pub use ironclaw_triggers::TriggerId;
 pub use ironclaw_turns::TurnStatus;
 #[cfg(feature = "root-llm-provider")]
-pub use llm_catalog::{
+pub use llm_admin::llm_catalog::{
     RebornLlmCatalogError, resolve_against_registry, resolve_llm_selection_against_catalog,
     resolve_reborn_runtime_llm,
 };
 #[cfg(feature = "root-llm-provider")]
-pub use llm_config_service::{LlmReloadTrigger, RebornLlmConfigService};
+pub use llm_admin::llm_config_service::{LlmReloadTrigger, RebornLlmConfigService};
 #[cfg(feature = "root-llm-provider")]
-pub use llm_key_store::{LlmKeyStore, LlmKeyStoreError};
+pub use llm_admin::llm_key_store::{LlmKeyStore, LlmKeyStoreError};
+pub use llm_admin::nearai_mcp::{
+    NearAiMcpBootstrapConfig, NearAiMcpBootstrapConfigError, nearai_mcp_bootstrap_config_from_env,
+};
+#[cfg(feature = "openai-compat-beta")]
+pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
+#[cfg(feature = "root-llm-provider")]
+pub use llm_admin::provider_admin::{
+    RebornModelRoutesState, RebornProviderAdmin, RebornProviderAdminError, RebornProviderInfo,
+    RebornProviderList, RebornProviderMetadata, RebornProviderSelection, RebornProviderStatus,
+    RebornProviderWriteOutcome, RebornV1State,
+};
+#[cfg(feature = "root-llm-provider")]
+pub use llm_admin::provider_admin_product_command::RebornProviderAdminProductCommandService;
+#[cfg(feature = "root-llm-provider")]
+pub use llm_admin::provider_repo::{ProviderRepo, ProviderRepoError};
 pub use local_runtime_profile::{
     RebornLocalRuntimeProfileError, RebornLocalRuntimeProfileOptions,
     hosted_single_tenant_runtime_policy, hosted_single_tenant_volume_runtime_policy,
     local_dev_runtime_policy, local_dev_yolo_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options,
 };
-pub use nearai_mcp::{
-    NearAiMcpBootstrapConfig, NearAiMcpBootstrapConfigError, nearai_mcp_bootstrap_config_from_env,
+pub use observability::budget::build_default_budget_accountant;
+pub use observability::budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
+pub use observability::hooks::{
+    HOOKS_ENABLED_ENV, HOOKS_THIRD_PARTY_ENABLED_ENV, HookDispatcherBuilderFactory,
+    HookProjectionRegistry, HooksActivationConfig, MAX_INSTALLED_EXTENSIONS_CONSIDERED,
+    MAX_TOTAL_HOOKS_PER_TENANT, ThirdPartyDiscoveryInput, build_hook_dispatcher_builder_factory,
+    build_hook_dispatcher_builder_factory_for_tenant, build_hook_projection_registry,
+    tenant_extension_root,
 };
-#[cfg(feature = "openai-compat-beta")]
-pub use openai_compat_serve::build_openai_compat_route_mount;
-pub use operator_logs::{OperatorLogLayer, capture_tracing_log, operator_log_buffer};
+pub use observability::operator_logs::{
+    OperatorLogLayer, capture_tracing_log, operator_log_buffer,
+};
+pub use observability::trajectory_observer::RebornTrajectoryObserver;
+pub use product_auth::api::auth::{
+    RebornAuthContinuationDispatcher, RebornAuthProductError, RebornCredentialLifecycleError,
+    RebornManualTokenChallenge, RebornManualTokenError, RebornManualTokenSetupRequest,
+    RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse, RebornOAuthCallbackError,
+    RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
+    RebornProductAuthServicePorts, RebornProductAuthServices,
+};
 pub use product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
     ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
@@ -241,21 +211,12 @@ pub use product_live_adapters::{
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use production_runtime_policy::RebornProductionRuntimePolicy;
 pub use profile::{RebornCompositionProfile, RebornCompositionProfileParseError};
-#[cfg(feature = "root-llm-provider")]
-pub use provider_admin::{
-    RebornModelRoutesState, RebornProviderAdmin, RebornProviderAdminError, RebornProviderInfo,
-    RebornProviderList, RebornProviderMetadata, RebornProviderSelection, RebornProviderStatus,
-    RebornProviderWriteOutcome, RebornV1State,
-};
-#[cfg(feature = "root-llm-provider")]
-pub use provider_admin_product_command::RebornProviderAdminProductCommandService;
-#[cfg(feature = "root-llm-provider")]
-pub use provider_repo::{ProviderRepo, ProviderRepoError};
 pub use readiness::{
     RebornFacadeReadiness, RebornReadiness, RebornReadinessDiagnostic,
     RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
     RebornReadinessDiagnosticStatus, RebornReadinessState, RebornWorkerReadiness,
 };
+pub use retry_disposition::{RetryDisposition, retry_disposition};
 #[cfg(any(test, feature = "test-support"))]
 pub use runtime::RebornTurnDriveOutcome;
 pub use runtime::{
@@ -271,7 +232,6 @@ pub use runtime_input::{
 };
 #[cfg(feature = "root-llm-provider")]
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
-pub use skill_listing::{RebornSkillListError, list_reborn_local_skills};
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_actor_identity::{
     RebornUserIdentityLookup, RebornUserIdentityLookupError, SlackUserIdentityActorResolver,
@@ -342,7 +302,7 @@ pub use slack_serve::{
     SlackInstallationSelector, SlackTeamId, slack_events_route_descriptors,
     slack_events_route_mount,
 };
-pub use trajectory_observer::RebornTrajectoryObserver;
+pub use web_access::register_bundled_web_access_first_party_handlers;
 pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
 pub use webui_rate_limit::RateLimitConfigError;

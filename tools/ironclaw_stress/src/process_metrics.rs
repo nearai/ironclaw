@@ -1,5 +1,4 @@
 use std::{
-    fs,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -165,7 +164,7 @@ struct ProcStatusSnapshot {
 
 #[cfg(target_os = "linux")]
 fn proc_status_snapshot() -> Option<ProcStatusSnapshot> {
-    let status = fs::read_to_string("/proc/self/status").ok()?;
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
     let mut snapshot = ProcStatusSnapshot::default();
     for line in status.lines() {
         if let Some(value) = line.strip_prefix("VmRSS:") {
@@ -266,12 +265,12 @@ fn ps_value(column: &str) -> Option<u64> {
 
 #[cfg(target_os = "linux")]
 fn open_fd_count() -> Option<u64> {
-    u64::try_from(fs::read_dir("/proc/self/fd").ok()?.count()).ok()
+    u64::try_from(std::fs::read_dir("/proc/self/fd").ok()?.count()).ok()
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
 fn open_fd_count() -> Option<u64> {
-    u64::try_from(fs::read_dir("/dev/fd").ok()?.count()).ok()
+    u64::try_from(std::fs::read_dir("/dev/fd").ok()?.count()).ok()
 }
 
 #[cfg(not(unix))]

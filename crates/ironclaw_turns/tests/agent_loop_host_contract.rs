@@ -186,6 +186,7 @@ async fn host_managed_model_port_routes_gateway_and_emits_model_milestones() {
 
     let response = port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: vec![LoopModelMessage {
                 role: "user".to_string(),
                 content_ref: LoopMessageRef::new("msg:user-message").unwrap(),
@@ -240,6 +241,7 @@ async fn host_managed_model_port_returns_response_when_model_started_milestone_f
 
     let response = port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: Vec::new(),
             surface_version: None,
             model_preference: None,
@@ -280,6 +282,7 @@ async fn host_managed_model_port_returns_response_when_model_completed_milestone
 
     let response = port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: Vec::new(),
             surface_version: None,
             model_preference: None,
@@ -317,6 +320,7 @@ async fn host_managed_model_port_sanitizes_gateway_errors() {
 
     let error = port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: Vec::new(),
             surface_version: None,
             model_preference: None,
@@ -343,6 +347,7 @@ async fn host_managed_model_port_sanitizes_gateway_errors() {
 async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministically() {
     let context = claimed_run_context().await;
     let surface = VisibleCapabilitySurface {
+        callable_capability_ids: None,
         version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
         descriptors: vec![CapabilityDescriptorView {
             capability_id: CapabilityId::new("demo.echo").unwrap(),
@@ -1425,6 +1430,7 @@ async fn loop_prompt_port_builds_text_only_bundle_from_context_refs() {
 async fn loop_prompt_port_filters_visible_surface_by_capability_view() {
     let host = Arc::new(RecordingAgentLoopHost::new(claimed_run_context().await));
     let surface = VisibleCapabilitySurface {
+        callable_capability_ids: None,
         version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
         descriptors: vec![
             CapabilityDescriptorView {
@@ -2018,6 +2024,7 @@ async fn loop_prompt_port_materializes_memory_surface_and_safety_as_host_owned_r
             .with_context_memory_snippet("memory:project", "project memory available"),
     );
     let surface = VisibleCapabilitySurface {
+        callable_capability_ids: None,
         version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
         descriptors: vec![CapabilityDescriptorView {
             capability_id: CapabilityId::new("demo.echo").unwrap(),
@@ -2585,6 +2592,7 @@ impl AgentLoopDriver for ReplyDriver {
         assert_eq!(prompt.messages.len(), 1);
         let response = host
             .stream_model(LoopModelRequest {
+                inline_messages: Vec::new(),
                 messages: prompt.messages,
                 surface_version: prompt.surface_version,
                 model_preference: Some(
@@ -2600,6 +2608,7 @@ impl AgentLoopDriver for ReplyDriver {
         let ParentLoopOutput::AssistantReply(reply) = response.output else {
             return Err(AgentLoopDriverError::Failed {
                 reason_kind: "unexpected_model_output".to_string(),
+                detail: None,
             });
         };
         let message_ref = host
@@ -2673,6 +2682,7 @@ impl AgentLoopDriver for CapabilityDriver {
         let CapabilityOutcome::ApprovalRequired { gate_ref, .. } = outcome else {
             return Err(AgentLoopDriverError::Failed {
                 reason_kind: "expected_approval".to_string(),
+                detail: None,
             });
         };
         let state_ref = LoopCheckpointStateRef::new("checkpoint:approval-state").unwrap();
@@ -2842,6 +2852,7 @@ async fn host_managed_model_port_times_out_a_hung_gateway() {
 
     let error = port
         .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: vec![LoopModelMessage {
                 role: "user".to_string(),
                 content_ref: LoopMessageRef::new("msg:user-message").unwrap(),
@@ -2891,6 +2902,7 @@ impl RecordingAgentLoopHost {
             capability_outcomes: Mutex::new(Vec::new()),
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             visible_surface: VisibleCapabilitySurface {
+                callable_capability_ids: None,
                 version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
                 descriptors: vec![CapabilityDescriptorView {
                     capability_id: CapabilityId::new("demo.echo").unwrap(),
@@ -3327,6 +3339,7 @@ fn driver_run_request(host: &RecordingAgentLoopHost) -> ironclaw_turns::AgentLoo
 fn driver_error(error: AgentLoopHostError) -> AgentLoopDriverError {
     AgentLoopDriverError::Failed {
         reason_kind: error.kind.as_str().to_string(),
+        detail: error.detail,
     }
 }
 
@@ -3439,6 +3452,7 @@ impl LoopModelBudgetAccountant for RecordingBudgetAccountant {
 
 fn simple_model_request(context: &LoopRunContext) -> LoopModelRequest {
     LoopModelRequest {
+        inline_messages: Vec::new(),
         messages: vec![LoopModelMessage {
             role: "user".to_string(),
             content_ref: LoopMessageRef::new("msg:user-message").unwrap(),

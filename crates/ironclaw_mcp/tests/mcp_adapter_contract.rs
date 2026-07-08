@@ -114,7 +114,7 @@ async fn mcp_host_http_adapter_returns_sanitized_shared_egress_errors() {
     let adapter = McpRuntimeHttpAdapter::new(Arc::new(SecretEchoRuntimeEgress));
 
     let error = adapter
-        .request(McpHostHttpRequest {
+        .request(CapabilityHostHttpRequest {
             scope: sample_scope(),
             capability_id: CapabilityId::new("github-mcp.search").unwrap(),
             method: NetworkMethod::Get,
@@ -140,7 +140,7 @@ async fn mcp_host_http_adapter_maps_panicking_runtime_egress_to_sanitized_error(
     let adapter = McpRuntimeHttpAdapter::new(Arc::new(PanickingRuntimeEgress));
 
     let error = adapter
-        .request(McpHostHttpRequest {
+        .request(CapabilityHostHttpRequest {
             scope: sample_scope(),
             capability_id: CapabilityId::new("github-mcp.search").unwrap(),
             method: NetworkMethod::Get,
@@ -415,7 +415,7 @@ async fn concrete_mcp_http_client_rejects_missing_or_unsafe_initialize_protocol_
             .await
             .expect_err("unsafe initialize protocol versions must fail the call");
 
-        assert_eq!(error.stable_reason(), "response_error");
+        assert_eq!(error.stable_reason(), "mcp_invalid_protocol_version");
     }
 }
 
@@ -455,7 +455,7 @@ async fn concrete_mcp_http_client_sends_credentials_only_for_tool_call_exchange(
         .await
         .expect_err("direct secret-store leases must fail before MCP transport");
 
-    assert_eq!(error.stable_reason(), "request_denied");
+    assert_eq!(error.stable_reason(), "mcp_denied_credential_source");
     assert!(
         egress.requests().is_empty(),
         "direct leases must be rejected before initialize or tools/call transport"
@@ -606,7 +606,7 @@ async fn concrete_mcp_http_client_does_not_reuse_session_from_failed_initialize(
         })
         .await
         .expect_err("failed initialize responses must fail the call");
-    assert_eq!(error.stable_reason(), "response_error");
+    assert_eq!(error.stable_reason(), "mcp_http_status_500");
 
     client
         .call_tool(McpClientRequest {
@@ -658,7 +658,7 @@ async fn concrete_mcp_http_client_rejects_json_rpc_response_without_matching_id(
         .await
         .expect_err("ID-bearing JSON-RPC requests must reject missing response ids");
 
-    assert_eq!(error.stable_reason(), "response_error");
+    assert_eq!(error.stable_reason(), "mcp_jsonrpc_id_mismatch");
 }
 
 #[tokio::test]
@@ -803,6 +803,63 @@ async fn concrete_mcp_http_client_discovers_tool_schemas_through_shared_egress()
     );
 }
 
+/// Coverage gap noted in review of the SSE contract tests: the loopback MCP
+/// path predeclares its tool schemas, so `discover_tools` (host-mediated HTTP
+/// path) is only ever exercised over JSON-framed `tools/list` responses
+/// elsewhere in this file. A real MCP server is free to answer `tools/list`
+/// as a single SSE event (same as `tools/call` in
+/// `concrete_mcp_sse_client_parses_event_stream_through_shared_egress`), so
+/// this drives discovery against an SSE-framed response and asserts the
+/// parsed tool schemas are byte-identical to the JSON-framed discovery result.
+#[tokio::test]
+async fn concrete_mcp_http_client_discovers_tool_schemas_over_sse_framing() {
+    let sse_egress = RecordingRuntimeEgress::sse();
+    let sse_client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(sse_egress.clone())),
+        StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
+    );
+
+    let sse_output = sse_client
+        .discover_tools(McpClientRequest {
+            provider: ExtensionId::new("github-mcp").unwrap(),
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            scope: sample_scope(),
+            transport: "sse".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.example.test/sse".to_string()),
+            input: json!({}),
+            max_output_bytes: 4096,
+        })
+        .await
+        .unwrap();
+
+    let json_client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(RecordingRuntimeEgress::json_rpc())),
+        StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
+    );
+    let json_output = json_client
+        .discover_tools(McpClientRequest {
+            provider: ExtensionId::new("github-mcp").unwrap(),
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            scope: sample_scope(),
+            transport: "http".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.example.test/mcp".to_string()),
+            input: json!({}),
+            max_output_bytes: 4096,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        sse_output.tools, json_output.tools,
+        "SSE-framed tools/list must parse to the same tool schemas as JSON-framed tools/list"
+    );
+    assert_eq!(sse_egress.requests().len(), 3);
+}
+
 #[tokio::test]
 async fn concrete_mcp_http_client_maps_discovery_auth_status_to_auth_required() {
     let client = McpHostHttpClient::new(
@@ -883,7 +940,7 @@ async fn concrete_mcp_http_client_rejects_invalid_session_id_before_reuse() {
         .await
         .expect_err("invalid upstream session ids must not be reused as request headers");
 
-    assert_eq!(error.stable_reason(), "response_error");
+    assert_eq!(error.stable_reason(), "mcp_invalid_session_id");
 }
 
 #[tokio::test]
@@ -1401,9 +1458,9 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
                     }
                 }
             }
-            "tools/list" => Ok(runtime_json_response(
-                json_rpc_id(&request.body),
-                json!({
+            "tools/list" => {
+                let id = json_rpc_id(&request.body);
+                let result = json!({
                     "tools": [
                         {
                             "name": "search",
@@ -1433,9 +1490,18 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
                             }
                         }
                     ]
-                }),
-                vec![],
-            )),
+                });
+                match self.mode {
+                    RecordedResponseMode::Json
+                    | RecordedResponseMode::JsonMissingProtocolVersion => {
+                        Ok(runtime_json_response(id, result, vec![]))
+                    }
+                    RecordedResponseMode::Sse => Ok(runtime_sse_response(id, result)),
+                    RecordedResponseMode::AuthRequired => {
+                        unreachable!("auth-required mode returns before JSON-RPC method dispatch")
+                    }
+                }
+            }
             other => panic!("unexpected MCP JSON-RPC method {other}"),
         }
     }

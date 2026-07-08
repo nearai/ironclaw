@@ -25,14 +25,15 @@ use ironclaw_product_workflow::{
     RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornGetRunStateRequest,
     RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
-    RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
-    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    RebornResolveGateResponse, RebornRetryRunResponse, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
+    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornStreamEventsRequest,
+    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest,
 };
 use ironclaw_reborn_composition::{
     PublicRouteMount, RebornReadiness, RebornWebuiBundle, WebuiAuthentication, WebuiAuthenticator,
@@ -651,6 +652,10 @@ mod openai_compat_mount_tests {
 mod slack_personal_binding_pairing_mount_tests {
     use super::*;
     use ironclaw_product_adapters::AdapterInstallationId;
+    use ironclaw_product_workflow::{
+        ChannelConnectionResumeService, ProductWorkflowError, ResumeChannelConnectionRequest,
+        ResumeChannelConnectionResponse,
+    };
     use ironclaw_reborn_composition::slack_serve::SlackUserId;
     use ironclaw_reborn_composition::{
         IssuedSlackPersonalBindingPairingChallenge, RebornUserIdentityBinding,
@@ -662,6 +667,21 @@ mod slack_personal_binding_pairing_mount_tests {
         SlackPersonalBindingPairingService, SlackPersonalUserBindingService,
         WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH,
     };
+
+    /// No-op resume: this test exercises route mounting/auth, not resume.
+    struct NoopChannelConnectionResume;
+
+    #[async_trait::async_trait]
+    impl ChannelConnectionResumeService for NoopChannelConnectionResume {
+        async fn resume_channel_connection(
+            &self,
+            _request: ResumeChannelConnectionRequest,
+        ) -> Result<ResumeChannelConnectionResponse, ProductWorkflowError> {
+            Ok(ResumeChannelConnectionResponse {
+                resumed_runs: Vec::new(),
+            })
+        }
+    }
 
     #[tokio::test]
     async fn pairing_route_mounted_when_config_provided() {
@@ -688,7 +708,10 @@ mod slack_personal_binding_pairing_mount_tests {
             Arc::new(OnlyValidToken),
             vec![HeaderValue::from_static("http://localhost:1234")],
         )
-        .with_slack_personal_binding_pairing(SlackPersonalBindingPairingRouteConfig::new(pairing));
+        .with_slack_personal_binding_pairing(SlackPersonalBindingPairingRouteConfig::new(
+            pairing,
+            Arc::new(NoopChannelConnectionResume),
+        ));
         let app = webui_v2_app(bundle, config).expect("webui v2 app");
 
         let unauthenticated = app
@@ -940,6 +963,21 @@ impl RebornServicesApi for StubServices {
             status: TurnStatus::Cancelled,
             event_cursor: EventCursor(2),
             already_terminal: false,
+        })
+    }
+
+    async fn retry_run(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: WebUiRetryRunRequest,
+    ) -> Result<RebornRetryRunResponse, RebornServicesError> {
+        Err(RebornServicesError {
+            code: RebornServicesErrorCode::Internal,
+            kind: RebornServicesErrorKind::Internal,
+            status_code: 500,
+            retryable: false,
+            field: None,
+            validation_code: None,
         })
     }
 
@@ -2256,14 +2294,14 @@ fn expand_route_pattern(pattern: &str) -> String {
         .replace("{package_id}", "ext-fake")
 }
 
-// ─── static SPA mount (`ironclaw_webui_v2_static`) ────────────────────
+// ─── static SPA mount (`ironclaw_webui_v2`) ────────────────────
 //
 // The composition mounts the embedded SPA bundle under `/v2`. These
 // tests drive that mount through the same composed router production
 // uses, so a regression that drops the `.nest("/v2", ...)` call (or
 // that accidentally routes the SPA through the bearer-auth middleware)
 // fails here. Per `.claude/rules/testing.md` ("Test Through the
-// Caller") — the standalone router test in `ironclaw_webui_v2_static`
+// Caller") — the standalone router test in `ironclaw_webui_v2`
 // does not exercise the composition seam, so this layer needs its
 // own coverage.
 

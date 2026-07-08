@@ -3,7 +3,14 @@
 import json
 from urllib.parse import unquote, urlparse
 
-from helpers import SEL
+from playwright.async_api import expect
+
+from helpers import REBORN_V2_AUTH_TOKEN, SEL
+from reborn_webui_harness import (
+    reborn_v2_browser,  # noqa: F401 - imported fixture dependency
+    reborn_v2_page,  # noqa: F401 - imported fixture
+    reborn_v2_server,  # noqa: F401 - imported fixture dependency
+)
 
 
 MOCK_INSTALLED_SKILL = {
@@ -59,12 +66,10 @@ MOCK_SKILL_CONTENT = (
 
 
 async def go_to_skills(page):
-    """Navigate to Settings > Skills subtab."""
-    await page.locator(SEL["tab_button"].format(tab="settings")).click()
-    await page.locator(SEL["settings_subtab"].format(subtab="skills")).click()
-    await page.locator(SEL["settings_subpanel"].format(subtab="skills")).wait_for(
-        state="visible", timeout=5000
-    )
+    """Navigate to Reborn v2 Settings > Skills."""
+    base_url = page.url.split("/v2", 1)[0]
+    await page.goto(f"{base_url}/v2/settings/skills?token={REBORN_V2_AUTH_TOKEN}")
+    await expect(page.get_by_text("Add skill")).to_be_visible(timeout=15000)
 
 
 async def mock_skills_api(page, initial_skills=None):
@@ -134,8 +139,8 @@ async def mock_skills_api(page, initial_skills=None):
 
 
 async def add_mock_skill(page):
-    await page.get_by_label("Skill name").fill("markdown-helper")
-    await page.get_by_label("SKILL.md content").fill(MOCK_SKILL_CONTENT)
+    await page.get_by_placeholder("skill-name").fill("markdown-helper")
+    await page.locator("textarea").first.fill(MOCK_SKILL_CONTENT)
     async with page.expect_response(
         lambda r: "/api/webchat/v2/skills/install" in r.url
     ) as install_response:
@@ -144,23 +149,25 @@ async def add_mock_skill(page):
     assert response.ok
 
 
-async def test_skills_tab_visible(page):
+async def test_skills_tab_visible(reborn_v2_page):
     """Skills subtab shows the mounted-skill add form."""
+    page = reborn_v2_page
     await go_to_skills(page)
 
     assert await page.get_by_text("Add skill").is_visible()
-    assert await page.get_by_label("Skill name").is_visible()
-    assert await page.get_by_label("SKILL.md content").is_visible()
+    assert await page.get_by_placeholder("skill-name").is_visible()
+    assert await page.locator("textarea").first.is_visible()
 
 
-async def test_skills_add_and_delete(page):
+async def test_skills_add_and_delete(reborn_v2_page):
     """Add a user-mounted skill through the form, then delete it."""
+    page = reborn_v2_page
     mock_api = await mock_skills_api(page)
     await go_to_skills(page)
 
     await add_mock_skill(page)
     assert mock_api["install_requests"] == [
-        {"name": "markdown-helper", "content": MOCK_SKILL_CONTENT}
+        {"name": "markdown-helper", "content": MOCK_SKILL_CONTENT.strip()}
     ]
 
     installed = page.locator(SEL["skill_installed"])
@@ -183,27 +190,32 @@ async def test_skills_add_and_delete(page):
     )
 
 
-async def test_reborn_skills_delete_uses_native_confirm_dialog(page):
+async def test_reborn_skills_delete_uses_native_confirm_dialog(reborn_v2_page):
     """Reborn Skills settings delete confirms before calling the v2 endpoint."""
+    page = reborn_v2_page
     await mock_skills_api(page, initial_skills=[MOCK_INSTALLED_SKILL])
     await go_to_skills(page)
 
     installed = page.locator(SEL["skill_installed"]).filter(has_text="markdown-helper")
     await installed.first.wait_for(state="visible", timeout=5000)
 
-    async with page.expect_dialog() as dialog_info:
-        await installed.first.locator("button", has_text="Delete").click()
-    dialog = await dialog_info.value
-    assert dialog.type == "confirm"
-    assert "markdown-helper" in dialog.message
+    dialogs = []
 
+    async def accept_dialog(dialog):
+        dialogs.append(dialog)
+        await dialog.accept()
+
+    page.on("dialog", accept_dialog)
     async with page.expect_response(
         lambda r: "/api/webchat/v2/skills/markdown-helper" in r.url
         and r.request.method == "DELETE"
     ) as delete_response:
-        await dialog.accept()
+        await installed.first.locator("button", has_text="Delete").click()
     response = await delete_response.value
     assert response.ok
+    assert dialogs
+    assert dialogs[0].type == "confirm"
+    assert "markdown-helper" in dialogs[0].message
 
     await page.wait_for_function(
         """(selector) => document.querySelectorAll(selector).length === 0""",
@@ -212,8 +224,9 @@ async def test_reborn_skills_delete_uses_native_confirm_dialog(page):
     )
 
 
-async def test_skills_edit_user_managed_skill(page):
+async def test_skills_edit_user_managed_skill(reborn_v2_page):
     """Edit a mocked user-managed skill through the real Settings UI flow."""
+    page = reborn_v2_page
     mock_api = await mock_skills_api(page)
     await go_to_skills(page)
     await add_mock_skill(page)
@@ -249,8 +262,9 @@ async def test_skills_edit_user_managed_skill(page):
     assert "Updated E2E skill" in update["body"]["content"]
 
 
-async def test_skills_read_only_sources_hide_edit_and_delete(page):
+async def test_skills_read_only_sources_hide_edit_and_delete(reborn_v2_page):
     """System and workspace skills remain visible but not editable/deletable."""
+    page = reborn_v2_page
     await mock_skills_api(page, initial_skills=[MOCK_SYSTEM_SKILL, MOCK_WORKSPACE_SKILL])
     await go_to_skills(page)
 

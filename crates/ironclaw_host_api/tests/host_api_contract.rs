@@ -5,6 +5,22 @@ use rust_decimal_macros::dec;
 use serde_json::json;
 
 #[test]
+fn dispatch_input_issue_code_wire_strings_cover_all_variants() {
+    for (code, wire) in [
+        (DispatchInputIssueCode::MissingRequired, "missing_required"),
+        (DispatchInputIssueCode::UnexpectedField, "unexpected_field"),
+        (DispatchInputIssueCode::TypeMismatch, "type_mismatch"),
+        (DispatchInputIssueCode::InvalidValue, "invalid_value"),
+    ] {
+        assert_eq!(serde_json::to_value(code).unwrap(), json!(wire));
+        assert_eq!(
+            serde_json::from_value::<DispatchInputIssueCode>(json!(wire)).unwrap(),
+            code
+        );
+    }
+}
+
+#[test]
 fn runtime_credential_targets_validate_declaration_shape() {
     assert!(
         RuntimeCredentialTarget::Header {
