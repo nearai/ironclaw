@@ -316,6 +316,23 @@ impl HostManagedModelGateway for TriggerMutatorAttemptGateway {
     }
 }
 
+async fn wait_for_registration_outcomes(
+    gateway: &TriggerMutatorAttemptGateway,
+    expected_count: usize,
+    deadline: Duration,
+) -> BTreeMap<String, Result<(), String>> {
+    let stop = Instant::now() + deadline;
+    let mut last = gateway.registration_outcomes().await;
+    while Instant::now() < stop {
+        if last.len() >= expected_count {
+            return last;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        last = gateway.registration_outcomes().await;
+    }
+    last
+}
+
 /// Poll `repo` until `predicate` returns `true` or `deadline` elapses.
 ///
 /// Returns the last record seen. If the predicate is satisfied before the
@@ -1447,10 +1464,13 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
     // legitimate trigger's id before the fire runs.
     gateway.set_mutator_target_trigger_id(trigger_id).await;
 
-    // Wait for the fire to settle. This is the model's ONLY turn where a
-    // capability call can be attempted (`invoke_trigger_create` above never
-    // touched the model), so once `last_status` is set, the mutator
-    // self-attempts inside `gateway` have already run to completion.
+    // Wait for the fired turn's model gateway to make the mutator registration
+    // attempts before shutting the runtime down. The poller can mark the fire
+    // accepted before the turn runner reaches the model, so `last_status` alone
+    // is not a safe proxy for the gateway having run.
+    let registration_outcomes =
+        wait_for_registration_outcomes(&gateway, 4, Duration::from_secs(15)).await;
+
     let settled = wait_for_settled(
         &repo,
         &tenant_id,
@@ -1463,7 +1483,6 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
     runtime.shutdown().await.expect("runtime shutdown");
 
     let captured_contents = gateway.captured_message_contents().await;
-    let registration_outcomes = gateway.registration_outcomes().await;
 
     assert_eq!(
         registration_outcomes.len(),
