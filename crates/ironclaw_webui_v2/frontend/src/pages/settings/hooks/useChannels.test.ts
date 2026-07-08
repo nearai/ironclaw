@@ -64,13 +64,13 @@ test("useChannels derives channels from the extension channel surface, not the r
     runtime: "wasm",
     surfaces: toolSurfaces,
   };
-  // A hostile fixture wearing the retired `kind` string but declaring no
+  // A hostile fixture wearing a retired `kind` string but declaring no
   // channel surface must NOT be grouped as a channel: the wire carries
   // runtime + surfaces, and `kind` no longer exists on it.
   const impostor = {
     package_ref: { id: "impostor" },
     display_name: "Impostor",
-    kind: "wasm_channel",
+    kind: "channel",
     runtime: "wasm",
     surfaces: toolSurfaces,
   };

@@ -63,19 +63,35 @@ const RETIRED_TERMS: &[&str] = &[
 
 /// Retired identities that survive only as *substrings* of sanctioned names:
 /// `slack_bot_token` / `slack_signing_secret` are workspace credential
-/// handles, so the identity forms are matched exactly.
+/// handles, so the identity forms are matched exactly. The retired extension
+/// `kind` wire VALUES are likewise matched as exact quoted strings: bare
+/// `channel`/`mcp` remain legitimate vocabulary (the surface kind and the
+/// runtime label), but nothing in Reborn code may compare against the old
+/// conflated kind strings.
 const RETIRED_IDENTITY_FORMS: &[&str] = &[
     "\"slack_bot\"",
     "'slack_bot'",
     "\"slack_personal\"",
     "'slack_personal'",
     "assets/slack_bot/",
+    // The conflated extension `kind` wire values (replaced by
+    // runtime + surfaces).
+    "\"wasm_channel\"",
+    "'wasm_channel'",
+    "\"channel_relay\"",
+    "'channel_relay'",
+    "\"mcp_server\"",
+    "'mcp_server'",
 ];
 
 /// Path fragments allowed to reference retired vocabulary.
 const SANCTIONED_PATHS: &[&str] = &[
     // v1 → Reborn converter reads v1 domain names by design.
     "crates/ironclaw_reborn_migration/",
+    // The v1 gateway is a legacy enclave being strangled wholesale — its
+    // static JS still serves the v1 `kind` wire and is not policed
+    // term-by-term (same footing as `src/`).
+    "crates/ironclaw_gateway/",
     // One-time forward data migrations name what they fold forward.
     "extension_host/extension_installation_store.rs",
     "product_auth/durable/",
@@ -106,6 +122,7 @@ fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>) {
         }
         let is_rust = name.ends_with(".rs");
         let is_frontend = name.ends_with(".ts")
+            || name.ends_with(".tsx")
             || name.ends_with(".mts")
             || name.ends_with(".mjs")
             || name.ends_with(".js");
