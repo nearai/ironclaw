@@ -633,8 +633,8 @@ mod tests {
     #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn gate_registry_falls_through_unavailable_provider_to_next_requirement() {
-        use crate::slack_personal_oauth::SlackPersonalOAuthGateProvider;
-        use crate::slack_setup::SlackPersonalSetupServiceSlot;
+        use crate::slack::slack_personal_oauth::SlackPersonalOAuthGateProvider;
+        use crate::slack::slack_setup::SlackPersonalSetupServiceSlot;
 
         let fixture = GateFixture::new(None);
         let slack_driver = Arc::new(OAuthGateFlowDriver::new(

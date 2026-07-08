@@ -11,8 +11,10 @@ use ironclaw_host_api::{TenantId, UserId};
 use ironclaw_product_adapters::AdapterInstallationId;
 use thiserror::Error;
 
-use crate::slack_actor_identity::{SLACK_IDENTITY_PROVIDER, slack_user_identity_provider_user_id};
-use crate::slack_serve::{
+use crate::slack::slack_actor_identity::{
+    SLACK_IDENTITY_PROVIDER, slack_user_identity_provider_user_id,
+};
+use crate::slack::slack_serve::{
     SlackApiAppId, SlackEnterpriseId, SlackInstallationSelector, SlackTeamId, SlackUserId,
 };
 

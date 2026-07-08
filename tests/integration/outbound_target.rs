@@ -178,60 +178,65 @@ async fn target_set_unknown_target_routes_to_invalid_input() {
         .expect("an unknown target surfaces as Failed(InvalidInput)");
 }
 
-#[tokio::test]
-async fn target_set_disabled_by_settings_routes_to_policy_denied() {
-    let group = RebornIntegrationGroup::outbound_target_tools()
-        .await
-        .expect("outbound-target-tools group builds");
-    let harness = group
-        .thread("conv-outbound-set-denied")
-        .script([
-            RebornScriptedReply::tool_call(
-                "builtin.outbound_delivery_target_set",
-                serde_json::json!({ "target_id": KNOWN_TARGET_ID }),
-            ),
-            RebornScriptedReply::text("that tool is disabled"),
-        ])
-        .build()
-        .await
-        .expect("thread builds");
+#[test]
+fn target_set_disabled_by_settings_routes_to_policy_denied() {
+    run_async_test_with_stack(
+        "target_set_disabled_by_settings_routes_to_policy_denied",
+        || async {
+            let group = RebornIntegrationGroup::outbound_target_tools()
+                .await
+                .expect("outbound-target-tools group builds");
+            let harness = group
+                .thread("conv-outbound-set-denied")
+                .script([
+                    RebornScriptedReply::tool_call(
+                        "builtin.outbound_delivery_target_set",
+                        serde_json::json!({ "target_id": KNOWN_TARGET_ID }),
+                    ),
+                    RebornScriptedReply::text("that tool is disabled"),
+                ])
+                .build()
+                .await
+                .expect("thread builds");
 
-    // Persist a `Disabled` per-tool override for the run's effective dispatch
-    // user (the thread binding actor), driving the settings decision to Deny.
-    group
-        .capability_harness()
-        .expect("outbound_target_tools always uses HostRuntime")
-        .disable_outbound_target_set_tool(
-            harness.binding.tenant_id.clone(),
-            harness.binding.actor_user_id.clone(),
-        )
-        .await
-        .expect("tool override persists");
+            // Persist a `Disabled` per-tool override for the run's effective dispatch
+            // user (the thread binding actor), driving the settings decision to Deny.
+            group
+                .capability_harness()
+                .expect("outbound_target_tools always uses HostRuntime")
+                .disable_outbound_target_set_tool(
+                    harness.binding.tenant_id.clone(),
+                    harness.binding.actor_user_id.clone(),
+                )
+                .await
+                .expect("tool override persists");
 
-    harness
-        .submit_turn("send my replies to slack dm alpha")
-        .await
-        .expect("turn completes despite the policy-denied target_set");
+            harness
+                .submit_turn("send my replies to slack dm alpha")
+                .await
+                .expect("turn completes despite the policy-denied target_set");
 
-    harness
-        .assert_tool_invoked("builtin.outbound_delivery_target_set")
-        .await
-        .expect("target_set dispatched through the synthetic-capability port");
-    harness
-        .assert_tool_error(ToolErrorClass::Failed, "policy_denied")
-        .await
-        .expect("a disabled tool surfaces as Failed(PolicyDenied)");
-    // A policy-denied dispatch must short-circuit before ever reaching the
-    // facade set seam — proves the deny happened at the settings-decision gate,
-    // not merely that the model observed a policy_denied error string.
-    let facade = group
-        .capability_harness()
-        .expect("outbound_target_tools always uses HostRuntime")
-        .outbound_preferences_facade_for_test()
-        .expect("outbound_target_tools always wires a facade double");
-    assert!(
-        facade.recorded_set_target_ids().is_empty(),
-        "a policy-denied target_set must not reach the facade set seam"
+            harness
+                .assert_tool_invoked("builtin.outbound_delivery_target_set")
+                .await
+                .expect("target_set dispatched through the synthetic-capability port");
+            harness
+                .assert_tool_error(ToolErrorClass::Failed, "policy_denied")
+                .await
+                .expect("a disabled tool surfaces as Failed(PolicyDenied)");
+            // A policy-denied dispatch must short-circuit before ever reaching the
+            // facade set seam — proves the deny happened at the settings-decision gate,
+            // not merely that the model observed a policy_denied error string.
+            let facade = group
+                .capability_harness()
+                .expect("outbound_target_tools always uses HostRuntime")
+                .outbound_preferences_facade_for_test()
+                .expect("outbound_target_tools always wires a facade double");
+            assert!(
+                facade.recorded_set_target_ids().is_empty(),
+                "a policy-denied target_set must not reach the facade set seam"
+            );
+        },
     );
 }
 
@@ -348,4 +353,25 @@ async fn target_set_approval_gate_deny_leaves_preference_unchanged() {
         facade.recorded_set_target_ids().is_empty(),
         "a denied target_set must not reach the facade set seam"
     );
+}
+
+fn run_async_test_with_stack<F, Fut>(name: &'static str, test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio test runtime")
+                .block_on(test());
+        })
+        .expect("spawn stack-sized test thread");
+    if let Err(panic) = handle.join() {
+        std::panic::resume_unwind(panic);
+    }
 }

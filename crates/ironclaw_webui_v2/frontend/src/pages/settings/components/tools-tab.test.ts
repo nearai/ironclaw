@@ -88,6 +88,7 @@ function renderToolsModule({ tools = [], translations = {}, toolError = null } =
     Badge: "Badge",
     Card: "Card",
     Icon: "Icon",
+    SelectMenu: "SelectMenu",
     html,
     matchesSearch: (query, values) =>
       !query || values.some((value) => String(value || "").includes(query)),
@@ -145,6 +146,7 @@ test("Auto-approve toggle defaults ON when unset and reads present values strict
 
 test("Tool permission select follows global unless a per-tool override exists", () => {
   const { exports } = renderToolsModule();
+  const changes = [];
   const globalTool = exports.ToolRow({
     tool: {
       name: "builtin.echo",
@@ -154,12 +156,17 @@ test("Tool permission select follows global unless a per-tool override exists", 
       effective_source: "global",
       locked: false,
     },
-    onPermissionChange: () => {},
+    onPermissionChange: (name, value) => changes.push({ name, value }),
     isSaved: false,
   });
-  const globalSelect = findTemplateNode(globalTool, "<select");
-  assert.equal(globalSelect.values[0], "default");
-  assert.ok(collectScalars(globalTool).includes("tools.followDefault"));
+  const globalSelect = findComponentNode(globalTool, "SelectMenu");
+  assert.ok(globalSelect, "expected custom select menu");
+  const globalProps = componentProps(globalSelect, "SelectMenu");
+  assert.equal(globalProps.value, "default");
+  globalProps.onChange("disabled");
+  assert.deepEqual(changes, [{ name: "builtin.echo", value: "disabled" }]);
+  assert.ok(globalProps.options.some((option) => option.label === "tools.followDefault"));
+  assert.equal(findTemplateNode(globalTool, "<select"), null);
 
   const overrideTool = exports.ToolRow({
     tool: {
@@ -173,8 +180,8 @@ test("Tool permission select follows global unless a per-tool override exists", 
     onPermissionChange: () => {},
     isSaved: false,
   });
-  const overrideSelect = findTemplateNode(overrideTool, "<select");
-  assert.equal(overrideSelect.values[0], "ask_each_time");
+  const overrideSelect = findComponentNode(overrideTool, "SelectMenu");
+  assert.equal(componentProps(overrideSelect, "SelectMenu").value, "ask_each_time");
 });
 
 test("Tool rows localize built-in descriptions by capability id", () => {

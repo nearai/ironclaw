@@ -1,6 +1,7 @@
 import { Icon } from "../../../design-system/icons";
 import { Badge } from "../../../design-system/badge";
 import { Card } from "../../../design-system/card";
+import { SelectMenu } from "../../../design-system/select-menu";
 import { useT } from "../../../lib/i18n";
 import { useTools } from "../hooks/useTools";
 import { matchesSearch } from "../lib/settings-search";
@@ -150,19 +151,14 @@ function ToolRow({ tool, onPermissionChange, isSaved }) {
         {isLocked
           ? (<Badge tone={current.tone} label={current.label} size="sm" />)
           : (
-              <select
+              <SelectMenu
                 value={selectedState}
-                onChange={(e) => onPermissionChange(tool.name, e.currentTarget.value)}
-                aria-label={t("tools.permissionFor", { name: tool.name })}
-                className="v2-select h-8 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-2.5 font-mono text-xs text-[var(--v2-text-strong)] outline-none focus:border-[color-mix(in_srgb,var(--v2-accent)_45%,var(--v2-panel-border))]"
-              >
-                {permissionStates.map(
-                  (p) =>
-                    (<option key={p.value} value={p.value}>
-                      {p.label}
-                    </option>)
-                )}
-              </select>
+                options={permissionStates}
+                onChange={(value) => onPermissionChange(tool.name, value)}
+                ariaLabel={t("tools.permissionFor", { name: tool.name })}
+                className="w-36 sm:w-44"
+                data-testid="settings-tool-permission-select"
+              />
             )}
         {isSaved &&
         (

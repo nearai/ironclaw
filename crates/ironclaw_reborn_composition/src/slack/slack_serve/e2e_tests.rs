@@ -68,7 +68,7 @@ use ironclaw_wasm_product_adapters::{
 use tower::ServiceExt;
 
 use super::*;
-use crate::slack_delivery::{
+use crate::slack::slack_delivery::{
     PostSubmitDeliveryHook, SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
     SlackFinalReplyDeliverySettings, TriggeredRunDeliveryDriver,
 };
@@ -847,7 +847,7 @@ fn dm_reply_target_binding_ref() -> ReplyTargetBindingRef {
         seg("actor_kind", SLACK_USER_ACTOR_KIND),
         seg("actor", SLACK_USER),
     );
-    crate::slack_outbound_targets::slack_reply_target_binding_ref_from_raw(raw)
+    crate::slack::slack_outbound_targets::slack_reply_target_binding_ref_from_raw(raw)
         .expect("DM reply target binding ref") // safety: static test binding ref is valid.
 }
 
@@ -1190,7 +1190,7 @@ fn non_dm_channel_reply_target_binding_ref() -> ReplyTargetBindingRef {
         seg("actor_kind", SLACK_USER_ACTOR_KIND),
         seg("actor", SLACK_USER),
     );
-    crate::slack_outbound_targets::slack_reply_target_binding_ref_from_raw(raw)
+    crate::slack::slack_outbound_targets::slack_reply_target_binding_ref_from_raw(raw)
         .expect("channel reply target binding ref") // safety: static test binding ref is valid.
 }
 

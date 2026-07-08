@@ -10,7 +10,7 @@ use ironclaw_product_workflow::{
 
 use crate::{
     RebornBuildError, RebornRuntime, RebornWebuiBundle, SlackHostBetaMounts,
-    slack_channel_connection::slack_channel_connection_facade,
+    slack::slack_channel_connection::slack_channel_connection_facade,
     webui::build_webui_services_with_connectable_channels,
 };
 
@@ -59,7 +59,7 @@ pub fn build_webui_services_with_slack_host_beta_mounts(
         });
     }
     let personal_credential_cleanup = runtime.services().product_auth.clone().map(|services| {
-        services as Arc<dyn crate::slack_channel_connection::SlackPersonalCredentialCleanup>
+        services as Arc<dyn crate::slack::slack_channel_connection::SlackPersonalCredentialCleanup>
     });
     let channel_connection = slack_mounts
         .map(|mounts| slack_channel_connection_facade(mounts, personal_credential_cleanup));

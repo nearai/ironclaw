@@ -671,7 +671,7 @@ pub struct RebornRuntime {
     /// `None` when the trigger poller is not enabled.
     #[cfg(feature = "slack-v2-host-beta")]
     post_submit_hook_slot:
-        Option<Arc<std::sync::OnceLock<Arc<dyn crate::slack_delivery::PostSubmitDeliveryHook>>>>,
+        Option<Arc<std::sync::OnceLock<Arc<dyn crate::slack::slack_delivery::PostSubmitDeliveryHook>>>>,
     #[cfg(any(test, feature = "test-support"))]
     trigger_conversation_pairing:
         Option<Arc<dyn ironclaw_conversations::ConversationActorPairingService>>,
@@ -840,7 +840,7 @@ struct TriggerPollerServices {
     /// hook without restarting the poller.
     #[cfg(feature = "slack-v2-host-beta")]
     post_submit_hook_slot:
-        Arc<std::sync::OnceLock<Arc<dyn crate::slack_delivery::PostSubmitDeliveryHook>>>,
+        Arc<std::sync::OnceLock<Arc<dyn crate::slack::slack_delivery::PostSubmitDeliveryHook>>>,
     /// Test-support handle on the SAME conversation services instance the
     /// poller-side materializer/submitter use, so integration tests can call
     /// the production `pair_external_actor` API to seed the trigger
@@ -1742,14 +1742,14 @@ impl RebornRuntime {
     /// Wire the triggered-run delivery hook into the already-spawned trigger
     /// poller. Must be called after [`build_reborn_runtime`] returns and after
     /// the hook itself is constructed (e.g. inside
-    /// [`crate::slack_host_beta::build_slack_host_beta_mounts`]). The hook is
+    /// [`crate::slack::slack_host_beta::build_slack_host_beta_mounts`]). The hook is
     /// idempotent: a second call is silently ignored. Returns `false` when the
     /// trigger poller is not enabled (slot is `None`) or the slot is already
     /// occupied, `true` on first successful set.
     #[cfg(feature = "slack-v2-host-beta")]
     pub fn set_trigger_post_submit_hook(
         &self,
-        hook: Arc<dyn crate::slack_delivery::PostSubmitDeliveryHook>,
+        hook: Arc<dyn crate::slack::slack_delivery::PostSubmitDeliveryHook>,
     ) -> bool {
         let Some(slot) = self.post_submit_hook_slot.as_ref() else {
             tracing::debug!("set_trigger_post_submit_hook: trigger poller not enabled, ignoring");
@@ -3853,7 +3853,7 @@ pub async fn build_reborn_runtime(
     let trigger_poller_handle: Option<TriggerPollerRuntimeHandle>;
     #[cfg(feature = "slack-v2-host-beta")]
     let runtime_post_submit_hook_slot: Option<
-        Arc<std::sync::OnceLock<Arc<dyn crate::slack_delivery::PostSubmitDeliveryHook>>>,
+        Arc<std::sync::OnceLock<Arc<dyn crate::slack::slack_delivery::PostSubmitDeliveryHook>>>,
     >;
     #[cfg(any(test, feature = "test-support"))]
     let trigger_conversation_pairing_value: Option<

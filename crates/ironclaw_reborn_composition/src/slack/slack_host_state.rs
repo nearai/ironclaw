@@ -25,21 +25,23 @@ use ironclaw_product_adapters::AdapterInstallationId;
 use rand::RngExt as _;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::slack_actor_identity::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
-use crate::slack_channel_routes::{
+use crate::slack::slack_actor_identity::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
+use crate::slack::slack_channel_routes::{
     SlackChannelRoute, SlackChannelRouteAssignment, SlackChannelRouteError, SlackChannelRouteKey,
     SlackChannelRouteListPage, SlackChannelRouteStore,
 };
-use crate::slack_outbound_targets::{
+use crate::slack::slack_outbound_targets::{
     SlackPersonalDmTarget, SlackPersonalDmTargetError, SlackPersonalDmTargetKey,
     SlackPersonalDmTargetStore,
 };
-use crate::slack_personal_binding::{
+use crate::slack::slack_personal_binding::{
     RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
     RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
 };
-use crate::slack_serve::{SlackTeamId, SlackUserId};
-use crate::slack_setup::{SlackInstallationSetup, SlackInstallationSetupStore, SlackSetupError};
+use crate::slack::slack_serve::{SlackTeamId, SlackUserId};
+use crate::slack::slack_setup::{
+    SlackInstallationSetup, SlackInstallationSetupStore, SlackSetupError,
+};
 
 const SLACK_HOST_STATE_ROOT: &str = "/tenant-shared/slack-personal-binding";
 const SLACK_INSTALLATION_SETUP_PATH: &str = "/tenant-shared/slack-setup/installation.json";
@@ -1402,14 +1404,15 @@ impl StoredSlackUserIdentity {
     #[cfg(test)]
     fn binding(&self) -> Option<RebornUserIdentityBinding> {
         Some(RebornUserIdentityBinding {
-            provider: crate::slack_personal_binding::RebornIdentityProviderId::new(
+            provider: crate::slack::slack_personal_binding::RebornIdentityProviderId::new(
                 self.provider.clone(),
             )
             .ok()?,
-            provider_user_id: crate::slack_personal_binding::RebornIdentityProviderUserId::new(
-                self.provider_user_id.clone(),
-            )
-            .ok()?,
+            provider_user_id:
+                crate::slack::slack_personal_binding::RebornIdentityProviderUserId::new(
+                    self.provider_user_id.clone(),
+                )
+                .ok()?,
             user_id: UserId::new(self.user_id.clone()).ok()?,
         })
     }
@@ -1699,7 +1702,7 @@ mod tests {
     };
     use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 
-    use crate::slack_personal_binding::{
+    use crate::slack::slack_personal_binding::{
         RebornIdentityProviderId, RebornIdentityProviderUserId,
         RebornUserIdentityBindingDeleteStore,
     };
@@ -2206,7 +2209,7 @@ mod tests {
         let state = state();
         let tenant_id = TenantId::new("tenant-alpha").unwrap();
         let installation_id = installation();
-        let assigner = crate::slack_channel_routes::SlackChannelSubjectAssigner::new(
+        let assigner = crate::slack::slack_channel_routes::SlackChannelSubjectAssigner::new(
             tenant_id.clone(),
             installation_id.clone(),
             "T123".to_string(),
@@ -2287,7 +2290,7 @@ mod tests {
         let state = state();
         let tenant_id = TenantId::new("tenant-alpha").unwrap();
         let installation_id = installation();
-        let assigner = crate::slack_channel_routes::SlackChannelSubjectAssigner::new(
+        let assigner = crate::slack::slack_channel_routes::SlackChannelSubjectAssigner::new(
             tenant_id.clone(),
             installation_id.clone(),
             "T123".to_string(),
@@ -2334,7 +2337,7 @@ mod tests {
         let reader = state_with_root(root);
         let tenant_id = TenantId::new("tenant-alpha").unwrap();
         let installation_id = installation();
-        let assigner = crate::slack_channel_routes::SlackChannelSubjectAssigner::new(
+        let assigner = crate::slack::slack_channel_routes::SlackChannelSubjectAssigner::new(
             tenant_id.clone(),
             installation_id.clone(),
             "T123".to_string(),
@@ -2384,7 +2387,7 @@ mod tests {
         let state = state();
         let tenant_id = TenantId::new("tenant-alpha").unwrap();
         let installation_id = installation();
-        let assigner = crate::slack_channel_routes::SlackChannelSubjectAssigner::new(
+        let assigner = crate::slack::slack_channel_routes::SlackChannelSubjectAssigner::new(
             tenant_id.clone(),
             installation_id.clone(),
             "T123".to_string(),
@@ -2434,7 +2437,7 @@ mod tests {
         let state = state();
         let tenant_id = TenantId::new("tenant-alpha").unwrap();
         let installation_id = installation();
-        let assigner = crate::slack_channel_routes::SlackChannelSubjectAssigner::new(
+        let assigner = crate::slack::slack_channel_routes::SlackChannelSubjectAssigner::new(
             tenant_id.clone(),
             installation_id.clone(),
             "T123".to_string(),
@@ -2471,7 +2474,7 @@ mod tests {
         let state = state_with_backend(root.clone());
         let tenant_id = TenantId::new("tenant-alpha").unwrap();
         let installation_id = installation();
-        let assigner = crate::slack_channel_routes::SlackChannelSubjectAssigner::new(
+        let assigner = crate::slack::slack_channel_routes::SlackChannelSubjectAssigner::new(
             tenant_id.clone(),
             installation_id.clone(),
             "T123".to_string(),
@@ -2503,7 +2506,7 @@ mod tests {
         let state = state_with_backend(root.clone());
         let tenant_id = TenantId::new("tenant-alpha").unwrap();
         let installation_id = installation();
-        let assigner = crate::slack_channel_routes::SlackChannelSubjectAssigner::new(
+        let assigner = crate::slack::slack_channel_routes::SlackChannelSubjectAssigner::new(
             tenant_id.clone(),
             installation_id.clone(),
             "T123".to_string(),
@@ -2602,7 +2605,7 @@ mod tests {
         let state = state_with_backend(root.clone());
         let tenant_id = TenantId::new("tenant-alpha").unwrap();
         let installation_id = installation();
-        let assigner = crate::slack_channel_routes::SlackChannelSubjectAssigner::new(
+        let assigner = crate::slack::slack_channel_routes::SlackChannelSubjectAssigner::new(
             tenant_id.clone(),
             installation_id.clone(),
             "T123".to_string(),

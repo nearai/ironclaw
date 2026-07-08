@@ -45,28 +45,30 @@ mod runtime_setup;
 use crate::RebornRuntime;
 use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
 use crate::product_auth::serve::SlackPersonalOAuthBindingConfig;
-use crate::slack_actor_identity::{RebornUserIdentityLookup, SlackUserIdentityActorResolver};
-use crate::slack_channel_routes::{
+use crate::slack::slack_actor_identity::{
+    RebornUserIdentityLookup, SlackUserIdentityActorResolver,
+};
+use crate::slack::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteStore, SlackChannelRouteSubjectResolver,
 };
-use crate::slack_delivery::{
+use crate::slack::slack_delivery::{
     SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
     SlackFinalReplyDeliverySettings, TriggeredRunDeliveryDriver,
 };
-use crate::slack_egress::{SlackProtocolHttpEgress, StaticSlackEgressCredentialProvider};
-use crate::slack_host_state::FilesystemSlackHostState;
-use crate::slack_outbound_targets::{
+use crate::slack::slack_egress::{SlackProtocolHttpEgress, StaticSlackEgressCredentialProvider};
+use crate::slack::slack_host_state::FilesystemSlackHostState;
+use crate::slack::slack_outbound_targets::{
     SlackConfiguredChannelRoute, SlackHostBetaOutboundTargetProvider,
     SlackOutboundTargetProviderConfig, SlackPersonalDmTarget, SlackPersonalDmTargetError,
     SlackPersonalDmTargetProvisioner, SlackPersonalDmTargetStore,
 };
-use crate::slack_personal_binding::{
+use crate::slack::slack_personal_binding::{
     RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
     RebornUserIdentityBindingStore, SlackPersonalBindingInstallation,
     SlackPersonalBindingPrincipal, SlackPersonalUserBinder, SlackPersonalUserBindingError,
     SlackPersonalUserBindingRequest, SlackPersonalUserBindingService,
 };
-use crate::slack_serve::{
+use crate::slack::slack_serve::{
     SlackEventsRouteState, SlackInstallationRecord, SlackInstallationResolver,
     SlackInstallationSelector, SlackTeamId, SlackUserId, StaticSlackInstallationResolver,
     slack_events_route_mount,
@@ -416,7 +418,7 @@ pub struct SlackHostBetaMounts {
     /// Internal target-authority handle consumed only by WebUI product-facade composition.
     pub(crate) outbound_delivery_target_provider: Arc<dyn OutboundDeliveryTargetProvider>,
     pub(crate) outbound_delivery_target_provider_registered: bool,
-    setup_service: Option<Arc<crate::slack_setup::SlackSetupService>>,
+    setup_service: Option<Arc<crate::slack::slack_setup::SlackSetupService>>,
 }
 
 impl SlackHostBetaMounts {
@@ -424,7 +426,7 @@ impl SlackHostBetaMounts {
     /// can lazily resolve credentials at request time.
     pub fn fill_slack_personal_oauth_slot(
         &self,
-        slot: &crate::slack_setup::SlackPersonalSetupServiceSlot,
+        slot: &crate::slack::slack_setup::SlackPersonalSetupServiceSlot,
     ) {
         if let Some(service) = &self.setup_service {
             slot.fill(Arc::clone(service));
@@ -1234,22 +1236,22 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::slack_channel_routes::{
+    use crate::slack::slack_channel_routes::{
         InMemorySlackChannelRouteStore, SlackChannelRoute, SlackChannelRouteAdminRouteMount,
         SlackChannelRouteError, SlackChannelRouteKey, SlackChannelRouteListPage,
         WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH, WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH,
         slack_channel_route_admin_route_mount,
     };
-    use crate::slack_connectable_channel::{
+    use crate::slack::slack_connectable_channel::{
         SlackOperatorRouteVisibility, build_webui_services_with_slack_host_beta_mounts,
     };
-    use crate::slack_outbound_targets::{
+    use crate::slack::slack_outbound_targets::{
         InMemorySlackPersonalDmTargetStore, SLACK_OUTBOUND_TARGET_LIST_PAGE_SIZE,
         SlackPersonalDmTarget, SlackPersonalDmTargetError, SlackPersonalDmTargetKey,
         SlackPersonalDmTargetProvisioner, SlackPersonalDmTargetStore,
         slack_reply_target_binding_ref_from_raw, slack_shared_channel_reply_target_binding_ref,
     };
-    use crate::slack_serve::{SlackApiAppId, SlackUserId};
+    use crate::slack::slack_serve::{SlackApiAppId, SlackUserId};
     use crate::{
         RebornBuildError, RebornBuildInput, RebornRuntimeIdentity, RebornRuntimeInput,
         SLACK_EVENTS_PATH, WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig,
@@ -1363,7 +1365,7 @@ mod tests {
             _tenant_id: &TenantId,
             _installation_id: &AdapterInstallationId,
             _team_id: &str,
-            _assignments: Vec<crate::slack_channel_routes::SlackChannelRouteAssignment>,
+            _assignments: Vec<crate::slack::slack_channel_routes::SlackChannelRouteAssignment>,
         ) -> Result<Vec<SlackChannelRoute>, SlackChannelRouteError> {
             Err(SlackChannelRouteError::StoreUnavailable)
         }
@@ -3128,7 +3130,7 @@ mod tests {
             .setup_service
             .as_ref()
             .expect("dynamic mounts expose the Slack setup service")
-            .save(crate::slack_setup::SlackInstallationSetupUpdate {
+            .save(crate::slack::slack_setup::SlackInstallationSetupUpdate {
                 installation_id: INSTALLATION.to_string(),
                 team_id: TEAM.to_string(),
                 api_app_id: API_APP.to_string(),
@@ -4494,9 +4496,9 @@ mod tests {
     impl SlackPersonalDmTargetStore for FailingSlackPersonalDmTargetStore {
         async fn load_personal_dm_target(
             &self,
-            _key: &crate::slack_outbound_targets::SlackPersonalDmTargetKey,
+            _key: &crate::slack::slack_outbound_targets::SlackPersonalDmTargetKey,
         ) -> Result<
-            Option<crate::slack_outbound_targets::SlackPersonalDmTarget>,
+            Option<crate::slack::slack_outbound_targets::SlackPersonalDmTarget>,
             SlackPersonalDmTargetError,
         > {
             Err(SlackPersonalDmTargetError::StoreUnavailable)
@@ -4504,15 +4506,17 @@ mod tests {
 
         async fn upsert_personal_dm_target(
             &self,
-            target: crate::slack_outbound_targets::SlackPersonalDmTarget,
-        ) -> Result<crate::slack_outbound_targets::SlackPersonalDmTarget, SlackPersonalDmTargetError>
-        {
+            target: crate::slack::slack_outbound_targets::SlackPersonalDmTarget,
+        ) -> Result<
+            crate::slack::slack_outbound_targets::SlackPersonalDmTarget,
+            SlackPersonalDmTargetError,
+        > {
             Ok(target)
         }
 
         async fn delete_personal_dm_target(
             &self,
-            _key: &crate::slack_outbound_targets::SlackPersonalDmTargetKey,
+            _key: &crate::slack::slack_outbound_targets::SlackPersonalDmTargetKey,
         ) -> Result<bool, SlackPersonalDmTargetError> {
             Err(SlackPersonalDmTargetError::StoreUnavailable)
         }
@@ -4522,7 +4526,7 @@ mod tests {
             _tenant_id: &TenantId,
             _user_id: &UserId,
             _installation_id: &AdapterInstallationId,
-            _team_id: &crate::slack_serve::SlackTeamId,
+            _team_id: &crate::slack::slack_serve::SlackTeamId,
         ) -> Result<usize, SlackPersonalDmTargetError> {
             Err(SlackPersonalDmTargetError::StoreUnavailable)
         }
@@ -4646,7 +4650,7 @@ mod tests {
             .setup_service
             .as_ref()
             .expect("dynamic mounts expose the Slack setup service")
-            .save(crate::slack_setup::SlackInstallationSetupUpdate {
+            .save(crate::slack::slack_setup::SlackInstallationSetupUpdate {
                 installation_id: INSTALLATION.to_string(),
                 team_id: TEAM.to_string(),
                 api_app_id: API_APP.to_string(),

@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
-use crate::slack_serve::{SlackApiAppId, SlackTeamId};
+use crate::slack::slack_serve::{SlackApiAppId, SlackTeamId};
 
 const SLACK_BOT_TOKEN_HANDLE_PREFIX: &str = "slack_bot_token";
 const SLACK_SIGNING_SECRET_HANDLE_PREFIX: &str = "slack_signing_secret";

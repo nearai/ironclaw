@@ -26,11 +26,13 @@ use thiserror::Error;
 
 use crate::outbound::OutboundDeliveryTargetProvider;
 use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
-use crate::slack_channel_routes::{
+use crate::slack::slack_channel_routes::{
     SlackChannelRouteError, SlackChannelRouteKey, SlackChannelRouteStore,
 };
-use crate::slack_dm_open::{SlackDmOpenError, open_slack_dm_channel, validate_slack_dm_channel_id};
-use crate::slack_serve::{SlackTeamId, SlackUserId};
+use crate::slack::slack_dm_open::{
+    SlackDmOpenError, open_slack_dm_channel, validate_slack_dm_channel_id,
+};
+use crate::slack::slack_serve::{SlackTeamId, SlackUserId};
 
 pub(crate) const SLACK_OUTBOUND_TARGET_LIST_PAGE_SIZE: usize = 500;
 const SLACK_OUTBOUND_TARGET_LIST_MAX_TOTAL_ROUTES: usize = 10_000;
@@ -1063,7 +1065,7 @@ fn validate_slack_id(field: &'static str, value: &str) -> Result<(), SlackPerson
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::slack_channel_routes::{
+    use crate::slack::slack_channel_routes::{
         InMemorySlackChannelRouteStore, SlackChannelRouteError, SlackChannelRouteKey,
         SlackChannelRouteListPage,
     };
@@ -1419,7 +1421,7 @@ mod tests {
             // Return more routes than the cap in a single page (no next cursor,
             // so the loop will try the cap check on this batch).
             let routes = (0..=SLACK_OUTBOUND_TARGET_LIST_MAX_TOTAL_ROUTES)
-                .map(|i| crate::slack_channel_routes::SlackChannelRoute {
+                .map(|i| crate::slack::slack_channel_routes::SlackChannelRoute {
                     tenant_id: TENANT.to_string(),
                     installation_id: INSTALLATION.to_string(),
                     team_id: TEAM.to_string(),
@@ -1437,7 +1439,7 @@ mod tests {
             &self,
             _key: SlackChannelRouteKey,
             _subject_user_id: UserId,
-        ) -> Result<crate::slack_channel_routes::SlackChannelRoute, SlackChannelRouteError>
+        ) -> Result<crate::slack::slack_channel_routes::SlackChannelRoute, SlackChannelRouteError>
         {
             Err(SlackChannelRouteError::StoreUnavailable)
         }
@@ -1454,9 +1456,11 @@ mod tests {
             _tenant_id: &TenantId,
             _installation_id: &AdapterInstallationId,
             _team_id: &str,
-            _assignments: Vec<crate::slack_channel_routes::SlackChannelRouteAssignment>,
-        ) -> Result<Vec<crate::slack_channel_routes::SlackChannelRoute>, SlackChannelRouteError>
-        {
+            _assignments: Vec<crate::slack::slack_channel_routes::SlackChannelRouteAssignment>,
+        ) -> Result<
+            Vec<crate::slack::slack_channel_routes::SlackChannelRoute>,
+            SlackChannelRouteError,
+        > {
             Err(SlackChannelRouteError::StoreUnavailable)
         }
 

@@ -35,11 +35,11 @@ use rand::RngExt as _;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::slack_personal_binding::{
+use crate::slack::slack_personal_binding::{
     SlackPersonalBindingPrincipal, SlackPersonalUserBindingError, SlackPersonalUserBindingRequest,
     SlackPersonalUserBindingService,
 };
-use crate::slack_serve::{SlackApiAppId, SlackEnterpriseId, SlackTeamId, SlackUserId};
+use crate::slack::slack_serve::{SlackApiAppId, SlackEnterpriseId, SlackTeamId, SlackUserId};
 
 pub const SLACK_PERSONAL_BINDING_OAUTH_START_PATH: &str =
     "/api/reborn/slack/personal-binding/oauth/start";
@@ -677,7 +677,7 @@ mod tests {
             [SlackPersonalBindingInstallation {
                 tenant_id: tenant("tenant-alpha"),
                 installation_id: installation("install-alpha"),
-                selector: crate::slack_serve::SlackInstallationSelector::app_team(
+                selector: crate::slack::slack_serve::SlackInstallationSelector::app_team(
                     "A-app", "T-team",
                 ),
             }],
@@ -747,12 +747,15 @@ mod tests {
         assert_eq!(
             store.bindings(),
             vec![RebornUserIdentityBinding {
-                provider: crate::slack_personal_binding::RebornIdentityProviderId::new("slack")
-                    .expect("provider"),
-                provider_user_id: crate::slack_personal_binding::RebornIdentityProviderUserId::new(
-                    "install-alpha:U123",
+                provider: crate::slack::slack_personal_binding::RebornIdentityProviderId::new(
+                    "slack"
                 )
-                .expect("provider user id"),
+                .expect("provider"),
+                provider_user_id:
+                    crate::slack::slack_personal_binding::RebornIdentityProviderUserId::new(
+                        "install-alpha:U123",
+                    )
+                    .expect("provider user id"),
                 user_id: user("user:alice"),
             }]
         );
@@ -765,7 +768,7 @@ mod tests {
             [SlackPersonalBindingInstallation {
                 tenant_id: tenant("tenant-alpha"),
                 installation_id: installation("install-alpha"),
-                selector: crate::slack_serve::SlackInstallationSelector::app_team(
+                selector: crate::slack::slack_serve::SlackInstallationSelector::app_team(
                     "A-app", "T-team",
                 ),
             }],
@@ -887,7 +890,7 @@ mod tests {
             [SlackPersonalBindingInstallation {
                 tenant_id: tenant("tenant-alpha"),
                 installation_id: installation("install-alpha"),
-                selector: crate::slack_serve::SlackInstallationSelector::app_team(
+                selector: crate::slack::slack_serve::SlackInstallationSelector::app_team(
                     "A-other", "T-team",
                 ),
             }],
@@ -1116,7 +1119,7 @@ mod tests {
             [SlackPersonalBindingInstallation {
                 tenant_id: tenant("tenant-alpha"),
                 installation_id: installation("install-alpha"),
-                selector: crate::slack_serve::SlackInstallationSelector::app_team(
+                selector: crate::slack::slack_serve::SlackInstallationSelector::app_team(
                     "A-app", "T-team",
                 ),
             }],

@@ -53,7 +53,7 @@ use tokio::sync::Semaphore;
 use crate::product_auth::api::auth_prompt::{
     BlockedAuthPromptRequest, auth_prompt_view_for_blocked_auth,
 };
-use crate::slack_outbound_targets::{
+use crate::slack::slack_outbound_targets::{
     slack_conversation_id_from_reply_target_binding_ref, slack_reply_target_is_personal_dm,
 };
 use crate::{AuthChallengeProvider, BlockedAuthFlowCanceller};
@@ -3353,7 +3353,7 @@ mod tests {
             seg("actor_kind", "slack_user"),
             seg("actor", "U123"),
         );
-        crate::slack_outbound_targets::slack_reply_target_binding_ref_from_raw(raw)
+        crate::slack::slack_outbound_targets::slack_reply_target_binding_ref_from_raw(raw)
             .expect("test binding ref")
     }
 
@@ -6979,7 +6979,7 @@ mod tests {
             seg("conversation", "C0SHARED"),
             seg("topic", ""),
         );
-        crate::slack_outbound_targets::slack_reply_target_binding_ref_from_raw(raw)
+        crate::slack::slack_outbound_targets::slack_reply_target_binding_ref_from_raw(raw)
             .expect("test shared-channel binding ref")
     }
 

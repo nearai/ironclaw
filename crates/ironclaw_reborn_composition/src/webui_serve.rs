@@ -61,11 +61,11 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use crate::product_auth::serve::SlackPersonalOAuthBindingConfig;
 use crate::product_auth::serve::{ProductAuthRouteState, product_auth_route_mount};
 #[cfg(feature = "slack-v2-host-beta")]
-use crate::slack_channel_routes::{
+use crate::slack::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, slack_channel_route_admin_route_mount,
 };
 #[cfg(feature = "slack-v2-host-beta")]
-use crate::slack_personal_binding_serve::{
+use crate::slack::slack_personal_binding_serve::{
     SlackPersonalBindingRouteConfig, SlackPersonalBindingRouteState,
     slack_personal_binding_route_mount,
 };
@@ -257,7 +257,8 @@ pub struct WebuiServeConfig {
     /// route fails closed with a sanitized service-unavailable response.
     pub(crate) google_oauth: Option<GoogleOAuthRouteConfig>,
     #[cfg(feature = "slack-v2-host-beta")]
-    pub(crate) slack_personal_oauth: Option<crate::slack_setup::SlackPersonalSetupServiceSlot>,
+    pub(crate) slack_personal_oauth:
+        Option<crate::slack::slack_setup::SlackPersonalSetupServiceSlot>,
     /// Optional host hook that binds a successful Slack personal OAuth identity
     /// to the authenticated Reborn user.
     #[cfg(feature = "slack-v2-host-beta")]
@@ -396,7 +397,7 @@ impl WebuiServeConfig {
     #[cfg(feature = "slack-v2-host-beta")]
     pub fn with_slack_personal_oauth(
         mut self,
-        slot: crate::slack_setup::SlackPersonalSetupServiceSlot,
+        slot: crate::slack::slack_setup::SlackPersonalSetupServiceSlot,
     ) -> Self {
         self.slack_personal_oauth = Some(slot);
         self
