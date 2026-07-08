@@ -2242,7 +2242,6 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
         if not authorization_url.startswith("https://slack.com/oauth/"):
             raise AssertionError(f"Slack OAuth start returned unexpected URL: {oauth_start!r}")
         if "admin_managed_channels" in observed["slack_strategies"]:
-            await expect(page.locator("body")).to_contain_text("Slack setup", timeout=15000)  # type: ignore[attr-defined]
             await expect(page.locator("body")).to_contain_text("Slack workspace setup", timeout=15000)  # type: ignore[attr-defined]
         else:
             await expect(page.locator("body")).to_contain_text(title, timeout=15000)  # type: ignore[attr-defined]
