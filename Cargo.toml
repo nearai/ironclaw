@@ -272,6 +272,7 @@ insta = { version = "1.46.3", features = ["yaml"] }
 # Pull the LLM crate's `testing` feature in only for tests so `StubLlm` and
 # fault-injection helpers don't ship in release binaries.
 ironclaw_llm = { path = "crates/ironclaw_llm", version = "0.1.0", features = ["testing"] }
+ironclaw_agent_loop = { path = "crates/ironclaw_agent_loop", version = "0.1.0", features = ["test-support"] }
 ironclaw_auth = { path = "crates/ironclaw_auth", version = "0.1.0" }
 ironclaw_approvals = { path = "crates/ironclaw_approvals", version = "0.1.0" }
 # C-ATTACH: `InboundAttachment` for `submit_turn_with_image_attachment`.
@@ -428,6 +429,10 @@ path = "tests/integration/triggered_delivery_outcome.rs"
 [[test]]
 name = "reborn_integration_attach"
 path = "tests/integration/attach.rs"
+
+[[test]]
+name = "reborn_integration_subagent_await_edge"
+path = "tests/integration/subagent_await_edge.rs"
 
 [[test]]
 name = "reborn_integration_auth_failure"

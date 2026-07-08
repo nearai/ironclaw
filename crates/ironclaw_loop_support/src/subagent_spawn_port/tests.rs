@@ -928,6 +928,7 @@ impl TurnSpawnTreeStateStore for StaticTurnStateStore {
             scope: scope.clone(),
             root_run_id,
             descendant_count: u64::from(delta),
+            released_children: std::collections::BTreeSet::new(),
         })
     }
 
@@ -936,11 +937,21 @@ impl TurnSpawnTreeStateStore for StaticTurnStateStore {
         scope: &TurnScope,
         root_run_id: TurnRunId,
         delta: u32,
+        _idempotency_key: TurnRunId,
     ) -> Result<(), TurnError> {
         self.releases
             .lock()
             .unwrap()
             .push((scope.clone(), root_run_id, delta));
+        Ok(())
+    }
+
+    async fn prune_released_child(
+        &self,
+        _scope: &TurnScope,
+        _root_run_id: TurnRunId,
+        _child_run_id: TurnRunId,
+    ) -> Result<(), TurnError> {
         Ok(())
     }
 }
@@ -1104,7 +1115,7 @@ async fn spawn_test_port(
         turn_state_store: turn_store,
         thread_service: Arc::new(InMemorySessionThreadService::default()),
         goal_store: Arc::new(NoopGoalStore),
-        gate_store: Arc::new(InMemorySubagentGateResolutionStore::default()),
+        await_edge_writer: Arc::new(InMemoryAwaitEdgeWriter::default()),
         definition_resolver: Arc::new(resolver),
         spawn_input_codec: Arc::new(StaticSpawnInputCodec {
             args: default_spawn_args(),
@@ -1137,7 +1148,7 @@ fn spawn_test_port_with_inner(
         )))),
         thread_service: Arc::new(InMemorySessionThreadService::default()),
         goal_store: Arc::new(NoopGoalStore),
-        gate_store: Arc::new(InMemorySubagentGateResolutionStore::default()),
+        await_edge_writer: Arc::new(InMemoryAwaitEdgeWriter::default()),
         definition_resolver: Arc::new(StaticDefinitionResolver {
             resolved: Some(subagent_definition(false)),
             parent: None,
@@ -1159,7 +1170,7 @@ struct SpawnPortWithRecorders {
     port: SubagentSpawnCapabilityPort,
     child_runs: Arc<RecordingChildRuns>,
     goal_store: Arc<RecordingGoalStore>,
-    gate_store: Arc<InMemorySubagentGateResolutionStore>,
+    await_edge_writer: Arc<InMemoryAwaitEdgeWriter>,
 }
 
 fn spawn_test_port_with_codec_and_recorders(
@@ -1168,7 +1179,7 @@ fn spawn_test_port_with_codec_and_recorders(
 ) -> SpawnPortWithRecorders {
     let child_runs = Arc::new(RecordingChildRuns::default());
     let goal_store = Arc::new(RecordingGoalStore::default());
-    let gate_store = Arc::new(InMemorySubagentGateResolutionStore::default());
+    let gate_store = Arc::new(InMemoryAwaitEdgeWriter::default());
     let deps = Arc::new(SubagentSpawnDeps {
         coordinator: Arc::new(StaticCoordinator),
         child_runs: child_runs.clone(),
@@ -1178,7 +1189,7 @@ fn spawn_test_port_with_codec_and_recorders(
         )))),
         thread_service: Arc::new(InMemorySessionThreadService::default()),
         goal_store: goal_store.clone(),
-        gate_store: gate_store.clone(),
+        await_edge_writer: gate_store.clone(),
         definition_resolver: Arc::new(StaticDefinitionResolver {
             resolved: Some(subagent_definition(false)),
             parent: None,
@@ -1199,7 +1210,7 @@ fn spawn_test_port_with_codec_and_recorders(
         port,
         child_runs,
         goal_store,
-        gate_store,
+        await_edge_writer: gate_store,
     }
 }
 
@@ -1680,7 +1691,7 @@ async fn spawn_provider_tool_call_invoke_rejects_changed_activity_id_before_chil
             turn_state_store: Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0)))),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             goal_store: Arc::new(NoopGoalStore),
-            gate_store: Arc::new(InMemorySubagentGateResolutionStore::default()),
+            await_edge_writer: Arc::new(InMemoryAwaitEdgeWriter::default()),
             definition_resolver: Arc::new(StaticDefinitionResolver {
                 resolved: Some(subagent_definition(false)),
                 parent: None,
@@ -1764,7 +1775,7 @@ async fn spawn_provider_tool_call_registration_does_not_require_inner_spawn_name
             turn_state_store: Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0)))),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             goal_store: Arc::new(NoopGoalStore),
-            gate_store: Arc::new(InMemorySubagentGateResolutionStore::default()),
+            await_edge_writer: Arc::new(InMemoryAwaitEdgeWriter::default()),
             definition_resolver: Arc::new(StaticDefinitionResolver {
                 resolved: Some(subagent_definition(false)),
                 parent: None,
@@ -1943,7 +1954,7 @@ async fn invoke_spawn_rejects_when_authorization_input_ref_is_missing() {
             turn_state_store: Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0)))),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             goal_store: Arc::new(NoopGoalStore),
-            gate_store: Arc::new(InMemorySubagentGateResolutionStore::default()),
+            await_edge_writer: Arc::new(InMemoryAwaitEdgeWriter::default()),
             definition_resolver: Arc::new(StaticDefinitionResolver {
                 resolved: Some(subagent_definition(false)),
                 parent: None,
@@ -1968,14 +1979,14 @@ async fn invoke_spawn_submits_child_run_through_spawn_tree_port() {
     let turn_store = Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0))));
     let child_runs = Arc::new(RecordingChildRuns::default());
     let goal_store = Arc::new(RecordingGoalStore::default());
-    let gate_store = Arc::new(InMemorySubagentGateResolutionStore::default());
+    let gate_store = Arc::new(InMemoryAwaitEdgeWriter::default());
     let deps = Arc::new(SubagentSpawnDeps {
         coordinator: Arc::new(StaticCoordinator),
         child_runs: child_runs.clone(),
         turn_state_store: turn_store,
         thread_service: Arc::new(InMemorySessionThreadService::default()),
         goal_store: goal_store.clone(),
-        gate_store: gate_store.clone(),
+        await_edge_writer: gate_store.clone(),
         definition_resolver: Arc::new(StaticDefinitionResolver {
             resolved: Some(subagent_definition(false)),
             parent: None,
@@ -2057,7 +2068,7 @@ async fn invoke_capability_batch_handles_mixed_spawn_and_non_spawn_invocations()
         turn_state_store: turn_store,
         thread_service: Arc::new(InMemorySessionThreadService::default()),
         goal_store: Arc::new(NoopGoalStore),
-        gate_store: Arc::new(InMemorySubagentGateResolutionStore::default()),
+        await_edge_writer: Arc::new(InMemoryAwaitEdgeWriter::default()),
         definition_resolver: Arc::new(StaticDefinitionResolver {
             resolved: Some(subagent_definition(false)),
             parent: None,
@@ -2114,7 +2125,7 @@ async fn invoke_capability_batch_rolls_back_preceding_spawn_on_inner_batch_failu
     let turn_store = Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0))));
     let child_runs = Arc::new(RecordingChildRuns::default());
     let goal_store = Arc::new(RecordingGoalStore::default());
-    let gate_store = Arc::new(InMemorySubagentGateResolutionStore::default());
+    let gate_store = Arc::new(InMemoryAwaitEdgeWriter::default());
     let thread_service = Arc::new(InMemorySessionThreadService::default());
     let deps = Arc::new(SubagentSpawnDeps {
         coordinator: Arc::new(StaticCoordinator),
@@ -2122,7 +2133,7 @@ async fn invoke_capability_batch_rolls_back_preceding_spawn_on_inner_batch_failu
         turn_state_store: turn_store.clone(),
         thread_service: thread_service.clone(),
         goal_store: goal_store.clone(),
-        gate_store: gate_store.clone(),
+        await_edge_writer: gate_store.clone(),
         definition_resolver: Arc::new(StaticDefinitionResolver {
             resolved: Some(subagent_definition(false)),
             parent: None,
@@ -2202,7 +2213,7 @@ async fn invoke_capability_batch_stops_on_first_spawn_suspension_when_requested(
     let turn_store = Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0))));
     let child_runs = Arc::new(RecordingChildRuns::default());
     let goal_store = Arc::new(RecordingGoalStore::default());
-    let gate_store = Arc::new(InMemorySubagentGateResolutionStore::default());
+    let gate_store = Arc::new(InMemoryAwaitEdgeWriter::default());
     let thread_service = Arc::new(InMemorySessionThreadService::default());
     let inner = Arc::new(RecordingBatchPort::default());
     let deps = Arc::new(SubagentSpawnDeps {
@@ -2211,7 +2222,7 @@ async fn invoke_capability_batch_stops_on_first_spawn_suspension_when_requested(
         turn_state_store: turn_store.clone(),
         thread_service: thread_service.clone(),
         goal_store: goal_store.clone(),
-        gate_store: gate_store.clone(),
+        await_edge_writer: gate_store.clone(),
         definition_resolver: Arc::new(StaticDefinitionResolver {
             resolved: Some(subagent_definition(false)),
             parent: None,
@@ -2279,7 +2290,7 @@ async fn invoke_capability_batch_preserves_spawns_on_inner_batch_suspension() {
     let turn_store = Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0))));
     let child_runs = Arc::new(RecordingChildRuns::default());
     let goal_store = Arc::new(RecordingGoalStore::default());
-    let gate_store = Arc::new(InMemorySubagentGateResolutionStore::default());
+    let gate_store = Arc::new(InMemoryAwaitEdgeWriter::default());
     let thread_service = Arc::new(InMemorySessionThreadService::default());
     let inner = Arc::new(SuspendedBatchPort::default());
     let deps = Arc::new(SubagentSpawnDeps {
@@ -2288,7 +2299,7 @@ async fn invoke_capability_batch_preserves_spawns_on_inner_batch_suspension() {
         turn_state_store: turn_store.clone(),
         thread_service,
         goal_store: goal_store.clone(),
-        gate_store: gate_store.clone(),
+        await_edge_writer: gate_store.clone(),
         definition_resolver: Arc::new(StaticDefinitionResolver {
             resolved: Some(subagent_definition(false)),
             parent: None,
@@ -2355,7 +2366,13 @@ async fn invoke_capability_batch_preserves_spawns_on_inner_batch_suspension() {
     assert!(turn_store.releases.lock().unwrap().is_empty());
     assert!(goal_store.deletes().is_empty());
     assert_eq!(goal_store.puts().len(), 2);
-    assert_eq!(gate_store.records().len(), 1);
+    // §3 replacement: `InMemoryAwaitEdgeWriter` keys per-child
+    // `(parent_run_id, child_run_id)`, not per-`gate_ref` — two batch
+    // children sharing one shared gate_ref now record 2 distinct edges
+    // (matching the real `FilesystemAwaitEdgeStore`'s per-child tracking,
+    // D3's group-based settling), not 1 collapsed record as the deleted
+    // `BoundedSubagentGateResolutionStore`'s gate_ref-keyed map did.
+    assert_eq!(gate_store.records().len(), 2);
 }
 
 #[tokio::test]
@@ -2365,7 +2382,7 @@ async fn invoke_spawn_cancels_child_when_post_submit_thread_mark_fails() {
     let turn_store = Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0))));
     let child_runs = Arc::new(RecordingChildRuns::default());
     let goal_store = Arc::new(RecordingGoalStore::default());
-    let gate_store = Arc::new(InMemorySubagentGateResolutionStore::default());
+    let gate_store = Arc::new(InMemoryAwaitEdgeWriter::default());
     let thread_service = Arc::new(FailingMarkThreadService::default());
     let deps = Arc::new(SubagentSpawnDeps {
         coordinator: Arc::new(StaticCoordinator),
@@ -2373,7 +2390,7 @@ async fn invoke_spawn_cancels_child_when_post_submit_thread_mark_fails() {
         turn_state_store: turn_store.clone(),
         thread_service: thread_service.clone(),
         goal_store: goal_store.clone(),
-        gate_store: gate_store.clone(),
+        await_edge_writer: gate_store.clone(),
         definition_resolver: Arc::new(StaticDefinitionResolver {
             resolved: Some(subagent_definition(false)),
             parent: None,
@@ -2642,7 +2659,7 @@ async fn invoke_spawn_propagates_decode_rejection_before_side_effects() {
     );
     assert!(harness.child_runs.requests().is_empty());
     assert!(harness.goal_store.puts().is_empty());
-    assert!(harness.gate_store.records().is_empty());
+    assert!(harness.await_edge_writer.records().is_empty());
 }
 
 #[tokio::test]
@@ -2683,7 +2700,7 @@ async fn invoke_spawn_batch_propagates_decode_rejection_before_side_effects() {
     );
     assert!(harness.child_runs.requests().is_empty());
     assert!(harness.goal_store.puts().is_empty());
-    assert!(harness.gate_store.records().is_empty());
+    assert!(harness.await_edge_writer.records().is_empty());
 }
 
 #[tokio::test]
@@ -2822,14 +2839,14 @@ async fn invoke_batch_coalesces_blocking_spawns_under_single_gate() {
     let context = test_run_context_with_agent_actor("spawn-batch-coalesce").await;
     let turn_store = Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0))));
     let child_runs = Arc::new(RecordingChildRuns::default());
-    let gate_store = Arc::new(InMemorySubagentGateResolutionStore::default());
+    let gate_store = Arc::new(InMemoryAwaitEdgeWriter::default());
     let deps = Arc::new(SubagentSpawnDeps {
         coordinator: Arc::new(StaticCoordinator),
         child_runs: child_runs.clone(),
         turn_state_store: turn_store,
         thread_service: Arc::new(InMemorySessionThreadService::default()),
         goal_store: Arc::new(NoopGoalStore),
-        gate_store: gate_store.clone(),
+        await_edge_writer: gate_store.clone(),
         definition_resolver: Arc::new(StaticDefinitionResolver {
             resolved: Some(subagent_definition(false)),
             parent: None,
@@ -2910,14 +2927,14 @@ async fn invoke_batch_mixed_spawn_and_non_spawn_capabilities() {
     let context = test_run_context_with_agent_actor("spawn-batch-mixed").await;
     let turn_store = Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0))));
     let child_runs = Arc::new(RecordingChildRuns::default());
-    let gate_store = Arc::new(InMemorySubagentGateResolutionStore::default());
+    let gate_store = Arc::new(InMemoryAwaitEdgeWriter::default());
     let deps = Arc::new(SubagentSpawnDeps {
         coordinator: Arc::new(StaticCoordinator),
         child_runs: child_runs.clone(),
         turn_state_store: turn_store,
         thread_service: Arc::new(InMemorySessionThreadService::default()),
         goal_store: Arc::new(NoopGoalStore),
-        gate_store: gate_store.clone(),
+        await_edge_writer: gate_store.clone(),
         definition_resolver: Arc::new(StaticDefinitionResolver {
             resolved: Some(subagent_definition(false)),
             parent: None,
@@ -3006,9 +3023,17 @@ async fn invoke_batch_mixed_spawn_and_non_spawn_capabilities() {
     assert_eq!(first_gate, second_gate);
     assert_eq!(inner_result.result_ref.as_str(), "result:auth");
     assert_eq!(child_runs.requests().len(), 2);
+    // §3 replacement: `InMemoryAwaitEdgeWriter` keys per-child, not
+    // per-`gate_ref` — both batch children sharing this gate_ref get their
+    // own tracked edge now (see the comment on the analogous assertion in
+    // `invoke_batch_mixed_spawn_and_non_spawn_capabilities` above).
     let awaited = gate_store.records();
-    assert_eq!(awaited.len(), 1);
-    assert_eq!(awaited[0].gate_ref.as_str(), first_gate.as_str());
+    assert_eq!(awaited.len(), 2);
+    assert!(
+        awaited
+            .iter()
+            .all(|record| record.gate_ref.as_str() == first_gate.as_str())
+    );
 }
 
 #[tokio::test]
@@ -3016,14 +3041,14 @@ async fn invoke_batch_skips_shared_gate_for_single_blocking_spawn() {
     let context = test_run_context_with_agent_actor("spawn-batch-single").await;
     let turn_store = Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0))));
     let child_runs = Arc::new(RecordingChildRuns::default());
-    let gate_store = Arc::new(InMemorySubagentGateResolutionStore::default());
+    let gate_store = Arc::new(InMemoryAwaitEdgeWriter::default());
     let deps = Arc::new(SubagentSpawnDeps {
         coordinator: Arc::new(StaticCoordinator),
         child_runs: child_runs.clone(),
         turn_state_store: turn_store,
         thread_service: Arc::new(InMemorySessionThreadService::default()),
         goal_store: Arc::new(NoopGoalStore),
-        gate_store: gate_store.clone(),
+        await_edge_writer: gate_store.clone(),
         definition_resolver: Arc::new(StaticDefinitionResolver {
             resolved: Some(subagent_definition(false)),
             parent: None,
@@ -3124,7 +3149,7 @@ async fn spawn_subagent_propagates_byte_len_from_result_writer() {
         turn_state_store: Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0)))),
         thread_service: Arc::new(InMemorySessionThreadService::default()),
         goal_store: Arc::new(NoopGoalStore),
-        gate_store: Arc::new(InMemorySubagentGateResolutionStore::default()),
+        await_edge_writer: Arc::new(InMemoryAwaitEdgeWriter::default()),
         definition_resolver: Arc::new(StaticDefinitionResolver {
             resolved: Some(subagent_definition(false)),
             parent: None,
@@ -3317,7 +3342,7 @@ async fn spawn_provider_tool_call_registration_accepts_subagent_type_wire_key() 
             turn_state_store: Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0)))),
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             goal_store: Arc::new(NoopGoalStore),
-            gate_store: Arc::new(InMemorySubagentGateResolutionStore::default()),
+            await_edge_writer: Arc::new(InMemoryAwaitEdgeWriter::default()),
             definition_resolver: Arc::new(StaticDefinitionResolver {
                 resolved: Some(subagent_definition(false)),
                 parent: None,
@@ -3425,7 +3450,7 @@ async fn new_with_schema_propagates_schema_to_spawn_tool_definition() {
         turn_state_store: Arc::new(StaticTurnStateStore::new(None)),
         thread_service: Arc::new(ironclaw_threads::InMemorySessionThreadService::default()),
         goal_store: Arc::new(NoopGoalStore),
-        gate_store: Arc::new(InMemorySubagentGateResolutionStore::default()),
+        await_edge_writer: Arc::new(InMemoryAwaitEdgeWriter::default()),
         definition_resolver: Arc::new(StaticDefinitionResolver {
             resolved: Some(subagent_definition(false)),
             parent: None,

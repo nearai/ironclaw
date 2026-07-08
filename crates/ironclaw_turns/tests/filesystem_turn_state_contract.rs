@@ -3920,7 +3920,7 @@ async fn filesystem_turn_state_store_persists_lineage_and_tree_reservations() {
         Err(TurnError::CapacityExceeded { .. })
     ));
     store
-        .release_tree_descendants(&child_b_scope, parent, 1)
+        .release_tree_descendants(&child_b_scope, parent, 1, parent)
         .await
         .unwrap();
 

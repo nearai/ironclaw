@@ -341,16 +341,6 @@ pub trait SubagentSpawnGoalStore: Send + Sync {
     ) -> Result<(), AgentLoopHostError>;
 }
 
-#[async_trait]
-pub trait SubagentGateResolutionStore: Send + Sync {
-    async fn record_awaited_child(
-        &self,
-        record: AwaitedChildSetRecord,
-    ) -> Result<(), AgentLoopHostError>;
-
-    async fn delete_awaited_child(&self, gate_ref: &GateRef) -> Result<(), AgentLoopHostError>;
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SubagentSpawnLimits {
     pub max_depth: u32,
@@ -375,7 +365,7 @@ pub struct SubagentSpawnDeps {
     pub turn_state_store: Arc<dyn TurnSpawnTreeStateStore>,
     pub thread_service: Arc<dyn SessionThreadService>,
     pub goal_store: Arc<dyn SubagentSpawnGoalStore>,
-    pub gate_store: Arc<dyn SubagentGateResolutionStore>,
+    pub await_edge_writer: Arc<dyn crate::AwaitEdgeWriter>,
     pub definition_resolver: Arc<dyn SubagentDefinitionResolver>,
     pub spawn_input_codec: Arc<dyn SpawnSubagentInputCodec>,
     pub result_writer: Arc<dyn LoopCapabilityResultWriter>,
@@ -403,7 +393,10 @@ struct SpawnContext {
 #[derive(Default)]
 struct SpawnCompensationState {
     goal_written: Option<(TurnScope, TurnRunId)>,
-    gate_written: Option<GateRef>,
+    /// (child_scope, child_run_id) — the parent_run_id needed for
+    /// `abandon_awaited_child` is the enclosing `run_context.run_id` at
+    /// rollback time.
+    edge_written: Option<(TurnScope, TurnRunId)>,
     result_written: Option<LoopResultRef>,
     submitted_child_tree: Option<(TurnScope, TurnRunId)>,
     submitted_child_run: Option<(TurnScope, TurnActor, TurnRunId)>,
@@ -440,8 +433,11 @@ impl SpawnCompensationState {
                 }
             }
         }
-        if let Some(gate_ref) = self.gate_written.as_ref() {
-            let _ = deps.gate_store.delete_awaited_child(gate_ref).await;
+        if let Some((child_scope, child_run_id)) = self.edge_written.as_ref() {
+            let _ = deps
+                .await_edge_writer
+                .abandon_awaited_child(child_scope, run_context.run_id, *child_run_id)
+                .await;
         }
         if let Some((scope, run_id)) = self.goal_written.as_ref() {
             let _ = deps.goal_store.delete_goal(scope, *run_id).await;
@@ -453,9 +449,18 @@ impl SpawnCompensationState {
                 .await;
         }
         if let Some((scope, tree_root)) = self.submitted_child_tree.as_ref() {
+            // Idempotency key for the release-tree-descendants dedup guard
+            // (§5.5 round-5/6): the just-submitted child's own run id, the
+            // same field this rollback path already holds for its cancel
+            // call above — never a newly-invented token (round-6 correction).
+            let idempotency_key = self
+                .submitted_child_run
+                .as_ref()
+                .map(|(_, _, run_id)| *run_id)
+                .unwrap_or(*tree_root);
             let _ = deps
                 .turn_state_store
-                .release_tree_descendants(scope, *tree_root, 1)
+                .release_tree_descendants(scope, *tree_root, 1, idempotency_key)
                 .await;
         }
         if let Some((scope, thread_id)) = self.thread_written.as_ref() {
@@ -918,6 +923,19 @@ impl SubagentSpawnCapabilityPort {
             child_scope.project_id.clone(),
             child_thread.thread_id.clone(),
         );
+        // Lazy-recovery admission gate (§5.3): refuse to open a new edge onto
+        // a scope whose boot/lazy recovery is still in flight — retryable,
+        // handled like `ThreadBusy` by callers.
+        self.deps
+            .await_edge_writer
+            .check_scope_recovered(&child_turn_scope)
+            .await
+            .map_err(|error| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Unavailable,
+                    format!("subagent spawn scope recovery in progress: {error}"),
+                )
+            })?;
         self.deps
             .goal_store
             .put_goal(
@@ -932,7 +950,7 @@ impl SubagentSpawnCapabilityPort {
         compensation.goal_written = Some((child_turn_scope.clone(), child_run_id));
 
         self.deps
-            .gate_store
+            .await_edge_writer
             .record_awaited_child(AwaitedChildSetRecord {
                 gate_ref: gate_ref.clone(),
                 parent_run_context: self.run_context.clone(),
@@ -951,7 +969,7 @@ impl SubagentSpawnCapabilityPort {
                 mode,
             })
             .await?;
-        compensation.gate_written = Some(gate_ref.clone());
+        compensation.edge_written = Some((child_turn_scope.clone(), child_run_id));
 
         let accepted = self
             .deps
@@ -1309,29 +1327,40 @@ impl SpawnSubagentInputCodec for JsonSpawnSubagentInputCodec {
     }
 }
 
+/// Lightweight in-memory [`crate::AwaitEdgeWriter`] test fixture — no
+/// filesystem/CAS/roster semantics. For `loop_support`'s own unit tests that
+/// just need a legal writer, not a durability test; production and any test
+/// that exercises real await-edge behavior use `ironclaw_reborn`'s
+/// `FilesystemAwaitEdgeStore`.
 #[derive(Default)]
-pub struct InMemorySubagentGateResolutionStore {
-    inner: parking_lot::Mutex<HashMap<GateRef, AwaitedChildSetRecord>>,
+pub struct InMemoryAwaitEdgeWriter {
+    inner: parking_lot::Mutex<HashMap<(TurnRunId, TurnRunId), AwaitedChildSetRecord>>,
 }
 
-impl InMemorySubagentGateResolutionStore {
+impl InMemoryAwaitEdgeWriter {
     pub fn records(&self) -> Vec<AwaitedChildSetRecord> {
         self.inner.lock().values().cloned().collect()
     }
 }
 
 #[async_trait]
-impl SubagentGateResolutionStore for InMemorySubagentGateResolutionStore {
+impl crate::AwaitEdgeWriter for InMemoryAwaitEdgeWriter {
     async fn record_awaited_child(
         &self,
         record: AwaitedChildSetRecord,
     ) -> Result<(), AgentLoopHostError> {
-        self.inner.lock().insert(record.gate_ref.clone(), record);
+        let key = (record.parent_run_context.run_id, record.child_run_id);
+        self.inner.lock().insert(key, record);
         Ok(())
     }
 
-    async fn delete_awaited_child(&self, gate_ref: &GateRef) -> Result<(), AgentLoopHostError> {
-        self.inner.lock().remove(gate_ref);
+    async fn abandon_awaited_child(
+        &self,
+        _child_scope: &TurnScope,
+        parent_run_id: TurnRunId,
+        child_run_id: TurnRunId,
+    ) -> Result<(), AgentLoopHostError> {
+        self.inner.lock().remove(&(parent_run_id, child_run_id));
         Ok(())
     }
 }

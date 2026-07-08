@@ -517,7 +517,7 @@ async fn children_of_get_run_record_and_tree_reservation_are_scope_checked() {
     ));
     assert!(matches!(
         store
-            .release_tree_descendants(&child_scope, child_a_id, 1)
+            .release_tree_descendants(&child_scope, child_a_id, 1, child_a_id)
             .await,
         Err(TurnError::InvalidRequest { .. })
     ));
@@ -538,7 +538,7 @@ async fn children_of_get_run_record_and_tree_reservation_are_scope_checked() {
         Err(TurnError::CapacityExceeded { .. })
     ));
     store
-        .release_tree_descendants(&scope("thread-parent"), parent, 1)
+        .release_tree_descendants(&scope("thread-parent"), parent, 1, parent)
         .await
         .unwrap();
     assert_eq!(
@@ -4104,7 +4104,7 @@ async fn terminal_root_release_does_not_duplicate_pruning_queue() {
         .unwrap();
     complete_queued_run(&store, parent_run_id, "thread-tree-root-release").await;
     store
-        .release_tree_descendants(&parent_scope, parent_run_id, 1)
+        .release_tree_descendants(&parent_scope, parent_run_id, 1, parent_run_id)
         .await
         .unwrap();
 
@@ -4169,7 +4169,7 @@ async fn releasing_old_reserved_terminal_root_keeps_newer_terminal_record() {
     );
 
     store
-        .release_tree_descendants(&parent_scope, parent_run_id, 1)
+        .release_tree_descendants(&parent_scope, parent_run_id, 1, parent_run_id)
         .await
         .unwrap();
 
@@ -6721,7 +6721,7 @@ async fn release_tree_descendants_rejects_over_release() {
         .unwrap();
 
     let err = store
-        .release_tree_descendants(&owner_scope, root, 3)
+        .release_tree_descendants(&owner_scope, root, 3, root)
         .await
         .unwrap_err();
     match err {
@@ -6730,6 +6730,77 @@ async fn release_tree_descendants_rejects_over_release() {
         }
         other => panic!("expected InvalidRequest, got {other:?}"),
     }
+}
+
+/// §5.5 round-5/6: a retried `release_tree_descendants` call for the same
+/// child (`idempotency_key`) must be a no-op, not a second decrement — this
+/// is what makes recovery re-driving an edge stuck at
+/// `ReservationReleaseState::Claimed`, or a rollback retry, safe to repeat.
+/// Deleting the dedup check would silently over-release capacity: this test
+/// pins that a repeated call for the *same* child does not free capacity
+/// twice, while a *different* child's release still counts normally.
+#[tokio::test]
+async fn release_tree_descendants_dedups_repeated_call_for_same_child() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+
+    let root = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-tree-root-dedup",
+                "idem-tree-root-dedup",
+            ))
+            .await
+            .unwrap(),
+    );
+    let owner_scope = scope("thread-tree-root-dedup");
+    let child_a = TurnRunId::new();
+    let child_b = TurnRunId::new();
+
+    // Reserve 2 descendant slots against a cap with no spare headroom (cap
+    // == the reservation), so a double-release is the only way a later
+    // 2-slot reserve could succeed.
+    store
+        .reserve_tree_descendants(&owner_scope, root, 2, 2)
+        .await
+        .unwrap();
+
+    // Release child_a's slot, then retry the *exact same* release call
+    // (simulating recovery re-driving a `Claimed`-stuck edge). The retry
+    // must not free a second slot.
+    store
+        .release_tree_descendants(&owner_scope, root, 1, child_a)
+        .await
+        .unwrap();
+    store
+        .release_tree_descendants(&owner_scope, root, 1, child_a)
+        .await
+        .unwrap();
+
+    // Only 1 slot was actually freed (child_a's) — 1 remains occupied, so
+    // reserving 2 more against the same cap=2 must be rejected. If the
+    // retry had double-released instead, 0 would remain occupied and this
+    // would incorrectly succeed.
+    let over_cap = store
+        .reserve_tree_descendants(&owner_scope, root, 2, 2)
+        .await;
+    assert!(
+        matches!(over_cap, Err(TurnError::CapacityExceeded { .. })),
+        "expected the retried release to be a no-op leaving 1 slot still occupied, got {over_cap:?}"
+    );
+
+    // A *different* child's release still counts normally, confirming the
+    // dedup is keyed per-child, not a blanket no-op — freeing child_b's slot
+    // too now allows a fresh 2-slot reservation against the same cap.
+    store
+        .release_tree_descendants(&owner_scope, root, 1, child_b)
+        .await
+        .unwrap();
+    let after_second_child = store
+        .reserve_tree_descendants(&owner_scope, root, 2, 2)
+        .await
+        .unwrap();
+    assert_eq!(after_second_child.descendant_count, 2);
 }
 
 #[tokio::test]

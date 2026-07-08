@@ -3919,6 +3919,7 @@ dependencies = [
  "hyper-util",
  "iana-time-zone",
  "insta",
+ "ironclaw_agent_loop",
  "ironclaw_approvals",
  "ironclaw_attachments",
  "ironclaw_auth",
@@ -4834,6 +4835,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "blake3",
  "chrono",
  "futures-util",
  "ironclaw_agent_loop",
