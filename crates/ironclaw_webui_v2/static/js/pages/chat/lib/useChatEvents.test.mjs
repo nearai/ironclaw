@@ -272,6 +272,50 @@ test("useChatEvents: final_reply replaces matching streamed projection bubble", 
   assert.equal(harness.isProcessing, false);
 });
 
+test("useChatEvents: stale projection text does not duplicate finalized same-run reply", () => {
+  const harness = createUseChatEventsHarness();
+  harness.replaceMessages([
+    {
+      id: "msg-user-1",
+      role: "user",
+      content: "search first",
+      turnRunId: "run-1",
+    },
+    {
+      id: "tool-web-search",
+      role: "tool_activity",
+      toolName: "web_search",
+      turnRunId: "run-1",
+    },
+    {
+      id: "msg-assistant-1",
+      role: "assistant",
+      content: "final answer",
+      isFinalReply: true,
+      turnRunId: "run-1",
+    },
+  ]);
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { text: { id: "text:run-1", body: "stale final answer" } },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 3);
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => message.id),
+    ["msg-user-1", "tool-web-search", "msg-assistant-1"],
+  );
+  assert.equal(harness.messages[2].content, "final answer");
+  assert.equal(harness.messages[2].isFinalReply, true);
+});
+
 test("useChatEvents: skill activation projection stays out of chat transcript", () => {
   const harness = createUseChatEventsHarness();
 

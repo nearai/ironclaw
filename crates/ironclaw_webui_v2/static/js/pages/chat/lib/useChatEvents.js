@@ -506,6 +506,12 @@ function applyProjectionItems({
       const messageId = `text-${item.text.id}`;
       const textRunId = projectionTextRunId(item.text.id);
       setMessages((prev) => {
+        if (
+          textRunId &&
+          prev.some((m) => isFinalAssistantForRun(m, textRunId))
+        ) {
+          return prev;
+        }
         const timelineMessageId = item.text.id ? `msg-${item.text.id}` : null;
         const existing = prev.findIndex(
           (m) => m.id === messageId || (timelineMessageId && m.id === timelineMessageId),
@@ -722,6 +728,14 @@ function projectionTextRunId(id) {
   if (typeof id !== "string") return null;
   const prefix = "text:";
   return id.startsWith(prefix) ? id.slice(prefix.length) || null : null;
+}
+
+function isFinalAssistantForRun(message, runId) {
+  return (
+    message?.role === "assistant" &&
+    message?.isFinalReply === true &&
+    message?.turnRunId === runId
+  );
 }
 
 function upsertToolFromActivity(setMessages, invocationId, card) {
