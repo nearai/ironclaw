@@ -1,5 +1,8 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    future::Future,
+    hash::Hash,
+    pin::Pin,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -15,6 +18,7 @@ use ironclaw_host_api::{
     CapabilityId, EffectKind, Principal, ResourceScope,
     runtime_policy::{ApprovalPolicy, EffectiveRuntimePolicy, RuntimeProfile},
 };
+use tokio::sync::Notify;
 
 use crate::local_dev_capability_policy::LocalDevCapabilityPolicy;
 use crate::{
@@ -56,6 +60,9 @@ pub(crate) struct StoreApprovalSettingsProvider {
     override_cache:
         Mutex<ApprovalSettingsScopeCache<HashMap<CapabilityId, ToolPermissionOverride>>>,
     always_allow_cache: Mutex<ApprovalSettingsScopeCache<HashSet<AlwaysAllowPolicyCacheKey>>>,
+    auto_approve_inflight: Mutex<HashMap<AutoApproveSettingsCacheKey, Arc<Notify>>>,
+    override_inflight: Mutex<HashMap<ApprovalSettingsScopeCacheKey, Arc<Notify>>>,
+    always_allow_inflight: Mutex<HashMap<ApprovalSettingsScopeCacheKey, Arc<Notify>>>,
 }
 
 impl StoreApprovalSettingsProvider {
@@ -71,6 +78,9 @@ impl StoreApprovalSettingsProvider {
             auto_approve_cache: Mutex::new(AutoApproveSettingsCache::default()),
             override_cache: Mutex::new(ApprovalSettingsScopeCache::default()),
             always_allow_cache: Mutex::new(ApprovalSettingsScopeCache::default()),
+            auto_approve_inflight: Mutex::new(HashMap::new()),
+            override_inflight: Mutex::new(HashMap::new()),
+            always_allow_inflight: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -115,6 +125,46 @@ impl ApprovalSettingsScopeCacheKey {
 struct AlwaysAllowPolicyCacheKey {
     capability_id: CapabilityId,
     grantee: Principal,
+}
+
+enum InflightSettingsLoad<K> {
+    Leader { key: K, notify: Arc<Notify> },
+    Follower(Pin<Box<dyn Future<Output = ()> + Send + 'static>>),
+}
+
+fn begin_inflight_settings_load<K>(
+    inflight: &Mutex<HashMap<K, Arc<Notify>>>,
+    key: &K,
+) -> InflightSettingsLoad<K>
+where
+    K: Clone + Eq + Hash,
+{
+    let mut inflight = inflight
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(notify) = inflight.get(key) {
+        return InflightSettingsLoad::Follower(Box::pin(notify.clone().notified_owned()));
+    }
+    let notify = Arc::new(Notify::new());
+    inflight.insert(key.clone(), notify.clone());
+    InflightSettingsLoad::Leader {
+        key: key.clone(),
+        notify,
+    }
+}
+
+fn finish_inflight_settings_load<K>(
+    inflight: &Mutex<HashMap<K, Arc<Notify>>>,
+    key: &K,
+    notify: Arc<Notify>,
+) where
+    K: Eq + Hash,
+{
+    inflight
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(key);
+    notify.notify_waiters();
 }
 
 #[derive(Default)]
@@ -253,40 +303,59 @@ impl ApprovalSettingsProvider for StoreApprovalSettingsProvider {
         let operator_scope = operator_tool_permission_scope(scope);
         if self.overrides.supports_scope_listing() {
             let cache_key = ApprovalSettingsScopeCacheKey::from_scope(&operator_scope);
-            if let Some(overrides) = self
-                .override_cache
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .get(&cache_key)
-            {
-                return overrides.get(capability_id).copied();
-            }
-
-            let started_at = ironclaw_observability::live_latency_started_at();
-            match self.overrides.list_for_scope(&operator_scope).await {
-                Ok(records) => {
-                    trace_approval_settings_latency_ok(
-                        "tool_override_scope",
-                        scope,
-                        None,
-                        started_at,
-                    );
-                    let overrides = records
-                        .into_iter()
-                        .map(|record| (record.key.capability_id, record.state))
-                        .collect::<HashMap<_, _>>();
-                    let result = overrides.get(capability_id).copied();
-                    self.override_cache
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .insert(cache_key, overrides);
-                    return result;
+            loop {
+                if let Some(overrides) = self
+                    .override_cache
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .get(&cache_key)
+                {
+                    return overrides.get(capability_id).copied();
                 }
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        "tool permission override scope lookup failed; falling back to exact lookup"
-                    );
+                match begin_inflight_settings_load(&self.override_inflight, &cache_key) {
+                    InflightSettingsLoad::Follower(wait_for_leader) => {
+                        wait_for_leader.await;
+                    }
+                    InflightSettingsLoad::Leader { key, notify } => {
+                        let started_at = ironclaw_observability::live_latency_started_at();
+                        match self.overrides.list_for_scope(&operator_scope).await {
+                            Ok(records) => {
+                                trace_approval_settings_latency_ok(
+                                    "tool_override_scope",
+                                    scope,
+                                    None,
+                                    started_at,
+                                );
+                                let overrides = records
+                                    .into_iter()
+                                    .map(|record| (record.key.capability_id, record.state))
+                                    .collect::<HashMap<_, _>>();
+                                let result = overrides.get(capability_id).copied();
+                                self.override_cache
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    .insert(key.clone(), overrides);
+                                finish_inflight_settings_load(
+                                    &self.override_inflight,
+                                    &key,
+                                    notify,
+                                );
+                                return result;
+                            }
+                            Err(error) => {
+                                finish_inflight_settings_load(
+                                    &self.override_inflight,
+                                    &key,
+                                    notify,
+                                );
+                                tracing::warn!(
+                                    %error,
+                                    "tool permission override scope lookup failed; falling back to exact lookup"
+                                );
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -309,29 +378,44 @@ impl ApprovalSettingsProvider for StoreApprovalSettingsProvider {
         let key = AutoApproveSettingsCacheKey {
             setting: AutoApproveSettingKey::from_resource_scope(scope),
         };
-        if let Some(enabled) = self
-            .auto_approve_cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(&key)
-        {
-            return enabled;
-        }
-        let started_at = ironclaw_observability::live_latency_started_at();
-        let enabled = match self.auto_approve.is_enabled(scope).await {
-            Ok(enabled) => enabled,
-            Err(error) => {
-                // silent-ok: fail-safe to "ask" by disabling global auto-approve; logged for observability.
-                tracing::warn!(%error, "auto-approve setting lookup failed; defaulting to off");
-                false
+        loop {
+            if let Some(enabled) = self
+                .auto_approve_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(&key)
+            {
+                return enabled;
             }
-        };
-        trace_approval_settings_latency_ok("global_auto_approve", scope, None, started_at);
-        self.auto_approve_cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(key, enabled);
-        enabled
+            match begin_inflight_settings_load(&self.auto_approve_inflight, &key) {
+                InflightSettingsLoad::Follower(wait_for_leader) => {
+                    wait_for_leader.await;
+                }
+                InflightSettingsLoad::Leader { key, notify } => {
+                    let started_at = ironclaw_observability::live_latency_started_at();
+                    let enabled = match self.auto_approve.is_enabled(scope).await {
+                        Ok(enabled) => enabled,
+                        Err(error) => {
+                            // silent-ok: fail-safe to "ask" by disabling global auto-approve; logged for observability.
+                            tracing::warn!(%error, "auto-approve setting lookup failed; defaulting to off");
+                            false
+                        }
+                    };
+                    trace_approval_settings_latency_ok(
+                        "global_auto_approve",
+                        scope,
+                        None,
+                        started_at,
+                    );
+                    self.auto_approve_cache
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .insert(key.clone(), enabled);
+                    finish_inflight_settings_load(&self.auto_approve_inflight, &key, notify);
+                    return enabled;
+                }
+            }
+        }
     }
 
     async fn tool_always_allow(
@@ -347,48 +431,70 @@ impl ApprovalSettingsProvider for StoreApprovalSettingsProvider {
                 capability_id: capability_id.clone(),
                 grantee: grantee.clone(),
             };
-            if let Some(policies) = self
-                .always_allow_cache
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .get(&cache_key)
-            {
-                return policies.contains(&policy_key);
-            }
-
-            let started_at = ironclaw_observability::live_latency_started_at();
-            match self
-                .persistent_policies
-                .list_for_scope_action(&operator_scope, PersistentApprovalAction::Dispatch)
-                .await
-            {
-                Ok(records) => {
-                    trace_approval_settings_latency_ok(
-                        "tool_always_allow_scope",
-                        scope,
-                        None,
-                        started_at,
-                    );
-                    let policies = records
-                        .into_iter()
-                        .filter(|policy| policy.active_grant().is_some())
-                        .map(|policy| AlwaysAllowPolicyCacheKey {
-                            capability_id: policy.key.capability_id,
-                            grantee: policy.key.grantee,
-                        })
-                        .collect::<HashSet<_>>();
-                    let result = policies.contains(&policy_key);
-                    self.always_allow_cache
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .insert(cache_key, policies);
-                    return result;
+            loop {
+                if let Some(policies) = self
+                    .always_allow_cache
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .get(&cache_key)
+                {
+                    return policies.contains(&policy_key);
                 }
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        "persistent approval policy scope lookup failed; falling back to exact lookup"
-                    );
+                match begin_inflight_settings_load(&self.always_allow_inflight, &cache_key) {
+                    InflightSettingsLoad::Follower(wait_for_leader) => {
+                        wait_for_leader.await;
+                    }
+                    InflightSettingsLoad::Leader { key, notify } => {
+                        let started_at = ironclaw_observability::live_latency_started_at();
+                        match self
+                            .persistent_policies
+                            .list_for_scope_action(
+                                &operator_scope,
+                                PersistentApprovalAction::Dispatch,
+                            )
+                            .await
+                        {
+                            Ok(records) => {
+                                trace_approval_settings_latency_ok(
+                                    "tool_always_allow_scope",
+                                    scope,
+                                    None,
+                                    started_at,
+                                );
+                                let policies = records
+                                    .into_iter()
+                                    .filter(|policy| policy.active_grant().is_some())
+                                    .map(|policy| AlwaysAllowPolicyCacheKey {
+                                        capability_id: policy.key.capability_id,
+                                        grantee: policy.key.grantee,
+                                    })
+                                    .collect::<HashSet<_>>();
+                                let result = policies.contains(&policy_key);
+                                self.always_allow_cache
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    .insert(key.clone(), policies);
+                                finish_inflight_settings_load(
+                                    &self.always_allow_inflight,
+                                    &key,
+                                    notify,
+                                );
+                                return result;
+                            }
+                            Err(error) => {
+                                finish_inflight_settings_load(
+                                    &self.always_allow_inflight,
+                                    &key,
+                                    notify,
+                                );
+                                tracing::warn!(
+                                    %error,
+                                    "persistent approval policy scope lookup failed; falling back to exact lookup"
+                                );
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -492,6 +598,7 @@ mod tests {
     struct CountingAutoApproveSettingStore {
         enabled: bool,
         gets: AtomicUsize,
+        delay: Duration,
     }
 
     impl CountingAutoApproveSettingStore {
@@ -499,6 +606,15 @@ mod tests {
             Self {
                 enabled: true,
                 gets: AtomicUsize::new(0),
+                delay: Duration::ZERO,
+            }
+        }
+
+        fn enabled_with_delay(delay: Duration) -> Self {
+            Self {
+                enabled: true,
+                gets: AtomicUsize::new(0),
+                delay,
             }
         }
 
@@ -529,6 +645,9 @@ mod tests {
             key: &AutoApproveSettingKey,
         ) -> Result<Option<AutoApproveSettingRecord>, CapabilityPermissionStoreError> {
             self.gets.fetch_add(1, Ordering::SeqCst);
+            if !self.delay.is_zero() {
+                tokio::time::sleep(self.delay).await;
+            }
             let now: Timestamp = chrono::Utc::now();
             Ok(Some(AutoApproveSettingRecord {
                 key: key.clone(),
@@ -959,6 +1078,44 @@ mod tests {
             auto_approve.get_count(),
             2,
             "after the short cache ttl, the provider should reread so settings changes apply without restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_dev_authorizer_coalesces_concurrent_global_auto_approve_misses() {
+        let user_id = UserId::new("test-user").expect("user id");
+        let auto_approve = Arc::new(CountingAutoApproveSettingStore::enabled_with_delay(
+            Duration::from_millis(25),
+        ));
+        let settings = Arc::new(StoreApprovalSettingsProvider::new(
+            Arc::new(InMemoryToolPermissionOverrideStore::new()),
+            auto_approve.clone(),
+            Arc::new(ironclaw_approvals::InMemoryPersistentApprovalPolicyStore::new()),
+        ));
+        let policy = Arc::new(local_dev_capability_policy().expect("capability policy"));
+        let authorizer = local_dev_authorizer(None, policy, settings);
+
+        let mut handles = Vec::new();
+        for _ in 0..32 {
+            let authorizer = authorizer.clone();
+            let user_id = user_id.clone();
+            handles.push(tokio::spawn(async move {
+                local_dev_shell_decision_with_authorizer(authorizer.as_ref(), &user_id).await
+            }));
+        }
+
+        for handle in handles {
+            let decision = handle.await.expect("authorization task should finish");
+            assert!(
+                matches!(decision, ironclaw_host_api::Decision::Allow { .. }),
+                "global auto-approve should allow the gated shell capability, got {decision:?}"
+            );
+        }
+
+        assert_eq!(
+            auto_approve.get_count(),
+            1,
+            "concurrent cold misses for one operator scope should share one durable settings read"
         );
     }
 

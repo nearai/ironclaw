@@ -544,20 +544,21 @@ where
         &self,
         request: &GetRunStateRequest,
     ) -> Result<Option<TurnRunState>, TurnError> {
-        let (snapshot, _) = self
-            .read_snapshot_with_runner_lease_overlay(RunnerLeaseOverlay::Run(request.run_id))
-            .await?;
-        let Some(run) = projection::run_record(&snapshot, &request.scope, request.run_id) else {
-            return Ok(None);
+        let (run, turn) = {
+            let mut guard = self.snapshot_state.lock().await;
+            if guard.is_none() {
+                *guard = Some(self.load_snapshot_from_rows().await?);
+            }
+            let Some(state) = guard.as_ref() else {
+                return Ok(None);
+            };
+            let Some(run) = state.run_record(&request.scope, request.run_id) else {
+                return Ok(None);
+            };
+            let turn = state.turn_record_for_run(&request.scope, &run)?;
+            (run, turn)
         };
-        let turn = snapshot
-            .turns
-            .iter()
-            .find(|record| record.turn_id == run.turn_id && record.scope == request.scope)
-            .cloned()
-            .ok_or_else(|| TurnError::Unavailable {
-                reason: "turn run references missing cached turn row".to_string(),
-            })?;
+        let run = self.runner_lease_store().overlay_run_record(run).await?;
         Ok(Some(projection::run_state_from_record(run, turn.actor)))
     }
 
