@@ -27,7 +27,7 @@ use ironclaw_product_workflow::{
     CodexLoginStart, FsMount, LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot,
     LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
     NearAiWalletLoginRequest, NearAiWalletLoginResult, ProductWorkflowError, ProjectFsFile,
-    ProjectionCursor, RebornAddMemberRequest, RebornAttachmentRequest,
+    ProjectionCursor, RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentRequest,
     RebornAutomationMutationResponse, RebornCancelRunResponse,
     RebornConnectableChannelListResponse, RebornCreateProjectRequest, RebornCreateThreadResponse,
     RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
@@ -1084,6 +1084,19 @@ pub async fn trace_credits(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornTraceCreditsResponse>, WebUiV2HttpError> {
     let response = state.services().trace_credits(caller).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/traces/account`
+///
+/// Read-only list of the authenticated caller's submitted Trace Commons traces,
+/// fetched per-user from the server. Scope is derived from the caller; no input
+/// is accepted. Unenrolled callers receive the zero-state, not an error.
+pub async fn trace_account_traces(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornAccountTracesResponse>, WebUiV2HttpError> {
+    let response = state.services().trace_account_traces(caller).await?;
     Ok(Json(response))
 }
 

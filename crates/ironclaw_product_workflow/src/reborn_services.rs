@@ -77,7 +77,10 @@ mod trace_credits;
 mod types;
 
 pub use error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
-pub use trace_credits::{RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse};
+pub use trace_credits::{
+    RebornAccountTrace, RebornAccountTracesResponse, RebornTraceCreditsResponse,
+    RebornTraceHoldAuthorizeResponse,
+};
 
 pub use fs_browse::{
     FilesystemBrowseReader, FsMount, RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo,
@@ -2029,6 +2032,27 @@ pub trait RebornServicesApi: Send + Sync {
         // not a misleading zero/not-enrolled view (carry the cause for the
         // server-side trail per error-handling.md).
         trace_credits::local_trace_credits_for_user(&scope)
+            .map_err(RebornServicesError::internal_from)
+    }
+
+    /// Read-only list of the authenticated caller's submitted Trace Commons
+    /// traces, fetched directly from the server (not a local view).
+    ///
+    /// The scope is always derived from the authenticated caller's tenant +
+    /// user id — never from request input. A user who is not enrolled gets the
+    /// unenrolled zero-state (`{ enrolled: false, traces: [] }`), never an
+    /// error. Transport failures surface as an internal error.
+    ///
+    /// The default body is the production implementation using the crate-local
+    /// hardened reqwest path (no host-egress sink), so impls (including test
+    /// fakes) only override this when they need a non-standard fetch path.
+    async fn trace_account_traces(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornAccountTracesResponse, RebornServicesError> {
+        let actor = caller.actor();
+        trace_credits::account_traces_for_user(&caller.tenant_id, &actor.user_id)
+            .await
             .map_err(RebornServicesError::internal_from)
     }
 

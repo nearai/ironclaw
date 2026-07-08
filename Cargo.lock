@@ -5130,6 +5130,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "ironclaw_common",
+ "ironclaw_host_api",
  "ironclaw_llm",
  "ironclaw_safety",
  "jsonwebtoken",
