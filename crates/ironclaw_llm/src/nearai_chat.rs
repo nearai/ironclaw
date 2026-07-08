@@ -26,6 +26,7 @@ use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, FinishReason,
     LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
 };
+use crate::tool_args::parse_tool_call_args;
 
 #[path = "nearai_tool_message_flattening.rs"]
 mod nearai_tool_message_flattening;
@@ -558,6 +559,7 @@ impl NearAiChatProvider {
             .map(|chunk| chunk.map_err(|e| e.to_string()))
             .eventsource();
         let mut parsed = NearAiStreamingResponse::default();
+        let mut stream_completed = false;
         let mut tool_calls: HashMap<usize, NearAiStreamingToolCallState> = HashMap::new();
 
         while let Some(event) = stream.next().await {
@@ -570,6 +572,7 @@ impl NearAiChatProvider {
                 continue;
             }
             if data == "[DONE]" {
+                stream_completed = true;
                 break;
             }
             let chunk: ChatCompletionStreamChunk =
@@ -591,6 +594,7 @@ impl NearAiChatProvider {
             }
             for choice in chunk.choices {
                 if let Some(reason) = choice.finish_reason.as_deref() {
+                    stream_completed = true;
                     parsed.finish_reason = map_finish_reason(reason);
                 }
                 if let Some(delta) = choice.delta.content.filter(|s| !s.is_empty()) {
@@ -622,12 +626,22 @@ impl NearAiChatProvider {
             }
         }
 
+        if !stream_completed {
+            return Err(LlmError::InvalidResponse {
+                provider: "nearai_chat".to_string(),
+                reason: "stream ended before terminal completion marker".to_string(),
+            });
+        }
+
         let mut ordered_tool_calls = tool_calls.into_iter().collect::<Vec<_>>();
         ordered_tool_calls.sort_by_key(|(index, _)| *index);
-        parsed.tool_calls = ordered_tool_calls
-            .into_iter()
-            .filter_map(|(_, state)| state.into_tool_call())
-            .collect();
+        let mut parsed_tool_calls = Vec::new();
+        for (_, state) in ordered_tool_calls {
+            if let Some(tool_call) = state.into_tool_call()? {
+                parsed_tool_calls.push(tool_call);
+            }
+        }
+        parsed.tool_calls = parsed_tool_calls;
         Ok(parsed)
     }
 
@@ -1551,20 +1565,26 @@ struct NearAiStreamingToolCallState {
 }
 
 impl NearAiStreamingToolCallState {
-    fn into_tool_call(self) -> Option<ToolCall> {
+    fn into_tool_call(self) -> Result<Option<ToolCall>, LlmError> {
         if self.id.is_empty() && self.name.is_empty() && self.arguments.is_empty() {
-            return None;
+            return Ok(None);
         }
-        let arguments = serde_json::from_str(&self.arguments)
-            .unwrap_or(serde_json::Value::Object(Default::default()));
-        Some(ToolCall {
+        let arguments = if self.arguments.trim().is_empty() {
+            serde_json::Value::Object(Default::default())
+        } else {
+            parse_tool_call_args(&self.arguments).map_err(|error| LlmError::InvalidResponse {
+                provider: "nearai_chat".to_string(),
+                reason: error.reason,
+            })?
+        };
+        Ok(Some(ToolCall {
             id: self.id,
             name: self.name,
             arguments,
             reasoning: None,
             signature: None,
             arguments_parse_error: None,
-        })
+        }))
     }
 }
 
@@ -1834,6 +1854,36 @@ mod tests {
         }
     }
 
+    fn search_tool_definition() -> crate::provider::ToolDefinition {
+        crate::provider::ToolDefinition {
+            name: "search".to_string(),
+            description: "Search".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" }
+                },
+                "required": ["query"]
+            }),
+        }
+    }
+
+    async fn complete_search_tool_streaming(
+        provider: NearAiChatProvider,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        let (delta_tx, _delta_rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink = Arc::new(RecordingCompletionStreamSink { sender: delta_tx });
+        provider
+            .complete_with_tools_streaming(
+                ToolCompletionRequest::new(
+                    vec![ChatMessage::user("search")],
+                    vec![search_tool_definition()],
+                ),
+                sink,
+            )
+            .await
+    }
+
     #[tokio::test]
     async fn complete_streaming_emits_delta_before_response_completes() {
         use tokio::io::AsyncWriteExt;
@@ -1928,6 +1978,104 @@ data: [DONE]
         assert_eq!(response.finish_reason, FinishReason::Stop);
         assert_eq!(response.input_tokens, 3);
         assert_eq!(response.output_tokens, 2);
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_streaming_rejects_truncated_tool_call_stream() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server_task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let (headers, body) = read_http_request_body(&mut socket).await;
+            assert!(headers.starts_with("POST /v1/chat/completions "));
+            let request_json: serde_json::Value =
+                serde_json::from_str(&body).expect("request json");
+            assert_eq!(request_json["stream"], true);
+
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .expect("write sse headers");
+            socket
+                .write_all(
+                    br#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_search","type":"function","function":{"name":"search","arguments":"{\"query\":"}}]},"finish_reason":null}]}
+
+"#,
+                )
+                .await
+                .expect("write partial tool call chunk");
+        });
+
+        let provider = NearAiChatProvider::new(test_nearai_config(&base_url), test_session())
+            .expect("provider");
+        let result = complete_search_tool_streaming(provider).await;
+
+        server_task.await.expect("server task");
+        match result {
+            Err(LlmError::InvalidResponse { provider, reason }) => {
+                assert_eq!(provider, "nearai_chat");
+                assert!(
+                    reason.contains("terminal completion marker"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            other => panic!("expected invalid truncated stream, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_streaming_rejects_malformed_tool_arguments_after_done() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server_task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let (headers, body) = read_http_request_body(&mut socket).await;
+            assert!(headers.starts_with("POST /v1/chat/completions "));
+            let request_json: serde_json::Value =
+                serde_json::from_str(&body).expect("request json");
+            assert_eq!(request_json["stream"], true);
+
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .expect("write sse headers");
+            socket
+                .write_all(
+                    br#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_search","type":"function","function":{"name":"search","arguments":"{\"query\":"}}]},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+
+"#,
+                )
+                .await
+                .expect("write malformed tool call stream");
+        });
+
+        let provider = NearAiChatProvider::new(test_nearai_config(&base_url), test_session())
+            .expect("provider");
+        let result = complete_search_tool_streaming(provider).await;
+
+        server_task.await.expect("server task");
+        match result {
+            Err(LlmError::InvalidResponse { provider, reason }) => {
+                assert_eq!(provider, "nearai_chat");
+                assert!(
+                    reason.starts_with("failed to parse tool-call arguments JSON: "),
+                    "unexpected reason: {reason}"
+                );
+            }
+            other => panic!("expected invalid malformed tool arguments, got {other:?}"),
+        }
     }
 
     #[test]

@@ -496,7 +496,7 @@ function applyProjectionItems({
     }
 
     if (item.text) {
-      // ProductProjectionItem::Text { id, body } — the body is the
+      // ProductProjectionItem::Text { id, run_id, body } — the body is the
       // assistant-visible reply text accumulated through projection.
       // Dedup by item id and by the matching durable timeline message id so a
       // late projection cannot duplicate a reply already rendered from
@@ -504,7 +504,7 @@ function applyProjectionItems({
       // projection snapshot as a still-blocked gate; run_status remains the source of
       // truth for clearing pendingGate/processing.
       const messageId = `text-${item.text.id}`;
-      const textRunId = projectionTextRunId(item.text.id);
+      const textRunId = item.text.run_id || null;
       setMessages((prev) => {
         if (
           textRunId &&
@@ -722,12 +722,6 @@ function clearLocallyResolvedRun(locallyResolvedGatesRef, runId) {
 function isLocallyResolvedGate(locallyResolvedGatesRef, runId, gateRef) {
   if (!runId || !gateRef) return false;
   return Boolean(locallyResolvedGatesRef?.current?.has(`${runId}\n${gateRef}`));
-}
-
-function projectionTextRunId(id) {
-  if (typeof id !== "string") return null;
-  const prefix = "text:";
-  return id.startsWith(prefix) ? id.slice(prefix.length) || null : null;
 }
 
 function isFinalAssistantForRun(message, runId) {

@@ -681,7 +681,7 @@ mod tests {
             events.contains("isFinalReply: false"),
             "live projection text must remain in-flight until final reply/timeline finalizes it"
         );
-        assert!(events.contains("function projectionTextRunId"));
+        assert!(events.contains("const textRunId = item.text.run_id || null;"));
     }
 
     #[test]

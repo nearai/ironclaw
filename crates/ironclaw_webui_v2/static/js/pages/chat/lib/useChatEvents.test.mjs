@@ -182,7 +182,7 @@ test("useChatEvents: projection text streams into one assistant bubble without e
       state: {
         items: [
           { run_status: { run_id: "run-1", status: "running" } },
-          { text: { id: "text:run-1", body: "partial" } },
+          { text: { id: "text:run-1", run_id: "run-1", body: "partial" } },
         ],
       },
     },
@@ -209,7 +209,7 @@ test("useChatEvents: projection text streams into one assistant bubble without e
     type: "projection_update",
     frame: {
       state: {
-        items: [{ text: { id: "text:run-1", body: "partial answer" } }],
+        items: [{ text: { id: "text:run-1", run_id: "run-1", body: "partial answer" } }],
       },
     },
   });
@@ -243,7 +243,7 @@ test("useChatEvents: final_reply replaces matching streamed projection bubble", 
       state: {
         items: [
           { run_status: { run_id: "run-1", status: "running" } },
-          { text: { id: "text:run-1", body: "part" } },
+          { text: { id: "text:run-1", run_id: "run-1", body: "part" } },
         ],
       },
     },
@@ -301,7 +301,7 @@ test("useChatEvents: stale projection text does not duplicate finalized same-run
     frame: {
       state: {
         items: [
-          { text: { id: "text:run-1", body: "stale final answer" } },
+          { text: { id: "text:run-1", run_id: "run-1", body: "stale final answer" } },
         ],
       },
     },
@@ -345,7 +345,7 @@ test("useChatEvents: replayed text before activity keeps finalized reply after a
     frame: {
       state: {
         items: [
-          { text: { id: "text:run-1", body: "stale final answer" } },
+          { text: { id: "text:run-1", run_id: "run-1", body: "stale final answer" } },
           {
             capability_activity: {
               invocation_id: "invocation-1",
@@ -409,7 +409,7 @@ test("useChatEvents: replayed activity before text keeps finalized reply after a
               updated_at: "2026-07-08T13:00:00Z",
             },
           },
-          { text: { id: "text:run-1", body: "stale final answer" } },
+          { text: { id: "text:run-1", run_id: "run-1", body: "stale final answer" } },
         ],
       },
     },
@@ -452,7 +452,7 @@ test("useChatEvents: text replay before a later activity frame keeps tools befor
     type: "projection_update",
     frame: {
       state: {
-        items: [{ text: { id: "text:run-1", body: "pre-tool text" } }],
+        items: [{ text: { id: "text:run-1", run_id: "run-1", body: "pre-tool text" } }],
       },
     },
   });
@@ -524,7 +524,7 @@ test("useChatEvents: text replay after activity does not move finalized reply on
     type: "projection_update",
     frame: {
       state: {
-        items: [{ text: { id: "text:run-1", body: "post-tool text" } }],
+        items: [{ text: { id: "text:run-1", run_id: "run-1", body: "post-tool text" } }],
       },
     },
   });

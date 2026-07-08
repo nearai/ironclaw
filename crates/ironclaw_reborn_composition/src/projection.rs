@@ -402,8 +402,14 @@ impl WebuiRuntimeProjectionStream {
         let mut cursor = origin_cursor;
         let is_resuming_runtime_payloads = cursor.runtime_payloads_delivered > 0;
         let mut turn_wakes = self.turn_event_wake_source.subscribe();
-        let Some(first) = subscription.next().await else {
-            return;
+        let first = tokio::select! {
+            _ = sender.closed() => return,
+            item = subscription.next() => {
+                let Some(item) = item else {
+                    return;
+                };
+                item
+            }
         };
         let mut batch = WebuiProjectionBatch::new(cursor.clone());
         let buffered = if is_resuming_runtime_payloads {
@@ -455,6 +461,9 @@ impl WebuiRuntimeProjectionStream {
 
         loop {
             tokio::select! {
+                _ = sender.closed() => {
+                    return;
+                }
                 item = subscription.next() => {
                     let Some(item) = item else {
                         return;

@@ -3742,7 +3742,14 @@ impl RebornServicesApi for RebornServices {
         let actor_for_revalidation = actor;
         let (sender, receiver) = mpsc::channel(128);
         tokio::spawn(async move {
-            while let Some(next) = subscription.next().await {
+            loop {
+                let next = tokio::select! {
+                    _ = sender.closed() => return,
+                    next = subscription.next() => next,
+                };
+                let Some(next) = next else {
+                    return;
+                };
                 let envelope = match next {
                     Ok(envelope) => envelope,
                     Err(error) => {
@@ -3750,6 +3757,9 @@ impl RebornServicesApi for RebornServices {
                         return;
                     }
                 };
+                if sender.is_closed() {
+                    return;
+                }
                 let revalidate = service
                     .resolve_thread_access_for_caller(
                         caller_for_revalidation.clone(),
@@ -3759,6 +3769,9 @@ impl RebornServicesApi for RebornServices {
                     .await;
                 if let Err(error) = revalidate {
                     let _ = sender.send(Err(error)).await;
+                    return;
+                }
+                if sender.is_closed() {
                     return;
                 }
                 if sender.send(Ok(envelope)).await.is_err() {

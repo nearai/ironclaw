@@ -173,6 +173,7 @@ pub struct ThreadLiveProjectionUpdate {
 pub enum ThreadLiveProjectionItem {
     Text {
         id: String,
+        run_id: TurnRunId,
         body: String,
     },
     Thinking {

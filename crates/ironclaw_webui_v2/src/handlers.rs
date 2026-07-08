@@ -691,9 +691,9 @@ fn sse_poll_interval_for_idle_polls(idle_polls: u32) -> Duration {
 /// `Last-Event-ID`, which bounds drift and recycles slots even under
 /// long-running tab leaks.
 ///
-/// Until the facade gains a true subscription API, the handler drains and
-/// polls in a loop. Drain-only semantics are documented on
-/// [`RebornServicesApi::stream_events`].
+/// When the facade supports subscriptions, the handler forwards that live
+/// stream directly. Older compositions fall back to drain/poll semantics,
+/// documented on [`RebornServicesApi::stream_events`].
 ///
 /// [`WebChatV2EventFrame`]: crate::schema::WebChatV2EventFrame
 /// [`RebornServicesApi::stream_events`]: ironclaw_product_workflow::RebornServicesApi::stream_events

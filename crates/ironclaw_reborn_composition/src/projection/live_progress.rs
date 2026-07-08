@@ -200,10 +200,13 @@ pub(super) fn product_items_for_live_update(
         .items
         .iter()
         .filter_map(|item| match item {
-            ThreadLiveProjectionItem::Text { id, body } => Some(ProductProjectionItem::Text {
-                id: id.clone(),
-                body: body.clone(),
-            }),
+            ThreadLiveProjectionItem::Text { id, run_id, body } => {
+                Some(ProductProjectionItem::Text {
+                    id: id.clone(),
+                    run_id: Some(*run_id),
+                    body: body.clone(),
+                })
+            }
             ThreadLiveProjectionItem::Thinking { id, run_id, body } => {
                 Some(ProductProjectionItem::Thinking {
                     id: id.clone(),
@@ -304,6 +307,7 @@ impl LiveProgressMilestoneSink {
             sequence,
             ThreadLiveProjectionItem::Text {
                 id: text_id(milestone.run_id),
+                run_id: milestone.run_id,
                 body,
             },
         );

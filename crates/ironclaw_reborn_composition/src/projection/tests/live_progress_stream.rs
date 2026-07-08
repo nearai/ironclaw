@@ -139,7 +139,11 @@ async fn webui_event_stream_drains_live_assistant_text_projection_from_update_so
                 if state.thread_id == thread_id.to_string() =>
             {
                 state.items.iter().find_map(|item| match item {
-                    ProductProjectionItem::Text { id, body } if id == &expected_id => {
+                    ProductProjectionItem::Text {
+                        id,
+                        run_id: observed_run_id,
+                        body,
+                    } if id == &expected_id && *observed_run_id == Some(run_id) => {
                         Some(body.clone())
                     }
                     _ => None,
