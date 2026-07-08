@@ -853,11 +853,21 @@ impl ActivationCandidateCacheKey {
 
 impl ActivationCandidate {
     fn into_context_candidate(self) -> HostSkillContextCandidate {
+        // Disclosure follows provenance, not the tool-trust tier: system, user,
+        // and admin-installed tenant-shared skills are all trusted authorship,
+        // so their bodies may instruct the model. Tenant-shared keeps its
+        // attenuated `Installed` trust for tool access (see
+        // `FilesystemSkillBundleRoot::tenant_shared`); only disclosure differs.
+        let content_disclosable = matches!(
+            self.descriptor.id().source_kind(),
+            SkillSourceKind::System | SkillSourceKind::User | SkillSourceKind::TenantShared
+        );
         HostSkillContextCandidate::loaded(
             self.skill_md,
             self.descriptor.trust().cloned(),
             self.descriptor.visibility().copied(),
         )
+        .with_content_disclosable(content_disclosable)
         .with_ordering_key(descriptor_context_ordering_key(&self.descriptor))
     }
 }

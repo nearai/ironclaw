@@ -559,6 +559,8 @@ registerPack("ja", {
   "skills.urlPlaceholder": "https://example.com/SKILL.md",
   "skills.content": "SKILL.md コンテンツ",
   "skills.contentHint": "ローカルまたはコピーしたスキル コンテンツをインポートする場合は、URL の代わりにこれを使用します。",
+  "skills.shareWithAllUsers": "すべてのユーザーと共有",
+  "skills.shareWithAllUsersHint": "管理者が管理する共有スキルとしてインストールされます（名前に shared- プレフィックスが付きます）。全ユーザーに表示され、読み取り専用です。",
   "skills.contentPlaceholder": "---\\n名前: 例\\n説明: ...\\n---\\n",
   "skills.install": "インポート",
   "skills.installing": "インポート中...",
@@ -1152,6 +1154,7 @@ registerPack("ja", {
   "skills.edit": "編集",
   "skills.group.system": "システムスキル",
   "skills.group.user": "あなたのスキル",
+  "skills.group.tenantShared": "共有スキル",
   "skills.group.workspace": "ワークスペーススキル",
   "skills.loading": "読み込み中...",
   "skills.save": "保存",
@@ -1160,6 +1163,7 @@ registerPack("ja", {
   "skills.source.system": "システム",
   "skills.source.user": "ユーザー",
   "skills.source.workspace": "ワークスペース",
+  "skills.source.tenant_shared": "共有",
   "skills.updateFailed": "更新に失敗しました。",
   "skills.updated": "スキル \"{name}\" を更新しました"
 });

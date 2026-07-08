@@ -184,6 +184,7 @@ impl RebornServicesApi for RecordingServices {
         _caller: WebUiAuthenticatedCaller,
         _name: String,
         _content: Option<String>,
+        _shared: bool,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
         unreachable!("not exercised by this test")
     }

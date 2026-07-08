@@ -1126,6 +1126,8 @@ pub enum RebornSkillSourceKind {
     Installed,
     Workspace,
     System,
+    /// Admin-installed, visible read-only to every user in the tenant.
+    TenantShared,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

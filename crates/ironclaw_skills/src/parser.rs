@@ -97,6 +97,42 @@ pub fn set_skill_auto_activate(content: &str, auto_activate: bool) -> String {
     out
 }
 
+/// Return `content` with the top-level `name:` frontmatter value replaced by
+/// `new_name`, normalizing line endings to LF like [`set_skill_auto_activate`].
+/// Only a plain top-level `name:` key is rewritten; callers must re-parse the
+/// result and verify the manifest name actually changed (exotic YAML shapes —
+/// quoted, folded, or aliased values — are left untouched and surface as a
+/// mismatch at that verification).
+pub fn set_skill_frontmatter_name(content: &str, new_name: &str) -> String {
+    let new_line = format!("name: {new_name}");
+    let mut out = String::with_capacity(content.len() + new_line.len() + 2);
+    let mut seen_open = false;
+    let mut in_frontmatter = false;
+    let mut wrote_name = false;
+    for line in content.lines() {
+        if line.trim() == "---" {
+            if !seen_open {
+                seen_open = true;
+                in_frontmatter = true;
+            } else if in_frontmatter {
+                in_frontmatter = false;
+            }
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        if in_frontmatter && !wrote_name && line.starts_with("name:") {
+            out.push_str(&new_line);
+            out.push('\n');
+            wrote_name = true;
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 pub(crate) fn starts_with_frontmatter_delimiter(content: &str) -> bool {
     let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
     let stripped = normalized.strip_prefix('\u{feff}').unwrap_or(&normalized);
@@ -507,6 +543,26 @@ metadata:
             on.matches("auto_activate:").count(),
             1,
             "flag replaced, not duplicated"
+        );
+    }
+
+    #[test]
+    fn set_skill_frontmatter_name_rewrites_only_the_frontmatter_key() {
+        let content = "---\nname: my-skill\ndescription: about my-skill\n---\n# my-skill\n\nname: my-skill in the body stays.\n";
+        let renamed = set_skill_frontmatter_name(content, "shared-my-skill");
+        let parsed = parse_skill_md(&renamed).expect("re-parses after rename");
+        assert_eq!(parsed.manifest.name, "shared-my-skill");
+        // Body and other frontmatter fields are untouched.
+        assert!(
+            parsed
+                .prompt_content
+                .contains("name: my-skill in the body stays.")
+        );
+        assert!(renamed.contains("description: about my-skill"));
+        assert_eq!(
+            renamed.matches("name: shared-my-skill").count(),
+            1,
+            "exactly one rewritten frontmatter name line"
         );
     }
 }

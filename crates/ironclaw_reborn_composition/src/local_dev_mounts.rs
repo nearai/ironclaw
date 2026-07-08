@@ -67,8 +67,8 @@ pub(crate) fn scoped_skill_context_mount_view(
             MountPermissions::read_only(),
         )?,
         grant(
-            "/tenant-shared/skills",
-            "/projects/tenant-shared/skills",
+            TENANT_SHARED_SKILLS_ALIAS,
+            TENANT_SHARED_SKILLS_TARGET,
             MountPermissions::read_only(),
         )?,
         grant(
@@ -79,12 +79,25 @@ pub(crate) fn scoped_skill_context_mount_view(
     ])
 }
 
+/// Physical target backing the tenant-shared skill tier. Matches the
+/// activation-side grant in [`scoped_skill_context_mount_view`] and the
+/// storage-root isolation validation in `factory.rs` — keep the three aligned.
+const TENANT_SHARED_SKILLS_ALIAS: &str = "/tenant-shared/skills";
+const TENANT_SHARED_SKILLS_TARGET: &str = "/projects/tenant-shared/skills";
+
 pub(crate) fn skill_management_mount_view() -> Result<MountView, HostApiError> {
     MountView::new(vec![
         grant(
             "/skills",
             "/projects/skills",
             MountPermissions::read_write_list_delete(),
+        )?,
+        // Read-only by design: the loop's builtin.skill_* capabilities can
+        // list/read tenant-shared skills but never write or remove them.
+        grant(
+            TENANT_SHARED_SKILLS_ALIAS,
+            TENANT_SHARED_SKILLS_TARGET,
+            MountPermissions::read_only(),
         )?,
         grant(
             "/system/skills",
@@ -97,6 +110,26 @@ pub(crate) fn skill_management_mount_view() -> Result<MountView, HostApiError> {
 pub(crate) fn scoped_skill_management_mount_view(
     scope: &ResourceScope,
 ) -> Result<MountView, HostApiError> {
+    scoped_skill_management_mount_view_with_shared_permissions(scope, MountPermissions::read_only())
+}
+
+/// Admin (`operator_webui_config`) variant of
+/// [`scoped_skill_management_mount_view`]: identical except the tenant-shared
+/// tier is writable, so only admin-derived contexts can install/update/remove
+/// `shared-*` skills.
+pub(crate) fn scoped_skill_management_admin_mount_view(
+    scope: &ResourceScope,
+) -> Result<MountView, HostApiError> {
+    scoped_skill_management_mount_view_with_shared_permissions(
+        scope,
+        MountPermissions::read_write_list_delete(),
+    )
+}
+
+fn scoped_skill_management_mount_view_with_shared_permissions(
+    scope: &ResourceScope,
+    tenant_shared_permissions: MountPermissions,
+) -> Result<MountView, HostApiError> {
     MountView::new(vec![
         grant(
             "/skills",
@@ -106,6 +139,11 @@ pub(crate) fn scoped_skill_management_mount_view(
                 scope.user_id.as_str()
             ),
             MountPermissions::read_write_list_delete(),
+        )?,
+        grant(
+            TENANT_SHARED_SKILLS_ALIAS,
+            TENANT_SHARED_SKILLS_TARGET,
+            tenant_shared_permissions,
         )?,
         grant(
             "/system/skills",

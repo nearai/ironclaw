@@ -213,6 +213,7 @@ impl RebornServicesApi for RecordingServices {
         _caller: WebUiAuthenticatedCaller,
         _name: String,
         _content: Option<String>,
+        _shared: bool,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }

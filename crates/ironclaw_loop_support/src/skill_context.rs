@@ -55,6 +55,15 @@ pub struct HostSkillContextCandidate {
     pub trust: Option<SkillTrust>,
     /// Host-approved model visibility. `None` fails the build closed.
     pub visibility: Option<SkillVisibility>,
+    /// Whether the skill body may be disclosed to the model, independent of the
+    /// tool-attenuation trust tier. Trusted-authorship provenance (system, user,
+    /// and admin-installed tenant-shared skills) is disclosable; untrusted
+    /// registry content is not. Defaults to `trust == Trusted` in the
+    /// constructors; sources with disclosable-but-attenuated provenance
+    /// (tenant-shared) opt in via [`with_content_disclosable`].
+    ///
+    /// [`with_content_disclosable`]: HostSkillContextCandidate::with_content_disclosable
+    pub content_disclosable: bool,
     /// Optional deterministic ordering key. Defaults to parsed skill name.
     pub ordering_key: Option<String>,
 }
@@ -67,6 +76,7 @@ impl HostSkillContextCandidate {
     ) -> Self {
         Self {
             payload: HostSkillContextCandidatePayload::LoadedSkillMd(skill_md.into()),
+            content_disclosable: default_content_disclosable(trust),
             trust,
             visibility,
             ordering_key: None,
@@ -76,6 +86,7 @@ impl HostSkillContextCandidate {
     pub fn unavailable(trust: Option<SkillTrust>, visibility: Option<SkillVisibility>) -> Self {
         Self {
             payload: HostSkillContextCandidatePayload::Unavailable,
+            content_disclosable: default_content_disclosable(trust),
             trust,
             visibility,
             ordering_key: None,
@@ -93,10 +104,20 @@ impl HostSkillContextCandidate {
                 name: name.into(),
                 safe_description: safe_description.into(),
             },
+            content_disclosable: default_content_disclosable(trust),
             trust,
             visibility,
             ordering_key: None,
         }
+    }
+
+    /// Override whether the skill body may be disclosed to the model,
+    /// independent of the tool-attenuation trust tier. Used by sources whose
+    /// content is admin-vetted (disclosable) but still runs with attenuated
+    /// tools (`Installed` trust) — e.g. tenant-shared skills.
+    pub fn with_content_disclosable(mut self, content_disclosable: bool) -> Self {
+        self.content_disclosable = content_disclosable;
+        self
     }
 
     pub fn with_ordering_key(mut self, ordering_key: impl Into<String>) -> Self {
@@ -205,6 +226,7 @@ pub fn build_skill_run_snapshot(
         let visibility = candidate
             .visibility
             .ok_or(HostSkillContextBuildError::VisibilityDataMissing)?;
+        let content_disclosable = candidate.content_disclosable;
         if visibility != SkillVisibility::Visible {
             continue;
         }
@@ -216,6 +238,7 @@ pub fn build_skill_run_snapshot(
                     parsed,
                     trust,
                     visibility,
+                    content_disclosable,
                     candidate.ordering_key,
                 ));
             }
@@ -240,17 +263,31 @@ pub fn build_skill_run_snapshot(
     Ok(SkillRunSnapshot::from_entries(entries))
 }
 
+/// Default disclosability when a source does not set it explicitly: trusted
+/// authorship (`SkillTrust::Trusted`) is disclosable, everything else is not.
+/// Sources whose content is admin-vetted but tool-attenuated (tenant-shared)
+/// opt in via [`HostSkillContextCandidate::with_content_disclosable`].
+pub(crate) fn default_content_disclosable(trust: Option<SkillTrust>) -> bool {
+    matches!(trust, Some(SkillTrust::Trusted))
+}
+
 fn parsed_skill_to_snapshot_entry(
     parsed: ParsedSkill,
     trust: SkillTrust,
     visibility: SkillVisibility,
+    content_disclosable: bool,
     ordering_key: Option<String>,
 ) -> InstalledSkillSnapshot {
     let name = parsed.manifest.name;
     let trust = skill_trust_level(trust);
-    let prompt_content = match trust {
-        SkillTrustLevel::Installed => None,
-        SkillTrustLevel::Trusted => Some(parsed.prompt_content),
+    // Disclosure is decoupled from the tool-trust tier: an admin-vetted
+    // tenant-shared skill is `Installed` trust (attenuated tools) yet
+    // content-disclosable, so its body still reaches the model. Untrusted
+    // content stays description-only.
+    let prompt_content = if content_disclosable {
+        Some(parsed.prompt_content)
+    } else {
+        None
     };
     InstalledSkillSnapshot {
         ordering_key: ordering_key.unwrap_or_else(|| name.clone()),
@@ -258,6 +295,7 @@ fn parsed_skill_to_snapshot_entry(
         trust,
         visibility,
         activation_state: SkillActivationState::Loaded,
+        content_disclosable,
         prompt_content,
         safe_description: parsed.manifest.description,
     }
@@ -276,6 +314,8 @@ fn discoverable_skill_to_snapshot_entry(
         trust: skill_trust_level(trust),
         visibility,
         activation_state: SkillActivationState::Discoverable,
+        // Discoverable entries never carry a body regardless of disclosability.
+        content_disclosable: false,
         prompt_content: None,
         safe_description,
     }

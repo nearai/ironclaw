@@ -5,17 +5,25 @@
 //!
 //! # Trust and Visibility Model
 //!
-//! Every installed skill in a run has three dimensions that gate what the model sees:
+//! Every installed skill in a run has four dimensions that gate what the model sees:
 //!
-//! - **Trust level** ([`SkillTrustLevel`]): determines how much content the model receives.
-//!   `Trusted` skills may include prompt content after activation; `Installed` skills expose
-//!   only a safe description.
+//! - **Trust level** ([`SkillTrustLevel`]): governs the *tool-attenuation* ceiling
+//!   (`Trusted` skills run with full tools, `Installed` skills with read-only/attenuated
+//!   tools). It does *not* by itself decide body disclosure — see the disclosure axis.
+//!
+//! - **Content disclosure** ([`InstalledSkillSnapshot::content_disclosable`]): governs
+//!   whether the skill *body* reaches the model, decoupled from the tool tier. Trusted
+//!   authorship (system/user skills and admin-installed tenant-shared skills) is
+//!   disclosable; untrusted registry content exposes only a safe description. This lets an
+//!   admin-vetted tenant-shared skill instruct the model while keeping `Installed`
+//!   (attenuated) tool trust. `Trusted`-tier skills are always disclosable, which is also
+//!   the back-compatible default for snapshots serialized before this axis existed.
 //!
 //! - **Visibility** ([`SkillVisibility`]): determines whether the model sees the skill at all.
 //!   `Visible` skills appear in the context; `Hidden` and `Denied` skills are omitted entirely
 //!   so the model has no knowledge of their existence.
 //!
-//! - **Activation state** ([`SkillActivationState`]): determines whether a visible trusted
+//! - **Activation state** ([`SkillActivationState`]): determines whether a visible, disclosable
 //!   skill is only discoverable metadata or loaded prompt context.
 //!
 //! # Fail-closed semantics
@@ -212,8 +220,16 @@ pub struct InstalledSkillSnapshot {
     /// Activation state — determines whether prompt content may be disclosed.
     #[serde(default = "default_skill_activation_state")]
     pub activation_state: SkillActivationState,
+    /// Whether the skill body may be disclosed to the model. Decoupled from
+    /// [`trust`](Self::trust) (which governs tool attenuation) so that
+    /// admin-vetted content — e.g. tenant-shared skills installed by an
+    /// operator — can instruct the model while still running with the
+    /// attenuated (`Installed`) tool ceiling. Defaults to `false`
+    /// (fail-closed) for snapshots serialized before this axis existed.
+    #[serde(default)]
+    pub content_disclosable: bool,
     /// Full prompt content. Only included in model context when
-    /// `trust == Trusted`, `visibility == Visible`, and
+    /// `content_disclosable`, `visibility == Visible`, and
     /// `activation_state == Loaded`.
     pub prompt_content: Option<String>,
     /// Sanitized description safe for model consumption.
@@ -584,7 +600,15 @@ fn canonicalize_skill_entry(entry: &mut InstalledSkillSnapshot) {
 }
 
 fn can_disclose_prompt_content(entry: &InstalledSkillSnapshot) -> bool {
-    entry.trust == SkillTrustLevel::Trusted
+    // Disclosure is decoupled from the tool-attenuation tier: `trust` governs
+    // the tool ceiling, while disclosure governs whether the skill body reaches
+    // the model. A body is disclosed when either the entry is explicitly marked
+    // `content_disclosable` (admin-vetted tenant-shared content, which keeps its
+    // attenuated `Installed` tool trust) OR it carries the `Trusted` authorship
+    // tier. The `Trusted` clause preserves the historical contract and is also
+    // the back-compatible default for snapshots serialized before the
+    // `content_disclosable` axis existed (which deserialize it as `false`).
+    (entry.content_disclosable || entry.trust == SkillTrustLevel::Trusted)
         && entry.visibility == SkillVisibility::Visible
         && entry.activation_state == SkillActivationState::Loaded
 }
@@ -734,6 +758,7 @@ fn compute_snapshot_version(sorted_entries: &[InstalledSkillSnapshot]) -> String
             },
         );
         feed_digest_field(&mut digest, entry.activation_state.as_str().as_bytes());
+        digest.update([u8::from(entry.content_disclosable)]);
         match entry.prompt_content {
             Some(ref content) => {
                 digest.update([1]);
@@ -808,6 +833,7 @@ mod tests {
             trust: SkillTrustLevel::Trusted,
             visibility: SkillVisibility::Visible,
             activation_state: SkillActivationState::Loaded,
+            content_disclosable: true,
             prompt_content: Some("prompt".to_string()),
             safe_description: "description".to_string(),
             ordering_key: "alpha".to_string(),
@@ -827,5 +853,60 @@ mod tests {
         assert!(contains_internal_handle_marker("uses CAP_file_read"));
         assert!(contains_internal_handle_marker("uses Secret://oauth"));
         assert!(!contains_internal_handle_marker("capacity planning"));
+    }
+
+    fn loaded_entry(trust: SkillTrustLevel, content_disclosable: bool) -> InstalledSkillSnapshot {
+        InstalledSkillSnapshot {
+            name: "shared-critters".to_string(),
+            trust,
+            visibility: SkillVisibility::Visible,
+            activation_state: SkillActivationState::Loaded,
+            content_disclosable,
+            prompt_content: Some("write a haiku about the critter".to_string()),
+            safe_description: "Use when the user mentions worms, ants, or flies".to_string(),
+            ordering_key: "shared-critters".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn installed_trust_skill_discloses_body_when_content_disclosable() {
+        // Regression: an admin-vetted tenant-shared skill is `Installed` trust
+        // (attenuated tools) yet must still instruct the model. Disclosure is
+        // gated on `content_disclosable`, not on `trust == Trusted`.
+        let entry = loaded_entry(SkillTrustLevel::Installed, true);
+        let snapshot = SkillRunSnapshot::from_entries(vec![entry]);
+        let service = SkillContextService::new(snapshot);
+        let snippets = service.skill_snippets_from_held().await.unwrap();
+        assert_eq!(snippets.len(), 1);
+        assert!(
+            snippets[0]
+                .model_content
+                .contains("write a haiku about the critter"),
+            "installed+disclosable skill must inject its body, got: {:?}",
+            snippets[0].model_content
+        );
+    }
+
+    #[tokio::test]
+    async fn installed_trust_skill_withholds_body_when_not_disclosable() {
+        // The untrusted case: an `Installed` skill that is not disclosable must
+        // expose only its safe description, never its body (defense in depth).
+        let entry = loaded_entry(SkillTrustLevel::Installed, false);
+        let snapshot = SkillRunSnapshot::from_entries(vec![entry]);
+        let service = SkillContextService::new(snapshot);
+        let snippets = service.skill_snippets_from_held().await.unwrap();
+        assert_eq!(snippets.len(), 1);
+        assert!(
+            !snippets[0]
+                .model_content
+                .contains("write a haiku about the critter"),
+            "non-disclosable skill must withhold its body, got: {:?}",
+            snippets[0].model_content
+        );
+        assert!(
+            snippets[0]
+                .model_content
+                .contains("Use when the user mentions")
+        );
     }
 }

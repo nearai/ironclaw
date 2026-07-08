@@ -13,8 +13,9 @@ use crate::{
 
 use super::{
     SKILL_FILE_NAME, SkillInstallSource, SkillManagementContext, SkillManagementError,
-    SkillManagementErrorKind, SkillSource, USER_SKILLS_ROOT, filesystem_error,
-    log_skill_filesystem_phase, scoped_sibling, skill_root_scoped_path, skill_scoped_path,
+    SkillManagementErrorKind, SkillSource, TENANT_SHARED_SKILLS_ROOT, USER_SKILLS_ROOT,
+    filesystem_error, log_skill_filesystem_phase, scoped_sibling, skill_root_scoped_path,
+    skill_scoped_path,
 };
 
 pub const MAX_INSTALL_BUNDLE_FILES: usize = 256;
@@ -29,20 +30,21 @@ pub struct SkillInstallFile<'a> {
 
 pub(super) async fn publish_skill_install(
     context: &SkillManagementContext,
+    root: &str,
     skill_name: &str,
     normalized_content: &str,
     files: &[SkillInstallFile<'_>],
     source: SkillInstallSource,
     source_url: Option<&str>,
 ) -> Result<(), SkillManagementError> {
-    let skill_dir = skill_root_scoped_path(USER_SKILLS_ROOT, skill_name)?;
-    let skill_path = skill_scoped_path(USER_SKILLS_ROOT, skill_name, SKILL_FILE_NAME)?;
+    let skill_dir = skill_root_scoped_path(root, skill_name)?;
+    let skill_path = skill_scoped_path(root, skill_name, SKILL_FILE_NAME)?;
 
     let result = async {
         create_dir_all(context, skill_name, "create_dir_all", &skill_dir).await?;
         for file in files {
             let relative_path = normalize_install_relative_path(file.relative_path)?;
-            let file_path = skill_bundle_file_scoped_path(skill_name, &relative_path)?;
+            let file_path = skill_bundle_file_scoped_path(root, skill_name, &relative_path)?;
             if let Some(parent) = scoped_parent(&file_path)? {
                 create_dir_all(context, skill_name, "create_bundle_parent", &parent).await?;
             }
@@ -58,7 +60,7 @@ pub(super) async fn publish_skill_install(
         }
         if source == SkillInstallSource::InstalledUrl {
             let metadata_path =
-                skill_bundle_file_scoped_path(skill_name, INSTALL_METADATA_FILE_NAME)?;
+                skill_bundle_file_scoped_path(root, skill_name, INSTALL_METADATA_FILE_NAME)?;
             let metadata = install_metadata_bytes(source_url)?;
             log_skill_filesystem_phase("write_install_metadata", skill_name, &metadata_path);
             context
@@ -96,13 +98,14 @@ pub(super) async fn publish_skill_install(
 
 pub(super) async fn existing_skill_install_matches(
     context: &SkillManagementContext,
+    root: &str,
     skill_name: &str,
     normalized_content: &str,
     files: &[SkillInstallFile<'_>],
     source: SkillInstallSource,
     source_url: Option<&str>,
 ) -> Result<bool, SkillManagementError> {
-    let skill_dir = skill_root_scoped_path(USER_SKILLS_ROOT, skill_name)?;
+    let skill_dir = skill_root_scoped_path(root, skill_name)?;
     let expected_files = expected_install_files(normalized_content, files, source, source_url)?;
     existing_files_match_expected(context, &skill_dir, expected_files).await
 }
@@ -287,12 +290,13 @@ fn install_metadata_bytes(source_url: Option<&str>) -> Result<Vec<u8>, SkillMana
 }
 
 fn skill_bundle_file_scoped_path(
+    root: &str,
     skill_name: &str,
     relative_path: &str,
 ) -> Result<ScopedPath, SkillManagementError> {
     ScopedPath::new(format!(
         "{}/{}/{}",
-        USER_SKILLS_ROOT.trim_end_matches('/'),
+        root.trim_end_matches('/'),
         skill_name,
         relative_path
     ))
@@ -331,7 +335,7 @@ fn scoped_parent(path: &ScopedPath) -> Result<Option<ScopedPath>, SkillManagemen
     let Some((parent, _)) = path.as_str().rsplit_once('/') else {
         return Ok(None);
     };
-    if parent.is_empty() || parent == USER_SKILLS_ROOT {
+    if parent.is_empty() || parent == USER_SKILLS_ROOT || parent == TENANT_SHARED_SKILLS_ROOT {
         return Ok(None);
     }
     ScopedPath::new(parent.to_string())

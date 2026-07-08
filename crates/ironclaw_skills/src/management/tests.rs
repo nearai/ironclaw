@@ -41,6 +41,7 @@ async fn install_list_and_remove_user_skills_through_scoped_mounts() {
             files: &[],
             source: SkillInstallSource::User,
             source_url: None,
+            target: SkillInstallTarget::UserPrivate,
         },
     )
     .await
@@ -89,6 +90,7 @@ async fn install_rejects_name_mismatch() {
             files: &[],
             source: SkillInstallSource::User,
             source_url: None,
+            target: SkillInstallTarget::UserPrivate,
         },
     )
     .await
@@ -110,6 +112,7 @@ async fn install_accepts_named_plain_markdown_content() {
             files: &[],
             source: SkillInstallSource::User,
             source_url: None,
+            target: SkillInstallTarget::UserPrivate,
         },
     )
     .await
@@ -140,6 +143,7 @@ async fn install_matching_existing_skill_is_idempotent() {
         files: &[],
         source: SkillInstallSource::User,
         source_url: None,
+        target: SkillInstallTarget::UserPrivate,
     };
 
     let first = install_skill(&context, request).await.unwrap();
@@ -165,6 +169,7 @@ async fn install_rejects_existing_skill_with_different_content() {
             files: &[],
             source: SkillInstallSource::User,
             source_url: None,
+            target: SkillInstallTarget::UserPrivate,
         },
     )
     .await
@@ -177,6 +182,7 @@ async fn install_rejects_existing_skill_with_different_content() {
             files: &[],
             source: SkillInstallSource::User,
             source_url: None,
+            target: SkillInstallTarget::UserPrivate,
         },
     )
     .await
@@ -195,6 +201,7 @@ async fn install_rejects_existing_skill_with_extra_files() {
         files: &[],
         source: SkillInstallSource::User,
         source_url: None,
+        target: SkillInstallTarget::UserPrivate,
     };
 
     install_skill(&context, request).await.unwrap();
@@ -228,6 +235,7 @@ async fn install_rejects_malformed_frontmatter_even_with_requested_name() {
             files: &[],
             source: SkillInstallSource::User,
             source_url: None,
+            target: SkillInstallTarget::UserPrivate,
         },
     )
     .await
@@ -257,6 +265,7 @@ async fn install_rejects_plain_markdown_when_synthesized_content_exceeds_prompt_
             files: &[],
             source: SkillInstallSource::User,
             source_url: None,
+            target: SkillInstallTarget::UserPrivate,
         },
     )
     .await
@@ -283,6 +292,7 @@ async fn install_preserves_parse_error_context() {
             files: &[],
             source: SkillInstallSource::User,
             source_url: None,
+            target: SkillInstallTarget::UserPrivate,
         },
     )
     .await
@@ -337,6 +347,7 @@ async fn install_rejects_invalid_bundle_files() {
                 }],
                 source: SkillInstallSource::User,
                 source_url: None,
+                target: SkillInstallTarget::UserPrivate,
             },
         )
         .await
@@ -359,6 +370,7 @@ async fn install_rejects_invalid_bundle_files() {
             }],
             source: SkillInstallSource::User,
             source_url: None,
+            target: SkillInstallTarget::UserPrivate,
         },
     )
     .await
@@ -385,6 +397,7 @@ async fn install_rejects_invalid_bundle_files() {
             files: &files,
             source: SkillInstallSource::User,
             source_url: None,
+            target: SkillInstallTarget::UserPrivate,
         },
     )
     .await
@@ -419,6 +432,7 @@ async fn install_bundle_failure_cleans_up_partial_directory() {
             ],
             source: SkillInstallSource::User,
             source_url: None,
+            target: SkillInstallTarget::UserPrivate,
         },
     )
     .await
@@ -456,6 +470,7 @@ async fn install_rejects_preexisting_skill_directory_without_deleting_contents()
             }],
             source: SkillInstallSource::User,
             source_url: None,
+            target: SkillInstallTarget::UserPrivate,
         },
     )
     .await
@@ -480,7 +495,7 @@ async fn install_rejects_preexisting_skill_directory_without_deleting_contents()
 async fn install_serializes_concurrent_same_name_requests() {
     let filesystem = Arc::new(InMemoryBackend::default());
     let context = skill_management_context(filesystem.clone(), skill_mounts());
-    let content = skill_md("shared-helper", "description", "PROMPT");
+    let content = skill_md("parallel-helper", "description", "PROMPT");
 
     let first = install_skill(
         &context,
@@ -490,6 +505,7 @@ async fn install_serializes_concurrent_same_name_requests() {
             files: &[],
             source: SkillInstallSource::User,
             source_url: None,
+            target: SkillInstallTarget::UserPrivate,
         },
     );
     let second = install_skill(
@@ -500,6 +516,7 @@ async fn install_serializes_concurrent_same_name_requests() {
             files: &[],
             source: SkillInstallSource::User,
             source_url: None,
+            target: SkillInstallTarget::UserPrivate,
         },
     );
     let (first, second) = tokio::join!(first, second);
@@ -508,7 +525,7 @@ async fn install_serializes_concurrent_same_name_requests() {
     assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 2);
     assert_file_contents(
         &filesystem,
-        "/projects/skills/shared-helper/SKILL.md",
+        "/projects/skills/parallel-helper/SKILL.md",
         content.as_bytes(),
     )
     .await;
@@ -535,6 +552,7 @@ async fn install_metadata_write_failure_cleans_up_partial_directory() {
             }],
             source: SkillInstallSource::InstalledUrl,
             source_url: Some("https://example.test/SKILL.md"),
+            target: SkillInstallTarget::UserPrivate,
         },
     )
     .await
@@ -576,6 +594,7 @@ async fn install_cleanup_failure_is_reported() {
             ],
             source: SkillInstallSource::User,
             source_url: None,
+            target: SkillInstallTarget::UserPrivate,
         },
     )
     .await
@@ -776,6 +795,362 @@ async fn search_skills_stops_after_entry_scan_budget() {
 
     assert_eq!(result.skills.len(), super::SKILL_SEARCH_ENTRY_SCAN_LIMIT);
     assert!(result.truncated);
+}
+
+#[tokio::test]
+async fn tenant_shared_install_auto_prefixes_and_lists_from_shared_root() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    let context = skill_management_context(filesystem.clone(), skill_mounts());
+
+    let installed = install_skill(
+        &context,
+        SkillInstallRequest {
+            name: Some("market-brief"),
+            content: &skill_md("market-brief", "shared market brief", "SHARED_PROMPT"),
+            files: &[],
+            source: SkillInstallSource::User,
+            source_url: None,
+            target: SkillInstallTarget::TenantShared,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(installed.name, "shared-market-brief");
+    assert_eq!(
+        installed.scoped_path,
+        "/tenant-shared/skills/shared-market-brief/SKILL.md"
+    );
+    assert_eq!(installed.source, SkillSource::TenantShared);
+
+    // The frontmatter name was rewritten to match the prefixed directory name,
+    // so the stored document re-parses with the name it is addressed by.
+    let stored = read_file(
+        filesystem.as_ref(),
+        "/projects/tenant-shared/skills/shared-market-brief/SKILL.md",
+    )
+    .await;
+    assert!(
+        stored.contains("name: shared-market-brief"),
+        "frontmatter name must be rewritten, got: {stored}"
+    );
+
+    let listed = list_skills(&context).await.unwrap();
+    assert!(listed.iter().any(|skill| {
+        skill.name == "shared-market-brief" && skill.source == SkillSource::TenantShared
+    }));
+
+    // Search enumerates the shared root too.
+    let found = search_skills(
+        &context,
+        SkillSearchRequest {
+            query: "market",
+            limit: 10,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(found.skills.iter().any(|skill| {
+        skill.name == "shared-market-brief" && skill.source == SkillSource::TenantShared
+    }));
+}
+
+#[tokio::test]
+async fn tenant_shared_install_keeps_existing_prefix() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    let context = skill_management_context(filesystem, skill_mounts());
+
+    let installed = install_skill(
+        &context,
+        SkillInstallRequest {
+            name: None,
+            content: &skill_md("shared-ops", "already prefixed", "PROMPT"),
+            files: &[],
+            source: SkillInstallSource::User,
+            source_url: None,
+            target: SkillInstallTarget::TenantShared,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(installed.name, "shared-ops");
+    assert_eq!(installed.source, SkillSource::TenantShared);
+}
+
+#[tokio::test]
+async fn user_install_rejects_reserved_shared_prefix() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    let context = skill_management_context(filesystem, skill_mounts());
+
+    // Frontmatter-named.
+    let error = install_skill(
+        &context,
+        SkillInstallRequest {
+            name: None,
+            content: &skill_md("shared-sneak", "reserved prefix", "PROMPT"),
+            files: &[],
+            source: SkillInstallSource::User,
+            source_url: None,
+            target: SkillInstallTarget::UserPrivate,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.kind(), SkillManagementErrorKind::InvalidInput);
+
+    // Case variant cannot bypass the reservation.
+    let error = install_skill(
+        &context,
+        SkillInstallRequest {
+            name: None,
+            content: &skill_md("Shared-Sneak", "reserved prefix", "PROMPT"),
+            files: &[],
+            source: SkillInstallSource::User,
+            source_url: None,
+            target: SkillInstallTarget::UserPrivate,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.kind(), SkillManagementErrorKind::InvalidInput);
+
+    // Requested-name path (plain markdown, synthesized frontmatter).
+    let error = install_skill(
+        &context,
+        SkillInstallRequest {
+            name: Some("shared-plain"),
+            content: "# Plain\n\nNo frontmatter here.\n",
+            files: &[],
+            source: SkillInstallSource::User,
+            source_url: None,
+            target: SkillInstallTarget::UserPrivate,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.kind(), SkillManagementErrorKind::InvalidInput);
+}
+
+#[tokio::test]
+async fn shared_names_route_read_update_remove_to_shared_root() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    let context = skill_management_context(filesystem.clone(), skill_mounts());
+
+    install_skill(
+        &context,
+        SkillInstallRequest {
+            name: None,
+            content: &skill_md("shared-routing", "shared routing", "PROMPT"),
+            files: &[],
+            source: SkillInstallSource::User,
+            source_url: None,
+            target: SkillInstallTarget::TenantShared,
+        },
+    )
+    .await
+    .unwrap();
+
+    let content = read_skill_content(
+        &context,
+        SkillContentRequest {
+            name: "shared-routing",
+        },
+    )
+    .await
+    .unwrap();
+    assert!(content.content.contains("shared routing"));
+
+    let updated_doc = skill_md("shared-routing", "updated shared routing", "PROMPT_V2");
+    update_skill(
+        &context,
+        SkillUpdateRequest {
+            name: "shared-routing",
+            content: &updated_doc,
+        },
+    )
+    .await
+    .unwrap();
+    let stored = read_file(
+        filesystem.as_ref(),
+        "/projects/tenant-shared/skills/shared-routing/SKILL.md",
+    )
+    .await;
+    assert!(stored.contains("updated shared routing"));
+
+    remove_skill(
+        &context,
+        SkillRemoveRequest {
+            name: "shared-routing",
+        },
+    )
+    .await
+    .unwrap();
+    assert_missing(
+        filesystem.as_ref(),
+        "/projects/tenant-shared/skills/shared-routing/SKILL.md",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn shared_mutations_fail_closed_on_read_only_shared_mount() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    write_file(
+        filesystem.as_ref(),
+        "/projects/tenant-shared/skills/shared-locked/SKILL.md",
+        skill_md("shared-locked", "admin only", "PROMPT"),
+    )
+    .await;
+    let context = skill_management_context(filesystem, read_only_shared_skill_mounts());
+
+    // Reads stay open: every user can see and read shared skills.
+    let listed = list_skills(&context).await.unwrap();
+    assert!(listed.iter().any(|skill| {
+        skill.name == "shared-locked" && skill.source == SkillSource::TenantShared
+    }));
+    read_skill_content(
+        &context,
+        SkillContentRequest {
+            name: "shared-locked",
+        },
+    )
+    .await
+    .unwrap();
+
+    // Mutations die at the mount layer.
+    let error = update_skill(
+        &context,
+        SkillUpdateRequest {
+            name: "shared-locked",
+            content: &skill_md("shared-locked", "tampered", "PROMPT"),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.kind(), SkillManagementErrorKind::FilesystemDenied);
+
+    let error = remove_skill(
+        &context,
+        SkillRemoveRequest {
+            name: "shared-locked",
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.kind(), SkillManagementErrorKind::FilesystemDenied);
+
+    let error = install_skill(
+        &context,
+        SkillInstallRequest {
+            name: None,
+            content: &skill_md("new-shared", "not allowed", "PROMPT"),
+            files: &[],
+            source: SkillInstallSource::User,
+            source_url: None,
+            target: SkillInstallTarget::TenantShared,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.kind(), SkillManagementErrorKind::FilesystemDenied);
+}
+
+#[test]
+fn tenant_shared_name_predicate_is_byte_safe_on_raw_input() {
+    // Callers (facade gates) pass raw, unvalidated browser names — a
+    // non-ASCII char straddling the prefix boundary must not panic.
+    // "shared\u{00e9}" is 8 bytes with byte 7 inside 'é'.
+    assert!(!is_tenant_shared_skill_name("shared\u{00e9}"));
+    assert!(!is_tenant_shared_skill_name("\u{00e9}shared-"));
+    assert!(!is_tenant_shared_skill_name("short"));
+    assert!(!is_tenant_shared_skill_name(""));
+    assert!(is_tenant_shared_skill_name("shared-"));
+    assert!(is_tenant_shared_skill_name("Shared-Ops"));
+    assert!(is_tenant_shared_skill_name("SHARED-x"));
+}
+
+#[tokio::test]
+async fn list_skips_tier_mismatched_directories() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    // Legacy/hand-placed state that violates the disjoint-namespace rule:
+    // a `shared-*` directory inside the user root and an unprefixed directory
+    // inside the tenant-shared root. Both would 404 on every name-routed
+    // operation, so the listers must skip them (files stay on disk).
+    write_file(
+        filesystem.as_ref(),
+        "/projects/skills/shared-legacy/SKILL.md",
+        skill_md("shared-legacy", "legacy in user root", "PROMPT"),
+    )
+    .await;
+    write_file(
+        filesystem.as_ref(),
+        "/projects/tenant-shared/skills/dropped-in/SKILL.md",
+        skill_md("dropped-in", "unprefixed in shared root", "PROMPT"),
+    )
+    .await;
+    write_file(
+        filesystem.as_ref(),
+        "/projects/tenant-shared/skills/shared-valid/SKILL.md",
+        skill_md("shared-valid", "valid shared", "PROMPT"),
+    )
+    .await;
+    let context = skill_management_context(filesystem, skill_mounts());
+
+    let listed = list_skills(&context).await.unwrap();
+    assert!(!listed.iter().any(|skill| skill.name == "shared-legacy"));
+    assert!(!listed.iter().any(|skill| skill.name == "dropped-in"));
+    assert!(
+        listed
+            .iter()
+            .any(|skill| skill.name == "shared-valid" && skill.source == SkillSource::TenantShared)
+    );
+
+    let found = search_skills(
+        &context,
+        SkillSearchRequest {
+            query: "",
+            limit: 20,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        !found
+            .skills
+            .iter()
+            .any(|skill| skill.name == "shared-legacy")
+    );
+    assert!(!found.skills.iter().any(|skill| skill.name == "dropped-in"));
+    assert!(
+        found
+            .skills
+            .iter()
+            .any(|skill| skill.name == "shared-valid")
+    );
+}
+
+#[tokio::test]
+async fn tenant_shared_install_rejects_unprefixable_name() {
+    let filesystem = Arc::new(InMemoryBackend::default());
+    let context = skill_management_context(filesystem, skill_mounts());
+
+    // 60 chars is a valid skill name, but prefixing it would exceed the
+    // 64-char limit — the install must fail loudly rather than truncate.
+    let long_name = "a".repeat(60);
+    let error = install_skill(
+        &context,
+        SkillInstallRequest {
+            name: None,
+            content: &skill_md(&long_name, "too long to prefix", "PROMPT"),
+            files: &[],
+            source: SkillInstallSource::User,
+            source_url: None,
+            target: SkillInstallTarget::TenantShared,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.kind(), SkillManagementErrorKind::InvalidInput);
 }
 
 #[tokio::test]
@@ -1018,11 +1393,26 @@ impl RootFilesystem for FailingListFilesystem {
 }
 
 fn skill_mounts() -> MountView {
+    skill_mounts_with_shared_permissions(MountPermissions::read_write_list_delete())
+}
+
+/// Mirrors the non-admin management view: the tenant-shared tier is mounted
+/// read-only, so shared mutations must fail closed at the mount layer.
+fn read_only_shared_skill_mounts() -> MountView {
+    skill_mounts_with_shared_permissions(MountPermissions::read_only())
+}
+
+fn skill_mounts_with_shared_permissions(shared_permissions: MountPermissions) -> MountView {
     MountView::new(vec![
         MountGrant::new(
             MountAlias::new("/skills").unwrap(),
             VirtualPath::new("/projects/skills").unwrap(),
             MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/tenant-shared/skills").unwrap(),
+            VirtualPath::new("/projects/tenant-shared/skills").unwrap(),
+            shared_permissions,
         ),
         MountGrant::new(
             MountAlias::new("/system/skills").unwrap(),

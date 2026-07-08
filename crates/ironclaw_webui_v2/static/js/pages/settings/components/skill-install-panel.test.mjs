@@ -17,6 +17,9 @@ const COPY = {
   "skills.name": "Skill name",
   "skills.namePlaceholder": "skill-name",
   "skills.nameRequired": "Skill name is required.",
+  "skills.shareWithAllUsers": "Share with all users",
+  "skills.shareWithAllUsersHint":
+    "Installs as an admin-managed shared skill (the name gets the shared- prefix). Visible to every user, read-only for them.",
 };
 
 function html(strings, ...values) {
@@ -129,10 +132,11 @@ function createHarness({ onInstall = async () => ({ success: true }) } = {}) {
     props(rendered, component) {
       return componentProps(rendered, component, allComponents);
     },
-    render({ isInstalling = false } = {}) {
+    render({ isInstalling = false, isAdmin = false } = {}) {
       cursor = 0;
       return exports.SkillInstallPanel({
         isInstalling,
+        isAdmin,
         onInstall: async (payload) => {
           installs.push(payload);
           return onInstall(payload);
@@ -140,6 +144,21 @@ function createHarness({ onInstall = async () => ({ success: true }) } = {}) {
       });
     },
   };
+}
+
+// Find the value bound to `name=` anywhere in the rendered template tree —
+// used for raw-element props (the shared checkbox is a plain <input>, not a
+// design-system component).
+function rawPropByName(root, name) {
+  const matches = [];
+  visit(root, (node) => {
+    if (!Array.isArray(node.strings) || !Array.isArray(node.values)) return;
+    for (let index = 0; index < node.values.length; index += 1) {
+      const bound = node.strings[index]?.match(/([A-Za-z][A-Za-z0-9-]*)=\s*$/)?.[1];
+      if (bound === name) matches.push(node.values[index]);
+    }
+  });
+  return matches;
 }
 
 test("SkillInstallPanel clears required-field errors when fields become valid", async () => {
@@ -243,4 +262,61 @@ test("SkillInstallPanel disables submit and changes label while installing", () 
 
   assert.equal(button.disabled, true);
   assert.ok(collectScalars(rendered).includes("Importing..."));
+});
+
+// #5459 P4: the share toggle is admin-only, and checking it must put
+// `shared: true` in the install payload — this pins the buildPayload
+// passthrough (a payload builder that drops the flag regresses silently).
+test("SkillInstallPanel sends shared flag only when admin checks the toggle", async () => {
+  const harness = createHarness();
+
+  // Non-admin render: no share toggle at all.
+  let rendered = harness.render();
+  assert.equal(rawPropByName(rendered, "onChange").length, 0);
+  assert.ok(!collectScalars(rendered).includes("Share with all users"));
+
+  // Admin render: toggle present, unchecked installs stay private
+  // (payload omits the flag entirely for pre-#5459 request-shape parity).
+  rendered = harness.render({ isAdmin: true });
+  assert.ok(collectScalars(rendered).includes("Share with all users"));
+  harness.props(rendered, harness.Input)[0].onInput({
+    currentTarget: { value: "team-brief" },
+  });
+  rendered = harness.render({ isAdmin: true });
+  harness.props(rendered, harness.Textarea)[0].onInput({
+    currentTarget: { value: "---\nname: team-brief\n---\nBody." },
+  });
+  rendered = harness.render({ isAdmin: true });
+  await harness.props(rendered, harness.Button)[0].onClick();
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.installs)), [
+    {
+      name: "team-brief",
+      content: "---\nname: team-brief\n---\nBody.",
+    },
+  ]);
+
+  // Check the toggle: the next install carries shared: true.
+  rendered = harness.render({ isAdmin: true });
+  const onChange = rawPropByName(rendered, "onChange")[0];
+  assert.equal(typeof onChange, "function");
+  onChange({ currentTarget: { checked: true } });
+  rendered = harness.render({ isAdmin: true });
+  harness.props(rendered, harness.Input)[0].onInput({
+    currentTarget: { value: "team-brief" },
+  });
+  rendered = harness.render({ isAdmin: true });
+  harness.props(rendered, harness.Textarea)[0].onInput({
+    currentTarget: { value: "---\nname: team-brief\n---\nBody." },
+  });
+  rendered = harness.render({ isAdmin: true });
+  await harness.props(rendered, harness.Button)[0].onClick();
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.installs.at(-1))), {
+    name: "team-brief",
+    content: "---\nname: team-brief\n---\nBody.",
+    shared: true,
+  });
+
+  // Success resets the toggle so the next install defaults back to private.
+  rendered = harness.render({ isAdmin: true });
+  assert.equal(rawPropByName(rendered, "checked")[0], false);
 });

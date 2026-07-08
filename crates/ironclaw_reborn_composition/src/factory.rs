@@ -4257,6 +4257,29 @@ where
 fn production_skill_management_mount_view(
     scope: &ResourceScope,
 ) -> Result<MountView, HostApiError> {
+    production_skill_management_mount_view_with_shared_permissions(
+        scope,
+        MountPermissions::read_only(),
+    )
+}
+
+/// Admin (`operator_webui_config`) variant: the tenant-shared skill tier is
+/// writable. Mirrors `local_dev_mounts::scoped_skill_management_admin_mount_view`.
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn production_skill_management_admin_mount_view(
+    scope: &ResourceScope,
+) -> Result<MountView, HostApiError> {
+    production_skill_management_mount_view_with_shared_permissions(
+        scope,
+        MountPermissions::read_write_list_delete(),
+    )
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn production_skill_management_mount_view_with_shared_permissions(
+    scope: &ResourceScope,
+    tenant_shared_permissions: MountPermissions,
+) -> Result<MountView, HostApiError> {
     MountView::new(vec![
         MountGrant::new(
             MountAlias::new("/skills")?,
@@ -4266,6 +4289,11 @@ fn production_skill_management_mount_view(
                 scope.user_id.as_str()
             ))?,
             MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/tenant-shared/skills")?,
+            VirtualPath::new("/tenant-shared/skills")?,
+            tenant_shared_permissions,
         ),
         MountGrant::new(
             MountAlias::new("/system/skills")?,
@@ -4321,6 +4349,7 @@ where
         owner_user_id,
         skill_management_filesystem,
         Arc::new(production_skill_management_mount_view),
+        Arc::new(production_skill_management_admin_mount_view),
     ));
     let trigger_create_hook = Arc::new(ScopedFilesystemTriggerCreatorPairingHook::new(Arc::clone(
         &stores.scoped_filesystem,

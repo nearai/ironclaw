@@ -559,6 +559,8 @@ registerPack("ko", {
   "skills.urlPlaceholder": "https://example.com/SKILL.md",
   "skills.content": "SKILL.md 콘텐츠",
   "skills.contentHint": "로컬 또는 복사된 스킬 콘텐츠를 가져올 때 URL 대신 이것을 사용하세요.",
+  "skills.shareWithAllUsers": "모든 사용자와 공유",
+  "skills.shareWithAllUsersHint": "관리자가 관리하는 공유 스킬로 설치됩니다(이름에 shared- 접두사가 붙습니다). 모든 사용자에게 표시되며 읽기 전용입니다.",
   "skills.contentPlaceholder": "---\\n이름: 예\\n설명: ...\\n---\\n",
   "skills.install": "가져오기",
   "skills.installing": "가져오는 중...",
@@ -1152,6 +1154,7 @@ registerPack("ko", {
   "skills.edit": "편집",
   "skills.group.system": "시스템 스킬",
   "skills.group.user": "내 스킬",
+  "skills.group.tenantShared": "공유 스킬",
   "skills.group.workspace": "워크스페이스 스킬",
   "skills.loading": "불러오는 중...",
   "skills.save": "저장",
@@ -1160,6 +1163,7 @@ registerPack("ko", {
   "skills.source.system": "시스템",
   "skills.source.user": "사용자",
   "skills.source.workspace": "워크스페이스",
+  "skills.source.tenant_shared": "공유",
   "skills.updateFailed": "업데이트 실패.",
   "skills.updated": "스킬 \"{name}\" 업데이트됨"
 });

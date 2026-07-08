@@ -1,6 +1,8 @@
 use std::{path::PathBuf, sync::Arc};
 
-use crate::local_dev_mounts::scoped_skill_management_mount_view;
+use crate::local_dev_mounts::{
+    scoped_skill_management_admin_mount_view, scoped_skill_management_mount_view,
+};
 use async_trait::async_trait;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::{
@@ -14,9 +16,10 @@ use ironclaw_product_workflow::{
     LifecycleSkillSource, LifecycleSkillSummary, ProductWorkflowError,
 };
 use ironclaw_skills::{
-    SkillInstallRequest, SkillInstallSource, SkillManagementContext, SkillManagementError,
-    SkillManagementErrorKind, SkillRemoveRequest, SkillSearchRequest, SkillUpdateRequest,
-    install_skill, list_skills, read_skill_content, remove_skill, search_skills, update_skill,
+    SkillInstallRequest, SkillInstallSource, SkillInstallTarget, SkillManagementContext,
+    SkillManagementError, SkillManagementErrorKind, SkillRemoveRequest, SkillSearchRequest,
+    SkillUpdateRequest, install_skill, list_skills, read_skill_content, remove_skill,
+    search_skills, update_skill,
 };
 
 use crate::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
@@ -33,6 +36,11 @@ pub(crate) struct RebornLocalSkillManagementPort {
     owner_user_id: UserId,
     filesystem: Arc<dyn RootFilesystem>,
     skill_management_mount_resolver: Arc<SkillManagementMountResolver>,
+    /// Resolver used for admin (`operator_webui_config`) mutations: identical
+    /// to the base view except the tenant-shared skills mount is read-write.
+    /// Non-admin callers never receive this view, so even a facade-gate bypass
+    /// dies at the mount layer (`FilesystemDenied`).
+    admin_skill_management_mount_resolver: Arc<SkillManagementMountResolver>,
 }
 
 impl RebornLocalSkillManagementPort {
@@ -42,19 +50,24 @@ impl RebornLocalSkillManagementPort {
         filesystem: Arc<dyn RootFilesystem>,
         skill_management_mounts: MountView,
     ) -> Self {
-        let resolver = Arc::new(move |_scope: &ResourceScope| Ok(skill_management_mounts.clone()));
-        Self::new_with_mount_resolver(owner_user_id, filesystem, resolver)
+        let mounts = skill_management_mounts.clone();
+        let resolver = Arc::new(move |_scope: &ResourceScope| Ok(mounts.clone()));
+        let admin_resolver =
+            Arc::new(move |_scope: &ResourceScope| Ok(skill_management_mounts.clone()));
+        Self::new_with_mount_resolver(owner_user_id, filesystem, resolver, admin_resolver)
     }
 
     pub(crate) fn new_with_mount_resolver(
         owner_user_id: UserId,
         filesystem: Arc<dyn RootFilesystem>,
         skill_management_mount_resolver: Arc<SkillManagementMountResolver>,
+        admin_skill_management_mount_resolver: Arc<SkillManagementMountResolver>,
     ) -> Self {
         Self {
             owner_user_id,
             filesystem,
             skill_management_mount_resolver,
+            admin_skill_management_mount_resolver,
         }
     }
 
@@ -66,9 +79,14 @@ impl RebornLocalSkillManagementPort {
     fn skill_context_for_scope(
         &self,
         scope: ResourceScope,
+        admin: bool,
     ) -> Result<SkillManagementContext, RebornLocalSkillManagementError> {
-        let mounts =
-            (self.skill_management_mount_resolver)(&scope).map_err(invalid_skill_context)?;
+        let resolver = if admin {
+            &self.admin_skill_management_mount_resolver
+        } else {
+            &self.skill_management_mount_resolver
+        };
+        let mounts = (resolver)(&scope).map_err(invalid_skill_context)?;
         Ok(SkillManagementContext::new(
             self.filesystem.clone(),
             mounts,
@@ -80,7 +98,7 @@ impl RebornLocalSkillManagementPort {
         &self,
         scope: ResourceScope,
     ) -> Result<Vec<ironclaw_skills::SkillSummary>, RebornLocalSkillManagementError> {
-        let context = self.skill_context_for_scope(scope)?;
+        let context = self.skill_context_for_scope(scope, false)?;
         Ok(list_skills(&context).await?)
     }
 
@@ -90,7 +108,7 @@ impl RebornLocalSkillManagementPort {
         query: &str,
         limit: usize,
     ) -> Result<ironclaw_skills::SkillSearchResult, RebornLocalSkillManagementError> {
-        let context = self.skill_context_for_scope(scope)?;
+        let context = self.skill_context_for_scope(scope, false)?;
         Ok(search_skills(&context, SkillSearchRequest { query, limit }).await?)
     }
 
@@ -99,27 +117,30 @@ impl RebornLocalSkillManagementPort {
         scope: ResourceScope,
         name: &str,
     ) -> Result<ironclaw_skills::SkillContentResult, RebornLocalSkillManagementError> {
-        let context = self.skill_context_for_scope(scope)?;
+        let context = self.skill_context_for_scope(scope, false)?;
         Ok(read_skill_content(&context, ironclaw_skills::SkillContentRequest { name }).await?)
     }
 
     pub(crate) async fn update_for_scope(
         &self,
         scope: ResourceScope,
+        admin: bool,
         name: &str,
         content: &str,
     ) -> Result<ironclaw_skills::SkillUpdateResult, RebornLocalSkillManagementError> {
-        let context = self.skill_context_for_scope(scope)?;
+        let context = self.skill_context_for_scope(scope, admin)?;
         Ok(update_skill(&context, SkillUpdateRequest { name, content }).await?)
     }
 
     pub(crate) async fn install_for_scope(
         &self,
         scope: ResourceScope,
+        admin: bool,
         name: Option<&str>,
         content: &str,
+        target: SkillInstallTarget,
     ) -> Result<ironclaw_skills::SkillInstallResult, RebornLocalSkillManagementError> {
-        let context = self.skill_context_for_scope(scope)?;
+        let context = self.skill_context_for_scope(scope, admin)?;
         Ok(install_skill(
             &context,
             SkillInstallRequest {
@@ -128,6 +149,7 @@ impl RebornLocalSkillManagementPort {
                 files: &[],
                 source: SkillInstallSource::User,
                 source_url: None,
+                target,
             },
         )
         .await?)
@@ -136,9 +158,10 @@ impl RebornLocalSkillManagementPort {
     pub(crate) async fn remove_for_scope(
         &self,
         scope: ResourceScope,
+        admin: bool,
         name: &str,
     ) -> Result<ironclaw_skills::SkillRemoveResult, RebornLocalSkillManagementError> {
-        let context = self.skill_context_for_scope(scope)?;
+        let context = self.skill_context_for_scope(scope, admin)?;
         Ok(remove_skill(&context, SkillRemoveRequest { name }).await?)
     }
 }
@@ -166,12 +189,15 @@ where
 {
     let mount_resolver: Arc<SkillManagementMountResolver> =
         Arc::new(scoped_skill_management_mount_view);
+    let admin_mount_resolver: Arc<SkillManagementMountResolver> =
+        Arc::new(scoped_skill_management_admin_mount_view);
     let filesystem: Arc<dyn RootFilesystem> = filesystem;
     Ok(Arc::new(
         RebornLocalSkillManagementPort::new_with_mount_resolver(
             owner_user_id,
             filesystem,
             mount_resolver,
+            admin_mount_resolver,
         ),
     ))
 }
@@ -297,8 +323,13 @@ impl RebornLocalLifecycleFacade {
                     .skill_management
                     .install_for_scope(
                         scope,
+                        // Model-visible product action: never admin, never
+                        // tenant-shared — the reserved `shared-` prefix is
+                        // rejected inside `install_skill`.
+                        false,
                         name.as_ref().map(LifecyclePackageId::as_str),
                         &content,
+                        SkillInstallTarget::UserPrivate,
                     )
                     .await
                     .map_err(map_local_skill_management_error)?;
@@ -319,7 +350,9 @@ impl RebornLocalLifecycleFacade {
                     .map_err(map_local_skill_management_error)?;
                 let removed = self
                     .skill_management
-                    .remove_for_scope(scope, package_ref.id.as_str())
+                    // Model-visible product action: non-admin view, so removing
+                    // a `shared-*` skill fails closed at the read-only mount.
+                    .remove_for_scope(scope, false, package_ref.id.as_str())
                     .await
                     .map_err(map_local_skill_management_error)?;
                 Ok(response_with_payload(
@@ -558,6 +591,7 @@ fn skill_summary(
         description: skill.description,
         source: match skill.source {
             ironclaw_skills::ManagedSkillSource::System => LifecycleSkillSource::System,
+            ironclaw_skills::ManagedSkillSource::TenantShared => LifecycleSkillSource::TenantShared,
             ironclaw_skills::ManagedSkillSource::User
             | ironclaw_skills::ManagedSkillSource::Installed => LifecycleSkillSource::User,
         },
@@ -784,8 +818,10 @@ mod tests {
         skill_management
             .install_for_scope(
                 alice_scope.clone(),
-                Some("shared-name"),
-                &skill_content("shared-name"),
+                false,
+                Some("same-name"),
+                &skill_content("same-name"),
+                SkillInstallTarget::UserPrivate,
             )
             .await
             .expect("alice installs skill");
@@ -794,7 +830,7 @@ mod tests {
             .list_for_scope(alice_scope)
             .await
             .expect("alice lists skills");
-        assert!(alice_skills.iter().any(|skill| skill.name == "shared-name"));
+        assert!(alice_skills.iter().any(|skill| skill.name == "same-name"));
         assert!(
             alice_skills
                 .iter()
@@ -805,16 +841,16 @@ mod tests {
             .list_for_scope(bob_scope)
             .await
             .expect("bob lists skills");
-        assert!(!bob_skills.iter().any(|skill| skill.name == "shared-name"));
+        assert!(!bob_skills.iter().any(|skill| skill.name == "same-name"));
         assert!(bob_skills.iter().any(|skill| skill.name == "system-helper"));
         assert!(
             storage_root
-                .join("tenants/tenant-alpha/users/alice/skills/shared-name/SKILL.md")
+                .join("tenants/tenant-alpha/users/alice/skills/same-name/SKILL.md")
                 .exists()
         );
         assert!(
             !storage_root
-                .join("tenants/tenant-alpha/users/bob/skills/shared-name/SKILL.md")
+                .join("tenants/tenant-alpha/users/bob/skills/same-name/SKILL.md")
                 .exists()
         );
     }

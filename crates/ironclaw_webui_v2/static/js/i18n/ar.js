@@ -559,6 +559,8 @@ registerPack("ar", {
   "skills.urlPlaceholder": "https://example.com/SKILL.md",
   "skills.content": "محتوى SKILL.md",
   "skills.contentHint": "استخدم هذا بدلاً من عنوان URL عند استيراد محتوى المهارات المحلي أو المنسوخ.",
+  "skills.shareWithAllUsers": "المشاركة مع جميع المستخدمين",
+  "skills.shareWithAllUsersHint": "تُثبَّت كمهارة مشتركة يديرها المسؤول (يُضاف إلى الاسم البادئة shared-). مرئية لجميع المستخدمين وللقراءة فقط.",
   "skills.contentPlaceholder": "---\\nالاسم: مثال\\nالوصف: ...\\n---\\n",
   "skills.install": "استيراد",
   "skills.installing": "استيراد...",
@@ -1152,6 +1154,7 @@ registerPack("ar", {
   "skills.edit": "تحرير",
   "skills.group.system": "مهارات النظام",
   "skills.group.user": "مهاراتك",
+  "skills.group.tenantShared": "المهارات المشتركة",
   "skills.group.workspace": "مهارات مساحة العمل",
   "skills.loading": "جارٍ التحميل...",
   "skills.save": "حفظ",
@@ -1160,6 +1163,7 @@ registerPack("ar", {
   "skills.source.system": "النظام",
   "skills.source.user": "المستخدم",
   "skills.source.workspace": "مساحة العمل",
+  "skills.source.tenant_shared": "مشتركة",
   "skills.updateFailed": "فشل التحديث.",
   "skills.updated": "تم تحديث المهارة \"{name}\""
 });
