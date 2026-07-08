@@ -22,11 +22,22 @@ function loadConnectionStatusForTest() {
   return context.globalThis.__testExports.ConnectionStatus;
 }
 
-test("ConnectionStatus suppresses transient initial connecting state", () => {
+test("ConnectionStatus suppresses non-actionable transport states", () => {
   const ConnectionStatus = loadConnectionStatusForTest();
 
-  assert.equal(ConnectionStatus({ status: "connecting" }), null);
-  const reconnecting = ConnectionStatus({ status: "reconnecting" });
-  assert.notEqual(reconnecting, null);
-  assert.equal(typeof reconnecting, "object");
+  for (const status of [
+    undefined,
+    "idle",
+    "connecting",
+    "connected",
+    "reconnecting",
+    "disconnected",
+    "paused",
+  ]) {
+    assert.equal(ConnectionStatus({ status }), null, status);
+  }
+
+  const unknown = ConnectionStatus({ status: "blocked" });
+  assert.notEqual(unknown, null);
+  assert.equal(typeof unknown, "object");
 });
