@@ -20,7 +20,9 @@ use crate::extension_host::extension_lifecycle::{
 };
 use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
 use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
-use crate::slack::slack_actor_identity::{RebornUserIdentityLookup, SlackUserIdentityActorResolver};
+use crate::slack::slack_actor_identity::{
+    RebornUserIdentityLookup, SlackUserIdentityActorResolver,
+};
 use crate::slack::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteAssignment, SlackChannelRouteError,
     SlackChannelRouteStore, SlackChannelRouteSubjectResolver, SlackChannelSetupActivation,
@@ -932,8 +934,10 @@ fn slack_dynamic_target_unavailable() -> RebornServicesError {
 async fn slack_host_beta_config_from_setup(
     setup_service: &SlackSetupService,
     setup: SlackInstallationSetup,
-) -> Result<Result<SlackHostBetaConfig, SlackHostBetaBuildError>, crate::slack::slack_setup::SlackSetupError>
-{
+) -> Result<
+    Result<SlackHostBetaConfig, SlackHostBetaBuildError>,
+    crate::slack::slack_setup::SlackSetupError,
+> {
     let user_id = setup.user_id()?;
     let shared_subject_user_id = setup.shared_subject_user_id()?;
     let signing_secret = setup_service.signing_secret(&setup).await?;
@@ -1184,7 +1188,8 @@ mod tests {
     impl SlackInstallationSetupStore for InMemorySetupStore {
         async fn get_slack_installation_setup(
             &self,
-        ) -> Result<Option<SlackInstallationSetup>, crate::slack::slack_setup::SlackSetupError> {
+        ) -> Result<Option<SlackInstallationSetup>, crate::slack::slack_setup::SlackSetupError>
+        {
             Ok(self.setup.read().await.clone())
         }
 

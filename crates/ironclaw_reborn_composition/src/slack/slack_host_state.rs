@@ -39,7 +39,9 @@ use crate::slack::slack_personal_binding::{
     RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
 };
 use crate::slack::slack_serve::{SlackTeamId, SlackUserId};
-use crate::slack::slack_setup::{SlackInstallationSetup, SlackInstallationSetupStore, SlackSetupError};
+use crate::slack::slack_setup::{
+    SlackInstallationSetup, SlackInstallationSetupStore, SlackSetupError,
+};
 
 const SLACK_HOST_STATE_ROOT: &str = "/tenant-shared/slack-personal-binding";
 const SLACK_INSTALLATION_SETUP_PATH: &str = "/tenant-shared/slack-setup/installation.json";
@@ -1406,10 +1408,11 @@ impl StoredSlackUserIdentity {
                 self.provider.clone(),
             )
             .ok()?,
-            provider_user_id: crate::slack::slack_personal_binding::RebornIdentityProviderUserId::new(
-                self.provider_user_id.clone(),
-            )
-            .ok()?,
+            provider_user_id:
+                crate::slack::slack_personal_binding::RebornIdentityProviderUserId::new(
+                    self.provider_user_id.clone(),
+                )
+                .ok()?,
             user_id: UserId::new(self.user_id.clone()).ok()?,
         })
     }

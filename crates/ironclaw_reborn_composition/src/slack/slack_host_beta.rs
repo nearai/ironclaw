@@ -45,7 +45,9 @@ mod runtime_setup;
 use crate::RebornRuntime;
 use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
 use crate::product_auth::serve::SlackPersonalOAuthBindingConfig;
-use crate::slack::slack_actor_identity::{RebornUserIdentityLookup, SlackUserIdentityActorResolver};
+use crate::slack::slack_actor_identity::{
+    RebornUserIdentityLookup, SlackUserIdentityActorResolver,
+};
 use crate::slack::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteStore, SlackChannelRouteSubjectResolver,
 };
@@ -4505,8 +4507,10 @@ mod tests {
         async fn upsert_personal_dm_target(
             &self,
             target: crate::slack::slack_outbound_targets::SlackPersonalDmTarget,
-        ) -> Result<crate::slack::slack_outbound_targets::SlackPersonalDmTarget, SlackPersonalDmTargetError>
-        {
+        ) -> Result<
+            crate::slack::slack_outbound_targets::SlackPersonalDmTarget,
+            SlackPersonalDmTargetError,
+        > {
             Ok(target)
         }
 

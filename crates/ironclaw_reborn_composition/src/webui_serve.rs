@@ -257,7 +257,8 @@ pub struct WebuiServeConfig {
     /// route fails closed with a sanitized service-unavailable response.
     pub(crate) google_oauth: Option<GoogleOAuthRouteConfig>,
     #[cfg(feature = "slack-v2-host-beta")]
-    pub(crate) slack_personal_oauth: Option<crate::slack::slack_setup::SlackPersonalSetupServiceSlot>,
+    pub(crate) slack_personal_oauth:
+        Option<crate::slack::slack_setup::SlackPersonalSetupServiceSlot>,
     /// Optional host hook that binds a successful Slack personal OAuth identity
     /// to the authenticated Reborn user.
     #[cfg(feature = "slack-v2-host-beta")]

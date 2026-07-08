@@ -900,10 +900,11 @@ async fn bind_slack_personal_oauth_identity_for_callback(
 
     // Computed before the request takes ownership of the installation id so
     // the rollback can target exactly the binding this callback writes.
-    let bound_provider_user_id = crate::slack::slack_actor_identity::slack_user_identity_provider_user_id(
-        &connection_scope.installation_id,
-        identity.subject.as_str(),
-    );
+    let bound_provider_user_id =
+        crate::slack::slack_actor_identity::slack_user_identity_provider_user_id(
+            &connection_scope.installation_id,
+            identity.subject.as_str(),
+        );
     config
         .binding_service
         .bind_personal_user(
@@ -2305,7 +2306,9 @@ mod tests {
 
     #[cfg(feature = "slack-v2-host-beta")]
     #[async_trait]
-    impl crate::slack::slack_personal_binding::RebornUserIdentityBindingDeleteStore for RecordingBindingStore {
+    impl crate::slack::slack_personal_binding::RebornUserIdentityBindingDeleteStore
+        for RecordingBindingStore
+    {
         async fn delete_user_identity_bindings_for_user(
             &self,
             provider: &str,

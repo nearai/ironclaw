@@ -29,7 +29,9 @@ use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
 use crate::slack::slack_channel_routes::{
     SlackChannelRouteError, SlackChannelRouteKey, SlackChannelRouteStore,
 };
-use crate::slack::slack_dm_open::{SlackDmOpenError, open_slack_dm_channel, validate_slack_dm_channel_id};
+use crate::slack::slack_dm_open::{
+    SlackDmOpenError, open_slack_dm_channel, validate_slack_dm_channel_id,
+};
 use crate::slack::slack_serve::{SlackTeamId, SlackUserId};
 
 pub(crate) const SLACK_OUTBOUND_TARGET_LIST_PAGE_SIZE: usize = 500;
@@ -1455,8 +1457,10 @@ mod tests {
             _installation_id: &AdapterInstallationId,
             _team_id: &str,
             _assignments: Vec<crate::slack::slack_channel_routes::SlackChannelRouteAssignment>,
-        ) -> Result<Vec<crate::slack::slack_channel_routes::SlackChannelRoute>, SlackChannelRouteError>
-        {
+        ) -> Result<
+            Vec<crate::slack::slack_channel_routes::SlackChannelRoute>,
+            SlackChannelRouteError,
+        > {
             Err(SlackChannelRouteError::StoreUnavailable)
         }
 

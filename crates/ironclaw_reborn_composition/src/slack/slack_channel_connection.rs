@@ -758,7 +758,8 @@ mod tests {
         async fn delete_personal_dm_target(
             &self,
             _key: &crate::slack::slack_outbound_targets::SlackPersonalDmTargetKey,
-        ) -> Result<bool, crate::slack::slack_outbound_targets::SlackPersonalDmTargetError> {
+        ) -> Result<bool, crate::slack::slack_outbound_targets::SlackPersonalDmTargetError>
+        {
             Err(crate::slack::slack_outbound_targets::SlackPersonalDmTargetError::StoreUnavailable)
         }
 
@@ -768,7 +769,8 @@ mod tests {
             _user_id: &UserId,
             _installation_id: &AdapterInstallationId,
             _team_id: &SlackTeamId,
-        ) -> Result<usize, crate::slack::slack_outbound_targets::SlackPersonalDmTargetError> {
+        ) -> Result<usize, crate::slack::slack_outbound_targets::SlackPersonalDmTargetError>
+        {
             Err(crate::slack::slack_outbound_targets::SlackPersonalDmTargetError::StoreUnavailable)
         }
     }

@@ -23,7 +23,9 @@ use crate::product_auth::oauth::oauth_gate::{
 };
 use crate::product_auth::oauth::oauth_provider_client::HostOAuthProviderClient;
 #[cfg(feature = "slack-v2-host-beta")]
-use crate::slack::slack_personal_oauth::{SlackPersonalOAuthGateProvider, slack_personal_provider_spec};
+use crate::slack::slack_personal_oauth::{
+    SlackPersonalOAuthGateProvider, slack_personal_provider_spec,
+};
 #[cfg(feature = "slack-v2-host-beta")]
 use crate::slack::slack_setup::SlackPersonalSetupServiceSlot;
 

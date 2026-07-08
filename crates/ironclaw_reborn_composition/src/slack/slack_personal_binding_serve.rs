@@ -747,12 +747,15 @@ mod tests {
         assert_eq!(
             store.bindings(),
             vec![RebornUserIdentityBinding {
-                provider: crate::slack::slack_personal_binding::RebornIdentityProviderId::new("slack")
-                    .expect("provider"),
-                provider_user_id: crate::slack::slack_personal_binding::RebornIdentityProviderUserId::new(
-                    "install-alpha:U123",
+                provider: crate::slack::slack_personal_binding::RebornIdentityProviderId::new(
+                    "slack"
                 )
-                .expect("provider user id"),
+                .expect("provider"),
+                provider_user_id:
+                    crate::slack::slack_personal_binding::RebornIdentityProviderUserId::new(
+                        "install-alpha:U123",
+                    )
+                    .expect("provider user id"),
                 user_id: user("user:alice"),
             }]
         );
