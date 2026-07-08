@@ -45,11 +45,11 @@ use ironclaw_host_api::{
     InvocationId, Principal, ResourceScope, TenantId, ThreadId, UserId,
 };
 use ironclaw_loop_support::{
-    CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-    EmptyUserProfileSource, FilesystemSkillBundleSource, HostIdentityContextSource,
-    HostSkillContextSource, HostUserProfileSource, JsonSpawnSubagentInputCodec,
-    LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
-    ModelGatewayBackedSystemInferencePort,
+    AwaitEdgeSettler, AwaitEdgeWriter, CapabilityAllowSet, CapabilityResolveError,
+    CapabilitySurfaceProfileResolver, EmptyUserProfileSource, FilesystemSkillBundleSource,
+    HostIdentityContextSource, HostSkillContextSource, HostUserProfileSource,
+    JsonSpawnSubagentInputCodec, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
+    LoopCapabilityResultWriter, ModelGatewayBackedSystemInferencePort,
 };
 use ironclaw_observability::live_latency_started_at;
 use ironclaw_product_adapters::ProjectionStream;
@@ -72,12 +72,15 @@ use ironclaw_reborn::runtime::{
     build_default_planned_runtime,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_reborn::subagent::await_edge::{
+    boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver,
+    store::FilesystemAwaitEdgeStore,
+};
+use ironclaw_reborn::subagent::flavors::StaticSubagentDefinitionResolver;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn::subagent::goal_store::FilesystemSubagentGoalStore;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 use ironclaw_reborn::subagent::goal_store::InMemoryBoundedSubagentGoalStore;
-use ironclaw_reborn::subagent::{
-    flavors::StaticSubagentDefinitionResolver, gate_resolution::BoundedSubagentGateResolutionStore,
-};
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, MessageKind, MessageStatus,
     SessionThreadService, ThreadHistoryRequest, ThreadScope,
@@ -192,7 +195,109 @@ struct RuntimeStoreParts<'a> {
     budget_gate_store: Arc<dyn ironclaw_resources::BudgetGateStore>,
     broadcast_budget_event_sink: Arc<ironclaw_resources::BroadcastBudgetEventSink>,
     subagent_goal_store: Arc<dyn RuntimeSubagentGoalStore>,
+    /// §3 replacement for `subagent_gate_store`: built here (not later, once
+    /// `capability_result_writer` becomes available) because `F` (the
+    /// filesystem backend generic) is only nameable inside
+    /// `local_runtime_parts`/`production_runtime_parts` — by the time the
+    /// shared caller destructures `RuntimeStoreParts`, everything is already
+    /// type-erased. The resolver's result writer isn't ready yet at this
+    /// point either, so it's bound later via
+    /// `AwaitEdgeSettler::bind_result_writer` (a deferred-binding trait
+    /// method mirroring `bind_coordinator`).
+    subagent_await_edge_writer: Arc<dyn AwaitEdgeWriter>,
+    subagent_await_edge_settler: Arc<dyn AwaitEdgeSettler>,
+    subagent_await_edge_evidence: Arc<dyn AwaitDependentRunEvidenceStore>,
     trigger_repository: Option<Arc<dyn ironclaw_triggers::TriggerRepository>>,
+}
+
+/// Non-durable await-edge fallback for the composition profile with neither
+/// `libsql` nor `postgres` enabled (no real filesystem backend exists in
+/// that mode at all — the same reduced-durability posture
+/// `InMemoryBoundedSubagentGoalStore` already accepts for the goal store).
+/// Reported limitation, not silently papered over: this mode never
+/// delivers a subagent's result back to a parked parent (the settler never
+/// fires) and never recognizes an awaited-child gate as blocked-exit
+/// evidence. `spawn_subagent` stays deny-filtered in production regardless
+/// (the design's standing no-flag ruling), so this gap is unreachable
+/// there; it only matters for future non-libsql/non-postgres local-dev
+/// deployments that clear the deny-filter, which is out of PR1's scope.
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
+struct NonDurableAwaitEdgeSettler;
+
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
+#[async_trait::async_trait]
+impl AwaitEdgeSettler for NonDurableAwaitEdgeSettler {
+    async fn on_child_terminal(
+        &self,
+        _event: &ironclaw_turns::TurnLifecycleEvent,
+    ) -> Result<
+        ironclaw_loop_support::ResolveOutcome,
+        ironclaw_turns::run_profile::AgentLoopHostError,
+    > {
+        Ok(ironclaw_loop_support::ResolveOutcome::NotApplicable)
+    }
+
+    fn bind_coordinator(
+        &self,
+        _coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
+    ) -> Result<(), ironclaw_turns::TurnError> {
+        Ok(())
+    }
+
+    fn bind_result_writer(
+        &self,
+        _result_writer: Arc<dyn LoopCapabilityResultWriter>,
+    ) -> Result<(), ironclaw_turns::TurnError> {
+        Ok(())
+    }
+
+    fn as_turn_committed_event_observer(
+        self: Arc<Self>,
+    ) -> Arc<dyn ironclaw_turns::TurnCommittedEventObserver> {
+        self
+    }
+}
+
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
+#[async_trait::async_trait]
+impl ironclaw_turns::TurnCommittedEventObserver for NonDurableAwaitEdgeSettler {
+    fn observes_state(&self, _state: &ironclaw_turns::TurnRunState) -> bool {
+        false
+    }
+
+    fn observes_event(&self, _event: &ironclaw_turns::TurnLifecycleEvent) -> bool {
+        false
+    }
+
+    async fn observe_committed_state(
+        &self,
+        _state: ironclaw_turns::TurnRunState,
+    ) -> Result<(), ironclaw_turns::TurnError> {
+        Ok(())
+    }
+
+    async fn observe_committed_event(
+        &self,
+        _event: ironclaw_turns::TurnLifecycleEvent,
+    ) -> Result<(), ironclaw_turns::TurnError> {
+        Ok(())
+    }
+}
+
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
+struct NonDurableAwaitDependentRunEvidence;
+
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
+#[async_trait::async_trait]
+impl AwaitDependentRunEvidenceStore for NonDurableAwaitDependentRunEvidence {
+    async fn has_awaited_child_gate(
+        &self,
+        _scope: &ironclaw_turns::TurnScope,
+        _run_id: ironclaw_turns::TurnRunId,
+        _gate_ref: &ironclaw_turns::LoopGateRef,
+    ) -> Result<bool, ironclaw_turns::TurnError> {
+        Ok(false)
+    }
 }
 
 fn local_runtime_parts(
@@ -206,6 +311,37 @@ fn local_runtime_parts(
     let subagent_goal_store =
         Arc::new(InMemoryBoundedSubagentGoalStore::new()) as Arc<dyn RuntimeSubagentGoalStore>;
 
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    let (subagent_await_edge_writer, subagent_await_edge_settler, subagent_await_edge_evidence) = {
+        let store = Arc::new(FilesystemAwaitEdgeStore::new(Arc::clone(
+            &local_runtime.subagent_goal_filesystem,
+        )));
+        let resolver = Arc::new(AwaitEdgeResolver::new_unbound_deferred_result_writer(
+            Arc::clone(&store),
+            Arc::clone(&subagent_goal_store)
+                as Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore>,
+            Arc::clone(&local_runtime.turn_state)
+                as Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore>,
+            Arc::clone(&local_runtime.thread_service),
+        ));
+        let driver = Arc::new(ScopeRecoveryDriver::new(
+            Arc::clone(&resolver),
+            Arc::clone(&store),
+        ));
+        (
+            driver as Arc<dyn AwaitEdgeWriter>,
+            resolver as Arc<dyn AwaitEdgeSettler>,
+            store as Arc<dyn AwaitDependentRunEvidenceStore>,
+        )
+    };
+    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+    let (subagent_await_edge_writer, subagent_await_edge_settler, subagent_await_edge_evidence) = (
+        Arc::new(ironclaw_loop_support::InMemoryAwaitEdgeWriter::default())
+            as Arc<dyn AwaitEdgeWriter>,
+        Arc::new(NonDurableAwaitEdgeSettler) as Arc<dyn AwaitEdgeSettler>,
+        Arc::new(NonDurableAwaitDependentRunEvidence) as Arc<dyn AwaitDependentRunEvidenceStore>,
+    );
+
     RuntimeStoreParts {
         local_runtime: Some(local_runtime),
         turn_state_store: Arc::clone(&local_runtime.turn_state) as Arc<dyn RuntimeTurnStateStore>,
@@ -218,6 +354,9 @@ fn local_runtime_parts(
         budget_gate_store: Arc::clone(&local_runtime.budget_gate_store),
         broadcast_budget_event_sink: Arc::clone(&local_runtime.broadcast_budget_event_sink),
         subagent_goal_store,
+        subagent_await_edge_writer,
+        subagent_await_edge_settler,
+        subagent_await_edge_evidence,
         trigger_repository: Some(Arc::clone(&local_runtime.trigger_repository)),
     }
 }
@@ -229,6 +368,24 @@ fn production_runtime_parts<F>(
 where
     F: RootFilesystem + 'static,
 {
+    let subagent_goal_store = Arc::new(FilesystemSubagentGoalStore::new(Arc::clone(
+        &graph.scoped_filesystem,
+    ))) as Arc<dyn RuntimeSubagentGoalStore>;
+
+    let await_edge_store = Arc::new(FilesystemAwaitEdgeStore::new(Arc::clone(
+        &graph.scoped_filesystem,
+    )));
+    let await_edge_resolver = Arc::new(AwaitEdgeResolver::new_unbound_deferred_result_writer(
+        Arc::clone(&await_edge_store),
+        Arc::clone(&subagent_goal_store) as Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore>,
+        Arc::clone(&graph.turn_state) as Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore>,
+        Arc::clone(&graph.thread_service),
+    ));
+    let await_edge_driver = Arc::new(ScopeRecoveryDriver::new(
+        Arc::clone(&await_edge_resolver),
+        Arc::clone(&await_edge_store),
+    ));
+
     RuntimeStoreParts {
         local_runtime: None,
         turn_state_store: Arc::clone(&graph.turn_state) as Arc<dyn RuntimeTurnStateStore>,
@@ -241,9 +398,10 @@ where
         resource_governor: Arc::clone(&graph.resource_governor),
         budget_gate_store: Arc::clone(&graph.budget_gate_store),
         broadcast_budget_event_sink: Arc::clone(&graph.broadcast_budget_event_sink),
-        subagent_goal_store: Arc::new(FilesystemSubagentGoalStore::new(Arc::clone(
-            &graph.scoped_filesystem,
-        ))) as Arc<dyn RuntimeSubagentGoalStore>,
+        subagent_goal_store,
+        subagent_await_edge_writer: await_edge_driver as Arc<dyn AwaitEdgeWriter>,
+        subagent_await_edge_settler: await_edge_resolver as Arc<dyn AwaitEdgeSettler>,
+        subagent_await_edge_evidence: await_edge_store as Arc<dyn AwaitDependentRunEvidenceStore>,
         trigger_repository: Some(Arc::clone(&graph.trigger_repository)),
     }
 }
@@ -3028,6 +3186,9 @@ pub async fn build_reborn_runtime(
         budget_gate_store,
         broadcast_budget_event_sink,
         subagent_goal_store,
+        subagent_await_edge_writer,
+        subagent_await_edge_settler,
+        subagent_await_edge_evidence,
         trigger_repository: _trigger_repository,
     } = runtime_parts;
     let (skill_context_source, skill_activation_source, skill_execution_adapter) =
@@ -3059,7 +3220,6 @@ pub async fn build_reborn_runtime(
         owner_user_id: Some(actor_user_id.clone()),
         mission_id: None,
     };
-    let subagent_gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
 
     // Resolve the model gateway in three flat steps so the cfg gates
     // don't multiply into a 4-way permutation:
@@ -3191,7 +3351,7 @@ pub async fn build_reborn_runtime(
     };
 
     let await_dependent_run_evidence: Arc<dyn AwaitDependentRunEvidenceStore> =
-        subagent_gate_store.clone();
+        Arc::clone(&subagent_await_edge_evidence);
     let mut loop_exit_evidence = ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
         Arc::clone(&thread_service),
         Arc::clone(&turn_state_store) as Arc<dyn ironclaw_turns::TurnStateStore>,
@@ -3492,6 +3652,17 @@ pub async fn build_reborn_runtime(
     let resolved_tool_disclosure = tool_disclosure.unwrap_or_else(ToolDisclosureMode::from_env);
     let default_runtime_config = DefaultPlannedRuntimeConfig::default();
 
+    // Deferred bind (§ await-edge resolver ordering note above,
+    // `RuntimeStoreParts`'s doc comment): the resolver was assembled inside
+    // `local_runtime_parts`/`production_runtime_parts` before
+    // `capability_result_writer` existed. Bind it now, exactly once, before
+    // the resolver's settler ever runs.
+    subagent_await_edge_settler
+        .bind_result_writer(Arc::clone(&capability_result_writer))
+        .map_err(|error| RebornRuntimeError::MalformedConfig {
+            reason: format!("await-edge resolver result writer bind failed: {error}"),
+        })?;
+
     let planned_runtime_parts = DefaultPlannedRuntimeParts {
         turn_state: Arc::clone(&turn_state_store),
         thread_service: Arc::clone(&thread_service),
@@ -3515,7 +3686,9 @@ pub async fn build_reborn_runtime(
         capability_surface_resolver,
         capability_result_writer,
         subagent_goal_store,
-        subagent_gate_store,
+        subagent_await_edge_writer,
+        subagent_await_edge_settler,
+        subagent_await_edge_evidence,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
             capability_input_resolver,
@@ -7555,6 +7728,16 @@ output_schema_ref = "schemas/write.output.json"
             .expect("parent cancellation succeeds");
 
         let result_ref = LoopResultRef::new("result:runtime-cancel-child").unwrap();
+        let parent_resolved_run_profile = InMemoryRunProfileResolver::default()
+            .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+            .await
+            .expect("resolve run profile");
+        let parent_run_context = LoopRunContext::new(
+            parent_scope.clone(),
+            TurnId::new(),
+            parent_run_id,
+            parent_resolved_run_profile,
+        );
         runtime
             .thread_service
             .append_tool_result_reference(AppendToolResultReferenceRequest {
@@ -7593,6 +7776,9 @@ output_schema_ref = "schemas/write.output.json"
                         mode: SpawnSubagentMode::Blocking,
                         result_ref,
                         handoff: None,
+                        parent_run_context: parent_run_context.clone(),
+                        gate_ref: ironclaw_turns::GateRef::new("gate:runtime-cancel-child")
+                            .unwrap(),
                     })
                     .unwrap(),
                 ),

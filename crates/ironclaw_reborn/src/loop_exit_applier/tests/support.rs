@@ -29,8 +29,68 @@ use crate::loop_exit_applier::{
     ThreadCheckpointLoopExitEvidencePort,
 };
 
+/// Always-empty test fixture — no filesystem/CAS store needed here, this
+/// test module only ever wants "no awaited-child evidence exists."
+struct NoAwaitDependentRunEvidence;
+
+#[async_trait]
+impl AwaitDependentRunEvidenceStore for NoAwaitDependentRunEvidence {
+    async fn has_awaited_child_gate(
+        &self,
+        _scope: &TurnScope,
+        _run_id: TurnRunId,
+        _gate_ref: &LoopGateRef,
+    ) -> Result<bool, TurnError> {
+        Ok(false)
+    }
+}
+
 pub(super) fn empty_await_dependent_run_evidence() -> Arc<dyn AwaitDependentRunEvidenceStore> {
-    Arc::new(crate::subagent::gate_resolution::BoundedSubagentGateResolutionStore::new())
+    Arc::new(NoAwaitDependentRunEvidence)
+}
+
+/// Minimal in-memory test double recording one `(scope, run_id, gate_ref,
+/// mode)` tuple — enough for the two real-evidence tests in `mod.rs`
+/// (accept a matching blocking-mode gate, reject a background-mode one)
+/// without pulling in the real filesystem-backed `FilesystemAwaitEdgeStore`
+/// (feature-gated behind `filesystem-goal-store`; this test module is
+/// `#[cfg(test)]`-only and must stay compilable without that feature).
+pub(super) struct RecordingAwaitDependentRunEvidence {
+    scope: TurnScope,
+    run_id: TurnRunId,
+    gate_ref: GateRef,
+    mode: ironclaw_loop_support::SpawnSubagentMode,
+}
+
+impl RecordingAwaitDependentRunEvidence {
+    pub(super) fn new(
+        scope: TurnScope,
+        run_id: TurnRunId,
+        gate_ref: GateRef,
+        mode: ironclaw_loop_support::SpawnSubagentMode,
+    ) -> Self {
+        Self {
+            scope,
+            run_id,
+            gate_ref,
+            mode,
+        }
+    }
+}
+
+#[async_trait]
+impl AwaitDependentRunEvidenceStore for RecordingAwaitDependentRunEvidence {
+    async fn has_awaited_child_gate(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        gate_ref: &LoopGateRef,
+    ) -> Result<bool, TurnError> {
+        Ok(*scope == self.scope
+            && run_id == self.run_id
+            && gate_ref.as_str() == self.gate_ref.as_str()
+            && self.mode == ironclaw_loop_support::SpawnSubagentMode::Blocking)
+    }
 }
 
 pub(super) fn text_checkpoint_evidence(

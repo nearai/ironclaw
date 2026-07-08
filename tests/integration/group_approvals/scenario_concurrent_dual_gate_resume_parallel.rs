@@ -8,91 +8,29 @@
 //! separate, prod-relevant concern orthogonal to what this scenario proves."
 //!
 //! #5466 measured ~10% of single-attempt real-parallel exchanges landing on
-//! a sanitized `exit_application_failed` catch-all (the `LoopExitApplier`
-//! error-path category) instead of `Completed`. This is the one OBSERVED
-//! symptom, category-level only -- NOT a root-cause diagnosis; the allow-list
-//! below only proves this test doesn't silently swallow a DIFFERENT failure.
-//!
-//! DO NOT add a `StorageMode::LibSql` variant: #5466 reports the libsql
-//! variant SIGABRTs the whole test process (`SQLITE_MISUSE` across an
-//! `extern "C"` boundary) -- a process abort that would take every other
-//! test in this `[[test]]` binary down with it. Exclude unconditionally
-//! until #5466's libsql diagnosis lands a real fix.
+//! a sanitized `exit_application_failed` catch-all instead of `Completed`,
+//! root-caused to `FilesystemTurnStateStore`'s lock-free CAS retry churning
+//! a fresh libsql connection per attempt under concurrent contention (see
+//! `crates/ironclaw_turns/src/filesystem_store.rs`'s `cas_update`). #5751
+//! fixed the root cause with a bounded deadpool connection pool. Verified
+//! here (cycle-3 fix lane, PR #5819): 50 real `StorageMode::LibSql` runs and
+//! 40 `InMemory` runs, 0 failures and 0 tolerated-flake occurrences in
+//! either -- both the libsql exclusion and the retry-tolerance this
+//! scenario used to need are retired.
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
-use ironclaw_turns::{TurnRunState, TurnStatus};
+use ironclaw_turns::TurnStatus;
 use serde_json::json;
 
-/// #5466's own measured single-attempt failure rate is ~10%; this pushes the
-/// compound false-fail rate to ~0.1%.
-const MAX_ATTEMPTS: u32 = 3;
-/// The one category #5466 reports observing. See module doc: category-level
-/// allow-list only, not a root-cause diagnosis.
-const ALLOWED_FAILURE_CATEGORY: &str = "exit_application_failed";
-
 pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
-    for attempt in 1..=MAX_ATTEMPTS {
-        if attempt_once(g, attempt).await? {
-            return Ok(());
-        }
-    }
-    Err(format!(
-        "exhausted {MAX_ATTEMPTS} attempts; every attempt hit the allow-listed \
-         {ALLOWED_FAILURE_CATEGORY} category"
-    )
-    .into())
-}
-
-/// One run's classified terminal outcome: either it completed cleanly, or it
-/// hit the one tolerated flake category (#5466) and this attempt should retry.
-enum RunOutcome {
-    Completed,
-    ToleratedFlake,
-}
-
-/// Classifies a terminal `TurnRunState`. `Err` for anything outside
-/// Completed/allow-listed-Failed -- a genuine, non-tolerated regression.
-fn classify_terminal(label: &str, state: &TurnRunState) -> HarnessResult<RunOutcome> {
-    match state.status {
-        TurnStatus::Completed => {
-            if let Some(failure) = &state.failure {
-                return Err(format!(
-                    "thread {label} reached Completed but recorded a failure: {failure:?}"
-                )
-                .into());
-            }
-            Ok(RunOutcome::Completed)
-        }
-        TurnStatus::Failed => {
-            let category = state.failure.as_ref().map(|f| f.category());
-            if category != Some(ALLOWED_FAILURE_CATEGORY) {
-                return Err(format!(
-                    "thread {label} reached Failed with an unrecognized category {category:?} \
-                     (only {ALLOWED_FAILURE_CATEGORY:?} is allow-listed); state={state:?}"
-                )
-                .into());
-            }
-            Ok(RunOutcome::ToleratedFlake)
-        }
-        other => Err(format!(
-            "thread {label} reached unexpected terminal status {other:?} (expected \
-             Completed or allow-listed Failed); state={state:?}"
-        )
-        .into()),
-    }
-}
-
-/// Runs one full parallel exchange. `Ok(true)` on a clean pass, `Ok(false)`
-/// if either run hit the tolerated flake (caller retries), `Err` otherwise.
-async fn attempt_once(g: &RebornIntegrationGroup, attempt: u32) -> HarnessResult<bool> {
-    let path_a = format!("parallel_a_{attempt}.txt");
-    let path_b = format!("parallel_b_{attempt}.txt");
+    let path_a = "parallel_a.txt";
+    let path_b = "parallel_b.txt";
     let content_a = "thread A approved (parallel)";
     let content_b = "thread B should not persist";
 
     let thread_a = g
-        .thread(format!("conv-concurrent-dual-gate-parallel-a-{attempt}"))
+        .thread("conv-concurrent-dual-gate-parallel-a")
         .script([
             RebornScriptedReply::tool_call(
                 "builtin.write_file",
@@ -103,7 +41,7 @@ async fn attempt_once(g: &RebornIntegrationGroup, attempt: u32) -> HarnessResult
         .build()
         .await?;
     let thread_b = g
-        .thread(format!("conv-concurrent-dual-gate-parallel-b-{attempt}"))
+        .thread("conv-concurrent-dual-gate-parallel-b")
         .script([
             RebornScriptedReply::tool_call(
                 "builtin.write_file",
@@ -139,8 +77,6 @@ async fn attempt_once(g: &RebornIntegrationGroup, attempt: u32) -> HarnessResult
     approve_result?;
     deny_result?;
 
-    // Bounded retry / no permanent wedge: an `Err` here (timeout) is always
-    // fatal -- #5466's symptom is a fast terminal Failed, never a hang.
     let (state_a, state_b) = tokio::join!(
         thread_a.wait_for_terminal(run_a),
         thread_b.wait_for_terminal(run_b),
@@ -148,34 +84,29 @@ async fn attempt_once(g: &RebornIntegrationGroup, attempt: u32) -> HarnessResult
     let state_a = state_a?;
     let state_b = state_b?;
 
-    let outcome_a = classify_terminal("A", &state_a)?;
-    let outcome_b = classify_terminal("B", &state_b)?;
-
-    // No cross-thread bleed / no lost update, regardless of terminal status:
-    // B (denied) must never have its file; A's file must match ITS OWN
-    // disposition (present+correct only when Completed, absent when the
-    // tolerated flake fired -- never B's content either way).
-    thread_b.assert_workspace_file_absent(&path_b).await?;
-    thread_a.assert_workspace_file_absent(&path_b).await?;
-    match outcome_a {
-        RunOutcome::Completed => {
-            thread_a
-                .assert_workspace_file_contains(&path_a, content_a)
-                .await?;
+    for (label, state) in [("A", &state_a), ("B", &state_b)] {
+        if state.status != TurnStatus::Completed {
+            return Err(format!(
+                "thread {label} expected Completed, got {:?}; state={state:?}",
+                state.status
+            )
+            .into());
         }
-        RunOutcome::ToleratedFlake => {
-            thread_a.assert_workspace_file_absent(&path_a).await?;
+        if let Some(failure) = &state.failure {
+            return Err(format!(
+                "thread {label} reached Completed but recorded a failure: {failure:?}"
+            )
+            .into());
         }
     }
 
-    if matches!(outcome_a, RunOutcome::ToleratedFlake)
-        || matches!(outcome_b, RunOutcome::ToleratedFlake)
-    {
-        eprintln!(
-            "w6-cas-contention: tolerated #5466 flake on attempt {attempt}/{MAX_ATTEMPTS}: \
-             {ALLOWED_FAILURE_CATEGORY:?}"
-        );
-        return Ok(false);
-    }
-    Ok(true)
+    // No cross-thread bleed / no lost update: B (denied) must never have its
+    // file; A's (approved) file must be present with its own content.
+    thread_b.assert_workspace_file_absent(path_b).await?;
+    thread_a.assert_workspace_file_absent(path_b).await?;
+    thread_a
+        .assert_workspace_file_contains(path_a, content_a)
+        .await?;
+
+    Ok(())
 }

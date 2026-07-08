@@ -47,6 +47,11 @@ libsql-restart-tests = [
 [dependencies]
 async-trait = "0.1"
 base64 = { version = "0.22", optional = true }
+# Scope-roster shard-prefix hashing only (§4.5) — same version already used
+# by `ironclaw_filesystem` for the identical stable-hex-from-key pattern
+# (`db.rs`'s index-name collision suffixing); not a `[workspace.dependencies]`
+# entry, so this crate needs its own line.
+blake3 = "1"
 chrono = "0.4"
 futures-util = { version = "0.3", default-features = false }
 ironclaw_agent_loop = { path = "../ironclaw_agent_loop", version = "0.1.0" }
