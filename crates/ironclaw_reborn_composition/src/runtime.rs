@@ -1772,29 +1772,6 @@ impl RebornRuntime {
             .as_ref()
             .is_some_and(|slot| slot.get().is_some())
     }
-
-    /// Wire the per-caller channel-connection facade into the already-built
-    /// extension-lifecycle capability handler. Must be called after
-    /// [`build_reborn_runtime`] returns and after the facade is constructed
-    /// (e.g. inside the Slack host-beta WebUI composition). Idempotent: a second
-    /// call is silently ignored. Returns `false` when the local-runtime slot is
-    /// unavailable or already occupied, `true` on first successful set. Shares
-    /// the same `OnceLock` the handler reads
-    /// (`RebornLocalRuntimeServices::channel_connection_facade_slot`).
-    #[cfg(feature = "slack-v2-host-beta")]
-    pub(crate) fn set_channel_connection_facade(
-        &self,
-        facade: Arc<dyn ironclaw_product_workflow::ChannelConnectionFacade>,
-    ) -> bool {
-        let Some(local_runtime) = self.services.local_runtime.as_ref() else {
-            return false;
-        };
-        local_runtime
-            .channel_connection_facade_slot
-            .set(facade)
-            .is_ok()
-    }
-
     #[cfg(test)]
     fn webui_approval_audit_sink(&self) -> Arc<InMemoryAuditSink> {
         self.approval_audit_sink.clone()

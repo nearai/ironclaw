@@ -25,7 +25,7 @@ use ironclaw_product_adapters::AdapterInstallationId;
 use rand::RngExt as _;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::slack::slack_actor_identity::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
+use crate::provider_identity::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
 use crate::slack::slack_channel_routes::{
     SlackChannelRoute, SlackChannelRouteAssignment, SlackChannelRouteError, SlackChannelRouteKey,
     SlackChannelRouteListPage, SlackChannelRouteStore,

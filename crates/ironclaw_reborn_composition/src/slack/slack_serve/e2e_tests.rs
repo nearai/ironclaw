@@ -72,10 +72,7 @@ use crate::slack::slack_delivery::{
     PostSubmitDeliveryHook, SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
     SlackFinalReplyDeliverySettings, TriggeredRunDeliveryDriver,
 };
-use crate::{
-    AuthChallengeProvider, RebornUserIdentityLookup, RebornUserIdentityLookupError,
-    SlackUserIdentityActorResolver,
-};
+use crate::{AuthChallengeProvider, RebornUserIdentityLookup, RebornUserIdentityLookupError};
 
 #[path = "e2e_auth_challenge.rs"]
 mod e2e_auth_challenge;
@@ -382,12 +379,14 @@ fn static_personal_actor_user_resolver() -> Arc<dyn ProductActorUserResolver> {
 }
 
 fn user_identity_actor_user_resolver() -> Arc<dyn ProductActorUserResolver> {
-    Arc::new(SlackUserIdentityActorResolver::new(Arc::new(
-        RecordingUserIdentityLookup::new([(
-            format!("{INSTALLATION}:{SLACK_USER}"),
-            UserId::new(USER).expect("user"), // safety: static test user id is valid.
-        )]),
-    )))
+    Arc::new(
+        crate::slack_host_beta::runtime_setup::slack_provider_identity_actor_resolver(Arc::new(
+            RecordingUserIdentityLookup::new([(
+                format!("{INSTALLATION}:{SLACK_USER}"),
+                UserId::new(USER).expect("user"), // safety: static test user id is valid.
+            )]),
+        )),
+    )
 }
 
 /// A scope-aware approval service used in delivered-gate-route E2E tests.

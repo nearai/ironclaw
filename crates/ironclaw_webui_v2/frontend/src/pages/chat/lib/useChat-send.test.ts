@@ -2526,8 +2526,8 @@ test("useChat: a channel-connected event refreshes the connection caches without
       "the extensions snapshot is refreshed on connect",
     );
     assert.ok(
-      invalidated.includes("connectable-channels"),
-      "the connectable-channels snapshot is refreshed on connect",
+      !invalidated.includes("connectable-channels"),
+      "channel discovery is extension-surface data now; there is no connectable-channels query left to refresh",
     );
     assert.deepEqual(
       stateUpdates

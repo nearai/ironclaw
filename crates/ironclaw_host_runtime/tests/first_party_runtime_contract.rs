@@ -688,6 +688,7 @@ fn first_party_registry_with_effects(effects: Vec<EffectKind>) -> ExtensionRegis
                 service: "host".to_string(),
             },
             host_apis: Vec::new(),
+            host_api_surfaces: Vec::new(),
             capabilities: vec![CapabilityManifest {
                 id: capability_id(),
                 implements: Vec::new(),

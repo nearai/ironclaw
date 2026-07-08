@@ -151,6 +151,7 @@ fn package_from_spec(spec: &GsuitePackageSpec) -> Result<ExtensionPackage, Exten
                 service: spec.service.to_string(),
             },
             host_apis: Vec::new(),
+            host_api_surfaces: Vec::new(),
             hooks: Vec::new(),
             capabilities,
         },

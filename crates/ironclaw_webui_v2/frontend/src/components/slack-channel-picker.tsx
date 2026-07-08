@@ -13,13 +13,13 @@ import {
 
 const QUERY_KEY = ["slack-allowed-channels"];
 
-export function SlackChannelPicker({ action }) {
+export function SlackChannelPicker() {
   const t = useT();
   const queryClient = useQueryClient();
   const [draftChannelId, setDraftChannelId] = React.useState("");
   const [draftSubjectUserId, setDraftSubjectUserId] = React.useState("");
   const [channels, setChannels] = React.useState([]);
-  const copy = slackChannelPickerCopy(action, t);
+  const copy = slackChannelPickerCopy(t);
 
   const channelsQuery = useQuery({
     queryKey: QUERY_KEY,
@@ -46,7 +46,6 @@ export function SlackChannelPicker({ action }) {
       queryClient.invalidateQueries({ queryKey: QUERY_KEY });
       queryClient.invalidateQueries({ queryKey: ["slack-routable-subjects"] });
       queryClient.invalidateQueries({ queryKey: ["extensions"] });
-      queryClient.invalidateQueries({ queryKey: ["connectable-channels"] });
     },
   });
 
@@ -272,19 +271,19 @@ function persistedSlackChannels(channels = []) {
   }));
 }
 
-function slackChannelPickerCopy(action, t) {
+function slackChannelPickerCopy(t) {
   return {
-    title: action?.title || t("channels.slackAccessTitle"),
+    title: t("channels.slackAccessTitle"),
     instructions:
-      action?.instructions || t("channels.slackAccessInstructions"),
-    inputPlaceholder: action?.input_placeholder || "C0123456789",
+      t("channels.slackAccessInstructions"),
+    inputPlaceholder: "C0123456789",
     addLabel: t("channels.slackAccessAdd"),
     loadingMessage: t("channels.slackAccessLoading"),
     emptyMessage: t("channels.slackAccessEmpty"),
-    submitLabel: action?.submit_label || t("channels.slackAccessSave"),
+    submitLabel: t("channels.slackAccessSave"),
     savingLabel: t("channels.slackAccessSaving"),
-    successMessage: action?.success_message || t("channels.slackAccessSuccess"),
-    errorMessage: action?.error_message || t("channels.slackAccessError"),
+    successMessage: t("channels.slackAccessSuccess"),
+    errorMessage: t("channels.slackAccessError"),
     autoSubjectLabel: t("channels.slackAccessAutoSubject"),
     noSubjectsLabel: t("channels.slackAccessNoSubjects"),
     allowLabel: (channelId) => t("channels.slackAccessAllow", { channelId }),

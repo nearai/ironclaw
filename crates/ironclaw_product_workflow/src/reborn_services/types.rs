@@ -11,7 +11,8 @@ use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, de};
 
 use crate::{
-    LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload, LifecycleReadinessBlocker,
+    ChannelConnectionRequirement, LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload,
+    LifecycleReadinessBlocker,
 };
 
 const OUTBOUND_DELIVERY_TARGET_ID_MAX_BYTES: usize = 512;
@@ -155,21 +156,6 @@ pub struct RebornServiceLifecycleResponse {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remediation: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornConnectableChannelListResponse {
-    pub channels: Vec<RebornConnectableChannelInfo>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornConnectableChannelInfo {
-    pub channel: String,
-    pub display_name: String,
-    pub strategy: RebornChannelConnectStrategy,
-    pub action: RebornChannelConnectAction,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub command_aliases: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1147,6 +1133,26 @@ pub struct RebornExtensionRegistryEntry {
     pub version: Option<String>,
 }
 
+/// One product-facing surface an installed extension declares, as rendered on
+/// the extensions wire. `channel` carries typed direction (inbound = external
+/// messages arrive here; outbound = the host delivers final replies /
+/// notifications here) plus the caller-scoped connection state and connect
+/// affordance when the surface requires an account binding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RebornExtensionSurface {
+    Tool,
+    Auth,
+    Channel {
+        inbound: bool,
+        outbound: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        connected: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        connection: Option<ChannelConnectionRequirement>,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornExtensionInfo {
     pub package_ref: LifecyclePackageRef,
@@ -1169,6 +1175,9 @@ pub struct RebornExtensionInfo {
     pub onboarding_state: Option<RebornExtensionOnboardingState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub onboarding: Option<RebornExtensionOnboardingPayload>,
+    /// Declared product surfaces (tool / auth / channel-with-direction).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub surfaces: Vec<RebornExtensionSurface>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

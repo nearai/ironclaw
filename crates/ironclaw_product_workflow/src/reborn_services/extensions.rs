@@ -4,15 +4,15 @@ use std::{
 };
 
 use futures::{StreamExt, TryStreamExt, stream};
-use ironclaw_host_api::ExtensionId;
+use ironclaw_host_api::{CapabilitySurfaceKind, ExtensionId};
 
 use crate::{
-    ChannelConnectionFacade, LifecycleExtensionSummary, LifecycleExtensionSurfaceKind,
-    LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
-    LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
-    LifecycleProductPayload, LifecycleProductResponse, LifecycleProductSurfaceContext,
-    RebornExtensionActionResponse, RebornExtensionInfo, RebornExtensionListResponse,
-    RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
+    ChannelConnectionFacade, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
+    LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductAction,
+    LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
+    LifecycleProductResponse, LifecycleProductSurfaceContext, RebornExtensionActionResponse,
+    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionOnboardingState,
+    RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornExtensionSurface,
     RebornServicesError, WebUiAuthenticatedCaller,
 };
 
@@ -356,6 +356,33 @@ fn extension_info(
     } else {
         onboarding.state
     };
+    let connected = if has_external_channel_surface {
+        connections.get(summary.package_ref.id.as_str()).copied()
+    } else {
+        None
+    };
+    let surfaces: Vec<RebornExtensionSurface> = summary
+        .surface_kinds
+        .iter()
+        .filter_map(|kind| match kind {
+            CapabilitySurfaceKind::Tool => Some(RebornExtensionSurface::Tool),
+            CapabilitySurfaceKind::Auth => Some(RebornExtensionSurface::Auth),
+            CapabilitySurfaceKind::Channel => Some(RebornExtensionSurface::Channel {
+                inbound: summary
+                    .channel_directions
+                    .map(|directions| directions.inbound)
+                    .unwrap_or(false),
+                outbound: summary
+                    .channel_directions
+                    .map(|directions| directions.outbound)
+                    .unwrap_or(false),
+                connected,
+                connection: summary.channel_connection.clone(),
+            }),
+            // Reserved kinds have no manifest section yet, so no wire form.
+            CapabilitySurfaceKind::Trigger | CapabilitySurfaceKind::File => None,
+        })
+        .collect();
     RebornExtensionInfo {
         package_ref: summary.package_ref,
         display_name: summary.name,
@@ -376,6 +403,7 @@ fn extension_info(
         version: Some(summary.version),
         onboarding_state,
         onboarding: onboarding.onboarding,
+        surfaces,
     }
 }
 
@@ -390,7 +418,7 @@ fn extension_kind(summary: &LifecycleExtensionSummary) -> &'static str {
 fn has_external_channel_surface(summary: &LifecycleExtensionSummary) -> bool {
     summary
         .surface_kinds
-        .contains(&LifecycleExtensionSurfaceKind::ExternalChannel)
+        .contains(&CapabilitySurfaceKind::Channel)
 }
 
 fn removable_channel_cleanup_for_summary(
@@ -472,7 +500,7 @@ mod tests {
 
     use async_trait::async_trait;
     use ironclaw_auth::{CredentialAccountId, CredentialAccountProjection};
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+    use ironclaw_host_api::{AgentId, CapabilitySurfaceKind, ProjectId, TenantId, UserId};
 
     use super::*;
     use crate::reborn_services::StaticChannelConnectionFacade;
@@ -480,7 +508,7 @@ mod tests {
         ChannelConnectionFacade, ExtensionCredentialStatusRequest,
         ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialRequirement,
         LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding,
-        LifecycleExtensionRuntimeKind, LifecycleExtensionSource, LifecycleExtensionSurfaceKind,
+        LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
         LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecycleSearchExtensionSummary,
         ProductWorkflowError, RebornExtensionOnboardingState, RebornServicesError,
         RebornServicesErrorCode, RebornServicesErrorKind, WebUiAuthenticatedCaller,
@@ -945,7 +973,7 @@ mod tests {
     fn product_adapter_surface_projects_channel_kind() {
         let mut summary = summary_with_onboarding();
         summary.runtime_kind = LifecycleExtensionRuntimeKind::FirstParty;
-        summary.surface_kinds = vec![LifecycleExtensionSurfaceKind::ExternalChannel];
+        summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
 
         let entry = registry_entry(summary, &HashSet::new());
 
@@ -977,7 +1005,7 @@ mod tests {
         // channel surface overrides runtime kind → "channel"
         let mut channel_summary = summary_with_onboarding();
         channel_summary.runtime_kind = LifecycleExtensionRuntimeKind::WasmTool;
-        channel_summary.surface_kinds = vec![LifecycleExtensionSurfaceKind::ExternalChannel];
+        channel_summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
         assert_eq!(
             extension_kind(&channel_summary),
             "channel",
@@ -989,7 +1017,7 @@ mod tests {
     async fn list_projects_external_channel_surface_kind_through_extension_info() {
         let mut summary = summary_with_onboarding();
         summary.runtime_kind = LifecycleExtensionRuntimeKind::FirstParty;
-        summary.surface_kinds = vec![LifecycleExtensionSurfaceKind::ExternalChannel];
+        summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
         summary.credential_requirements = Vec::new();
         let facade = ListingFacade {
             extension: LifecycleInstalledExtensionSummary {
@@ -1007,7 +1035,7 @@ mod tests {
 
         let mut unconnected_summary = summary_with_onboarding();
         unconnected_summary.runtime_kind = LifecycleExtensionRuntimeKind::FirstParty;
-        unconnected_summary.surface_kinds = vec![LifecycleExtensionSurfaceKind::ExternalChannel];
+        unconnected_summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
         unconnected_summary.credential_requirements = Vec::new();
         let unconnected = list_extensions(
             Arc::new(ListingFacade {
@@ -1049,14 +1077,14 @@ mod tests {
         let installed_summary = {
             let mut summary = summary_with_onboarding_for("installed-fixture");
             summary.runtime_kind = LifecycleExtensionRuntimeKind::FirstParty;
-            summary.surface_kinds = vec![LifecycleExtensionSurfaceKind::ExternalChannel];
+            summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
             summary
         };
         let registry_installed_summary = installed_summary.clone();
         let registry_uninstalled_summary = {
             let mut summary = summary_with_onboarding_for("uninstalled-fixture");
             summary.runtime_kind = LifecycleExtensionRuntimeKind::FirstParty;
-            summary.surface_kinds = vec![LifecycleExtensionSurfaceKind::ExternalChannel];
+            summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
             summary
         };
         let facade = RegistryListingFacade {
@@ -1422,8 +1450,7 @@ mod tests {
                 LifecycleProductAction::ExtensionList => {
                     let mut summary = self.summary.clone();
                     if self.channel {
-                        summary.surface_kinds =
-                            vec![LifecycleExtensionSurfaceKind::ExternalChannel];
+                        summary.surface_kinds = vec![CapabilitySurfaceKind::Channel];
                     }
                     Ok(LifecycleProductResponse {
                         package_ref: None,
@@ -1516,6 +1543,8 @@ mod tests {
             source: LifecycleExtensionSource::HostBundled,
             runtime_kind: LifecycleExtensionRuntimeKind::WasmTool,
             surface_kinds: Vec::new(),
+            channel_directions: None,
+            channel_connection: None,
             visible_capability_ids: Vec::new(),
             visible_read_only_capability_ids: Vec::new(),
             credential_requirements: vec![LifecycleExtensionCredentialRequirement {
@@ -1545,6 +1574,8 @@ mod tests {
             source: LifecycleExtensionSource::HostBundled,
             runtime_kind: LifecycleExtensionRuntimeKind::McpServer,
             surface_kinds: Vec::new(),
+            channel_directions: None,
+            channel_connection: None,
             visible_capability_ids: vec!["nearai.web_search".to_string()],
             visible_read_only_capability_ids: vec!["nearai.web_search".to_string()],
             credential_requirements: Vec::new(),

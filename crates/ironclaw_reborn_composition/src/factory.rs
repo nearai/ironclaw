@@ -88,8 +88,7 @@ use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRu
 use ironclaw_outbound::{InMemoryDeliveredGateRouteStore, InMemoryTriggeredRunDeliveryStore};
 use ironclaw_processes::ProcessServices;
 use ironclaw_product_workflow::{
-    ChannelConnectionFacade, LifecycleProductSurfaceContext, ProductAuthTurnGateResumeDispatcher,
-    ProjectService,
+    LifecycleProductSurfaceContext, ProductAuthTurnGateResumeDispatcher, ProjectService,
 };
 use ironclaw_projects::ProjectRepository;
 use ironclaw_resources::InMemoryResourceGovernor;
@@ -873,17 +872,6 @@ pub(crate) struct RebornLocalRuntimeServices {
     // wiring need scoped storage/registry ownership before this is reused
     // outside local-dev composition. Tracked in #4091.
     pub(crate) extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
-    /// Late-binding slot for the per-caller channel-connection facade. Created
-    /// empty here and shared with the extension-lifecycle capability handler so
-    /// an inbound-channel activation can check whether the caller has already
-    /// connected the channel. Filled after runtime build by the Slack host-beta
-    /// composition (`build_webui_services_with_slack_host_beta_mounts` →
-    /// `RebornRuntime::set_channel_connection_facade`); stays empty in
-    /// deployments without a connectable channel, in which case the handler
-    /// fails closed (blocks) for any channel that declares a connection
-    /// requirement. Mirrors the `post_submit_hook_slot` deferred-wiring pattern.
-    pub(crate) channel_connection_facade_slot:
-        Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionFacade>>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub(crate) host_runtime_http_egress: Option<HostRuntimeHttpEgressPort>,
     pub(crate) skill_mounts: MountView,
@@ -1723,7 +1711,6 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         &mut first_party_registry,
         extension_management,
         product_auth.runtime_credential_account_selection_service(),
-        Arc::clone(&store_graph.local_runtime.channel_connection_facade_slot),
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("local-dev extension lifecycle handlers are invalid: {error}"),
@@ -2232,7 +2219,6 @@ async fn build_local_dev_store_graph(
         budget_gate_store,
         skill_management,
         extension_management: None,
-        channel_connection_facade_slot: Arc::new(std::sync::OnceLock::new()),
         runtime_http_egress: None,
         host_runtime_http_egress: None,
         skill_mounts,
@@ -2385,7 +2371,6 @@ async fn build_local_dev_store_graph(
         budget_gate_store,
         skill_management,
         extension_management: None,
-        channel_connection_facade_slot: Arc::new(std::sync::OnceLock::new()),
         runtime_http_egress: None,
         host_runtime_http_egress: None,
         skill_mounts,
@@ -5180,9 +5165,6 @@ mod tests {
             budget_gate_store: Arc::clone(&base_runtime.budget_gate_store),
             skill_management: Arc::clone(&base_runtime.skill_management),
             extension_management: base_runtime.extension_management.clone(),
-            channel_connection_facade_slot: Arc::clone(
-                &base_runtime.channel_connection_facade_slot,
-            ),
             runtime_http_egress: base_runtime.runtime_http_egress.clone(),
             host_runtime_http_egress: base_runtime.host_runtime_http_egress.clone(),
             skill_mounts: base_runtime.skill_mounts.clone(),

@@ -20,9 +20,7 @@ use crate::extension_host::extension_lifecycle::{
 };
 use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
 use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
-use crate::slack::slack_actor_identity::{
-    RebornUserIdentityLookup, SlackUserIdentityActorResolver,
-};
+use crate::provider_identity::{ProviderIdentityActorResolver, RebornUserIdentityLookup};
 use crate::slack::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteAssignment, SlackChannelRouteError,
     SlackChannelRouteStore, SlackChannelRouteSubjectResolver, SlackChannelSetupActivation,
@@ -639,10 +637,10 @@ impl DynamicSlackInstallationResolver {
             .map_err(map_build_error_to_ingress_not_found(
                 "build Slack setup config",
             ))?;
-        let identity_lookup: Arc<dyn crate::slack::slack_actor_identity::RebornUserIdentityLookup> =
+        let identity_lookup: Arc<dyn crate::provider_identity::RebornUserIdentityLookup> =
             self.state.clone();
         let actor_user_resolver = Arc::new(SlackHostBetaActorUserResolver::new(Arc::new(
-            SlackUserIdentityActorResolver::new(Arc::clone(&identity_lookup)),
+            slack_provider_identity_actor_resolver(Arc::clone(&identity_lookup)),
         )));
         let subject_route_resolver: Arc<dyn ProductConversationSubjectRouteResolver> =
             Arc::new(SlackChannelRouteSubjectResolver::new(
@@ -989,6 +987,21 @@ fn map_setup_error_to_dynamic_target_unavailable(
         );
         slack_dynamic_target_unavailable()
     }
+}
+
+/// The Slack channel surface's actor→user resolver: the generic
+/// provider-identity resolver parameterized with Slack's adapter id, actor
+/// kind, and credential-authority provider — data from the Slack surface
+/// declarations, not a Slack-specific resolver implementation.
+pub(crate) fn slack_provider_identity_actor_resolver(
+    lookup: Arc<dyn RebornUserIdentityLookup>,
+) -> ProviderIdentityActorResolver {
+    ProviderIdentityActorResolver::new(
+        crate::slack_channel_connection::SLACK_IDENTITY_PROVIDER,
+        ironclaw_slack_v2_adapter::SLACK_V2_ADAPTER_ID,
+        ironclaw_slack_v2_adapter::SLACK_USER_ACTOR_KIND,
+        lookup,
+    )
 }
 
 #[cfg(test)]

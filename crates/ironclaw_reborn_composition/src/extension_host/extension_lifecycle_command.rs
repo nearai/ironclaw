@@ -335,6 +335,8 @@ mod tests {
                         runtime_kind:
                             ironclaw_product_workflow::LifecycleExtensionRuntimeKind::WasmTool,
                         surface_kinds: Vec::new(),
+                        channel_directions: None,
+                        channel_connection: None,
                         visible_capability_ids: Vec::new(),
                         visible_read_only_capability_ids: Vec::new(),
                         credential_requirements: Vec::new(),

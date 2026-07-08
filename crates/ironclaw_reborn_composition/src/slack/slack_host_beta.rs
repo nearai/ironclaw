@@ -40,14 +40,12 @@ use secrecy::{ExposeSecret, SecretString};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-mod runtime_setup;
+pub(crate) mod runtime_setup;
 
 use crate::RebornRuntime;
 use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
 use crate::product_auth::serve::SlackPersonalOAuthBindingConfig;
-use crate::slack::slack_actor_identity::{
-    RebornUserIdentityLookup, SlackUserIdentityActorResolver,
-};
+use crate::provider_identity::RebornUserIdentityLookup;
 use crate::slack::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteStore, SlackChannelRouteSubjectResolver,
 };
@@ -722,7 +720,9 @@ pub fn build_slack_host_beta_mounts(
         ProvisioningSlackPersonalUserBinder::new(Arc::clone(&binding_service), dm_provisioner),
     );
     let actor_user_resolver = Arc::new(SlackHostBetaActorUserResolver::new(Arc::new(
-        SlackUserIdentityActorResolver::new(state.clone()),
+        crate::slack_host_beta::runtime_setup::slack_provider_identity_actor_resolver(
+            state.clone(),
+        ),
     )));
     let channel_route_store: Arc<dyn SlackChannelRouteStore> = state.clone();
     let personal_dm_target_store: Arc<dyn SlackPersonalDmTargetStore> = state.clone();
@@ -1219,10 +1219,9 @@ mod tests {
     use ironclaw_processes::{InMemoryProcessResultStore, InMemoryProcessStore, ProcessServices};
     use ironclaw_product_workflow::{
         LifecyclePackageKind, LifecyclePackageRef, ProductActorUserResolutionRequest,
-        ProductWorkflowError, RebornChannelConnectStrategy, RebornExtensionOnboardingState,
-        RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetStatus,
-        RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
-        WebUiAuthenticatedCaller,
+        ProductWorkflowError, RebornExtensionOnboardingState, RebornOutboundDeliveryTargetId,
+        RebornOutboundDeliveryTargetStatus, RebornServicesErrorCode, RebornServicesErrorKind,
+        RebornSetOutboundPreferencesRequest, WebUiAuthenticatedCaller,
     };
     use ironclaw_resources::InMemoryResourceGovernor;
     use ironclaw_secrets::InMemorySecretStore;
@@ -1236,14 +1235,12 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+    use crate::slack::slack_channel_connection::build_webui_services_with_slack_host_beta_mounts;
     use crate::slack::slack_channel_routes::{
         InMemorySlackChannelRouteStore, SlackChannelRoute, SlackChannelRouteAdminRouteMount,
         SlackChannelRouteError, SlackChannelRouteKey, SlackChannelRouteListPage,
         WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH, WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH,
         slack_channel_route_admin_route_mount,
-    };
-    use crate::slack::slack_connectable_channel::{
-        SlackOperatorRouteVisibility, build_webui_services_with_slack_host_beta_mounts,
     };
     use crate::slack::slack_outbound_targets::{
         InMemorySlackPersonalDmTargetStore, SLACK_OUTBOUND_TARGET_LIST_PAGE_SIZE,
@@ -1495,13 +1492,8 @@ mod tests {
         let mounts = build_slack_host_beta_mounts(&runtime, config()).expect("mounts");
         runtime.clear_local_runtime_for_test();
 
-        let error = build_webui_services_with_slack_host_beta_mounts(
-            &runtime,
-            None,
-            Some(&mounts),
-            SlackOperatorRouteVisibility::Hidden,
-        )
-        .expect_err("outbound target providers require local runtime wiring");
+        let error = build_webui_services_with_slack_host_beta_mounts(&runtime, None, Some(&mounts))
+            .expect_err("outbound target providers require local runtime wiring");
 
         assert!(matches!(
             error,
@@ -1935,13 +1927,9 @@ mod tests {
         let (runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
             .expect("mounts");
-        let bundle = build_webui_services_with_slack_host_beta_mounts(
-            &runtime,
-            None,
-            Some(&mounts),
-            SlackOperatorRouteVisibility::Visible,
-        )
-        .expect("webui bundle");
+        let bundle =
+            build_webui_services_with_slack_host_beta_mounts(&runtime, None, Some(&mounts))
+                .expect("webui bundle");
         let app = webui_v2_app(
             bundle,
             WebuiServeConfig::new(
@@ -2016,166 +2004,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slack_connectable_channels_advertise_admin_action_to_operator_token() {
-        let (runtime, _root) = runtime().await;
-        let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
-            .expect("mounts");
-        let bundle = build_webui_services_with_slack_host_beta_mounts(
-            &runtime,
-            None,
-            Some(&mounts),
-            SlackOperatorRouteVisibility::Visible,
-        )
-        .expect("webui bundle");
-        let app = webui_v2_app(
-            bundle,
-            WebuiServeConfig::new(
-                TenantId::new(TENANT).expect("tenant"),
-                Arc::new(OperatorTokenAuthenticator),
-                Vec::new(),
-            )
-            .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
-            .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-            .with_slack_channel_routes(mounts.channel_routes),
-        )
-        .expect("webui app");
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/api/webchat/v2/channels/connectable")
-                    .header("authorization", "Bearer operator-token")
-                    .body(Body::empty())
-                    .expect("request builds"),
-            )
-            .await
-            .expect("route responds");
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
-            .await
-            .expect("response body");
-        let body: serde_json::Value = serde_json::from_slice(&body).expect("response json");
-        let strategies: Vec<_> = body["channels"]
-            .as_array()
-            .expect("channels")
-            .iter()
-            .map(|channel| channel["strategy"].as_str().expect("strategy"))
-            .collect();
-        assert!(
-            strategies.contains(&"admin_managed_channels"),
-            "operator token should see Slack admin channel setup: {body}"
-        );
-        assert!(
-            strategies.contains(&"oauth"),
-            "operator token should see personal Slack OAuth connection: {body}"
-        );
-
-        runtime.shutdown().await.expect("runtime shuts down");
-    }
-
-    #[tokio::test]
-    async fn slack_connectable_channels_hide_admin_action_from_sso_session_token() {
-        let (runtime, _root) = runtime().await;
-        let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
-            .expect("mounts");
-        let bundle = build_webui_services_with_slack_host_beta_mounts(
-            &runtime,
-            None,
-            Some(&mounts),
-            SlackOperatorRouteVisibility::Visible,
-        )
-        .expect("webui bundle");
-        let app = webui_v2_app(
-            bundle,
-            WebuiServeConfig::new(
-                TenantId::new(TENANT).expect("tenant"),
-                Arc::new(MixedSessionAndOperatorAuthenticator),
-                Vec::new(),
-            )
-            .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
-            .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-            .with_slack_channel_routes(mounts.channel_routes),
-        )
-        .expect("webui app");
-
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/api/webchat/v2/channels/connectable")
-                    .header("authorization", "Bearer session-token")
-                    .body(Body::empty())
-                    .expect("request builds"),
-            )
-            .await
-            .expect("route responds");
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
-            .await
-            .expect("response body");
-        let body: serde_json::Value = serde_json::from_slice(&body).expect("response json");
-        let session_strategies: Vec<_> = body["channels"]
-            .as_array()
-            .expect("channels")
-            .iter()
-            .map(|channel| channel["strategy"].as_str().expect("strategy"))
-            .collect();
-        assert!(
-            !session_strategies.contains(&"admin_managed_channels"),
-            "SSO session token should not see Slack admin setup: {body}"
-        );
-        assert!(
-            session_strategies.contains(&"oauth"),
-            "SSO session token should see personal Slack OAuth connection: {body}"
-        );
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/api/webchat/v2/channels/connectable")
-                    .header("authorization", "Bearer operator-token")
-                    .body(Body::empty())
-                    .expect("request builds"),
-            )
-            .await
-            .expect("route responds");
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
-            .await
-            .expect("response body");
-        let body: serde_json::Value = serde_json::from_slice(&body).expect("response json");
-        let operator_strategies: Vec<_> = body["channels"]
-            .as_array()
-            .expect("channels")
-            .iter()
-            .map(|channel| channel["strategy"].as_str().expect("strategy"))
-            .collect();
-        assert!(
-            operator_strategies.contains(&"admin_managed_channels"),
-            "operator token should see Slack admin setup: {body}"
-        );
-
-        runtime.shutdown().await.expect("runtime shuts down");
-    }
-
-    #[tokio::test]
     async fn slack_channel_route_admin_is_reachable_through_webui_v2_app() {
         let (runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
             .expect("mounts");
-        let bundle = build_webui_services_with_slack_host_beta_mounts(
-            &runtime,
-            None,
-            Some(&mounts),
-            SlackOperatorRouteVisibility::Visible,
-        )
-        .expect("webui bundle");
+        let bundle =
+            build_webui_services_with_slack_host_beta_mounts(&runtime, None, Some(&mounts))
+                .expect("webui bundle");
         let app = webui_v2_app(
             bundle,
             WebuiServeConfig::new(
@@ -2308,39 +2143,12 @@ mod tests {
         let (runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
             .expect("mounts");
-        let bundle = build_webui_services_with_slack_host_beta_mounts(
-            &runtime,
-            None,
-            Some(&mounts),
-            SlackOperatorRouteVisibility::Hidden,
-        )
-        .expect("webui bundle");
-        let caller = WebUiAuthenticatedCaller::new(
-            TenantId::new(TENANT).expect("tenant"),
-            UserId::new(USER).expect("user"),
-            Some(AgentId::new(AGENT).expect("agent")),
-            Some(ProjectId::new(PROJECT).expect("project")),
-        );
-        let connectable = bundle
-            .api
-            .list_connectable_channels(caller)
-            .await
-            .expect("connectable channels");
-        assert!(
-            connectable
-                .channels
-                .iter()
-                .any(|channel| channel.strategy == RebornChannelConnectStrategy::OAuth),
-            "non-operator WebUI should still advertise personal Slack OAuth"
-        );
-        assert!(
-            connectable
-                .channels
-                .iter()
-                .all(|channel| channel.strategy
-                    != RebornChannelConnectStrategy::AdminManagedChannels),
-            "non-operator WebUI must not advertise Slack admin channel management"
-        );
+        let bundle =
+            build_webui_services_with_slack_host_beta_mounts(&runtime, None, Some(&mounts))
+                .expect("webui bundle");
+        // Channel discovery is extension-surface data on the extensions list
+        // (pinned at the product_workflow contract tier); this test keeps the
+        // host-beta mount composition + admin route wiring coverage.
         let app = webui_v2_app(
             bundle,
             WebuiServeConfig::new(
@@ -2375,13 +2183,9 @@ mod tests {
         let (runtime, _root) = runtime().await;
         let mounts =
             build_slack_host_beta_mounts(&runtime, config_without_legacy_actor()).expect("mounts");
-        let bundle = build_webui_services_with_slack_host_beta_mounts(
-            &runtime,
-            None,
-            Some(&mounts),
-            SlackOperatorRouteVisibility::Hidden,
-        )
-        .expect("webui bundle");
+        let bundle =
+            build_webui_services_with_slack_host_beta_mounts(&runtime, None, Some(&mounts))
+                .expect("webui bundle");
         let caller = operator_caller();
         // Model B: the user installs the tools extension (`slack`); the bot
         // channel (`slack_bot`) is hidden operator infrastructure. The tools
@@ -2431,13 +2235,9 @@ mod tests {
         )
         .await
         .expect("dynamic mounts");
-        let bundle = build_webui_services_with_slack_host_beta_mounts(
-            &runtime,
-            None,
-            Some(&mounts),
-            SlackOperatorRouteVisibility::Visible,
-        )
-        .expect("webui bundle");
+        let bundle =
+            build_webui_services_with_slack_host_beta_mounts(&runtime, None, Some(&mounts))
+                .expect("webui bundle");
         let caller = operator_caller();
         // Model B: the Slack bot channel is operator-provisioned infrastructure,
         // configured through the operator setup route (not the user catalog). Even
@@ -2497,13 +2297,9 @@ mod tests {
         let (runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
             .expect("mounts");
-        let bundle = build_webui_services_with_slack_host_beta_mounts(
-            &runtime,
-            None,
-            Some(&mounts),
-            SlackOperatorRouteVisibility::Hidden,
-        )
-        .expect("webui bundle");
+        let bundle =
+            build_webui_services_with_slack_host_beta_mounts(&runtime, None, Some(&mounts))
+                .expect("webui bundle");
         let app = webui_v2_app(
             bundle,
             WebuiServeConfig::new(
@@ -2538,13 +2334,9 @@ mod tests {
     async fn slack_host_beta_targets_wire_through_outbound_preferences_facade() {
         let (runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_mounts(&runtime, config()).expect("mounts");
-        let bundle = build_webui_services_with_slack_host_beta_mounts(
-            &runtime,
-            None,
-            Some(&mounts),
-            SlackOperatorRouteVisibility::Hidden,
-        )
-        .expect("webui bundle");
+        let bundle =
+            build_webui_services_with_slack_host_beta_mounts(&runtime, None, Some(&mounts))
+                .expect("webui bundle");
         let shared_subject = WebUiAuthenticatedCaller::new(
             TenantId::new(TENANT).expect("tenant"),
             UserId::new(SHARED_SUBJECT).expect("shared subject"),
@@ -2674,13 +2466,9 @@ mod tests {
         let (runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_mounts(&runtime, config()).expect("mounts");
         let route_mount = slack_channel_route_admin_route_mount(mounts.channel_routes.clone());
-        let bundle = build_webui_services_with_slack_host_beta_mounts(
-            &runtime,
-            None,
-            Some(&mounts),
-            SlackOperatorRouteVisibility::Hidden,
-        )
-        .expect("webui bundle");
+        let bundle =
+            build_webui_services_with_slack_host_beta_mounts(&runtime, None, Some(&mounts))
+                .expect("webui bundle");
         upsert_slack_channel_route(&route_mount, "C0DYNAMIC", SHARED_SUBJECT).await;
 
         let targets = bundle
@@ -2776,13 +2564,9 @@ mod tests {
         let (runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
             .expect("mounts");
-        let bundle = build_webui_services_with_slack_host_beta_mounts(
-            &runtime,
-            None,
-            Some(&mounts),
-            SlackOperatorRouteVisibility::Hidden,
-        )
-        .expect("webui bundle");
+        let bundle =
+            build_webui_services_with_slack_host_beta_mounts(&runtime, None, Some(&mounts))
+                .expect("webui bundle");
 
         let targets = bundle
             .api
@@ -2813,13 +2597,9 @@ mod tests {
             .await
             .expect("DM target provisions");
         let mounts = build_slack_host_beta_mounts(&runtime, config).expect("mounts");
-        let bundle = build_webui_services_with_slack_host_beta_mounts(
-            &runtime,
-            None,
-            Some(&mounts),
-            SlackOperatorRouteVisibility::Hidden,
-        )
-        .expect("webui bundle");
+        let bundle =
+            build_webui_services_with_slack_host_beta_mounts(&runtime, None, Some(&mounts))
+                .expect("webui bundle");
 
         let targets = bundle
             .api
@@ -2860,13 +2640,9 @@ mod tests {
             .await
             .expect("DM target provisions");
         let mounts = build_slack_host_beta_mounts(&runtime, config).expect("mounts");
-        let bundle = build_webui_services_with_slack_host_beta_mounts(
-            &runtime,
-            None,
-            Some(&mounts),
-            SlackOperatorRouteVisibility::Hidden,
-        )
-        .expect("webui bundle");
+        let bundle =
+            build_webui_services_with_slack_host_beta_mounts(&runtime, None, Some(&mounts))
+                .expect("webui bundle");
         let caller = operator_caller();
         let targets = bundle
             .api
@@ -3016,13 +2792,9 @@ mod tests {
             SlackPersonalDmTargetError::ProvisioningFailed(_)
         ));
         let mounts = build_slack_host_beta_mounts(&runtime, config).expect("mounts");
-        let bundle = build_webui_services_with_slack_host_beta_mounts(
-            &runtime,
-            None,
-            Some(&mounts),
-            SlackOperatorRouteVisibility::Hidden,
-        )
-        .expect("webui bundle");
+        let bundle =
+            build_webui_services_with_slack_host_beta_mounts(&runtime, None, Some(&mounts))
+                .expect("webui bundle");
 
         let targets = bundle
             .api
@@ -3068,7 +2840,6 @@ mod tests {
                     &runtime,
                     None,
                     Some(&mounts2),
-                    SlackOperatorRouteVisibility::Hidden,
                 )
                 .expect("webui bundle");
                 listed = bundle
@@ -3170,13 +2941,9 @@ mod tests {
             "slack:personal-dm:T0HOST:user:slack-host"
         );
 
-        let bundle = build_webui_services_with_slack_host_beta_mounts(
-            &runtime,
-            None,
-            Some(&mounts),
-            SlackOperatorRouteVisibility::Hidden,
-        )
-        .expect("webui bundle");
+        let bundle =
+            build_webui_services_with_slack_host_beta_mounts(&runtime, None, Some(&mounts))
+                .expect("webui bundle");
         let selected = bundle
             .api
             .set_outbound_preferences(
@@ -3224,13 +2991,9 @@ mod tests {
             .expect("second provisioning succeeds");
 
         let mounts = build_slack_host_beta_mounts(&runtime, config).expect("mounts");
-        let bundle = build_webui_services_with_slack_host_beta_mounts(
-            &runtime,
-            None,
-            Some(&mounts),
-            SlackOperatorRouteVisibility::Hidden,
-        )
-        .expect("webui bundle");
+        let bundle =
+            build_webui_services_with_slack_host_beta_mounts(&runtime, None, Some(&mounts))
+                .expect("webui bundle");
         let targets = bundle
             .api
             .list_outbound_delivery_targets(operator_caller())
@@ -3266,13 +3029,9 @@ mod tests {
         wait_for_nth_conversations_open(&egress, 1).await;
         let mounts2 =
             build_slack_host_beta_mounts(&runtime, config_without_legacy_actor()).expect("mounts");
-        let bundle = build_webui_services_with_slack_host_beta_mounts(
-            &runtime,
-            None,
-            Some(&mounts2),
-            SlackOperatorRouteVisibility::Hidden,
-        )
-        .expect("webui bundle");
+        let bundle =
+            build_webui_services_with_slack_host_beta_mounts(&runtime, None, Some(&mounts2))
+                .expect("webui bundle");
         let targets = bundle
             .api
             .list_outbound_delivery_targets(operator_caller())
@@ -3308,13 +3067,9 @@ mod tests {
     async fn slack_host_beta_targets_ignore_other_tenant_callers() {
         let (runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_mounts(&runtime, config()).expect("mounts");
-        let bundle = build_webui_services_with_slack_host_beta_mounts(
-            &runtime,
-            None,
-            Some(&mounts),
-            SlackOperatorRouteVisibility::Hidden,
-        )
-        .expect("webui bundle");
+        let bundle =
+            build_webui_services_with_slack_host_beta_mounts(&runtime, None, Some(&mounts))
+                .expect("webui bundle");
         let shared_subject = shared_subject_caller();
         let target_id = bundle
             .api
@@ -3423,13 +3178,9 @@ mod tests {
         let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
             .expect("mounts");
         let route_mount = slack_channel_route_admin_route_mount(mounts.channel_routes.clone());
-        let bundle = build_webui_services_with_slack_host_beta_mounts(
-            &runtime,
-            None,
-            Some(&mounts),
-            SlackOperatorRouteVisibility::Hidden,
-        )
-        .expect("webui bundle");
+        let bundle =
+            build_webui_services_with_slack_host_beta_mounts(&runtime, None, Some(&mounts))
+                .expect("webui bundle");
         upsert_slack_channel_route(&route_mount, "C0HOST", SHARED_SUBJECT).await;
 
         let shared_subject = shared_subject_caller();
@@ -3485,13 +3236,9 @@ mod tests {
         let (runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_mounts(&runtime, config()).expect("mounts");
         let route_mount = slack_channel_route_admin_route_mount(mounts.channel_routes.clone());
-        let bundle = build_webui_services_with_slack_host_beta_mounts(
-            &runtime,
-            None,
-            Some(&mounts),
-            SlackOperatorRouteVisibility::Hidden,
-        )
-        .expect("webui bundle");
+        let bundle =
+            build_webui_services_with_slack_host_beta_mounts(&runtime, None, Some(&mounts))
+                .expect("webui bundle");
         let shared_subject = shared_subject_caller();
         let operator = operator_caller();
         let target_id = bundle
@@ -3547,13 +3294,9 @@ mod tests {
         let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
             .expect("mounts");
         let route_mount = slack_channel_route_admin_route_mount(mounts.channel_routes.clone());
-        let bundle = build_webui_services_with_slack_host_beta_mounts(
-            &runtime,
-            None,
-            Some(&mounts),
-            SlackOperatorRouteVisibility::Hidden,
-        )
-        .expect("webui bundle");
+        let bundle =
+            build_webui_services_with_slack_host_beta_mounts(&runtime, None, Some(&mounts))
+                .expect("webui bundle");
         upsert_slack_channel_route(&route_mount, "C0HOST", SHARED_SUBJECT).await;
 
         let shared_subject = shared_subject_caller();
@@ -3609,13 +3352,9 @@ mod tests {
         let (runtime, _root) = runtime().await;
         let mounts = build_slack_host_beta_mounts(&runtime, config_without_channel_routes())
             .expect("mounts");
-        let bundle = build_webui_services_with_slack_host_beta_mounts(
-            &runtime,
-            None,
-            Some(&mounts),
-            SlackOperatorRouteVisibility::Visible,
-        )
-        .expect("webui bundle");
+        let bundle =
+            build_webui_services_with_slack_host_beta_mounts(&runtime, None, Some(&mounts))
+                .expect("webui bundle");
         let app = webui_v2_app(
             bundle.clone(),
             WebuiServeConfig::new(

@@ -13,106 +13,52 @@ export function isSlackPackage(item) {
   return packageId(item) === "slack";
 }
 
-export function isAdminManagedChannelsAction(connectAction) {
-  return connectAction?.strategy === "admin_managed_channels";
+// Channel discovery is extension-surface data: an extension's `surfaces`
+// carry a typed `channel` entry with direction (inbound/outbound), the
+// caller's connection state, and the connect affordance. There is no separate
+// connectable-channel registry.
+export function channelSurface(item) {
+  const surfaces = item?.surfaces || [];
+  return surfaces.find((surface) => surface?.kind === "channel") || null;
 }
 
-export function isInboundProofCodeAction(connectAction) {
-  return connectAction?.strategy === "inbound_proof_code";
+export function channelConnection(item) {
+  return channelSurface(item)?.connection || null;
 }
 
-export function isGenericInboundProofCodeAction(connectAction) {
-  return connectAction?.channel !== "slack" && isInboundProofCodeAction(connectAction);
+export function isInboundProofCodeConnection(connection) {
+  return connection?.strategy === "inbound_proof_code";
 }
 
-export function isSlackAdminManagedAction(connectAction) {
-  return connectAction?.channel === "slack" && isAdminManagedChannelsAction(connectAction);
-}
-
-export function findSlackConnectAction(connectableChannels) {
-  return findSlackConnectActions(connectableChannels)[0] || null;
-}
-
-export function findSlackConnectActions(connectableChannels) {
-  return connectActionsForChannel(connectableChannels, "slack");
-}
-
-export function connectActionsForPackage(connectableChannels, item) {
-  return connectActionsForChannel(connectableChannels, packageId(item));
-}
-
-export function connectActionsForChannel(connectableChannels, channel) {
-  if (!channel) return [];
-  const channels = connectableChannels || [];
-  const adminAction = channels.find(
-    (connectAction) =>
-      connectAction?.channel === channel && isAdminManagedChannelsAction(connectAction)
-  );
-  if (channel === "slack") {
-    return adminAction ? [adminAction] : [];
+export function ChannelConnectSections({ item }) {
+  const connection = channelConnection(item);
+  const sections = [];
+  if (isSlackPackage(item)) {
+    // Operator-only Slack workspace setup + channel routing. The section
+    // self-gates on the operator-scoped setup endpoint, so non-operators see
+    // nothing here; the user OAuth connect lives in the configure modal.
+    sections.push(<SlackAdminManagedSection key="slack-admin" />);
+  } else if (isInboundProofCodeConnection(connection)) {
+    const pairingChannel = connection.channel || packageId(item);
+    sections.push(
+      <PairingSection
+        key={`pairing-${pairingChannel}`}
+        channel={pairingChannel}
+        copy={connection}
+        redeemFn={redeemPairingCode}
+        showPendingRequests={false}
+        queryKeys={[["extensions"], ["pairing", pairingChannel]]}
+      />
+    );
   }
-  const actions = [
-    adminAction,
-    channels.find(
-      (connectAction) =>
-        connectAction?.channel === channel && isInboundProofCodeAction(connectAction)
-    ),
-  ].filter(Boolean);
-  if (actions.length > 0) return actions;
-  const fallback = channels.find((connectAction) => connectAction?.channel === channel);
-  return fallback ? [fallback] : [];
-}
-
-export function ChannelConnectActionSections({
-  connectAction = null,
-  connectActions = null,
-}) {
-  const actions =
-    connectActions || (connectAction ? [connectAction] : []);
-  const sections = actions
-    .map((action) => {
-      const key = `${action.channel}-${action.strategy}`;
-      if (isSlackAdminManagedAction(action)) {
-        return (<SlackAdminManagedSection key={key} action={action.action} />);
-      }
-      if (isGenericInboundProofCodeAction(action)) {
-        return (
-          <PairingSection
-            key={key}
-            channel={action.channel}
-            copy={action.action}
-            redeemFn={redeemPairingCode}
-            showPendingRequests={false}
-            queryKeys={[
-              ["extensions"],
-              ["connectable-channels"],
-              ["pairing", action.channel],
-            ]}
-          />
-        );
-      }
-      return null;
-    })
-    .filter(Boolean);
   return sections.length > 0
     ? (<div className="space-y-3">{sections}</div>)
     : null;
 }
 
-export function SlackConnectActionSections({
-  slackConnectAction,
-  slackConnectActions,
-}) {
-  return ChannelConnectActionSections({
-    connectAction: slackConnectAction,
-    connectActions: slackConnectActions,
-  });
-}
-
 export function ChannelsTab({
   status,
   channels,
-  connectableChannels,
   channelRegistry,
   onActivate,
   onConfigure,
@@ -123,10 +69,6 @@ export function ChannelsTab({
   const t = useT();
   const installedChannels = channels || [];
   const enabledChannels = status.enabled_channels || [];
-  const slackConnectActions = findSlackConnectActions(connectableChannels);
-  const hasInstalledSlackPackage = installedChannels.some(isSlackPackage);
-  const showBuiltinSlackConnectActions =
-    slackConnectActions.length > 0 && !hasInstalledSlackPackage;
 
   return (
     <div className="space-y-5">
@@ -142,7 +84,7 @@ export function ChannelsTab({
           enabled={true}
           detail={"SSE: " +
           (status.sse_connections || 0) +
-          " · WS: " +
+          " \u00b7 WS: " +
           (status.ws_connections || 0)}
         />
         <BuiltinRow
@@ -163,21 +105,6 @@ export function ChannelsTab({
           enabled={enabledChannels.includes("repl")}
           detail="ironclaw run --repl"
         />
-        {showBuiltinSlackConnectActions &&
-        (
-          <BuiltinRow
-            name={t("channels.slack")}
-            description={t("channels.slackDesc")}
-            enabled={false}
-            statusLabel={t("channels.setup")}
-            statusTone="muted"
-            detail={t("channels.slackDetail")}
-          >
-            <ChannelConnectActionSections
-              connectActions={slackConnectActions}
-            />
-          </BuiltinRow>
-        )}
       </div>
 
       {installedChannels.length > 0 &&
@@ -191,10 +118,9 @@ export function ChannelsTab({
           <div className="grid grid-cols-1 gap-4">
             {installedChannels.map(
               (ch) => {
-                const connectActions = connectActionsForPackage(connectableChannels, ch);
-                const isSlack = isSlackPackage(ch);
-                const pairingHandledByConnectAction =
-                  connectActions.some(isGenericInboundProofCodeAction);
+                const connection = channelConnection(ch);
+                const pairingHandledBySurface =
+                  isInboundProofCodeConnection(connection);
                 return (
                   <div key={packageId(ch)} className="flex flex-col gap-3">
                     <ExtensionCard
@@ -204,12 +130,9 @@ export function ChannelsTab({
                       onRemove={onRemove}
                       isBusy={isBusy}
                     />
-                    {connectActions.length > 0 &&
-                    (<ChannelConnectActionSections
-                      connectActions={connectActions}
-                    />)}
-                    {!isSlack &&
-                    !pairingHandledByConnectAction &&
+                    <ChannelConnectSections item={ch} />
+                    {!isSlackPackage(ch) &&
+                    !pairingHandledBySurface &&
                     (ch.onboarding_state === "pairing_required" ||
                       ch.onboarding_state === "pairing") &&
                     ( <PairingSection

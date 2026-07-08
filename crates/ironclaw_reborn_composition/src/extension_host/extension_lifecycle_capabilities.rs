@@ -1,7 +1,4 @@
-use std::{
-    sync::{Arc, OnceLock},
-    time::Instant,
-};
+use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use ironclaw_extensions::{
@@ -17,8 +14,8 @@ use ironclaw_host_runtime::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 use ironclaw_product_workflow::{
-    ChannelConnectionFacade, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload,
-    LifecycleProductResponse, ProductWorkflowError,
+    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
+    ProductWorkflowError,
 };
 use serde::Deserialize;
 
@@ -51,7 +48,6 @@ pub(crate) fn insert_handlers(
     registry: &mut FirstPartyCapabilityRegistry,
     extension_management: Arc<RebornLocalExtensionManagementPort>,
     credential_accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
-    _channel_connection: Arc<OnceLock<Arc<dyn ChannelConnectionFacade>>>,
 ) -> Result<(), HostApiError> {
     let handler = Arc::new(ExtensionLifecycleToolHandler {
         extension_management,

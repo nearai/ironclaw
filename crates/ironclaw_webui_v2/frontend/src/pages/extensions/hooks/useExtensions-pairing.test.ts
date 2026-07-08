@@ -31,7 +31,6 @@ function contextFor(mutationState, queryCalls) {
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
-    listConnectableChannels: () => {},
     fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
@@ -80,9 +79,6 @@ test("useExtensions points channel install success at the setup panel", () => {
       if (queryKey[0] === "extension-registry") {
         return { data: { entries: [] }, isLoading: false };
       }
-      if (queryKey[0] === "connectable-channels") {
-        return { data: { channels: [] }, isLoading: false };
-      }
       return { data: {}, isLoading: false };
     },
   };
@@ -121,7 +117,6 @@ test("useExtensions install→configure hands the modal the channel kind (so it 
     useQuery: ({ queryKey }) => {
       if (queryKey[0] === "extensions") return { data: { extensions: [] }, isLoading: false };
       if (queryKey[0] === "extension-registry") return { data: { entries: [] }, isLoading: false };
-      if (queryKey[0] === "connectable-channels") return { data: { channels: [] }, isLoading: false };
       return { data: {}, isLoading: false };
     },
   };
@@ -172,9 +167,6 @@ test("useExtensions places uninstalled wasm_channel registry entry in channelReg
           },
           isLoading: false,
         };
-      }
-      if (queryKey[0] === "connectable-channels") {
-        return { data: { channels: [] }, isLoading: false };
       }
       return { data: {}, isLoading: false };
     },
@@ -230,9 +222,6 @@ test("useExtensions groups manifest-backed channels with channel entries", () =>
           },
           isLoading: false,
         };
-      }
-      if (queryKey[0] === "connectable-channels") {
-        return { data: { channels: [] }, isLoading: false };
       }
       return { data: {}, isLoading: false };
     },

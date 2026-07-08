@@ -37,7 +37,6 @@ function renderExtensionsPage(tab) {
       channelRegistry: [],
       mcpRegistry: [],
       catalogEntries: [],
-      connectableChannels: [],
       isLoading: false,
       isBusy: false,
       actionResult: null,

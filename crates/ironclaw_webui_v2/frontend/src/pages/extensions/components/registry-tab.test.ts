@@ -113,7 +113,6 @@ test("RegistryTab renders only real installed extensions with management actions
     onActivate: () => {},
     onConfigure: () => {},
     onRemove: () => {},
-    connectableChannels: [],
     isBusy: false,
   });
 
@@ -156,7 +155,6 @@ test("RegistryTab searches installed entries using registry metadata", () => {
       onActivate: () => {},
       onConfigure: () => {},
       onRemove: () => {},
-      connectableChannels: [],
       isBusy: false,
     },
     "calendar",

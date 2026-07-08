@@ -498,6 +498,7 @@ mod tests {
                             url: Some(url.to_string()),
                         },
                         host_apis: Vec::new(),
+                        host_api_surfaces: Vec::new(),
                         hooks: Vec::new(),
                         capabilities: vec![ironclaw_extensions::CapabilityManifest {
                             id: CapabilityId::new(capability_id).unwrap(),

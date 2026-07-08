@@ -59,6 +59,7 @@ pub use product_auth::api::auth_prompt::{
 mod delivered_gate_routing;
 #[cfg(feature = "slack-v2-host-beta")]
 mod host_ingress;
+mod provider_identity;
 mod readiness;
 mod retry_disposition;
 mod runtime;
@@ -194,6 +195,10 @@ pub use product_live_adapters::{
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use production_runtime_policy::RebornProductionRuntimePolicy;
 pub use profile::{RebornCompositionProfile, RebornCompositionProfileParseError};
+pub use provider_identity::{
+    ProviderIdentityActorResolver, RebornUserIdentityLookup, RebornUserIdentityLookupError,
+    installation_scoped_provider_user_id,
+};
 pub use readiness::{
     RebornFacadeReadiness, RebornReadiness, RebornReadinessDiagnostic,
     RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
@@ -216,18 +221,11 @@ pub use runtime_input::{
 #[cfg(feature = "root-llm-provider")]
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
 #[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_actor_identity::{
-    RebornUserIdentityLookup, RebornUserIdentityLookupError, SlackUserIdentityActorResolver,
-    slack_user_identity_provider_user_id,
-};
+pub use slack::slack_channel_connection::build_webui_services_with_slack_host_beta_mounts;
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH,
     WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH, WEBUI_V2_CHANNELS_SLACK_SUBJECTS_PATH,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-pub use slack::slack_connectable_channel::{
-    SlackOperatorRouteVisibility, build_webui_services_with_slack_host_beta_mounts,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack::slack_delivery::{

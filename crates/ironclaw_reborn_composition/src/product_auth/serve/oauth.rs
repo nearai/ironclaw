@@ -903,11 +903,10 @@ async fn bind_slack_personal_oauth_identity_for_callback(
 
     // Computed before the request takes ownership of the installation id so
     // the rollback can target exactly the binding this callback writes.
-    let bound_provider_user_id =
-        crate::slack::slack_actor_identity::slack_user_identity_provider_user_id(
-            &connection_scope.installation_id,
-            identity.subject.as_str(),
-        );
+    let bound_provider_user_id = crate::provider_identity::installation_scoped_provider_user_id(
+        &connection_scope.installation_id,
+        identity.subject.as_str(),
+    );
     config
         .binding_service
         .bind_personal_user(
@@ -935,7 +934,7 @@ async fn bind_slack_personal_oauth_identity_for_callback(
         // credential", which Disconnect already repairs.
         if let Err(error) = rollback_store
             .delete_user_identity_bindings_for_user(
-                crate::slack::slack_actor_identity::SLACK_IDENTITY_PROVIDER,
+                crate::slack::slack_channel_connection::SLACK_IDENTITY_PROVIDER,
                 &rollback_user_id,
                 Some(bound_provider_user_id.as_str()),
             )

@@ -20,7 +20,7 @@ use ironclaw_product_workflow::{
 use crate::{
     RebornProductAuthServices, SlackHostBetaMounts,
     extension_host::available_extensions::SLACK_BOT_EXTENSION_ID,
-    slack::slack_actor_identity::{RebornUserIdentityLookup, SLACK_IDENTITY_PROVIDER},
+    provider_identity::RebornUserIdentityLookup,
     slack::slack_host_beta::{SlackPersonalConnectionScope, SlackPersonalConnectionScopeResolver},
     slack::slack_outbound_targets::SlackPersonalDmTargetStore,
     slack::slack_personal_binding::RebornUserIdentityBindingDeleteStore,
@@ -211,6 +211,8 @@ fn personal_credential_cleanup_request(
     })
 }
 
+pub(crate) const SLACK_IDENTITY_PROVIDER: &str = "slack";
+
 pub(crate) fn slack_channel_connection_facade(
     mounts: &SlackHostBetaMounts,
     personal_credential_cleanup: Option<Arc<dyn SlackPersonalCredentialCleanup>>,
@@ -226,6 +228,44 @@ pub(crate) fn slack_channel_connection_facade(
     })
 }
 
+/// Compose the WebUI-facing product facade with the Slack host-beta mounts:
+/// the caller-scoped channel-connection facade (connection state + disconnect
+/// cleanup) and the Slack outbound delivery target provider. Channel
+/// discovery itself is extension-surface data on the extensions list — there
+/// is no separate connectable-channel registry.
+pub fn build_webui_services_with_slack_host_beta_mounts(
+    runtime: &crate::RebornRuntime,
+    event_stream: Option<std::sync::Arc<dyn ironclaw_product_adapters::ProjectionStream>>,
+    slack_mounts: Option<&crate::SlackHostBetaMounts>,
+) -> Result<crate::RebornWebuiBundle, crate::RebornBuildError> {
+    let outbound_delivery_target_providers = slack_mounts
+        .filter(|mounts| !mounts.outbound_delivery_target_provider_registered)
+        .map(|mounts| {
+            vec![std::sync::Arc::clone(
+                &mounts.outbound_delivery_target_provider,
+            )]
+        })
+        .unwrap_or_default();
+    if slack_mounts.is_some() && runtime.outbound_delivery_target_provider().is_none() {
+        return Err(crate::RebornBuildError::InvalidConfig {
+            reason: "outbound delivery target providers require local runtime services".to_string(),
+        });
+    }
+    let personal_credential_cleanup = runtime
+        .services()
+        .product_auth
+        .clone()
+        .map(|services| services as std::sync::Arc<dyn SlackPersonalCredentialCleanup>);
+    let channel_connection = slack_mounts
+        .map(|mounts| slack_channel_connection_facade(mounts, personal_credential_cleanup));
+    crate::webui::build_webui_services_with_channel_connection(
+        runtime,
+        event_stream,
+        channel_connection,
+        outbound_delivery_target_providers,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
@@ -236,9 +276,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        slack::slack_actor_identity::{
-            RebornUserIdentityLookupError, slack_user_identity_provider_user_id,
-        },
+        provider_identity::{RebornUserIdentityLookupError, installation_scoped_provider_user_id},
         slack::slack_outbound_targets::{
             InMemorySlackPersonalDmTargetStore, SlackPersonalDmTarget, SlackPersonalDmTargetKey,
         },
@@ -253,7 +291,7 @@ mod tests {
         let installation_id = AdapterInstallationId::new("install-alpha").expect("installation id");
         let team_id = SlackTeamId::new("T123");
         let user_id = UserId::new("user:alice").expect("user");
-        let slack_provider_user_id = slack_user_identity_provider_user_id(&installation_id, "U123");
+        let slack_provider_user_id = installation_scoped_provider_user_id(&installation_id, "U123");
         let identity_store = Arc::new(RecordingSlackIdentityStore::new([(
             slack_provider_user_id,
             user_id.clone(),
@@ -381,7 +419,7 @@ mod tests {
         let installation_id = AdapterInstallationId::new("install-alpha").expect("installation id");
         let team_id = SlackTeamId::new("T123");
         let user_id = UserId::new("user:alice").expect("user");
-        let slack_provider_user_id = slack_user_identity_provider_user_id(&installation_id, "U123");
+        let slack_provider_user_id = installation_scoped_provider_user_id(&installation_id, "U123");
         let identity_store = Arc::new(RecordingSlackIdentityStore::new([(
             slack_provider_user_id,
             user_id.clone(),
@@ -428,7 +466,7 @@ mod tests {
         let team_id = SlackTeamId::new("T123");
         let user_id = UserId::new("user:alice").expect("user");
         let other_installation_provider_user_id =
-            slack_user_identity_provider_user_id(&other_installation_id, "U123");
+            installation_scoped_provider_user_id(&other_installation_id, "U123");
         let identity_store = Arc::new(RecordingSlackIdentityStore::new([(
             other_installation_provider_user_id,
             user_id.clone(),
@@ -468,7 +506,7 @@ mod tests {
         let expected_tenant_id = tenant_id.clone();
         let user_id = UserId::new("user:alice").expect("user");
         let installation_id = AdapterInstallationId::new("install-alpha").expect("installation id");
-        let slack_provider_user_id = slack_user_identity_provider_user_id(&installation_id, "U123");
+        let slack_provider_user_id = installation_scoped_provider_user_id(&installation_id, "U123");
         let identity_store = Arc::new(RecordingSlackIdentityStore::new([(
             slack_provider_user_id,
             user_id.clone(),
@@ -526,7 +564,7 @@ mod tests {
         let installation_id = AdapterInstallationId::new("install-alpha").expect("installation id");
         let team_id = SlackTeamId::new("T123");
         let user_id = UserId::new("user:alice").expect("user");
-        let slack_provider_user_id = slack_user_identity_provider_user_id(&installation_id, "U123");
+        let slack_provider_user_id = installation_scoped_provider_user_id(&installation_id, "U123");
         let identity_store = Arc::new(RecordingSlackIdentityStore::new([(
             slack_provider_user_id,
             user_id.clone(),
@@ -565,7 +603,7 @@ mod tests {
         let installation_id = AdapterInstallationId::new("install-alpha").expect("installation id");
         let team_id = SlackTeamId::new("T123");
         let user_id = UserId::new("user:alice").expect("user");
-        let slack_provider_user_id = slack_user_identity_provider_user_id(&installation_id, "U123");
+        let slack_provider_user_id = installation_scoped_provider_user_id(&installation_id, "U123");
         let identity_store = Arc::new(RecordingSlackIdentityStore::new([(
             slack_provider_user_id,
             user_id.clone(),

@@ -45,29 +45,37 @@ const FIELD_HELP = {
   },
 };
 
-export function SlackAdminManagedSection({ action }) {
+export function SlackAdminManagedSection() {
   const setupQuery = useQuery({
     queryKey: QUERY_KEY,
     queryFn: getSlackSetup,
+    retry: false,
   });
   const configured = setupQuery.data?.configured === true;
 
+  // The setup endpoint is operator-scoped; when it rejects the caller this
+  // section renders nothing (regular users connect Slack through the
+  // extension configure modal instead).
+  if (setupQuery.isError) {
+    return null;
+  }
+
   return (
     <div className="space-y-3">
-      <SlackSetupPanel action={action} setupQuery={setupQuery} />
-      {configured && (<SlackChannelPicker action={action} />)}
+      <SlackSetupPanel setupQuery={setupQuery} />
+      {configured && (<SlackChannelPicker />)}
     </div>
   );
 }
 
-export function SlackSetupPanel({ action, setupQuery }) {
+export function SlackSetupPanel({ setupQuery }) {
   const t = useT();
   const queryClient = useQueryClient();
   const [form, setForm] = React.useState(emptyForm());
   const initializedRef = React.useRef(false);
   const dirtyRef = React.useRef(false);
   const status = setupQuery.data;
-  const copy = slackSetupCopy(action, t);
+  const copy = slackSetupCopy(t);
 
   React.useEffect(() => {
     if (!status || initializedRef.current || dirtyRef.current) return;
@@ -85,7 +93,6 @@ export function SlackSetupPanel({ action, setupQuery }) {
       queryClient.invalidateQueries({ queryKey: QUERY_KEY });
       queryClient.invalidateQueries({ queryKey: ["slack-allowed-channels"] });
       queryClient.invalidateQueries({ queryKey: ["slack-routable-subjects"] });
-      queryClient.invalidateQueries({ queryKey: ["connectable-channels"] });
       queryClient.invalidateQueries({ queryKey: ["extensions"] });
     },
   });
@@ -303,12 +310,12 @@ function FieldHint({ help, t }) {
   );
 }
 
-function slackSetupCopy(action, t) {
+function slackSetupCopy(t) {
   return {
-    title: action?.title || t("slackSetup.title"),
-    instructions: action?.instructions || t("slackSetup.instructions"),
-    submitLabel: action?.submit_label || t("slackSetup.save"),
-    successMessage: action?.success_message || t("slackSetup.saved"),
-    errorMessage: action?.error_message || t("slackSetup.saveFailed"),
+    title: t("slackSetup.title"),
+    instructions: t("slackSetup.instructions"),
+    submitLabel: t("slackSetup.save"),
+    successMessage: t("slackSetup.saved"),
+    errorMessage: t("slackSetup.saveFailed"),
   };
 }
