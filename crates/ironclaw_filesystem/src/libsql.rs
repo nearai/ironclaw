@@ -802,6 +802,52 @@ impl RootFilesystem for LibSqlRootFilesystem {
         Ok(())
     }
 
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        expected_version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        // Single-key CAS delete: unlike `delete`, no subtree/event/sequence
+        // sweep. `is_dir = 0` scopes it to the record plane, matching `put`'s
+        // Version arm and `current_version_libsql`.
+        //
+        // Review fix (PR #5749): the conditional DELETE and the zero-rows
+        // diagnosis read must be atomic w.r.t. a concurrent delete+recreate
+        // on the same path, or the diagnosis can observe a version written
+        // *after* our DELETE decided 0 rows matched, misclassifying the
+        // outcome. `BEGIN IMMEDIATE` takes the write lock up front (same
+        // idiom as `put`) so the DELETE and the follow-up SELECT run as one
+        // unit on one connection — this also keeps the call stack to a
+        // single checkout, matching the one-checkout-per-call-stack
+        // invariant the bounded pool (see `libsql_pool`, issue #5466) enforces
+        // (no nested `self.connect()`).
+        //
+        // Round-A review: validate `expected_version` before taking the
+        // pool checkout / write lock. An out-of-range version can never
+        // match a real row, so failing closed here avoids holding a
+        // contended connection (and SQLite's write lock) for a call
+        // destined to error — relevant under the concurrent CAS storms
+        // this pool exists to survive.
+        let expected_raw = record_version_to_i64(path, expected_version)?;
+        let conn = self.connect().await?;
+        conn.execute("BEGIN IMMEDIATE", ())
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
+        let result =
+            delete_if_version_libsql_inner(&conn, path, expected_version, expected_raw).await;
+        match result {
+            Ok(()) => conn
+                .execute("COMMIT", ())
+                .await
+                .map(|_| ())
+                .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error)),
+            Err(err) => {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(err)
+            }
+        }
+    }
+
     async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {
         let conn = self.connect().await?;
         // INTEGER PRIMARY KEY AUTOINCREMENT assigns a fresh monotonic id per
@@ -1312,6 +1358,43 @@ async fn current_version_libsql(
         .get(0)
         .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
     Ok(Some(record_version_from_i64(path, version)?))
+}
+
+/// Body of `delete_if_version` extracted so the outer caller can wrap the
+/// conditional DELETE and the zero-rows diagnosis SELECT in one
+/// BEGIN IMMEDIATE / COMMIT transaction, with a single ROLLBACK path.
+/// Running both statements on the same connection inside the same
+/// transaction is what makes the classification atomic: nothing else can
+/// delete-then-recreate the row between the DELETE and the diagnosis read.
+#[cfg(feature = "libsql")]
+async fn delete_if_version_libsql_inner(
+    conn: &libsql::Connection,
+    path: &VirtualPath,
+    expected_version: RecordVersion,
+    expected_raw: i64,
+) -> Result<(), FilesystemError> {
+    let deleted = conn
+        .execute(
+            "DELETE FROM root_filesystem_entries \
+             WHERE path = ?1 AND is_dir = 0 AND version = ?2",
+            libsql::params![path.as_str(), expected_raw],
+        )
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
+    if deleted > 0 {
+        return Ok(());
+    }
+    // 0 rows: absent row → NotFound (already gone, benign); row present
+    // at another version → VersionMismatch (gone stale). Distinct from
+    // put's diagnosis, which collapses absent into VersionMismatch.
+    if let Some(found) = current_version_libsql(conn, path).await? {
+        return Err(FilesystemError::VersionMismatch {
+            path: path.clone(),
+            expected: Some(expected_version),
+            found: Some(found),
+        });
+    }
+    Err(not_found(path.clone(), FilesystemOperation::Delete))
 }
 
 /// Body of `run_migrations` extracted so the outer caller can wrap the
@@ -2254,5 +2337,67 @@ mod tests {
             }
             other => panic!("expected FilesystemError::BackendInfrastructure, got {other:?}"),
         }
+    }
+
+    /// Deterministic, single-task regression pin for the atomicity fix
+    /// (commit 1792aebb2 / PR #5749 round 4): `delete_if_version`'s
+    /// zero-rows diagnosis must reuse the SAME connection the conditional
+    /// DELETE ran on, not check out a second one. Round-B review finding:
+    /// the concurrency storm test in `tests/concurrent_cas_storm.rs`
+    /// doesn't actually discriminate this — every racer shares one
+    /// pre-fetched version and nothing recreates the path mid-round, so
+    /// it passes with or without the fix. This test does discriminate it,
+    /// with no concurrency required: build a deliberately size-1 pool (via
+    /// `build_libsql_pool_with_config`), let `delete_if_version` check out
+    /// its only connection, and hit the stale-version (0-rows) branch. If
+    /// the diagnosis internally called `self.connect()` again — the
+    /// pre-fix pattern — that second checkout would deadlock against the
+    /// first (nothing else can return the only connection) and time out;
+    /// reusing the passed-in `conn` completes immediately.
+    #[tokio::test]
+    async fn delete_if_version_diagnosis_reuses_the_delete_connection_under_a_size_one_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("delete-single-conn-test.db");
+        let db = std::sync::Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+        let fs = LibSqlRootFilesystem {
+            pool: crate::libsql_pool::build_libsql_pool_with_config(
+                db,
+                1,
+                std::time::Duration::from_millis(200),
+            ),
+        };
+        fs.run_migrations().await.unwrap();
+
+        let path = VirtualPath::new("/secrets/single-conn").unwrap();
+        let v1 = fs
+            .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+            .await
+            .unwrap();
+
+        // Stale version drives the 0-rows branch, which must diagnose
+        // NotFound/VersionMismatch via `current_version_libsql(conn, ...)`
+        // on the connection already checked out above, not a second
+        // checkout — a second checkout would time out against the
+        // size-1 pool's only (self-held) connection.
+        let stale = RecordVersion::from_backend(v1.get() + 1);
+        let err = fs.delete_if_version(&path, stale).await.unwrap_err();
+        assert!(
+            matches!(err, FilesystemError::VersionMismatch { .. }),
+            "expected VersionMismatch (proves the diagnosis ran to \
+             completion without deadlocking on the size-1 pool), got: {err:?}"
+        );
+
+        // Round-C review: the assertion above only proves the diagnosis
+        // didn't deadlock: `ROLLBACK` itself could still fail to run (or
+        // fail and leave the connection mid-transaction) without failing
+        // that assertion. Prove the connection actually came back to the
+        // size-1 pool in a clean, reusable state by checking it out again
+        // for a real CAS delete — a still-open transaction from the
+        // VersionMismatch path would make this second call either hang
+        // against the size-1 pool or fail on a nested-transaction error.
+        fs.delete_if_version(&path, v1)
+            .await
+            .expect("connection must return to the size-1 pool clean after a VersionMismatch, not deadlock or error on a leftover transaction");
+        assert!(fs.get(&path).await.unwrap().is_none());
     }
 }

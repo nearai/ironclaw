@@ -143,28 +143,14 @@ use ironclaw_turns::{
 use ironclaw_turns::{InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore};
 
 use crate::RebornProductAuthServicePorts;
-#[cfg(feature = "slack-v2-host-beta")]
-use crate::available_extensions::slack_manifest_digest;
 use crate::default_system_prompt::seed_default_system_prompt;
-use crate::input::{RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput};
-use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
-use crate::local_dev_authorization::{StoreApprovalSettingsProvider, local_dev_authorizer};
-use crate::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
-use crate::local_dev_mounts::{
-    ambient_workspace_mount_view, memory_mount_view, scoped_skill_context_mount_view,
-    skill_management_mount_view, system_extensions_lifecycle_mount_view, workspace_mount_view,
+#[cfg(feature = "slack-v2-host-beta")]
+use crate::extension_host::available_extensions::slack_manifest_digest;
+use crate::extension_host::lifecycle::{
+    RebornLocalSkillManagementPort, build_local_skill_management_port,
 };
-use crate::mcp::hosted_http_mcp_runtime;
-use crate::product_auth::credentials::product_auth_providers::{
-    OAuthProviderComposition, compose_provider_client,
-};
-use crate::product_auth::credentials::runtime_credentials::ProductAuthRuntimeCredentialResolver;
-use crate::runtime_input::RebornRuntimeIdentity;
-use crate::{
-    RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
-    RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornWorkerReadiness,
-};
-use crate::{
+use crate::extension_host::mcp::hosted_http_mcp_runtime;
+use crate::extension_host::{
     available_extensions::{
         AvailableExtensionCatalog, gmail_manifest_digest, google_calendar_manifest_digest,
         google_docs_manifest_digest, google_drive_manifest_digest, google_sheets_manifest_digest,
@@ -181,7 +167,23 @@ use crate::{
     gsuite::{
         ProductAuthRuntimeGsuiteCredentialStager, register_bundled_gsuite_first_party_handlers,
     },
-    web_access::register_bundled_web_access_first_party_handlers,
+};
+use crate::input::{RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput};
+use crate::local_dev_authorization::{StoreApprovalSettingsProvider, local_dev_authorizer};
+use crate::local_dev_capability_policy::{LocalDevCapabilityPolicy, local_dev_capability_policy};
+use crate::local_dev_mounts::{
+    ambient_workspace_mount_view, memory_mount_view, scoped_skill_context_mount_view,
+    skill_management_mount_view, system_extensions_lifecycle_mount_view, workspace_mount_view,
+};
+use crate::product_auth::credentials::product_auth_providers::{
+    OAuthProviderComposition, compose_provider_client,
+};
+use crate::product_auth::credentials::runtime_credentials::ProductAuthRuntimeCredentialResolver;
+use crate::runtime_input::RebornRuntimeIdentity;
+use crate::web_access::register_bundled_web_access_first_party_handlers;
+use crate::{
+    RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
+    RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornWorkerReadiness,
 };
 
 pub(crate) type LocalDevRootFilesystem = CompositeRootFilesystem;
@@ -1251,7 +1253,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             reason: error.to_string(),
         }
     })?;
-    crate::bundled_skills::ensure_bundled_reborn_skills_installed(&root).await?;
+    crate::extension_host::bundled_skills::ensure_bundled_reborn_skills_installed(&root).await?;
     let filesystem_bundle = build_local_dev_root_filesystem(
         &root,
         &workspace_root,
@@ -4689,13 +4691,12 @@ mod tests {
     #[cfg(feature = "libsql")]
     use secrecy::ExposeSecret;
 
+    use crate::extension_host::extension_lifecycle::ExtensionActivationMode;
+    use crate::local_dev_capability_policy::{
+        LocalDevApprovalPolicyAction, LocalDevCapabilityPolicyError,
+    };
     use crate::{
-        RebornReadinessDiagnostic, RebornReadinessState,
-        extension_lifecycle::ExtensionActivationMode,
-        local_dev_capability_policy::{
-            LocalDevApprovalPolicyAction, LocalDevCapabilityPolicyError,
-        },
-        runtime::SKILL_ACTIVATE_CAPABILITY_ID,
+        RebornReadinessDiagnostic, RebornReadinessState, runtime::SKILL_ACTIVATE_CAPABILITY_ID,
     };
 
     #[cfg(any(feature = "libsql", feature = "postgres"))]

@@ -11,8 +11,8 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{RuntimeCapabilityOutcome, RuntimeFailureKind};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
-use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
-use crate::extension_lifecycle_capabilities::{
+use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
+use crate::extension_host::extension_lifecycle_capabilities::{
     EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
 };
 use crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest;

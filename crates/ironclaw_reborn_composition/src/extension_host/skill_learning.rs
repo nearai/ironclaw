@@ -87,7 +87,9 @@ mod learning {
     };
     use tokio::task::JoinHandle;
 
-    use crate::lifecycle::{RebornLocalSkillManagementError, RebornLocalSkillManagementPort};
+    use crate::extension_host::lifecycle::{
+        RebornLocalSkillManagementError, RebornLocalSkillManagementPort,
+    };
     use crate::projection::LiveProjectionPublisher;
 
     /// Cheap pre-filter: skip the (paid) distillation LLM call on runs that

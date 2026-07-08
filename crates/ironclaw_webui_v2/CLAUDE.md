@@ -91,6 +91,9 @@ browser-reachable.
 | `webui.v2.operator.status` | GET | `/api/webchat/v2/operator/status` | None | `ProjectionOnly` |
 | `webui.v2.operator.logs` | GET | `/api/webchat/v2/operator/logs` | None | `ProjectionOnly` |
 | `webui.v2.operator.service_lifecycle` | POST | `/api/webchat/v2/operator/service` | None | `ProductWorkflow` |
+| `webui.v2.trace_credits` | GET | `/api/webchat/v2/traces/credit` | None | `ProductWorkflow` |
+| `webui.v2.trace_account_traces` | GET | `/api/webchat/v2/traces/account` (optional `?limit=N`) | None | `ProductWorkflow` |
+| `webui.v2.authorize_trace_hold` | POST | `/api/webchat/v2/traces/holds/{submission_id}/authorize` | None | `ProductWorkflow` |
 
 `webui.v2.logs` accepts bounded `limit`, `cursor`, `level`, and `target`
 query parameters, mutually exclusive boolean `tail` and `follow` flags from

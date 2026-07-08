@@ -8,8 +8,10 @@
 //! [`ironclaw_reborn_traces::contribution::trace_scope_key`]).
 
 use chrono::{DateTime, Utc};
+use ironclaw_host_api::{TenantId, UserId};
 use ironclaw_reborn_traces::contribution::{
-    authorize_manual_review_hold_for_scope, read_trace_policy_for_scope, scoped_credit_view,
+    authorize_manual_review_hold_for_scope, fetch_account_traces, read_trace_policy_for_scope,
+    resolve_trace_credentials, scoped_credit_view,
 };
 use serde::{Deserialize, Serialize};
 
@@ -64,6 +66,32 @@ pub struct RebornTraceHold {
     pub reason: String,
 }
 
+/// One submitted trace record as returned by the Trace Commons server.
+/// Carries only the fields the UI needs; unknown server fields are ignored.
+#[derive(Debug, Clone, Serialize)]
+pub struct RebornAccountTrace {
+    pub submission_id: String,
+    pub status: String,
+    pub pending_credit: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_credit: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub received_at: Option<String>,
+}
+
+/// Read-only list of the caller's submitted Trace Commons traces.
+///
+/// `enrolled` mirrors the caller's contribution-policy enrollment status
+/// (same semantics as [`RebornTraceCreditsResponse::enrolled`]).
+/// `traces` is the server-returned list in reverse-chronological order;
+/// an empty list is normal for an enrolled user who has not yet submitted
+/// any traces.
+#[derive(Debug, Clone, Serialize)]
+pub struct RebornAccountTracesResponse {
+    pub enrolled: bool,
+    pub traces: Vec<RebornAccountTrace>,
+}
+
 /// Result of authorizing a held trace for submission.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RebornTraceHoldAuthorizeResponse {
@@ -71,6 +99,65 @@ pub struct RebornTraceHoldAuthorizeResponse {
     /// authorized for submission; false when there was no such held trace
     /// (already authorized, already submitted, or never held).
     pub authorized: bool,
+}
+
+/// Typed failure for [`account_traces_for_user`]. Each variant names the backend
+/// operation that failed and carries the full cause chain (`{:#}`) so the WebUI
+/// boundary keeps a diagnosable cause instead of an undiscriminated `String`.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum AccountTracesError {
+    /// `resolve_trace_credentials` failed to read local enrollment state.
+    #[error("resolve trace credentials: {0}")]
+    ResolveCredentials(String),
+    /// `fetch_account_traces` failed (transport / server / decode).
+    #[error("fetch account traces: {0}")]
+    Fetch(String),
+}
+
+/// Fetch the caller-scoped submitted traces from the Trace Commons server.
+///
+/// Uses the crate-local hardened reqwest path (no host-egress sink) — the same
+/// network lane as the rest of the WebUI / facade surface. The `enrolled` flag
+/// is set from `resolve_trace_credentials`; a user who is not enrolled gets the
+/// unenrolled zero-state (`enrolled: false`, empty list) rather than an error.
+/// Transport failures surface as a typed `Err` (the operation is named and the
+/// cause chain preserved) so the caller can return a sanitized, diagnosable 500.
+pub(super) async fn account_traces_for_user(
+    tenant_id: &TenantId,
+    user_id: &UserId,
+) -> Result<RebornAccountTracesResponse, AccountTracesError> {
+    // Identity stays typed inside this crate; only cross to `&str` at the
+    // `ironclaw_reborn_traces` boundary, which is stringly-typed.
+    let enrolled = resolve_trace_credentials(tenant_id, user_id)
+        .map_err(|e| AccountTracesError::ResolveCredentials(format!("{e:#}")))?
+        .is_some();
+    if !enrolled {
+        return Ok(RebornAccountTracesResponse {
+            enrolled: false,
+            traces: vec![],
+        });
+    }
+    // `None` is not unbounded: `fetch_account_traces` defaults a missing limit to
+    // ACCOUNT_TRACES_DEFAULT_LIMIT (200), clamps any explicit value to
+    // [1, ACCOUNT_TRACES_MAX_LIMIT], and caps the buffered response bytes — so
+    // the initial settings-page slice can never scale with total account age.
+    let items = fetch_account_traces(tenant_id.as_str(), user_id.as_str(), None)
+        .await
+        .map_err(|e| AccountTracesError::Fetch(format!("{e:#}")))?;
+    let traces = items
+        .into_iter()
+        .map(|item| RebornAccountTrace {
+            submission_id: item.submission_id,
+            status: item.status,
+            pending_credit: item.credit_points_pending,
+            final_credit: item.credit_points_final,
+            received_at: item.received_at,
+        })
+        .collect();
+    Ok(RebornAccountTracesResponse {
+        enrolled: true,
+        traces,
+    })
 }
 
 /// Authorize the caller-scoped held manual-review trace for submission.

@@ -507,7 +507,7 @@ pub struct RebornRuntime {
     trace_flush_worker: crate::observability::trace_capture::TraceQueueFlushWorkerHandle,
     #[cfg(feature = "root-llm-provider")]
     skill_learning_extraction_tasks:
-        Option<Arc<crate::skill_learning::SkillLearningExtractionTasks>>,
+        Option<Arc<crate::extension_host::skill_learning::SkillLearningExtractionTasks>>,
     /// Late-binding slot shared with the poller's `PostSubmitHookWrappedSubmitter`.
     /// `set_trigger_post_submit_hook` fills this after `build_reborn_runtime` returns.
     /// `None` when the trigger poller is not enabled.
@@ -3361,39 +3361,45 @@ pub async fn build_reborn_runtime(
         vec![trace_capture_sink];
     #[cfg(feature = "root-llm-provider")]
     let mut skill_learning_extraction_tasks: Option<
-        Arc<crate::skill_learning::SkillLearningExtractionTasks>,
+        Arc<crate::extension_host::skill_learning::SkillLearningExtractionTasks>,
     > = None;
     #[cfg(feature = "root-llm-provider")]
     if let (Some((learning_provider, learning_model)), Some(local_runtime)) =
         (skill_learning_provider, local_runtime)
     {
-        let inference: Arc<dyn ironclaw_skill_learning::SkillInferencePort> =
-            Arc::new(crate::skill_learning::SkillLearningInferenceAdapter::new(
+        let inference: Arc<dyn ironclaw_skill_learning::SkillInferencePort> = Arc::new(
+            crate::extension_host::skill_learning::SkillLearningInferenceAdapter::new(
                 learning_provider,
                 learning_model,
-            ));
+            ),
+        );
         // Reuse the runtime's already-built scoped skill-management port so the
         // learned skill lands exactly where the WebUI lists it and the next run
         // loads it. The writer evolves an existing learned skill in place when a
         // recurring task is re-learned, using the same learning model to refine
         // it (accumulated gotchas, bumped version) instead of accreting siblings.
-        let skill_refiner: Arc<dyn crate::skill_learning::SkillRefiner> = Arc::new(
-            crate::skill_learning::LlmSkillRefiner::new(Arc::clone(&inference)),
+        let skill_refiner: Arc<dyn crate::extension_host::skill_learning::SkillRefiner> = Arc::new(
+            crate::extension_host::skill_learning::LlmSkillRefiner::new(Arc::clone(&inference)),
         );
-        let skill_writer: Arc<dyn crate::skill_learning::SkillWriter> =
-            Arc::new(crate::skill_learning::PortSkillWriter::new(
+        let skill_writer: Arc<dyn crate::extension_host::skill_learning::SkillWriter> =
+            Arc::new(crate::extension_host::skill_learning::PortSkillWriter::new(
                 Arc::clone(&local_runtime.skill_management),
                 skill_refiner,
             ));
         // Live "learned a skill" bubble on the run's thread stream (reuses the
         // SkillActivation projection -> existing chat bubble).
-        let skill_learned_notifier: Arc<dyn crate::skill_learning::SkillLearnedNotifier> = Arc::new(
-            crate::skill_learning::LiveSkillLearnedNotifier::new(skill_learning_publisher),
+        let skill_learned_notifier: Arc<
+            dyn crate::extension_host::skill_learning::SkillLearnedNotifier,
+        > = Arc::new(
+            crate::extension_host::skill_learning::LiveSkillLearnedNotifier::new(
+                skill_learning_publisher,
+            ),
         );
-        let extraction_tasks = Arc::new(crate::skill_learning::SkillLearningExtractionTasks::new());
+        let extraction_tasks =
+            Arc::new(crate::extension_host::skill_learning::SkillLearningExtractionTasks::new());
         skill_learning_extraction_tasks = Some(Arc::clone(&extraction_tasks));
         turn_event_sinks.push(Arc::new(
-            crate::skill_learning::SkillLearningTurnEventSink::new(
+            crate::extension_host::skill_learning::SkillLearningTurnEventSink::new(
                 Arc::clone(&thread_service),
                 inference,
                 skill_writer,
@@ -3403,16 +3409,17 @@ pub async fn build_reborn_runtime(
         ));
     }
     let turn_event_sink: Arc<dyn ironclaw_turns::TurnEventSink> = Arc::new(
-        crate::skill_learning::CompositeTurnEventSink::new(turn_event_sinks),
+        crate::extension_host::skill_learning::CompositeTurnEventSink::new(turn_event_sinks),
     );
 
     let communication_context_provider: Option<
         Arc<dyn ironclaw_turns::run_profile::CommunicationContextProvider>,
     > = match (local_runtime, outbound_preferences_facade.clone()) {
         (Some(local_runtime), Some(outbound_preferences_facade)) => {
-            let mut lifecycle_facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
-                Arc::clone(&local_runtime.skill_management),
-            );
+            let mut lifecycle_facade =
+                crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(Arc::clone(
+                    &local_runtime.skill_management,
+                ));
             if let Some(extension_management) = &local_runtime.extension_management {
                 lifecycle_facade =
                     lifecycle_facade.with_extension_management(Arc::clone(extension_management));
@@ -4812,6 +4819,7 @@ output_schema_ref = "schemas/write.output.json"
 
     #[cfg(feature = "libsql")]
     use crate::RebornRuntimeProcessBinding;
+    use crate::extension_host::extension_lifecycle::ExtensionActivationMode;
     use crate::input::RebornBuildInput;
     #[cfg(feature = "libsql")]
     use crate::observability::hooks::HooksActivationConfig;
@@ -4823,7 +4831,6 @@ output_schema_ref = "schemas/write.output.json"
     use crate::webui::build_webui_services;
     use crate::{
         RebornCompositionProfile, RebornReadiness, RebornReadinessState, RebornRuntimeError,
-        extension_lifecycle::ExtensionActivationMode,
     };
 
     use super::{
@@ -10056,7 +10063,7 @@ output_schema_ref = "schemas/write.output.json"
 
         // Gateway state seeded after runtime build.
         struct LifecycleFacadeHandle {
-            facade: crate::lifecycle::RebornLocalLifecycleFacade,
+            facade: crate::extension_host::lifecycle::RebornLocalLifecycleFacade,
         }
 
         impl std::fmt::Debug for LifecycleFacadeHandle {
@@ -10231,7 +10238,7 @@ output_schema_ref = "schemas/write.output.json"
             .as_ref()
             .expect("extension management")
             .clone();
-        let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
+        let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
             local_runtime.skill_management.clone(),
         )
         .with_extension_management(extension_management)

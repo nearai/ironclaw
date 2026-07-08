@@ -111,6 +111,20 @@ impl RootFilesystem for HsmBackend {
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         self.inner.delete(path).await
     }
+
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        expected_version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        // Review fix (PR #5749): the HSM declares `Delete` + `TxnCapability::Cas`
+        // (see `declared_capabilities` above), so it must actually serve
+        // `delete_if_version` rather than fall through to the trait default
+        // `Unsupported` — that combination would pass mount-time capability
+        // validation but fail at call time. Delegate to the inner backend,
+        // same as every other unified-entry-plane method on this wrapper.
+        self.inner.delete_if_version(path, expected_version).await
+    }
 }
 
 #[cfg(test)]
@@ -217,6 +231,41 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn delete_if_version_delegates_to_inner_backend() {
+        // Review fix (PR #5749): HsmBackend declares Delete + TxnCapability::Cas,
+        // so delete_if_version must actually delegate to the inner backend
+        // instead of hitting the trait default `Unsupported`.
+        let hsm = HsmBackend::new();
+        let path = vpath("/secrets/account/api-key");
+
+        let version = hsm
+            .put(
+                &path,
+                Entry::bytes(b"ciphertext-blob".to_vec()),
+                CasExpectation::Absent,
+            )
+            .await
+            .unwrap();
+
+        // Wrong version is rejected with VersionMismatch, proving the call
+        // actually reached the inner backend's CAS logic rather than a stub.
+        let other_version = version.next();
+        let err = hsm
+            .delete_if_version(&path, other_version)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FilesystemError::VersionMismatch { .. }));
+
+        // Correct version deletes.
+        hsm.delete_if_version(&path, version).await.unwrap();
+        assert!(hsm.get(&path).await.unwrap().is_none());
+
+        // Now absent: NotFound, not Unsupported.
+        let err = hsm.delete_if_version(&path, version).await.unwrap_err();
+        assert!(matches!(err, FilesystemError::NotFound { .. }));
     }
 
     #[tokio::test]

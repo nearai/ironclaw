@@ -2,10 +2,11 @@ import { html } from "../../../lib/html.js";
 import { Card } from "../../../design-system/card.js";
 import { useT } from "../../../lib/i18n.js";
 import { useTraceCredits } from "../hooks/useTraceCredits.js";
+import { useAccountTraces } from "../hooks/useAccountTraces.js";
 import { matchesSearch } from "../lib/settings-search.js";
 import { SettingsSearchEmpty } from "./settings-search-empty.js";
 
-function formatCredit(value) {
+export function formatCredit(value) {
   return (Number(value) || 0).toFixed(2);
 }
 
@@ -14,10 +15,20 @@ function formatSignedCredit(value) {
   return `${numeric >= 0 ? "+" : ""}${numeric.toFixed(2)}`;
 }
 
-function formatTimestamp(value, t) {
+export function formatTimestamp(value, t) {
   if (!value) return t("traceCommons.never");
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? t("traceCommons.never") : parsed.toLocaleString();
+}
+
+// Decide how the submitted-traces section renders. Pure so the branch logic is
+// unit-testable: "error" wins over everything (a tracesQuery failure must
+// surface, never silently hide behind an empty state), "list" needs an
+// enrolled contributor with at least one trace, anything else renders nothing.
+export function tracesSectionMode({ isError, enrolled, traces }) {
+  if (isError) return "error";
+  if (enrolled && Array.isArray(traces) && traces.length > 0) return "list";
+  return "hidden";
 }
 
 function StatRow({ label, value, description }) {
@@ -38,6 +49,7 @@ function StatRow({ label, value, description }) {
 export function TraceCommonsTab({ searchQuery = "" }) {
   const t = useT();
   const { credits, query, authorize } = useTraceCredits();
+  const { traces, enrolled: tracesEnrolled, query: tracesQuery } = useAccountTraces();
 
   if (
     !matchesSearch(searchQuery, [
@@ -181,6 +193,84 @@ export function TraceCommonsTab({ searchQuery = "" }) {
     `;
   }
 
+  // The submitted-traces section depends only on the traces query — NOT on the
+  // credits/empty-state branch above — so it renders independently. Instance-only
+  // enrollment is a separate path from personal-invite credits: an instance
+  // contributor with no personal credits hits the credits empty-state branch, so
+  // gating this on that branch would silently hide their traces and any
+  // tracesQuery errors. Render it after `body` regardless of the credits state.
+  const tracesMode = tracesSectionMode({
+    isError: tracesQuery.isError,
+    enrolled: tracesEnrolled,
+    traces,
+  });
+  const tracesSection =
+    tracesMode !== "hidden" &&
+    html`
+      <div className="mt-5">
+        <h4
+          className="mb-1 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]"
+        >
+          ${t("traceCommons.submittedTracesTitle")}
+        </h4>
+        ${tracesMode === "error"
+          ? html`
+              <div
+                className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
+              >
+                ${t("traceCommons.tracesLoadFailed")}
+              </div>
+            `
+          : html`
+        <ul className="space-y-2">
+          ${traces.map(
+            (trace) => html`
+              <li
+                key=${trace.submission_id}
+                className="rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-2"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div className="truncate font-mono text-[10px] text-[var(--v2-text-faint)]">
+                    ${trace.submission_id}
+                  </div>
+                  <div
+                    className="shrink-0 font-mono text-xs text-[var(--v2-text-strong)]"
+                    title=${t("traceCommons.traceStatus")}
+                    aria-label=${t("traceCommons.traceStatus")}
+                  >
+                    ${trace.status}
+                  </div>
+                </div>
+                <div className="mt-1 flex gap-4 text-xs text-[var(--v2-text-muted)]">
+                  <span>
+                    ${t("traceCommons.tracePendingCredit")}:${" "}
+                    <span className="font-mono text-[var(--v2-text-strong)]">
+                      ${formatCredit(trace.pending_credit)}
+                    </span>
+                  </span>
+                  <span>
+                    ${t("traceCommons.traceFinalCredit")}:${" "}
+                    <span className="font-mono text-[var(--v2-text-strong)]">
+                      ${trace.final_credit != null
+                        ? formatCredit(trace.final_credit)
+                        : "—"}
+                    </span>
+                  </span>
+                  <span className="ml-auto shrink-0">
+                    ${t("traceCommons.traceReceivedAt")}:${" "}
+                    <span className="font-mono text-[var(--v2-text-strong)]">
+                      ${formatTimestamp(trace.received_at, t)}
+                    </span>
+                  </span>
+                </div>
+              </li>
+            `
+          )}
+        </ul>
+            `}
+      </div>
+    `;
+
   return html`
     <${Card} padding="md">
       <h3
@@ -193,6 +283,8 @@ export function TraceCommonsTab({ searchQuery = "" }) {
       </p>
 
       ${body}
+
+      ${tracesSection}
 
       <p className="mt-5 text-xs leading-5 text-[var(--v2-text-faint)]">
         ${t("traceCommons.note")}

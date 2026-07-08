@@ -666,6 +666,21 @@ impl RootFilesystem for PostgresRootFilesystem {
         postgres_delete_with_client(&client, path).await
     }
 
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        expected_version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        // Round-B review: validate `expected_version` before taking the
+        // pool checkout, mirroring the libsql backend's Round-A fix — an
+        // out-of-range version can never match a real row, so failing
+        // closed here avoids holding a contended pool connection for a
+        // call destined to error.
+        let expected_raw = record_version_to_i64(path, expected_version)?;
+        let client = self.client().await?;
+        postgres_delete_if_version_with_client(&client, path, expected_version, expected_raw).await
+    }
+
     async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
         let client = self.client().await?;
         client
@@ -1611,6 +1626,78 @@ async fn postgres_delete_with_client(
     Ok(())
 }
 
+/// Guarded delete: remove the single file row at `path` only when it still
+/// holds the expected version. Single-key by design — no subtree band,
+/// unlike blind delete's `path = $1 OR (path >= $2 ...)`.
+///
+/// Review fix (PR #5749): the conditional DELETE and the zero-rows
+/// diagnosis now run as ONE statement (one round trip), not two. Two
+/// separate statements left a window between them in which an external
+/// transaction could commit a full delete-then-recreate on the same path;
+/// the second statement (a fresh READ COMMITTED snapshot) would then
+/// observe the *new* incarnation and misclassify the outcome. Folding both
+/// into a single `WITH` query closes that window: `locked` takes a
+/// `FOR UPDATE` row lock up front, and `deleted` is made to depend on it
+/// (`path IN (SELECT path FROM locked)`) so Postgres must evaluate `locked`
+/// first — the lock is held for the rest of the statement, so no
+/// concurrent delete/recreate on this path can commit until ours does.
+#[cfg(feature = "postgres")]
+const DELETE_IF_VERSION_ATOMIC_SQL: &str = r#"
+    WITH locked AS (
+        SELECT path, version
+        FROM root_filesystem_entries
+        WHERE path = $1 AND is_dir = FALSE
+        FOR UPDATE
+    ),
+    deleted AS (
+        DELETE FROM root_filesystem_entries
+        WHERE path = $1
+          AND is_dir = FALSE
+          AND version = $2
+          AND path IN (SELECT path FROM locked)
+        RETURNING TRUE AS ok
+    )
+    SELECT
+        EXISTS (SELECT 1 FROM deleted) AS was_deleted,
+        (SELECT version FROM locked) AS locked_version
+    "#;
+
+/// CAS delete for the Postgres backend: one statement, one round trip,
+/// mirroring the put round-trip budget. Classifies from the same query that
+/// performed the delete attempt: no row at `path` → NotFound (already gone,
+/// benign); row present at another version → VersionMismatch (gone stale).
+/// `diagnose_put_failure` / `postgres_current_version_with_client` are
+/// deliberately not reused here: reusing them would require a second
+/// statement, reopening the race this fix closes.
+#[cfg(feature = "postgres")]
+async fn postgres_delete_if_version_with_client(
+    client: &deadpool_postgres::Object,
+    path: &VirtualPath,
+    expected_version: RecordVersion,
+    expected_raw: i64,
+) -> Result<(), FilesystemError> {
+    let row = cached_query_one(
+        client,
+        DELETE_IF_VERSION_ATOMIC_SQL,
+        &[&path.as_str(), &expected_raw],
+    )
+    .await
+    .map_err(|error| db_error(path.clone(), FilesystemOperation::Delete, error))?;
+    let was_deleted: bool = row.get("was_deleted");
+    if was_deleted {
+        return Ok(());
+    }
+    let locked_version: Option<i64> = row.get("locked_version");
+    if let Some(raw) = locked_version {
+        return Err(FilesystemError::VersionMismatch {
+            path: path.clone(),
+            expected: Some(expected_version),
+            found: Some(record_version_from_i64(path, raw)?),
+        });
+    }
+    Err(not_found(path.clone(), FilesystemOperation::Delete))
+}
+
 #[cfg(feature = "postgres")]
 async fn postgres_current_version_with_client(
     client: &deadpool_postgres::Object,
@@ -2036,6 +2123,69 @@ mod tests {
         // an explicit is_dir = FALSE predicate.
         assert!(PUT_VERSION_SQL.contains("is_dir = FALSE"));
         assert!(PUT_ANY_SQL.contains("is_dir = FALSE"));
+    }
+
+    /// `delete_if_version` must stay one single-key statement: one round-trip
+    /// on the happy path (matching the put budget), scoped to the record plane
+    /// (`is_dir = FALSE`), and with no `OR`-joined subtree band — re-adding
+    /// blind delete's sweep would let a version guard on one path silently
+    /// cascade to unguarded descendants.
+    ///
+    /// Review fix (PR #5749): also pins the atomicity fix — the conditional
+    /// delete and the zero-rows diagnosis must be ONE statement (`locked`
+    /// CTE + `FOR UPDATE`, `deleted` CTE depending on it), not two separate
+    /// round trips. Two statements reopens the race where an external
+    /// delete+recreate commits in the gap between them.
+    #[test]
+    fn delete_if_version_statements_are_single_round_trip_and_single_key() {
+        let sql = DELETE_IF_VERSION_ATOMIC_SQL;
+        assert_eq!(
+            top_level_statement_count(sql),
+            1,
+            "delete_if_version must be a single statement. Got: {sql}"
+        );
+        assert!(
+            !sql.contains(" OR "),
+            "delete_if_version must stay single-key (no subtree band): {sql}"
+        );
+        assert!(sql.contains("is_dir = FALSE"));
+        assert!(sql.contains("version = $2"));
+        assert!(
+            sql.contains("FOR UPDATE"),
+            "delete_if_version must lock the row before deciding NotFound vs \
+             VersionMismatch, or a concurrent delete+recreate can race the \
+             classification: {sql}"
+        );
+        assert!(
+            sql.contains("path IN (SELECT path FROM locked)"),
+            "the delete CTE must depend on the locked CTE so Postgres \
+             sequences lock-then-delete instead of running them \
+             independently: {sql}"
+        );
+        // Round-C review: a bare `contains("FOR UPDATE")` / `contains("version
+        // = $2")` check is fooled by two concrete, semantically-broken
+        // mutants that keep those substrings intact. Guard against both
+        // directly instead of relying on substring presence alone.
+        assert!(
+            !sql.contains("SKIP LOCKED"),
+            "delete_if_version's FOR UPDATE must block on a contending row, \
+             not skip it — `FOR UPDATE SKIP LOCKED` still satisfies a bare \
+             `contains(\"FOR UPDATE\")` check but would let a concurrent \
+             delete+recreate slip past the lock entirely, reopening the \
+             atomicity race this fix closes: {sql}"
+        );
+        let locked_clause_end = sql
+            .find("deleted AS (")
+            .expect("SQL must have a deleted CTE");
+        assert!(
+            !sql[..locked_clause_end].contains("version = $2"),
+            "the version guard must live in the `deleted` CTE's WHERE \
+             clause, not `locked`'s — moving it there still satisfies a \
+             bare `contains(\"version = $2\")` check, but would make \
+             `locked` (and thus the whole statement) find no row at all for \
+             a present-but-stale-version path, misclassifying a stale \
+             version as NotFound instead of VersionMismatch: {sql}"
+        );
     }
 
     /// The descendant range is the half-open `[prefix/, prefix0)` band that the
