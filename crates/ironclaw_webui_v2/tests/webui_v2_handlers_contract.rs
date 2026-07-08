@@ -59,9 +59,9 @@ use ironclaw_product_workflow::{
     RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
     RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
     RebornSkillSearchResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
-    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, SetActiveLlmRequest,
-    UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    RebornStreamEventsSubscription, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
+    SetActiveLlmRequest, UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
     WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
     WebUiSendMessageRequest, WebUiSetupExtensionRequest, rejecting_reborn_services_error,
@@ -74,7 +74,7 @@ use ironclaw_webui_v2::{
     DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State, webui_v2_router,
 };
 use serde_json::Value;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc};
 use tower::ServiceExt;
 
 fn caller() -> WebUiAuthenticatedCaller {
@@ -302,6 +302,9 @@ struct StubServices {
     /// branches, or empty drains in a deterministic order.
     next_stream_events: Mutex<VecDeque<Result<RebornStreamEventsResponse, RebornServicesError>>>,
     stream_events_notify: Arc<Notify>,
+    stream_events_subscription_enabled: Mutex<bool>,
+    subscribe_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
+    next_stream_events_subscription: Mutex<Option<RebornStreamEventsSubscription>>,
     /// Queued response for the next `submit_turn` call. When `Some`, the value
     /// is taken and returned instead of the default `Submitted` response.
     next_submit_response: Mutex<Option<RebornSubmitTurnResponse>>,
@@ -376,6 +379,23 @@ impl StubServices {
             .lock()
             .expect("lock")
             .push_back(response);
+    }
+
+    fn enable_stream_events_subscription(
+        &self,
+        events: Vec<Result<ProductOutboundEnvelope, RebornServicesError>>,
+    ) {
+        let (sender, receiver) = mpsc::channel(events.len().max(1));
+        for event in events {
+            sender.try_send(event).expect("subscription test queue");
+        }
+        drop(sender);
+        *self
+            .stream_events_subscription_enabled
+            .lock()
+            .expect("lock") = true;
+        *self.next_stream_events_subscription.lock().expect("lock") =
+            Some(RebornStreamEventsSubscription::new(receiver));
     }
 
     /// Triggered the first time `stream_events` is invoked. Lets the SSE
@@ -684,6 +704,29 @@ impl RebornServicesApi for StubServices {
         }
         // Empty drain; SSE handler will keep-alive until the test drops it.
         Ok(RebornStreamEventsResponse { events: Vec::new() })
+    }
+
+    fn supports_stream_events_subscription(&self) -> bool {
+        *self
+            .stream_events_subscription_enabled
+            .lock()
+            .expect("lock")
+    }
+
+    async fn subscribe_events(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: RebornStreamEventsRequest,
+    ) -> Result<RebornStreamEventsSubscription, RebornServicesError> {
+        self.subscribe_events_calls
+            .lock()
+            .expect("lock")
+            .push(request);
+        self.next_stream_events_subscription
+            .lock()
+            .expect("lock")
+            .take()
+            .ok_or_else(|| service_unavailable_error(true))
     }
 
     async fn get_run_state(
@@ -5132,6 +5175,59 @@ async fn stream_events_continues_immediately_after_non_empty_batch() {
         Some(&expected_cursor),
         "follow-up call must still preserve cursor ordering"
     );
+}
+
+#[tokio::test]
+async fn stream_events_uses_subscription_when_facade_supports_it() {
+    let services = Arc::new(StubServices::default());
+    let envelope_a = make_projection_update_envelope("cursor:sub-a");
+    let envelope_b = make_projection_update_envelope("cursor:sub-b");
+    services.enable_stream_events_subscription(vec![Ok(envelope_a.clone()), Ok(envelope_b)]);
+
+    let router = router_with(services.clone());
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/events")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut body = response.into_body();
+    let bytes = collect_sse_until(&mut body, Duration::from_millis(750), |buf| {
+        parse_sse_events(buf).len() >= 2
+    })
+    .await;
+    drop(body);
+
+    let events = parse_sse_events(&bytes);
+    assert!(
+        events.len() >= 2,
+        "subscription events must reach SSE without facade polling; got {events:?}; raw: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let cursor_a_json =
+        serde_json::to_string(envelope_a.projection_cursor()).expect("cursor-a json");
+    assert_eq!(events[0].event.as_deref(), Some("projection_update"));
+    assert_eq!(events[0].id.as_deref(), Some(cursor_a_json.as_str()));
+
+    assert_eq!(
+        services.stream_events_calls.lock().expect("lock").len(),
+        0,
+        "subscription-enabled SSE route must not call the polling drain facade"
+    );
+    let subscribe_calls = services
+        .subscribe_events_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(subscribe_calls.len(), 1);
+    assert_eq!(subscribe_calls[0].thread_id, "thread-x");
+    assert!(subscribe_calls[0].after_cursor.is_none());
 }
 
 // Pins the *wire* contract the browser sees, not just the handler being

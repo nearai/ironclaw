@@ -69,7 +69,8 @@ pub use outbound::{
 };
 pub use projection::{
     ProductProjectionReadInput, ProductProjectionSubject, ProductProjectionSubscribeInput,
-    ProjectionReadRequest, ProjectionStream, ProjectionSubscriptionRequest,
+    ProjectionReadRequest, ProjectionStream, ProjectionStreamSubscription,
+    ProjectionSubscriptionRequest,
 };
 pub use redaction::{REDACTED_PLACEHOLDER, RedactedDebug, RedactedString};
 pub use workflow::ProductWorkflow;

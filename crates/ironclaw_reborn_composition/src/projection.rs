@@ -25,14 +25,16 @@ use ironclaw_product_adapters::{
     CapabilityActivityViewInput, ExternalActorRef, ExternalConversationRef, ProductAdapterError,
     ProductAdapterId, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
     ProductProjectionItem, ProductProjectionState, ProductWorkflowRejectionKind,
-    ProjectionCursor as ProductProjectionCursor, ProjectionStream, ProjectionSubscriptionRequest,
-    RedactedString,
+    ProjectionCursor as ProductProjectionCursor, ProjectionStream, ProjectionStreamSubscription,
+    ProjectionSubscriptionRequest, RedactedString,
 };
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_turns::{
-    ReplyTargetBindingRef, SanitizedFailure, TurnActor, TurnCoordinator, TurnEventProjectionCursor,
-    TurnEventProjectionSource, TurnRunId, TurnScope, run_profile::LoopHostMilestoneSink,
+    ReplyTargetBindingRef, SanitizedFailure, TurnActor, TurnCoordinator, TurnError,
+    TurnEventProjectionCursor, TurnEventProjectionSource, TurnEventSink, TurnLifecycleEvent,
+    TurnRunId, TurnScope, run_profile::LoopHostMilestoneSink,
 };
+use tokio::sync::{broadcast, mpsc};
 
 mod display_preview;
 mod live_progress;
@@ -71,12 +73,14 @@ const WEBUI_PROJECTION_PAGE_LIMIT: usize = 256;
 const WEBUI_RUNTIME_ITEM_MAX_PAYLOADS: usize = WEBUI_PROJECTION_PAGE_LIMIT + 1;
 const WEBUI_PROJECTION_ADAPTER_ID: &str = "webui_v2";
 const WEBUI_PROJECTION_INSTALLATION_ID: &str = "webui_v2.local";
+const TURN_EVENT_WAKE_BUFFER: usize = 256;
 
 #[derive(Clone)]
 pub(crate) struct RebornProjectionServices {
     event_stream_manager: Arc<EventStreamManager>,
     live_updates: Arc<InMemoryProjectionUpdateSource>,
     live_sequence: Arc<AtomicU64>,
+    turn_event_wake_source: Arc<TurnEventWakeSource>,
     turn_events: TurnEventBridge,
     approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
     display_previews: Arc<dyn CapabilityDisplayPreviewSource>,
@@ -149,6 +153,7 @@ impl RebornProjectionServices {
         Arc::new(WebuiRuntimeProjectionStream {
             manager: Arc::clone(&self.event_stream_manager),
             turn_events: self.turn_events.clone(),
+            turn_event_wake_source: Arc::clone(&self.turn_event_wake_source),
             auth_challenges: self.auth_challenges.clone(),
             display_previews: Arc::clone(&self.display_previews),
             reply_target_binding_ref: self.webui_reply_target_binding_ref.clone(),
@@ -180,6 +185,12 @@ impl RebornProjectionServices {
     ) -> Arc<dyn SkillActivationObserver> {
         Arc::new(LiveSkillActivationObserver::new(publisher))
     }
+
+    pub(crate) fn turn_event_wake_sink(&self) -> Arc<dyn TurnEventSink> {
+        Arc::new(TurnEventWakeSink {
+            source: Arc::clone(&self.turn_event_wake_source),
+        })
+    }
 }
 
 pub(crate) fn build_reborn_projection_services(
@@ -205,6 +216,7 @@ pub(crate) fn build_reborn_projection_services(
         event_stream_manager,
         live_updates,
         live_sequence,
+        turn_event_wake_source: Arc::new(TurnEventWakeSource::new()),
         turn_events: TurnEventBridge::default(),
         approval_requests: None,
         display_previews: Arc::new(NoopCapabilityDisplayPreviewSource),
@@ -213,15 +225,68 @@ pub(crate) fn build_reborn_projection_services(
     }
 }
 
+#[derive(Debug, Clone)]
+struct TurnEventWake {
+    scope: TurnScope,
+    owner_user_id: Option<UserId>,
+}
+
+struct TurnEventWakeSource {
+    sender: broadcast::Sender<TurnEventWake>,
+}
+
+impl TurnEventWakeSource {
+    fn new() -> Self {
+        let (sender, _) = broadcast::channel(TURN_EVENT_WAKE_BUFFER);
+        Self { sender }
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<TurnEventWake> {
+        self.sender.subscribe()
+    }
+
+    fn publish(&self, event: &TurnLifecycleEvent) {
+        let _ = self.sender.send(TurnEventWake {
+            scope: event.scope.clone(),
+            owner_user_id: event.owner_user_id.clone(),
+        });
+    }
+}
+
+struct TurnEventWakeSink {
+    source: Arc<TurnEventWakeSource>,
+}
+
+#[async_trait]
+impl TurnEventSink for TurnEventWakeSink {
+    async fn publish(&self, event: TurnLifecycleEvent) -> Result<(), TurnError> {
+        self.source.publish(&event);
+        Ok(())
+    }
+}
+
+fn turn_wake_matches_request(
+    wake: &TurnEventWake,
+    request: &ProjectionSubscriptionRequest,
+) -> bool {
+    wake.scope == request.scope
+        && wake
+            .owner_user_id
+            .as_ref()
+            .is_none_or(|owner_user_id| owner_user_id == &request.actor.user_id)
+}
+
 /// WebUI bridge over the shared EventStreamManager.
 ///
 /// This exposes runtime projection payloads that WebChat v2 has first-class
 /// SSE frames for: run status and capability activity. Timeline content stays
 /// behind the WebUI timeline facade until the browser event schema grows a
 /// first-class timeline-entry mapper.
+#[derive(Clone)]
 struct WebuiRuntimeProjectionStream {
     manager: Arc<EventStreamManager>,
     turn_events: TurnEventBridge,
+    turn_event_wake_source: Arc<TurnEventWakeSource>,
     auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
     display_previews: Arc<dyn CapabilityDisplayPreviewSource>,
     reply_target_binding_ref: ReplyTargetBindingRef,
@@ -229,32 +294,30 @@ struct WebuiRuntimeProjectionStream {
 
 #[async_trait]
 impl ProjectionStream for WebuiRuntimeProjectionStream {
+    fn supports_subscription(&self) -> bool {
+        true
+    }
+
+    async fn subscribe(
+        &self,
+        request: ProjectionSubscriptionRequest,
+    ) -> Result<ProjectionStreamSubscription, ProductAdapterError> {
+        let (subscription, origin_cursor) = self.runtime_subscription(&request).await?;
+        let (sender, receiver) = mpsc::channel(WEBUI_PROJECTION_PAGE_LIMIT);
+        let stream = self.clone();
+        tokio::spawn(async move {
+            stream
+                .forward_subscription(request, subscription, origin_cursor, sender)
+                .await;
+        });
+        Ok(ProjectionStreamSubscription::new(receiver))
+    }
+
     async fn drain(
         &self,
         request: ProjectionSubscriptionRequest,
     ) -> Result<Vec<ProductOutboundEnvelope>, ProductAdapterError> {
-        let projection_scope = runtime_projection_scope(&request.actor, &request.scope);
-        let origin_cursor = request
-            .after_cursor
-            .map(|cursor| parse_webui_projection_cursor(cursor.as_str()))
-            .transpose()?
-            .unwrap_or_default();
-        validate_webui_projection_cursor_scope(&origin_cursor, &request.scope, &projection_scope)?;
-        let mut subscription = self
-            .manager
-            .subscribe(ProjectionSubscribeRequest {
-                actor: request.actor.clone(),
-                scope: projection_scope.clone(),
-                view: ProjectionViewClass::ProductThread,
-                target: ProjectionTarget::Thread {
-                    thread_id: request.scope.thread_id.clone(),
-                },
-                after_cursor: origin_cursor.runtime.clone(),
-                limit: WEBUI_PROJECTION_PAGE_LIMIT,
-                capabilities: SubscriberCapabilities::default(),
-            })
-            .await
-            .map_err(map_event_stream_error)?;
+        let (mut subscription, origin_cursor) = self.runtime_subscription(&request).await?;
 
         let is_resuming_runtime_payloads = origin_cursor.runtime_payloads_delivered > 0;
         let mut batch = WebuiProjectionBatch::new(origin_cursor);
@@ -293,6 +356,181 @@ impl ProjectionStream for WebuiRuntimeProjectionStream {
             .await?;
         }
 
+        self.append_turn_events(&mut batch, &request).await?;
+        self.batch_into_outbound(batch, &request)
+    }
+}
+
+impl WebuiRuntimeProjectionStream {
+    async fn runtime_subscription(
+        &self,
+        request: &ProjectionSubscriptionRequest,
+    ) -> Result<(EventProjectionSubscription, WebuiProjectionCursor), ProductAdapterError> {
+        let projection_scope = runtime_projection_scope(&request.actor, &request.scope);
+        let origin_cursor = request
+            .after_cursor
+            .clone()
+            .map(|cursor| parse_webui_projection_cursor(cursor.as_str()))
+            .transpose()?
+            .unwrap_or_default();
+        validate_webui_projection_cursor_scope(&origin_cursor, &request.scope, &projection_scope)?;
+        let subscription = self
+            .manager
+            .subscribe(ProjectionSubscribeRequest {
+                actor: request.actor.clone(),
+                scope: projection_scope.clone(),
+                view: ProjectionViewClass::ProductThread,
+                target: ProjectionTarget::Thread {
+                    thread_id: request.scope.thread_id.clone(),
+                },
+                after_cursor: origin_cursor.runtime.clone(),
+                limit: WEBUI_PROJECTION_PAGE_LIMIT,
+                capabilities: SubscriberCapabilities::default(),
+            })
+            .await
+            .map_err(map_event_stream_error)?;
+        Ok((subscription, origin_cursor))
+    }
+
+    async fn forward_subscription(
+        self,
+        request: ProjectionSubscriptionRequest,
+        mut subscription: EventProjectionSubscription,
+        origin_cursor: WebuiProjectionCursor,
+        sender: mpsc::Sender<Result<ProductOutboundEnvelope, ProductAdapterError>>,
+    ) {
+        let mut cursor = origin_cursor;
+        let is_resuming_runtime_payloads = cursor.runtime_payloads_delivered > 0;
+        let mut turn_wakes = self.turn_event_wake_source.subscribe();
+        let Some(first) = subscription.next().await else {
+            return;
+        };
+        let mut batch = WebuiProjectionBatch::new(cursor.clone());
+        let buffered = if is_resuming_runtime_payloads {
+            Vec::new()
+        } else {
+            collect_buffered_runtime_items(&mut subscription)
+        };
+        let first_result = push_ordered_initial_runtime_items(
+            &mut batch,
+            first,
+            buffered,
+            &request.scope,
+            self.display_previews.as_ref(),
+        )
+        .await;
+        let mut keep_consuming = match first_result {
+            Ok(keep_consuming) => keep_consuming,
+            Err(error) => {
+                send_projection_subscription_error(&sender, error).await;
+                return;
+            }
+        };
+        if keep_consuming && !is_resuming_runtime_payloads {
+            if let Err(error) = consume_buffered_runtime_items(
+                &mut subscription,
+                &mut batch,
+                &request.scope,
+                self.display_previews.as_ref(),
+            )
+            .await
+            {
+                send_projection_subscription_error(&sender, error).await;
+                return;
+            }
+        }
+        if let Err(error) = self.append_turn_events(&mut batch, &request).await {
+            send_projection_subscription_error(&sender, error).await;
+            return;
+        }
+        if !self
+            .send_subscription_batch(batch, &request, &sender, &mut cursor)
+            .await
+        {
+            return;
+        }
+        if !keep_consuming {
+            return;
+        }
+
+        loop {
+            tokio::select! {
+                item = subscription.next() => {
+                    let Some(item) = item else {
+                        return;
+                    };
+                    let mut batch = WebuiProjectionBatch::new(cursor.clone());
+                    keep_consuming = match push_runtime_item(
+                        &mut batch,
+                        item,
+                        &request.scope,
+                        self.display_previews.as_ref(),
+                    )
+                    .await
+                    {
+                        Ok(keep_consuming) => keep_consuming,
+                        Err(error) => {
+                            send_projection_subscription_error(&sender, error).await;
+                            return;
+                        }
+                    };
+                    if let Err(error) = self.append_turn_events(&mut batch, &request).await {
+                        send_projection_subscription_error(&sender, error).await;
+                        return;
+                    }
+                    if !self
+                        .send_subscription_batch(batch, &request, &sender, &mut cursor)
+                        .await
+                    {
+                        return;
+                    }
+                    if !keep_consuming {
+                        return;
+                    }
+                }
+                wake = turn_wakes.recv() => {
+                    match wake {
+                        Ok(wake) if !turn_wake_matches_request(&wake, &request) => {
+                            continue;
+                        }
+                        Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => {
+                            return;
+                        }
+                    }
+
+                    let mut batch = WebuiProjectionBatch::new(cursor.clone());
+                    if let Err(error) = consume_buffered_runtime_items(
+                        &mut subscription,
+                        &mut batch,
+                        &request.scope,
+                        self.display_previews.as_ref(),
+                    )
+                    .await
+                    {
+                        send_projection_subscription_error(&sender, error).await;
+                        return;
+                    }
+                    if let Err(error) = self.append_turn_events(&mut batch, &request).await {
+                        send_projection_subscription_error(&sender, error).await;
+                        return;
+                    }
+                    if !self
+                        .send_subscription_batch(batch, &request, &sender, &mut cursor)
+                        .await
+                    {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn append_turn_events(
+        &self,
+        batch: &mut WebuiProjectionBatch,
+        request: &ProjectionSubscriptionRequest,
+    ) -> Result<(), ProductAdapterError> {
         let turn_after = batch.cursor().turn.clone();
         let turn_drain = self
             .turn_events
@@ -315,6 +553,14 @@ impl ProjectionStream for WebuiRuntimeProjectionStream {
         {
             batch.push_turn(next_cursor, ProductOutboundPayload::KeepAlive);
         }
+        Ok(())
+    }
+
+    fn batch_into_outbound(
+        &self,
+        batch: WebuiProjectionBatch,
+        request: &ProjectionSubscriptionRequest,
+    ) -> Result<Vec<ProductOutboundEnvelope>, ProductAdapterError> {
         batch
             .into_payloads()
             .map(|(cursor, payload)| {
@@ -328,6 +574,49 @@ impl ProjectionStream for WebuiRuntimeProjectionStream {
             })
             .collect()
     }
+
+    async fn send_subscription_batch(
+        &self,
+        batch: WebuiProjectionBatch,
+        request: &ProjectionSubscriptionRequest,
+        sender: &mpsc::Sender<Result<ProductOutboundEnvelope, ProductAdapterError>>,
+        cursor: &mut WebuiProjectionCursor,
+    ) -> bool {
+        for (next_cursor, payload) in batch.into_payloads() {
+            let projection_cursor = match product_cursor_from_webui_cursor(&next_cursor) {
+                Ok(cursor) => cursor,
+                Err(error) => {
+                    send_projection_subscription_error(sender, error).await;
+                    return false;
+                }
+            };
+            let envelope = match envelope_to_outbound(
+                projection_cursor,
+                payload,
+                &request.scope,
+                &request.actor,
+                &self.reply_target_binding_ref,
+            ) {
+                Ok(envelope) => envelope,
+                Err(error) => {
+                    send_projection_subscription_error(sender, error).await;
+                    return false;
+                }
+            };
+            *cursor = next_cursor;
+            if sender.send(Ok(envelope)).await.is_err() {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+async fn send_projection_subscription_error(
+    sender: &mpsc::Sender<Result<ProductOutboundEnvelope, ProductAdapterError>>,
+    error: ProductAdapterError,
+) {
+    let _ = sender.send(Err(error)).await;
 }
 
 async fn consume_buffered_runtime_items(

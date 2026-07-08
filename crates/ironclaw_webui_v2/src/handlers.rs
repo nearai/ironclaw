@@ -26,37 +26,37 @@ use futures::stream::Stream;
 use ironclaw_product_workflow::{
     CodexLoginStart, FsMount, LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot,
     LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, ProductWorkflowError, ProjectFsFile,
-    ProjectionCursor, RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentRequest,
-    RebornAutomationMutationResponse, RebornCancelRunResponse,
-    RebornConnectableChannelListResponse, RebornCreateProjectRequest, RebornCreateThreadResponse,
-    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
-    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
-    RebornFsListRequest, RebornFsListResponse, RebornFsMountsResponse, RebornFsReadRequest,
-    RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest,
-    RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
-    RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,
-    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
-    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
-    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
-    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest, RebornOperatorSetupResponse,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
-    RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsReadRequest,
-    RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectMemberInfo,
-    RebornProjectResponse, RebornRemoveMemberRequest, RebornResolveGateResponse,
-    RebornRetryRunResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
-    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
-    RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
-    SetActiveLlmRequest, SettingsToolPermissionState, UpsertLlmProviderRequest,
-    WebUiAttachmentCapabilities, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-    webui_attachment_capabilities,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, ProductOutboundEnvelope,
+    ProductWorkflowError, ProjectFsFile, ProjectionCursor, RebornAccountTracesResponse,
+    RebornAddMemberRequest, RebornAttachmentRequest, RebornAutomationMutationResponse,
+    RebornCancelRunResponse, RebornConnectableChannelListResponse, RebornCreateProjectRequest,
+    RebornCreateThreadResponse, RebornDeleteProjectRequest, RebornDeleteThreadRequest,
+    RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionListResponse,
+    RebornExtensionRegistryResponse, RebornFsListRequest, RebornFsListResponse,
+    RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
+    RebornGetProjectRequest, RebornListAutomationsResponse, RebornListMembersRequest,
+    RebornListMembersResponse, RebornListProjectsRequest, RebornListProjectsResponse,
+    RebornListThreadsResponse, RebornLogQueryRequest, RebornLogQueryResponse,
+    RebornOperatorCommandPlaneResponse, RebornOperatorConfigGetResponse,
+    RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
+    RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
+    RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest,
+    RebornOperatorSetupResponse, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundPreferencesResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
+    RebornProjectFsReadRequest, RebornProjectFsStatRequest, RebornProjectFsStatResponse,
+    RebornProjectMemberInfo, RebornProjectResponse, RebornRemoveMemberRequest,
+    RebornResolveGateResponse, RebornRetryRunResponse, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
+    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornStreamEventsRequest,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest,
+    RebornUpdateProjectRequest, SetActiveLlmRequest, SettingsToolPermissionState,
+    UpsertLlmProviderRequest, WebUiAttachmentCapabilities, WebUiAuthenticatedCaller,
+    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
+    WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest, webui_attachment_capabilities,
 };
 use serde::{Deserialize, Serialize};
 
@@ -755,6 +755,44 @@ struct SseErrorPayload {
     retryable: bool,
 }
 
+fn webchat_sse_event_from_envelope(envelope: ProductOutboundEnvelope) -> Option<Event> {
+    let frame = WebChatV2EventFrame::from_outbound(envelope);
+    let id = cursor_token(frame.cursor());
+    match serde_json::to_string(&frame) {
+        Ok(payload) => {
+            let mut event = Event::default().event(frame.event_name()).data(payload);
+            if let Some(id) = id {
+                event = event.id(id);
+            }
+            Some(event)
+        }
+        Err(error) => {
+            // debug, not warn: this is an internal diagnostic, not
+            // user-facing status, and info!/warn! corrupts the REPL/TUI
+            // per CLAUDE.md.
+            tracing::debug!(
+                target = "ironclaw_webui_v2::sse",
+                error = %error,
+                "failed to serialize WebChatV2EventFrame for SSE",
+            );
+            None
+        }
+    }
+}
+
+fn sse_error_event(error: RebornServicesError) -> Event {
+    let payload = SseErrorPayload {
+        error: error.code,
+        kind: error.kind,
+        retryable: error.retryable,
+    };
+    Event::default()
+        .event("error")
+        .json_data(payload)
+        .expect("SseErrorPayload is a tagged enum + bool with derived Serialize; cannot fail")
+    // safety: typed struct with derived Serialize on serde-compatible fields only
+}
+
 fn build_sse_stream(
     services: std::sync::Arc<dyn RebornServicesApi>,
     caller: WebUiAuthenticatedCaller,
@@ -770,6 +808,71 @@ fn build_sse_stream(
         let _slot_guard = slot;
         let started_at = tokio::time::Instant::now();
         let mut after_cursor = initial_cursor.and_then(parse_cursor_token);
+        if services.supports_stream_events_subscription() {
+            let remaining = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
+            if remaining.is_zero() {
+                return;
+            }
+            let request = RebornStreamEventsRequest {
+                thread_id: thread_id.clone(),
+                after_cursor: after_cursor.clone(),
+            };
+            let mut subscription = match tokio::time::timeout(
+                remaining,
+                services.subscribe_events(caller.clone(), request),
+            )
+            .await
+            {
+                Err(_elapsed) => {
+                    tracing::debug!(
+                        target = "ironclaw_webui_v2::sse",
+                        "stream_events subscription pending past SSE_MAX_LIFETIME; closing stream"
+                    );
+                    return;
+                }
+                Ok(Ok(subscription)) => subscription,
+                Ok(Err(error)) => {
+                    tracing::debug!(
+                        target = "ironclaw_webui_v2::sse",
+                        error = ?error,
+                        "facade rejected SSE subscription; closing stream",
+                    );
+                    yield Ok(sse_error_event(error));
+                    return;
+                }
+            };
+            loop {
+                let remaining = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
+                if remaining.is_zero() {
+                    return;
+                }
+                match tokio::time::timeout(remaining, subscription.next()).await {
+                    Err(_elapsed) => {
+                        tracing::debug!(
+                            target = "ironclaw_webui_v2::sse",
+                            "stream_events subscription pending past SSE_MAX_LIFETIME; closing stream"
+                        );
+                        return;
+                    }
+                    Ok(Some(Ok(envelope))) => {
+                        if let Some(event) = webchat_sse_event_from_envelope(envelope) {
+                            yield Ok(event);
+                        }
+                    }
+                    Ok(Some(Err(error))) => {
+                        tracing::debug!(
+                            target = "ironclaw_webui_v2::sse",
+                            error = ?error,
+                            "facade rejected SSE subscription event; closing stream",
+                        );
+                        yield Ok(sse_error_event(error));
+                        return;
+                    }
+                    Ok(None) => return,
+                }
+            }
+        }
+
         let mut idle_polls = 0_u32;
         loop {
             // Force a clean close once the budget is exhausted so the
@@ -810,27 +913,8 @@ fn build_sse_stream(
                         after_cursor = Some(latest.projection_cursor.clone());
                     }
                     for envelope in response.events {
-                        let frame = WebChatV2EventFrame::from_outbound(envelope);
-                        let id = cursor_token(frame.cursor());
-                        match serde_json::to_string(&frame) {
-                            Ok(payload) => {
-                                let mut event = Event::default().event(frame.event_name()).data(payload);
-                                if let Some(id) = id {
-                                    event = event.id(id);
-                                }
-                                yield Ok(event);
-                            }
-                            Err(error) => {
-                                // debug, not warn: this is an internal
-                                // diagnostic, not user-facing status, and
-                                // info!/warn! corrupts the REPL/TUI per
-                                // CLAUDE.md.
-                                tracing::debug!(
-                                    target = "ironclaw_webui_v2::sse",
-                                    error = %error,
-                                    "failed to serialize WebChatV2EventFrame for SSE",
-                                );
-                            }
+                        if let Some(event) = webchat_sse_event_from_envelope(envelope) {
+                            yield Ok(event);
                         }
                     }
                     if had_events {
@@ -859,15 +943,7 @@ fn build_sse_stream(
                         error = ?error,
                         "facade rejected SSE drain; closing stream",
                     );
-                    let payload = SseErrorPayload {
-                        error: error.code,
-                        kind: error.kind,
-                        retryable: error.retryable,
-                    };
-                    yield Ok(Event::default()
-                        .event("error")
-                        .json_data(payload)
-                        .expect("SseErrorPayload is a tagged enum + bool with derived Serialize; cannot fail")); // safety: typed struct with derived Serialize on serde-compatible fields only
+                    yield Ok(sse_error_event(error));
                     return;
                 }
             }
@@ -1952,6 +2028,128 @@ async fn ws_drain_loop(
     let _slot_guard = slot;
     let started_at = tokio::time::Instant::now();
     let mut after_cursor = initial_cursor.and_then(parse_cursor_token);
+    if services.supports_stream_events_subscription() {
+        let remaining = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
+        if remaining.is_zero() {
+            let _ =
+                ws_send_with_timeout(&mut socket, None, std::time::Duration::from_millis(0)).await;
+            return;
+        }
+        let request = RebornStreamEventsRequest {
+            thread_id: thread_id.clone(),
+            after_cursor: after_cursor.clone(),
+        };
+        let mut subscription =
+            match tokio::time::timeout(remaining, services.subscribe_events(caller, request)).await
+            {
+                Err(_elapsed) => {
+                    let _ = socket.close().await;
+                    return;
+                }
+                Ok(Ok(subscription)) => subscription,
+                Ok(Err(error)) => {
+                    tracing::debug!(
+                        target = "ironclaw_webui_v2::ws",
+                        error = ?error,
+                        "facade rejected WS subscription; closing stream",
+                    );
+                    let payload = SseErrorPayload {
+                        error: error.code,
+                        kind: error.kind,
+                        retryable: error.retryable,
+                    };
+                    if let Ok(text) = serde_json::to_string(&payload) {
+                        let send_budget = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
+                        let _ = ws_send_with_timeout(
+                            &mut socket,
+                            Some(axum::extract::ws::Message::Text(text.into())),
+                            send_budget,
+                        )
+                        .await;
+                    }
+                    let _ = socket.close().await;
+                    return;
+                }
+            };
+        loop {
+            let remaining = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
+            if remaining.is_zero() {
+                let _ = socket.close().await;
+                return;
+            }
+            let outcome = tokio::select! {
+                biased;
+                incoming = socket.recv() => {
+                    match incoming {
+                        None | Some(Err(_)) => return,
+                        Some(Ok(axum::extract::ws::Message::Close(_))) => return,
+                        Some(Ok(_)) => continue,
+                    }
+                }
+                next = tokio::time::timeout(remaining, subscription.next()) => next,
+            };
+            match outcome {
+                Err(_elapsed) => {
+                    let _ = socket.close().await;
+                    return;
+                }
+                Ok(Some(Ok(envelope))) => match serde_json::to_string(&envelope) {
+                    Ok(text) => {
+                        let send_budget = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
+                        if send_budget.is_zero() {
+                            let _ = socket.close().await;
+                            return;
+                        }
+                        if ws_send_with_timeout(
+                            &mut socket,
+                            Some(axum::extract::ws::Message::Text(text.into())),
+                            send_budget,
+                        )
+                        .await
+                        .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            target = "ironclaw_webui_v2::ws",
+                            error = %error,
+                            "failed to serialize ProductOutboundEnvelope for WS",
+                        );
+                    }
+                },
+                Ok(Some(Err(error))) => {
+                    tracing::debug!(
+                        target = "ironclaw_webui_v2::ws",
+                        error = ?error,
+                        "facade rejected WS subscription event; closing stream",
+                    );
+                    let payload = SseErrorPayload {
+                        error: error.code,
+                        kind: error.kind,
+                        retryable: error.retryable,
+                    };
+                    if let Ok(text) = serde_json::to_string(&payload) {
+                        let send_budget = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
+                        let _ = ws_send_with_timeout(
+                            &mut socket,
+                            Some(axum::extract::ws::Message::Text(text.into())),
+                            send_budget,
+                        )
+                        .await;
+                    }
+                    let _ = socket.close().await;
+                    return;
+                }
+                Ok(None) => {
+                    let _ = socket.close().await;
+                    return;
+                }
+            }
+        }
+    }
+
     let mut idle_polls = 0_u32;
     loop {
         let remaining = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());

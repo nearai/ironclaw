@@ -51,7 +51,7 @@ serde_json = "1"
 secrecy = { version = "0.10", features = ["serde"] }
 sha2 = "0.11"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "time"] }
+tokio = { version = "1", features = ["macros", "sync", "time"] }
 tracing = "0.1"
 url = "2"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
