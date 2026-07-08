@@ -214,7 +214,7 @@ test("groupMessages: delayed same-run activity moves before its final reply", ()
   );
 });
 
-test("groupMessages: same-run activity does not jump above streaming assistant text", () => {
+test("groupMessages: same-run activity stays before streaming assistant text", () => {
   const grouped = groupMessages([
     { id: "u1", role: "user", content: "what is GPT-5.6?", turnRunId: "run-1" },
     {
@@ -235,10 +235,10 @@ test("groupMessages: same-run activity does not jump above streaming assistant t
   assert.equal(grouped.length, 3);
   assert.deepEqual(
     grouped.map((item) => item.type === "activity-run" ? item.id : item.message.id),
-    ["u1", "text-text:run-1", "activity-run-tool-web-search"],
+    ["u1", "activity-run-tool-web-search", "text-text:run-1"],
   );
   assert.deepEqual(
-    grouped[2].activity.map((item) => item.id),
+    grouped[1].activity.map((item) => item.id),
     ["tool-web-search"],
   );
 });
